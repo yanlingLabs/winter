@@ -555,9 +555,10 @@ struct ToolCallRecord: Equatable {
     /// carried here as the call's stable identity. `nil` only for `.tool` items constructed
     /// without one (the pre-Task-1 shape, still reachable from tests).
     let callId: String?
-    /// `SessionReducer.extractToolDetail`'s short hint (a command's first line, a path, a task
-    /// subject); `nil` when the tool is not one of the recognized shapes or its `argsJson` did
-    /// not parse.
+    /// `SessionReducer.extractToolDetail`'s short hint (a command's first line, a path, a url, a
+    /// `"<verb> <operand>"` pair — see that method's doc); `nil` when the tool has no useful
+    /// one-line summary or its `argsJson` did not parse. Always ≤ ~100 characters, so the
+    /// `lineLimit(1)` row below truncates only genuinely long values.
     let detail: String?
     /// The tool's result text, already capped by `SessionReducer.maxToolOutputCharacters`. `nil`
     /// means no result was ever seen for this call — which is NOT the same as "still running";

@@ -243,10 +243,11 @@ func interactionOutcomeMayBeReplaced(current: InteractionRecord.Outcome?, with n
 struct ActivityItem: Equatable {
     enum Kind: Equatable {
         /// `detail` (LIVE-GATE G3) is a short, tool-specific hint extracted from the tool call's
-        /// `argsJson` by `SessionReducer.extractToolDetail` — the bash command's first line, a
-        /// task subject, or a file path/pattern, depending on `name`. `nil` for tools with no
-        /// recognized detail field, or when `argsJson` fails to parse (defensive: malformed/
-        /// missing JSON never throws, it just yields no detail). Consumed by the transcript's
+        /// `argsJson` by `SessionReducer.extractToolDetail` — a command's first line, a path, a
+        /// url, a query, a subject, or a `"<verb> <operand>"` pair for the multi-verb tools,
+        /// depending on `name`; see that method's doc for the rules and their limits. `nil` for
+        /// tools with no useful one-line summary, or when `argsJson` fails to parse (defensive:
+        /// malformed/missing JSON never throws, it just yields no detail). Consumed by the transcript's
         /// grouped tool rows (`groupActivity`/`toolGroupLabel` in ChatContent) for the expandable
         /// per-call detail lines — never by `activityGlyphAndLabel`'s single-item fallback path.
         ///
@@ -1034,33 +1035,166 @@ enum SessionReducer {
         }
     }
 
+    /// The ceiling on one detail line, in characters — the clip `bash` has always had, applied
+    /// since Task 10 to EVERY tool's hint. Urls, CSS selectors, questions and notification bodies
+    /// are all long or unbounded on the wire, and the row that renders this is `lineLimit(1)`
+    /// (`TranscriptMessageViews`), so an unclipped value buys nothing and costs memory per item.
+    private static let maxToolDetailCharacters = 100
+
+    /// One non-empty string field of a parsed args object, or `nil`. A missing field, a field of
+    /// the wrong JSON type, and an empty string are all the same answer — which is what makes
+    /// every case in `extractToolDetail` total without a single `try`.
+    private static func toolArgString(_ obj: [String: Any], _ key: String) -> String? {
+        guard let s = obj[key] as? String, !s.isEmpty else { return nil }
+        return s
+    }
+
+    /// First line only, clipped to `maxToolDetailCharacters`; `nil` if nothing survives.
+    ///
+    /// Applied to the ASSEMBLED line, not just its operand: `argsJson` is the model's RAW output,
+    /// emitted BEFORE any parse (`engine.ts`'s tool loop emits `tool_call` and only then dispatches),
+    /// so even a field the daemon declares as a zod enum — `browser.verb`, `lsp.action` — can carry
+    /// anything at all in a malformed call. Clipping the whole line is the only bound that holds.
+    private static func clipToolDetail(_ s: String) -> String? {
+        let firstLine = s.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
+            .first.map(String.init) ?? s
+        let clipped = String(firstLine.prefix(maxToolDetailCharacters))
+        return clipped.isEmpty ? nil : clipped
+    }
+
+    /// `"<lead> <object>"` for a multi-verb tool, or the bare lead when this verb has no operand.
+    /// A `browser` call is `tabs`/`read`/`screenshot` as often as it is `navigate <url>`, and
+    /// "browser tabs" is worth a row where a bare "browser" is not.
+    private static func verbLedToolDetail(_ lead: String, _ object: String?) -> String? {
+        clipToolDetail(object.map { "\(lead) \($0)" } ?? lead)
+    }
+
     /// LIVE-GATE G3: a short, tool-specific hint pulled from the tool call's raw `argsJson` —
-    /// pure JSON parsing, no throwing (malformed/missing JSON, or a field of the wrong type,
-    /// all fall through to `nil`; this must never crash the reducer). `bash` → the command's
-    /// first line, clipped to 100 chars (long heredocs/scripts stay one line). `task_create`/
-    /// `task_update` → the task's `subject`. `read`/`write`/`edit`/`glob`/`grep` → whichever of
-    /// `file_path`/`path`/`pattern` is present (different tools use different field names for
-    /// "the thing this call touched"). Anything else → `nil` — not every tool has a useful
-    /// one-line summary, and that's fine, the group just renders with no detail lines.
+    /// pure JSON parsing, no throwing (malformed/missing JSON, or a field of the wrong type, all
+    /// fall through to `nil`; this must never crash the reducer). Every returned value goes
+    /// through `clipToolDetail`.
+    ///
+    /// **Coverage is stated as RULES, not as a list of thirty tools** — a per-tool enumeration here
+    /// would be stale within a task. Each rule's field names were read off the daemon's own zod
+    /// schema in `packages/core/src/agent/tools/`; **a name guessed instead of read yields `nil`,
+    /// which renders exactly like today, so a wrong key is invisible.** Grep the schema before
+    /// touching a case.
+    ///
+    /// 1. **The recognisable operand.** Whichever ONE field a human would recognise — a command, a
+    ///    path, a url, a query, a subject, a name, an id, a recipient. Bare, unprefixed.
+    /// 2. **Verb-led tools get `"<verb> <operand>"`** — `browser`, `lsp`, `computer`, `schedule`.
+    ///    The verb rides even when the call has no operand (`browser tabs`), so every well-formed
+    ///    call produces a readable row; only a missing/mistyped verb yields `nil`.
+    /// 3. **Content the agent WROTE is never surfaced.** `browser type` shows its `selector`, never
+    ///    its `text`; `computer` shows `keys` (a shortcut) but never `text`. Norma is driving the
+    ///    user's own logged-in browser and their own screen — a transcript row is not the place for
+    ///    whatever got typed into them.
+    /// 4. **`nil` is a correct answer** and stays the default. `exit_plan_mode` (its `plan` is a
+    ///    document), an unnamed `Workflow` (its `script` is a program), `list_sessions` (every field
+    ///    optional and normally absent), and the argless tools all take it. A row cluttered with
+    ///    JSON noise is the failure this avoids; a group with no detail lines is not.
+    ///
+    /// **The `path` / `file_path` correction (Task 10).** This doc used to claim `read`/`write`/
+    /// `edit`/`glob`/`grep`/`ls` send "whichever of `file_path`/`path`/`pattern` is present". They
+    /// never send `file_path`: every fs tool declares `path` (`fs-read.ts`, `fs-write.ts`) and
+    /// `glob`/`grep` declare `pattern`. `file_path` is `lsp`'s field, and only `lsp`'s. It is still
+    /// checked first for the fs tools as a deliberate belt — it is CC's name for that argument, so a
+    /// model trained on that shape does sometimes emit it, and such a call still emits its
+    /// `tool_call` (and therefore its row) before failing the daemon's zod parse.
     private static func extractToolDetail(name: String, argsJson: String) -> String? {
         guard let data = argsJson.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return nil
         }
+        func str(_ key: String) -> String? { toolArgString(obj, key) }
+
         switch name {
+        // ---- shell, files, notebooks ----------------------------------------------------------
         case "bash":
-            guard let command = obj["command"] as? String, !command.isEmpty else { return nil }
-            let firstLine = command.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
-                .first.map(String.init) ?? command
-            return String(firstLine.prefix(100))
-        case "task_create", "task_update":
-            guard let subject = obj["subject"] as? String, !subject.isEmpty else { return nil }
-            return subject
+            return str("command").flatMap(clipToolDetail)
         case "read", "write", "edit", "glob", "grep", "ls":
-            if let path = obj["file_path"] as? String, !path.isEmpty { return path }
-            if let path = obj["path"] as? String, !path.isEmpty { return path }
-            if let pattern = obj["pattern"] as? String, !pattern.isEmpty { return pattern }
-            return nil
+            return (str("file_path") ?? str("path") ?? str("pattern")).flatMap(clipToolDetail)
+        case "notebook_edit":
+            return str("notebook_path").flatMap(clipToolDetail)
+
+        // ---- tasks and background runs --------------------------------------------------------
+        // `task_stop` really does say `task_id` where `task_get`/`bash_output` say `taskId`.
+        case "task_create", "task_update":
+            return str("subject").flatMap(clipToolDetail)
+        case "task_get", "bash_output":
+            return str("taskId").flatMap(clipToolDetail)
+        case "task_stop":
+            return str("task_id").flatMap(clipToolDetail)
+
+        // ---- the browser (rule 2 + rule 3) ----------------------------------------------------
+        // The operand order is a fall-through, not an arbitration: no valid call carries two of
+        // these. `navigate`/`open` carry a url; `click`/`type`/`submit` a selector; `wait` an
+        // `until`; and `scroll` is EITHER a direction OR a selector — the daemon refuses a call
+        // naming both.
+        case "browser":
+            guard let verb = str("verb") else { return nil }
+            return verbLedToolDetail(verb, str("url") ?? str("selector") ?? str("direction") ?? str("until"))
+
+        // ---- the web and page reading ---------------------------------------------------------
+        case "web_fetch":
+            return str("url").flatMap(clipToolDetail)
+        case "web_search", "Search", "ToolSearch":
+            return str("query").flatMap(clipToolDetail)
+        // ReadPage takes a BATCH (`{pages:[{url, query?, …}]}`), never a bare url. The "+N more"
+        // rides AFTER the clip on purpose: it is the signal that this row shows one of several
+        // urls, so it must not be the part a long url cuts off.
+        case "ReadPage":
+            guard let pages = obj["pages"] as? [Any],
+                  let first = pages.first as? [String: Any],
+                  let url = toolArgString(first, "url").flatMap(clipToolDetail) else { return nil }
+            return pages.count > 1 ? "\(url) (+\(pages.count - 1) more)" : url
+
+        // ---- verb-led: language server, computer use, scheduling ------------------------------
+        case "lsp":
+            // `workspace_symbols` is project-wide and has no `file_path` at all — `symbol` is its
+            // operand.
+            guard let action = str("action") else { return nil }
+            return verbLedToolDetail(action, str("file_path") ?? str("symbol"))
+        case "computer":
+            guard let action = str("action") else { return nil }
+            return verbLedToolDetail(action, str("keys"))
+        case "schedule":
+            guard let op = str("op") else { return nil }
+            return verbLedToolDetail(op, str("spec") ?? str("id"))
+
+        // ---- one-word verbs and names ---------------------------------------------------------
+        case "exit_worktree", "manage_session":
+            return str("action").flatMap(clipToolDetail)
+        case "enter_worktree", "Skill", "skill_write", "Workflow":
+            return str("name").flatMap(clipToolDetail)
+
+        // ---- agents and sessions ----------------------------------------------------------------
+        // `spawn_agent.description` is the required 3-5 word summary; its `prompt` is the whole
+        // brief and would fill the row with noise.
+        case "spawn_agent":
+            return (str("description") ?? str("agentType")).flatMap(clipToolDetail)
+        case "session_spawn":
+            return (str("title") ?? str("dir")).flatMap(clipToolDetail)
+        case "send_message":
+            return str("to").flatMap(clipToolDetail)
+        case "agent_output":
+            return str("agent").flatMap(clipToolDetail)
+
+        // ---- MCP, notifications, questions ------------------------------------------------------
+        case "read_mcp_resource":
+            return str("uri").flatMap(clipToolDetail)
+        case "list_mcp_resources":
+            return str("server").flatMap(clipToolDetail)
+        case "push_notification":
+            return (str("title") ?? str("message")).flatMap(clipToolDetail)
+        case "AskQuestion":
+            return str("question").flatMap(clipToolDetail)
+        // `ask_user` batches: the question is one level down, inside `questions[]`.
+        case "ask_user":
+            guard let questions = obj["questions"] as? [Any],
+                  let first = questions.first as? [String: Any] else { return nil }
+            return toolArgString(first, "question").flatMap(clipToolDetail)
+
         default:
             return nil
         }
