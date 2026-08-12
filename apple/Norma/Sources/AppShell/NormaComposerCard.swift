@@ -260,7 +260,11 @@ struct NormaComposerCard: View {
     /// (an empty draft); a non-empty string is shown on hover.
     var sendBlockedReason: String?
 
-    @State private var isHovered = false
+    // The hover flag that used to strengthen the rim is GONE, not merely unused: the glass surface
+    // carries `.interactive()`, which is the material's own version of that response — it lights
+    // under the pointer rather than thickening a border. Keeping `@State isHovered` and its
+    // `.onHover` would have left a value written on every pointer move that nothing renders from,
+    // and an `.animation(value:)` interpolating nothing.
 
     /// The chrome THIS card renders, derived from its own inputs.
     ///
@@ -363,27 +367,26 @@ struct NormaComposerCard: View {
             controlRow(accessory: accessory, modelRow: modelRow)
         }
         .frame(height: newChatComposerHeight)
-        // The composer keeps its OWN complete face and border — all four corners, always. That is
-        // what makes the strip read as a second surface behind it rather than as this card growing
-        // a section.
-        .background(
-            RoundedRectangle(cornerRadius: newChatCardCornerRadius, style: .continuous)
-                .fill(Theme.composerSurface)
-        )
-        // The rim strengthens on hover; only the RIM moves, never the fill — a card that changed
-        // colour under the pointer would read as selected rather than as ready.
+        // TINTED LIQUID GLASS, iOS's recipe verbatim (`norma-ios` `ComposerChrome`): the surface
+        // rides as a heavy 0.75 tint on INTERACTIVE regular glass, so the transcript ghosts through
+        // and the card lights under the pointer. The tint is not an approximation of the phone's —
+        // `ComposerSurface` is byte-identical on both platforms (`#F9F9F7` / `#272726`), so this is
+        // literally the same colour at the same opacity.
         //
-        // Hover, NOT focus: `ComposerTextView` exposes no first-responder callback, so "focused to
-        // type" cannot be observed without giving that component one. Tracked, not faked.
-        .overlay(
-            RoundedRectangle(cornerRadius: newChatCardCornerRadius, style: .continuous)
-                .strokeBorder(isHovered ? AnyShapeStyle(Color.primary.opacity(0.30))
-                                        : AnyShapeStyle(Theme.hairline),
-                              lineWidth: shellSidebarHairlineWidth)
-        )
-        .shadow(color: .black.opacity(0.05), radius: 16, y: 4)
-        .animation(.easeOut(duration: 0.14), value: isHovered)
-        .onHover { isHovered = $0 }
+        // User call, 2026-08-12, and a deliberate REVERSAL of the 2026-08-06 "glass dropped" ruling
+        // for the ChatGPT-style Mac shell — scoped to this surface and the question box it morphs
+        // into, and for a structural reason rather than a decorative one: the morph is a
+        // material-to-material transition, and it can only read as one surface CHANGING SHAPE if
+        // both states are the same material. An opaque card cross-fading into a glass box reads as
+        // two views swapping.
+        //
+        // The hand-drawn fill, rim and shadow retired TOGETHER (as they did on iOS): glass brings
+        // its own edge treatment, and keeping a `strokeBorder` on top of it double-draws the edge.
+        // The hover rim goes with them — `.interactive()` is glass's own version of that response,
+        // and it is the material lighting rather than a border thickening.
+        .glassEffect(
+            .regular.tint(Theme.composerSurface.opacity(0.75)).interactive(),
+            in: .rect(cornerRadius: newChatCardCornerRadius, style: .continuous))
         .overlay(alignment: .bottomTrailing) {
             if showsWorkingIndicator {
                 ProgressView()
