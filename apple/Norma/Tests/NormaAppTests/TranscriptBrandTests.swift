@@ -434,9 +434,10 @@ final class TranscriptBrandTests: XCTestCase {
                 }
             }
         }
-        XCTAssertEqual(elevatedSites, 3,
-                       "the separator, the code-block rim and the latest pill — all three, or this "
-                       + "pin is passing because the rules stopped being drawn at all")
+        XCTAssertEqual(elevatedSites, 4,
+                       "the separator, the code-block rim, the latest pill and the interaction "
+                       + "card's own rim — all four, or this pin is passing because the rules "
+                       + "stopped being drawn at all")
     }
 
     /// The other half: the directory does not merely AVOID raw values, it reaches for the tokens.

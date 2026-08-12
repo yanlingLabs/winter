@@ -502,9 +502,9 @@ struct TranscriptInteractionCard: View {
                     .foregroundStyle(.red)
             }
         }
-        .padding(12)
+        .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.elevatedSurface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .modifier(InteractionCardChrome())
     }
 
     @ViewBuilder
@@ -649,8 +649,14 @@ struct ResolvedQuestionBody: View {
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(.secondary)
                     }
+                    // Norma's voice, so it wears Norma's voice — the assistant-prose serif register
+                    // (`brand.md` § 4, binding #4), which iOS applies here for the same stated
+                    // reason. Not a new serif binding: a question IS assistant prose, and Task 8
+                    // shipped that register for exactly this. The ANSWER below stays sans — it is
+                    // the user's word, and the two registers are what make the card read as a
+                    // dialogue rather than a form.
                     Text(question.question)
-                        .font(.system(size: 13))
+                        .font(Font(Theme.assistantProse(size: 14, weight: .regular)))
                         .foregroundStyle(.primary)
 
                     answerRows(for: question)
@@ -663,7 +669,20 @@ struct ResolvedQuestionBody: View {
                 }
             }
 
-            ResolvedOutcomeRow(outcome: outcome)
+            // iOS's resolved question card carries NO footer (`classicCard`: `if !isResolved
+            // { footer }`), and for an ANSWERED question that is right — the answer rows above
+            // already say what was decided, so "✓ Answered" restated it and "answered by orb"
+            // named a door the user had just used. Both were noise on the one card whose content
+            // IS the outcome.
+            //
+            // It stays for `.ended`, the case iOS's blanket rule loses: a question asked and never
+            // answered has nothing in its answer rows but a "—", and this row is the only thing
+            // that says whether it timed out, was cancelled, or died with its turn. Approvals and
+            // plans keep theirs unconditionally — there the outcome IS the information, and
+            // `ResolvedApprovalBody`/`ResolvedPlanBody` are untouched.
+            if case .question = outcome {} else {
+                ResolvedOutcomeRow(outcome: outcome)
+            }
         }
     }
 
@@ -722,6 +741,39 @@ struct ResolvedQuestionBody: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, 3)
+    }
+}
+
+/// The interaction card's surface — iOS's floating-card recipe (`norma-ios`
+/// `QuestionCardView.QuestionCardChrome`), ported: a **`CardSurface`** fill, a hairline rim, and a
+/// soft shadow, so the card FLOATS on the transcript instead of being a block cut into it.
+///
+/// It used to be `ElevatedSurface` at r=12 with no rim and no shadow, and that was the single
+/// loudest difference from iOS — because of the FILL, not the geometry. `ElevatedSurface`'s light
+/// value is `#F2F2F7`, which `brand.md` § 1 names for what it is: *"a retained cool system grey"*.
+/// Every other Mac surface is warm (`Canvas #F5F4F0`, `CardSurface #F9F9F7`, `ControlSurface
+/// #F0EFEC`); that one is not, and a cool grey block on a warm cream canvas reads **lavender**.
+/// It was never chosen — "retained" is the palette's own word for inherited.
+///
+/// Why the rim and the shadow are not decoration: `CardSurface` on the transcript's own ground is
+/// nearly the same value, so without them the card would have no edge at all. iOS needs the same
+/// two for the same reason. The rim is `HairlineElevated` rather than `Color.primary.opacity(0.17)`
+/// — iOS's literal — because Task 8 already solved that token for exactly this job: a floating
+/// control's rim measured against `CardSurface` (1.389:1 light / 1.431:1 dark, `brand.md` § 1).
+///
+/// r=16, not iOS's 28: that radius is a phone-scale value on a full-bleed card. The Mac's card sits
+/// in a wider column at a greater viewing distance, and `brand.md` § 1's own note about the sidebar
+/// register covers the principle — same binding, two platform registers.
+private struct InteractionCardChrome: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .background(Theme.cardSurface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .strokeBorder(Theme.hairlineElevated, lineWidth: 1)
+            )
+            .compositingGroup()   // flatten first: the shadow outlines the CARD, not every glyph
+            .shadow(color: .black.opacity(0.05), radius: 8, y: 1)
     }
 }
 
@@ -1004,8 +1056,10 @@ private struct QuestionBlock: View {
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
             }
+            // Same serif register as the frozen card's question (see `ResolvedQuestionBody`) — the
+            // pending and answered forms of one question must not speak in two different voices.
             Text(question.question)
-                .font(.system(size: 13))
+                .font(Font(Theme.assistantProse(size: 14, weight: .regular)))
                 .foregroundStyle(.primary)
 
             if showsPreviewPane {
