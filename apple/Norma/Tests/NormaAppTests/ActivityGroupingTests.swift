@@ -8,8 +8,19 @@ import XCTest
 /// names, collapses to ONE comma-joined sentence row — `groupActivity` now emits `.toolRun`
 /// groups of `ToolRunEntry` directly instead of r1's single-name `.tools` case.
 final class ActivityGroupingTests: XCTestCase {
-    private func tool(_ name: String, _ detail: String? = nil) -> ActivityItem {
-        ActivityItem(kind: .tool(name: name, detail: detail))
+    private func tool(
+        _ name: String,
+        _ detail: String? = nil,
+        callId: String? = nil,
+        output: String? = nil,
+        isError: Bool = false
+    ) -> ActivityItem {
+        ActivityItem(kind: .tool(name: name, detail: detail, callId: callId, output: output, isError: isError))
+    }
+
+    /// One call with only a detail — the shape most of these grouping cases care about.
+    private func call(_ detail: String? = nil) -> ToolCallRecord {
+        ToolCallRecord(callId: nil, detail: detail, output: nil, isError: false)
     }
 
     // MARK: groupActivity
@@ -17,7 +28,7 @@ final class ActivityGroupingTests: XCTestCase {
     func testConsecutiveSameNameToolsMergeIntoOneEntry() {
         let items = [tool("bash", "ls"), tool("bash", "pwd"), tool("bash", nil)]
         XCTAssertEqual(groupActivity(items), [
-            .toolRun([ToolRunEntry(name: "bash", count: 3, details: ["ls", "pwd"])]),
+            .toolRun([ToolRunEntry(name: "bash", calls: [call("ls"), call("pwd"), call(nil)])]),
         ])
     }
 
@@ -27,8 +38,8 @@ final class ActivityGroupingTests: XCTestCase {
         let items = [tool("bash", "ls"), tool("read", "/tmp/x")]
         XCTAssertEqual(groupActivity(items), [
             .toolRun([
-                ToolRunEntry(name: "bash", count: 1, details: ["ls"]),
-                ToolRunEntry(name: "read", count: 1, details: ["/tmp/x"]),
+                ToolRunEntry(name: "bash", calls: [call("ls")]),
+                ToolRunEntry(name: "read", calls: [call("/tmp/x")]),
             ]),
         ])
     }
@@ -39,9 +50,9 @@ final class ActivityGroupingTests: XCTestCase {
         let items = [tool("bash", "ls"), tool("read", "/a"), tool("bash", "pwd")]
         XCTAssertEqual(groupActivity(items), [
             .toolRun([
-                ToolRunEntry(name: "bash", count: 1, details: ["ls"]),
-                ToolRunEntry(name: "read", count: 1, details: ["/a"]),
-                ToolRunEntry(name: "bash", count: 1, details: ["pwd"]),
+                ToolRunEntry(name: "bash", calls: [call("ls")]),
+                ToolRunEntry(name: "read", calls: [call("/a")]),
+                ToolRunEntry(name: "bash", calls: [call("pwd")]),
             ]),
         ])
     }
@@ -53,9 +64,9 @@ final class ActivityGroupingTests: XCTestCase {
             tool("bash", "pwd"),
         ]
         XCTAssertEqual(groupActivity(items), [
-            .toolRun([ToolRunEntry(name: "bash", count: 1, details: ["ls"])]),
+            .toolRun([ToolRunEntry(name: "bash", calls: [call("ls")])]),
             .single(ActivityItem(kind: .interaction("needs approval"))),
-            .toolRun([ToolRunEntry(name: "bash", count: 1, details: ["pwd"])]),
+            .toolRun([ToolRunEntry(name: "bash", calls: [call("pwd")])]),
         ])
     }
 
@@ -68,7 +79,7 @@ final class ActivityGroupingTests: XCTestCase {
         // The task item vanishes from grouping — AND, since it's skipped rather than treated as a
         // run-breaker, the two bash calls on either side of it still merge into one entry.
         XCTAssertEqual(groupActivity(items), [
-            .toolRun([ToolRunEntry(name: "bash", count: 2, details: ["ls", "pwd"])]),
+            .toolRun([ToolRunEntry(name: "bash", calls: [call("ls"), call("pwd")])]),
         ])
     }
 
@@ -81,10 +92,44 @@ final class ActivityGroupingTests: XCTestCase {
         XCTAssertEqual(groupActivity(items), items.map { .single($0) })
     }
 
-    func testDetailsCollectOnlyNonNilInOrder() {
+    /// mac-chat-parity Task 2: a call with no extractable detail is KEPT, in place. Pre-Task-2 the
+    /// entry held a flat `details: [String]` that skipped them, so a run of five `browser` calls
+    /// (no `extractToolDetail` case) had `count == 5` and `details == []` and expanded to a
+    /// literally empty area — research §2.3's worked example. Does NOT cover what the expanded row
+    /// draws for those calls (view; `ToolRowTests` covers the expansion model).
+    func testEveryCallIsKeptEvenWhenItHasNoDetail() {
         let items = [tool("read", nil), tool("read", "/a"), tool("read", nil), tool("read", "/b")]
         XCTAssertEqual(groupActivity(items), [
-            .toolRun([ToolRunEntry(name: "read", count: 4, details: ["/a", "/b"])]),
+            .toolRun([ToolRunEntry(name: "read", calls: [call(nil), call("/a"), call(nil), call("/b")])]),
+        ])
+    }
+
+    /// `count` counts CALLS, always — it can no longer disagree with what the run can show, which
+    /// is what made positional zipping of results to details impossible before Task 2.
+    func testCountIsAlwaysTheNumberOfCallsEvenWithNoDetailsAtAll() {
+        let items = [tool("browser"), tool("browser"), tool("browser"), tool("browser"), tool("browser")]
+        guard case .toolRun(let entries)? = groupActivity(items).first, let entry = entries.first else {
+            return XCTFail("expected one .toolRun group with one entry")
+        }
+        XCTAssertEqual(entry.count, 5)
+        XCTAssertEqual(entry.count, entry.calls.count)
+        XCTAssertEqual(entry.calls.compactMap(\.detail), [])
+    }
+
+    /// mac-chat-parity Task 2: the result the reducer now keeps (Task 1) survives the fold into a
+    /// display entry. Before Task 2 `groupActivity` bound those associated values to `_` and threw
+    /// them away again, so the data was stored but unreachable from any view. Does NOT cover the
+    /// reducer's own fold (`SessionModel` tests) or the rendered row.
+    func testGroupingCarriesEachCallsResultAndIdentity() {
+        let items = [
+            tool("bash", "pnpm test", callId: "c1", output: "1146 pass", isError: false),
+            tool("bash", "nope", callId: "c2", output: "command not found", isError: true),
+        ]
+        XCTAssertEqual(groupActivity(items), [
+            .toolRun([ToolRunEntry(name: "bash", calls: [
+                ToolCallRecord(callId: "c1", detail: "pnpm test", output: "1146 pass", isError: false),
+                ToolCallRecord(callId: "c2", detail: "nope", output: "command not found", isError: true),
+            ])]),
         ])
     }
 
@@ -140,6 +185,50 @@ final class ActivityGroupingTests: XCTestCase {
         XCTAssertEqual(toolGroupFragment(name: "some_future_tool", count: 1), "used a tool")
     }
 
+    /// mac-chat-parity Task 2 (research §2.3 enumerates exactly these thirteen as falling through
+    /// to "used a tool"; §2.5 item 4 asks for them). Every name here is a real registered daemon
+    /// tool — verified against `name: "…"` across `packages/core/src/agent/tools/`. This is the
+    /// MAC's vocabulary being extended, NOT iOS's `ToolPhrase` being ported (spec §7 forbids that:
+    /// it matches capitalized Claude-Code names Norma's daemon never emits).
+    func testToolGroupFragmentCoversTheToolsThatUsedToFallThrough() {
+        XCTAssertEqual(toolGroupFragment(name: "browser", count: 1), "used the browser")
+        XCTAssertEqual(toolGroupFragment(name: "browser", count: 5), "used the browser 5 times")
+        XCTAssertEqual(toolGroupFragment(name: "web_fetch", count: 1), "fetched a page")
+        XCTAssertEqual(toolGroupFragment(name: "web_fetch", count: 2), "fetched 2 pages")
+        XCTAssertEqual(toolGroupFragment(name: "ReadPage", count: 1), "fetched a page")
+        XCTAssertEqual(toolGroupFragment(name: "ReadPage", count: 3), "fetched 3 pages")
+        XCTAssertEqual(toolGroupFragment(name: "web_search", count: 1), "searched the web")
+        XCTAssertEqual(toolGroupFragment(name: "web_search", count: 2), "searched the web 2 times")
+        XCTAssertEqual(toolGroupFragment(name: "Search", count: 1), "searched the web")
+        XCTAssertEqual(toolGroupFragment(name: "Search", count: 4), "searched the web 4 times")
+        XCTAssertEqual(toolGroupFragment(name: "computer", count: 1), "used the computer")
+        XCTAssertEqual(toolGroupFragment(name: "computer", count: 2), "used the computer 2 times")
+        XCTAssertEqual(toolGroupFragment(name: "lsp", count: 1), "checked the code")
+        XCTAssertEqual(toolGroupFragment(name: "lsp", count: 2), "checked the code 2 times")
+        XCTAssertEqual(toolGroupFragment(name: "notebook_edit", count: 1), "made a notebook edit")
+        XCTAssertEqual(toolGroupFragment(name: "notebook_edit", count: 2), "made 2 notebook edits")
+        XCTAssertEqual(toolGroupFragment(name: "AskQuestion", count: 1), "asked a question")
+        XCTAssertEqual(toolGroupFragment(name: "AskQuestion", count: 2), "asked 2 questions")
+        XCTAssertEqual(toolGroupFragment(name: "Workflow", count: 1), "ran a workflow")
+        XCTAssertEqual(toolGroupFragment(name: "Workflow", count: 2), "ran 2 workflows")
+        XCTAssertEqual(toolGroupFragment(name: "spawn_agent", count: 1), "started a subagent")
+        XCTAssertEqual(toolGroupFragment(name: "spawn_agent", count: 3), "started 3 subagents")
+        XCTAssertEqual(toolGroupFragment(name: "session_spawn", count: 1), "dispatched a session")
+        XCTAssertEqual(toolGroupFragment(name: "session_spawn", count: 2), "dispatched 2 sessions")
+        XCTAssertEqual(toolGroupFragment(name: "enter_worktree", count: 1), "entered a worktree")
+        XCTAssertEqual(toolGroupFragment(name: "enter_worktree", count: 2), "entered 2 worktrees")
+    }
+
+    /// The browser session from research §2.3, end to end at the model level: five `browser` calls
+    /// used to read "Used 5 tools" and expand to nothing. Does NOT cover the drawn row.
+    func testTheBrowserWorkedExampleNowReadsAsTheBrowser() {
+        let items = (0..<5).map { _ in tool("browser") }
+        guard case .toolRun(let entries)? = groupActivity(items).first else {
+            return XCTFail("expected one .toolRun group")
+        }
+        XCTAssertEqual(toolRunSentence(entries), "Used the browser 5 times")
+    }
+
     // MARK: toolGroupLabel (capitalized single-fragment — r1 continuity)
 
     func testToolGroupLabelCapitalizesTheFragment() {
@@ -154,8 +243,13 @@ final class ActivityGroupingTests: XCTestCase {
 
     // MARK: toolRunSentence
 
+    /// N calls of one tool, no details — what the sentence tests care about.
+    private func entry(_ name: String, count: Int) -> ToolRunEntry {
+        ToolRunEntry(name: name, calls: (0..<count).map { _ in call(nil) })
+    }
+
     func testSentenceForSingleEntryRunMatchesOldSimpleLabel() {
-        let entries = [ToolRunEntry(name: "bash", count: 3, details: ["ls", "pwd", "echo"])]
+        let entries = [ToolRunEntry(name: "bash", calls: [call("ls"), call("pwd"), call("echo")])]
         XCTAssertEqual(toolRunSentence(entries), toolGroupLabel(name: "bash", count: 3))
         XCTAssertEqual(toolRunSentence(entries), "Ran 3 shell commands")
     }
@@ -165,20 +259,12 @@ final class ActivityGroupingTests: XCTestCase {
         // own singular convention (matching every other verb: "a file" not "1 file") renders a
         // count of exactly 1 as "a directory", so the count-1 fragment here is "listed a directory".
         // Uses `ls` (not `glob`, which reverted to "searched" once `ls` shipped as its own tool).
-        let entries = [
-            ToolRunEntry(name: "read", count: 4, details: []),
-            ToolRunEntry(name: "ls", count: 1, details: []),
-            ToolRunEntry(name: "bash", count: 8, details: []),
-        ]
+        let entries = [entry("read", count: 4), entry("ls", count: 1), entry("bash", count: 8)]
         XCTAssertEqual(toolRunSentence(entries), "Read 4 files, listed a directory, ran 8 shell commands")
     }
 
     func testSentenceWithMultipleDirectoriesUsesTheCountedForm() {
-        let entries = [
-            ToolRunEntry(name: "read", count: 4, details: []),
-            ToolRunEntry(name: "ls", count: 2, details: []),
-            ToolRunEntry(name: "bash", count: 8, details: []),
-        ]
+        let entries = [entry("read", count: 4), entry("ls", count: 2), entry("bash", count: 8)]
         XCTAssertEqual(toolRunSentence(entries), "Read 4 files, listed 2 directories, ran 8 shell commands")
     }
 
@@ -187,8 +273,8 @@ final class ActivityGroupingTests: XCTestCase {
     }
 
     // MARK: detail concatenation order (TranscriptToolGroupRow's expansion is view-level, but the
-    // ordering it renders comes straight from `ToolRunEntry.details`/entry order — verify the
-    // model here, not the view.)
+    // ordering it renders comes straight from each entry's call order — verify the model here, not
+    // the view.)
 
     func testEntryDetailsAndEntryOrderTogetherGiveFullRunDetailOrder() {
         let items = [
@@ -199,7 +285,9 @@ final class ActivityGroupingTests: XCTestCase {
         guard case .toolRun(let entries)? = groupActivity(items).first else {
             return XCTFail("expected a single .toolRun group")
         }
-        let detailLines = entries.flatMap { entry in entry.details.map { "\(entry.name) \($0)" } }
+        let detailLines = entries.flatMap { entry in
+            entry.calls.compactMap { $0.detail.map { "\(entry.name) \($0)" } }
+        }
         XCTAssertEqual(detailLines, [
             "read /a", "read /b",
             "glob *.swift",

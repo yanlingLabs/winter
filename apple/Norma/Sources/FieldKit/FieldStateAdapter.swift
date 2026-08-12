@@ -285,6 +285,14 @@ final class FieldStateAdapter: ObservableObject {
         session.state.streamingText.isEmpty ? nil : session.state.streamingText
     }
 
+    /// Whether the main turn is running RIGHT NOW (mac-chat-parity Task 2). The transcript's tool
+    /// rows need it to tell "still running" from "no result ever arrived": a tool call the user
+    /// ESC'd never receives a `tool_result`, so its stored output is `nil` permanently, and a
+    /// running glyph derived from `nil` alone would leave a replayed aborted turn spinning forever.
+    /// Deliberately NOT `liveStreamingText != nil` — that is false for the entire time a tool runs,
+    /// which is exactly when this has to be true.
+    var turnRunning: Bool { session.state.turnRunning }
+
     /// LIVE-GATE G4: CC-parity pinned todo widget — `WindowSurfaceView.windowContent` renders a
     /// compact "what's left" list below the transcript whenever ANY task isn't done yet, mirroring
     /// Claude Code's own pinned-todo panel. Empty (hides the whole section) once every task is

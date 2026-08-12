@@ -18,9 +18,14 @@ struct TranscriptView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
                     ForEach(Array(adapter.transcript.enumerated()), id: \.offset) { index, exchange in
+                        let isLast = index == adapter.transcript.count - 1
                         TranscriptExchangeRow(
                             exchange: exchange,
-                            streamingText: index == adapter.transcript.count - 1 ? adapter.liveStreamingText : nil,
+                            streamingText: isLast ? adapter.liveStreamingText : nil,
+                            // Only the newest exchange can hold a call that is still running — an
+                            // older one's turn is over by construction, so its resultless calls read
+                            // as "no result", never as "running" (mac-chat-parity Task 2).
+                            turnIsLive: isLast && adapter.turnRunning,
                             tint: tint
                         )
                         .id(index)
@@ -82,8 +87,8 @@ struct TranscriptView: View {
 
 /// One exchange's rows — prompt bubble, GROUPED activity (LIVE-GATE G3 / r1b: `groupActivity`
 /// folds any UNBROKEN run of tool calls — even across different tool names — into one `.toolRun`
-/// sentence row, skips `.task` entirely), one row per assistant message plus the live streaming
-/// row, stopped flag. Activity and replies are NOT interleaved chronologically — every tool row
+/// sentence row carrying its status and expanding to every call's arguments and output, skips
+/// `.task` entirely), one row per assistant message plus the live streaming row, stopped flag. Activity and replies are NOT interleaved chronologically — every tool row
 /// precedes every reply row, because `Exchange` stores them in two separate lists; making the
 /// transcript event-shaped is a separate, larger change (spec §5 item 6). A
 /// dedicated `View` (not a `@ViewBuilder` func on `TranscriptView`) because it owns its own
@@ -95,6 +100,10 @@ private struct TranscriptExchangeRow: View {
     /// trailing-stream mechanism) — `TranscriptView.body` computes this per-index so this view
     /// stays a pure function of its own inputs.
     let streamingText: String?
+    /// True only for the LAST exchange while its turn is still running — the tool rows' gate for
+    /// drawing a running glyph. Same per-index computation as `streamingText`, and for the same
+    /// reason: this view stays a pure function of its inputs.
+    let turnIsLive: Bool
     let tint: Color
 
     @State private var expandedGroups: Set<Int> = []
@@ -109,6 +118,7 @@ private struct TranscriptExchangeRow: View {
                 case .toolRun(let entries):
                     TranscriptToolGroupRow(
                         entries: entries,
+                        turnIsLive: turnIsLive,
                         isExpanded: expandedGroups.contains(index),
                         toggle: { toggle(index) }
                     )
