@@ -344,6 +344,62 @@ final class PolicyMenuTests: XCTestCase {
         XCTAssertFalse(orb.fieldAdapter.isChatSession, "switching back to a non-chat row must flip it back off")
     }
 
+    /// mac-chat-parity T4 fix round 1 — the THIRD switch site, and the one the first pass missed.
+    ///
+    /// The orb's `fieldAdapter` is a `let` that lives for the whole app lifetime: nothing tears it
+    /// down between sessions, and until this fix nothing re-derived its policy either. So a `bypass`
+    /// adopted for session A through the ⋯ menu stayed on screen for session B — and, worse than the
+    /// stale value that predated T4, stayed FLAGGED as the daemon's own answer. Task 6 is told to
+    /// trust that flag, and the orb sidebar is dispatch-only (`AppDelegate.isOrbSidebarRow`), which
+    /// is exactly a mode spec §4 gives the permissions row to.
+    @MainActor
+    func testOrbSwitchingSessionsReSeedsThePolicyInsteadOfLatchingTheLastOneItSet() {
+        let orb = OrbWindowController(session: SessionModel())
+        orb.fieldAdapter.boundSessionId = { "s_a" }
+        let rows = [
+            SessionSummary(sessionId: "s_a", title: nil, createdAt: 1, scope: "global", mode: "dispatch", approvalPolicy: "ask"),
+            SessionSummary(sessionId: "s_b", title: nil, createdAt: 2, scope: "global", mode: "dispatch", approvalPolicy: "plan"),
+            SessionSummary(sessionId: "s_quiet", title: nil, createdAt: 3, scope: "global", mode: "dispatch"),
+        ]
+
+        // The user changes s_a's policy in the orb's own ⋯ menu (GlassRootView's wiring, on success).
+        orb.fieldAdapter.adoptSessionPolicy("bypass")
+        XCTAssertEqual(orb.fieldAdapter.sessionPolicy, "bypass")
+
+        // …then picks a DIFFERENT row in the orb sidebar.
+        orb.updateIsChatSession(for: "s_b", rows: rows)
+        XCTAssertEqual(orb.fieldAdapter.sessionPolicy, "plan",
+                       "the arriving session's policy — never the one this adapter last set for another session")
+        XCTAssertTrue(orb.fieldAdapter.sessionPolicyKnown)
+
+        // A row that reports nothing must clear the claim, not inherit s_b's.
+        orb.updateIsChatSession(for: "s_quiet", rows: rows)
+        XCTAssertEqual(orb.fieldAdapter.sessionPolicy, "auto")
+        XCTAssertFalse(orb.fieldAdapter.sessionPolicyKnown,
+                       "an unknown policy must never be certified as the daemon's answer")
+    }
+
+    /// The other half of the placement decision: a REDUNDANT reselect (the already-displayed row
+    /// tapped again — `SessionSidebarRow.onTapGesture` fires `onSelect` unconditionally) must NOT
+    /// re-seed. The seed sits below `updateIsChatSession`'s same-session guard for this reason: the
+    /// `directory` row can be older than the change the user just made through this very surface,
+    /// and re-reading it there would quietly replace their own value with a stale one. Exactly the
+    /// hazard that makes `healSessionPolicyIfUnknown` one-way, reached from the other side.
+    @MainActor
+    func testARedundantReselectNeverReSeedsOverThePolicyTheUserJustSet() {
+        let orb = OrbWindowController(session: SessionModel())
+        orb.fieldAdapter.boundSessionId = { "s_a" }
+        // The directory still holds the PRE-change row — no refresh has landed yet.
+        let staleRows = [SessionSummary(sessionId: "s_a", title: nil, createdAt: 1, scope: "global", mode: "dispatch", approvalPolicy: "ask")]
+
+        orb.fieldAdapter.adoptSessionPolicy("bypass")
+        orb.updateIsChatSession(for: "s_a", rows: staleRows)
+
+        XCTAssertEqual(orb.fieldAdapter.sessionPolicy, "bypass",
+                       "a reselect of the session already displayed is not a switch — the user's own confirmed change stands")
+        XCTAssertTrue(orb.fieldAdapter.sessionPolicyKnown)
+    }
+
     /// CONTROL: an id the directory hasn't loaded (yet) resolves non-chat — matches
     /// `DetachedWindowController.isChatSession`'s own documented "not found -> false" behavior
     /// (the SAME pure helper this method calls).

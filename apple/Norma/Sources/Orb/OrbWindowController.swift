@@ -253,6 +253,23 @@ final class OrbWindowController: ObservableObject {
         // session being left.
         fieldAdapter.interactionInFlight = []
         fieldAdapter.interactionErrors = [:]
+        // mac-chat-parity T4 fix round 1: the policy readout is re-derived here too — this being the
+        // THIRD switch site the paragraphs above name, and the one where getting it wrong lasts
+        // longest. `ShellSessionHost.hop` and `DetachedWindowController.selectSession` both seed;
+        // without this line the orb's app-lifetime adapter LATCHED the policy of whichever session
+        // its ⋯ menu last changed and reported it — flagged `sessionPolicyKnown == true`, i.e. "the
+        // daemon told us this" — for every session selected afterwards, with nothing to correct it
+        // (no other seed, no heal, and this adapter is never torn down).
+        //
+        // BELOW the guard, unlike `isChatSession` at the top of this method, and the difference is
+        // the point: chat-ness has exactly ONE writer (the daemon's `mode`), so re-deriving it on a
+        // redundant reselect is free. The policy has TWO — the daemon and this surface's own
+        // successful `setPolicy` — so a re-seed on a reselect could read a `directory` row older
+        // than the change the user just made here and quietly replace their value with it. Seeding
+        // is a SWITCH operation, and this guard is already the codebase's definition of a genuine
+        // switch. (Same one-way reasoning as `healSessionPolicyIfUnknown`, reached from the other
+        // side.)
+        fieldAdapter.seedSessionPolicy(for: sessionId, in: rows)
     }
 
     /// Task 4: fired by `requestWindowDetach()` with the panel's CURRENT frame (spawn the detached

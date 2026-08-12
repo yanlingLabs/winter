@@ -617,8 +617,10 @@ final class FieldStateAdapter: ObservableObject {
     /// attachment. Tolerable in a popover you open, glance at and change; a standing lie in a
     /// persistent row, where it inverts the danger styling's entire purpose.
     ///
-    /// Now written from three places, and only three: `seedSessionPolicy(for:in:)` at every
-    /// session-switch site, `healSessionPolicyIfUnknown(for:in:)` when the row lands late, and
+    /// Now written from three methods, and only three: `seedSessionPolicy(for:in:)` at ALL THREE
+    /// session-switch sites (`ShellSessionHost.attachFresh`/`hop`,
+    /// `DetachedWindowController.selectSession`, `OrbWindowController.updateIsChatSession`),
+    /// `healSessionPolicyIfUnknown(for:in:)` when the row lands late, and
     /// `adoptSessionPolicy(_:)` after a successful `session.setPolicy`. Still not a LIVE read — the
     /// daemon emits no policy-changed event, so a change made elsewhere after this was seeded is not
     /// learned until the next switch.
@@ -659,9 +661,12 @@ final class FieldStateAdapter: ObservableObject {
     @Published var policyChangeInFlight: Bool = false
 
     /// mac-chat-parity T4: seed the policy readout for `sessionId` off the directory's rows. Called
-    /// at every session-SWITCH site (`ShellSessionHost.attachFresh`/`hop`,
-    /// `DetachedWindowController.selectSession`) — the same places that already re-derive
-    /// `isChatSession` and clear the departed session's pendings.
+    /// at ALL THREE session-SWITCH sites — `ShellSessionHost.attachFresh`/`hop`,
+    /// `DetachedWindowController.selectSession`, and `OrbWindowController.updateIsChatSession` —
+    /// the same places that already re-derive `isChatSession` and clear the departed session's
+    /// pendings. Three is the whole set, and the codebase says so in
+    /// `OrbWindowController.updateIsChatSession`'s own doc; a sweep that stops at two leaves the
+    /// orb's APP-LIFETIME adapter latching one session's policy over every session picked after it.
     ///
     /// ALWAYS writes, including when the row says nothing: a switch that left the previous value in
     /// place would show the DEPARTED session's policy over the arriving one, the exact "a refusal is

@@ -234,6 +234,39 @@ final class DetachedWindowTests: XCTestCase {
         XCTAssertFalse(controller.adapterForTesting.sessionPolicyKnown)
     }
 
+    /// mac-chat-parity T4 fix round 1 (Minor 1): this window's OWN `onSetPolicy` wiring, driven end
+    /// to end. `PolicyMenuTests.testSessionPolicyUpdatesOnlyOnSuccess` pins the shape against a
+    /// hand-written closure, which would stay green if this wirer reverted to a bare
+    /// `adapter.sessionPolicy = policy` — leaving the value uncertified, and therefore fair game for
+    /// a `session.list` that was already in flight when the user made the change.
+    func testASuccessfulSetPolicyThroughThisWindowsOwnWiringCertifiesTheValue() async throws {
+        let t = DetachedScriptedTransport()
+        let session = SessionModel()
+        let feed = SessionFeed(makeTransport: { t }, token: "tok", clientName: "orb", mode: .pinned(sessionId: "S1"), session: session)
+        let controller = DetachedWindowController(
+            feed: feed, session: session,
+            frame: NSRect(x: 0, y: 0, width: 560, height: 640), title: "Norma"
+        )
+        defer { controller.close() }
+        controller.show()
+        await answerHandshake(t, sessionId: "S1")
+        XCTAssertFalse(controller.adapterForTesting.sessionPolicyKnown, "nothing has said anything yet")
+
+        controller.adapterForTesting.onSetPolicy("bypass")
+        XCTAssertTrue(controller.adapterForTesting.policyChangeInFlight, "flipped synchronously")
+        await waitUntilSent(t, 3)
+        let set = feedLineJSON(t.sent[2])
+        XCTAssertEqual(set["method"] as? String, "session.setPolicy")
+        XCTAssertEqual((set["params"] as? [String: Any])?["sessionId"] as? String, "S1")
+        XCTAssertEqual((set["params"] as? [String: Any])?["policy"] as? String, "bypass")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(set["id"] as! Int),"result":{"ok":true}}"#)
+
+        await feedWaitUntil { !controller.adapterForTesting.policyChangeInFlight }
+        XCTAssertEqual(controller.adapterForTesting.sessionPolicy, "bypass")
+        XCTAssertTrue(controller.adapterForTesting.sessionPolicyKnown,
+                      "adopting CERTIFIES the value; a bare assignment would move it and leave it uncertified")
+    }
+
     /// A no-op re-select (the current row tapped again) must not touch the wire at all.
     func testSelectSessionIsANoOpForTheAlreadyPinnedSession() async throws {
         let t = DetachedScriptedTransport()

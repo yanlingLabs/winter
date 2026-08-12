@@ -460,6 +460,63 @@ final class ShellSessionHostTests: XCTestCase {
         XCTAssertEqual(host.attachment?.adapter.sessionPolicyKnown, true)
     }
 
+    /// mac-chat-parity T4 fix round 1 (Minor 1): the shell's OWN `onSetPolicy` wiring, driven end to
+    /// end rather than reimplemented by a stub. `PolicyMenuTests.testSessionPolicyUpdatesOnlyOnSuccess`
+    /// pins the SHAPE against a hand-written closure, which stays green if this wirer reverts to a
+    /// bare `adapter.sessionPolicy = policy`.
+    ///
+    /// The harm that reversion causes is narrow but real, and this test's premise: the session was
+    /// attached before its row loaded, so the readout is UNKNOWN. A bare assignment moves the value
+    /// without certifying it — and `healSessionPolicyIfUnknown`, which is one-way precisely so it
+    /// cannot overwrite a known value, would then be free to overwrite this one with whatever a
+    /// `session.list` already in flight happens to carry. Adopting marks it known, which is what
+    /// closes that window.
+    func testASuccessfulSetPolicyThroughTheShellsOwnWiringCertifiesTheValue() async {
+        let lister = StubSessionLister()
+        let factory = ShellTransportFactory()
+        let directory = SessionDirectory(lister: lister.list)
+        let host = ShellSessionHost(directory: directory, makeFeed: { sessionId in
+            let session = SessionModel()
+            let feed = SessionFeed(makeTransport: { factory.make() }, token: "tok", clientName: "orb",
+                                   mode: .pinned(sessionId: sessionId), session: session)
+            return (feed, session)
+        })
+        defer { host.deselect() }
+
+        host.setShellVisible(true)
+        host.select("s_1") // no row yet — the readout starts unknown
+        await waitUntilMade(factory, 1)
+        let t = factory.made[0]
+        await answerHandshake(t, sessionId: "s_1")
+        XCTAssertEqual(host.attachment?.adapter.sessionPolicyKnown, false)
+
+        host.attachment?.adapter.onSetPolicy("bypass")
+        XCTAssertEqual(host.attachment?.adapter.policyChangeInFlight, true, "flipped synchronously")
+        await waitUntilSent(t, 3)
+        let set = feedLineJSON(t.sent[2])
+        XCTAssertEqual(set["method"] as? String, "session.setPolicy")
+        XCTAssertEqual((set["params"] as? [String: Any])?["sessionId"] as? String, "s_1")
+        XCTAssertEqual((set["params"] as? [String: Any])?["policy"] as? String, "bypass")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(set["id"] as! Int),"result":{"ok":true}}"#)
+
+        await waitUntilFalse { host.attachment?.adapter.policyChangeInFlight ?? true }
+        XCTAssertEqual(host.attachment?.adapter.sessionPolicy, "bypass")
+        XCTAssertEqual(host.attachment?.adapter.sessionPolicyKnown, true,
+                       "the daemon accepting the write IS an answer — a bare assignment would leave this false and let a heal overwrite it")
+
+        // The heal must now decline to touch it, even handed a row that disagrees — the point of
+        // certifying the value rather than merely moving it.
+        lister.rows = [SessionSummary(sessionId: "s_1", title: nil, createdAt: 1, scope: "global", cwd: nil, mode: "code", approvalPolicy: "ask")]
+        await directory.refresh()
+        XCTAssertEqual(host.attachment?.adapter.sessionPolicy, "bypass",
+                       "a list result carrying the pre-change policy must not undo the user's own confirmed change")
+    }
+
+    private func waitUntilFalse(_ cond: @MainActor () -> Bool) async {
+        let deadline = Date().addingTimeInterval(3)
+        while cond() && Date() < deadline { try? await Task.sleep(nanoseconds: 20_000_000) }
+    }
+
     // MARK: - AppDelegate wiring (no socket: the shell is hidden throughout)
 
     /// The shell's host is real, shares the app's ONE `SessionDirectory` (so every surface reads the
