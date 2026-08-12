@@ -367,6 +367,14 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         // actually prevents a cross-session collision now, not callId uniqueness — this clear
         // only bounds the dictionary's size across the switch.
         adapter.pendingCardDrafts = [:]
+        // Same sweep, same reason, for the two dictionaries beside it: `interactionInFlight` and
+        // `interactionErrors` are keyed by BARE callId — the very cross-session collision hazard
+        // `pendingCardDraftKey`'s doc describes, never applied to these two. A stale entry surviving
+        // a hop can put a NEW session's card into "Sending…" (buttons replaced, no retry) or print
+        // another session's error under it. Free to clear: both describe an in-flight attempt on the
+        // session being left.
+        adapter.interactionInFlight = []
+        adapter.interactionErrors = [:]
         Task { @MainActor [weak self] in
             await self?.feed.repin(to: sessionId)
         }

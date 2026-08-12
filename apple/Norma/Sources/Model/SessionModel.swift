@@ -140,6 +140,16 @@ struct InteractionRecord: Equatable {
         /// rule-writing approval freezes as a plain "Approved", the same thing iOS's resolved
         /// `ApprovalRowView` shows. Do not invent a local store for it: an outcome that survives
         /// relaunch has to come off the event log.
+        ///
+        /// **That gap is security-relevant, not cosmetic, and the follow-up should say so.**
+        /// `approvalAdditionalOptions` (`ChatContent/PendingCards.swift`) surfaces every non-
+        /// `allow_once`/`deny` option, which since working-directories T6.5 includes
+        /// `allow_add_dir` — "Allow and add as working directory", the one card option that WIDENS
+        /// THE SESSION'S WRITE FENCE. Choosing it freezes here as an indistinguishable "Approved",
+        /// so the audit trail cannot tell a one-off allow from a permanent rule or a fence
+        /// expansion. Closing it means adding `optionId` to `approval_resolved` — a protocol FIELD
+        /// change, which engages none of the compile-time traps, so its producers must be swept by
+        /// meaning (CLAUDE.md's own warning).
         case approval(approved: Bool, by: String)
         /// `question_resolved`. `answers`/`notes` are keyed by QUESTION TEXT, exactly as the wire
         /// keys them and as `questionAnswers`/`questionNotes` produce them.

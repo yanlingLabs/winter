@@ -1269,6 +1269,14 @@ final class ShellSessionHost: ObservableObject {
         // claim was wrong. The rest of the time (an ordinary same-session resolve), the adapter's
         // own resolve-path sweep (`FieldStateAdapter`'s `session.$state` sink) bounds it instead.
         live.adapter.pendingCardDrafts = [:]
+        // Same sweep, same reason, for the two dictionaries beside it: `interactionInFlight` and
+        // `interactionErrors` are keyed by BARE callId — the very cross-session collision hazard
+        // `pendingCardDraftKey`'s doc describes, never applied to these two. A stale entry surviving
+        // a hop can put a NEW session's card into "Sending…" (buttons replaced, no retry) or print
+        // another session's error under it. Free to clear: both describe an in-flight attempt on the
+        // session being left.
+        live.adapter.interactionInFlight = []
+        live.adapter.interactionErrors = [:]
         // T2 fix round 1: the first-message carry on the HOP path too — a departed new-chat
         // session opened from Recents while the shell shows another session arrives HERE, not
         // through `attachFresh`; the seed and the post-attach delivery must ride along or the
@@ -1499,7 +1507,11 @@ final class ShellSessionHost: ObservableObject {
             adapter.interactionErrors[callId] = nil
             Task { @MainActor [weak self, weak adapter] in
                 // Dispatch (Phase 7): a mirrored child card answers into the CHILD.
-                guard let target = childSessionId ?? self?.attachedSessionId else { return }
+                // A no-target early return must NOT strand the card: `interactionInFlight` was
+                // inserted synchronously above, and the card's "Sending…" state REPLACES its
+                // buttons — leaving the entry set would wedge it with no retry and no explanation.
+                // `onSetPolicy` just below has always handled its identical early return this way.
+                guard let target = childSessionId ?? self?.attachedSessionId else { adapter?.interactionInFlight.remove(callId); adapter?.interactionErrors[callId] = "couldn't send — try again"; return }
                 let ok = (try? await client.approvalRespond(sessionId: target, callId: callId, approved: approved, optionId: optionId)) != nil
                 adapter?.interactionInFlight.remove(callId)
                 if !ok { adapter?.interactionErrors[callId] = "couldn't send — try again" }
@@ -1510,7 +1522,11 @@ final class ShellSessionHost: ObservableObject {
             adapter.interactionInFlight.insert(callId)
             adapter.interactionErrors[callId] = nil
             Task { @MainActor [weak self, weak adapter] in
-                guard let target = childSessionId ?? self?.attachedSessionId else { return }
+                // A no-target early return must NOT strand the card: `interactionInFlight` was
+                // inserted synchronously above, and the card's "Sending…" state REPLACES its
+                // buttons — leaving the entry set would wedge it with no retry and no explanation.
+                // `onSetPolicy` just below has always handled its identical early return this way.
+                guard let target = childSessionId ?? self?.attachedSessionId else { adapter?.interactionInFlight.remove(callId); adapter?.interactionErrors[callId] = "couldn't send — try again"; return }
                 let ok = (try? await client.askUserRespond(sessionId: target, callId: callId, answers: answers, notes: notes.isEmpty ? nil : notes)) != nil
                 adapter?.interactionInFlight.remove(callId)
                 if !ok { adapter?.interactionErrors[callId] = "couldn't send — try again" }
@@ -1521,7 +1537,11 @@ final class ShellSessionHost: ObservableObject {
             adapter.interactionInFlight.insert(callId)
             adapter.interactionErrors[callId] = nil
             Task { @MainActor [weak self, weak adapter] in
-                guard let sid = self?.attachedSessionId else { return }
+                // A no-target early return must NOT strand the card: `interactionInFlight` was
+                // inserted synchronously above, and the card's "Sending…" state REPLACES its
+                // buttons — leaving the entry set would wedge it with no retry and no explanation.
+                // `onSetPolicy` just below has always handled its identical early return this way.
+                guard let sid = self?.attachedSessionId else { adapter?.interactionInFlight.remove(callId); adapter?.interactionErrors[callId] = "couldn't send — try again"; return }
                 let ok = (try? await client.planRespond(sessionId: sid, callId: callId, approved: approved, autoAccept: autoAccept, feedback: feedback)) != nil
                 adapter?.interactionInFlight.remove(callId)
                 if !ok { adapter?.interactionErrors[callId] = "couldn't send — try again" }

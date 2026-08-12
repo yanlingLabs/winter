@@ -64,6 +64,15 @@ struct PendingCardDraft: Equatable {
     /// The plan card's own two fields — untouched by anything above, which only questions read.
     var isRequestingChanges: Bool = false
     var feedback: String = ""
+    /// The APPROVAL card's "Show more" disclosure. Hoisted here for the same reason everything else
+    /// in this struct was, and one the band never exposed: `PendingApprovalBody` held it as view-
+    /// local `@State`, which was safe in a plain `VStack` band but is not in the transcript's
+    /// `LazyVStack`. Rows there are recycled freely, so expanding a long summary, scrolling away and
+    /// scrolling back silently collapsed it — and with `ForEach`'s index-keyed identity
+    /// (`TranscriptView`), a recycled row could inherit a NEIGHBOUR's expansion state. Same hazard
+    /// `InteractionCardWiring.draftBinding`'s doc names for typed answers; approvals simply had a
+    /// second piece of state nobody had moved yet.
+    var isSummaryExpanded: Bool = false
 
     /// Single-select an option — mirrors `PendingQuestionBody`'s old `onSelectSingle` closure.
     mutating func selectSingle(_ optionIndex: Int, forQuestion index: Int) {
@@ -394,12 +403,6 @@ func outcomeLabel(_ outcome: InteractionRecord.Outcome) -> InteractionOutcomeLab
     }
 }
 
-/// The provenance line under a frozen card — iOS's "answered by …" footer. `nil` when there is
-/// nobody to name (an ask that simply ended), so the card shows no dangling attribution.
-///
-/// `by` is whatever the responding client called itself (`"orb"`, `"iphone-gateway"`, `"cli-chat"`,
-/// a routine) — or the daemon's own `"timeout"` sentinel, whose wording says what actually happened
-/// instead of attributing the decision to a person.
 /// Whether a card draws its inline respond-error line — only while it is still PENDING, and that
 /// gate has to exist now that cards are permanent.
 ///
@@ -415,6 +418,12 @@ func showsInteractionErrorLine(_ record: InteractionRecord, hasError: Bool) -> B
     hasError && interactionIsPending(record)
 }
 
+/// The provenance line under a frozen card — iOS's "answered by …" footer. `nil` when there is
+/// nobody to name (an ask that simply ended), so the card shows no dangling attribution.
+///
+/// `by` is whatever the responding client called itself (`"orb"`, `"iphone-gateway"`, `"cli-chat"`,
+/// a routine) — or the daemon's own `"timeout"` sentinel, whose wording says what actually happened
+/// instead of attributing the decision to a person.
 func interactionProvenance(_ outcome: InteractionRecord.Outcome) -> String? {
     let by: String
     switch outcome {
@@ -432,10 +441,21 @@ func interactionProvenance(_ outcome: InteractionRecord.Outcome) -> String? {
 /// chrome (`TranscriptView`'s "latest" pill, `TranscriptCodeBlock`).
 ///
 /// **Pending and frozen are two different subtrees, not one subtree behind a flag.** The frozen
-/// bodies below contain no `Button` and no `TextField` at all, so a resolved card cannot be
-/// interacted with by construction — there is nothing to disable, nothing to accidentally leave
-/// enabled, and no `isResolved` parameter for a future edit to forget to thread through a new
-/// affordance. The header, surface and error line are shared, since those are identical either way.
+/// bodies below declare no `Button` and no `TextField` of their own, and — the part that actually
+/// carries the guarantee — `resolvedBody` is handed NO wiring closures at all, so there is no
+/// `onApproval`/`onQuestion`/`onPlan` in scope for a frozen card to call. A resolved card cannot
+/// re-answer its ask even by mistake: the capability is absent, not disabled, and no `isResolved`
+/// parameter exists for a future edit to forget to thread through a new affordance.
+///
+/// **What that does NOT say, precisely:** a frozen card is not free of every control. A frozen PLAN
+/// composes `TranscriptAssistantMessage`, and any fenced code block inside it renders
+/// `TranscriptCodeBlock`'s own copy button, which `isStreaming` does not gate (only the
+/// message-level copy button is gated — `TranscriptMessageViews.swift`). So a frozen plan containing
+/// a code fence carries live copy buttons TODAY. That is acceptable and stays: copying a plan is not
+/// responding to it, and the requirement is that the ask cannot be re-answered. It is written down
+/// because `testFrozenBodiesContainNoInteractiveAffordance` scans DECLARATIONS and cannot see
+/// through composition — the claim it checks is narrower than the sentence above, and this is the
+/// gap between them.
 ///
 /// The branch is `interactionIsPending(record)` — i.e. `record.outcome == nil` — and nothing else.
 /// The reducer guarantees that predicate goes false the moment the daemon stops waiting on the ask,
@@ -483,7 +503,7 @@ struct TranscriptInteractionCard: View {
     private var pendingBody: some View {
         switch record.ask {
         case .approval(_, let summary, let reviewerReason, let options):
-            PendingApprovalBody(callId: record.callId, summary: summary, reviewerReason: reviewerReason, childSessionId: record.childSessionId, options: options, isInFlight: isInFlight, onApproval: wiring.onApproval)
+            PendingApprovalBody(callId: record.callId, summary: summary, reviewerReason: reviewerReason, childSessionId: record.childSessionId, options: options, isInFlight: isInFlight, onApproval: wiring.onApproval, draft: wiring.draftBinding(record.callId))
         case .question(let questions):
             PendingQuestionBody(callId: record.callId, questions: questions, childSessionId: record.childSessionId, isInFlight: isInFlight, onQuestion: wiring.onQuestion, draft: wiring.draftBinding(record.callId))
         case .plan(let plan):
@@ -554,7 +574,10 @@ private struct QuestionSeparator: View {
 /// (`packages/protocol/src/events.ts` caps it "at the writer, not the schema"), and an unbounded
 /// record would let one pathological ask own the scrollback. 8 lines clears every summary the
 /// daemon composes in practice; the whole text is readable while the card is still pending.
-private struct ResolvedApprovalBody: View {
+/// panel-shell T10b precedent: internal rather than `private` so `InteractionCardTests` can
+/// construct it and prove — via `Mirror` — that it holds no respond closure, the same reason
+/// `PendingQuestionBody`/`PendingPlanBody` were widened.
+struct ResolvedApprovalBody: View {
     let summary: String
     let reviewerReason: String?
     let outcome: InteractionRecord.Outcome
@@ -587,7 +610,10 @@ private struct ResolvedApprovalBody: View {
 ///
 /// The preview pane goes with them for the same reason (and takes a nested `ScrollView` out of the
 /// transcript's own scroll view along the way).
-private struct ResolvedQuestionBody: View {
+/// panel-shell T10b precedent: internal rather than `private` so `InteractionCardTests` can
+/// construct it and prove — via `Mirror` — that it holds no respond closure, the same reason
+/// `PendingQuestionBody`/`PendingPlanBody` were widened.
+struct ResolvedQuestionBody: View {
     let questions: [SessionEvent.Question]
     let outcome: InteractionRecord.Outcome
 
@@ -677,7 +703,10 @@ private struct ResolvedQuestionBody: View {
 /// The plan that was presented, and what was decided about it. Keeps the pending card's markdown
 /// rendering and its ~260pt scroll cap — a plan is long by nature, and the record of one has to
 /// still be the plan.
-private struct ResolvedPlanBody: View {
+/// panel-shell T10b precedent: internal rather than `private` so `InteractionCardTests` can
+/// construct it and prove — via `Mirror` — that it holds no respond closure, the same reason
+/// `PendingQuestionBody`/`PendingPlanBody` were widened.
+struct ResolvedPlanBody: View {
     let plan: String
     let outcome: InteractionRecord.Outcome
 
@@ -691,12 +720,19 @@ private struct ResolvedPlanBody: View {
             ScrollView {
                 // `isStreaming: true` on a plan that is emphatically NOT streaming is load-bearing,
                 // not a copy-paste: it is how `TranscriptAssistantMessage` suppresses its trailing
-                // per-message copy affordance. That makes this the ONE place a frozen body's
-                // "declares nothing interactive" property depends on a flag rather than on its own
-                // source — `testFrozenBodiesContainNoInteractiveAffordance` scans declarations and
-                // cannot see through composition. Flipping this flag would put a live control inside
-                // a frozen card with no test going red. (It would be harmless in itself — copying a
-                // plan is not responding to it — but the claim would quietly stop being true.)
+                // MESSAGE-level copy button.
+                //
+                // It does not suppress everything. A fenced code block inside the plan routes to
+                // `TranscriptCodeBlock`, whose own copy button is NOT gated on this flag
+                // (`TranscriptMessageViews.swift`) — so a frozen plan containing a code fence
+                // already carries live copy buttons and their 1.2s revert timers. Deliberately left
+                // alone: copying a plan is not responding to it, and this card's requirement is that
+                // the ask cannot be RE-ANSWERED, which holds because `resolvedBody` is handed no
+                // respond closures at all.
+                //
+                // What this line is worth guarding is narrower than it looks, then: flipping the
+                // flag would add the message-level copy button too, with no test going red, because
+                // the declaration scan cannot see through composition. Named, not relied upon.
                 TranscriptAssistantMessage(text: plan, isStreaming: true)
             }
             .frame(maxHeight: 260)
@@ -738,8 +774,10 @@ private struct PendingApprovalBody: View {
     let options: [SessionEvent.ApprovalOption]?
     let isInFlight: Bool
     let onApproval: (String, Bool, String?, String?) -> Void  // callId, approved, optionId, childSessionId
-
-    @State private var isExpanded = false
+    /// The "Show more" disclosure — externally owned, NOT view-local `@State`. See
+    /// `PendingCardDraft.isSummaryExpanded` for why the transcript's `LazyVStack` makes that
+    /// mandatory rather than tidy.
+    @Binding var draft: PendingCardDraft
 
     private var mightOverflowThreeLines: Bool {
         summary.count > 150 || summary.filter { $0 == "\n" }.count >= 3
@@ -755,13 +793,13 @@ private struct PendingApprovalBody: View {
             Text(summary)
                 .font(.system(size: 12, design: .monospaced))
                 .foregroundStyle(.secondary)
-                .lineLimit(isExpanded ? nil : 3)
+                .lineLimit(draft.isSummaryExpanded ? nil : 3)
                 .truncationMode(.middle)
                 .textSelection(.enabled)
 
             if mightOverflowThreeLines {
-                Button(isExpanded ? "Show less" : "Show more") {
-                    isExpanded.toggle()
+                Button(draft.isSummaryExpanded ? "Show less" : "Show more") {
+                    draft.isSummaryExpanded.toggle()
                 }
                 .buttonStyle(.plain)
                 .font(.system(size: 11, weight: .medium))

@@ -187,6 +187,34 @@ final class InteractionCardTests: XCTestCase {
         }
     }
 
+    /// The real guarantee, and a stronger one than the source scan: a frozen body holds no respond
+    /// closure, so there is nothing in scope for it to call. `TranscriptInteractionCard.resolvedBody`
+    /// constructs these three with data only — no `onApproval`/`onQuestion`/`onPlan`, no
+    /// `draftBinding` — which is why a resolved card cannot re-answer its ask even by mistake. Driven
+    /// through `Mirror` so it inspects the actual types rather than the file's text, and so it
+    /// survives a refactor that moves the declarations.
+    ///
+    /// Unlike the scan below, this is immune to composition: a nested view cannot manufacture a
+    /// closure its parent was never given.
+    func testAFrozenCardIsHandedNoRespondClosures() {
+        let approval = ResolvedApprovalBody(summary: "rm -rf x", reviewerReason: nil,
+                                            outcome: .approval(approved: true, by: "orb"))
+        let question = ResolvedQuestionBody(questions: [portQuestion],
+                                            outcome: .question(answers: ["Which port?": "8080"], notes: [:], by: "orb"))
+        let plan = ResolvedPlanBody(plan: "the plan",
+                                    outcome: .plan(approved: true, autoAccept: false, feedback: nil, by: "orb"))
+
+        for (name, body) in [("ResolvedApprovalBody", Mirror(reflecting: approval)),
+                             ("ResolvedQuestionBody", Mirror(reflecting: question)),
+                             ("ResolvedPlanBody", Mirror(reflecting: plan))] {
+            for child in body.children {
+                let type = String(describing: Swift.type(of: child.value))
+                XCTAssertFalse(type.contains("->"),
+                               "\(name).\(child.label ?? "?") is a closure (\(type)) — a frozen card must hold no callback")
+            }
+        }
+    }
+
     /// A respond that failed and was then resolved some other way (the fail-closed timeout, the
     /// phone answering it) must not leave "couldn't send — try again" in the permanent record.
     /// Nothing clears `interactionErrors` on resolve — it is cleared only at the start of the next
@@ -202,14 +230,22 @@ final class InteractionCardTests: XCTestCase {
         }
     }
 
-    /// Non-interactivity is structural, not a disabled flag: the resolved bodies are separate view
-    /// types from the pending ones, and they declare no `Button`/`TextField` at all. This asserts
-    /// the source says so, by reading the file — the only way to make the claim without a UI test
-    /// harness, and honest about being exactly that.
+    /// The resolved bodies are separate view types from the pending ones and declare no
+    /// `Button`/`TextField` of their own. This asserts the source says so, by reading the file — the
+    /// only way to make the claim without a UI test harness, and honest about being exactly that.
     ///
-    /// It does NOT prove SwiftUI refuses a click (that is the live gate), and it does not cover the
-    /// shared chrome in `TranscriptInteractionCard` — which is why the check is scoped to the three
-    /// `Resolved*Body` declarations rather than the whole file.
+    /// **Three things it does not establish, all of them real:**
+    ///   1. It does not prove SwiftUI refuses a click — that is the live gate.
+    ///   2. **It cannot see through composition.** `ResolvedPlanBody` composes
+    ///      `TranscriptAssistantMessage`, and a fenced code block inside a plan renders
+    ///      `TranscriptCodeBlock`'s copy button, which nothing here gates — so a frozen plan with a
+    ///      code fence DOES carry live buttons today. Accepted: copying is not re-answering.
+    ///   3. It does not cover the shared chrome in `TranscriptInteractionCard`, which is why the
+    ///      scope is the three `Resolved*Body` declarations rather than the whole file.
+    ///
+    /// What actually guarantees a frozen card cannot RE-ANSWER its ask is not this scan: it is that
+    /// `TranscriptInteractionCard.resolvedBody` is handed no respond closures, so there is nothing
+    /// in scope to call. That is pinned by `testAFrozenCardIsHandedNoRespondClosures` below.
     func testFrozenBodiesContainNoInteractiveAffordance() throws {
         let url = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
@@ -217,7 +253,10 @@ final class InteractionCardTests: XCTestCase {
         let source = try String(contentsOf: url, encoding: .utf8)
 
         for name in ["ResolvedApprovalBody", "ResolvedQuestionBody", "ResolvedPlanBody"] {
-            guard let start = source.range(of: "private struct \(name): View {") else {
+            // Access level is not part of the claim — these are internal so `Mirror` can reach them
+            // (`testAFrozenCardIsHandedNoRespondClosures`), and were `private` before that.
+            guard let start = source.range(of: "\nstruct \(name): View {")
+                    ?? source.range(of: "\nprivate struct \(name): View {") else {
                 return XCTFail("\(name) not found — rename it here too, do not delete the check")
             }
             // The declaration runs to its closing brace at column 0.
