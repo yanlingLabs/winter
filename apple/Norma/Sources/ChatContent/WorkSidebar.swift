@@ -156,6 +156,23 @@ func isPolicyDangerous(_ policy: String) -> Bool {
     policy == "bypass"
 }
 
+/// mac-chat-parity T4: PURE — the approval policy the DAEMON reports for a session, read off
+/// `session.list`'s own row (`SessionSummary.approvalPolicy`). Lives here, beside the other three
+/// pure policy decisions the pickers ride on, so every surface asks the same question of the same
+/// source; `FieldStateAdapter`'s seed/heal are its only callers today and Task 6's persistent row
+/// will be the third.
+///
+/// `nil` for BOTH absences, deliberately indistinguishable: the row is not loaded yet, or the row
+/// is from a daemon predating the field. Neither is "this session has no policy" — every session
+/// has one — and neither entitles a caller to name it. Contrast
+/// `DetachedWindowController.isChatSession(_:in:)`, which collapses its not-found case to `false`
+/// and documents at length why that is right THERE: an answer of "not chat" merely shows a picker,
+/// while an answer of "auto" here would be a standing claim about how much the agent may do
+/// unattended.
+func wireApprovalPolicy(_ sessionId: String, in rows: [SessionSummary]) -> String? {
+    rows.first(where: { $0.sessionId == sessionId })?.approvalPolicy
+}
+
 // MARK: - The right work sidebar (a function-family on WindowContentView, like `subagentSection`/
 // `pinnedTasksSection`, so it renders them directly — brief Step 2's "smallest diff" option).
 

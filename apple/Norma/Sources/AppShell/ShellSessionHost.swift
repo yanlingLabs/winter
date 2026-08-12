@@ -1106,6 +1106,11 @@ final class ShellSessionHost: ObservableObject {
         // this reads `false` and the row isn't found. `reconcileIsChatSession` (wired in `init`)
         // is what makes that transient, not permanent — see its own doc comment.
         adapter.isChatSession = Self.isChatSession(sessionId, in: directory.rows)
+        // mac-chat-parity T4: the policy readout is seeded off the SAME one-shot read of
+        // `directory.rows`, and inherits the same "the row may not be loaded yet" caveat — which is
+        // why `seedSessionPolicy` records whether it actually learned anything, and why the
+        // `directory.$rows` subscription in `init` heals it when the row lands.
+        adapter.seedSessionPolicy(for: sessionId, in: directory.rows)
         // chatgpt-ui T2: the first-message carry (spec §2 — "composer content carries over; no
         // flicker"). The pending text shows in the attached composer from the very first frame
         // and clears only when the send actually lands (`deliverPendingFirstMessage`) — so the
@@ -1242,6 +1247,11 @@ final class ShellSessionHost: ObservableObject {
         // an in-place switch does elsewhere: a different session means a different mode, a different
         // pinned model/effort, and refusals that were about the session the user just left.
         live.adapter.isChatSession = Self.isChatSession(sessionId, in: directory.rows)
+        // mac-chat-parity T4: and a different session means a different POLICY — re-derived here,
+        // never carried. `seedSessionPolicy` resets to "unknown" for an arriving row that says
+        // nothing rather than leaving the departed session's value on screen; that value would be a
+        // claim about a session it was never about, the same class as the refusals cleared below.
+        live.adapter.seedSessionPolicy(for: sessionId, in: directory.rows)
         live.adapter.pendingModel = .none
         live.adapter.pendingEffort = .none
         live.adapter.selectionProbation = nil
@@ -1460,6 +1470,14 @@ final class ShellSessionHost: ObservableObject {
         if live.adapter.isChatSession != derived {
             live.adapter.isChatSession = derived
         }
+        // mac-chat-parity T4: the same door, for the same race — a session attached before its row
+        // loaded has no policy to show either, and nothing else would ever read the row again for
+        // the rest of that attachment. ONE-WAY (see `healSessionPolicyIfUnknown`): unlike
+        // `isChatSession` above, which re-derives in both directions off a fact only the daemon
+        // owns, the policy has a second legitimate writer — the user's own successful `setPolicy` —
+        // so a two-way reconcile here would let a list result already in flight when they changed it
+        // silently undo the change.
+        live.adapter.healSessionPolicyIfUnknown(for: sid, in: rows)
     }
 
     // MARK: - The hosted view's wiring
@@ -1555,7 +1573,7 @@ final class ShellSessionHost: ObservableObject {
                 guard let sid = self?.attachedSessionId else { adapter?.policyChangeInFlight = false; return }
                 let ok = (try? await client.setPolicy(sessionId: sid, policy: policy)) != nil
                 adapter?.policyChangeInFlight = false
-                if ok { adapter?.sessionPolicy = policy }
+                if ok { adapter?.adoptSessionPolicy(policy) }
             }
         }
         adapter.onSetModel = { [weak self, weak adapter] model in

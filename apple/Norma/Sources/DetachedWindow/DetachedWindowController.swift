@@ -103,7 +103,7 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         let feedClient = feed.client
         let sessionDirectory = SessionDirectory(lister: {
             try await feedClient.listSessions().map {
-                SessionSummary(sessionId: $0.sessionId, title: $0.title, createdAt: $0.createdAt, scope: $0.scope, cwd: $0.cwd, mode: $0.mode, parentSessionId: $0.parentSessionId, model: $0.model, effort: $0.effort, dirs: $0.dirs, activity: $0.activity, archived: $0.archived, signals: $0.signals)
+                SessionSummary(sessionId: $0.sessionId, title: $0.title, createdAt: $0.createdAt, scope: $0.scope, cwd: $0.cwd, mode: $0.mode, parentSessionId: $0.parentSessionId, model: $0.model, effort: $0.effort, dirs: $0.dirs, activity: $0.activity, archived: $0.archived, signals: $0.signals, approvalPolicy: $0.approvalPolicy)
             }
         })
         directory = sessionDirectory
@@ -226,7 +226,7 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
                 guard let self else { return }
                 let ok = (try? await client.setPolicy(sessionId: self.sessionId, policy: policy)) != nil
                 adapter?.policyChangeInFlight = false
-                if ok { adapter?.sessionPolicy = policy }
+                if ok { adapter?.adoptSessionPolicy(policy) }
             }
         }
 
@@ -347,6 +347,12 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         guard sessionId != self.sessionId else { return }
         self.sessionId = sessionId
         adapter.isChatSession = Self.isChatSession(sessionId, in: directory.rows)
+        // mac-chat-parity T4: and a different POLICY — re-derived off this window's own directory,
+        // never carried across the switch (`seedSessionPolicy` resets to "unknown" for an arriving
+        // row that says nothing). The sidebar's clicked row is always already loaded here, so the
+        // not-loaded case this shares with `isChatSession` above is the `newSession()` path, where
+        // "unknown" is simply the truth until the directory catches up.
+        adapter.seedSessionPolicy(for: sessionId, in: directory.rows)
         // provider-correctness T6: a different session means a different pinned model/effort and a
         // possibly-different mode, so every picker overlay from the OLD session must go — leaving
         // one would render the previous session's optimistic choice as this session's selection.

@@ -96,7 +96,7 @@ struct GlassRootView: View {
             Task { @MainActor in
                 let ok = await controller.onSetPolicy?(policy) ?? false
                 adapter.policyChangeInFlight = false
-                if ok { adapter.sessionPolicy = policy }
+                if ok { adapter.adoptSessionPolicy(policy) }
             }
         }
 

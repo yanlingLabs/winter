@@ -409,12 +409,26 @@ extension NormaClient {
     ///
     /// `signals` is the pair `SessionSignals` documents: `nil` means "daemon predating the surface",
     /// never `false/false`.
-    public func listSessions() async throws -> [(sessionId: String, scope: String, createdAt: Int, lastSeq: Int, title: String?, cwd: String?, mode: String?, parentSessionId: String?, model: String?, effort: String?, dirs: [SessionDirEntry]?, activity: String?, archived: Bool?, signals: SessionSignals?)] {
+    ///
+    /// mac-chat-parity T4: `approvalPolicy` appended LAST, same purely-additive precedent as every
+    /// field above it. The READ half of `setPolicy(sessionId:policy:)` — before it, the Mac app's
+    /// only source for "what policy is this session on" was its OWN last successful write
+    /// (`FieldStateAdapter.sessionPolicy`, seeded `"auto"`), so a session left at `bypass` by the
+    /// CLI or another window read "Auto" indefinitely.
+    ///
+    /// A plain `String`, and NOT narrowed to the six settable modes: a chat session's policy is the
+    /// internal `"chat"` that `session.setPolicy` refuses as an input (core's `gate.ts`), and it is
+    /// exactly the row whose policy explains why its picker is hidden. `nil` means the daemon did
+    /// not say — an older daemon, since every daemon at or past this version stamps EVERY row (it
+    /// rides no participation gate, unlike `activity`/`dirs`). **Never coerce that `nil` to
+    /// `"auto"`**: that asserts a policy nobody stated, which is the standing lie this field exists
+    /// to end. See `FieldStateAdapter.sessionPolicyKnown` (apple/Norma) for the consumer shape.
+    public func listSessions() async throws -> [(sessionId: String, scope: String, createdAt: Int, lastSeq: Int, title: String?, cwd: String?, mode: String?, parentSessionId: String?, model: String?, effort: String?, dirs: [SessionDirEntry]?, activity: String?, archived: Bool?, signals: SessionSignals?, approvalPolicy: String?)] {
         let r = try await request("session.list", params: nil)
         return (r["sessions"]?.arrayValue ?? []).compactMap { s in
             guard let id = s["sessionId"]?.stringValue, let scope = s["scope"]?.stringValue,
                   let created = s["createdAt"]?.intValue, let last = s["lastSeq"]?.intValue else { return nil }
-            return (id, scope, created, last, s["title"]?.stringValue, s["cwd"]?.stringValue, s["mode"]?.stringValue, s["parentSessionId"]?.stringValue, s["model"]?.stringValue, s["effort"]?.stringValue, decodeSessionDirs(s["dirs"]), s["activity"]?.stringValue, s["archived"]?.boolValue, decodeSessionSignals(s["signals"]))
+            return (id, scope, created, last, s["title"]?.stringValue, s["cwd"]?.stringValue, s["mode"]?.stringValue, s["parentSessionId"]?.stringValue, s["model"]?.stringValue, s["effort"]?.stringValue, decodeSessionDirs(s["dirs"]), s["activity"]?.stringValue, s["archived"]?.boolValue, decodeSessionSignals(s["signals"]), s["approvalPolicy"]?.stringValue)
         }
     }
 
