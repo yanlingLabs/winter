@@ -121,6 +121,11 @@ enum Typography {
     static let fieldCodeLabelNS: NSFont = sansNS(ofSize: captionSize, .medium)
     /// The orb field's code-block body.
     static let fieldCodeBlockNS: NSFont = monoNS(ofSize: controlSize)
+    /// The orb field's INLINE-code run — 13.5 verbatim, its own token on purpose: it was
+    /// briefly derived from the transcript's sans metrics (which happened to compute 13.5),
+    /// and the 2026-08-13 ladder unification would have silently shrunk it to 12 through that
+    /// coupling. The orb is gated; its values never ride along with transcript rulings.
+    static let fieldInlineCodeNS: NSFont = monoNS(ofSize: 13.5)
     /// The shortcut recorder's key-cap legend.
     static let shortcutKeyNS: NSFont = sansNS(ofSize: captionSize)
     /// The web panel's native tab-strip label.
@@ -209,25 +214,31 @@ enum TranscriptProseRole: Equatable {
 
 /// The type metrics one prose role renders at.
 ///
-/// The two ladders are NOT the same numbers in two faces. New York's x-height is ~9% shorter than
-/// San Francisco's at equal point size (measured on this OS: 6.713 vs 7.369 at 14 pt), so setting
-/// serif at the sans body's 14 pt would make Norma's replies read *smaller* than the user's own
-/// message sitting right above them. The serif ladder is the sans ladder scaled by 15.5/14, the
-/// factor that lands New York's x-height on 7.334 — within 0.5% of the sans body it replaces.
-/// Same rule the wordmark's two platform registers came from: measure, don't estimate.
+/// **One ladder, two faces, two rhythms — by ruling (2026-08-13: "the iOS here is source of
+/// truth. the Mac should follow it").** iOS sets the user bubble and the serif assistant prose
+/// at the SAME nominal style (`.body`), and the Mac now mirrors that relationship: both roles
+/// share every size below; only the FACE (serif vs sans, chosen by `transcriptProseFont`) and
+/// the LEADING differ — iOS's own distinction (`lineSpacing(6)` on serif markdown, nothing on
+/// the bubble).
+///
+/// The x-height measurement that used to size the sans ladder lower is still TRUE as a fact and
+/// is retained as an **accepted property**, not a rule: New York's x-height is ~9% shorter than
+/// San Francisco's at equal point size (measured on this OS: 6.713 vs 7.369 at 14 pt), so at the
+/// shared size the serif reply reads ~10% optically lighter than the sans bubble. Known, chosen.
+/// `TranscriptBrandTests` pins both halves: the shared sizes AND the accepted property.
 struct TranscriptProseMetrics: Equatable {
     /// Paragraph, bullet and numbered-item size.
     let bodySize: CGFloat
     /// Block quotes, one step down from `bodySize`.
     let quoteSize: CGFloat
-    /// Added to the font's own line height. The sans register keeps the donor's 3; serif takes 5,
-    /// a wider rhythm for a reading face over long desktop line lengths — short of iOS's 1.59
-    /// pitch/size ratio (`AssistantMarkdown.swift`), which is tuned for a phone's line width.
+    /// Added to the font's own line height. Sans keeps 3; serif takes 5, a wider rhythm for a
+    /// reading face over long desktop line lengths — short of iOS's 1.59 pitch/size ratio
+    /// (`AssistantMarkdown.swift`), which is tuned for a phone's line width. The ONE remaining
+    /// divergence between the two roles' metrics, deliberately (see the type doc above).
     let lineSpacing: CGFloat
-    /// How far BELOW its block's size an inline monospaced code run is set. Two different drops
-    /// because SF Mono has to be shorter against New York than against SF to read as the same size:
-    /// at these ladders both land on 13.5 pt for body text, which is exactly what this surface has
-    /// always used.
+    /// How far BELOW its block's size an inline monospaced code run is set. One shared drop
+    /// since the 2026-08-13 unification ruling: both roles land inline code on 13.5 pt for body
+    /// text, which is exactly what this surface has always used.
     let codeSizeDrop: CGFloat
     /// Heading sizes for levels 1…4; level 5+ takes the last entry, as the donor's ladder did.
     let headingSizes: [CGFloat]
@@ -247,11 +258,12 @@ struct TranscriptProseMetrics: Equatable {
 func transcriptProseMetrics(_ role: TranscriptProseRole) -> TranscriptProseMetrics {
     switch role {
     case .sans:
-        // The donor's ladder, unchanged — the register the user's own message and plan cards keep.
-        return TranscriptProseMetrics(bodySize: 14, quoteSize: 13.5, lineSpacing: 3,
-                                      codeSizeDrop: 0.5, headingSizes: [20, 17, 15.5, 14.5])
+        // Unified onto the assistant's sizes by the 2026-08-13 ruling (iOS canonical: its user
+        // bubble and serif prose share `.body`). Only the leading stays the sans register's own.
+        // Until the ruling this was the donor's 14 / 13.5 / drop 0.5 / [20, 17, 15.5, 14.5].
+        return TranscriptProseMetrics(bodySize: 15.5, quoteSize: 15, lineSpacing: 3,
+                                      codeSizeDrop: 2, headingSizes: [22, 19, 17, 16])
     case .assistant:
-        // The sans ladder × 15.5/14, rounded to half points.
         return TranscriptProseMetrics(bodySize: 15.5, quoteSize: 15, lineSpacing: 5,
                                       codeSizeDrop: 2, headingSizes: [22, 19, 17, 16])
     }

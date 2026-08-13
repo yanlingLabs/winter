@@ -90,6 +90,7 @@ final class TypographyTests: XCTestCase {
         // NSFont pipeline tokens
         "fieldCodeLabelNS": .nsFont(Typography.fieldCodeLabelNS),
         "fieldCodeBlockNS": .nsFont(Typography.fieldCodeBlockNS),
+        "fieldInlineCodeNS": .nsFont(Typography.fieldInlineCodeNS),
         "shortcutKeyNS": .nsFont(Typography.shortcutKeyNS),
         "panelTabLabelNS": .nsFont(Typography.panelTabLabelNS),
         // The serif registers (Theme)
@@ -122,6 +123,7 @@ final class TypographyTests: XCTestCase {
     private static let nsFontMeanings: [String: NSFont] = [
         "fieldCodeLabelNS": .systemFont(ofSize: 11, weight: .medium),
         "fieldCodeBlockNS": .monospacedSystemFont(ofSize: 13, weight: .regular),
+        "fieldInlineCodeNS": .monospacedSystemFont(ofSize: 13.5, weight: .regular),
         "shortcutKeyNS": .systemFont(ofSize: 11, weight: .regular),
         "panelTabLabelNS": .systemFont(ofSize: 12, weight: .regular),
     ]

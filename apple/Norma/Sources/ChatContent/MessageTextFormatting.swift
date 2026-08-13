@@ -237,8 +237,8 @@ enum MessageTextFormatter {
     static func chatInlineAttributedString(
         _ text: String,
         colorScheme: ColorScheme,
-        baseFont: NSFont = Typography.sansNS(ofSize: Typography.bodySize),
-        codeFont: NSFont = Typography.monoNS(ofSize: transcriptProseMetrics(.sans).codeSize(for: Typography.bodySize)),
+        baseFont: NSFont = Typography.sansNS(ofSize: transcriptProseMetrics(.sans).bodySize),
+        codeFont: NSFont = Typography.monoNS(ofSize: transcriptProseMetrics(.sans).codeSize(for: transcriptProseMetrics(.sans).bodySize)),
         lineSpacing: CGFloat = 0
     ) -> AttributedString {
         // mac-chat-parity Task 8: the inline-code chip's fill is the brand's `ControlSurface` — its
@@ -300,7 +300,7 @@ enum MessageTextFormatter {
                     inlineAttributedString(
                         fieldDisplayText(content),
                         baseFont: baseFont,
-                        codeFont: Typography.monoNS(ofSize: transcriptProseMetrics(.sans).codeSize(for: Typography.bodySize)),
+                        codeFont: Typography.fieldInlineCodeNS,
                         foregroundColor: foregroundColor,
                         codeForegroundColor: foregroundColor,
                         codeBackgroundColor: foregroundColor.withAlphaComponent(0.16),

@@ -147,19 +147,22 @@ Since the 2026-08-13 typography pass this section is the **type source of truth 
 | **Mac** | `apple/Norma/Sources/App/Typography.swift` (+ the serif bindings in `Theme.swift`) | `TypographyTests` — parses this section's tables AND sweeps every app source |
 | **iOS** | `../norma-ios/Norma/App/Typography.swift` (+ the serif bindings in its `Theme.swift`) | `TypographyTests` in `NormaTests` — transcription + the same sweep |
 
-### 4.1 The optical-parity law
+### 4.1 The parity law
 
-**Point-size parity is NOT optical parity.** New York's x-height is ~9–10% shorter than San Francisco's at equal point size. Measured on macOS 26:
+**Point-size parity is the design — iOS is the source of truth, ruled 2026-08-13** ("the iOS here is source of truth. the Mac should follow it"). iOS sets the user bubble and the serif assistant prose at the SAME nominal style (`.body`); the Mac mirrors that relationship at its own register: **one transcript ladder, shared by both prose roles**, with only the face and the leading differing.
+
+The x-height facts stay recorded — as **accepted properties**, no longer as the rule. Measured on macOS 26:
 
 - SF at 14 pt: x-height **7.3691** · NY at 14 pt: **6.713** (−9%)
-- NY at 15.5 pt: x-height **7.3337** — within **0.48%** of SF at 14 pt → *optical parity*
-- SF at 15.5 pt: x-height **8.1587** — serif at the same points reads **~10% smaller** (−10.11%)
+- NY at 15.5 pt: x-height **7.3337** — within **0.48%** of SF at 14 pt
+- SF at 15.5 pt: x-height **8.1587** — at a shared point size the serif reads **~10% optically lighter** (−10.11%)
+
+That last line is the accepted property: at the shared ladder, Norma's serif reply reads ~10% lighter than the sans bubble beside it. Known, chosen — it is iOS's own rendered relationship, and matching it is the point. (An earlier pass sized the Mac's sans ladder lower to equalise x-heights; the ruling retired that — § 4.6.)
 
 Consequences, stated as law:
 
-1. **A serif role set beside a sans role takes MORE points, not the same number.** The Mac's serif ladder is the sans ladder × 15.5/14 for exactly this reason, and `TranscriptBrandTests.testTheSerifBodyIsSizedToMatchTheSansBodyItSitsBeside` keeps the measurement executable.
+1. **The two transcript prose roles share ONE ladder.** Same body, quote, headings and inline-code drop; the serif carries a wider leading (5 vs 3 — iOS's own distinction: `lineSpacing(6)` on serif markdown, nothing on the bubble). `TranscriptBrandTests.testTheTwoProseRolesShareOneNominalSizeByRuling` pins both the shared sizes and the accepted optical property.
 2. **Parity between the apps is parity of ROLES, not of numbers.** iOS expresses roles as Dynamic Type styles (they must keep scaling); the Mac expresses them as points (macOS has no user type ramp). The same role name in the table below is the parity contract — never copy a number across the column boundary.
-3. **iOS currently violates clause 1** and this is recorded, not smoothed away: its serif assistant prose sits at `.body` — the same style as the sans user bubble beside it — so the reply genuinely renders ~10% smaller than the user's message. See § 4.6 for the recorded ruling and its recipe.
 
 ### 4.2 The serif allowlist
 
@@ -185,25 +188,25 @@ The contract: **same role structure, same hierarchy order, same serif/sans assig
 
 | Role | iOS | Mac | Face / notes |
 | --- | --- | --- | --- |
-| `assistantProse` | `.body` serif, `lineSpacing(6)` | 15.5 serif, lineSpacing 5 | NY. Binding #4. The two ladders below. |
-| `userBubble` | `.body` | 14 sans (the sans ladder's body) | SF. |
+| `assistantProse` | `.body` serif, `lineSpacing(6)` | 15.5 serif, lineSpacing 5 | NY. Binding #4. The unified ladder below. |
+| `userBubble` | `.body` | 15.5 sans (the unified ladder's body) | SF. Same nominal size as the reply — § 4.1's law, iOS's own relationship. |
 | `codeBlock` | `.footnote` mono | 12.5 mono | SF Mono. Mac: `syntaxCodeNS`. |
 | `toolPhrase` | 14 (pinned) | 11 | Recorded divergence, § 4.6 — both sides measured, differently. |
 | `toolOutputMono` | `.footnote` mono | 11 mono | The expandable tool payload. |
 | `transcriptError` | `.footnote` | 11 | Mac: `caption`. |
 | `jumpPill` | `.caption` semibold | 11 medium | "Jump to latest". |
 
-The two Mac transcript ladders (`transcriptProseMetrics`, pinned by `TranscriptBrandTests`):
+The Mac's ONE transcript ladder (`transcriptProseMetrics`, both roles, pinned by `TranscriptBrandTests`; sans values were 14 / 13.5 / drop 0.5 / [20, 17, 15.5, 14.5] until the 2026-08-13 ruling):
 
-| | Sans (user message, plan card) | Serif (assistant reply) |
-| --- | --- | --- |
-| Body | 14 | 15.5 |
-| Headings H1–H4 | 20 / 17 / 15.5 / 14.5 | 22 / 19 / 17 / 16 |
-| Block quote | 13.5 | 15 |
-| `lineSpacing` | 3 | 5 |
-| Inline code | 13.5 (body − 0.5) | 13.5 (body − 2) |
+| | Both prose roles (sans user message & plan card · serif assistant reply) |
+| --- | --- |
+| Body | 15.5 |
+| Headings H1–H4 | 22 / 19 / 17 / 16 |
+| Block quote | 15 |
+| Inline code | 13.5 (body − 2, one shared drop) |
+| `lineSpacing` | **sans 3 · serif 5** — the one metric the roles do NOT share |
 
-Two notes. **Inline code lands on 13.5 pt in both**, by two different drops — SF Mono has to sit lower against New York than against SF to read as the same size. And the serif rhythm is 5, not iOS's: iOS's 1.59 pitch/size ratio is tuned for a phone's line width, and this is a desktop window.
+The serif rhythm is 5, not iOS's: iOS's 1.59 pitch/size ratio is tuned for a phone's line width, and this is a desktop window. The sans keeps its tighter 3 — leading is the roles' one distinction, exactly as on iOS.
 
 iOS's serif ladder is semantic: body prose `.body` serif; H1–H2 `.title3` semibold serif; H3+ `.headline` serif; no block-quote block in its renderer (recorded, § 4.6). Its inline code comes out of `AttributedString`'s markdown at the surrounding run's size — no separate role to name.
 
@@ -323,6 +326,7 @@ The scale (§ 4.5) plus its mono variants and the named one-offs:
 | `chipLabel` | — | `.caption2` | Activity chips, sidebar count chips. |
 | `fieldCodeLabelNS` | — | 11 medium | The orb field's code-block language label. |
 | `fieldCodeBlockNS` | — | 13 mono | The orb field's code-block body. |
+| `fieldInlineCodeNS` | — | 13.5 mono | The orb field's inline-code run — verbatim, deliberately NOT derived from the transcript ladder (the 2026-08-13 unification would have silently shrunk a derived value to 12; the orb never rides along with transcript rulings). |
 | `shortcutKeyNS` | — | 11 | Shortcut recorder key-caps. |
 | `panelTabLabelNS` | — | 12 | The web panel's native tab label. |
 
@@ -359,13 +363,14 @@ Tokenisation is a refactor: rendered output changes **only** where a row here re
 
 | Role | iOS | Mac | Status |
 | --- | --- | --- | --- |
-| Assistant serif prose vs sans beside it | both at `.body` → serif reads ~10% smaller | serif ladder ×15.5/14 → optical parity | **The open ruling.** iOS violates § 4.1; fix without breaking Dynamic Type = the whole serif ladder via `@ScaledMetric(relativeTo: .body)` (body ≈18.9→19; headings scaled to keep descending, else H3+ at `.headline`(17) falls *under* a 19 pt body). A phone-visual change on the primary reading surface → needs the on-device gate; recorded with the full recipe in the 2026-08-13 typography report. |
+| Assistant serif prose vs sans beside it | both at `.body` → serif reads ~10% optically lighter | ONE shared ladder (15.5) → the same relationship | **RULED 2026-08-13: iOS is the source of truth; the Mac follows.** The earlier optical-parity correction (sans ladder sized lower to equalise x-heights) and the recorded `@ScaledMetric` recipe for lifting iOS's serif are both RETIRED — the point-size relationship, serif-reads-lighter and all, is the design. iOS unchanged; the Mac's sans ladder unified onto the assistant's sizes (leading stays distinct). |
+| Composer field vs user bubble | both `.body` — the field and the bubble share one style | 14 (chrome body) vs 15.5 (unified ladder) | New divergence CREATED by the ruling's scope: the unification covered the transcript ladders, and the Mac composer types at the chrome scale. Recorded for a future ruling, not silently changed. |
 | `toolPhrase` | 14 pinned (Claude-measured on device, r3) | 11 (`caption`, the chrome scale) | Both deliberate measurements; a desktop row is quieter. Kept. |
 | `composerSend` | 17 bold | 15 medium (`bodyLarge`) | Kept — different affordance sizes on the two composers. |
 | `composerModelPill` | 14 pinned | 13 (`control`) | Kept. |
 | Question options | box `.callout`, frozen card `.subheadline` | 14.5 (callout ratio) | iOS's two registers for one role predate the Mac port; the Mac took the box's. Kept, both named. |
 | Question pills/chips | composer `.caption` medium, card chip `.caption2` semibold | 11 | Same story. Kept, both named. |
-| Block quotes | no block in the iOS renderer | 13.5 / 15 by role | iOS parser gap, not a type decision. Recorded. |
+| Block quotes | no block in the iOS renderer | 15 (unified ladder) | iOS parser gap, not a type decision. Recorded. |
 | iOS fixed-size meta (`toolPhrase` 14, `composerModelPill` 14, glyph pins) | pinned, does not scale with Dynamic Type | n/a | Pre-existing, deliberate per their measurement comments; now *named* so the exception is visible. |
 
 ### 4.7 How to add a role

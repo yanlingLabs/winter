@@ -247,17 +247,20 @@ final class InteractionCardTests: XCTestCase {
     // MARK: - The question card's type ladder (ported from iOS by ratio)
 
     /// **The question is set at the transcript's own prose size**, which is iOS's relationship
-    /// (`.body` for both) and the one the Mac did not have: it was 14 — the USER's message size —
-    /// so Norma's question was in the user's register wearing her serif face.
+    /// (`.body` for both).
     ///
     /// Asserted as a DERIVATION, not a value. `QuestionCardType.question` reads
     /// `transcriptProseMetrics(.assistant)`, so changing the prose ladder moves the question with
     /// it; a test that said `== 15.5` would pass while the two silently drifted apart.
+    ///
+    /// This used to ALSO assert `question != sans body` ("specifically NOT the user's message
+    /// size") — retired by the 2026-08-13 ruling, under which the two prose roles share ONE
+    /// nominal size (iOS canonical: its bubble and its serif prose are both `.body`), so
+    /// question == sans body is now true BY DESIGN, not a regression. The derivation half is the
+    /// one that still carries meaning, and it stays.
     func testTheQuestionIsSetAtTheTranscriptsOwnProseSize() {
         XCTAssertEqual(QuestionCardType.question, transcriptProseMetrics(.assistant).bodySize,
                        "a question is Norma talking — it belongs in her prose register, not a step under it")
-        XCTAssertNotEqual(QuestionCardType.question, transcriptProseMetrics(.sans).bodySize,
-                          "and specifically NOT the user's message size, which is what it used to be")
     }
 
     /// The steps under it, as iOS's ratios against `.body` (17) rather than its point values —

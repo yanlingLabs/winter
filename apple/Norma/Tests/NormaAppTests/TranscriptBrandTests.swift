@@ -228,20 +228,37 @@ final class TranscriptBrandTests: XCTestCase {
         }
     }
 
-    /// **Why the serif register is 15.5 pt and not 14.** New York's x-height is ~9% shorter than San
-    /// Francisco's at equal size, so serif-at-14 would make Norma's reply read visibly smaller than
-    /// the user's own message directly above it. The ladder is scaled until the x-heights agree.
-    /// This is the measurement itself, kept executable — a future size tune that broke the match
-    /// would be changing the thing the number was chosen for.
-    func testTheSerifBodyIsSizedToMatchTheSansBodyItSitsBeside() {
-        let serifBody = transcriptProseFont(.assistant, size: transcriptProseMetrics(.assistant).bodySize,
-                                            weight: .regular)
-        let sansBody = transcriptProseFont(.sans, size: transcriptProseMetrics(.sans).bodySize,
-                                           weight: .regular)
-        XCTAssertEqual(serifBody.xHeight, sansBody.xHeight, accuracy: sansBody.xHeight * 0.02,
-                       "the two bodies must read as the same size (within 2%)")
-        XCTAssertGreaterThan(serifBody.pointSize, sansBody.pointSize,
-                             "…which takes MORE points, since New York is the shorter face")
+    /// **The parity pin, rewritten by ruling (2026-08-13: "the iOS here is source of truth. the
+    /// Mac should follow it").** Until that ruling this test asserted the OPPOSITE — x-height
+    /// (optical) parity, with the serif taking more points — encoding the measurement as law.
+    /// The ruling retired the measurement's rule-status: iOS sets both prose roles at one nominal
+    /// style, so the Mac's two roles now share ONE ladder, and this pins that sharing in both
+    /// directions — every size equal, the faces distinct, the serif leading strictly wider (iOS's
+    /// own lineSpacing(6)-on-serif-only distinction).
+    ///
+    /// The old measurement survives as the ACCEPTED PROPERTY (brand.md § 4.1): at the shared size
+    /// the serif genuinely reads ~10% optically lighter. Pinned as a fact so the doc's claim
+    /// stays measured — if the OS ever changed the faces until it stopped being true, the doc
+    /// would be wrong and this would say so.
+    func testTheTwoProseRolesShareOneNominalSizeByRuling() {
+        let serif = transcriptProseMetrics(.assistant)
+        let sans = transcriptProseMetrics(.sans)
+        XCTAssertEqual(serif.bodySize, sans.bodySize, "one body size, by ruling")
+        XCTAssertEqual(serif.quoteSize, sans.quoteSize, "one quote size")
+        XCTAssertEqual(serif.headingSizes, sans.headingSizes, "one heading run")
+        XCTAssertEqual(serif.codeSizeDrop, sans.codeSizeDrop, "one inline-code drop")
+        XCTAssertGreaterThan(serif.lineSpacing, sans.lineSpacing,
+                             "leading is the ONE metric the roles keep distinct — serif wider")
+
+        let serifBody = transcriptProseFont(.assistant, size: serif.bodySize, weight: .regular)
+        let sansBody = transcriptProseFont(.sans, size: sans.bodySize, weight: .regular)
+        XCTAssertEqual(serifBody.pointSize, sansBody.pointSize, "the same nominal size, rendered")
+        XCTAssertNotEqual(serifBody.familyName, sansBody.familyName,
+                          "…in two visibly different faces")
+        // The accepted property, kept measured: New York's shorter x-height means the serif
+        // reads optically lighter at the shared size (~10% on this OS).
+        XCTAssertLessThan(serifBody.xHeight, sansBody.xHeight,
+                          "brand.md § 4.1's accepted property stopped being true on this OS")
     }
 
     /// The renderer is where the face actually lands: `MessageTextFormatter` builds an
@@ -453,19 +470,21 @@ final class TranscriptBrandTests: XCTestCase {
 
     // MARK: - 5. The two type ladders
 
-    /// **A DRIFT FENCE, NOT COVERAGE** (fix round 1, review M1) — the same species as
-    /// `ModelPickerTests.swift:767` and this file's own `testTheUserBubbleDeclaresTheSansRole`. It
-    /// restates the constants next door, so mutating either side moves both and it can never red on
-    /// its own merits. Kept because "nothing moved for the sans role" is a claim worth writing down
-    /// where the serif ladder is derived FROM these figures; not counted among the pins that carry
-    /// weight, which are the measured ones.
-    func testTheSansLadderIsTheDonorsAndDidNotMove() {
+    /// **A DRIFT FENCE, NOT COVERAGE** — it restates the constants next door, so mutating either
+    /// side moves both; kept because the ladder's VALUES are a claim worth writing down. Until
+    /// the 2026-08-13 ruling this pinned the donor's 14-pt sans ladder ("did not move"); the
+    /// ruling MOVED it — iOS is the source of truth, its two prose roles share one nominal size,
+    /// and the Mac's sans ladder unified onto the assistant's figures. The unification itself
+    /// (equal to the serif role, leading apart) is `testTheTwoProseRolesShareOneNominalSizeByRuling`'s
+    /// job; this pins what the shared figures ARE.
+    func testTheUnifiedLadderCarriesTheRuledValues() {
         let sans = transcriptProseMetrics(.sans)
-        XCTAssertEqual(sans.bodySize, 14)
-        XCTAssertEqual(sans.quoteSize, 13.5)
-        XCTAssertEqual(sans.lineSpacing, 3)
-        XCTAssertEqual([1, 2, 3, 4].map(sans.headingSize), [20, 17, 15.5, 14.5])
-        XCTAssertEqual(sans.codeSize(for: 14), 13.5, "the donor's inline-code size for body text")
+        XCTAssertEqual(sans.bodySize, 15.5)
+        XCTAssertEqual(sans.quoteSize, 15)
+        XCTAssertEqual(sans.lineSpacing, 3, "the sans keeps its own tighter leading")
+        XCTAssertEqual([1, 2, 3, 4].map(sans.headingSize), [22, 19, 17, 16])
+        XCTAssertEqual(sans.codeSize(for: sans.bodySize), 13.5,
+                       "inline code still lands where this surface always set it")
     }
 
     /// Both ladders must be internally ordered — a heading that is smaller than the body it heads,
@@ -502,17 +521,20 @@ final class TranscriptBrandTests: XCTestCase {
         }
     }
 
-    /// The two drops exist so inline code reads as the same size against either face — SF Mono has
-    /// to sit lower against New York than against SF. At the shipped ladders both land on the 13.5 pt
-    /// this surface has always used for body-text code, which is the check: not that the drops are
-    /// equal (they are not), but that what the reader SEES is.
+    /// Inline code lands on ONE size (13.5 for body text) against either face. Before the
+    /// 2026-08-13 unification the two roles got there by two DIFFERENT drops (0.5 sans, 2 serif —
+    /// bodies differed, drops compensated) and this test asserted that inequality; the ruling
+    /// unified the bodies, so one shared drop now does it by construction, and the inequality
+    /// half is retired WITH its reason recorded rather than deleted silently.
     func testInlineCodeLandsOnOneSizeAcrossBothFaces() {
         let assistant = transcriptProseMetrics(.assistant)
         let sans = transcriptProseMetrics(.sans)
         XCTAssertEqual(assistant.codeSize(for: assistant.bodySize),
                        sans.codeSize(for: sans.bodySize))
-        XCTAssertNotEqual(assistant.codeSizeDrop, sans.codeSizeDrop,
-                          "…and it takes two different drops to get there")
+        XCTAssertEqual(assistant.codeSize(for: assistant.bodySize), 13.5,
+                       "the size this surface has always used for body-text code")
+        XCTAssertEqual(assistant.codeSizeDrop, sans.codeSizeDrop,
+                       "one shared drop since the ladders unified")
     }
 
     // MARK: - Source access (the ComposerChromeTests convention)
