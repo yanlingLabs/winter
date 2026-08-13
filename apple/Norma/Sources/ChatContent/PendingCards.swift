@@ -89,6 +89,10 @@ struct PendingCardDraft: Equatable {
     /// merits too: losing your PLACE in a four-question ask on a `.maximized` teardown is the same
     /// class of annoyance as losing the answers, and the fix was already built.
     var visibleQuestion: Int = 0
+    /// Which questions have their NOTE field open. Its own set: the note icon used to drive
+    /// `otherExpanded`, so clicking it opened the *Other* text field instead — two different
+    /// affordances sharing one flag, which is why the note field appeared to be permanently on.
+    var notesOpen: Set<Int> = []
 
     /// Wipe every answer in the block — what the × does (user call, 2026-08-13; iOS's style8).
     ///
@@ -102,6 +106,12 @@ struct PendingCardDraft: Equatable {
         otherTexts = [:]
         otherExpanded = []
         notes = [:]
+        notesOpen = []
+    }
+
+    /// Toggle a question's note field.
+    mutating func toggleNote(forQuestion index: Int) {
+        notesOpen.formSymmetricDifference([index])
     }
 
     /// Single-select an option — mirrors `PendingQuestionBody`'s old `onSelectSingle` closure.
@@ -1225,6 +1235,7 @@ struct PendingQuestionBody: View {
                     selected: draft.selections[index] ?? [],
                     otherText: draft.otherTexts[index] ?? "",
                     isOtherExpanded: draft.otherExpanded.contains(index),
+                    isNoteOpen: draft.notesOpen.contains(index),
                     noteText: draft.notes[index] ?? "",
                     isInFlight: isInFlight,
                     onSelectSingle: { optionIndex in draft.selectSingle(optionIndex, forQuestion: index) },
@@ -1306,10 +1317,10 @@ struct PendingQuestionBody: View {
 
             if questions.indices.contains(index), questionAllowsNotes(questions[index]) {
                 circleButton(
-                    system: draft.otherExpanded.contains(index) ? "note.text" : "note.text.badge.plus",
-                    label: "Add note"
+                    system: draft.notesOpen.contains(index) ? "note.text" : "note.text.badge.plus",
+                    label: draft.notesOpen.contains(index) ? "Hide note" : "Add note"
                 ) {
-                    draft.expandOther(forQuestion: index)
+                    draft.toggleNote(forQuestion: index)
                 }
             }
         }
@@ -1382,6 +1393,7 @@ private struct QuestionBlock: View {
     let selected: Set<Int>
     let otherText: String
     let isOtherExpanded: Bool
+    let isNoteOpen: Bool
     let noteText: String
     let isInFlight: Bool
     let onSelectSingle: (Int) -> Void
@@ -1427,7 +1439,7 @@ private struct QuestionBlock: View {
             // Notes are a code-mode (`ask_user`) affordance; chat's simplified (header-less) card
             // has none (Slice B1). The note state/callback wiring itself is untouched — this only
             // gates whether the field is SHOWN, so code mode's notes keep working unchanged.
-            if questionAllowsNotes(question) {
+            if questionAllowsNotes(question), isNoteOpen {
                 noteRow
             }
         }
@@ -1509,8 +1521,11 @@ private struct QuestionBlock: View {
 
     private func optionLabel(_ option: SessionEvent.QuestionOption, isSelected: Bool) -> some View {
         VStack(alignment: .leading, spacing: 1) {
+            // NEVER bold when chosen (user call, 2026-08-13): the trailing checkmark already says
+            // "this one", and a second signal on the same row made the chosen option shout while
+            // its siblings whispered. Weight is for hierarchy — label over description — not state.
             Text(option.label)
-                .font(.system(size: 13, weight: optionSelectionChrome(isSelected: isSelected).isBold ? .semibold : .regular))
+                .font(.system(size: 13))
                 .foregroundStyle(.primary)
             if let description = option.description, !description.isEmpty {
                 Text(description)
@@ -1522,24 +1537,35 @@ private struct QuestionBlock: View {
 
     @ViewBuilder
     private var otherRow: some View {
-        if isOtherExpanded {
-            TextField("Other…", text: Binding(get: { otherText }, set: onOtherTextChange))
-                .textFieldStyle(.roundedBorder)
-                .font(.system(size: 12))
-                .disabled(isInFlight)
-        } else {
-            Button("Other…", action: onExpandOther)
-                .buttonStyle(.plain)
+        // A quiet pencil marks it writable — iOS's `otherField`, and the same glyph the FROZEN card
+        // uses to record that an answer was typed rather than chosen. One mark, one meaning, in
+        // both halves of a question's life.
+        HStack(spacing: 8) {
+            Image(systemName: "pencil")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
-                .disabled(isInFlight)
+            if isOtherExpanded {
+                TextField("Other…", text: Binding(get: { otherText }, set: onOtherTextChange))
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13))
+                    .disabled(isInFlight)
+            } else {
+                Button("Other…", action: onExpandOther)
+                    .buttonStyle(.plain)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+                    .disabled(isInFlight)
+                Spacer(minLength: 0)
+            }
         }
+        .padding(.vertical, 10)
     }
 
-    /// CC AskUserQuestion parity: a per-question free-text note — always visible (unlike Other,
-    /// which is a discoverable toggle), never gates Submit, and rides into `questionNotes`'s dict
-    /// only when non-empty (see that helper's doc). Always below the options/Other row, for both
-    /// the plain-list and side-by-side-preview layouts.
+    /// CC AskUserQuestion parity: a per-question free-text note. **Hidden until the note icon in
+    /// the action row is clicked** (user call, 2026-08-13) — it was standing open on every question,
+    /// which put an empty text field under every ask and made the box look like a form with a blank
+    /// nobody had filled in. It never gates Submit, and rides into `questionNotes`'s dict only when
+    /// non-empty (see that helper's doc).
     private var noteRow: some View {
         // No `.foregroundStyle` override, matching `otherRow`'s TextField above — SwiftUI's
         // `TextField` prompt (the "Add a note (optional)" placeholder) already renders dimmed on

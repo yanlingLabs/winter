@@ -534,7 +534,12 @@ struct ComposerQuestionBox: View {
             draft: $draft
         )
         .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        // THE COMPOSER'S OWN WIDTH, not the column's (user call, twice). The composer caps at
+        // `newChatCardWidth` and centres; the box was taking `.infinity` and running the full width
+        // of the detail column, so the morph changed the surface's SIZE as well as its shape — the
+        // one thing that breaks the illusion of a single surface changing form. Same constant, so
+        // the two cannot drift.
+        .frame(maxWidth: newChatCardWidth)
         .background(
             RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
                 .fill(Theme.composerSurface)
@@ -544,5 +549,9 @@ struct ComposerQuestionBox: View {
                 .strokeBorder(Theme.hairline, lineWidth: shellSidebarHairlineWidth)
         )
         .shadow(color: .black.opacity(0.05), radius: 16, y: 4)
+        // Centring goes LAST, outside the face: applied before the background, it would have handed
+        // the fill an infinite width to paint and the box would have been full-bleed with a cap
+        // drawn only around its contents — the exact bug this change is fixing, one layer in.
+        .frame(maxWidth: .infinity, alignment: .center)
     }
 }
