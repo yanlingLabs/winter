@@ -17,92 +17,10 @@ import SwiftUI
 /// No `.drawingGroup()` (v1 LAW) and no `repeatForever` animation anywhere below — this content
 /// renders under the morph's scale/blur/opacity bands.
 
-// MARK: - The prose register (mac-chat-parity Task 8)
-
-/// Which face a block of formatted prose is set in.
-///
-/// TWO roles, because `docs/brand.md` § 4's serif allowlist has exactly ONE transcript binding
-/// (#4, assistant prose) and everything else on this surface stays sans.
-///
-/// It is a REQUIRED parameter — never a default — on the three views that TAKE one
-/// (`TranscriptAssistantMessage` and the two private renderers below), because the dangerous
-/// direction is a new call site *inheriting* serif: a card, a placeholder, a future summary panel
-/// silently putting chrome into Norma's speaking voice. A `let` with no initial value is a required
-/// parameter of Swift's memberwise initialiser, so omitting it does not compile — demonstrated by
-/// mutation (`error: missing argument for parameter 'role'`), not assumed. (The distinction this
-/// plan learned the hard way at Task 6: an *optional* `var` gets an implicit `nil` default and
-/// gives no such protection at all.)
-///
-/// `TranscriptUserBubble` is the one view that DECLARES its role rather than taking one: it renders
-/// exactly one thing — the user's own words — so there is nothing for a caller to decide.
-enum TranscriptProseRole: Equatable {
-    /// Serif allowlist binding #4 — what Norma *says*, in the transcript, in its own voice.
-    case assistant
-    /// Everything else that goes through this same markdown renderer: the user's own message, and a
-    /// plan card's body. A card is chrome around a decision, so it stays sans even though its text
-    /// was written by the model — `docs/brand.md` § 4 allowlists the *transcript reply*, not
-    /// model-authored text wherever it appears.
-    case sans
-}
-
-/// The type metrics one prose role renders at.
-///
-/// The two ladders are NOT the same numbers in two faces. New York's x-height is ~9% shorter than
-/// San Francisco's at equal point size (measured on this OS: 6.713 vs 7.369 at 14 pt), so setting
-/// serif at the sans body's 14 pt would make Norma's replies read *smaller* than the user's own
-/// message sitting right above them. The serif ladder is the sans ladder scaled by 15.5/14, the
-/// factor that lands New York's x-height on 7.334 — within 0.5% of the sans body it replaces.
-/// Same rule the wordmark's two platform registers came from: measure, don't estimate.
-struct TranscriptProseMetrics: Equatable {
-    /// Paragraph, bullet and numbered-item size.
-    let bodySize: CGFloat
-    /// Block quotes, one step down from `bodySize`.
-    let quoteSize: CGFloat
-    /// Added to the font's own line height. The sans register keeps the donor's 3; serif takes 5,
-    /// a wider rhythm for a reading face over long desktop line lengths — short of iOS's 1.59
-    /// pitch/size ratio (`AssistantMarkdown.swift`), which is tuned for a phone's line width.
-    let lineSpacing: CGFloat
-    /// How far BELOW its block's size an inline monospaced code run is set. Two different drops
-    /// because SF Mono has to be shorter against New York than against SF to read as the same size:
-    /// at these ladders both land on 13.5 pt for body text, which is exactly what this surface has
-    /// always used.
-    let codeSizeDrop: CGFloat
-    /// Heading sizes for levels 1…4; level 5+ takes the last entry, as the donor's ladder did.
-    let headingSizes: [CGFloat]
-
-    func headingSize(_ level: Int) -> CGFloat {
-        guard level >= 1 else { return headingSizes[0] }
-        return headingSizes[min(level, headingSizes.count) - 1]
-    }
-
-    /// The floor is the donor's: below ~11.5 pt monospaced text stops being readable at all, so a
-    /// deep heading's code run never shrinks past it.
-    func codeSize(for blockSize: CGFloat) -> CGFloat {
-        max(11.5, blockSize - codeSizeDrop)
-    }
-}
-
-func transcriptProseMetrics(_ role: TranscriptProseRole) -> TranscriptProseMetrics {
-    switch role {
-    case .sans:
-        // The donor's ladder, unchanged — the register the user's own message and plan cards keep.
-        return TranscriptProseMetrics(bodySize: 14, quoteSize: 13.5, lineSpacing: 3,
-                                      codeSizeDrop: 0.5, headingSizes: [20, 17, 15.5, 14.5])
-    case .assistant:
-        // The sans ladder × 15.5/14, rounded to half points.
-        return TranscriptProseMetrics(bodySize: 15.5, quoteSize: 15, lineSpacing: 5,
-                                      codeSizeDrop: 2, headingSizes: [22, 19, 17, 16])
-    }
-}
-
-/// The face itself. `Theme.assistantProse` is where the serif binding lives (`docs/brand.md` § 4);
-/// everything else is the system sans by doing nothing to it.
-func transcriptProseFont(_ role: TranscriptProseRole, size: CGFloat, weight: NSFont.Weight) -> NSFont {
-    switch role {
-    case .assistant: return Theme.assistantProse(size: size, weight: weight)
-    case .sans: return .systemFont(ofSize: size, weight: weight)
-    }
-}
+// MARK: - The prose register — MOVED to `App/Typography.swift` (2026-08-13 typography pass):
+// `TranscriptProseRole`, `TranscriptProseMetrics`, `transcriptProseMetrics`,
+// `transcriptProseFont` and the new `transcriptProseSwiftUIFont` all live with the rest of the
+// type system now. Same symbols, same values; the views below are unchanged consumers.
 
 /// The user's own message — right-aligned bubble, donor `ChatMessageBubble`'s `isUser` branch.
 /// Surfaced on `Theme.bubbleUser` (mac-chat-parity Task 8), the brand's own token for exactly this

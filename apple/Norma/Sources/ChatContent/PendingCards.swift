@@ -1162,28 +1162,10 @@ func questionMorphsTheComposer(_ record: InteractionRecord, closed: Set<String> 
     return interactionIsPending(record)
 }
 
-// MARK: - The question card's type ladder (ported from iOS by RATIO, 2026-08-13)
-
-/// iOS sets a question at the transcript's own prose size and steps everything under it down from
-/// there; the Mac had the whole card a register lower, with the question at 14 — which is the
-/// USER's message size, not Norma's. So her question was set in the user's register while wearing
-/// her serif face, the one place the two crossed.
-///
-/// Ported as RATIOS against `.body` (17 at the default Dynamic Type size), not as point values:
-/// copying 17/16/13/12 onto a 15.5 pt Mac ladder would have made the card larger than the prose
-/// around it. Rounded to the half points this file already uses.
-enum QuestionCardType {
-    /// **Derived, not written down**: the question IS the transcript's assistant prose size (iOS
-    /// ratio 1.00). Reading it from `transcriptProseMetrics` is what makes that an invariant rather
-    /// than two constants that happen to agree today — change the prose ladder and this follows.
-    static var question: CGFloat { transcriptProseMetrics(.assistant).bodySize }
-    /// iOS `.callout`, 16/17 = 0.94 → 14.5. The option label and a frozen card's answer row.
-    static let option: CGFloat = 14.5
-    /// iOS `.footnote`, 13/17 = 0.76 → 12. Option descriptions and notes.
-    static let secondary: CGFloat = 12
-    /// iOS `.caption`, 12/17 = 0.71 → 11. Header chips and pills — already this value.
-    static let pill: CGFloat = 11
-}
+// MARK: - The question card's type ladder — MOVED to `App/Typography.swift` (2026-08-13
+// typography pass): `QuestionCardType` and its derivation (question ≡ assistant prose size) live
+// with the rest of the type system now, same symbols, same values. The `Typography.question*`
+// role functions there are how views below reach it.
 
 /// The action row's control height — "thicker" than a stock button (user call), and one number for
 /// all three so the circles are round against the capsule rather than merely near it. iOS's is 50 on

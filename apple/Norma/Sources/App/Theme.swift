@@ -169,8 +169,10 @@ enum Theme {
     }
 
     // Everything the serif allowlist does NOT cover — rows, labels, chrome, lists, tool output —
-    // stays on the standard system sans (San Francisco): a plain `Font` with no design override.
-    // There is nothing to wrap here; reach for `.font(.system(size:weight:))` directly.
+    // stays on the standard system sans (San Francisco), reached ONLY through the named roles in
+    // `Typography` (`App/Typography.swift`, the Mac column of `docs/brand.md` § 4.3's role
+    // table). Never construct a font at a call site — `TypographyTests` sweeps every app source
+    // for exactly that.
     //
     // Bindings #2 and #3 (the pairing gate title, the pairing words) have no Mac surface at all.
 

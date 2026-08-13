@@ -237,8 +237,8 @@ enum MessageTextFormatter {
     static func chatInlineAttributedString(
         _ text: String,
         colorScheme: ColorScheme,
-        baseFont: NSFont = .systemFont(ofSize: 14),
-        codeFont: NSFont = .monospacedSystemFont(ofSize: 13.5, weight: .regular),
+        baseFont: NSFont = Typography.sansNS(ofSize: Typography.bodySize),
+        codeFont: NSFont = Typography.monoNS(ofSize: transcriptProseMetrics(.sans).codeSize(for: Typography.bodySize)),
         lineSpacing: CGFloat = 0
     ) -> AttributedString {
         // mac-chat-parity Task 8: the inline-code chip's fill is the brand's `ControlSurface` — its
@@ -264,7 +264,7 @@ enum MessageTextFormatter {
         _ text: String,
         baseFont: NSFont? = nil
     ) -> AttributedString {
-        let font = baseFont ?? mathFont(ofSize: 15.5, italic: true)
+        let font = baseFont ?? Typography.mathDefaultNS(italic: true)
         return AttributedString(
             NSAttributedString(
                 string: renderMathExpression(text),
@@ -300,7 +300,7 @@ enum MessageTextFormatter {
                     inlineAttributedString(
                         fieldDisplayText(content),
                         baseFont: baseFont,
-                        codeFont: .monospacedSystemFont(ofSize: 13.5, weight: .regular),
+                        codeFont: Typography.monoNS(ofSize: transcriptProseMetrics(.sans).codeSize(for: Typography.bodySize)),
                         foregroundColor: foregroundColor,
                         codeForegroundColor: foregroundColor,
                         codeBackgroundColor: foregroundColor.withAlphaComponent(0.16),
@@ -346,7 +346,7 @@ enum MessageTextFormatter {
                 NSAttributedString(
                     string: "\(language)\n",
                     attributes: [
-                        .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+                        .font: Typography.fieldCodeLabelNS,
                         .foregroundColor: foregroundColor.withAlphaComponent(0.72)
                     ]
                 )
@@ -361,7 +361,7 @@ enum MessageTextFormatter {
             NSAttributedString(
                 string: code,
                 attributes: [
-                    .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
+                    .font: Typography.fieldCodeBlockNS,
                     .foregroundColor: foregroundColor,
                     .backgroundColor: foregroundColor.withAlphaComponent(0.13),
                     .paragraphStyle: paragraph
@@ -392,18 +392,18 @@ enum MessageTextFormatter {
             lineSpacing: lineSpacing
         )
         let math = codeAttributes(
-            font: mathFont(ofSize: baseFont.pointSize + 0.5, italic: true),
+            font: Typography.mathNS(ofSize: baseFont.pointSize + 0.5, italic: true),
             foregroundColor: foregroundColor,
             backgroundColor: nil,
             lineSpacing: lineSpacing
         )
         let bold = inlineAttributes(
-            font: styledFont(baseFont, trait: .boldFontMask),
+            font: Typography.converted(baseFont, toHaveTrait: .boldFontMask),
             foregroundColor: foregroundColor,
             lineSpacing: lineSpacing
         )
         let italic = inlineAttributes(
-            font: styledFont(baseFont, trait: .italicFontMask),
+            font: Typography.converted(baseFont, toHaveTrait: .italicFontMask),
             foregroundColor: foregroundColor,
             lineSpacing: lineSpacing
         )
@@ -605,34 +605,9 @@ enum MessageTextFormatter {
         baseAttributes(font: font, foregroundColor: foregroundColor, lineSpacing: lineSpacing)
     }
 
-    private static func styledFont(_ font: NSFont, trait: NSFontTraitMask) -> NSFont {
-        NSFontManager.shared.convert(font, toHaveTrait: trait)
-    }
-
-    private static func mathFont(ofSize size: CGFloat, italic: Bool) -> NSFont {
-        let candidates = italic
-            ? [
-                "STIXTwoText-Italic",
-                "STIXGeneral-Italic",
-                "TimesNewRomanPS-ItalicMT",
-                "Georgia-Italic",
-                "NewYork-RegularItalic"
-            ]
-            : [
-                "STIXTwoMath-Regular",
-                "STIXGeneral-Regular",
-                "TimesNewRomanPSMT",
-                "Georgia",
-                "NewYork-Regular"
-            ]
-        for name in candidates {
-            if let font = NSFont(name: name, size: size) {
-                return font
-            }
-        }
-        let fallback = NSFont.systemFont(ofSize: size, weight: .regular)
-        return italic ? styledFont(fallback, trait: .italicFontMask) : fallback
-    }
+    // `styledFont` and `mathFont` MOVED to `App/Typography.swift` (2026-08-13 typography pass)
+    // as `Typography.converted(_:toHaveTrait:)` / `Typography.mathNS(ofSize:italic:)` — this
+    // pipeline constructs no fonts of its own; every face flows in from the token file.
 
     private static func fieldDisplayText(_ text: String) -> String {
         text.replacingOccurrences(of: "\r\n", with: "\n")
@@ -1015,7 +990,7 @@ enum SyntaxHighlighter {
         let attributed = NSMutableAttributedString(
             string: code,
             attributes: [
-                .font: NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular),
+                .font: Typography.syntaxCodeNS,
                 .foregroundColor: NSColor.labelColor
             ]
         )
