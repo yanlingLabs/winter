@@ -227,6 +227,7 @@ The question is Norma asking, so its text is **binding #4 by derivation** on bot
 | `questionActionGlyph` | 17 medium | — | The clear (xmark) circle. |
 | `questionNoteGlyph` | 18 | — | The note toggle. |
 | `questionNoteField` | `.footnote` | — | The note input. |
+| `questionAttribution` | `.caption` | — | The frozen card's "answered by …" footer. |
 | `questionPreviewMono` | — | `.body` mono | The Mac card's read-only preview pane. |
 
 #### The composer
@@ -237,6 +238,7 @@ The question is Norma asking, so its text is **binding #4 by derivation** on bot
 | `composerPlusGlyph` | 17 light | 17 medium | The attach circle — the one composer glyph size the platforms share. Mac: `composerAttachGlyph`. |
 | `composerModelPill` | 14 (pinned) | 13 | iOS Claude-measured on device; Mac `control`. Recorded, § 4.6. |
 | `composerSend` | 17 bold | 15 medium | Recorded divergence, § 4.6. |
+| `composerMicGlyph` | 15 | — | The mock mic circle. |
 | `composerStop` | 15 semibold | — | |
 | `composerVoice` | 17 | — | The mock voice orb. |
 
