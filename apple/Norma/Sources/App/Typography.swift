@@ -121,11 +121,47 @@ enum Typography {
     static let fieldCodeLabelNS: NSFont = sansNS(ofSize: captionSize, .medium)
     /// The orb field's code-block body.
     static let fieldCodeBlockNS: NSFont = monoNS(ofSize: controlSize)
-    /// The orb field's INLINE-code run — 13.5 verbatim, its own token on purpose: it was
-    /// briefly derived from the transcript's sans metrics (which happened to compute 13.5),
-    /// and the 2026-08-13 ladder unification would have silently shrunk it to 12 through that
-    /// coupling. The orb is gated; its values never ride along with transcript rulings.
-    static let fieldInlineCodeNS: NSFont = monoNS(ofSize: 13.5)
+    /// The orb field's INLINE-code run — DERIVED through the shared transcript metrics since
+    /// the second 2026-08-13 ruling ("make its sizes bound to the apps transcript sizes"),
+    /// which reversed this token's brief verbatim posture. The wiring change has ZERO rendered
+    /// delta: the unified ladder computes 15.5 − 2 = 13.5, exactly the verbatim value it
+    /// replaces. (Under the pre-unification drop the same derivation would have computed 12 —
+    /// the reason it was verbatim for the hours between the two rulings.)
+    static var fieldInlineCodeNS: NSFont {
+        monoNS(ofSize: transcriptProseMetrics(.sans).codeSize(for: transcriptProseMetrics(.sans).bodySize))
+    }
+
+    // MARK: Bound roles — the 2026-08-13 binding rulings
+
+    /// The composer's TYPING size — BOUND to the user-message size (ruling: "make the composer
+    /// field bound to the user message size aka 15.5"). It reads the live sans transcript
+    /// metrics, so a ladder change moves the typing surface and the sent bubble together and a
+    /// type-then-send size jump is structurally impossible, not just currently absent.
+    ///
+    /// The ONE composer that does not take this is the orb field's own (`NormaFieldView`
+    /// passes `Typography.bodySize` explicitly): its pill height derives from measured text
+    /// content, so binding it would move the resting field by +1 pt (line height 17 → 18,
+    /// measured) — and the field's geometry is ruled stable. HELD pending that answer;
+    /// recorded in `docs/brand.md` § 4.6 and pinned by `TypographyTests`.
+    static var composerFieldSize: CGFloat { transcriptProseMetrics(.sans).bodySize }
+
+    /// The composer's typing face at the bound size — also the placeholder and the held-draft
+    /// echo, which must render at exactly the size the live text types at.
+    static func composerField(_ weight: Font.Weight = .regular) -> Font {
+        sans(composerFieldSize, weight)
+    }
+
+    /// The orb field's user-message echo (the prompt line above a reply) — bound to the
+    /// user-message size by the orb ruling. Face stays the field's difference-blend sans;
+    /// only the SIZE is the transcript's.
+    static func fieldUserMessage(_ weight: Font.Weight = .regular) -> Font {
+        sans(transcriptProseMetrics(.sans).bodySize, weight)
+    }
+
+    /// The orb field's reply text — bound to the assistant's transcript size, same terms.
+    static func fieldAssistantMessage(_ weight: Font.Weight = .regular) -> Font {
+        sans(transcriptProseMetrics(.assistant).bodySize, weight)
+    }
     /// The shortcut recorder's key-cap legend.
     static let shortcutKeyNS: NSFont = sansNS(ofSize: captionSize)
     /// The web panel's native tab-strip label.

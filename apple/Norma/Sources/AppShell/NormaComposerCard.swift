@@ -331,8 +331,7 @@ struct NormaComposerCard: View {
                     ComposerTextView(
                         text: $text,
                         onSubmit: onSubmit,
-                        usesAdaptiveColors: true,
-                        fontSize: newChatComposerFontSize
+                        usesAdaptiveColors: true
                     )
                     // The component has no placeholder parameter, so this is an overlay that steps
                     // aside the moment there is text. Non-hit-testing, or it would eat the click
@@ -341,7 +340,7 @@ struct NormaComposerCard: View {
                     .overlay(alignment: .topLeading) {
                         if text.isEmpty {
                             Text(placeholder)
-                                .font(Typography.heading())
+                                .font(Typography.composerField())
                                 .foregroundStyle(Theme.textMuted)
                                 .padding(.horizontal, ComposerTextView.textContainerInset.width)
                                 .padding(.vertical, ComposerTextView.textContainerInset.height)
@@ -352,7 +351,7 @@ struct NormaComposerCard: View {
                     // The held draft — same size and same top-leading start as the live composer,
                     // so the swap does not visibly jump; secondary colour is what reads as held.
                     Text(text)
-                        .font(Typography.heading())
+                        .font(Typography.composerField())
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, ComposerTextView.textContainerInset.width)
                         .padding(.vertical, ComposerTextView.textContainerInset.height)

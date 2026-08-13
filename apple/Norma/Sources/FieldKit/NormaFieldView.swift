@@ -770,6 +770,12 @@ struct NormaFieldView: View {
                 text: adapter.draftBinding,
                 onSubmit: { adapter.onSubmit(adapter.composerDraft) },
                 onContentHeightChange: { height in composerContentHeight = height },
+                // HELD at the chrome body size, deliberately NOT the bound composerFieldSize
+                // (2026-08-13): this pill's height is measured from the text content, so the
+                // bound 15.5 would move the resting field by +1 pt (line 17 -> 18, measured) —
+                // and the field's geometry is ruled stable. Recorded in brand.md § 4.6 as the
+                // open question; change ONLY with that ruling. TypographyTests pins this hold.
+                fontSize: Typography.bodySize,
                 onFocusKey: { key, first, last in
                     let r = resolveFieldFocusKey(current: adapter.focusedElement, key: key,
                                                  caretAtFirstLine: first, caretAtLastLine: last)
@@ -791,7 +797,7 @@ struct NormaFieldView: View {
                     // glyph render ~2pt right / 4pt down from there, so the placeholder visibly
                     // overlapped the caret (user report: "placeholder overlapping the caret").
                     Text("Ask Norma…")
-                        .font(Typography.body())
+                        .font(Typography.body())  // matches the HELD composer size above
                         .foregroundStyle(.white.opacity(0.5)) // difference-blend-safe placeholder
                         .padding(.leading, ComposerTextView.textContainerInset.width
                             + ComposerTextView.lineFragmentPadding)
@@ -937,14 +943,17 @@ struct NormaFieldView: View {
         VStack(alignment: .leading, spacing: 6) {
             if let prompt = adapter.displayedPrompt {
                 Text(prompt)
-                    .font(Typography.caption(.medium))
+                    // Bound to the transcript's USER-message size (2026-08-13 orb ruling) —
+                    // the echo of what you asked reads at the size the bubble renders.
+                    .font(Typography.fieldUserMessage(.medium))
                     .foregroundStyle(.white.opacity(0.65)) // difference-blend-safe secondary
                     .lineLimit(2)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             if !replyText.isEmpty {
                 Text(replyText)
-                    .font(Typography.control())
+                    // Bound to the transcript's ASSISTANT size (2026-08-13 orb ruling).
+                    .font(Typography.fieldAssistantMessage())
                     // GATE-3 F6b: under GlassForegroundLegibility's difference blend,
                     // .primary is BLACK in Light mode -> |0 - bg| = bg -> invisible.
                     // Pure white is the only correct foreground here (same rule as the

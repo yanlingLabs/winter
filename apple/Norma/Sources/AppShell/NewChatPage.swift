@@ -126,12 +126,6 @@ let newChatModelPlaceholder = "Default model"
 /// page is for, so this asks rather than repeats — the reference's own split.
 let newChatComposerPlaceholder = "How can I help you today?"
 
-/// ONE size for everything the composer slot renders — the live text, its placeholder, and the
-/// held draft shown while a create is in flight. They must agree or the text changes size the
-/// moment you type, or the moment you send. `Typography.headingSize` (16), not the component's
-/// default `bodySize` (14): on this page the composer IS the subject rather than a strip under a
-/// transcript (user call, 2026-08-07).
-let newChatComposerFontSize: CGFloat = Typography.headingSize
 
 /// PURE: whether this page is showing its COWORK shape — today, the idea list in place of the
 /// starter chips (`NewChatPage.starters`).

@@ -38,13 +38,17 @@ struct ComposerTextView: NSViewRepresentable {
     /// requires. Defaults `false` so the field's own call-site (`NormaFieldView.swift`) is
     /// byte-identical / zero behavior change; only the window opts in.
     var usesAdaptiveColors: Bool = false
-    /// The typed text's point size. Defaults to 14 so every existing call site — the orb field and
-    /// the chat window — is byte-identical; only the new-chat page opts up, where the composer is
-    /// the page's whole subject rather than a strip at the bottom of a transcript.
+    /// The typed text's point size. The default is BOUND to the user-message size (ruling
+    /// 2026-08-13: the composer types at the size the sent bubble renders, derived from the
+    /// same live metrics, so the two can never diverge). The new-chat page's former 16-pt
+    /// opt-up is retired by the same ruling; the one surviving override is the ORB FIELD,
+    /// which passes `Typography.bodySize` explicitly — its pill height is measured from the
+    /// text content, so the bound size would move the resting field by +1 pt, and the field's
+    /// geometry is ruled stable (held pending that answer; `docs/brand.md` § 4.6).
     ///
     /// Anything drawing a PLACEHOLDER over this composer must use the same value, or the text
     /// changes size the moment you type.
-    var fontSize: CGFloat = Typography.bodySize
+    var fontSize: CGFloat = Typography.composerFieldSize
     /// Task 6 (FieldFocus): virtual-focus keyboard chain, consulted first by
     /// `CommandTextView.doCommand(by:)` on ↑/↓/Enter — returning `true` means consumed (the
     /// pre-existing Enter/Shift+Enter contract does NOT run). Defaults `nil` so the chat window's

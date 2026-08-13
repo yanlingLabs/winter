@@ -57,7 +57,7 @@ final class TypographyTests: XCTestCase {
         "questionPillCheck": .sizeOnly(Typography.badgeSize),
         "questionPreviewMono": .font(Typography.questionPreviewMono),
         // Composer
-        "composerField": .sizeOnly(Typography.bodySize),
+        "composerField": .derived,
         "composerPlusGlyph": .font(Typography.composerPlusGlyph),
         "composerModelPill": .sizeOnly(Typography.controlSize),
         "composerSend": .sizeOnly(Typography.bodyLargeSize),
@@ -90,7 +90,9 @@ final class TypographyTests: XCTestCase {
         // NSFont pipeline tokens
         "fieldCodeLabelNS": .nsFont(Typography.fieldCodeLabelNS),
         "fieldCodeBlockNS": .nsFont(Typography.fieldCodeBlockNS),
-        "fieldInlineCodeNS": .nsFont(Typography.fieldInlineCodeNS),
+        "fieldInlineCodeNS": .derived,
+        "fieldUserMessage": .derived,
+        "fieldAssistantMessage": .derived,
         "shortcutKeyNS": .nsFont(Typography.shortcutKeyNS),
         "panelTabLabelNS": .nsFont(Typography.panelTabLabelNS),
         // The serif registers (Theme)
@@ -123,7 +125,6 @@ final class TypographyTests: XCTestCase {
     private static let nsFontMeanings: [String: NSFont] = [
         "fieldCodeLabelNS": .systemFont(ofSize: 11, weight: .medium),
         "fieldCodeBlockNS": .monospacedSystemFont(ofSize: 13, weight: .regular),
-        "fieldInlineCodeNS": .monospacedSystemFont(ofSize: 13.5, weight: .regular),
         "shortcutKeyNS": .systemFont(ofSize: 11, weight: .regular),
         "panelTabLabelNS": .systemFont(ofSize: 12, weight: .regular),
     ]
@@ -470,6 +471,79 @@ final class TypographyTests: XCTestCase {
         XCTAssertEqual(count, 21,
             "the token files' font-construction count moved — if you added a role, § 4.7's "
             + "checklist first (doc row + mapping in TypographyTests), then update this pin")
+    }
+
+    // MARK: - 4. The 2026-08-13 binding rulings
+
+    /// Ruling 1: the composer TYPES at the user-message size, as a live derivation — and
+    /// ruling 2: the orb field's message text derives from the transcript roles. Both pinned
+    /// against the metrics they must follow, so "bound" stays structural: un-derive either
+    /// side (a literal, the old chrome size, the retired 16) and this reds.
+    func testComposerAndOrbMessageTextAreBoundToTheTranscript() throws {
+        // The component's DEFAULT is the bound size — every home that does not explicitly
+        // override types at the user-message size.
+        XCTAssertEqual(ComposerTextView(text: .constant(""), onSubmit: {}).fontSize,
+                       transcriptProseMetrics(.sans).bodySize,
+                       "the composer's default must derive from the user-message metrics")
+        XCTAssertEqual(Typography.composerFieldSize, transcriptProseMetrics(.sans).bodySize)
+        XCTAssertEqual(Typography.composerField(), .system(size: transcriptProseMetrics(.sans).bodySize,
+                                                           weight: .regular))
+        // The orb's message roles derive from the transcript roles.
+        XCTAssertEqual(Typography.fieldUserMessage(.medium),
+                       .system(size: transcriptProseMetrics(.sans).bodySize, weight: .medium))
+        XCTAssertEqual(Typography.fieldAssistantMessage(),
+                       .system(size: transcriptProseMetrics(.assistant).bodySize, weight: .regular))
+        // The inline-code re-coupling was a WIRING change with zero rendered delta — both
+        // halves stated: derived AND still the 13.5 this surface always drew.
+        XCTAssertEqual(Typography.fieldInlineCodeNS.pointSize,
+                       transcriptProseMetrics(.sans).codeSize(for: transcriptProseMetrics(.sans).bodySize))
+        XCTAssertEqual(Typography.fieldInlineCodeNS.pointSize, 13.5)
+
+        // The ONE recorded exception (brand.md § 4.6): the orb field's own composer is HELD at
+        // the chrome body size pending the geometry ruling — its pill height is measured from
+        // text content, so the bound size would move the resting field by +1 pt. A wiring pin
+        // on the explicit override, so the hold cannot drift away silently in either direction.
+        let fieldSource = try String(
+            contentsOf: sourceRoot().appendingPathComponent("FieldKit/NormaFieldView.swift"),
+            encoding: .utf8)
+        XCTAssertEqual(fieldSource.components(separatedBy: "fontSize: Typography.bodySize").count - 1, 1,
+                       "the orb composer's HELD size override moved — that hold has its own § 4.6 "
+                       + "entry and only the geometry ruling may change it")
+    }
+
+    /// The constraint binding both rulings: the orb field's GEOMETRY is independent of the
+    /// type system. (a) The geometry side — MorphModel, WindowSurfaceGeometry, everything in
+    /// Orb/ — never references a type token or a font metric (source scan, comments stripped;
+    /// `.xHeight`-style members are matched with their dot so `composerMaxHeight` cannot
+    /// false-positive). (b) The clamps text lays out INSIDE are literals, value-pinned. What
+    /// this deliberately does NOT freeze: the pill's grow-with-typing height BETWEEN the
+    /// clamps, which is measured text content by v1 design — the § 4.6 hold covers the one
+    /// font-size input into that mechanism.
+    func testOrbGeometryIsIndependentOfTheTypeSystem() throws {
+        let geometryFiles = try appSources().filter { url in
+            url.path.contains("/Orb/")
+                || url.path.hasSuffix("FieldKit/MorphModel.swift")
+                || url.path.hasSuffix("FieldKit/WindowSurfaceGeometry.swift")
+        }
+        XCTAssertGreaterThanOrEqual(geometryFiles.count, 10,
+                                    "the geometry-side scan lost its files")
+        let banned = ["Typography.", "Theme.", "transcriptProseMetrics", "NSFont",
+                      ".pointSize", ".xHeight", ".capHeight", "defaultLineHeight", "boundingRect"]
+        for url in geometryFiles {
+            let code = try String(contentsOf: url, encoding: .utf8)
+                .components(separatedBy: "\n")
+                .filter { !$0.drop(while: { $0 == " " || $0 == "\t" }).hasPrefix("//") }
+                .joined(separator: "\n")
+            for token in banned where code.contains(token) {
+                XCTFail("\(url.lastPathComponent) references the type system (`\(token)`) — "
+                        + "orb geometry is ruled independent of text size (brand.md § 4.5)")
+            }
+        }
+        // The clamps themselves — literals, by value.
+        let morph = MorphModel()
+        XCTAssertEqual(morph.composerWidth, 360)
+        XCTAssertEqual(morph.composerMinHeight, 44)
+        XCTAssertEqual(morph.composerMaxHeight, 240)
     }
 
     // MARK: - Source access

@@ -237,7 +237,7 @@ The question is Norma asking, so its text is **binding #4 by derivation** on bot
 
 | Role | iOS | Mac | Notes |
 | --- | --- | --- | --- |
-| `composerField` | `.body` | 14 | The input itself. Mac: `ComposerTextView` via `sansNS(ofSize:)`, fed `bodySize` — except the new-chat page, whose composer is the page's subject and takes `headingSize` (16; `newChatComposerFontSize` derives from it). |
+| `composerField` | `.body` | derived | The input itself — BOUND to the user-message size (ruling 2026-08-13), reading the live sans metrics so typing and the sent bubble can never diverge. The new-chat page's former 16-pt opt-up (2026-08-07) is retired by the same ruling. The ONE exception is the orb field's own composer, HELD at chrome `body` (14) pending the geometry question in § 4.6. |
 | `composerPlusGlyph` | 17 light | 17 medium | The attach circle — the one composer glyph size the platforms share. Mac: `composerAttachGlyph`. |
 | `composerModelPill` | 14 (pinned) | 13 | iOS Claude-measured on device; Mac `control`. Recorded, § 4.6. |
 | `composerSend` | 17 bold | 15 medium | Recorded divergence, § 4.6. |
@@ -326,7 +326,9 @@ The scale (§ 4.5) plus its mono variants and the named one-offs:
 | `chipLabel` | — | `.caption2` | Activity chips, sidebar count chips. |
 | `fieldCodeLabelNS` | — | 11 medium | The orb field's code-block language label. |
 | `fieldCodeBlockNS` | — | 13 mono | The orb field's code-block body. |
-| `fieldInlineCodeNS` | — | 13.5 mono | The orb field's inline-code run — verbatim, deliberately NOT derived from the transcript ladder (the 2026-08-13 unification would have silently shrunk a derived value to 12; the orb never rides along with transcript rulings). |
+| `fieldInlineCodeNS` | — | derived | The orb field's inline-code run — re-bound through the shared transcript metrics by the orb ruling (lands on the same 13.5 the verbatim value carried: 15.5 − 2; a wiring change with zero rendered delta). |
+| `fieldUserMessage` | — | derived | The orb field's echo of what you asked — bound to the transcript's user-message size (both 15.5 today). Face stays the field's difference-blend sans. |
+| `fieldAssistantMessage` | — | derived | The orb field's reply text — bound to the assistant's transcript size. |
 | `shortcutKeyNS` | — | 11 | Shortcut recorder key-caps. |
 | `panelTabLabelNS` | — | 12 | The web panel's native tab label. |
 
@@ -355,7 +357,7 @@ Same binding, two platform registers. Not drift — a phone drawer and a desktop
 
 macOS has no user Dynamic Type, so Mac chrome is honest fixed points — which is exactly why they must all live on one named ladder. The nine steps (8 / 9 / 10 / 11 / 12 / 13 / 14 / 15 / 16) are the app's own measured status quo from the 2026-08-13 inventory (12 pt ×107, 11 pt ×91, 13 pt ×35, 14 and 10 pt ×14 each, 9 pt ×9 — a clean ladder that was always there, just unnamed). Tokenising it changed **no rendered output**; weights stay call-site arguments (`Typography.caption(.semibold)`) because emphasis is per-surface, size is not.
 
-**The orb is tokenised verbatim, never tuned from here.** The orb field renders on glass under the morph's blend law and `NormaFieldView`'s geometry is measured; its chrome happens to sit on the same scale (10–14), and `morphTrafficGlyph` (8.5 bold in a 14 pt circle) is one-off geometry. Any value change on those surfaces is an orb change and takes the orb's own gate.
+**The orb's MESSAGE text follows the transcript; its chrome stays verbatim; its geometry never follows either.** The 2026-08-13 orb ruling bound the field's user echo, reply text and inline code to the live transcript metrics (`fieldUserMessage` / `fieldAssistantMessage` / `fieldInlineCodeNS`). Everything else the orb draws — status glyphs, verb labels, hint rows, chips, `morphTrafficGlyph` (8.5 bold in a 14 pt circle) — is chrome on the measured scale, tokenised verbatim, and any change there is an orb change taking the orb's own gate. The field's GEOMETRY is ruled stable independent of text size: the panel frame and the pill clamps (360 / 44 / 240) are literals in `MorphModel`, the geometry side never references the type system (pinned by `TypographyTests.testOrbGeometryIsIndependentOfTheTypeSystem`), and text lays out inside those clamps — wrapping and scrolling at the ceiling as it already does. The one text-derived dimension is the pill's grow-with-typing height BETWEEN the clamps, which is why the orb's own composer is held (§ 4.6).
 
 ### 4.6 Recorded divergences, and the open iOS ruling
 
@@ -364,7 +366,9 @@ Tokenisation is a refactor: rendered output changes **only** where a row here re
 | Role | iOS | Mac | Status |
 | --- | --- | --- | --- |
 | Assistant serif prose vs sans beside it | both at `.body` → serif reads ~10% optically lighter | ONE shared ladder (15.5) → the same relationship | **RULED 2026-08-13: iOS is the source of truth; the Mac follows.** The earlier optical-parity correction (sans ladder sized lower to equalise x-heights) and the recorded `@ScaledMetric` recipe for lifting iOS's serif are both RETIRED — the point-size relationship, serif-reads-lighter and all, is the design. iOS unchanged; the Mac's sans ladder unified onto the assistant's sizes (leading stays distinct). |
-| Composer field vs user bubble | both `.body` — the field and the bubble share one style | 14 (chrome body) vs 15.5 (unified ladder) | New divergence CREATED by the ruling's scope: the unification covered the transcript ladders, and the Mac composer types at the chrome scale. Recorded for a future ruling, not silently changed. |
+| Composer field vs user bubble | both `.body` — the field and the bubble share one style | derived — one bound size | **RESOLVED 2026-08-13** ("make the composer field bound to the user message size aka 15.5"): `composerFieldSize` reads the live sans metrics, so the divergence is structurally closed — a ladder change moves typing and bubble together. The new-chat page's 16-pt register (a 2026-08-07 user call) is retired by the same ruling. |
+| Orb field + morph window message text | n/a | derived — bound to the transcript roles | **RULED 2026-08-13** ("the orb field/expanded window should follow the same message sizes … bound to the apps transcript sizes"): the field's echo, reply and inline code derive from the metrics; the morph window's transcript is `WindowContentView` → `TranscriptView` → the metrics end to end (verified). Reply 13 → 15.5 and echo 11 → 15.5 are the rendered changes; inline code lands on the same 13.5. |
+| The orb field's OWN composer | n/a | HELD at chrome body (14) | **The open geometry question.** The pill's height is measured from text content (`composerContentHeight` → clamped into [44, 240]); binding the typing size to 15.5 moves the resting field by +1 pt (line height 17 → 18, measured 2026-08-13) and widens every grow-step — and the field's size is ruled stable ("kept stable and not dependent on the text size"). Held, pinned, awaiting the call: accept the +1 pt and bind, or keep the hold. The clear-button threshold (`composerContentHeight >= 55`) would also shift meaning by one line either way. |
 | `toolPhrase` | 14 pinned (Claude-measured on device, r3) | 11 (`caption`, the chrome scale) | Both deliberate measurements; a desktop row is quieter. Kept. |
 | `composerSend` | 17 bold | 15 medium (`bodyLarge`) | Kept — different affordance sizes on the two composers. |
 | `composerModelPill` | 14 pinned | 13 (`control`) | Kept. |
