@@ -1435,6 +1435,10 @@ private struct QuestionBlock: View {
                 optionsList
             }
 
+            // Other is an OPTION, so it is divided from the listed ones exactly as they are
+            // divided from each other (user call, 2026-08-13; iOS puts a rule here too). Without it
+            // the last listed option and the free-text row ran together as one block.
+            if !question.options.isEmpty { optionSeparator }
             otherRow
             // Notes are a code-mode (`ask_user`) affordance; chat's simplified (header-less) card
             // has none (Slice B1). The note state/callback wiring itself is untouched — this only

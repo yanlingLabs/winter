@@ -27,6 +27,7 @@ export function registerAskUserTool(r: ToolRegistry): void {
       "Ask the user 1-4 questions whenever you need them to choose between options or clarify something you cannot resolve from the request, the code, or sensible defaults. ALWAYS ask through this tool — never pose the question as prose and stop; a prose question stalls the session and can't be answered from other surfaces. " +
       "Each question has 2-4 distinct option choices; each option needs a label AND a description explaining what it means; do NOT add an 'Other' option (the interface adds a free-text 'Other' automatically). " +
       "An option may also carry a short `preview` (a visual/example, e.g. a diff snippet or path, shown beside the option) — previews are only supported for single-select questions (multiSelect: false). " +
+      "Each question also needs a `header`: a VERY SHORT category label for the question's chip — 12 CHARACTERS MAXIMUM, one or two words ('Topic', 'Sources', 'Byline'), never a phrase. Anything longer is REFUSED and the whole call fails, taking every question in it with you. " +
       "If you recommend an option, put it first and append ' (Recommended)' to its label. Use multiSelect: true when choices are not mutually exclusive. " +
       "The user's answers are returned; if no one answers in time you'll be told to proceed with your best judgment.",
     args: AskUserArgs,

@@ -511,6 +511,12 @@ struct NormaComposerCard: View {
 /// taller box wants a rounder corner, and it is the one thing about the box that says "this is not
 /// the composer" while it is up.
 struct ComposerQuestionBox: View {
+    /// The composer's own hover behaviour, inherited on purpose (user call, 2026-08-13): only the
+    /// RIM moves, never the fill. The box is standing in the composer's place, so it should answer
+    /// the pointer the way the thing it replaced does — a surface that went inert under the cursor
+    /// would read as disabled rather than as waiting.
+    @State private var isHovered = false
+
     let callId: String
     let questions: [SessionEvent.Question]
     let childSessionId: String?
@@ -546,9 +552,13 @@ struct ComposerQuestionBox: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
-                .strokeBorder(Theme.hairline, lineWidth: shellSidebarHairlineWidth)
+                .strokeBorder(isHovered ? AnyShapeStyle(Color.primary.opacity(0.30))
+                                        : AnyShapeStyle(Theme.hairline),
+                              lineWidth: shellSidebarHairlineWidth)
         )
         .shadow(color: .black.opacity(0.05), radius: 16, y: 4)
+        .animation(.easeOut(duration: 0.14), value: isHovered)
+        .onHover { isHovered = $0 }
         // Centring goes LAST, outside the face: applied before the background, it would have handed
         // the fill an infinite width to paint and the box would have been full-bleed with a cap
         // drawn only around its contents — the exact bug this change is fixing, one layer in.
