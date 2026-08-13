@@ -6,7 +6,14 @@ const NO_ANSWER = () => `No answer within ${ASK_TIMEOUT_S()}s — the user is no
 
 const AskUserQuestionArgs = z.object({
   question: z.string().min(1),
-  header: z.string().min(1).max(12),
+  // ADVERTISED 12, ACCEPTED 14 (user call, 2026-08-13) — a deliberate two-character tolerance, not
+  // a slack limit. The description asks for 12 because that is what the chip renders cleanly; the
+  // schema takes 14 because `questions` validates as a WHOLE, so a single overlong label refuses
+  // the entire call and loses every question in it. A model that lands on "Draft details" (13)
+  // should not cost the user a four-question ask and a retry — the observed failures were all 13s
+  // and one 14. Past 14 it still refuses: the tolerance absorbs a near miss, it does not invite a
+  // phrase.
+  header: z.string().min(1).max(14),
   // CC AskUserQuestion parity: `preview` is an optional short visual/example (e.g. a diff snippet
   // or path) shown beside the option — single-select only, enforced by the refine below.
   options: z.array(z.object({ label: z.string().min(1), description: z.string().min(1), preview: z.string().optional() })).min(2).max(4),
@@ -27,7 +34,7 @@ export function registerAskUserTool(r: ToolRegistry): void {
       "Ask the user 1-4 questions whenever you need them to choose between options or clarify something you cannot resolve from the request, the code, or sensible defaults. ALWAYS ask through this tool — never pose the question as prose and stop; a prose question stalls the session and can't be answered from other surfaces. " +
       "Each question has 2-4 distinct option choices; each option needs a label AND a description explaining what it means; do NOT add an 'Other' option (the interface adds a free-text 'Other' automatically). " +
       "An option may also carry a short `preview` (a visual/example, e.g. a diff snippet or path, shown beside the option) — previews are only supported for single-select questions (multiSelect: false). " +
-      "Each question also needs a `header`: a VERY SHORT category label for the question's chip — 12 CHARACTERS MAXIMUM, one or two words ('Topic', 'Sources', 'Byline'), never a phrase. Anything longer is REFUSED and the whole call fails, taking every question in it with you. " +
+      "Each question also needs a `header`: a VERY SHORT category label for the question's chip — 12 CHARACTERS MAXIMUM (including spaces), one or two words ('Topic', 'Sources', 'Byline'), never a phrase. Anything longer is REFUSED and the whole call fails, taking every question in it with you. " +
       "If you recommend an option, put it first and append ' (Recommended)' to its label. Use multiSelect: true when choices are not mutually exclusive. " +
       "The user's answers are returned; if no one answers in time you'll be told to proceed with your best judgment.",
     args: AskUserArgs,
