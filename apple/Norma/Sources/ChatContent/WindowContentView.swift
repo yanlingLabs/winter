@@ -83,6 +83,17 @@ struct WindowContentView<Accessory: View>: View {
     @State private var sidebar = SidebarState(leftExpanded: true, rightExpanded: true,
                                               leftOverlayOpen: false, rightOverlayOpen: false)
 
+    /// Asks the user has CLOSED out of the composer (2026-08-13). Closing hands the composer back
+    /// and returns that question to the transcript, where it stays pending and answerable — "not
+    /// now", never "never", because the daemon is still waiting on a reply either way.
+    ///
+    /// View-local `@State`, deliberately: it is a presentation preference for THIS window, not an
+    /// answer. A second window on the same session should still be offered the ask in its own
+    /// composer, and a closed ask should come back on relaunch rather than staying hidden forever on
+    /// the strength of one click. It also cannot go stale — a resolved ask leaves
+    /// `pendingInteractions`, so a lingering id in here selects nothing.
+    @State private var closedAsks: Set<String> = []
+
     var body: some View {
         // `sidebars == nil` → today's exact layout, byte-identical: `contentColumn(rightVisible:
         // false)` re-adds `&& !false` (== `&& true`) to the two relocation gates, a no-op.
@@ -156,6 +167,9 @@ struct WindowContentView<Accessory: View>: View {
             // `DetachedWindowController`) get it, since both render this shared view.
             TranscriptView(adapter: adapter, tint: tint, cardWiring: InteractionCardWiring(
                 inFlight: adapter.interactionInFlight,
+                // The mirror of the composer's `excluding:` just below. One set, read twice: the
+                // transcript draws exactly the pending questions the composer is NOT holding.
+                closedAsks: closedAsks,
                 errorLines: adapter.interactionErrors,
                 // panel-shell T10b: `adapter.pendingCardDraftBinding` closes over `adapter` itself
                 // (an `@ObservedObject` this view already holds live), so every Binding it mints —
@@ -210,13 +224,15 @@ struct WindowContentView<Accessory: View>: View {
                     // `.id(callId)` gives each question block its own view identity, so a second
                     // ask arriving as the first is answered gets a fresh box (and fresh draft
                     // state) instead of inheriting the outgoing one's.
-                    if let pending = composerMorphQuestion(adapter.pendingInteractions) {
+                    if let pending = composerMorphQuestion(adapter.pendingInteractions,
+                                                          excluding: closedAsks) {
                         ComposerQuestionBox(
                             callId: pending.callId,
                             questions: pending.questions,
                             childSessionId: pending.childSessionId,
                             isInFlight: adapter.interactionInFlight.contains(pending.callId),
                             onQuestion: adapter.onQuestionRespond,
+                            onClose: { closedAsks.insert(pending.callId) },
                             draft: adapter.pendingCardDraftBinding(for: pending.callId)
                         )
                         .id(pending.callId)

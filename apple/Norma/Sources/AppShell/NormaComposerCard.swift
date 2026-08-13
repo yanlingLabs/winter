@@ -516,6 +516,8 @@ struct ComposerQuestionBox: View {
     let childSessionId: String?
     let isInFlight: Bool
     let onQuestion: (String, [String: String], [String: String], String?) -> Void
+    /// Hands the composer back and returns the ask to the transcript — see `PendingQuestionBody.onClose`.
+    let onClose: () -> Void
     @Binding var draft: PendingCardDraft
 
     /// iOS's 28-on-a-22-composer, at this shell's 18.
@@ -528,6 +530,7 @@ struct ComposerQuestionBox: View {
             childSessionId: childSessionId,
             isInFlight: isInFlight,
             onQuestion: onQuestion,
+            onClose: onClose,
             draft: $draft
         )
         .padding(16)

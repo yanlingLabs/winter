@@ -503,7 +503,7 @@ final class PendingCardsTests: XCTestCase {
         var stored = PendingCardDraft()
         let binding = Binding<PendingCardDraft>(get: { stored }, set: { stored = $0 })
         let view = PendingQuestionBody(callId: "q1", questions: qs, childSessionId: nil, isInFlight: false,
-                                        onQuestion: { _, _, _, _ in }, draft: binding)
+                                        onQuestion: { _, _, _, _ in }, onClose: nil, draft: binding)
         XCTAssertFalse(hasAnyStateBackedStorage(view),
             "PendingQuestionBody must hold no view-local @State for the answer — it must read/write " +
             "through the externally-owned `draft` Binding so an in-progress answer survives detail's " +

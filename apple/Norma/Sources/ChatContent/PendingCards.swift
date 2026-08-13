@@ -30,6 +30,9 @@ import NormaProtocol
 struct InteractionCardWiring {
     /// callIds with a respond RPC currently awaiting — the card's "Sending…" state.
     let inFlight: Set<String>
+    /// The asks the composer has handed back (`WindowContentView.closedAsks`). The transcript draws
+    /// exactly the pending questions the composer is NOT holding — one set, read on both sides.
+    var closedAsks: Set<String> = []
     /// callId → inline error text from a failed respond RPC.
     let errorLines: [String: String]
     /// panel-shell T10b: a live `Binding` onto callId's `PendingCardDraft`. Built by the caller off
@@ -79,6 +82,27 @@ struct PendingCardDraft: Equatable {
     /// `InteractionCardWiring.draftBinding`'s doc names for typed answers; approvals simply had a
     /// second piece of state nobody had moved yet.
     var isSummaryExpanded: Bool = false
+    /// Which question of a multi-question block is on screen (2026-08-13).
+    ///
+    /// Here rather than in the view's `@State` for the reason everything else in this struct is —
+    /// and `PendingQuestionBodyHoldsNoViewLocalState` enforces it. It earns the place on its own
+    /// merits too: losing your PLACE in a four-question ask on a `.maximized` teardown is the same
+    /// class of annoyance as losing the answers, and the fix was already built.
+    var visibleQuestion: Int = 0
+
+    /// Wipe every answer in the block — what the × does (user call, 2026-08-13; iOS's style8).
+    ///
+    /// The QUESTION fields only. `isRequestingChanges`/`feedback`/`isSummaryExpanded` belong to the
+    /// plan and approval cards, which have no × and never share a draft with a question — clearing
+    /// them here would be a mutation nobody asked for, reachable only by a future card that reuses
+    /// this type. `otherExpanded` goes too: a note field left standing open over a cleared answer
+    /// is the one piece of the old state that would still look like content.
+    mutating func clearAll() {
+        selections = [:]
+        otherTexts = [:]
+        otherExpanded = []
+        notes = [:]
+    }
 
     /// Single-select an option — mirrors `PendingQuestionBody`'s old `onSelectSingle` closure.
     mutating func selectSingle(_ optionIndex: Int, forQuestion index: Int) {
@@ -531,7 +555,7 @@ struct TranscriptInteractionCard: View {
         case .approval(_, let summary, let reviewerReason, let options):
             PendingApprovalBody(callId: record.callId, summary: summary, reviewerReason: reviewerReason, childSessionId: record.childSessionId, options: options, isInFlight: isInFlight, onApproval: wiring.onApproval, draft: wiring.draftBinding(record.callId))
         case .question(let questions):
-            PendingQuestionBody(callId: record.callId, questions: questions, childSessionId: record.childSessionId, isInFlight: isInFlight, onQuestion: wiring.onQuestion, draft: wiring.draftBinding(record.callId))
+            PendingQuestionBody(callId: record.callId, questions: questions, childSessionId: record.childSessionId, isInFlight: isInFlight, onQuestion: wiring.onQuestion, onClose: nil, draft: wiring.draftBinding(record.callId))
         case .plan(let plan):
             PendingPlanBody(callId: record.callId, plan: plan, isInFlight: isInFlight, onPlan: wiring.onPlan, draft: wiring.draftBinding(record.callId))
         }
@@ -680,83 +704,67 @@ func deckLeanDegrees(depth: Int) -> Double {
 /// SP-ask-stack). The geometry is iOS's: modular depth, 2% scale per step back, a 6pt offset,
 /// alternating ±2.2° lean, and at most three peeking behind the front.
 ///
-/// **The CYCLING is not iOS's, and could not be.** iOS advances with a `DragGesture`, which on
-/// macOS only sees a click-drag — a two-finger trackpad swipe arrives as a scroll event, so a
-/// straight port would have shipped a deck most users could not turn, and one that fought the
-/// transcript's own scrolling if it could. Instead:
-///   - **click a peeked card** to bring it forward — the affordance the stack already suggests;
-///   - **a pager** (‹ 2 of 3 ›), because a Mac has no swipe hint and a deck with no visible control
-///     is a deck nobody discovers.
-/// The FRONT card is deliberately not click-to-advance: its answer text is selectable, and stealing
-/// that click would trade a working affordance for a redundant one.
+/// **Click the stack to UNSTACK it** (user call, 2026-08-13). iOS cycles a card at a time with a
+/// swipe; that gesture does not exist here — a two-finger trackpad swipe arrives as a scroll event,
+/// so the phone's `DragGesture` would only answer to click-drag. Rather than invent a pager (tried,
+/// and it read as chrome bolted onto a card), the deck simply opens: one click fans the stack out
+/// into a plain vertical list, aligned, pushing the rest of the transcript down; another closes it.
+///
+/// It is the honest Mac trade. The phone cycles because it has one screen-width to spend; a Mac has
+/// the column to just show them, and "see all three at once" beats "turn to card two" when the room
+/// exists. Expanded, the cards are ordinary aligned cards with no fan, no lean, and no gesture to
+/// discover — nothing to learn, which is the point.
 struct ResolvedQuestionDeck: View {
     let questions: [SessionEvent.Question]
     let outcome: InteractionRecord.Outcome
 
-    @State private var front = 0
+    @State private var expanded = false
 
     private var count: Int { questions.count }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ZStack(alignment: .top) {
-                ForEach(questions.indices, id: \.self) { index in
-                    let depth = deckDepth(index: index, front: front, count: count)
-                    card(index)
-                        .zIndex(Double(count - depth))
-                        .scaleEffect(depth == 0 ? 1 : 1 - CGFloat(depth) * 0.02)
-                        .offset(x: CGFloat(depth) * 6)
-                        .rotationEffect(.degrees(deckLeanDegrees(depth: depth)))
-                        .opacity(depth > 3 ? 0 : 1)   // at most three peeking behind
-                        .allowsHitTesting(depth <= 3)
-                        .accessibilityHidden(depth != 0)   // VoiceOver reads the front card only
+        Group {
+            if expanded {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(questions.indices, id: \.self) { card($0) }
                 }
+            } else {
+                stack
             }
-            pager
         }
-        .animation(.smooth(duration: 0.28), value: front)
+        // The whole thing is the target in both states — collapsed there is a fanned deck to click,
+        // expanded there is a column whose cards should close it again. `.contentShape` so the gaps
+        // between cards are live too, and `.plain` so neither state grows a button's face.
+        .contentShape(Rectangle())
+        .onTapGesture { expanded.toggle() }
+        .animation(.smooth(duration: 0.3), value: expanded)
+        .accessibilityElement(children: .contain)
+        .accessibilityHint(expanded
+            ? "Showing all \(count) answered questions. Click to stack them."
+            : "\(count) answered questions, stacked. Click to show them all.")
     }
 
-    @ViewBuilder
+    /// The collapsed fan — iOS's geometry, front card upright, at most three peeking behind.
+    private var stack: some View {
+        ZStack(alignment: .top) {
+            ForEach(questions.indices, id: \.self) { index in
+                let depth = deckDepth(index: index, front: 0, count: count)
+                card(index)
+                    .zIndex(Double(count - depth))
+                    .scaleEffect(depth == 0 ? 1 : 1 - CGFloat(depth) * 0.02)
+                    .offset(x: CGFloat(depth) * 6)
+                    .rotationEffect(.degrees(deckLeanDegrees(depth: depth)))
+                    .opacity(depth > 3 ? 0 : 1)
+                    .accessibilityHidden(depth != 0)   // VoiceOver reads the front card only
+            }
+        }
+    }
+
     private func card(_ index: Int) -> some View {
-        let content = ResolvedQuestionBody(questions: [questions[index]], outcome: outcome)
+        ResolvedQuestionBody(questions: [questions[index]], outcome: outcome)
             .padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)
             .modifier(InteractionCardChrome())
-
-        if deckDepth(index: index, front: front, count: count) == 0 {
-            content
-        } else {
-            // A peeked card is a button to bring it forward. `.plain` so it keeps the card's own
-            // face — a bordered button style would draw a second surface around a surface.
-            Button { front = index } label: { content }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Show answered question \(index + 1) of \(count)")
-        }
-    }
-
-    private var pager: some View {
-        HStack(spacing: 10) {
-            Button { front = deckDepth(index: front - 1, front: 0, count: count) } label: {
-                Image(systemName: "chevron.left")
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Previous answered question")
-
-            Text("\(front + 1) of \(count)")
-                .font(.system(size: 11))
-                .foregroundStyle(Theme.textMuted)
-                .monospacedDigit()
-
-            Button { front = deckDepth(index: front + 1, front: 0, count: count) } label: {
-                Image(systemName: "chevron.right")
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Next answered question")
-        }
-        .font(.system(size: 11, weight: .medium))
-        .foregroundStyle(Theme.textMuted)
-        .padding(.leading, 4)
     }
 }
 
@@ -1116,9 +1124,10 @@ private struct PendingApprovalBody: View {
 /// Returns the payload rather than the `PendingInteraction` so the caller cannot accidentally hand
 /// the box an approval — the type makes the wrong call site unwritable.
 func composerMorphQuestion(
-    _ pending: [PendingInteraction]
+    _ pending: [PendingInteraction],
+    excluding closed: Set<String> = []
 ) -> (callId: String, questions: [SessionEvent.Question], childSessionId: String?)? {
-    for interaction in pending {
+    for interaction in pending where !closed.contains(interaction.callId) {
         if case .question(let callId, let questions, let childSessionId) = interaction {
             // A question whose payload has not landed yet cannot render a form. Skipping it rather
             // than morphing into an empty box means the composer stays usable until it arrives.
@@ -1135,9 +1144,27 @@ func composerMorphQuestion(
 /// whatever the composer picked: a second pending question — rarer, but reachable via a dispatch
 /// child — must not appear inline just because the composer is busy with the first. It waits its
 /// turn in the same slot, exactly as iOS's oldest-first rule intends.
-func questionMorphsTheComposer(_ record: InteractionRecord) -> Bool {
+func questionMorphsTheComposer(_ record: InteractionRecord, closed: Set<String> = []) -> Bool {
     guard case .question = record.ask else { return false }
+    // A CLOSED ask is the composer's no-longer: the user handed the composer back, so the transcript
+    // takes the question again — still pending, still answerable, just not in the way.
+    guard !closed.contains(record.callId) else { return false }
     return interactionIsPending(record)
+}
+
+/// The action row's control height — "thicker" than a stock button (user call), and one number for
+/// all three so the circles are round against the capsule rather than merely near it. iOS's is 50 on
+/// a touch target; 44 is this shell's equivalent at pointer scale.
+let pendingQuestionActionHeight: CGFloat = 44
+
+/// PURE: what a question's pill says — its header, or a plain ordinal when the ask carries none.
+/// Never the question text: a pill row of truncated sentences is unreadable, and the question
+/// itself is on screen directly below the pills.
+func pendingQuestionPillLabel(_ question: SessionEvent.Question, index: Int) -> String {
+    if let header = question.header, !header.trimmingCharacters(in: .whitespaces).isEmpty {
+        return header
+    }
+    return "\(index + 1)"
 }
 
 struct PendingQuestionBody: View {
@@ -1148,6 +1175,15 @@ struct PendingQuestionBody: View {
     let childSessionId: String?
     let isInFlight: Bool
     let onQuestion: (String, [String: String], [String: String], String?) -> Void
+    /// What Close does, or **`nil` where there is nothing to close FROM** — the transcript's own
+    /// copy of a closed-out ask passes nil, because that card IS the question's home and a Close
+    /// button there would be a button with no destination.
+    ///
+    /// **iOS's own `closeQuestion()` is an empty stub** — its Close button does nothing at all — so
+    /// this is not a port, it is the missing half. In the composer it hands the composer back and
+    /// returns the ask to the transcript, where it stays pending and answerable: "not now" rather
+    /// than "never", the only honest meaning available while the daemon is still waiting.
+    let onClose: (() -> Void)?
     /// panel-shell T10b: the answer lives HERE now, not in local `@State` — see `PendingCardDraft`'s
     /// own doc for why (it must survive `ShellRootView`'s `.maximized` teardown of `detail`).
     @Binding var draft: PendingCardDraft
@@ -1156,18 +1192,36 @@ struct PendingQuestionBody: View {
         questionCardComplete(questions: questions, selections: draft.selections, otherTexts: draft.otherTexts)
     }
 
+    /// Which question is on screen. ONE AT A TIME (user call, 2026-08-13): a four-question ask
+    /// stacked into one column was a wall of form. The pills above and Next below are the two ways
+    /// through it — Next walks forward, a pill jumps anywhere, including back.
+    ///
+    /// Clamped on READ rather than trusted: the draft outlives any particular question list (it is
+    /// keyed by callId and survives teardown), so a stale index must never index out of bounds.
+    private var index: Int { min(max(draft.visibleQuestion, 0), max(questions.count - 1, 0)) }
+    private var isLast: Bool { index >= questions.count - 1 }
+
+    /// Any answer-in-progress anywhere in the BLOCK — the Close/clear split point, and deliberately
+    /// block-wide rather than per-question (iOS's `hasAnyContent`): the × clears everything, so it
+    /// must appear whenever there is anything anywhere to clear, even on a page the user has not
+    /// touched.
+    private var hasAnyContent: Bool {
+        questions.indices.contains { i in
+            !(draft.selections[i] ?? []).isEmpty
+                || !(draft.otherTexts[i] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || !(draft.notes[i] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            ForEach(Array(questions.enumerated()), id: \.offset) { index, question in
-                // mac-chat-parity Task 3: a hairline between questions, iOS's rule for a
-                // multi-question block. One ask can carry up to four questions and, without a
-                // division, four blocks of "header / question / options / Other / note" read as one
-                // long undifferentiated form.
-                if index > 0 { QuestionSeparator() }
+        VStack(alignment: .leading, spacing: 12) {
+            if questions.count > 1 { pillPicker }
+
+            if questions.indices.contains(index) {
                 QuestionBlock(
                     index: index,
-                    question: question,
-                    showsHeader: questionShowsHeaderChip(question, questionCount: questions.count),
+                    question: questions[index],
+                    showsHeader: false,   // the pills carry the headers now
                     selected: draft.selections[index] ?? [],
                     otherText: draft.otherTexts[index] ?? "",
                     isOtherExpanded: draft.otherExpanded.contains(index),
@@ -1179,23 +1233,131 @@ struct PendingQuestionBody: View {
                     onOtherTextChange: { text in draft.setOtherText(text, forQuestion: index) },
                     onNoteTextChange: { text in draft.setNote(text, forQuestion: index) }
                 )
+                .id(index)   // each page is its own view, so a field never inherits the last one's text
             }
 
-            // mac-chat-parity Task 3: full width and the card's ONE prominent action — a small
-            // natural-width button floating under a form gave no sense of being the thing that
-            // completes it. `Sending…` while the respond RPC is out (iOS's own in-flight label);
-            // still disabled in that state, so the label is the signal and the disable is the guard.
-            Button(action: submit) {
-                if isInFlight {
-                    Label("Sending…", systemImage: "hourglass").frame(maxWidth: .infinity)
-                } else {
-                    Text("Submit").frame(maxWidth: .infinity)
+            actionRow
+        }
+        .animation(.smooth(duration: 0.2), value: hasAnyContent)
+        .animation(.smooth(duration: 0.2), value: index)
+    }
+
+    /// The other questions' headers, always visible — iOS's pill picker. A pill is the way BACK
+    /// (Next is the way forward), and its checkmark is how a four-question ask says how far along
+    /// it is without a counter.
+    private var pillPicker: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 6) {
+                ForEach(questions.indices, id: \.self) { i in
+                    let isCurrent = i == index
+                    let answered = !(draft.selections[i] ?? []).isEmpty
+                        || !(draft.otherTexts[i] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    Button { draft.visibleQuestion = i } label: {
+                        HStack(spacing: 4) {
+                            Text(pendingQuestionPillLabel(questions[i], index: i))
+                                .font(.system(size: 11, weight: .medium))
+                                .lineLimit(1)
+                            if answered {
+                                Image(systemName: "checkmark").font(.system(size: 9, weight: .semibold))
+                            }
+                        }
+                        .foregroundStyle(isCurrent ? Theme.accent : Color.secondary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(Capsule().fill(isCurrent ? Theme.accent.opacity(0.14) : Color.clear))
+                        .overlay(Capsule().strokeBorder(
+                            isCurrent ? Theme.accent.opacity(0.4) : Theme.hairlineElevated,
+                            lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Question \(i + 1) of \(questions.count): \(pendingQuestionPillLabel(questions[i], index: i))")
+                    .accessibilityAddTraits(isCurrent ? [.isSelected] : [])
                 }
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .disabled(isInFlight || !isComplete)
         }
+        .scrollIndicators(.never)
+    }
+
+    /// `[×] [ Next | Submit ] [note]`, or `[ Close ] [note]` on an untouched block.
+    ///
+    /// The × CLEARS, it does not close (iOS's style8, and the user's own instruction): one click
+    /// wipes every selection, Other text and note across the whole block, landing back on the empty
+    /// state where Close is the actual close. Two honest clicks, no accidental discard of a
+    /// half-built answer.
+    private var actionRow: some View {
+        HStack(spacing: 10) {
+            if hasAnyContent {
+                circleButton(system: "xmark", label: "Clear answers") {
+                    draft.clearAll()
+                }
+                .transition(.blurReplace)
+            }
+
+            if hasAnyContent {
+                primaryButton
+            } else if let onClose {
+                wideButton(title: "Close", disabled: false, action: onClose)
+                    .transition(.blurReplace)
+            } else if !isLast {
+                // No Close to offer (the transcript's copy), but a multi-question block still needs
+                // its way forward before anything is picked.
+                primaryButton
+            }
+
+            if questions.indices.contains(index), questionAllowsNotes(questions[index]) {
+                circleButton(
+                    system: draft.otherExpanded.contains(index) ? "note.text" : "note.text.badge.plus",
+                    label: "Add note"
+                ) {
+                    draft.expandOther(forQuestion: index)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var primaryButton: some View {
+        if isLast {
+            wideButton(title: isInFlight ? "Sending…" : "Submit",
+                       disabled: isInFlight || !isComplete,
+                       action: submit)
+        } else {
+            // Next is NAVIGATION, never gated on an answer: a user may want to read question three
+            // before deciding question one, and the pills already allow that — a disabled Next
+            // would be the only thing on the box claiming the questions must be answered in order.
+            wideButton(title: "Next", disabled: false) { draft.visibleQuestion = index + 1 }
+        }
+    }
+
+    /// The wide action. `inverseCanvas`, NOT accent (user call): accent is the app's *selection*
+    /// colour and it is already spoken by the chosen option's checkmark just above — a button in
+    /// the same colour competed with the answer for the same meaning. Inverted canvas is what iOS
+    /// gives Submit, and what "+ New chat" already wears on this platform.
+    private func wideButton(title: String, disabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Theme.canvas)
+                .frame(maxWidth: .infinity)
+                .frame(height: pendingQuestionActionHeight)
+                .background(Capsule().fill(Theme.inverseCanvas.opacity(disabled ? 0.35 : 1)))
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
+    }
+
+    private func circleButton(system: String, label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: system)
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(.primary)
+                .frame(width: pendingQuestionActionHeight, height: pendingQuestionActionHeight)
+                .background(Circle().fill(Theme.controlSurface))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
     }
 
     private func submit() {
@@ -1272,10 +1434,24 @@ private struct QuestionBlock: View {
     }
 
     @ViewBuilder
+    /// Options separated by hairlines, with **Other last** — iOS's (and Claude's) card structure,
+    /// where the rule carries the division so no row needs a fill or a border to be distinct.
     private var optionsList: some View {
-        ForEach(Array(question.options.enumerated()), id: \.offset) { optionIndex, option in
-            optionRow(optionIndex, option)
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(question.options.enumerated()), id: \.offset) { optionIndex, option in
+                if optionIndex > 0 { optionSeparator }
+                optionRow(optionIndex, option)
+            }
         }
+    }
+
+    /// The hairline between option rows, and before Other. `hairlineElevated` because this box
+    /// stands on a raised surface — the shell token measures 1.040:1 there in dark (`brand.md` § 1),
+    /// which is the rule very nearly not drawn at all.
+    private var optionSeparator: some View {
+        Rectangle()
+            .fill(Theme.hairlineElevated)
+            .frame(height: 1)
     }
 
     @ViewBuilder
@@ -1301,30 +1477,30 @@ private struct QuestionBlock: View {
     /// (`optionSelectionGlyph`) and the same selected chrome (`optionSelectionChrome`).
     private func optionRow(_ optionIndex: Int, _ option: SessionEvent.QuestionOption) -> some View {
         let isSelected = selected.contains(optionIndex)
-        let chrome = optionSelectionChrome(isSelected: isSelected)
         return Button {
             if question.multiSelect { onToggleMulti(optionIndex) } else { onSelectSingle(optionIndex) }
         } label: {
-            HStack(alignment: .top, spacing: 8) {
-                Image(systemName: optionSelectionGlyph(multiSelect: question.multiSelect, isSelected: isSelected))
-                    .foregroundStyle(isSelected ? Theme.accent : .secondary)
+            // iOS's row grammar (user call, 2026-08-13): NO leading glyph, no fill, no border — the
+            // hairlines carry the structure, and a chosen row earns ONE TRAILING accent checkmark.
+            // The check lives in a RESERVED column so selecting never reflows the label, and it is
+            // the same mark for single- and multi-select: the control's shape mattered when it was
+            // being chosen among, but on the row itself "chosen" means one thing. The button's own
+            // `.isSelected` trait still tells VoiceOver which arity this is.
+            HStack(alignment: .center, spacing: 12) {
                 optionLabel(option, isSelected: isSelected)
-                Spacer(minLength: 0)
+                Spacer(minLength: 8)
+                Image(systemName: "checkmark")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Theme.accent)
+                    .opacity(isSelected ? 1 : 0)
+                    .frame(width: 28, alignment: .center)
+                    .accessibilityHidden(true)
             }
-            .padding(.vertical, 6)
-            .padding(.horizontal, 10)
-            // The whole row, fill and padding included, is the hit target — not just the glyph and
-            // the words. iOS's rule, and the one that makes a bordered selected row honest about
-            // where it can be clicked.
-            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(Theme.accent.opacity(chrome.fillOpacity))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .strokeBorder(Theme.accent, lineWidth: chrome.strokeWidth)
-            )
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 10)
+            // The whole row is the hit target, gaps included — with no fill to click, the words
+            // alone would be a smaller target than the row looks.
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .disabled(isInFlight)

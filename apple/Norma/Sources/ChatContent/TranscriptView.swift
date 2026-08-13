@@ -188,7 +188,7 @@ private struct TranscriptExchangeRow: View {
                         // the only thing that changed is where an UNANSWERED question is shown.
                         //
                         // Approvals and plans are untouched and still draw here while pending.
-                        if !questionMorphsTheComposer(record) {
+                        if !questionMorphsTheComposer(record, closed: cardWiring.closedAsks) {
                             TranscriptInteractionCard(record: record, wiring: cardWiring)
                         }
                     } else {
