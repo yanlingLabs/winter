@@ -83,7 +83,7 @@ enum Typography {
     static let questionPreviewMono: Font = .system(.body, design: .monospaced)
     /// The composer's attach (+) glyph — 17 pt, one step past `heading`: glyph geometry, not a
     /// text step, and the SAME 17 the iOS composer draws its primary glyphs at.
-    static let composerAttachGlyph: Font = sans(17, .medium)
+    static let composerPlusGlyph: Font = sans(17, .medium)
 
     // MARK: Semantic passthroughs
 

@@ -140,37 +140,60 @@ Two consequences.
 
 **San Francisco everywhere, New York as a rare accent.** New York is the system serif (`Font.Design.serif`, no bundled font file) — the contrast of an authored serif heading over neutral sans body is the whole signature.
 
-### The serif allowlist
+Since the 2026-08-13 typography pass this section is the **type source of truth for both apps**, the same way § 1 is for color. Two token files implement it and nothing else may construct a font:
+
+| | Token file | Enforced by |
+| --- | --- | --- |
+| **Mac** | `apple/Norma/Sources/App/Typography.swift` (+ the serif bindings in `Theme.swift`) | `TypographyTests` — parses this section's tables AND sweeps every app source |
+| **iOS** | `../norma-ios/Norma/App/Typography.swift` (+ the serif bindings in its `Theme.swift`) | `TypographyTests` in `NormaTests` — transcription + the same sweep |
+
+### 4.1 The optical-parity law
+
+**Point-size parity is NOT optical parity.** New York's x-height is ~9–10% shorter than San Francisco's at equal point size. Measured on macOS 26:
+
+- SF at 14 pt: x-height **7.3691** · NY at 14 pt: **6.713** (−9%)
+- NY at 15.5 pt: x-height **7.3337** — within **0.48%** of SF at 14 pt → *optical parity*
+- SF at 15.5 pt: x-height **8.1587** — serif at the same points reads **~10% smaller** (−10.11%)
+
+Consequences, stated as law:
+
+1. **A serif role set beside a sans role takes MORE points, not the same number.** The Mac's serif ladder is the sans ladder × 15.5/14 for exactly this reason, and `TranscriptBrandTests.testTheSerifBodyIsSizedToMatchTheSansBodyItSitsBeside` keeps the measurement executable.
+2. **Parity between the apps is parity of ROLES, not of numbers.** iOS expresses roles as Dynamic Type styles (they must keep scaling); the Mac expresses them as points (macOS has no user type ramp). The same role name in the table below is the parity contract — never copy a number across the column boundary.
+3. **iOS currently violates clause 1** and this is recorded, not smoothed away: its serif assistant prose sits at `.body` — the same style as the sans user bubble beside it — so the reply genuinely renders ~10% smaller than the user's message. See § 4.6 for the recorded ruling and its recipe.
+
+### 4.2 The serif allowlist
 
 Serif may be used **only** for:
 
-1. **The wordmark** — the iOS drawer title, the Mac sidebar header.
-2. **The pairing-gate title** — iOS only.
-3. **The pairing words display** — iOS only.
-4. **Assistant prose in the transcript** — the reading face for what the assistant says. *Live on both platforms* (iOS from SP-chat; Mac from the 2026-08-12 chat-parity pass).
+1. **The wordmark** — the iOS drawer title, the Mac sidebar header (`Theme.wordmark`, both platforms).
+2. **The pairing-gate title** — iOS only (`Theme.serifTitle`).
+3. **The pairing words display** — iOS only (`Theme.pairingWords`).
+4. **Assistant prose in the transcript** — the reading face for what the assistant says. *Live on both platforms* (iOS from SP-chat; Mac from the 2026-08-12 chat-parity pass). The question card's question text is this binding too, by derivation — Norma asking is Norma speaking.
+5. **The Mac new-chat greeting** (`Theme.greeting`) — added 2026-08-07. Not invented on a whim: the iOS gallery's typography file names "the home greeting" as a sanctioned serif moment alongside the wordmark; this entry *records* that shipped decision (its full defence lives on the token's own doc), which the list had failed to do until the 2026-08-13 typography pass.
 
 Everything else — user messages, tool output, lists, chrome, code — stays on the system sans by doing nothing.
 
 Binding #4 has one boundary worth stating outright, because the Mac's own renderer makes it easy to cross: it allowlists **the transcript reply**, not model-authored text wherever it appears. A plan card's body is written by the model and rendered by the very same view, and it stays **sans** — a card is chrome around a decision. On the Mac that is a required `role` parameter rather than a default, and `TranscriptBrandTests` scans both call sites in both directions.
 
-**Do not add a fifth binding without amending this list.** Serif beyond these four moments turns an accent into a costume.
+**Do not add a sixth binding without amending this list.** Serif beyond these moments turns an accent into a costume.
 
-### The wordmark's two size registers
+### 4.3 The role table
 
-The wordmark is a **logo lockup, not text**, so it is pinned rather than Dynamic-Type-scaled — the deliberate exception to the rule that everything else scales.
+The contract: **same role structure, same hierarchy order, same serif/sans assignment — platform-appropriate values.** iOS cells are Dynamic Type styles (weights via `.weight()`, all scaling intact); Mac cells are points. `—` means the role has no surface on that platform. Unqualified role names live on `Typography`; `Theme.`-qualified ones are the serif allowlist. The Mac column of every table in this section is **machine-parsed by `TypographyTests.testEveryRoleMatchesTheTableInBrandMd`** — cell grammar: points [`mono`] [weight], a `.style` name, `derived`, or `—`.
 
-| Platform | Register | Why |
-| --- | --- | --- |
-| iOS | `.system(size: 25, weight: .semibold, design: .serif)` | Measured against Claude's iOS drawer, where the wordmark is ~25 pt. `.title` (28 pt) rendered visibly ~15% taller side by side. |
-| Mac | `.system(size: 20, weight: .semibold, design: .serif)` | 25 pt overpowers the row block in a 272 pt sidebar; 20 pt is what the ChatGPT desktop reference measures. |
+#### Content roles (the transcript, both voices)
 
-Same binding, two platform registers. Not drift — a phone drawer and a desktop sidebar are different objects at different viewing distances.
+| Role | iOS | Mac | Face / notes |
+| --- | --- | --- | --- |
+| `assistantProse` | `.body` serif, `lineSpacing(6)` | 15.5 serif, lineSpacing 5 | NY. Binding #4. The two ladders below. |
+| `userBubble` | `.body` | 14 sans (the sans ladder's body) | SF. |
+| `codeBlock` | `.footnote` mono | 12.5 mono | SF Mono. Mac: `syntaxCodeNS`. |
+| `toolPhrase` | 14 (pinned) | 11 | Recorded divergence, § 4.6 — both sides measured, differently. |
+| `toolOutputMono` | `.footnote` mono | 11 mono | The expandable tool payload. |
+| `transcriptError` | `.footnote` | 11 | Mac: `caption`. |
+| `jumpPill` | `.caption` semibold | 11 medium | "Jump to latest". |
 
-### The assistant-prose register (binding #4)
-
-Serif prose is not the sans ladder in a different face. **New York's x-height is ~9% shorter than San Francisco's at equal point size** — measured on macOS 26: 6.713 vs 7.369 at 14 pt. Set serif at the sans body's size and Norma's reply reads visibly *smaller* than the user's own message directly above it.
-
-So the Mac's prose register is the sans ladder scaled by **15.5/14**, the factor that lands New York's x-height on 7.334 — within 0.5% of the sans body it replaces:
+The two Mac transcript ladders (`transcriptProseMetrics`, pinned by `TranscriptBrandTests`):
 
 | | Sans (user message, plan card) | Serif (assistant reply) |
 | --- | --- | --- |
@@ -182,9 +205,180 @@ So the Mac's prose register is the sans ladder scaled by **15.5/14**, the factor
 
 Two notes. **Inline code lands on 13.5 pt in both**, by two different drops — SF Mono has to sit lower against New York than against SF to read as the same size. And the serif rhythm is 5, not iOS's: iOS's 1.59 pitch/size ratio is tuned for a phone's line width, and this is a desktop window.
 
-iOS keeps its own register (`.body`, `lineSpacing(6)`) — that is Dynamic Type doing its job on a phone, not a second opinion about the same number.
+iOS's serif ladder is semantic: body prose `.body` serif; H1–H2 `.title3` semibold serif; H3+ `.headline` serif; no block-quote block in its renderer (recorded, § 4.6). Its inline code comes out of `AttributedString`'s markdown at the surrounding run's size — no separate role to name.
 
-**Bold and italic runs inside serif prose stay New York.** `NSFontManager.convert(_:toHaveTrait:)` is free to fall back to another family when a trait is unavailable; measured, it does not here (`.NewYork-Regular` → `.NewYork-Semibold` / `.NewYork-RegularItalic`). Pinned, because the failure — every emphasis rendering in SF mid-sentence — is the kind nobody reports and everybody feels.
+**Bold and italic runs inside serif prose stay New York.** `NSFontManager.convert(_:toHaveTrait:)` is free to fall back to another family when a trait is unavailable; measured, it does not here (`.NewYork-Regular` → `.NewYork-Semibold` / `.NewYork-RegularItalic`). Pinned by `TranscriptBrandTests.testSerifProseSurvivesBoldAndItalicConversion`, because the failure — every emphasis rendering in SF mid-sentence — is the kind nobody reports and everybody feels. The conversion itself lives in `Typography.converted(_:toHaveTrait:)` so the sweep can ban `NSFontManager` everywhere else.
+
+#### The question card (one ladder, two registers)
+
+The question is Norma asking, so its text is **binding #4 by derivation** on both platforms: on iOS by construction (`questionText ≡ assistantProse`), on the Mac by code (`QuestionCardType.question` *reads* `transcriptProseMetrics(.assistant).bodySize` — pinned as a derivation, never a copied number, by `InteractionCardTests`). The Mac steps are the iOS ratios against `.body` = 17, rounded to half points.
+
+| Role | iOS | Mac | Notes |
+| --- | --- | --- | --- |
+| `questionText` | `.body` serif, `lineSpacing(6)` | derived | ≡ `assistantProse` body, both platforms. |
+| `questionOption` | `.callout` | 14.5 | The composer box's option register — the one the Mac ported. |
+| `questionOptionInline` | `.subheadline` | — | iOS's frozen transcript card uses a step lower; recorded, § 4.6. |
+| `questionSecondary` | `.footnote` | 12 | Descriptions, notes, Other. |
+| `questionPill` | `.caption` medium | 11 | The composer's header pills. |
+| `questionCardChip` | `.caption2` semibold | — | iOS's frozen-card category chip; recorded, § 4.6. |
+| `questionPillCheck` | 9 semibold | 9 semibold | The answered-pill checkmark — the one glyph both platforms pin at 9. |
+| `questionCheckmark` | `.body` medium | — | iOS's reserved-column option check. |
+| `questionAction` | `.headline` | — | Submit / Close capsules (Mac's action row is chrome-drawn, `control`). |
+| `questionActionGlyph` | 17 medium | — | The clear (xmark) circle. |
+| `questionNoteGlyph` | 18 | — | The note toggle. |
+| `questionNoteField` | `.footnote` | — | The note input. |
+| `questionPreviewMono` | — | `.body` mono | The Mac card's read-only preview pane. |
+
+#### The composer
+
+| Role | iOS | Mac | Notes |
+| --- | --- | --- | --- |
+| `composerField` | `.body` | 14 | The input itself. Mac: `ComposerTextView` via `sansNS(ofSize:)`, fed `bodySize` — except the new-chat page, whose composer is the page's subject and takes `headingSize` (16; `newChatComposerFontSize` derives from it). |
+| `composerPlusGlyph` | 17 light | 17 medium | The attach circle — the one composer glyph size the platforms share. Mac: `composerAttachGlyph`. |
+| `composerModelPill` | 14 (pinned) | 13 | iOS Claude-measured on device; Mac `control`. Recorded, § 4.6. |
+| `composerSend` | 17 bold | 15 medium | Recorded divergence, § 4.6. |
+| `composerStop` | 15 semibold | — | |
+| `composerVoice` | 17 | — | The mock voice orb. |
+
+#### iOS chrome (no Mac counterpart — the drawer, session lists, pickers, approvals, pairing)
+
+| Role | iOS | Mac | Notes |
+| --- | --- | --- | --- |
+| `sidebarSectionLabel` | `.subheadline` | — | "Recents" (sentence case, measured ~15 pt vs Claude). |
+| `sidebarModeRow` | `.body` | — | Mode glyph + title. |
+| `sidebarRecentRow` | `.body` | — | Recent-session rows. |
+| `sidebarSoonBadge` | `.caption2` medium | — | The "Soon" capsule; also the session list's offline badge. |
+| `sidebarMeta` | `.footnote` | — | Retry / empty-state lines. |
+| `newChatPill` | `.callout` medium | — | |
+| `sessionRowTitle` | `.body` | — | |
+| `sessionRowSubtitle` | `.subheadline` | — | |
+| `sessionRowChevron` | `.footnote` semibold | — | |
+| `sessionStatusTitle` | `.subheadline` medium | — | Connection banner title. |
+| `sessionStatusCaption` | `.caption2` | — | "Showing cached". |
+| `newSessionGlyph` | 14 | — | The plus-bubble in the 32 pt inverse circle. |
+| `bannerText` | `.caption` | — | Session-level notice rows. |
+| `bannerDismiss` | `.caption2` bold | — | |
+| `actionIcon` | 16 | — | Message action buttons (copy/retry). |
+| `footerAsterisk` | 22 semibold | — | The end-of-conversation mark. |
+| `footerDisclaimer` | `.footnote` | — | |
+| `approvalTitle` | `.subheadline` semibold | — | |
+| `approvalMeta` | `.footnote` | — | Summary + verdict rows (weights at call sites). |
+| `dispatchBody` | `.callout` | — | |
+| `settingsFootnote` | `.footnote` | — | |
+| `pickerSheetTitle` | `.title3` semibold | — | |
+| `pickerHeaderGlyph` | 17 medium | — | |
+| `pickerRowIcon` | `.title3` | — | |
+| `pickerRowTitle` | `.body` | — | Selected weights at call sites. |
+| `pickerBadge` | `.footnote` semibold | — | |
+| `pickerSubtitle` | `.subheadline` | — | |
+| `pickerCaption` | `.caption2` medium | — | |
+| `Theme.serifTitle` | `.title2` serif semibold | — | Binding #2, the pairing gate. |
+| `Theme.pairingWords` | `.largeTitle` serif semibold | — | Binding #3 — named by this pass; was inline. |
+| `pairedTitle` | `.title2` semibold | — | "Paired with …" (sans — chrome, not a binding). |
+| `pairingAction` | `.headline` | — | Pair / Done / Submit capsules. |
+| `pairingBody` | `.body` | — | |
+| `pairingSubtitle` | `.subheadline` medium | — | |
+| `pairingCaption` | `.footnote` | — | |
+| `pairedGlyph` | 64 | — | The drawn-on checkmark. |
+| `gateGlyph` | 56 | — | The not-paired phone glyph. |
+| `scannerTitle` | `.title2` bold | — | |
+| `scannerHeadline` | `.headline` | — | |
+| `scannerSubtitle` | `.subheadline` | — | |
+| `scannerInstruction` | `.footnote` | — | |
+| `scannerGlyphLarge` | 48 | — | |
+| `scannerGlyph` | 40 | — | |
+
+The pinned glyph sizes above (14/16/17/18/22/40/48/56/64 and the two 13/11 tool marks) are **decoration geometry, not reading text** — the same exception class as the wordmark. Everything a user *reads* on iOS stays on the ramp.
+
+#### Mac chrome (no iOS counterpart — the window shell, dashboard, orb)
+
+The scale (§ 4.5) plus its mono variants and the named one-offs:
+
+| Role | iOS | Mac | Notes |
+| --- | --- | --- | --- |
+| `micro` | — | 8 | Path-crumb chevrons. |
+| `badge` | — | 9 | Count badges, pill checkmarks, tool-row disclosure chevrons. |
+| `tiny` | — | 10 | Timestamps, micro-labels. |
+| `caption` | — | 11 | The small-meta workhorse (91 sites at adoption). |
+| `label` | — | 12 | The standard label (107 sites at adoption). |
+| `control` | — | 13 | Sidebar/palette rows, composer chrome. |
+| `body` | — | 14 | Input + reading chrome. |
+| `bodyLarge` | — | 15 | Send glyphs, palette input. |
+| `heading` | — | 16 | Tile values, the new-chat composer. |
+| `captionMono` | — | 11 mono | Paths, ids, hashes. |
+| `labelMono` | — | 12 mono | Field values, URLs, config text. |
+| `controlMono` | — | 13 mono | Provider model strings. |
+| `emptyStateGlyph` | — | 34 light | Every landing surface's glyph. |
+| `pairingCode` | — | 22 mono semibold | The six-digit confirm code. |
+| `pairingGlyphLarge` | — | 36 | |
+| `pairingGlyphMedium` | — | 30 | |
+| `morphTrafficGlyph` | — | 8.5 bold | The morph window's hand-drawn traffic lights — verbatim orb geometry, § 4.5. |
+| `paneTitle` | — | `.headline` | Dashboard pane titles. |
+| `emptyStateTitle` | — | `.title2` | |
+| `emptyStateSubtitle` | — | `.callout` | Also the dispatch explainer. |
+| `landingBody` | — | `.body` | |
+| `landingCaption` | — | `.caption` | |
+| `chipLabel` | — | `.caption2` | Activity chips, sidebar count chips. |
+| `fieldCodeLabelNS` | — | 11 medium | The orb field's code-block language label. |
+| `fieldCodeBlockNS` | — | 13 mono | The orb field's code-block body. |
+| `shortcutKeyNS` | — | 11 | Shortcut recorder key-caps. |
+| `panelTabLabelNS` | — | 12 | The web panel's native tab label. |
+
+Block maths (`mathNS`) walks a real maths-face candidate list (STIX Two first) and **defaults to the assistant-prose body size by derivation** (`mathDefaultNS`) — display maths sits inside Norma's reply.
+
+#### The serif registers (both platforms, `Theme`)
+
+| Role | iOS | Mac | Notes |
+| --- | --- | --- | --- |
+| `Theme.wordmark` | 25 semibold serif | 20 semibold serif | Binding #1 — § 4.4 records why the numbers differ. |
+| `Theme.greeting` | — | 38 serif | Binding #5, the new-chat page. |
+| `Theme.assistantProse` | (via `.fontDesign(.serif)`) | derived | Binding #4's face — an NSFont face *function*; every size it renders comes from the ladders above, and `TranscriptBrandTests` pins the face itself. |
+
+### 4.4 The wordmark's two size registers
+
+The wordmark is a **logo lockup, not text**, so it is pinned rather than Dynamic-Type-scaled — the deliberate exception to the rule that everything else scales.
+
+| Platform | Register | Why |
+| --- | --- | --- |
+| iOS | `.system(size: 25, weight: .semibold, design: .serif)` | Measured against Claude's iOS drawer, where the wordmark is ~25 pt. `.title` (28 pt) rendered visibly ~15% taller side by side. |
+| Mac | `.system(size: 20, weight: .semibold, design: .serif)` | 25 pt overpowers the row block in a 272 pt sidebar; 20 pt is what the ChatGPT desktop reference measures. |
+
+Same binding, two platform registers. Not drift — a phone drawer and a desktop sidebar are different objects at different viewing distances.
+
+### 4.5 The Mac chrome scale
+
+macOS has no user Dynamic Type, so Mac chrome is honest fixed points — which is exactly why they must all live on one named ladder. The nine steps (8 / 9 / 10 / 11 / 12 / 13 / 14 / 15 / 16) are the app's own measured status quo from the 2026-08-13 inventory (12 pt ×107, 11 pt ×91, 13 pt ×35, 14 and 10 pt ×14 each, 9 pt ×9 — a clean ladder that was always there, just unnamed). Tokenising it changed **no rendered output**; weights stay call-site arguments (`Typography.caption(.semibold)`) because emphasis is per-surface, size is not.
+
+**The orb is tokenised verbatim, never tuned from here.** The orb field renders on glass under the morph's blend law and `NormaFieldView`'s geometry is measured; its chrome happens to sit on the same scale (10–14), and `morphTrafficGlyph` (8.5 bold in a 14 pt circle) is one-off geometry. Any value change on those surfaces is an orb change and takes the orb's own gate.
+
+### 4.6 Recorded divergences, and the open iOS ruling
+
+Tokenisation is a refactor: rendered output changes **only** where a row here records a reconciliation with grounds. These are the places the two apps express the same role differently, kept as-is and recorded:
+
+| Role | iOS | Mac | Status |
+| --- | --- | --- | --- |
+| Assistant serif prose vs sans beside it | both at `.body` → serif reads ~10% smaller | serif ladder ×15.5/14 → optical parity | **The open ruling.** iOS violates § 4.1; fix without breaking Dynamic Type = the whole serif ladder via `@ScaledMetric(relativeTo: .body)` (body ≈18.9→19; headings scaled to keep descending, else H3+ at `.headline`(17) falls *under* a 19 pt body). A phone-visual change on the primary reading surface → needs the on-device gate; recorded with the full recipe in the 2026-08-13 typography report. |
+| `toolPhrase` | 14 pinned (Claude-measured on device, r3) | 11 (`caption`, the chrome scale) | Both deliberate measurements; a desktop row is quieter. Kept. |
+| `composerSend` | 17 bold | 15 medium (`bodyLarge`) | Kept — different affordance sizes on the two composers. |
+| `composerModelPill` | 14 pinned | 13 (`control`) | Kept. |
+| Question options | box `.callout`, frozen card `.subheadline` | 14.5 (callout ratio) | iOS's two registers for one role predate the Mac port; the Mac took the box's. Kept, both named. |
+| Question pills/chips | composer `.caption` medium, card chip `.caption2` semibold | 11 | Same story. Kept, both named. |
+| Block quotes | no block in the iOS renderer | 13.5 / 15 by role | iOS parser gap, not a type decision. Recorded. |
+| iOS fixed-size meta (`toolPhrase` 14, `composerModelPill` 14, glyph pins) | pinned, does not scale with Dynamic Type | n/a | Pre-existing, deliberate per their measurement comments; now *named* so the exception is visible. |
+
+### 4.7 How to add a role
+
+1. Name it in the right table above (iOS style, Mac points, face, weight if it matters). The name is the Swift symbol name.
+2. Add the token to the platform file(s): `Typography` for chrome, `Theme` only for a new serif binding (which also means amending § 4.2 — that is the point of the list).
+3. Run the suite. `TypographyTests` fails until doc and code agree — the Mac side parses this file, and both platforms pin the construction count inside the token files, so an unrecorded token cannot ride along silently.
+4. Route call sites through the role. Never a literal at a call site: the sweep fails on any font constructed outside the token files.
+
+### 4.8 Enforcement
+
+- **Mac** — `TypographyTests` (in `NormaAppTests`): `testEveryRoleMatchesTheTableInBrandMd` parses § 4.3/§ 4.5's Mac cells from this file and asserts them against the live tokens (both directions, with a minimum-row floor so a format change cannot green it vacuously); `testNoFontIsConstructedOutsideTheTokenFiles` sweeps `Sources/` recursively; `testTokenFileConstructionCountIsPinned` pins the number of constructions inside the token files. Plus the pre-existing `TranscriptBrandTests` ladders/x-height/serif pins and `InteractionCardTests`' derivation pins.
+- **iOS** — `TypographyTests` (in `NormaTests`): the doc table hand-transcribed (the § 1 palette pattern — the doc lives in this repo, so the phone asserts the transcription; updating the table means updating that test in the same change), the same recursive sweep, the same construction-count pin.
+- **What the sweep cannot see** (each checked 2026-08-13): implicit `.init(` in argument position to a `Font`-typed parameter; `AttributeContainer.font = .body`-style implicit assignment; `.environment(\.font, …)` (none in either app); `.lineSpacing` literals outside the tokenised transcript surfaces; `.imageScale` (relative, no number; unused); `.minimumScaleFactor` (unused); Interface Builder files (neither repo has any); and omissions — a control that never sets a font renders the platform default. Multi-line `.font(` arguments are *forced* single-line rather than parsed.
+- Trailing comments are not stripped by the sweep — it over-flags rather than under-flags, by design. Write the reason on its own line.
 
 ---
 

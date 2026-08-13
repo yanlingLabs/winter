@@ -527,11 +527,19 @@ final class TranscriptBrandTests: XCTestCase {
     }
 
     private func chatContentSources() throws -> [URL] {
-        try FileManager.default
-            .contentsOfDirectory(at: sourceRoot().appendingPathComponent("Sources/ChatContent"),
-                                 includingPropertiesForKeys: nil)
-            .filter { $0.pathExtension == "swift" }
-            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        // Recursive since the 2026-08-13 typography pass: `contentsOfDirectory` was a latent
+        // hole — a file added under a ChatContent/ SUBDIRECTORY would have been invisible to
+        // every scan in this suite (the directory has no subdirectories today, so this changes
+        // nothing yet; it stops being wrong later).
+        var files: [URL] = []
+        let walker = FileManager.default.enumerator(
+            at: sourceRoot().appendingPathComponent("Sources/ChatContent"),
+            includingPropertiesForKeys: nil)
+        while let url = walker?.nextObject() as? URL {
+            guard url.pathExtension == "swift" else { continue }
+            files.append(url)
+        }
+        return files.sorted { $0.lastPathComponent < $1.lastPathComponent }
     }
 
     /// How many times a token appears across EVERY app source file, comments stripped.

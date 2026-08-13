@@ -456,7 +456,7 @@ struct NormaComposerCard: View {
     /// written once, and this shell still knows nothing about modes.
     private func controlRow(accessory: AnyView?, modelRow: ComposerModelRow) -> some View {
         HStack(spacing: 8) {
-            NewChatControlButton(systemImage: "plus", label: "Attach (not wired yet)", font: Typography.composerAttachGlyph)
+            NewChatControlButton(systemImage: "plus", label: "Attach (not wired yet)", font: Typography.composerPlusGlyph)
             accessory
             Spacer(minLength: 12)
             ComposerModelChip(row: modelRow,
