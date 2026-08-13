@@ -178,6 +178,72 @@ final class InteractionCardTests: XCTestCase {
         XCTAssertEqual(resolvedAnswer(for: portQuestion, answer: "   "), .none)
     }
 
+    // MARK: - The composer morph (user call, 2026-08-12)
+
+    private func q(_ text: String) -> SessionEvent.Question {
+        SessionEvent.Question(question: text, header: nil,
+                              options: [SessionEvent.QuestionOption(label: "yes", description: nil)],
+                              multiSelect: false)
+    }
+
+    /// OLDEST first, so answering unblocks the earliest waiting turn — and questions ONLY. An
+    /// approval sitting ahead of a question in the queue must not shadow it: approvals stay in the
+    /// transcript, so if this scanned only the head of the list the composer would never morph
+    /// while one was open.
+    func testTheComposerTakesTheOldestPendingQUESTIONAndIgnoresOtherAsks() {
+        let picked = composerMorphQuestion([
+            .approval(callId: "ap1", toolName: "bash", summary: "rm -rf x"),
+            .plan(callId: "pl1", plan: "# Plan"),
+            .question(callId: "q1", questions: [q("first?")], childSessionId: "child-7"),
+            .question(callId: "q2", questions: [q("second?")]),
+        ])
+        XCTAssertEqual(picked?.callId, "q1", "the OLDEST question, not the newest and not the head of the queue")
+        XCTAssertEqual(picked?.questions.first?.question, "first?")
+        XCTAssertEqual(picked?.childSessionId, "child-7", "a dispatch child's ask must carry its routing")
+
+        XCTAssertNil(composerMorphQuestion([
+            .approval(callId: "ap1", toolName: "bash", summary: "rm -rf x"),
+            .plan(callId: "pl1", plan: "# Plan"),
+        ]), "approvals and plans belong in the transcript — they must not take the composer's slot")
+        XCTAssertNil(composerMorphQuestion([]))
+    }
+
+    /// A question whose payload has not landed yet cannot render a form, so the composer stays a
+    /// composer rather than morphing into an empty box the user cannot answer or dismiss.
+    func testAQuestionWithNoQuestionsYetDoesNotTakeTheComposer() {
+        XCTAssertNil(composerMorphQuestion([.question(callId: "q1", questions: [])]))
+        XCTAssertEqual(
+            composerMorphQuestion([
+                .question(callId: "q1", questions: []),
+                .question(callId: "q2", questions: [q("real?")]),
+            ])?.callId,
+            "q2", "skip the unhealed one and take the next real question")
+    }
+
+    /// The transcript's half of the same decision. These two functions must agree: if the composer
+    /// shows it and the transcript also draws it, the question renders twice; if neither does, an
+    /// ask disappears and the turn hangs with nothing on screen to answer.
+    func testOnlyAPendingQuestionStepsOutOfTheTranscript() {
+        let question = InteractionRecord.Ask.question(questions: [q("which?")])
+        XCTAssertTrue(questionMorphsTheComposer(InteractionRecord(callId: "q1", ask: question)),
+                      "pending question → the composer has it")
+        XCTAssertFalse(
+            questionMorphsTheComposer(InteractionRecord(
+                callId: "q1", ask: question,
+                outcome: .question(answers: ["which?": "this"], notes: [:], by: "orb"))),
+            "ANSWERED → back in the transcript, frozen: this is what keeps Task 3's scrollback record")
+        XCTAssertFalse(
+            questionMorphsTheComposer(InteractionRecord(callId: "q1", ask: question, outcome: .ended)),
+            "ended without an answer still belongs in the transcript — it is a record of what was asked")
+        for ask: InteractionRecord.Ask in [
+            .approval(toolName: "bash", summary: "rm -rf x"),
+            .plan(plan: "# Plan"),
+        ] {
+            XCTAssertFalse(questionMorphsTheComposer(InteractionRecord(callId: "a1", ask: ask)),
+                           "\(ask) draws in the transcript while pending — only questions morph")
+        }
+    }
+
     // MARK: - A frozen card cannot be interacted with
 
     /// The pending/frozen branch is `outcome == nil` and nothing else, so a card is interactive

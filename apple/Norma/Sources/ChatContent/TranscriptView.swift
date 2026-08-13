@@ -181,7 +181,16 @@ private struct TranscriptExchangeRow: View {
                     // card simply inherits it. Named because a live gate reads a round-3 card above
                     // round-1 prose as misplacement otherwise.
                     if let record = item.interactionRecord {
-                        TranscriptInteractionCard(record: record, wiring: cardWiring)
+                        // A PENDING question renders nowhere here — the composer has become it
+                        // (`composerMorphQuestion`, user call 2026-08-12, iOS's SP-ask-morph). It
+                        // reappears in this exact slot the moment it is answered, frozen with what
+                        // was chosen, so the scrollback record Task 3 exists to keep is unaffected:
+                        // the only thing that changed is where an UNANSWERED question is shown.
+                        //
+                        // Approvals and plans are untouched and still draw here while pending.
+                        if !questionMorphsTheComposer(record) {
+                            TranscriptInteractionCard(record: record, wiring: cardWiring)
+                        }
                     } else {
                         TranscriptActivityRow(item: item)
                     }

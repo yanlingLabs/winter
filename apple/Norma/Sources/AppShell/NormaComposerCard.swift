@@ -2,6 +2,9 @@ import SwiftUI
 // mac-chat-parity T7: `SyncConfigSnapshot` — the daemon's model catalogue, which the model/effort
 // chip's two lists are built from.
 import NormaKit
+// The composer morph (2026-08-12): `SessionEvent.Question` — what `ComposerQuestionBox` renders
+// when the composer's slot is holding an ask instead of a draft.
+import NormaProtocol
 
 // MARK: - The shared composer shell
 
@@ -494,5 +497,49 @@ struct NormaComposerCard: View {
                                         ? "Send — type a message first" : sendBlockedReason!)
             }
         }
+    }
+}
+
+// MARK: - The composer's other face (user call, 2026-08-12 — iOS's SP-ask-morph)
+
+/// The pending question wearing the composer's own face — what the composer becomes while an ask is
+/// waiting (iOS `QuestionComposerView`).
+///
+/// **The same fill as the composer** (user call): `Theme.composerSurface`, its rim, its shadow. The
+/// morph reads as one surface changing shape only if the surface does not change colour on the way.
+/// The RADIUS does grow, 18 → 24, which is iOS's own 22 → 28 relationship at this shell's scale: a
+/// taller box wants a rounder corner, and it is the one thing about the box that says "this is not
+/// the composer" while it is up.
+struct ComposerQuestionBox: View {
+    let callId: String
+    let questions: [SessionEvent.Question]
+    let childSessionId: String?
+    let isInFlight: Bool
+    let onQuestion: (String, [String: String], [String: String], String?) -> Void
+    @Binding var draft: PendingCardDraft
+
+    /// iOS's 28-on-a-22-composer, at this shell's 18.
+    static let cornerRadius: CGFloat = 24
+
+    var body: some View {
+        PendingQuestionBody(
+            callId: callId,
+            questions: questions,
+            childSessionId: childSessionId,
+            isInFlight: isInFlight,
+            onQuestion: onQuestion,
+            draft: $draft
+        )
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
+                .fill(Theme.composerSurface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
+                .strokeBorder(Theme.hairline, lineWidth: shellSidebarHairlineWidth)
+        )
+        .shadow(color: .black.opacity(0.05), radius: 16, y: 4)
     }
 }

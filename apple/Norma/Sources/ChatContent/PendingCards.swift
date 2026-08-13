@@ -979,6 +979,42 @@ private struct PendingApprovalBody: View {
 /// `WorkingDirsMenu.swift`'s extension; here it is `PendingCardsTests`, which constructs this view
 /// directly to prove — via `Mirror` — that it holds no view-local `@State` for the answer any
 /// more (`testPendingQuestionBodyHoldsNoViewLocalState`).
+// MARK: - The composer morph (user call, 2026-08-12 — iOS's SP-ask-morph)
+
+/// PURE: the ask the composer becomes — the OLDEST pending question, so answering unblocks the
+/// earliest waiting turn (iOS's `QuestionComposerView.firstPending` rule, same reason).
+///
+/// Approvals and plans are deliberately NOT included. Only the question has a form big enough to
+/// need the composer's room, and only the question is a thing the user *writes* an answer to; an
+/// approval is two buttons and belongs where it was asked, in the transcript.
+///
+/// Returns the payload rather than the `PendingInteraction` so the caller cannot accidentally hand
+/// the box an approval — the type makes the wrong call site unwritable.
+func composerMorphQuestion(
+    _ pending: [PendingInteraction]
+) -> (callId: String, questions: [SessionEvent.Question], childSessionId: String?)? {
+    for interaction in pending {
+        if case .question(let callId, let questions, let childSessionId) = interaction {
+            // A question whose payload has not landed yet cannot render a form. Skipping it rather
+            // than morphing into an empty box means the composer stays usable until it arrives.
+            if !questions.isEmpty { return (callId, questions, childSessionId) }
+        }
+    }
+    return nil
+}
+
+/// Whether the transcript should stay out of this record's way because the composer is showing it.
+///
+/// The other half of `composerMorphQuestion`, and the two must agree or the question renders twice.
+/// Deliberately keyed on the SHAPE of the record (a pending question) rather than on identity with
+/// whatever the composer picked: a second pending question — rarer, but reachable via a dispatch
+/// child — must not appear inline just because the composer is busy with the first. It waits its
+/// turn in the same slot, exactly as iOS's oldest-first rule intends.
+func questionMorphsTheComposer(_ record: InteractionRecord) -> Bool {
+    guard case .question = record.ask else { return false }
+    return interactionIsPending(record)
+}
+
 struct PendingQuestionBody: View {
     let callId: String
     let questions: [SessionEvent.Question]

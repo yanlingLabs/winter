@@ -195,8 +195,35 @@ struct WindowContentView<Accessory: View>: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
 
-                    if let card = composerCard {
+                    // While a question is waiting, the composer's SLOT is the question box — the
+                    // composer does not appear below it, beside it, or greyed out; it becomes it
+                    // (user call, 2026-08-12; iOS `CodeSessionView`'s SP-ask-morph). Answering
+                    // restores the composer and the question reappears in the transcript, frozen.
+                    //
+                    // `.blurReplace` in both directions is iOS's own transition here
+                    // (`CodeSessionView.swift:142`/`:152`) — and it is a BLUR CROSS-FADE, not a
+                    // geometric morph: nothing interpolates the shape. What sells it is staging,
+                    // not animation — one slot, one surface colour, a radius that grows. Checked in
+                    // the iOS source rather than assumed; the only true glass-morph API in that app
+                    // is in `SessionListView`, not here.
+                    //
+                    // `.id(callId)` gives each question block its own view identity, so a second
+                    // ask arriving as the first is answered gets a fresh box (and fresh draft
+                    // state) instead of inheriting the outgoing one's.
+                    if let pending = composerMorphQuestion(adapter.pendingInteractions) {
+                        ComposerQuestionBox(
+                            callId: pending.callId,
+                            questions: pending.questions,
+                            childSessionId: pending.childSessionId,
+                            isInFlight: adapter.interactionInFlight.contains(pending.callId),
+                            onQuestion: adapter.onQuestionRespond,
+                            draft: adapter.pendingCardDraftBinding(for: pending.callId)
+                        )
+                        .id(pending.callId)
+                        .transition(.blurReplace)
+                    } else if let card = composerCard {
                         card.frame(maxWidth: .infinity)
+                            .transition(.blurReplace)
                     } else {
                         ComposerTextView(
                             text: adapter.draftBinding,
@@ -204,12 +231,19 @@ struct WindowContentView<Accessory: View>: View {
                             usesAdaptiveColors: true
                         )
                         .frame(height: 88)
+                        .transition(.blurReplace)
                     }
 
                     if !adapter.liveSubagents.isEmpty && !rightVisible {
                         subagentSection(adapter.liveSubagents)
                     }
                 }
+                // The driver. A `.transition` is inert without one — the branches above would swap
+                // instantly and the blur would never render. Keyed on the ASK'S IDENTITY rather than
+                // on a Bool, so question-to-question (a second ask arriving as the first resolves)
+                // animates too instead of snapping between two states that are both "a box".
+                .animation(.smooth(duration: 0.3),
+                           value: composerMorphQuestion(adapter.pendingInteractions)?.callId)
             }
         }
         .padding(.horizontal, 16)
