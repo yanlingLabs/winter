@@ -244,6 +244,52 @@ final class InteractionCardTests: XCTestCase {
         }
     }
 
+    // MARK: - The answered-question deck (iOS SP-ask-stack)
+
+    /// Modular in BOTH directions and with no ends — cycling past the last card returns to the
+    /// first, and stepping back from the first lands on the last. The pager drives itself through
+    /// this same function, so a negative index has to be as safe as an oversized one.
+    func testTheDeckLoopsInBothDirectionsAndHasNoEnds() {
+        XCTAssertEqual(deckDepth(index: 0, front: 0, count: 3), 0)
+        XCTAssertEqual(deckDepth(index: 1, front: 0, count: 3), 1)
+        XCTAssertEqual(deckDepth(index: 0, front: 1, count: 3), 2, "the front card's predecessor is BEHIND it, not ahead")
+        XCTAssertEqual(deckDepth(index: -1, front: 0, count: 3), 2, "stepping back from the first lands on the last")
+        XCTAssertEqual(deckDepth(index: 3, front: 0, count: 3), 0, "past the last returns to the first")
+        XCTAssertEqual(deckDepth(index: 0, front: 0, count: 0), 0, "no cards, no crash")
+    }
+
+    /// The fan alternates sides so the stack spreads rather than leaning as one block, and the
+    /// front card never leans at all — a tilted front card would read as a card being dragged.
+    func testTheDeckFansAlternatelyAndTheFrontCardIsUpright() {
+        XCTAssertEqual(deckLeanDegrees(depth: 0), 0, "the front card is upright")
+        XCTAssertEqual(deckLeanDegrees(depth: 1), 2.2, accuracy: 0.001)
+        XCTAssertEqual(deckLeanDegrees(depth: 2), -4.4, accuracy: 0.001, "alternating sides, not a growing lean")
+        XCTAssertEqual(deckLeanDegrees(depth: 3), 6.6, accuracy: 0.001)
+    }
+
+    /// A deck is drawn for an ANSWERED block of MORE THAN ONE question, and for nothing else.
+    func testOnlyAnAnsweredMultiQuestionBlockBecomesADeck() {
+        let two = [q("first?"), q("second?")]
+        let answered = InteractionRecord.Outcome.question(answers: ["first?": "yes"], notes: [:], by: "orb")
+
+        XCTAssertEqual(
+            questionDeckCards(InteractionRecord(callId: "q1", ask: .question(questions: two), outcome: answered))?.count,
+            2, "answered, two questions → a deck")
+        XCTAssertNil(
+            questionDeckCards(InteractionRecord(callId: "q1", ask: .question(questions: [q("only?")]), outcome: answered)),
+            "one question is an ordinary card, not a deck of one")
+        XCTAssertNil(
+            questionDeckCards(InteractionRecord(callId: "q1", ask: .question(questions: two))),
+            "pending never decks — the composer is holding it")
+        XCTAssertNil(
+            questionDeckCards(InteractionRecord(callId: "q1", ask: .question(questions: two), outcome: .ended)),
+            "ended unanswered stays one card: every card in that deck would read '—'")
+        XCTAssertNil(
+            questionDeckCards(InteractionRecord(callId: "a1", ask: .approval(toolName: "bash", summary: "x"),
+                                                outcome: .approval(approved: true, by: "orb"))),
+            "approvals never deck")
+    }
+
     // MARK: - A frozen card cannot be interacted with
 
     /// The pending/frozen branch is `outcome == nil` and nothing else, so a card is interactive

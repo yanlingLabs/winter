@@ -475,6 +475,18 @@ struct TranscriptInteractionCard: View {
     private var isInFlight: Bool { wiring.inFlight.contains(record.callId) }
 
     var body: some View {
+        if let deckQuestions = questionDeckCards(record), let outcome = record.outcome {
+            // Each card carries its OWN chrome here, so the outer `.modifier` below must not run —
+            // a deck inside one card would be a stack of faces on a face.
+            ResolvedQuestionDeck(questions: deckQuestions, outcome: outcome)
+                .frame(maxWidth: interactionCardMaxWidth, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            singleCard
+        }
+    }
+
+    private var singleCard: some View {
         VStack(alignment: .leading, spacing: 10) {
             // Branch review FIX 2: a simplified (header-less) question card suppresses this whole
             // row — the question already renders exactly once in the body (QuestionBlock's
@@ -635,6 +647,119 @@ struct ResolvedApprovalBody: View {
 /// panel-shell T10b precedent: internal rather than `private` so `InteractionCardTests` can
 /// construct it and prove — via `Mirror` — that it holds no respond closure, the same reason
 /// `PendingQuestionBody`/`PendingPlanBody` were widened.
+/// PURE: the answered questions a DECK is drawn for, or `nil` for an ordinary single card — iOS's
+/// SP-ask-stack rule: resolved, and more than one.
+///
+/// The three exclusions each have a reason worth keeping:
+///   - **one question** is an ordinary card; a deck of one is a card wearing a control nobody needs;
+///   - **still pending** never reaches here at all now — the composer is holding it
+///     (`questionMorphsTheComposer`), so a pending deck is unreachable rather than merely unwanted;
+///   - **`.ended`** (asked, never answered) stays a single card: every card in a deck would read
+///     "—", and fanning three of those out says nothing three times.
+func questionDeckCards(_ record: InteractionRecord) -> [SessionEvent.Question]? {
+    guard case .question(let questions) = record.ask, questions.count > 1,
+          let outcome = record.outcome, case .question = outcome else { return nil }
+    return questions
+}
+
+/// PURE: how far behind the front a card sits, looping — iOS's `resolvedStack` arithmetic verbatim.
+/// Modular so every card is always 0…n−1 steps back and the deck has no ends; cycling past the last
+/// card returns to the first rather than stopping.
+func deckDepth(index: Int, front: Int, count: Int) -> Int {
+    guard count > 0 else { return 0 }
+    return ((index - front) % count + count) % count
+}
+
+/// PURE: the lean on a card `depth` steps back — alternating sides so the stack fans rather than
+/// leaning as one block. iOS's ±2.2° per step.
+func deckLeanDegrees(depth: Int) -> Double {
+    depth == 0 ? 0 : Double(depth) * (depth.isMultiple(of: 2) ? -2.2 : 2.2)
+}
+
+/// A resolved MULTI-question block, as a Photos-style deck — one card per question (iOS's
+/// SP-ask-stack). The geometry is iOS's: modular depth, 2% scale per step back, a 6pt offset,
+/// alternating ±2.2° lean, and at most three peeking behind the front.
+///
+/// **The CYCLING is not iOS's, and could not be.** iOS advances with a `DragGesture`, which on
+/// macOS only sees a click-drag — a two-finger trackpad swipe arrives as a scroll event, so a
+/// straight port would have shipped a deck most users could not turn, and one that fought the
+/// transcript's own scrolling if it could. Instead:
+///   - **click a peeked card** to bring it forward — the affordance the stack already suggests;
+///   - **a pager** (‹ 2 of 3 ›), because a Mac has no swipe hint and a deck with no visible control
+///     is a deck nobody discovers.
+/// The FRONT card is deliberately not click-to-advance: its answer text is selectable, and stealing
+/// that click would trade a working affordance for a redundant one.
+struct ResolvedQuestionDeck: View {
+    let questions: [SessionEvent.Question]
+    let outcome: InteractionRecord.Outcome
+
+    @State private var front = 0
+
+    private var count: Int { questions.count }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ZStack(alignment: .top) {
+                ForEach(questions.indices, id: \.self) { index in
+                    let depth = deckDepth(index: index, front: front, count: count)
+                    card(index)
+                        .zIndex(Double(count - depth))
+                        .scaleEffect(depth == 0 ? 1 : 1 - CGFloat(depth) * 0.02)
+                        .offset(x: CGFloat(depth) * 6)
+                        .rotationEffect(.degrees(deckLeanDegrees(depth: depth)))
+                        .opacity(depth > 3 ? 0 : 1)   // at most three peeking behind
+                        .allowsHitTesting(depth <= 3)
+                        .accessibilityHidden(depth != 0)   // VoiceOver reads the front card only
+                }
+            }
+            pager
+        }
+        .animation(.smooth(duration: 0.28), value: front)
+    }
+
+    @ViewBuilder
+    private func card(_ index: Int) -> some View {
+        let content = ResolvedQuestionBody(questions: [questions[index]], outcome: outcome)
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .modifier(InteractionCardChrome())
+
+        if deckDepth(index: index, front: front, count: count) == 0 {
+            content
+        } else {
+            // A peeked card is a button to bring it forward. `.plain` so it keeps the card's own
+            // face — a bordered button style would draw a second surface around a surface.
+            Button { front = index } label: { content }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Show answered question \(index + 1) of \(count)")
+        }
+    }
+
+    private var pager: some View {
+        HStack(spacing: 10) {
+            Button { front = deckDepth(index: front - 1, front: 0, count: count) } label: {
+                Image(systemName: "chevron.left")
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Previous answered question")
+
+            Text("\(front + 1) of \(count)")
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.textMuted)
+                .monospacedDigit()
+
+            Button { front = deckDepth(index: front + 1, front: 0, count: count) } label: {
+                Image(systemName: "chevron.right")
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Next answered question")
+        }
+        .font(.system(size: 11, weight: .medium))
+        .foregroundStyle(Theme.textMuted)
+        .padding(.leading, 4)
+    }
+}
+
 struct ResolvedQuestionBody: View {
     let questions: [SessionEvent.Question]
     let outcome: InteractionRecord.Outcome
