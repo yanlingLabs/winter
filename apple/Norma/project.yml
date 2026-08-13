@@ -434,6 +434,16 @@ targets:
           # quoting (quoted OTHER_SWIFT_FLAGS values reach swiftc with literal quotes and the
           # prefix silently fails to match).
           OTHER_SWIFT_FLAGS: -file-prefix-map $(HOME)=/builder
+          # The C-family twin of the Swift flag above — for the app target's OWN ObjC++
+          # (`NormaApplication.mm`, `NormaCEF.mm`), whose `__FILE__`/assert macros embed absolute
+          # source paths. panel-cef B1 gave exactly this flag to all six targets it CREATED
+          # (CefDllWrapper + the five helpers) but never to this pre-existing target, which is the
+          # one that links the flagged binary: the 0.2.011 release run was BLOCKED by the
+          # name-guard's artifact scan on `Contents/MacOS/Norma` — the first release to contain
+          # ObjC++ at all — with `NormaCEF.mm`'s and a CEF header's builder paths inside. Unlike
+          # Swift's `#filePath` (the caveat above), clang's `-ffile-prefix-map` DOES remap
+          # `__FILE__`, so this is a complete fix, and the release scan remains the gate.
+          OTHER_CPLUSPLUSFLAGS: -ffile-prefix-map=$(HOME)=/builder
           # The linker separately records absolute intermediate-object paths (N_OSO stabs in the
           # symtab, for dSYM lookup) which -file-prefix-map cannot reach — verified as the last
           # builder-path residue in release binaries. -oso_prefix strips that prefix at link time.
