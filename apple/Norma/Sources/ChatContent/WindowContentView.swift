@@ -114,7 +114,7 @@ struct WindowContentView<Accessory: View>: View {
             HStack(spacing: 12) {
                 headerAccessory()
                 Text(adapter.statusText)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(Typography.label(.medium))
                     .foregroundStyle(.secondary)
                 Spacer()
                 // working-directories T8: the working-folders chip. Its gate is the DAEMON's own
@@ -205,7 +205,7 @@ struct WindowContentView<Accessory: View>: View {
                     }
 
                     if let queued = adapter.queuedText {
-                        Text(queued).font(.system(size: 11)).foregroundStyle(Theme.textMuted)
+                        Text(queued).font(Typography.caption()).foregroundStyle(Theme.textMuted)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
 
@@ -443,7 +443,7 @@ struct WindowContentView<Accessory: View>: View {
     private func sidebarChevron(_ systemName: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: systemName)
-                .font(.system(size: 11, weight: .medium))
+                .font(Typography.caption(.medium))
                 .foregroundStyle(.secondary)
                 .padding(.top, topInset + sidebarChevronTopOffset)
                 .frame(width: 16)
@@ -469,7 +469,7 @@ struct WindowContentView<Accessory: View>: View {
             showingPolicyMenu = true
         } label: {
             Image(systemName: "ellipsis.circle")
-                .font(.system(size: 14))
+                .font(Typography.body())
                 .foregroundStyle(.secondary)
         }
         .buttonStyle(.plain)
@@ -490,7 +490,7 @@ struct WindowContentView<Accessory: View>: View {
     private var policyMenuContent: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text("Approval mode")
-                .font(.system(size: 11, weight: .semibold))
+                .font(Typography.caption(.semibold))
                 .foregroundStyle(.secondary)
                 .padding(.bottom, 4)
             // Task 6 (2e-iii): the row body is shared with the WorkSidebar's Options block — and,
@@ -518,7 +518,7 @@ struct WindowContentView<Accessory: View>: View {
             showingModelMenu = true
         } label: {
             Image(systemName: "cpu")
-                .font(.system(size: 14))
+                .font(Typography.body())
                 .foregroundStyle(.secondary)
         }
         .buttonStyle(.plain)
@@ -567,7 +567,7 @@ struct WindowContentView<Accessory: View>: View {
             showingEffortMenu = true
         } label: {
             Image(systemName: "gauge.with.dots.needle.33percent")
-                .font(.system(size: 14))
+                .font(Typography.body())
                 .foregroundStyle(.secondary)
         }
         .buttonStyle(.plain)
@@ -625,12 +625,12 @@ struct WindowContentView<Accessory: View>: View {
             }
             if built.collapsedCompleted > 0 && !expandedCompleted {
                 Text("… +\(built.collapsedCompleted) completed")
-                    .font(.system(size: 11))
+                    .font(Typography.caption())
                     .foregroundStyle(Theme.textMuted)
                     .onTapGesture { expandedCompleted = true }
             } else if expandedCompleted && built.collapsedCompleted > 0 {
                 Text("… collapse")
-                    .font(.system(size: 11))
+                    .font(Typography.caption())
                     .foregroundStyle(Theme.textMuted)
                     .onTapGesture { expandedCompleted = false }
             }
@@ -684,8 +684,7 @@ struct WindowContentView<Accessory: View>: View {
                 }
             }
         }
-        .font(.system(size: 11))
-        .fontWeight(row.status == "in_progress" ? .bold : nil)
+        .font(Typography.caption(row.status == "in_progress" ? .bold : .regular))
         .foregroundStyle(rowTextStyle(row.status))
         .lineLimit(1)
         .truncationMode(.middle)
@@ -740,8 +739,7 @@ struct WindowContentView<Accessory: View>: View {
                 Text("· " + formatElapsed(row.activeMs))
             }
         }
-        .font(.system(size: 11))
-        .fontWeight(row.status == "working" ? .bold : nil)
+        .font(Typography.caption(row.status == "working" ? .bold : .regular))
         .foregroundStyle(subagentRowStyle(row.status))
         .lineLimit(1)
         .truncationMode(.middle)
@@ -833,7 +831,7 @@ struct ModelMenuContent: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text("Model")
-                .font(.system(size: 11, weight: .semibold))
+                .font(Typography.caption(.semibold))
                 .foregroundStyle(.secondary)
                 .padding(.bottom, 4)
             ModelPickerRow(model: nil, current: current, isDisabled: isDisabled, onSelect: onSelect)
@@ -898,7 +896,7 @@ struct EffortMenuContent: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text("Reasoning effort")
-                .font(.system(size: 11, weight: .semibold))
+                .font(Typography.caption(.semibold))
                 .foregroundStyle(.secondary)
                 .padding(.bottom, 4)
             EffortPickerRow(effort: nil, current: current, isDisabled: isDisabled, onSelect: onSelect)
@@ -907,7 +905,7 @@ struct EffortMenuContent: View {
             }
             if !tiers.isEmpty {
                 Text("Norma")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(Typography.caption(.semibold))
                     .foregroundStyle(.secondary)
                     .padding(.top, 6)
                     .padding(.bottom, 4)

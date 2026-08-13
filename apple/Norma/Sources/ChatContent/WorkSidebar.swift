@@ -288,7 +288,7 @@ extension WindowContentView {
     private var sidebarOptionsBlock: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Options")
-                .font(.system(size: 11, weight: .semibold))
+                .font(Typography.caption(.semibold))
                 .foregroundStyle(.secondary)
             // Plan-immunity (2026-07-28 design): the SAME gate as WindowContentView's
             // `policyMenuButton` (both of this view's surfaces render `PolicyPickerRow` through
@@ -335,7 +335,7 @@ extension WindowContentView {
                 .lineLimit(1)
                 .truncationMode(truncation)
         }
-        .font(.system(size: 11))
+        .font(Typography.caption())
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
@@ -343,7 +343,7 @@ extension WindowContentView {
     private var sidebarWorkBlock: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Work")
-                .font(.system(size: 11, weight: .semibold))
+                .font(Typography.caption(.semibold))
                 .foregroundStyle(.secondary)
             // Subagents ABOVE tasks (brief Step 2). Each section already carries its own leading
             // `Divider`; they hide when empty via these gates (mirrors the content column's gates).
@@ -355,7 +355,7 @@ extension WindowContentView {
             }
             if adapter.liveSubagents.isEmpty && adapter.pinnedTasks.isEmpty {
                 Text("No active work")
-                    .font(.system(size: 11))
+                    .font(Typography.caption())
                     .foregroundStyle(Theme.textMuted)
             }
         }

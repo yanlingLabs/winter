@@ -102,7 +102,7 @@ extension WindowContentView {
             showingActivityMenu = true
         } label: {
             Image(systemName: refused ? "moon.badge.exclamationmark" : (verb == .background ? "moon" : "moon.fill"))
-                .font(.system(size: 14))
+                .font(Typography.body())
                 .foregroundStyle(refused ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
         }
         .buttonStyle(.plain)
@@ -117,11 +117,11 @@ extension WindowContentView {
     func activityMenuContent(_ verb: BackgroundVerb) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text("Activity")
-                .font(.system(size: 11, weight: .semibold))
+                .font(Typography.caption(.semibold))
                 .foregroundStyle(.secondary)
             // The daemon's derived state, read off the same row every other header affordance reads.
             Text(activityDisplayLabel(currentSidebarSessionSummary?.activity))
-                .font(.system(size: 11))
+                .font(Typography.caption())
                 .foregroundStyle(Theme.textMuted)
                 .padding(.bottom, 6)
 
@@ -130,12 +130,12 @@ extension WindowContentView {
                 showingActivityMenu = false
             }
             .buttonStyle(.plain)
-            .font(.system(size: 11, weight: .medium))
+            .font(Typography.caption(.medium))
             .disabled(adapter.activityChangeInFlight)
             .padding(.vertical, 3)
 
             Text(backgroundVerbExplanation(verb))
-                .font(.system(size: 11))
+                .font(Typography.caption())
                 .foregroundStyle(Theme.textMuted)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: 240, alignment: .leading)
@@ -143,7 +143,7 @@ extension WindowContentView {
             // The daemon's own sentence, verbatim — see `FieldStateAdapter.activityRefusal`.
             if let refusal = adapter.activityRefusal {
                 Text(refusal)
-                    .font(.system(size: 11))
+                    .font(Typography.caption())
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: 240, alignment: .leading)

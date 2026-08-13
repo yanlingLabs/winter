@@ -230,7 +230,7 @@ private struct TranscriptMarkdownBlockView: View {
     /// beside New York text — iOS's rule (`AssistantMarkdown.listRows` sets its markers serif too).
     private func markerText(_ marker: String) -> Text {
         Text(marker)
-            .font(Font(transcriptProseFont(role, size: metrics.bodySize, weight: .semibold)))
+            .font(transcriptProseSwiftUIFont(role, size: metrics.bodySize, weight: .semibold))
             .foregroundStyle(tint)
     }
 
@@ -239,7 +239,7 @@ private struct TranscriptMarkdownBlockView: View {
             text,
             colorScheme: colorScheme,
             baseFont: transcriptProseFont(role, size: size, weight: weight),
-            codeFont: .monospacedSystemFont(ofSize: metrics.codeSize(for: size), weight: .regular),
+            codeFont: Typography.monoNS(ofSize: metrics.codeSize(for: size)),
             lineSpacing: metrics.lineSpacing
         ))
     }
@@ -276,7 +276,7 @@ private struct TranscriptCodeBlock: View {
             if let language, !language.isEmpty {
                 HStack {
                     Text(language)
-                        .font(.system(size: 11, weight: .medium))
+                        .font(Typography.caption(.medium))
                         .foregroundStyle(.secondary)
 
                     Spacer(minLength: 12)
@@ -365,10 +365,10 @@ private struct TranscriptCodeBlock: View {
 private func transcriptCopyLabel(didCopy: Bool, iconOnlyWhenIdle: Bool) -> some View {
     HStack(spacing: 5) {
         Image(systemName: didCopy ? "checkmark" : "doc.on.doc")
-            .font(.system(size: 11, weight: .semibold))
+            .font(Typography.caption(.semibold))
         if didCopy || !iconOnlyWhenIdle {
             Text(didCopy ? "Copied" : "Copy")
-                .font(.system(size: 11, weight: .medium))
+                .font(Typography.caption(.medium))
         }
     }
 }
@@ -432,7 +432,7 @@ struct TranscriptActivityRow: View {
             Text(mapped.glyph)
             Text(mapped.label)
         }
-        .font(.system(size: 11))
+        .font(Typography.caption())
         .foregroundStyle(Theme.textMuted)
         .lineLimit(1)
         .truncationMode(.middle)
@@ -447,7 +447,7 @@ struct TranscriptStoppedRow: View {
             Text("⏹")
             Text("stopped")
         }
-        .font(.system(size: 11))
+        .font(Typography.caption())
         .foregroundStyle(Theme.textMuted)
         .lineLimit(1)
         .truncationMode(.middle)
@@ -957,7 +957,7 @@ struct TranscriptToolGroupRow: View {
             Button(action: toggle) {
                 HStack(spacing: 6) {
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(Typography.badge(.semibold))
                         .rotationEffect(.degrees(isExpanded ? 90 : 0))
                         .frame(width: 10)
                     statusGlyph(toolRunStatus(entries, turnIsLive: turnIsLive))
@@ -971,7 +971,7 @@ struct TranscriptToolGroupRow: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .font(.system(size: 11))
+            .font(Typography.caption())
             .foregroundStyle(Theme.textMuted)
 
             // Only while collapsed: expanded, the failing call's whole output is already on screen.
@@ -982,7 +982,7 @@ struct TranscriptToolGroupRow: View {
             // so the "emphasis" the old comment claimed was not being drawn at all.
             if !isExpanded, let summary = toolRunFailureSummary(entries) {
                 Text(summary)
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(Typography.caption())
                     .foregroundStyle(.primary)
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -1007,7 +1007,7 @@ struct TranscriptToolGroupRow: View {
                             .lineLimit(1)
                             .truncationMode(.middle)
                     }
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(Typography.caption())
                     .foregroundStyle(Theme.textMuted)
 
                     if let output = line.output {
@@ -1019,7 +1019,7 @@ struct TranscriptToolGroupRow: View {
             }
             if let note = expansion.note {
                 Text(note)
-                    .font(.system(size: 10))
+                    .font(Typography.tiny())
                     .foregroundStyle(Theme.textMuted)
             }
         }
@@ -1028,7 +1028,7 @@ struct TranscriptToolGroupRow: View {
 
     private func statusGlyph(_ status: ToolCallStatus) -> some View {
         Image(systemName: toolStatusSymbol(status))
-            .font(.system(size: 9, weight: .semibold))
+            .font(Typography.badge(.semibold))
             // Fixed slot so the sentence does not shift sideways when the glyph flips on completion.
             .frame(width: 10)
             .accessibilityLabel(toolStatusAccessibilityLabel(status))
@@ -1050,7 +1050,7 @@ struct TranscriptToolGroupRow: View {
     private func outputBlock(_ preview: ToolOutputPreview) -> some View {
         blockChrome {
             Text(preview.text.isEmpty ? "No output" : preview.text)
-                .font(.system(size: 11, design: .monospaced))
+                .font(Typography.caption())
                 .foregroundStyle(preview.text.isEmpty
                                  ? AnyShapeStyle(Theme.textMuted) : AnyShapeStyle(.primary))
                 .textSelection(.enabled)
@@ -1058,7 +1058,7 @@ struct TranscriptToolGroupRow: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             if let elision = preview.elision {
                 Text(elision)
-                    .font(.system(size: 10))
+                    .font(Typography.tiny())
                     .foregroundStyle(Theme.textMuted)
             }
         }
@@ -1071,7 +1071,7 @@ struct TranscriptToolGroupRow: View {
     private func placeholderBlock(_ text: String) -> some View {
         blockChrome {
             Text(text)
-                .font(.system(size: 11, design: .monospaced))
+                .font(Typography.caption())
                 .foregroundStyle(Theme.textMuted)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }

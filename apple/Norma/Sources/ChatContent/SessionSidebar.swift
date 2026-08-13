@@ -64,9 +64,9 @@ struct SessionSidebar: View {
         Button(action: action) {
             HStack(spacing: 6) {
                 Image(systemName: "macwindow")
-                    .font(.system(size: 12))
+                    .font(Typography.label())
                 Text("Open Norma")
-                    .font(.system(size: 12))
+                    .font(Typography.label())
                 Spacer()
             }
             .foregroundStyle(.secondary)
@@ -81,9 +81,9 @@ struct SessionSidebar: View {
         Button(action: onNewSession) {
             HStack(spacing: 6) {
                 Image(systemName: "plus.circle")
-                    .font(.system(size: 12))
+                    .font(Typography.label())
                 Text("New session")
-                    .font(.system(size: 12))
+                    .font(Typography.label())
                 Spacer()
             }
             .foregroundStyle(.secondary)
@@ -117,12 +117,12 @@ private struct SessionSidebarRow: View {
                 // `.secondary` over `.tertiary`, and those collapse to one grey once the faint level
                 // moves onto the brand's muted token (mac-chat-parity Task 8). The title is the row's
                 // content, so it takes the other register.
-                .font(.system(size: 12))
+                .font(Typography.label())
                 .foregroundStyle(.primary)
                 .lineLimit(1)
                 .truncationMode(.middle)
             Text(Date(timeIntervalSince1970: TimeInterval(row.createdAt) / 1000), style: .relative)
-                .font(.system(size: 10))
+                .font(Typography.tiny())
                 .foregroundStyle(Theme.textMuted)
                 .lineLimit(1)
         }

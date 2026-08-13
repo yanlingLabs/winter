@@ -94,7 +94,7 @@ struct TranscriptView: View {
             scrollToBottom(proxy)
         } label: {
             Label("latest", systemImage: "arrow.down")
-                .font(.system(size: 11, weight: .medium))
+                .font(Typography.caption(.medium))
                 .padding(.horizontal, 10).padding(.vertical, 5)
                 .background(Capsule().fill(Theme.controlSurface))
                 .overlay(Capsule().strokeBorder(Theme.hairlineElevated,

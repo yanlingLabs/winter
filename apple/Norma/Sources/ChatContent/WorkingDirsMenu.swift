@@ -26,9 +26,9 @@ extension WindowContentView {
         } label: {
             HStack(spacing: 4) {
                 Image(systemName: refused ? "folder.badge.questionmark" : "folder")
-                    .font(.system(size: 12))
+                    .font(Typography.label())
                 Text(dirsChipLabel(currentSidebarSessionSummary?.dirs))
-                    .font(.system(size: 11))
+                    .font(Typography.caption())
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
@@ -56,7 +56,7 @@ extension WindowContentView {
         let dirs = currentSidebarSessionSummary?.dirs ?? []
         VStack(alignment: .leading, spacing: 2) {
             Text("Working folders")
-                .font(.system(size: 11, weight: .semibold))
+                .font(Typography.caption(.semibold))
                 .foregroundStyle(.secondary)
                 .padding(.bottom, 4)
 
@@ -64,7 +64,7 @@ extension WindowContentView {
                 // The workdir-less state, named rather than rendered as an empty list — a session
                 // with no working folder is not broken, it's confined to its outputs folder.
                 Text("No working folder — this session writes only to its outputs folder.")
-                    .font(.system(size: 11))
+                    .font(Typography.caption())
                     .foregroundStyle(Theme.textMuted)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: 260, alignment: .leading)
@@ -81,7 +81,7 @@ extension WindowContentView {
                 showingDirsMenu = false
             }
             .buttonStyle(.plain)
-            .font(.system(size: 11, weight: .medium))
+            .font(Typography.caption(.medium))
             .disabled(adapter.dirsChangeInFlight || !dirsPrimaryIsReplaceable(dirs))
             .padding(.vertical, 3)
 
@@ -91,7 +91,7 @@ extension WindowContentView {
                     showingDirsMenu = false
                 }
                 .buttonStyle(.plain)
-                .font(.system(size: 11, weight: .medium))
+                .font(Typography.caption(.medium))
                 .disabled(adapter.dirsChangeInFlight)
                 .padding(.vertical, 3)
             }
@@ -99,7 +99,7 @@ extension WindowContentView {
             // The daemon's own sentence, verbatim — see `FieldStateAdapter.dirsRefusal`.
             if let refusal = adapter.dirsRefusal {
                 Text(refusal)
-                    .font(.system(size: 11))
+                    .font(Typography.caption())
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: 260, alignment: .leading)
@@ -119,22 +119,22 @@ extension WindowContentView {
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 4) {
                     Text(workingDirDisplayName(entry.path))
-                        .font(.system(size: 11, weight: index == 0 ? .semibold : .regular))
+                        .font(Typography.caption(index == 0 ? .semibold : .regular))
                     if index == 0 {
                         Text("primary")
-                            .font(.system(size: 9, weight: .medium))
+                            .font(Typography.badge(.medium))
                             .foregroundStyle(Theme.textMuted)
                     }
                     if entry.locked {
                         // The first-write lock: Norma has written here, so this entry is permanent
                         // for the session's lifetime.
                         Image(systemName: "lock.fill")
-                            .font(.system(size: 8))
+                            .font(Typography.micro())
                             .foregroundStyle(Theme.textMuted)
                     }
                 }
                 Text(entry.path)
-                    .font(.system(size: 10))
+                    .font(Typography.tiny())
                     .foregroundStyle(Theme.textMuted)
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -145,7 +145,7 @@ extension WindowContentView {
                     adapter.onSetDirs(.remove, entry.path)
                 }
                 .buttonStyle(.plain)
-                .font(.system(size: 10, weight: .medium))
+                .font(Typography.tiny(.medium))
                 .foregroundStyle(.secondary)
                 .disabled(adapter.dirsChangeInFlight)
             }

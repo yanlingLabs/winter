@@ -532,7 +532,7 @@ struct TranscriptInteractionCard: View {
                     Text(cardTitle(record.ask))
                         .foregroundStyle(.primary)
                 }
-                .font(.system(size: 13, weight: .semibold))
+                .font(Typography.control(.semibold))
             }
 
             if let outcome = record.outcome {
@@ -544,7 +544,7 @@ struct TranscriptInteractionCard: View {
             if let errorLine = wiring.errorLines[record.callId],
                showsInteractionErrorLine(record, hasError: true) {
                 Text(errorLine)
-                    .font(.system(size: 11))
+                    .font(Typography.caption())
                     .foregroundStyle(.red)
             }
         }
@@ -597,12 +597,12 @@ private struct ResolvedOutcomeRow: View {
                 Image(systemName: label.symbol)
                 Text(label.text)
             }
-            .font(.system(size: 12, weight: .semibold))
+            .font(Typography.label(.semibold))
             .foregroundStyle(label.isAffirmative ? Color.green : Color.secondary)
 
             if let provenance = interactionProvenance(outcome) {
                 Text(provenance)
-                    .font(.system(size: 11))
+                    .font(Typography.caption())
                     .foregroundStyle(Theme.textMuted)
             }
         }
@@ -653,7 +653,7 @@ struct ResolvedApprovalBody: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(summary)
-                .font(.system(size: 12, design: .monospaced))
+                .font(Typography.label())
                 .foregroundStyle(.secondary)
                 .lineLimit(8)
                 .truncationMode(.middle)
@@ -661,7 +661,7 @@ struct ResolvedApprovalBody: View {
 
             if let reviewerReason {
                 Label("reviewer: \(capReviewerReason(reviewerReason))", systemImage: "exclamationmark.triangle")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(Typography.caption(.medium))
                     .foregroundStyle(.secondary)
             }
 
@@ -795,7 +795,7 @@ struct ResolvedQuestionBody: View {
                 VStack(alignment: .leading, spacing: 6) {
                     if questionShowsHeaderChip(question, questionCount: questions.count) {
                         Text(question.header ?? "")
-                            .font(.system(size: QuestionCardType.pill, weight: .semibold))
+                            .font(Typography.questionPill(.semibold))
                             .foregroundStyle(.secondary)
                     }
                     // Norma's voice, so it wears Norma's voice — the assistant-prose serif register
@@ -805,14 +805,14 @@ struct ResolvedQuestionBody: View {
                     // the user's word, and the two registers are what make the card read as a
                     // dialogue rather than a form.
                     Text(question.question)
-                        .font(Font(Theme.assistantProse(size: QuestionCardType.question, weight: .regular)))
+                        .font(Typography.questionSerif())
                         .foregroundStyle(.primary)
 
                     answerRows(for: question)
 
                     if let note = recorded.notes[question.question], !note.isEmpty {
                         Text(note)
-                            .font(.system(size: QuestionCardType.secondary))
+                            .font(Typography.questionSecondary())
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -858,7 +858,7 @@ struct ResolvedQuestionBody: View {
             chosenRow(glyph: "pencil", text: text)
         case .none:
             Text("—")
-                .font(.system(size: 13))
+                .font(Typography.control())
                 .foregroundStyle(Theme.textMuted)
         }
     }
@@ -878,12 +878,12 @@ struct ResolvedQuestionBody: View {
     private func chosenRow(glyph: String, text: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
             Text(text)
-                .font(.system(size: QuestionCardType.option))
+                .font(Typography.questionOption())
                 .foregroundStyle(.primary)
                 .textSelection(.enabled)
             Spacer(minLength: 8)
             Image(systemName: glyph)
-                .font(.system(size: QuestionCardType.option, weight: .medium))
+                .font(Typography.questionOption(.medium))
                 .foregroundStyle(Theme.accent)
                 .frame(width: 20, alignment: .center)
                 .accessibilityHidden(true)   // decorative; the answer text carries the meaning
@@ -983,7 +983,7 @@ struct ResolvedPlanBody: View {
 
             if let feedback {
                 Text(feedback)
-                    .font(.system(size: 12))
+                    .font(Typography.label())
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
             }
@@ -1035,7 +1035,7 @@ private struct PendingApprovalBody: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(summary)
-                .font(.system(size: 12, design: .monospaced))
+                .font(Typography.label())
                 .foregroundStyle(.secondary)
                 .lineLimit(draft.isSummaryExpanded ? nil : 3)
                 .truncationMode(.middle)
@@ -1046,7 +1046,7 @@ private struct PendingApprovalBody: View {
                     draft.isSummaryExpanded.toggle()
                 }
                 .buttonStyle(.plain)
-                .font(.system(size: 11, weight: .medium))
+                .font(Typography.caption(.medium))
                 .foregroundStyle(.secondary)
             }
 
@@ -1055,7 +1055,7 @@ private struct PendingApprovalBody: View {
             // nothing extra (byte-identical to the pre-5e-T5 body).
             if let reviewerReason {
                 Text("⚠ reviewer: \(capReviewerReason(reviewerReason))")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(Typography.caption(.medium))
                     .foregroundStyle(.secondary)
             }
 
@@ -1065,7 +1065,7 @@ private struct PendingApprovalBody: View {
                 // buttons had gone grey), and replacing them also removes the double-tap surface
                 // entirely rather than relying on the disable landing first. iOS's `.sending` state.
                 Label("Sending…", systemImage: "hourglass")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(Typography.label(.medium))
                     .foregroundStyle(.secondary)
             } else {
                 // Primary row — Approve is still plain allow-once (spec §5: "default button = Allow
@@ -1096,7 +1096,7 @@ private struct PendingApprovalBody: View {
                         ForEach(additionalOptions, id: \.id) { option in
                             Button(option.label) { onApproval(callId, true, option.id, childSessionId) }
                                 .buttonStyle(.plain)
-                                .font(.system(size: 11, weight: .medium))
+                                .font(Typography.caption(.medium))
                                 .foregroundStyle(.secondary)
                         }
                     }
@@ -1271,10 +1271,10 @@ struct PendingQuestionBody: View {
                     Button { draft.visibleQuestion = i } label: {
                         HStack(spacing: 4) {
                             Text(pendingQuestionPillLabel(questions[i], index: i))
-                                .font(.system(size: QuestionCardType.pill, weight: .medium))
+                                .font(Typography.questionPill(.medium))
                                 .lineLimit(1)
                             if answered {
-                                Image(systemName: "checkmark").font(.system(size: 9, weight: .semibold))
+                                Image(systemName: "checkmark").font(Typography.badge(.semibold))
                             }
                         }
                         .foregroundStyle(isCurrent ? Theme.accent : Color.secondary)
@@ -1352,7 +1352,7 @@ struct PendingQuestionBody: View {
     private func wideButton(title: String, disabled: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(title)
-                .font(.system(size: 13, weight: .semibold))
+                .font(Typography.control(.semibold))
                 .foregroundStyle(Theme.canvas)
                 .frame(maxWidth: .infinity)
                 .frame(height: pendingQuestionActionHeight)
@@ -1366,7 +1366,7 @@ struct PendingQuestionBody: View {
     private func circleButton(system: String, label: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: system)
-                .font(.system(size: 14, weight: .medium))
+                .font(Typography.body(.medium))
                 .foregroundStyle(.primary)
                 .frame(width: pendingQuestionActionHeight, height: pendingQuestionActionHeight)
                 .background(Circle().fill(Theme.controlSurface))
@@ -1417,13 +1417,13 @@ private struct QuestionBlock: View {
         VStack(alignment: .leading, spacing: 6) {
             if showsHeader {
                 Text(question.header ?? "")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(Typography.caption(.semibold))
                     .foregroundStyle(.secondary)
             }
             // Same serif register as the frozen card's question (see `ResolvedQuestionBody`) — the
             // pending and answered forms of one question must not speak in two different voices.
             Text(question.question)
-                .font(Font(Theme.assistantProse(size: QuestionCardType.question, weight: .regular)))
+                .font(Typography.questionSerif())
                 .foregroundStyle(.primary)
 
             if showsPreviewPane {
@@ -1480,7 +1480,7 @@ private struct QuestionBlock: View {
         if let text = focusedPreview {
             ScrollView {
                 Text(text)
-                    .font(.system(.body, design: .monospaced))
+                    .font(Typography.questionPreviewMono)
                     .foregroundStyle(.primary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .textSelection(.enabled)
@@ -1511,7 +1511,7 @@ private struct QuestionBlock: View {
                 optionLabel(option, isSelected: isSelected)
                 Spacer(minLength: 8)
                 Image(systemName: "checkmark")
-                    .font(.system(size: QuestionCardType.option, weight: .medium))
+                    .font(Typography.questionOption(.medium))
                     .foregroundStyle(Theme.accent)
                     .opacity(isSelected ? 1 : 0)
                     .frame(width: 28, alignment: .center)
@@ -1534,11 +1534,11 @@ private struct QuestionBlock: View {
             // "this one", and a second signal on the same row made the chosen option shout while
             // its siblings whispered. Weight is for hierarchy — label over description — not state.
             Text(option.label)
-                .font(.system(size: QuestionCardType.option))
+                .font(Typography.questionOption())
                 .foregroundStyle(.primary)
             if let description = option.description, !description.isEmpty {
                 Text(description)
-                    .font(.system(size: QuestionCardType.secondary))
+                    .font(Typography.questionSecondary())
                     .foregroundStyle(.secondary)
             }
         }
@@ -1551,17 +1551,17 @@ private struct QuestionBlock: View {
         // both halves of a question's life.
         HStack(spacing: 8) {
             Image(systemName: "pencil")
-                .font(.system(size: QuestionCardType.secondary))
+                .font(Typography.questionSecondary())
                 .foregroundStyle(.secondary)
             if isOtherExpanded {
                 TextField("Other…", text: Binding(get: { otherText }, set: onOtherTextChange))
                     .textFieldStyle(.plain)
-                    .font(.system(size: QuestionCardType.option))
+                    .font(Typography.questionOption())
                     .disabled(isInFlight)
             } else {
                 Button("Other…", action: onExpandOther)
                     .buttonStyle(.plain)
-                    .font(.system(size: QuestionCardType.option))
+                    .font(Typography.questionOption())
                     .foregroundStyle(.secondary)
                     .disabled(isInFlight)
                 Spacer(minLength: 0)
@@ -1582,7 +1582,7 @@ private struct QuestionBlock: View {
         // which is a `.primary`-weight answer, not a hint.
         TextField("Add a note (optional)", text: Binding(get: { noteText }, set: onNoteTextChange))
             .textFieldStyle(.roundedBorder)
-            .font(.system(size: QuestionCardType.secondary))
+            .font(Typography.questionSecondary())
             .disabled(isInFlight)
     }
 }
@@ -1627,7 +1627,7 @@ struct PendingPlanBody: View {
                 HStack(spacing: 8) {
                     TextField("What should change?", text: $draft.feedback)
                         .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 12))
+                        .font(Typography.label())
                     Button("Send") {
                         onPlan(callId, false, false, draft.feedback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : draft.feedback)
                     }
