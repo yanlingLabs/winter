@@ -25,7 +25,7 @@ struct TrustPane: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Text("Trust").font(.headline)
+                Text("Trust").font(Typography.paneTitle)
                 Spacer()
                 Button("Refresh") { Task { await load() } }
                     .disabled(loading)
@@ -33,20 +33,20 @@ struct TrustPane: View {
             .padding([.top, .horizontal])
             .padding(.bottom, 4)
             if let errorText {
-                Text(errorText).foregroundStyle(.red).font(.system(size: 12)).padding(.horizontal)
+                Text(errorText).foregroundStyle(.red).font(Typography.label()).padding(.horizontal)
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 2) {
                     if paths.isEmpty {
                         Text("No trusted directories")
-                            .font(.system(size: 12))
+                            .font(Typography.label())
                             .foregroundStyle(.secondary)
                             .padding(.horizontal)
                     }
                     ForEach(sortedTrustPaths(paths), id: \.self) { path in
                         HStack {
                             Text(path)
-                                .font(.system(size: 12, design: .monospaced))
+                                .font(Typography.labelMono())
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                             Spacer()

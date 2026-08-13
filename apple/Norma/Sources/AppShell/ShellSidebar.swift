@@ -889,7 +889,7 @@ struct ShellTitlebarButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: systemImage)
-                .font(.system(size: 13, weight: .medium))
+                .font(Typography.control(.medium))
                 .foregroundStyle((isPlaceholder || !isEnabled) ? AnyShapeStyle(.tertiary)
                                                                 : AnyShapeStyle(Theme.textMuted))
                 .frame(width: size, height: size)
@@ -993,7 +993,7 @@ struct ShellSidebar: View {
                     // sidebar-brand: the warm brand grey at the reference's larger, quieter
                     // register (was 11 pt semibold `.secondary`), under a generous section gap.
                     Text("Recents")
-                        .font(.system(size: 13))
+                        .font(Typography.control())
                         .foregroundStyle(Theme.textMuted)
                         .padding(.horizontal, 10)
                         .padding(.top, shellSidebarSectionGap)
@@ -1016,7 +1016,7 @@ struct ShellSidebar: View {
                     let recents = recentsCandidates(directory.rows)
                     if recents.isEmpty {
                         Text("No sessions yet")
-                            .font(.system(size: 13))
+                            .font(Typography.control())
                             .foregroundStyle(Theme.textMuted)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 4)
@@ -1094,16 +1094,16 @@ struct ShellSidebar: View {
     private func rowLabel(_ row: ShellSidebarRow) -> some View {
         HStack(spacing: 10) {
             Image(systemName: shellSidebarRowSystemImage(row))
-                .font(.system(size: 13))
+                .font(Typography.control())
                 .frame(width: 18)
             Text(shellSidebarRowTitle(row))
-                .font(.system(size: 13))
+                .font(Typography.control())
             Spacer(minLength: 4)
             if case .mode(let mode) = row, !mode.isAvailable {
                 // Deglassed (the capsule fill died with the reskin): a quiet tag, now in the
                 // brand's warm muted grey rather than the cooler system `.tertiary`.
                 Text("Soon")
-                    .font(.caption2.weight(.medium))
+                    .font(Typography.chipLabel.weight(.medium))
                     .foregroundStyle(Theme.textMuted)
             }
         }
@@ -1134,7 +1134,7 @@ struct ShellSidebar: View {
                 presentation.open()
             } label: {
                 Image(systemName: "magnifyingglass")
-                    .font(.system(size: 13, weight: .medium))
+                    .font(Typography.control(.medium))
                     .foregroundStyle(Theme.textMuted)
                     .frame(width: 24, height: 24)
                     .contentShape(Rectangle())
@@ -1167,11 +1167,11 @@ struct ShellSidebar: View {
                 // this is the same glyph set the mode rows above and the search palette already
                 // wear; there is no second table here to drift.
                 Image(systemName: SessionMode(wire: row.mode).systemImage)
-                    .font(.system(size: 12))
+                    .font(Typography.label())
                     .foregroundStyle(Theme.textMuted)
                     .frame(width: 16)
                 Text(sessionDisplayTitle(row.title))
-                    .font(.system(size: 13))
+                    .font(Typography.control())
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer(minLength: 4)
@@ -1259,10 +1259,10 @@ struct ShellSidebar: View {
                     HStack(spacing: 8) {
                         avatar
                         Text(shellAccountRowTitle)
-                            .font(.system(size: 13, weight: .medium))
+                            .font(Typography.control(.medium))
                             .foregroundStyle(.primary)
                         Image(systemName: "chevron.down")
-                            .font(.system(size: 9, weight: .semibold))
+                            .font(Typography.badge(.semibold))
                             .foregroundStyle(Theme.textMuted)
                     }
                     .padding(.horizontal, 8)
@@ -1281,7 +1281,7 @@ struct ShellSidebar: View {
                 // later"). Disabled for the same reason the navigation arrows are — an affordance
                 // that looks live and does nothing is worse than one that admits it isn't ready.
                 Image(systemName: "arrow.down.to.line.compact")
-                    .font(.system(size: 14))
+                    .font(Typography.body())
                     .foregroundStyle(.tertiary)
                     .accessibilityHidden(true)
             }
@@ -1304,7 +1304,7 @@ struct ShellSidebar: View {
             .frame(width: shellAccountAvatarSize, height: shellAccountAvatarSize)
             .overlay(
                 Text(String(shellAccountRowTitle.prefix(1)))
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(Typography.caption(.semibold))
                     .foregroundStyle(Theme.textMuted)
             )
     }
@@ -1321,7 +1321,7 @@ struct ShellSidebar: View {
             // The header carries the identity the row is a placeholder for — the reference puts
             // the account's email here. Non-interactive: it names, it does not navigate.
             Text(shellAccountRowTitle)
-                .font(.system(size: 12))
+                .font(Typography.label())
                 .foregroundStyle(Theme.textMuted)
                 .padding(.horizontal, 10)
                 .padding(.top, 4)
@@ -1341,11 +1341,11 @@ struct ShellSidebar: View {
                     } label: {
                         HStack(spacing: 10) {
                             Image(systemName: dashboardPaneSystemImage(pane))
-                                .font(.system(size: 13))
+                                .font(Typography.control())
                                 .foregroundStyle(Theme.textMuted)
                                 .frame(width: 18)
                             Text(dashboardPaneTitle(pane))
-                                .font(.system(size: 13))
+                                .font(Typography.control())
                                 .foregroundStyle(.primary)
                             Spacer(minLength: 12)
                         }
@@ -1438,12 +1438,12 @@ struct ShellLandingView: View {
     var body: some View {
         VStack(spacing: 10) {
             Image(systemName: shellDestinationSystemImage(destination))
-                .font(.system(size: 34, weight: .light))
+                .font(Typography.emptyStateGlyph)
                 .foregroundStyle(.tertiary)
             Text(shellDestinationTitle(destination))
-                .font(.title2)
+                .font(Typography.emptyStateTitle)
             Text(shellLandingPlaceholderText(destination))
-                .font(.callout)
+                .font(Typography.emptyStateSubtitle)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
         }

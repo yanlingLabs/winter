@@ -580,7 +580,7 @@ struct NormaFieldView: View {
             // THIS view alone, value-keyed on the local `chevronPulse` `@State`, never hoisted onto
             // an outer/ancestor view).
             Image(systemName: "arrow.up.left.and.arrow.down.right")
-                .font(.system(size: 12, weight: .semibold))
+                .font(Typography.label(.semibold))
                 .foregroundStyle(adapter.interactionNeeded ? Color(red: 1.0, green: 0.72, blue: 0.30) : .white)
                 .frame(width: chatButtonFinal.width, height: chatButtonFinal.height)
                 .contentShape(Circle())
@@ -791,7 +791,7 @@ struct NormaFieldView: View {
                     // glyph render ~2pt right / 4pt down from there, so the placeholder visibly
                     // overlapped the caret (user report: "placeholder overlapping the caret").
                     Text("Ask Norma…")
-                        .font(.system(size: 14))
+                        .font(Typography.body())
                         .foregroundStyle(.white.opacity(0.5)) // difference-blend-safe placeholder
                         .padding(.leading, ComposerTextView.textContainerInset.width
                             + ComposerTextView.lineFragmentPadding)
@@ -916,7 +916,7 @@ struct NormaFieldView: View {
             HStack(spacing: 6) {
                 if let historyPositionText = adapter.historyPositionText {
                     Text(historyPositionText)
-                        .font(.system(size: 10, weight: .medium))
+                        .font(Typography.tiny(.medium))
                         .foregroundStyle(.white.opacity(0.65)) // difference-blend-safe secondary
                         .padding(.horizontal, 6)
                         .padding(.vertical, 3)
@@ -937,14 +937,14 @@ struct NormaFieldView: View {
         VStack(alignment: .leading, spacing: 6) {
             if let prompt = adapter.displayedPrompt {
                 Text(prompt)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(Typography.caption(.medium))
                     .foregroundStyle(.white.opacity(0.65)) // difference-blend-safe secondary
                     .lineLimit(2)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             if !replyText.isEmpty {
                 Text(replyText)
-                    .font(.system(size: 13))
+                    .font(Typography.control())
                     // GATE-3 F6b: under GlassForegroundLegibility's difference blend,
                     // .primary is BLACK in Light mode -> |0 - bg| = bg -> invisible.
                     // Pure white is the only correct foreground here (same rule as the
@@ -961,7 +961,7 @@ struct NormaFieldView: View {
             // actually accepted and is waiting for the next round boundary, not lost.
             if let queuedText = adapter.queuedText {
                 Text("⧗ \(queuedText)")
-                    .font(.system(size: 11))
+                    .font(Typography.caption())
                     .foregroundStyle(.white.opacity(0.5)) // difference-blend-safe, dimmed
                     .lineLimit(2)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -985,7 +985,7 @@ struct NormaFieldView: View {
             adapter.showingDraft = true
         } label: {
             Image(systemName: "chevron.left")
-                .font(.system(size: 12, weight: .semibold))
+                .font(Typography.label(.semibold))
                 .foregroundStyle(.white.opacity(0.65)) // difference-blend-safe secondary
                 .frame(width: 22, height: 22)
         }
@@ -1004,15 +1004,15 @@ struct NormaFieldView: View {
     private var shimmerRow: some View {
         HStack(spacing: 4) {
             if adapter.isWorkingVerb {
-                WorkingSpinnerGlyph(font: .system(size: 13, weight: .semibold))
-                SheenText(text: adapter.statusText, font: .system(size: 13, weight: .semibold))
+                WorkingSpinnerGlyph(font: Typography.control(.semibold))
+                SheenText(text: adapter.statusText, font: Typography.control(.semibold))
                     .foregroundStyle(.white.opacity(0.65)) // difference-blend-safe secondary
             } else {
                 // Override pills (disconnected/needs approval) or an edge-case empty caption:
                 // plain, unanimated text — same convention as `FieldThinkingPill`'s `animated`
                 // gate.
                 Text(adapter.statusText.isEmpty ? "…" : adapter.statusText)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(Typography.control(.semibold))
                     .foregroundStyle(.white.opacity(0.65)) // difference-blend-safe secondary
             }
         }
@@ -1328,10 +1328,10 @@ private struct SegmentCell: View {
     var body: some View {
         HStack(spacing: 5) {
             Image(systemName: icon)
-                .font(.system(size: 11, weight: .medium))
+                .font(Typography.caption(.medium))
             if showsLabel {
                 Text(label)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(Typography.caption(.medium))
                     .lineLimit(1)
                     .fixedSize()
             }
@@ -1397,12 +1397,12 @@ private struct FieldThinkingPill: View {
         // diff-blending it would yield near-white in both modes.
         HStack(spacing: 4) {
             if animated {
-                WorkingSpinnerGlyph(font: .system(size: 11, weight: .medium))
-                SheenText(text: caption, font: .system(size: 11, weight: .medium))
+                WorkingSpinnerGlyph(font: Typography.caption(.medium))
+                SheenText(text: caption, font: Typography.caption(.medium))
                     .foregroundStyle(.white)
             } else {
                 Text(caption)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(Typography.caption(.medium))
                     .foregroundStyle(.white)
             }
         }
@@ -1434,7 +1434,7 @@ private struct FieldCountChip: View {
 
     var body: some View {
         Text(caption)
-            .font(.system(size: 11, weight: .medium))
+            .font(Typography.caption(.medium))
             .foregroundStyle(.white)
             .lineLimit(1)
             .truncationMode(.tail)
@@ -1520,7 +1520,7 @@ private struct FieldIconButton: View {
 
     var body: some View {
         Image(systemName: icon)
-            .font(.system(size: 13, weight: .medium))
+            .font(Typography.control(.medium))
             .foregroundStyle(isFocused ? GlassChromeColor.focusedForeground : GlassChromeColor.secondaryForeground(for: colorScheme))
             .frame(width: 26, height: 26)
             .background(

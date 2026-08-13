@@ -321,7 +321,7 @@ final class PanelCEFContainerView: NSView {
         label.alignment = .center
         label.maximumNumberOfLines = 0
         label.textColor = .secondaryLabelColor
-        label.font = .systemFont(ofSize: 12)
+        label.font = Typography.panelTabLabelNS
         addSubview(label)
         unavailableLabel = label
 

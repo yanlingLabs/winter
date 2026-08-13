@@ -107,7 +107,7 @@ struct PairingSheetContainerView: View {
                     presentation.dismiss()
                 } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 16))
+                        .font(Typography.heading())
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
@@ -122,15 +122,15 @@ struct PairingSheetContainerView: View {
             PairingSheetView(model: model)
         } else {
             VStack(spacing: 12) {
-                Text("Pair a Device").font(.headline)
+                Text("Pair a Device").font(Typography.paneTitle)
                 ProgressView()
                     .frame(width: 220, height: 220)
                     .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(.white))
                 Text("Preparing your Mac…")
-                    .font(.system(size: 12))
+                    .font(Typography.label())
                     .foregroundStyle(.secondary)
                 Text("This only takes a moment.")
-                    .font(.system(size: 12))
+                    .font(Typography.label())
                     .foregroundStyle(.secondary)
             }
             .padding(24)
@@ -168,7 +168,7 @@ struct PairingSheetView: View {
 
     private func showingQRContent(payload: String, secondsLeft: Int) -> some View {
         VStack(spacing: 12) {
-            Text("Pair a Device").font(.headline)
+            Text("Pair a Device").font(Typography.paneTitle)
             Group {
                 if let image = renderPairingQRCode(payload) {
                     Image(nsImage: image)
@@ -182,22 +182,22 @@ struct PairingSheetView: View {
             }
             .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(.white))
             Text("Scan this with the Norma companion app")
-                .font(.system(size: 12))
+                .font(Typography.label())
                 .foregroundStyle(.secondary)
             Text("Expires in \(secondsLeft)s")
-                .font(.system(size: 12, design: .monospaced))
+                .font(Typography.labelMono())
                 .foregroundStyle(.secondary)
         }
     }
 
     private func confirmingContent(words: [String]) -> some View {
         VStack(spacing: 16) {
-            Text("Confirm on this Mac").font(.headline)
+            Text("Confirm on this Mac").font(Typography.paneTitle)
             Text(words.joined(separator: "  "))
-                .font(.system(size: 22, weight: .semibold, design: .monospaced))
+                .font(Typography.pairingCode)
                 .textSelection(.enabled)
             Text("Make sure these words match what your phone shows.")
-                .font(.system(size: 12))
+                .font(Typography.label())
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
             TextField("Device name", text: $label, prompt: Text("e.g. My iPhone"))
@@ -219,12 +219,12 @@ struct PairingSheetView: View {
     private func doneContent(record: PairRecord) -> some View {
         VStack(spacing: 12) {
             Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 36))
+                .font(Typography.pairingGlyphLarge)
                 .foregroundStyle(.green)
             Text("\(record.label) is paired")
-                .font(.headline)
+                .font(Typography.paneTitle)
             Text("It can now reach this Mac remotely.")
-                .font(.system(size: 12))
+                .font(Typography.label())
                 .foregroundStyle(.secondary)
         }
     }
@@ -232,10 +232,10 @@ struct PairingSheetView: View {
     private func failedContent(message: String) -> some View {
         VStack(spacing: 12) {
             Image(systemName: "xmark.circle")
-                .font(.system(size: 30))
+                .font(Typography.pairingGlyphMedium)
                 .foregroundStyle(.secondary)
             Text(message)
-                .font(.system(size: 13))
+                .font(Typography.control())
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
             Button("New QR") { Task { await model.regenerate() } }

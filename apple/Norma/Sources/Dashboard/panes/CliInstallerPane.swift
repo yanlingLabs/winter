@@ -50,16 +50,16 @@ struct CliInstallerPane: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Command Line").font(.headline)
+            Text("Command Line").font(Typography.paneTitle)
             if isDev {
                 Text("Dev builds use the norma-dev wrapper — opens a Terminal window running the CLI straight out of this checkout.")
-                    .font(.system(size: 12))
+                    .font(Typography.label())
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Button("Open CLI") { openDevCli() }
             } else {
                 Text(cliInstallStatusText(state))
-                    .font(.system(size: 12))
+                    .font(Typography.label())
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Button(cliInstallButtonTitle(state)) {

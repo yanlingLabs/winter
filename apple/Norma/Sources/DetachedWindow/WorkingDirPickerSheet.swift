@@ -65,15 +65,15 @@ struct WorkingDirPickerView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Working folder")
-                .font(.system(size: 13, weight: .semibold))
+                .font(Typography.control(.semibold))
             Text("Norma can write inside the folder you choose. Everything else stays read-only.")
-                .font(.system(size: 11))
+                .font(Typography.caption())
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             if !model.folderRows.isEmpty {
                 Text("Recent")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(Typography.caption(.semibold))
                     .foregroundStyle(.secondary)
                     .padding(.top, 4)
                 ScrollView {
@@ -90,7 +90,7 @@ struct WorkingDirPickerView: View {
 
             Button("Open folder…") { model.onOpenPanel() }
                 .buttonStyle(.plain)
-                .font(.system(size: 12, weight: .medium))
+                .font(Typography.label(.medium))
 
             choiceRow(label: "No folder (outputs only)",
                       detail: "Writes only to this session's outputs folder.",
@@ -116,16 +116,16 @@ struct WorkingDirPickerView: View {
         } label: {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(label).font(.system(size: 12))
+                    Text(label).font(Typography.label())
                     Text(detail)
-                        .font(.system(size: 10))
+                        .font(Typography.tiny())
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
                 Spacer(minLength: 8)
                 if model.choice == choice {
-                    Image(systemName: "checkmark").font(.system(size: 11))
+                    Image(systemName: "checkmark").font(Typography.caption())
                 }
             }
             .contentShape(Rectangle())

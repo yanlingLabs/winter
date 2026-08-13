@@ -77,7 +77,7 @@ struct DispatchSurface: View {
             }
         }
         .buttonStyle(.plain)
-        .font(.callout)
+        .font(Typography.emptyStateSubtitle)
         .foregroundStyle(.secondary)
     }
 
@@ -103,7 +103,7 @@ struct DispatchSurface: View {
             ProgressView()
                 .controlSize(.large)
             Text("Opening Dispatch…")
-                .font(.callout)
+                .font(Typography.emptyStateSubtitle)
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

@@ -149,11 +149,11 @@ struct ComposerModelChip: View {
         } label: {
             HStack(spacing: 4) {
                 Text(row.chipTitle)
-                    .font(.system(size: 14))
+                    .font(Typography.body())
                     .foregroundStyle(.primary)
                     .lineLimit(1)
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(Typography.badge(.semibold))
                     .foregroundStyle(Theme.textMuted)
             }
             .contentShape(Rectangle())
@@ -341,7 +341,7 @@ struct NormaComposerCard: View {
                     .overlay(alignment: .topLeading) {
                         if text.isEmpty {
                             Text(placeholder)
-                                .font(.system(size: newChatComposerFontSize))
+                                .font(Typography.heading())
                                 .foregroundStyle(Theme.textMuted)
                                 .padding(.horizontal, ComposerTextView.textContainerInset.width)
                                 .padding(.vertical, ComposerTextView.textContainerInset.height)
@@ -352,7 +352,7 @@ struct NormaComposerCard: View {
                     // The held draft — same size and same top-leading start as the live composer,
                     // so the swap does not visibly jump; secondary colour is what reads as held.
                     Text(text)
-                        .font(.system(size: newChatComposerFontSize))
+                        .font(Typography.heading())
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, ComposerTextView.textContainerInset.width)
                         .padding(.vertical, ComposerTextView.textContainerInset.height)
@@ -456,14 +456,14 @@ struct NormaComposerCard: View {
     /// written once, and this shell still knows nothing about modes.
     private func controlRow(accessory: AnyView?, modelRow: ComposerModelRow) -> some View {
         HStack(spacing: 8) {
-            NewChatControlButton(systemImage: "plus", label: "Attach (not wired yet)", size: 17)
+            NewChatControlButton(systemImage: "plus", label: "Attach (not wired yet)", font: Typography.composerAttachGlyph)
             accessory
             Spacer(minLength: 12)
             ComposerModelChip(row: modelRow,
                               onOpen: model.onOpen,
                               onSetModel: model.onSetModel,
                               onSetEffort: model.onSetEffort)
-            NewChatControlButton(systemImage: "mic", label: "Dictate (not wired yet)", size: 15)
+            NewChatControlButton(systemImage: "mic", label: "Dictate (not wired yet)", font: Typography.bodyLarge(.medium))
             sendButton
         }
         .padding(.horizontal, 18)
@@ -475,7 +475,7 @@ struct NormaComposerCard: View {
             if sendBlockedReason == nil {
                 Button(action: onSubmit) {
                     Image(systemName: "arrow.up")
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(Typography.body(.semibold))
                         .foregroundStyle(Theme.canvas)
                         .frame(width: newChatSendButtonSize, height: newChatSendButtonSize)
                         .background(
@@ -489,7 +489,7 @@ struct NormaComposerCard: View {
                 .accessibilityLabel("Send")
             } else {
                 Image(systemName: "waveform")
-                    .font(.system(size: 15, weight: .medium))
+                    .font(Typography.bodyLarge(.medium))
                     .foregroundStyle(Theme.textMuted)
                     .frame(width: newChatSendButtonSize, height: newChatSendButtonSize)
                     .help(sendBlockedReason!.isEmpty ? "Type a message to send" : sendBlockedReason!)

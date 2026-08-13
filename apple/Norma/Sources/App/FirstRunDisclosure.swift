@@ -39,9 +39,9 @@ struct FirstRunDisclosureView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Before you start").font(.headline)
+            Text("Before you start").font(Typography.paneTitle)
             Text(normaProviderDisclosureText)
-                .font(.system(size: 12))
+                .font(Typography.label())
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             HStack {

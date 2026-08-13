@@ -110,7 +110,7 @@ struct SidebarSearchPalette: View {
             field
             if rows.isEmpty {
                 Text(recentsCandidates(directory.rows).isEmpty ? "No sessions yet" : "No matches")
-                    .font(.system(size: 13))
+                    .font(Typography.control())
                     .foregroundStyle(Theme.textMuted)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 18)
@@ -156,18 +156,18 @@ struct SidebarSearchPalette: View {
     private var field: some View {
         HStack(spacing: 10) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 14))
+                .font(Typography.body())
                 .foregroundStyle(Theme.textMuted)
             TextField("Search sessions", text: $query)
                 .textFieldStyle(.plain)
-                .font(.system(size: 15))
+                .font(Typography.bodyLarge())
                 .focused($fieldFocused)
                 .onSubmit(openSelection)
             Button {
                 presentation.close()
             } label: {
                 Image(systemName: "xmark")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(Typography.label(.medium))
                     .foregroundStyle(Theme.textMuted)
                     .contentShape(Rectangle())
             }
@@ -206,21 +206,21 @@ struct SidebarSearchPalette: View {
             // second table here to drift out of sync. Dispatch is unreachable in this list by
             // construction (spec R6, `recentsCandidates`).
             Image(systemName: SessionMode(wire: row.mode).systemImage)
-                .font(.system(size: 13))
+                .font(Typography.control())
                 .foregroundStyle(Theme.textMuted)
                 .frame(width: 20)
             Text(sessionDisplayTitle(row.title))
-                .font(.system(size: 14))
+                .font(Typography.body())
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer(minLength: 12)
             if isHighlighted {
                 Image(systemName: "return")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(Typography.caption(.medium))
                     .foregroundStyle(Theme.textMuted)
             } else {
                 Text(relativeTimeBucket(createdAt: row.createdAt, now: Date()))
-                    .font(.system(size: 12))
+                    .font(Typography.label())
                     .foregroundStyle(Theme.textMuted)
             }
         }

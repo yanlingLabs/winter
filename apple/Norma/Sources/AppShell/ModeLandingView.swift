@@ -116,7 +116,7 @@ struct ModeLandingView: View {
                 }
             } label: {
                 Label("New", systemImage: "plus.circle")
-                    .font(.system(size: 12))
+                    .font(Typography.label())
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
@@ -134,11 +134,11 @@ struct ModeLandingView: View {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(sessionDisplayTitle(row.title))
-                            .font(.body)
+                            .font(Typography.landingBody)
                             .lineLimit(1)
                             .truncationMode(.middle)
                         Text(Date(timeIntervalSince1970: TimeInterval(row.createdAt) / 1000), style: .relative)
-                            .font(.caption)
+                            .font(Typography.landingCaption)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
@@ -202,12 +202,12 @@ struct ModeLandingView: View {
             }
         }
         .disabled(inFlight)
-        .font(.caption)
+        .font(Typography.landingCaption)
         .foregroundStyle(.secondary)
 
         if let refusal = host.rosterRefusals[row.sessionId] {
             Text(refusal)
-                .font(.caption2)
+                .font(Typography.chipLabel)
                 .foregroundStyle(.red)
         }
     }
@@ -223,19 +223,19 @@ struct ModeLandingView: View {
     /// is the click; this is presentational only, so it says what THAT click does).
     private var resumeAffordance: some View {
         Label("Resume", systemImage: "arrow.uturn.left.circle")
-            .font(.caption2.weight(.medium))
+            .font(Typography.chipLabel.weight(.medium))
             .foregroundStyle(.secondary)
     }
 
     private var emptyState: some View {
         VStack(spacing: 10) {
             Image(systemName: mode.systemImage)
-                .font(.system(size: 34, weight: .light))
+                .font(Typography.emptyStateGlyph)
                 .foregroundStyle(.tertiary)
             Text(emptyTitle)
-                .font(.title2)
+                .font(Typography.emptyStateTitle)
             Text(emptyDetail)
-                .font(.callout)
+                .font(Typography.emptyStateSubtitle)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
         }

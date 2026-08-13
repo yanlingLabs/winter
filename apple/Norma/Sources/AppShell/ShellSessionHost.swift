@@ -2046,7 +2046,7 @@ struct ShellSessionView: View {
                                 host.moveToCli(sessionId: sessionId)
                             } label: {
                                 Label("Move to CLI", systemImage: "terminal")
-                                    .font(.system(size: 11, weight: .medium))
+                                    .font(Typography.caption(.medium))
                                     .padding(.horizontal, 8)
                                     .padding(.vertical, 4)
                                     .background(Capsule().fill(.quaternary))
@@ -2085,12 +2085,12 @@ struct ShellSessionUnavailableView: View {
     var body: some View {
         VStack(spacing: 10) {
             Image(systemName: "message")
-                .font(.system(size: 34, weight: .light))
+                .font(Typography.emptyStateGlyph)
                 .foregroundStyle(.tertiary)
             Text("This session isn't open")
-                .font(.title2)
+                .font(Typography.emptyStateTitle)
             Text("Norma couldn't reach the daemon for it. It opens as soon as the connection is back.")
-                .font(.callout)
+                .font(Typography.emptyStateSubtitle)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
         }
@@ -2142,9 +2142,9 @@ struct HopAwayBackgroundBar: View {
                 .foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 1) {
                 Text("\(title) is still running")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(Typography.label(.medium))
                 Text("Keep it going unattended?")
-                    .font(.system(size: 11))
+                    .font(Typography.caption())
                     .foregroundStyle(.secondary)
             }
             Spacer(minLength: 12)

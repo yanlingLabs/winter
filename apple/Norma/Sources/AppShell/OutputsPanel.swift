@@ -293,7 +293,7 @@ struct OutputsPanelContentView: View {
             ForEach(controller.entries) { entry in
                 VStack(alignment: .leading, spacing: 4) {
                     Text(entry.title)
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(Typography.label(.semibold))
                         .lineLimit(1)
                     ForEach(entry.files, id: \.self) { path in
                         Button {
@@ -314,7 +314,7 @@ struct OutputsPanelContentView: View {
                 }
             }
         }
-        .font(.system(size: 11))
+        .font(Typography.caption())
         .padding(12)
         .frame(width: outputsPanelDefaultSize.width, alignment: .leading)
         .fixedSize(horizontal: false, vertical: true)

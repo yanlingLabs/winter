@@ -92,7 +92,7 @@ struct ChatLandingView: View {
                 newChat?()
             } label: {
                 Label("New Chat", systemImage: "plus.circle")
-                    .font(.system(size: 12))
+                    .font(Typography.label())
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
@@ -104,12 +104,12 @@ struct ChatLandingView: View {
     private var emptyState: some View {
         VStack(spacing: 10) {
             Image(systemName: SessionMode.chat.systemImage)
-                .font(.system(size: 34, weight: .light))
+                .font(Typography.emptyStateGlyph)
                 .foregroundStyle(.tertiary)
             Text("No chats yet")
-                .font(.title2)
+                .font(Typography.emptyStateTitle)
             Text(chatLandingEmptyStateSubtitle)
-                .font(.callout)
+                .font(Typography.emptyStateSubtitle)
                 .foregroundStyle(.secondary)
         }
         .padding(32)
@@ -126,11 +126,11 @@ private struct ChatLandingRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(sessionDisplayTitle(row.title))
-                .font(.body)
+                .font(Typography.landingBody)
                 .lineLimit(1)
                 .truncationMode(.middle)
             Text(Date(timeIntervalSince1970: TimeInterval(row.createdAt) / 1000), style: .relative)
-                .font(.caption)
+                .font(Typography.landingCaption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
         }

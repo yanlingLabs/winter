@@ -529,7 +529,7 @@ struct PluginManagerView: View {
         VStack(alignment: .leading, spacing: 0) {
             header
             if let errorText = model.errorText {
-                Text(errorText).foregroundStyle(.red).font(.system(size: 12)).padding(.horizontal)
+                Text(errorText).foregroundStyle(.red).font(Typography.label()).padding(.horizontal)
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
@@ -589,10 +589,10 @@ struct PluginManagerView: View {
     /// the tiles strip / shortcut editor / helper row).
     private var pluginListSection: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text("Installed Plugins").font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary).padding(.horizontal)
+            Text("Installed Plugins").font(Typography.label(.semibold)).foregroundStyle(.secondary).padding(.horizontal)
             if model.rows.isEmpty {
                 Text("No plugins installed")
-                    .font(.system(size: 12))
+                    .font(Typography.label())
                     .foregroundStyle(.secondary)
                     .padding(.horizontal)
             }
@@ -605,7 +605,7 @@ struct PluginManagerView: View {
 
     private var header: some View {
         HStack {
-            Text("Plugins").font(.headline)
+            Text("Plugins").font(Typography.paneTitle)
             Spacer()
             Button("Install Plugin…") { presentInstallPanel() }
                 .disabled(model.installing)
@@ -671,21 +671,21 @@ struct PluginManagerView: View {
         let busy = model.busyName == row.name
         return VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
-                Text(row.name).font(.system(size: 13, weight: .medium))
+                Text(row.name).font(Typography.control(.medium))
                 tierBadge(row.tierBadge)
                 Text(row.version)
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(Typography.captionMono())
                     .foregroundStyle(.secondary)
                 Spacer()
                 statusIndicator(row)
             }
             Text(row.consentText)
-                .font(.system(size: 11))
+                .font(Typography.caption())
                 .foregroundStyle(.secondary)
             HStack(spacing: 10) {
                 ForEach(row.actions, id: \.self) { action in
                     Button(action.title) { Task { await perform(action, on: row.name) } }
-                        .font(.system(size: 12))
+                        .font(Typography.label())
                         .foregroundStyle(action == .remove ? .red : .primary)
                         .disabled(busy)
                 }
@@ -706,7 +706,7 @@ struct PluginManagerView: View {
 
     private func tierBadge(_ text: String) -> some View {
         Text(text)
-            .font(.system(size: 10, weight: .semibold))
+            .font(Typography.tiny(.semibold))
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
             .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(.quaternary))
@@ -720,7 +720,7 @@ struct PluginManagerView: View {
             if let dot = statusDotColor(row.statusColorKind) {
                 Circle().fill(dot).frame(width: 6, height: 6)
             }
-            Text(row.statusText).font(.system(size: 11)).foregroundStyle(.secondary)
+            Text(row.statusText).font(Typography.caption()).foregroundStyle(.secondary)
         }
     }
 

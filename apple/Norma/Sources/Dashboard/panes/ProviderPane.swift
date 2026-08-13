@@ -170,7 +170,7 @@ struct ProviderPane: View {
 
     private var header: some View {
         HStack {
-            Text("AI Provider").font(.headline)
+            Text("AI Provider").font(Typography.paneTitle)
             Spacer()
             Button("Refresh") { Task { await model.refreshStatus() } }
                 .disabled(model.statusLoading)
@@ -179,12 +179,12 @@ struct ProviderPane: View {
 
     private var currentStatus: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("Current provider").font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
+            Text("Current provider").font(Typography.label(.semibold)).foregroundStyle(.secondary)
             if let statusErrorText = model.statusErrorText {
-                Text(statusErrorText).foregroundStyle(.red).font(.system(size: 12))
+                Text(statusErrorText).foregroundStyle(.red).font(Typography.label())
             } else {
                 Text(providerStatusText(providerId: model.providerId, providerModel: model.providerModel))
-                    .font(.system(size: 13, design: .monospaced))
+                    .font(Typography.controlMono())
                     .textSelection(.enabled)
             }
         }
@@ -192,37 +192,37 @@ struct ProviderPane: View {
 
     private var byoKeyForm: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Use your own OpenAI API key").font(.system(size: 13, weight: .semibold))
+            Text("Use your own OpenAI API key").font(Typography.control(.semibold))
             Text("Norma will talk to OpenAI directly with this key. Applying it restarts the daemon so it takes effect immediately.")
-                .font(.system(size: 12))
+                .font(Typography.label())
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("Base URL").font(.system(size: 11)).foregroundStyle(.secondary)
+                Text("Base URL").font(Typography.caption()).foregroundStyle(.secondary)
                 TextField("https://api.openai.com/v1", text: $model.baseUrl)
                     .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12, design: .monospaced))
+                    .font(Typography.labelMono())
             }
             VStack(alignment: .leading, spacing: 4) {
-                Text("API key").font(.system(size: 11)).foregroundStyle(.secondary)
+                Text("API key").font(Typography.caption()).foregroundStyle(.secondary)
                 SecureField("sk-…", text: $model.apiKey)
                     .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12, design: .monospaced))
+                    .font(Typography.labelMono())
             }
             VStack(alignment: .leading, spacing: 4) {
-                Text("Model (optional)").font(.system(size: 11)).foregroundStyle(.secondary)
+                Text("Model (optional)").font(Typography.caption()).foregroundStyle(.secondary)
                 TextField("gpt-4o", text: $model.model)
                     .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12, design: .monospaced))
+                    .font(Typography.labelMono())
             }
 
             if let saveErrorText = model.saveErrorText {
-                Text(saveErrorText).foregroundStyle(.red).font(.system(size: 12))
+                Text(saveErrorText).foregroundStyle(.red).font(Typography.label())
             } else if model.savedConfirmation {
                 Text("Saved — Norma is switching to your API key.")
                     .foregroundStyle(.green)
-                    .font(.system(size: 12))
+                    .font(Typography.label())
             }
 
             HStack {
@@ -244,13 +244,13 @@ struct ProviderPane: View {
 
     private var chatGptSignIn: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Prefer to sign in with ChatGPT?").font(.system(size: 13, weight: .semibold))
+            Text("Prefer to sign in with ChatGPT?").font(Typography.control(.semibold))
             Text("Run this in a terminal:")
-                .font(.system(size: 12))
+                .font(Typography.label())
                 .foregroundStyle(.secondary)
             HStack(spacing: 8) {
                 Text(loginCommand)
-                    .font(.system(size: 12, design: .monospaced))
+                    .font(Typography.labelMono())
                     .textSelection(.enabled)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
@@ -262,7 +262,7 @@ struct ProviderPane: View {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { didCopyLoginCommand = false }
                 } label: {
                     Image(systemName: didCopyLoginCommand ? "checkmark" : "doc.on.doc")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(Typography.caption(.semibold))
                 }
                 .buttonStyle(.plain)
                 .help("Copy")
@@ -272,7 +272,7 @@ struct ProviderPane: View {
 
     private var disclosure: some View {
         Text(normaProviderDisclosureText)
-            .font(.system(size: 11))
+            .font(Typography.caption())
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
     }

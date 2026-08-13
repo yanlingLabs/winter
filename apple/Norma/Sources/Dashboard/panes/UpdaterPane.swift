@@ -22,14 +22,14 @@ struct UpdaterPane: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Updates").font(.headline)
+            Text("Updates").font(Typography.paneTitle)
             VStack(alignment: .leading, spacing: 6) {
                 row("Version", appVersion())
                 row("Channel", updateChannelDisplay(updateChannel()))
             }
             Button("Check for Updates…") { checkForUpdates() }
             Text("Updates install automatically in the background. A ready update offers Restart Now from the menu bar.")
-                .font(.system(size: 11))
+                .font(Typography.caption())
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer()
@@ -45,6 +45,6 @@ struct UpdaterPane: View {
             Text(value)
                 .textSelection(.enabled)
         }
-        .font(.system(size: 12, design: .monospaced))
+        .font(Typography.labelMono())
     }
 }

@@ -212,7 +212,7 @@ struct WorkflowsPane: View {
         VStack(alignment: .leading, spacing: 0) {
             header
             if let errorText = model.errorText {
-                Text(errorText).foregroundStyle(.red).font(.system(size: 12)).padding(.horizontal)
+                Text(errorText).foregroundStyle(.red).font(Typography.label()).padding(.horizontal)
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
@@ -227,7 +227,7 @@ struct WorkflowsPane: View {
 
     private var header: some View {
         HStack {
-            Text("Workflows").font(.headline)
+            Text("Workflows").font(Typography.paneTitle)
             Spacer()
             Button("Refresh") { Task { await model.refresh() } }
                 .disabled(model.loading)
@@ -239,9 +239,9 @@ struct WorkflowsPane: View {
     @ViewBuilder
     private var savedSection: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text("Saved").font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary).padding(.horizontal)
+            Text("Saved").font(Typography.label(.semibold)).foregroundStyle(.secondary).padding(.horizontal)
             if model.saved.isEmpty {
-                Text("No saved workflows").font(.system(size: 12)).foregroundStyle(.secondary).padding(.horizontal)
+                Text("No saved workflows").font(Typography.label()).foregroundStyle(.secondary).padding(.horizontal)
             }
             ForEach(model.saved, id: \.name) { workflow in
                 savedRow(workflow)
@@ -253,11 +253,11 @@ struct WorkflowsPane: View {
         HStack(spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(workflow.name)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(Typography.label(.medium))
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Text(workflow.description)
-                    .font(.system(size: 11))
+                    .font(Typography.caption())
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
             }
@@ -272,9 +272,9 @@ struct WorkflowsPane: View {
     @ViewBuilder
     private var runsSection: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text("Runs").font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary).padding(.horizontal)
+            Text("Runs").font(Typography.label(.semibold)).foregroundStyle(.secondary).padding(.horizontal)
             if model.rows.isEmpty {
-                Text("No workflow runs yet").font(.system(size: 12)).foregroundStyle(.secondary).padding(.horizontal)
+                Text("No workflow runs yet").font(Typography.label()).foregroundStyle(.secondary).padding(.horizontal)
             }
             ForEach(model.rows) { row in
                 runRow(row)
@@ -287,7 +287,7 @@ struct WorkflowsPane: View {
             HStack(spacing: 6) {
                 statusBadge(row.status)
                 Text(row.name ?? row.runId)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(Typography.label(.medium))
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer()
@@ -297,13 +297,13 @@ struct WorkflowsPane: View {
                 }
             }
             if let phase = row.phase {
-                Text(phase).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                Text(phase).font(Typography.caption()).foregroundStyle(.secondary).lineLimit(1)
             }
             Text("\(row.completed)/\(row.total) done · \(row.running) running")
-                .font(.system(size: 11, design: .monospaced))
+                .font(Typography.captionMono())
                 .foregroundStyle(.secondary)
             if let error = row.error {
-                Text(error).font(.system(size: 11)).foregroundStyle(.red).lineLimit(2)
+                Text(error).font(Typography.caption()).foregroundStyle(.red).lineLimit(2)
             }
         }
         .padding(.horizontal, 8)
@@ -317,7 +317,7 @@ struct WorkflowsPane: View {
 
     private func statusBadge(_ status: String) -> some View {
         Text(workflowStatusBadge(status))
-            .font(.system(size: 10, weight: .semibold))
+            .font(Typography.tiny(.semibold))
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
             .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(.quaternary))

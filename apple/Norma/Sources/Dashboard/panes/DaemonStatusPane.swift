@@ -48,7 +48,7 @@ struct DaemonStatusPane: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Daemon Status").font(.headline)
+                Text("Daemon Status").font(Typography.paneTitle)
                 Spacer()
                 Button("Refresh") { Task { await load() } }
                     .disabled(loading)
@@ -63,9 +63,9 @@ struct DaemonStatusPane: View {
                     row("Plugins", display.pluginsCount)
                 }
             } else if let errorText {
-                Text(errorText).foregroundStyle(.red).font(.system(size: 12))
+                Text(errorText).foregroundStyle(.red).font(Typography.label())
             } else {
-                Text("Loading…").foregroundStyle(.secondary).font(.system(size: 12))
+                Text("Loading…").foregroundStyle(.secondary).font(Typography.label())
             }
             Spacer()
         }
@@ -81,7 +81,7 @@ struct DaemonStatusPane: View {
             Text(value)
                 .textSelection(.enabled)
         }
-        .font(.system(size: 12, design: .monospaced))
+        .font(Typography.labelMono())
     }
 
     private func load() async {

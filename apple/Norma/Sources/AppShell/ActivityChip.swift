@@ -69,7 +69,7 @@ struct ActivityChip: View {
                     .fill(activityChipColor(style))
                     .frame(width: 5, height: 5)
                 Text(label)
-                    .font(.caption2.weight(.medium))
+                    .font(Typography.chipLabel.weight(.medium))
                     .foregroundStyle(activityChipColor(style))
             }
         }

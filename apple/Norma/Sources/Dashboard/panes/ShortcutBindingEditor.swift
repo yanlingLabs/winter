@@ -231,7 +231,7 @@ final class KeyCaptureNSView: NSView {
         let text = isCapturing ? "Press a key…" : (label.isEmpty ? "Click to set" : label)
         let attrs: [NSAttributedString.Key: Any] = [
             .foregroundColor: isCapturing ? NSColor.controlAccentColor : NSColor.labelColor,
-            .font: NSFont.systemFont(ofSize: 11),
+            .font: Typography.shortcutKeyNS,
         ]
         let size = text.size(withAttributes: attrs)
         let rect = NSRect(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2, width: size.width, height: size.height)
@@ -270,12 +270,12 @@ struct ShortcutBindingEditor: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Shortcuts").font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
+            Text("Shortcuts").font(Typography.label(.semibold)).foregroundStyle(.secondary)
             if let conflictMessage = model.conflictMessage {
-                Text(conflictMessage).foregroundStyle(.red).font(.system(size: 11))
+                Text(conflictMessage).foregroundStyle(.red).font(Typography.caption())
             }
             if model.rows.isEmpty {
-                Text("No plugin shortcuts declared").font(.system(size: 12)).foregroundStyle(.secondary)
+                Text("No plugin shortcuts declared").font(Typography.label()).foregroundStyle(.secondary)
             } else {
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(model.rows) { row in
@@ -290,9 +290,9 @@ struct ShortcutBindingEditor: View {
     private func shortcutRow(_ row: ShortcutBindingEditorModel.Row) -> some View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
-                Text(row.shortcutId).font(.system(size: 12, weight: .medium))
+                Text(row.shortcutId).font(Typography.label(.medium))
                 if let description = row.description {
-                    Text(description).font(.system(size: 11)).foregroundStyle(.secondary)
+                    Text(description).font(Typography.caption()).foregroundStyle(.secondary)
                 }
             }
             Spacer()

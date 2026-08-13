@@ -400,7 +400,7 @@ struct PanelTabStrip: View {
     private var newTabButton: some View {
         Button(action: onOpenTab) {
             Image(systemName: "plus")
-                .font(.system(size: 12, weight: .semibold))
+                .font(Typography.label(.semibold))
                 .foregroundStyle(Theme.textMuted)
                 .frame(width: panelTabPillSize.height, height: panelTabPillSize.height)
                 .contentShape(Rectangle())
@@ -497,11 +497,11 @@ private struct PanelTabPill: View {
         Button(action: onActivate) {
             ZStack(alignment: .leading) {
                 Image(systemName: panelTabFaviconSystemImage(tab.kind))
-                    .font(.system(size: 11))
+                    .font(Typography.caption())
                     .foregroundStyle(Theme.textMuted)
                     .padding(.leading, 9.5)
                 Text(title)
-                    .font(.system(size: 12))
+                    .font(Typography.label())
                     .lineLimit(1)
                     .truncationMode(.tail)
                     // **live-gate fix J: the title swap must not animate.** Fix E made a parked
@@ -545,7 +545,7 @@ private struct PanelTabPill: View {
         .overlay(alignment: .trailing) {
             Button(action: onClose) {
                 Image(systemName: "xmark")
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(Typography.badge(.semibold))
                     .foregroundStyle(Theme.textMuted)
                     .frame(width: panelTabCloseBoxSize, height: panelTabCloseBoxSize)
                     .contentShape(Rectangle())

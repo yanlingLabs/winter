@@ -154,9 +154,9 @@ struct TilesStripView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Live Tiles").font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
+            Text("Live Tiles").font(Typography.label(.semibold)).foregroundStyle(.secondary)
             if model.tiles.isEmpty {
-                Text("No live tiles").font(.system(size: 12)).foregroundStyle(.secondary)
+                Text("No live tiles").font(Typography.label()).foregroundStyle(.secondary)
             } else {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(alignment: .top, spacing: 10) {
@@ -175,14 +175,14 @@ struct TilesStripView: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 4) {
                 if let icon = tile.data.icon {
-                    Image(systemName: icon).font(.system(size: 12)).foregroundStyle(.secondary)
+                    Image(systemName: icon).font(Typography.label()).foregroundStyle(.secondary)
                 }
                 Text(tile.data.title)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(Typography.label(.medium))
                     .lineLimit(1)
             }
             if let value = tile.data.value {
-                Text(value).font(.system(size: 16, weight: .semibold))
+                Text(value).font(Typography.heading(.semibold))
             }
             if let progress = tile.data.progress {
                 ProgressView(value: min(max(progress, 0), 1))
@@ -193,7 +193,7 @@ struct TilesStripView: View {
                         Button(action.label) {
                             Task { await model.fireAction(pluginId: tile.pluginId, actionId: action.id) }
                         }
-                        .font(.system(size: 11))
+                        .font(Typography.caption())
                     }
                 }
             }

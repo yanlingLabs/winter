@@ -335,7 +335,7 @@ struct PanelWebChrome: View {
         // advertising a feature that was not built is worse than a narrower true one.
         TextField("Enter a web address", text: $text)
             .textFieldStyle(.plain)
-            .font(.system(size: 12))
+            .font(Typography.label())
             .multilineTextAlignment(.center)   // the spec's measured "centre-aligned, not leading"
             .foregroundStyle(refused ? AnyShapeStyle(.red) : AnyShapeStyle(.primary))
             .focused($fieldFocused)
@@ -373,7 +373,7 @@ struct PanelWebChrome: View {
             .disabled(!PanelURLPolicy.isAllowed(model.url))
         } label: {
             Image(systemName: "ellipsis")
-                .font(.system(size: 13, weight: .medium))
+                .font(Typography.control(.medium))
                 .foregroundStyle(Theme.textMuted)
                 .frame(width: panelChromeButtonSize, height: panelChromeButtonSize)
                 .contentShape(Rectangle())

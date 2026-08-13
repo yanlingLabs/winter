@@ -982,7 +982,7 @@ struct TranscriptToolGroupRow: View {
             // so the "emphasis" the old comment claimed was not being drawn at all.
             if !isExpanded, let summary = toolRunFailureSummary(entries) {
                 Text(summary)
-                    .font(Typography.caption())
+                    .font(Typography.captionMono())
                     .foregroundStyle(.primary)
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -1007,7 +1007,7 @@ struct TranscriptToolGroupRow: View {
                             .lineLimit(1)
                             .truncationMode(.middle)
                     }
-                    .font(Typography.caption())
+                    .font(Typography.captionMono())
                     .foregroundStyle(Theme.textMuted)
 
                     if let output = line.output {
@@ -1050,7 +1050,7 @@ struct TranscriptToolGroupRow: View {
     private func outputBlock(_ preview: ToolOutputPreview) -> some View {
         blockChrome {
             Text(preview.text.isEmpty ? "No output" : preview.text)
-                .font(Typography.caption())
+                .font(Typography.captionMono())
                 .foregroundStyle(preview.text.isEmpty
                                  ? AnyShapeStyle(Theme.textMuted) : AnyShapeStyle(.primary))
                 .textSelection(.enabled)
@@ -1071,7 +1071,7 @@ struct TranscriptToolGroupRow: View {
     private func placeholderBlock(_ text: String) -> some View {
         blockChrome {
             Text(text)
-                .font(Typography.caption())
+                .font(Typography.captionMono())
                 .foregroundStyle(Theme.textMuted)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }

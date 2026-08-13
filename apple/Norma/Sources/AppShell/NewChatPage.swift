@@ -128,9 +128,10 @@ let newChatComposerPlaceholder = "How can I help you today?"
 
 /// ONE size for everything the composer slot renders — the live text, its placeholder, and the
 /// held draft shown while a create is in flight. They must agree or the text changes size the
-/// moment you type, or the moment you send. 16 pt, not the component's default 14: on this page
-/// the composer IS the subject rather than a strip under a transcript (user call, 2026-08-07).
-let newChatComposerFontSize: CGFloat = 16
+/// moment you type, or the moment you send. `Typography.headingSize` (16), not the component's
+/// default `bodySize` (14): on this page the composer IS the subject rather than a strip under a
+/// transcript (user call, 2026-08-07).
+let newChatComposerFontSize: CGFloat = Typography.headingSize
 
 /// PURE: whether this page is showing its COWORK shape — today, the idea list in place of the
 /// starter chips (`NewChatPage.starters`).
@@ -222,9 +223,9 @@ struct NewChatStarterChip: View {
         Button(action: action) {
             HStack(spacing: 7) {
                 Image(systemName: starter.systemImage)
-                    .font(.system(size: 12))
+                    .font(Typography.label())
                 Text(starter.title)
-                    .font(.system(size: 13))
+                    .font(Typography.control())
             }
             .foregroundStyle(isHovered ? AnyShapeStyle(Theme.accent) : AnyShapeStyle(.primary))
             .padding(.horizontal, 14)
@@ -260,16 +261,16 @@ struct NewChatIdeaRow: View {
         Button(action: action) {
             HStack(spacing: 12) {
                 Image(systemName: idea.systemImage)
-                    .font(.system(size: 15))
+                    .font(Typography.bodyLarge())
                     .foregroundStyle(isHovered ? AnyShapeStyle(Theme.accent)
                                                : AnyShapeStyle(Theme.textMuted))
                     .frame(width: 22)
                 Text(idea.title)
-                    .font(.system(size: 14))
+                    .font(Typography.body())
                     .foregroundStyle(.primary)
                 Spacer(minLength: 12)
                 Text(SessionMode.cowork.title)
-                    .font(.system(size: 12))
+                    .font(Typography.label())
                     .foregroundStyle(Theme.textMuted)
             }
             .padding(.horizontal, 12)
@@ -292,12 +293,12 @@ struct NewChatIdeaRow: View {
 struct NewChatControlButton: View {
     let systemImage: String
     let label: String
-    var size: CGFloat = 13
+    var font: Font = Typography.control(.medium)
 
     var body: some View {
         Button {} label: {
             Image(systemName: systemImage)
-                .font(.system(size: size, weight: .medium))
+                .font(font)
                 .foregroundStyle(Theme.textMuted)
                 .frame(width: 26, height: 26)
                 .contentShape(Rectangle())
@@ -332,16 +333,16 @@ struct NewChatControlChip: View {
         Button { action?() } label: {
             HStack(spacing: 7) {
                 Image(systemName: systemImage)
-                    .font(.system(size: 13))
+                    .font(Typography.control())
                     .foregroundStyle(Theme.textMuted)
                 // PRIMARY, not muted, and at the control row's own size — these are CONTROLS you
                 // would click, and the reference sets them as such. Muted 11 pt read as captions
                 // sitting under the composer rather than as pickers.
                 Text(title)
-                    .font(.system(size: 14))
+                    .font(Typography.body())
                     .foregroundStyle(titleStyle)
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(Typography.badge(.semibold))
                     .foregroundStyle(Theme.textMuted)
             }
             .padding(.horizontal, 8)
@@ -429,7 +430,7 @@ struct NewChatPage: View {
             // the page never navigates on failure (`sendFirstChatMessage`'s own contract).
             if case .failed(let message) = host.newChatCreate {
                 Text(message)
-                    .font(.callout)
+                    .font(Typography.emptyStateSubtitle)
                     .foregroundStyle(.red)
                     .multilineTextAlignment(.center)
             }
@@ -510,7 +511,7 @@ struct NewChatPage: View {
     private var coworkIdeas: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text("Ideas for you")
-                .font(.system(size: 13))
+                .font(Typography.control())
                 .foregroundStyle(Theme.textMuted)
                 .padding(.horizontal, 12)
                 .padding(.bottom, 6)

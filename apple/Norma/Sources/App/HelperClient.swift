@@ -69,14 +69,14 @@ struct HelperApprovalRow: View {
         let display = helperStatusDisplay(helperClient.status)
         return HStack {
             Text(display.stateText)
-                .font(.system(size: 12))
+                .font(Typography.label())
                 .foregroundStyle(.secondary)
             Spacer()
             if display.showsOpenSettingsButton {
                 Button("Open System Settings") {
                     SMAppService.openSystemSettingsLoginItems()
                 }
-                .font(.system(size: 12))
+                .font(Typography.label())
             }
         }
     }

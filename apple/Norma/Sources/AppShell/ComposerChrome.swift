@@ -384,7 +384,7 @@ struct ComposerPolicyChip: View {
             .popover(isPresented: $showingMenu, arrowEdge: .top) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Approval mode")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(Typography.caption(.semibold))
                         .foregroundStyle(.secondary)
                         .padding(.bottom, 4)
                     ForEach(row.offers, id: \.self) { policy in
@@ -450,12 +450,12 @@ struct CoworkComposerStrip: View {
             if !announcement.isEmpty {
                 HStack(spacing: 6) {
                     Image(systemName: "sparkles")
-                        .font(.system(size: 11))
+                        .font(Typography.caption())
                     Text(announcement)
                         .lineLimit(1)
                         .truncationMode(.tail)
                 }
-                .font(.system(size: 13))
+                .font(Typography.control())
                 .foregroundStyle(Theme.textMuted)
             }
         }
@@ -485,7 +485,7 @@ struct ComposerModeSegment: View {
                     withAnimation(.easeInOut(duration: 0.24)) { context.mode.wrappedValue = option }
                 } label: {
                     Text(option.title)
-                        .font(.system(size: 14, weight: isSelected ? .medium : .regular))
+                        .font(Typography.body(isSelected ? .medium : .regular))
                         .foregroundStyle(isSelected ? AnyShapeStyle(.primary)
                                                     : AnyShapeStyle(Theme.textMuted))
                         .padding(.horizontal, 10)

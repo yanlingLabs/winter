@@ -81,6 +81,9 @@ enum Typography {
     static let morphTrafficGlyph: Font = sans(8.5, .bold)
     /// The question card's read-only preview pane — monospaced at the system body style.
     static let questionPreviewMono: Font = .system(.body, design: .monospaced)
+    /// The composer's attach (+) glyph — 17 pt, one step past `heading`: glyph geometry, not a
+    /// text step, and the SAME 17 the iOS composer draws its primary glyphs at.
+    static let composerAttachGlyph: Font = sans(17, .medium)
 
     // MARK: Semantic passthroughs
 

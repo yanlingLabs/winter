@@ -229,7 +229,7 @@ struct DashboardSurface: View {
                 ForEach(dashboardPaneGroups) { group in
                     VStack(alignment: .leading, spacing: 2) {
                         Text(group.title.uppercased())
-                            .font(.caption2.weight(.semibold))
+                            .font(Typography.chipLabel.weight(.semibold))
                             .foregroundStyle(.secondary)
                             .padding(.horizontal, 8)
                             .padding(.bottom, 2)
@@ -247,10 +247,10 @@ struct DashboardSurface: View {
         let isCurrent = pane == selection.selection
         return HStack(spacing: 6) {
             Image(systemName: dashboardPaneSystemImage(pane))
-                .font(.system(size: 12))
+                .font(Typography.label())
                 .frame(width: 16)
             Text(dashboardPaneTitle(pane))
-                .font(.system(size: 12))
+                .font(Typography.label())
             Spacer()
         }
         .foregroundStyle(isCurrent ? .primary : .secondary)

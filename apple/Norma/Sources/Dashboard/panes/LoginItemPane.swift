@@ -13,7 +13,7 @@ struct LoginItemPane: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Launch at Login").font(.headline)
+            Text("Launch at Login").font(Typography.paneTitle)
             Toggle("Launch Norma at login", isOn: Binding(
                 get: { enabled },
                 set: { newValue in
@@ -22,7 +22,7 @@ struct LoginItemPane: View {
                 }
             ))
             Text("Norma starts automatically when you log in — the same setting as the menu bar's own checkbox.")
-                .font(.system(size: 11))
+                .font(Typography.caption())
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer()

@@ -221,7 +221,7 @@ struct MemoryPane: View {
         VStack(alignment: .leading, spacing: 0) {
             header
             if let errorText = model.errorText {
-                Text(errorText).foregroundStyle(.red).font(.system(size: 12)).padding(.horizontal)
+                Text(errorText).foregroundStyle(.red).font(Typography.label()).padding(.horizontal)
             }
             HStack(spacing: 0) {
                 factList
@@ -256,7 +256,7 @@ struct MemoryPane: View {
 
     private var header: some View {
         HStack {
-            Text("Memory").font(.headline)
+            Text("Memory").font(Typography.paneTitle)
             Spacer()
             Button("Refresh") { Task { await model.refresh(); await model.loadAudit() } }
                 .disabled(model.loading)
@@ -270,7 +270,7 @@ struct MemoryPane: View {
             VStack(alignment: .leading, spacing: 2) {
                 if model.facts.isEmpty {
                     Text("No memory facts")
-                        .font(.system(size: 12))
+                        .font(Typography.label())
                         .foregroundStyle(.secondary)
                         .padding(.horizontal)
                 }
@@ -287,14 +287,14 @@ struct MemoryPane: View {
         return VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
                 Text(fact.name)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(Typography.label(.medium))
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer(minLength: 4)
                 typeBadge(fact.type)
             }
             Text(fact.description)
-                .font(.system(size: 11))
+                .font(Typography.caption())
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
         }
@@ -311,7 +311,7 @@ struct MemoryPane: View {
 
     private func typeBadge(_ type: String) -> some View {
         Text(memoryTypeBadge(type))
-            .font(.system(size: 10, weight: .semibold))
+            .font(Typography.tiny(.semibold))
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
             .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(.quaternary))
@@ -322,16 +322,16 @@ struct MemoryPane: View {
     private var detailSection: some View {
         if model.selectedName == nil {
             Text("Select a fact to view or edit it")
-                .font(.system(size: 12))
+                .font(Typography.label())
                 .foregroundStyle(.secondary)
                 .padding()
         } else if model.detailLoading {
             Text("Loading…")
-                .font(.system(size: 12))
+                .font(Typography.label())
                 .foregroundStyle(.secondary)
                 .padding()
         } else if let detailErrorText = model.detailErrorText {
-            Text(detailErrorText).foregroundStyle(.red).font(.system(size: 12)).padding()
+            Text(detailErrorText).foregroundStyle(.red).font(Typography.label()).padding()
         } else if model.detail != nil {
             factDetail
         }
@@ -340,7 +340,7 @@ struct MemoryPane: View {
     private var factDetail: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text(model.selectedName ?? "").font(.system(size: 13, weight: .semibold))
+                Text(model.selectedName ?? "").font(Typography.control(.semibold))
                 typeBadge(model.detail?.type ?? "user")
                 Spacer()
                 Button("Delete") { confirmingDeleteName = model.selectedName }
@@ -351,9 +351,9 @@ struct MemoryPane: View {
             }
             TextField("Description", text: $model.editedDescription)
                 .textFieldStyle(.roundedBorder)
-                .font(.system(size: 12))
+                .font(Typography.label())
             TextEditor(text: $model.editedBody)
-                .font(.system(size: 12, design: .monospaced))
+                .font(Typography.labelMono())
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(.quaternary))
         }
@@ -367,8 +367,8 @@ struct MemoryPane: View {
             } label: {
                 HStack {
                     Image(systemName: model.auditExpanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 10))
-                    Text("Recent changes").font(.system(size: 12, weight: .semibold))
+                        .font(Typography.tiny())
+                    Text("Recent changes").font(Typography.label(.semibold))
                     Spacer()
                 }
                 .contentShape(Rectangle())
@@ -376,9 +376,9 @@ struct MemoryPane: View {
             .buttonStyle(.plain)
             if model.auditExpanded {
                 if let auditErrorText = model.auditErrorText {
-                    Text(auditErrorText).foregroundStyle(.red).font(.system(size: 11))
+                    Text(auditErrorText).foregroundStyle(.red).font(Typography.caption())
                 } else if model.auditLines.isEmpty {
-                    Text("No recent changes").font(.system(size: 11)).foregroundStyle(.secondary)
+                    Text("No recent changes").font(Typography.caption()).foregroundStyle(.secondary)
                 } else {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 2) {
@@ -400,16 +400,16 @@ struct MemoryPane: View {
     private func auditRow(_ line: MemoryAuditLine) -> some View {
         HStack(spacing: 6) {
             Text(Date(timeIntervalSince1970: TimeInterval(line.ts) / 1000), style: .relative)
-                .font(.system(size: 11, design: .monospaced))
+                .font(Typography.captionMono())
                 .foregroundStyle(.secondary)
             Text(line.action)
-                .font(.system(size: 11, weight: .medium))
+                .font(Typography.caption(.medium))
             Text(line.name)
-                .font(.system(size: 11, design: .monospaced))
+                .font(Typography.captionMono())
                 .lineLimit(1)
             Spacer()
             Text(line.source)
-                .font(.system(size: 10))
+                .font(Typography.tiny())
                 .foregroundStyle(.secondary)
         }
     }

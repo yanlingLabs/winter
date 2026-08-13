@@ -71,7 +71,7 @@ struct OutputsBox: View {
         VStack(alignment: .leading, spacing: 6) {
             Divider().opacity(0.5)
             Text("Outputs (\(files.count))")
-                .font(.system(size: 11, weight: .semibold))
+                .font(Typography.caption(.semibold))
                 .foregroundStyle(.secondary)
             ForEach(files, id: \.path) { file in
                 Button {
@@ -90,7 +90,7 @@ struct OutputsBox: View {
                 .buttonStyle(.plain)
             }
         }
-        .font(.system(size: 11))
+        .font(Typography.caption())
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

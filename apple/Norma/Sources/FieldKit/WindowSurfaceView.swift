@@ -177,7 +177,7 @@ struct MacTrafficLights: View {
                 Circle().strokeBorder(Color.black.opacity(0.12), lineWidth: 0.5)
                 if hovering {
                     Image(systemName: glyph)
-                        .font(.system(size: 8.5, weight: .bold))
+                        .font(Typography.morphTrafficGlyph)
                         .foregroundStyle(Self.glyphColor)
                 }
             }

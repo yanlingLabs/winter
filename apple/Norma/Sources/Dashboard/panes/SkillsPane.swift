@@ -224,7 +224,7 @@ struct SkillsPane: View {
         VStack(alignment: .leading, spacing: 0) {
             header
             if let errorText = model.errorText {
-                Text(errorText).foregroundStyle(.red).font(.system(size: 12)).padding(.horizontal)
+                Text(errorText).foregroundStyle(.red).font(Typography.label()).padding(.horizontal)
             }
             HStack(spacing: 0) {
                 skillList
@@ -256,7 +256,7 @@ struct SkillsPane: View {
 
     private var header: some View {
         HStack {
-            Text("Skills").font(.headline)
+            Text("Skills").font(Typography.paneTitle)
             Spacer()
             Button("Refresh") { Task { await model.refresh() } }
                 .disabled(model.loading)
@@ -270,14 +270,14 @@ struct SkillsPane: View {
             VStack(alignment: .leading, spacing: 4) {
                 if model.skills.isEmpty {
                     Text("No skills")
-                        .font(.system(size: 12))
+                        .font(Typography.label())
                         .foregroundStyle(.secondary)
                         .padding(.horizontal)
                 }
                 ForEach(skillsGroupedBySource(model.skills), id: \.source) { group in
                     VStack(alignment: .leading, spacing: 2) {
                         Text(skillSourceBadge(group.source).uppercased())
-                            .font(.system(size: 10, weight: .semibold))
+                            .font(Typography.tiny(.semibold))
                             .foregroundStyle(.secondary)
                             .padding(.horizontal, 8)
                             .padding(.top, 6)
@@ -296,7 +296,7 @@ struct SkillsPane: View {
         return VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
                 Text(skill.name)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(Typography.label(.medium))
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer(minLength: 4)
@@ -305,7 +305,7 @@ struct SkillsPane: View {
                 }
             }
             Text(skill.description)
-                .font(.system(size: 11))
+                .font(Typography.caption())
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
         }
@@ -324,7 +324,7 @@ struct SkillsPane: View {
     /// practice, always "norma": `SkillStore.writeSelf` stamps it on every self-authored skill).
     private func authorMarker(_ author: String) -> some View {
         Text("author: \(author)")
-            .font(.system(size: 9, weight: .semibold))
+            .font(Typography.badge(.semibold))
             .padding(.horizontal, 5)
             .padding(.vertical, 1)
             .background(RoundedRectangle(cornerRadius: 3, style: .continuous).fill(.quaternary))
@@ -333,7 +333,7 @@ struct SkillsPane: View {
 
     private func sourceBadge(_ source: String) -> some View {
         Text(skillSourceBadge(source))
-            .font(.system(size: 10, weight: .semibold))
+            .font(Typography.tiny(.semibold))
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
             .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(.quaternary))
@@ -344,16 +344,16 @@ struct SkillsPane: View {
     private var detailSection: some View {
         if model.selectedName == nil {
             Text("Select a skill to view it")
-                .font(.system(size: 12))
+                .font(Typography.label())
                 .foregroundStyle(.secondary)
                 .padding()
         } else if model.detailLoading {
             Text("Loading…")
-                .font(.system(size: 12))
+                .font(Typography.label())
                 .foregroundStyle(.secondary)
                 .padding()
         } else if let detailErrorText = model.detailErrorText {
-            Text(detailErrorText).foregroundStyle(.red).font(.system(size: 12)).padding()
+            Text(detailErrorText).foregroundStyle(.red).font(Typography.label()).padding()
         } else if model.detail != nil {
             if model.isSelectedSelf {
                 editableSkillDetail
@@ -368,16 +368,16 @@ struct SkillsPane: View {
     private var readOnlySkillDetail: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text(model.selectedName ?? "").font(.system(size: 13, weight: .semibold))
+                Text(model.selectedName ?? "").font(Typography.control(.semibold))
                 sourceBadge(model.detail?.source ?? "")
                 Spacer()
             }
             Text(model.detail?.description ?? "")
-                .font(.system(size: 12))
+                .font(Typography.label())
                 .foregroundStyle(.secondary)
             ScrollView {
                 Text(model.detail?.body ?? "")
-                    .font(.system(size: 12, design: .monospaced))
+                    .font(Typography.labelMono())
                     .frame(maxWidth: .infinity, alignment: .topLeading)
                     .padding(8)
             }
@@ -392,7 +392,7 @@ struct SkillsPane: View {
     private var editableSkillDetail: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text(model.selectedName ?? "").font(.system(size: 13, weight: .semibold))
+                Text(model.selectedName ?? "").font(Typography.control(.semibold))
                 sourceBadge(model.detail?.source ?? "self")
                 Spacer()
                 Button("Delete") { confirmingDeleteName = model.selectedName }
@@ -403,9 +403,9 @@ struct SkillsPane: View {
             }
             TextField("Description", text: $model.editedDescription)
                 .textFieldStyle(.roundedBorder)
-                .font(.system(size: 12))
+                .font(Typography.label())
             TextEditor(text: $model.editedBody)
-                .font(.system(size: 12, design: .monospaced))
+                .font(Typography.labelMono())
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(.quaternary))
         }

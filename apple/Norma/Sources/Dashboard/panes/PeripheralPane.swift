@@ -31,7 +31,7 @@ struct PeripheralPane: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Peripheral").font(.headline)
+                Text("Peripheral").font(Typography.paneTitle)
                 Spacer()
                 Button("Panic") { provider.panic() }
                     .foregroundStyle(.red)
@@ -40,19 +40,19 @@ struct PeripheralPane: View {
             HelperApprovalRow(helperClient: helperClient)
             Divider()
             if provider.activeLeases.isEmpty {
-                Text("No active leases").font(.system(size: 12)).foregroundStyle(.secondary)
+                Text("No active leases").font(Typography.label()).foregroundStyle(.secondary)
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 8) {
                         ForEach(provider.activeLeases) { lease in
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(lease.class)
-                                    .font(.system(size: 13, weight: .medium))
+                                    .font(Typography.control(.medium))
                                 Text(holderDisplay(kind: lease.holder.kind, id: lease.holder.id))
-                                    .font(.system(size: 11, design: .monospaced))
+                                    .font(Typography.captionMono())
                                     .foregroundStyle(.secondary)
                                 Text(peripheralLeaseAgeText(expiresAt: lease.expiresAt, nowMs: Int(Date().timeIntervalSince1970 * 1000)))
-                                    .font(.system(size: 11))
+                                    .font(Typography.caption())
                                     .foregroundStyle(.secondary)
                             }
                         }

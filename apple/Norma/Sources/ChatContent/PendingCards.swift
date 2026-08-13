@@ -653,7 +653,7 @@ struct ResolvedApprovalBody: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(summary)
-                .font(Typography.label())
+                .font(Typography.labelMono())
                 .foregroundStyle(.secondary)
                 .lineLimit(8)
                 .truncationMode(.middle)
@@ -1035,7 +1035,7 @@ private struct PendingApprovalBody: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(summary)
-                .font(Typography.label())
+                .font(Typography.labelMono())
                 .foregroundStyle(.secondary)
                 .lineLimit(draft.isSummaryExpanded ? nil : 3)
                 .truncationMode(.middle)

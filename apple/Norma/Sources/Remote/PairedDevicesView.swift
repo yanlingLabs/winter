@@ -40,14 +40,14 @@ struct PairedDevicesView: View {
             if let errorText {
                 Text(errorText)
                     .foregroundStyle(.red)
-                    .font(.system(size: 12))
+                    .font(Typography.label())
                     .padding(.horizontal)
                     .padding(.bottom, 4)
             }
             if sortedRecords.isEmpty {
                 Spacer()
                 Text("No paired devices")
-                    .font(.system(size: 12))
+                    .font(Typography.label())
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity)
                 Spacer()
@@ -80,7 +80,7 @@ struct PairedDevicesView: View {
 
     private var header: some View {
         HStack {
-            Text("Paired Devices").font(.headline)
+            Text("Paired Devices").font(Typography.paneTitle)
             Spacer()
             Button("Pair a Device…") { onPairDevice() }
             Button("Refresh") { Task { await load() } }
@@ -96,9 +96,9 @@ struct PairedDevicesView: View {
     private func row(for record: PairRecord) -> some View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
-                Text(record.label).font(.system(size: 13))
+                Text(record.label).font(Typography.control())
                 Text("epoch \(record.pairingEpoch) · last seen \(relativeLastSeen(epochSeconds: record.lastSeenAt))")
-                    .font(.system(size: 11))
+                    .font(Typography.caption())
                     .foregroundStyle(.secondary)
             }
             Spacer()

@@ -89,9 +89,9 @@ struct ConsentSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("\(state.pluginName) requests consent")
-                .font(.headline)
+                .font(Typography.paneTitle)
             Text("Granting consent lets this plugin run the following, verbatim, on this Mac. Review it before continuing.")
-                .font(.system(size: 12))
+                .font(Typography.label())
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -99,7 +99,7 @@ struct ConsentSheet: View {
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(Array(state.consentBlock.enumerated()), id: \.offset) { _, line in
                         Text(line)
-                            .font(.system(size: 12, design: .monospaced))
+                            .font(Typography.labelMono())
                             .textSelection(.enabled)
                     }
                 }

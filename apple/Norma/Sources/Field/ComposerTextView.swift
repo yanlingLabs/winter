@@ -44,7 +44,7 @@ struct ComposerTextView: NSViewRepresentable {
     ///
     /// Anything drawing a PLACEHOLDER over this composer must use the same value, or the text
     /// changes size the moment you type.
-    var fontSize: CGFloat = 14
+    var fontSize: CGFloat = Typography.bodySize
     /// Task 6 (FieldFocus): virtual-focus keyboard chain, consulted first by
     /// `CommandTextView.doCommand(by:)` on ↑/↓/Enter — returning `true` means consumed (the
     /// pre-existing Enter/Shift+Enter contract does NOT run). Defaults `nil` so the chat window's
@@ -63,7 +63,7 @@ struct ComposerTextView: NSViewRepresentable {
     func makeNSView(context: Context) -> NSScrollView {
         let textView = CommandTextView()
         textView.delegate = context.coordinator
-        textView.font = .systemFont(ofSize: fontSize)
+        textView.font = Typography.sansNS(ofSize: fontSize)
         // GATE-3 FIX (F2): this composer is rendered inside `NormaFieldView.composerOrResponseContent`,
         // which is wrapped in `.modifier(GlassForegroundLegibility())` — `.blendMode(.difference)`
         // against the glass surface beneath (see that type + `GlassChromeColor`'s doc). Difference
@@ -85,7 +85,7 @@ struct ComposerTextView: NSViewRepresentable {
         textView.isVerticallyResizable = true
         textView.autoresizingMask = [.width]
         textView.typingAttributes = [
-            .font: textView.font ?? .systemFont(ofSize: fontSize),
+            .font: textView.font ?? Typography.sansNS(ofSize: fontSize),
             .foregroundColor: usesAdaptiveColors ? NSColor.labelColor : NSColor.white
         ]
         // The caret is NORMA'S accent (user call, 2026-08-07 — every cursor in the app one colour),
@@ -138,7 +138,7 @@ struct ComposerTextView: NSViewRepresentable {
         // Keep the live view in step if the size changes across an update — otherwise the font
         // would be whatever `makeNSView` happened to set the first time this view was built.
         if textView.font?.pointSize != fontSize {
-            textView.font = .systemFont(ofSize: fontSize)
+            textView.font = Typography.sansNS(ofSize: fontSize)
         }
         if textView.string != text {
             textView.string = text

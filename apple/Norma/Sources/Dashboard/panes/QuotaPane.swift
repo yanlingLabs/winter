@@ -40,20 +40,20 @@ struct QuotaPane: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Quota").font(.headline)
+                Text("Quota").font(Typography.paneTitle)
                 Spacer()
                 Button("Refresh") { Task { await load() } }
                     .disabled(loading)
             }
             if let display {
-                Text(display.statusLine).font(.system(size: 13, weight: .medium))
+                Text(display.statusLine).font(Typography.control(.medium))
                 Text(display.tokensLine)
-                    .font(.system(size: 12, design: .monospaced))
+                    .font(Typography.labelMono())
                     .foregroundStyle(.secondary)
             } else if let errorText {
-                Text(errorText).foregroundStyle(.red).font(.system(size: 12))
+                Text(errorText).foregroundStyle(.red).font(Typography.label())
             } else {
-                Text("Loading…").foregroundStyle(.secondary).font(.system(size: 12))
+                Text("Loading…").foregroundStyle(.secondary).font(Typography.label())
             }
             Spacer()
         }

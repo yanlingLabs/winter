@@ -45,7 +45,7 @@ struct FileViewer: View {
     private var header: some View {
         HStack(spacing: 10) {
             Text(url.lastPathComponent)
-                .font(.system(size: 12, weight: .medium))
+                .font(Typography.label(.medium))
                 .foregroundStyle(.primary)
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -70,7 +70,7 @@ struct FileViewer: View {
             .buttonStyle(.plain)
             .help("Close")
         }
-        .font(.system(size: 12))
+        .font(Typography.label())
         .foregroundStyle(.secondary)
         .padding(10)
     }
@@ -95,7 +95,7 @@ private struct TextFileContent: View {
         if let text = try? String(contentsOf: url, encoding: .utf8) {
             ScrollView {
                 Text(text)
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(Typography.captionMono())
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(10)
