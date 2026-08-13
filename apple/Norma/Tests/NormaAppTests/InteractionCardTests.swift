@@ -244,6 +244,38 @@ final class InteractionCardTests: XCTestCase {
         }
     }
 
+    // MARK: - The question card's type ladder (ported from iOS by ratio)
+
+    /// **The question is set at the transcript's own prose size**, which is iOS's relationship
+    /// (`.body` for both) and the one the Mac did not have: it was 14 — the USER's message size —
+    /// so Norma's question was in the user's register wearing her serif face.
+    ///
+    /// Asserted as a DERIVATION, not a value. `QuestionCardType.question` reads
+    /// `transcriptProseMetrics(.assistant)`, so changing the prose ladder moves the question with
+    /// it; a test that said `== 15.5` would pass while the two silently drifted apart.
+    func testTheQuestionIsSetAtTheTranscriptsOwnProseSize() {
+        XCTAssertEqual(QuestionCardType.question, transcriptProseMetrics(.assistant).bodySize,
+                       "a question is Norma talking — it belongs in her prose register, not a step under it")
+        XCTAssertNotEqual(QuestionCardType.question, transcriptProseMetrics(.sans).bodySize,
+                          "and specifically NOT the user's message size, which is what it used to be")
+    }
+
+    /// The steps under it, as iOS's ratios against `.body` (17) rather than its point values —
+    /// copying 17/16/13/12 onto a 15.5 ladder would have made the card larger than its own prose.
+    func testTheLadderUnderTheQuestionKeepsIOSsProportions() {
+        let prose = QuestionCardType.question
+        XCTAssertEqual(QuestionCardType.option / prose, 16.0 / 17.0, accuracy: 0.02,
+                       "option label ≈ iOS .callout")
+        XCTAssertEqual(QuestionCardType.secondary / prose, 13.0 / 17.0, accuracy: 0.02,
+                       "descriptions and notes ≈ iOS .footnote")
+        XCTAssertEqual(QuestionCardType.pill / prose, 12.0 / 17.0, accuracy: 0.03,
+                       "header chips ≈ iOS .caption")
+        // Descending, with no two steps collapsed into one — the hierarchy is the point.
+        XCTAssertGreaterThan(prose, QuestionCardType.option)
+        XCTAssertGreaterThan(QuestionCardType.option, QuestionCardType.secondary)
+        XCTAssertGreaterThan(QuestionCardType.secondary, QuestionCardType.pill)
+    }
+
     // MARK: - The answered-question deck (iOS SP-ask-stack)
 
     /// Modular in BOTH directions and with no ends — cycling past the last card returns to the

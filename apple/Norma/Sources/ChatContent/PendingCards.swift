@@ -795,7 +795,7 @@ struct ResolvedQuestionBody: View {
                 VStack(alignment: .leading, spacing: 6) {
                     if questionShowsHeaderChip(question, questionCount: questions.count) {
                         Text(question.header ?? "")
-                            .font(.system(size: 11, weight: .semibold))
+                            .font(.system(size: QuestionCardType.pill, weight: .semibold))
                             .foregroundStyle(.secondary)
                     }
                     // Norma's voice, so it wears Norma's voice — the assistant-prose serif register
@@ -805,14 +805,14 @@ struct ResolvedQuestionBody: View {
                     // the user's word, and the two registers are what make the card read as a
                     // dialogue rather than a form.
                     Text(question.question)
-                        .font(Font(Theme.assistantProse(size: 14, weight: .regular)))
+                        .font(Font(Theme.assistantProse(size: QuestionCardType.question, weight: .regular)))
                         .foregroundStyle(.primary)
 
                     answerRows(for: question)
 
                     if let note = recorded.notes[question.question], !note.isEmpty {
                         Text(note)
-                            .font(.system(size: 11))
+                            .font(.system(size: QuestionCardType.secondary))
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -878,12 +878,12 @@ struct ResolvedQuestionBody: View {
     private func chosenRow(glyph: String, text: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
             Text(text)
-                .font(.system(size: 13))
+                .font(.system(size: QuestionCardType.option))
                 .foregroundStyle(.primary)
                 .textSelection(.enabled)
             Spacer(minLength: 8)
             Image(systemName: glyph)
-                .font(.system(size: 13, weight: .medium))
+                .font(.system(size: QuestionCardType.option, weight: .medium))
                 .foregroundStyle(Theme.accent)
                 .frame(width: 20, alignment: .center)
                 .accessibilityHidden(true)   // decorative; the answer text carries the meaning
@@ -1162,6 +1162,29 @@ func questionMorphsTheComposer(_ record: InteractionRecord, closed: Set<String> 
     return interactionIsPending(record)
 }
 
+// MARK: - The question card's type ladder (ported from iOS by RATIO, 2026-08-13)
+
+/// iOS sets a question at the transcript's own prose size and steps everything under it down from
+/// there; the Mac had the whole card a register lower, with the question at 14 — which is the
+/// USER's message size, not Norma's. So her question was set in the user's register while wearing
+/// her serif face, the one place the two crossed.
+///
+/// Ported as RATIOS against `.body` (17 at the default Dynamic Type size), not as point values:
+/// copying 17/16/13/12 onto a 15.5 pt Mac ladder would have made the card larger than the prose
+/// around it. Rounded to the half points this file already uses.
+enum QuestionCardType {
+    /// **Derived, not written down**: the question IS the transcript's assistant prose size (iOS
+    /// ratio 1.00). Reading it from `transcriptProseMetrics` is what makes that an invariant rather
+    /// than two constants that happen to agree today — change the prose ladder and this follows.
+    static var question: CGFloat { transcriptProseMetrics(.assistant).bodySize }
+    /// iOS `.callout`, 16/17 = 0.94 → 14.5. The option label and a frozen card's answer row.
+    static let option: CGFloat = 14.5
+    /// iOS `.footnote`, 13/17 = 0.76 → 12. Option descriptions and notes.
+    static let secondary: CGFloat = 12
+    /// iOS `.caption`, 12/17 = 0.71 → 11. Header chips and pills — already this value.
+    static let pill: CGFloat = 11
+}
+
 /// The action row's control height — "thicker" than a stock button (user call), and one number for
 /// all three so the circles are round against the capsule rather than merely near it. iOS's is 50 on
 /// a touch target; 44 is this shell's equivalent at pointer scale.
@@ -1266,7 +1289,7 @@ struct PendingQuestionBody: View {
                     Button { draft.visibleQuestion = i } label: {
                         HStack(spacing: 4) {
                             Text(pendingQuestionPillLabel(questions[i], index: i))
-                                .font(.system(size: 11, weight: .medium))
+                                .font(.system(size: QuestionCardType.pill, weight: .medium))
                                 .lineLimit(1)
                             if answered {
                                 Image(systemName: "checkmark").font(.system(size: 9, weight: .semibold))
@@ -1418,7 +1441,7 @@ private struct QuestionBlock: View {
             // Same serif register as the frozen card's question (see `ResolvedQuestionBody`) — the
             // pending and answered forms of one question must not speak in two different voices.
             Text(question.question)
-                .font(Font(Theme.assistantProse(size: 14, weight: .regular)))
+                .font(Font(Theme.assistantProse(size: QuestionCardType.question, weight: .regular)))
                 .foregroundStyle(.primary)
 
             if showsPreviewPane {
@@ -1506,7 +1529,7 @@ private struct QuestionBlock: View {
                 optionLabel(option, isSelected: isSelected)
                 Spacer(minLength: 8)
                 Image(systemName: "checkmark")
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.system(size: QuestionCardType.option, weight: .medium))
                     .foregroundStyle(Theme.accent)
                     .opacity(isSelected ? 1 : 0)
                     .frame(width: 28, alignment: .center)
@@ -1529,11 +1552,11 @@ private struct QuestionBlock: View {
             // "this one", and a second signal on the same row made the chosen option shout while
             // its siblings whispered. Weight is for hierarchy — label over description — not state.
             Text(option.label)
-                .font(.system(size: 13))
+                .font(.system(size: QuestionCardType.option))
                 .foregroundStyle(.primary)
             if let description = option.description, !description.isEmpty {
                 Text(description)
-                    .font(.system(size: 11))
+                    .font(.system(size: QuestionCardType.secondary))
                     .foregroundStyle(.secondary)
             }
         }
@@ -1546,17 +1569,17 @@ private struct QuestionBlock: View {
         // both halves of a question's life.
         HStack(spacing: 8) {
             Image(systemName: "pencil")
-                .font(.system(size: 12))
+                .font(.system(size: QuestionCardType.secondary))
                 .foregroundStyle(.secondary)
             if isOtherExpanded {
                 TextField("Other…", text: Binding(get: { otherText }, set: onOtherTextChange))
                     .textFieldStyle(.plain)
-                    .font(.system(size: 13))
+                    .font(.system(size: QuestionCardType.option))
                     .disabled(isInFlight)
             } else {
                 Button("Other…", action: onExpandOther)
                     .buttonStyle(.plain)
-                    .font(.system(size: 13))
+                    .font(.system(size: QuestionCardType.option))
                     .foregroundStyle(.secondary)
                     .disabled(isInFlight)
                 Spacer(minLength: 0)
@@ -1577,7 +1600,7 @@ private struct QuestionBlock: View {
         // which is a `.primary`-weight answer, not a hint.
         TextField("Add a note (optional)", text: Binding(get: { noteText }, set: onNoteTextChange))
             .textFieldStyle(.roundedBorder)
-            .font(.system(size: 12))
+            .font(.system(size: QuestionCardType.secondary))
             .disabled(isInFlight)
     }
 }
