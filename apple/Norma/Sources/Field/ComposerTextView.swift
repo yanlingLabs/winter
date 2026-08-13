@@ -29,6 +29,17 @@ struct ComposerTextView: NSViewRepresentable {
     static let textContainerInset = NSSize(width: 2, height: 4)
     static let lineFragmentPadding: CGFloat = 0
 
+    /// The measured content height of a TWO-line draft at the composer's bound size — the
+    /// threshold family for "has the draft grown past a couple of lines" checks
+    /// (`NormaFieldView.showsClearButton`). Derived from the live face so a ladder change
+    /// moves it with the text it measures: heights jump a whole line at a time, so any
+    /// consumer comparing `> twoLineContentHeight` fires exactly when the third line arrives,
+    /// at every ladder.
+    static var twoLineContentHeight: CGFloat {
+        NSLayoutManager().defaultLineHeight(for: Typography.sansNS(ofSize: Typography.composerFieldSize)) * 2
+            + textContainerInset.height * 2
+    }
+
     @Binding var text: String
     var onSubmit: () -> Void
     var onContentHeightChange: (CGFloat) -> Void = { _ in }
@@ -40,11 +51,10 @@ struct ComposerTextView: NSViewRepresentable {
     var usesAdaptiveColors: Bool = false
     /// The typed text's point size. The default is BOUND to the user-message size (ruling
     /// 2026-08-13: the composer types at the size the sent bubble renders, derived from the
-    /// same live metrics, so the two can never diverge). The new-chat page's former 16-pt
-    /// opt-up is retired by the same ruling; the one surviving override is the ORB FIELD,
-    /// which passes `Typography.bodySize` explicitly — its pill height is measured from the
-    /// text content, so the bound size would move the resting field by +1 pt, and the field's
-    /// geometry is ruled stable (held pending that answer; `docs/brand.md` § 4.6).
+    /// same live metrics, so the two can never diverge). NO home overrides it any more: the
+    /// new-chat page's 16-pt opt-up and the orb field's brief hold-at-14 were both retired by
+    /// rulings the same day (the final one accepting the orb's +1 pt resting-height
+    /// consequence) — `TypographyTests` pins that the orb passes no override at all.
     ///
     /// Anything drawing a PLACEHOLDER over this composer must use the same value, or the text
     /// changes size the moment you type.

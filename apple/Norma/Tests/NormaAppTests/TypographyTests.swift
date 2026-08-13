@@ -468,7 +468,7 @@ final class TypographyTests: XCTestCase {
                 count += code.components(separatedBy: token).count - 1
             }
         }
-        XCTAssertEqual(count, 21,
+        XCTAssertEqual(count, 22,
             "the token files' font-construction count moved — if you added a role, § 4.7's "
             + "checklist first (doc row + mapping in TypographyTests), then update this pin")
     }
@@ -488,37 +488,60 @@ final class TypographyTests: XCTestCase {
         XCTAssertEqual(Typography.composerFieldSize, transcriptProseMetrics(.sans).bodySize)
         XCTAssertEqual(Typography.composerField(), .system(size: transcriptProseMetrics(.sans).bodySize,
                                                            weight: .regular))
-        // The orb's message roles derive from the transcript roles.
+        // The orb's message roles derive from the transcript roles — and the reply takes the
+        // transcript's FACE as well as its size (final 2026-08-13 ruling: "font style and
+        // size"): Theme.assistantProse serif, same spelling as the token builds.
         XCTAssertEqual(Typography.fieldUserMessage(.medium),
                        .system(size: transcriptProseMetrics(.sans).bodySize, weight: .medium))
         XCTAssertEqual(Typography.fieldAssistantMessage(),
-                       .system(size: transcriptProseMetrics(.assistant).bodySize, weight: .regular))
+                       Font(Theme.assistantProse(size: transcriptProseMetrics(.assistant).bodySize,
+                                                 weight: .regular)))
+        // …and the face is REALLY the serif (the Font-equality above is a wiring pin; this is
+        // the behavioural half — the same NSFont the token wraps resolves to the serif family).
+        XCTAssertTrue(Theme.assistantProse(size: transcriptProseMetrics(.assistant).bodySize,
+                                           weight: .regular).fontName.contains("NewYork"),
+                      "the field reply's face must be the transcript's New York serif")
         // The inline-code re-coupling was a WIRING change with zero rendered delta — both
         // halves stated: derived AND still the 13.5 this surface always drew.
         XCTAssertEqual(Typography.fieldInlineCodeNS.pointSize,
                        transcriptProseMetrics(.sans).codeSize(for: transcriptProseMetrics(.sans).bodySize))
         XCTAssertEqual(Typography.fieldInlineCodeNS.pointSize, 13.5)
 
-        // The ONE recorded exception (brand.md § 4.6): the orb field's own composer is HELD at
-        // the chrome body size pending the geometry ruling — its pill height is measured from
-        // text content, so the bound size would move the resting field by +1 pt. A wiring pin
-        // on the explicit override, so the hold cannot drift away silently in either direction.
+        // The hold-at-14 this test briefly pinned is RETIRED (final 2026-08-13 ruling: the
+        // orb types at the bound size too, +1 pt resting consequence accepted). The pin's
+        // replacement asserts the retirement: the orb passes NO fontSize override at all —
+        // the component's bound default is what reaches the pill — and its placeholder
+        // renders at the same bound role.
         let fieldSource = try String(
             contentsOf: sourceRoot().appendingPathComponent("FieldKit/NormaFieldView.swift"),
             encoding: .utf8)
-        XCTAssertEqual(fieldSource.components(separatedBy: "fontSize: Typography.bodySize").count - 1, 1,
-                       "the orb composer's HELD size override moved — that hold has its own § 4.6 "
-                       + "entry and only the geometry ruling may change it")
+        let fieldCode = fieldSource.components(separatedBy: "\n")
+            .filter { !$0.drop(while: { $0 == " " || $0 == "\t" }).hasPrefix("//") }
+            .joined(separator: "\n")
+        XCTAssertEqual(fieldCode.components(separatedBy: "fontSize:").count - 1, 0,
+                       "the orb composer must take the BOUND default — an override reopens the "
+                       + "hold the final 2026-08-13 ruling retired (brand.md § 4.6)")
+        XCTAssertEqual(fieldCode.components(separatedBy: "Typography.composerField()").count - 1, 1,
+                       "the orb placeholder must render at the bound composer role")
+        // The clear-button threshold derives from the live face — the drift fence on its
+        // formula, so the next ladder change moves it WITH the text it measures.
+        XCTAssertEqual(ComposerTextView.twoLineContentHeight,
+                       NSLayoutManager().defaultLineHeight(
+                           for: Typography.sansNS(ofSize: Typography.composerFieldSize)) * 2
+                           + ComposerTextView.textContainerInset.height * 2)
     }
 
-    /// The constraint binding both rulings: the orb field's GEOMETRY is independent of the
-    /// type system. (a) The geometry side — MorphModel, WindowSurfaceGeometry, everything in
-    /// Orb/ — never references a type token or a font metric (source scan, comments stripped;
-    /// `.xHeight`-style members are matched with their dot so `composerMaxHeight` cannot
-    /// false-positive). (b) The clamps text lays out INSIDE are literals, value-pinned. What
-    /// this deliberately does NOT freeze: the pill's grow-with-typing height BETWEEN the
-    /// clamps, which is measured text content by v1 design — the § 4.6 hold covers the one
-    /// font-size input into that mechanism.
+    /// Rewritten for the final 2026-08-13 ruling, honestly rather than weakened: the PANEL
+    /// half survives intact — the frame clamps and everything on the window-geometry side
+    /// (MorphModel, WindowSurfaceGeometry, all of Orb/) never reference a type token or a
+    /// font metric (source scan, comments stripped; `.xHeight`-style members are matched with
+    /// their dot so `composerMaxHeight` cannot false-positive), and the clamps text lays out
+    /// INSIDE are literals, value-pinned. The TYPING surface's content height, by contrast,
+    /// is now DELIBERATELY type-derived — the ruling accepted the +1 pt resting-field
+    /// consequence — and that is pinned as a positive assertion in
+    /// `testComposerAndOrbMessageTextAreBoundToTheTranscript` (the bound default, the bound
+    /// placeholder, and the threshold formula that moves with the ladder), not exempted here
+    /// with no replacement.
     func testOrbGeometryIsIndependentOfTheTypeSystem() throws {
         let geometryFiles = try appSources().filter { url in
             url.path.contains("/Orb/")

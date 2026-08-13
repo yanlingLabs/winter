@@ -770,12 +770,12 @@ struct NormaFieldView: View {
                 text: adapter.draftBinding,
                 onSubmit: { adapter.onSubmit(adapter.composerDraft) },
                 onContentHeightChange: { height in composerContentHeight = height },
-                // HELD at the chrome body size, deliberately NOT the bound composerFieldSize
-                // (2026-08-13): this pill's height is measured from the text content, so the
-                // bound 15.5 would move the resting field by +1 pt (line 17 -> 18, measured) —
-                // and the field's geometry is ruled stable. Recorded in brand.md § 4.6 as the
-                // open question; change ONLY with that ruling. TypographyTests pins this hold.
-                fontSize: Typography.bodySize,
+                // The hold-at-14 that briefly lived here is RETIRED by the final 2026-08-13
+                // ruling ("the orb should type at 15.5 as well make it bound to the user
+                // message transcript"): no override, so the component's BOUND default
+                // (Typography.composerFieldSize, the live user-message size) applies — the
+                // user accepted the quantified geometry consequence (resting field 47 -> 48,
+                // wider grow steps). TypographyTests pins the absence of any override.
                 onFocusKey: { key, first, last in
                     let r = resolveFieldFocusKey(current: adapter.focusedElement, key: key,
                                                  caretAtFirstLine: first, caretAtLastLine: last)
@@ -797,7 +797,7 @@ struct NormaFieldView: View {
                     // glyph render ~2pt right / 4pt down from there, so the placeholder visibly
                     // overlapped the caret (user report: "placeholder overlapping the caret").
                     Text("Ask Norma…")
-                        .font(Typography.body())  // matches the HELD composer size above
+                        .font(Typography.composerField())  // the placeholder follows the field
                         .foregroundStyle(.white.opacity(0.5)) // difference-blend-safe placeholder
                         .padding(.leading, ComposerTextView.textContainerInset.width
                             + ComposerTextView.lineFragmentPadding)
@@ -815,7 +815,12 @@ struct NormaFieldView: View {
         let hasText = !adapter.composerDraft
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .isEmpty
-        return hasText && composerContentHeight >= 55
+        // "The draft has grown past two lines." This was `>= 55`, a magic number in 17-pt
+        // line-height units that the 2026-08-13 typing-size ruling would have silently
+        // retuned (content heights jump discretely per line, so any value strictly between
+        // the 2- and 3-line heights encodes the same moment). Re-derived from the live face
+        // so the NEXT ladder change cannot shift its meaning either.
+        return hasText && composerContentHeight > ComposerTextView.twoLineContentHeight
     }
 
     /// v2's inline-response shell (`Field/FieldView.swift`'s `inlineResponse`), ported into v1's

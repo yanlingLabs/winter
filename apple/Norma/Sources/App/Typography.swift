@@ -138,11 +138,9 @@ enum Typography {
     /// metrics, so a ladder change moves the typing surface and the sent bubble together and a
     /// type-then-send size jump is structurally impossible, not just currently absent.
     ///
-    /// The ONE composer that does not take this is the orb field's own (`NormaFieldView`
-    /// passes `Typography.bodySize` explicitly): its pill height derives from measured text
-    /// content, so binding it would move the resting field by +1 pt (line height 17 → 18,
-    /// measured) — and the field's geometry is ruled stable. HELD pending that answer;
-    /// recorded in `docs/brand.md` § 4.6 and pinned by `TypographyTests`.
+    /// EVERY composer takes this, the orb field's own included — its brief hold-at-14 (the
+    /// pill's content-measured height meant binding moved the resting field 47 → 48 pt) was
+    /// retired by the final 2026-08-13 ruling, which accepted exactly that consequence.
     static var composerFieldSize: CGFloat { transcriptProseMetrics(.sans).bodySize }
 
     /// The composer's typing face at the bound size — also the placeholder and the held-draft
@@ -158,9 +156,14 @@ enum Typography {
         sans(transcriptProseMetrics(.sans).bodySize, weight)
     }
 
-    /// The orb field's reply text — bound to the assistant's transcript size, same terms.
-    static func fieldAssistantMessage(_ weight: Font.Weight = .regular) -> Font {
-        sans(transcriptProseMetrics(.assistant).bodySize, weight)
+    /// The orb field's reply text — the Mac transcript's assistant voice, FACE AND SIZE
+    /// (final 2026-08-13 ruling: "the assistant reply should also use the same font the mac
+    /// app uses font style and size"): `Theme.assistantProse` serif at the assistant role's
+    /// size. An extension of serif allowlist binding #4's surface — the field reply is Norma
+    /// speaking — recorded in `docs/brand.md` § 4.2. New York under the field's
+    /// difference-blend law is a visual-gate item; only eyes can check glass legibility.
+    static func fieldAssistantMessage(_ weight: NSFont.Weight = .regular) -> Font {
+        Font(Theme.assistantProse(size: transcriptProseMetrics(.assistant).bodySize, weight: weight))
     }
     /// The shortcut recorder's key-cap legend.
     static let shortcutKeyNS: NSFont = sansNS(ofSize: captionSize)
