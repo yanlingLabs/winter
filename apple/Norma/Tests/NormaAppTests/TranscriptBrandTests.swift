@@ -53,6 +53,19 @@ final class TranscriptBrandTests: XCTestCase {
         "DiffAdded": ("1F7A3D", "4CC38A", 1, 1),
         "DiffAddedWash": ("22C55E", "22C55E", 0.10, 0.16),
         "DiffRemovedWash": ("EF4444", "EF4444", 0.10, 0.16),
+        // diff-tabs Task 12 — the five panel-kind tints (Mac-only: the panel strip has no iOS
+        // surface). Same hue both appearances; only the alpha differs. The dark alpha is the
+        // brief's uniform 14% provisional, unchanged, for all five. The LIGHT alpha is the
+        // brief's uniform 8% provisional ONLY for `document`/`note` — `web`/`code`/`diff` were
+        // measured to drown `RowHover`'s hover cue at 8% (as low as 1.009:1) and are tuned down
+        // to where the hover delta and the wash's own visibility against `CardSurface` are equal,
+        // the best either can do given those two tokens are fixed. `docs/brand.md` § 3.7
+        // publishes every ratio and the identity behind the floor.
+        "PanelKindWebTint": ("3B82F6", "3B82F6", 0.047, 0.14),
+        "PanelKindDocumentTint": ("F59E0B", "F59E0B", 0.08, 0.14),
+        "PanelKindCodeTint": ("8B5CF6", "8B5CF6", 0.044, 0.14),
+        "PanelKindNoteTint": ("EAB308", "EAB308", 0.08, 0.14),
+        "PanelKindDiffTint": ("22C55E", "22C55E", 0.064, 0.14),
     ]
 
     /// The catalog IS the palette brand.md publishes. `SidebarBrandTests` already pins that every
