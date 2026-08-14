@@ -1,9 +1,10 @@
 // In-repo Myers line diff. No dependency on purpose (repo constraint).
 // `patch` is hunk sections only — the diff store's header line owns file metadata.
+// Trace memory capped at DIFF_TRACE_BUDGET_BYTES; beyond it the non-common middle degrades to whole-replace.
 
 export interface LineDiff { patch: string; added: number; removed: number; hunkCount: number }
 
-const MAX_DIFF_LINES = 30_000; // O(ND) guard: past this, emit whole-file replace
+const DIFF_TRACE_BUDGET_BYTES = 32 * 1024 * 1024; // 32 MB budget for trace snapshots
 
 interface Line { text: string; eol: boolean } // eol=false only ever on the last line
 
@@ -20,47 +21,91 @@ function splitLines(s: string): Line[] {
 
 type Op = { tag: "eq" | "del" | "ins"; a?: number; b?: number };
 
+function linesEqual(a: Line, b: Line): boolean {
+  return a.text === b.text && a.eol === b.eol;
+}
+
 function myersOps(a: Line[], b: Line[]): Op[] {
-  // Standard O(ND) greedy with trace; falls back to replace-everything when huge.
-  const N = a.length, M = b.length;
-  if (N + M > MAX_DIFF_LINES * 2) {
-    const ops: Op[] = [];
-    for (let i = 0; i < N; i++) ops.push({ tag: "del", a: i });
-    for (let j = 0; j < M; j++) ops.push({ tag: "ins", b: j });
-    return ops;
+  // Handle empty input.
+  if (a.length === 0 && b.length === 0) return [];
+
+  // Compute prefix: leading equal lines.
+  let prefix = 0;
+  while (prefix < a.length && prefix < b.length && linesEqual(a[prefix]!, b[prefix]!)) {
+    prefix++;
   }
+
+  // Compute suffix: trailing equal lines, capped to not overlap prefix.
+  let suffix = 0;
+  const maxSuffix = Math.max(0, Math.min(a.length, b.length) - prefix);
+  while (suffix < maxSuffix && linesEqual(a[a.length - 1 - suffix]!, b[b.length - 1 - suffix]!)) {
+    suffix++;
+  }
+
+  // Extract middle slices.
+  const aMid = a.slice(prefix, a.length - suffix);
+  const bMid = b.slice(prefix, b.length - suffix);
+
+  // Standard O(ND) greedy with trace on the middle; falls back to replace-everything when memory-constrained.
+  const N = aMid.length, M = bMid.length;
   const max = N + M;
+  const snapshotBytes = 4 * (2 * (N + M) + 1);
+  const maxD = Math.max(64, Math.floor(DIFF_TRACE_BUDGET_BYTES / Math.max(1, snapshotBytes)));
+
   const offset = max;
   let v = new Int32Array(2 * max + 1);
   const trace: Int32Array[] = [];
-  outer: for (let d = 0; d <= max; d++) {
+  let reachedEnd = false;
+  outer: for (let d = 0; d <= maxD && d <= max; d++) {
     trace.push(v.slice());
     for (let k = -d; k <= d; k += 2) {
       let x = (k === -d || (k !== d && v[offset + k - 1]! < v[offset + k + 1]!))
         ? v[offset + k + 1]!
         : v[offset + k - 1]! + 1;
       let y = x - k;
-      while (x < N && y < M && a[x]!.text === b[y]!.text && a[x]!.eol === b[y]!.eol) { x++; y++; }
+      while (x < N && y < M && linesEqual(aMid[x]!, bMid[y]!)) { x++; y++; }
       v[offset + k] = x;
-      if (x >= N && y >= M) { trace.push(v.slice()); break outer; }
+      if (x >= N && y >= M) { trace.push(v.slice()); reachedEnd = true; break outer; }
     }
   }
-  // Backtrack.
+
+  // If memory budget exhausted, fall back to whole-file replace for the middle region.
   const ops: Op[] = [];
-  let x = N, y = M;
-  for (let d = trace.length - 2; d >= 0 && (x > 0 || y > 0); d--) {
-    const vd = trace[d]!;
-    const k = x - y;
-    const prevK = (k === -d || (k !== d && vd[offset + k - 1]! < vd[offset + k + 1]!)) ? k + 1 : k - 1;
-    const prevX = vd[offset + prevK]!;
-    const prevY = prevX - prevK;
-    while (x > prevX && y > prevY) { x--; y--; ops.push({ tag: "eq", a: x, b: y }); }
-    if (d > 0) {
-      if (x === prevX) { y--; ops.push({ tag: "ins", b: y }); }
-      else { x--; ops.push({ tag: "del", a: x }); }
+  if (!reachedEnd) {
+    // Whole-file replace: all dels then all inss on the middle region.
+    for (let i = 0; i < N; i++) ops.push({ tag: "del", a: prefix + i });
+    for (let j = 0; j < M; j++) ops.push({ tag: "ins", b: prefix + j });
+  } else {
+    // Backtrack.
+    let x = N, y = M;
+    for (let d = trace.length - 2; d >= 0 && (x > 0 || y > 0); d--) {
+      const vd = trace[d]!;
+      const k = x - y;
+      const prevK = (k === -d || (k !== d && vd[offset + k - 1]! < vd[offset + k + 1]!)) ? k + 1 : k - 1;
+      const prevX = vd[offset + prevK]!;
+      const prevY = prevX - prevK;
+      while (x > prevX && y > prevY) { x--; y--; ops.push({ tag: "eq", a: prefix + x, b: prefix + y }); }
+      if (d > 0) {
+        if (x === prevX) { y--; ops.push({ tag: "ins", b: prefix + y }); }
+        else { x--; ops.push({ tag: "del", a: prefix + x }); }
+      }
     }
+    ops.reverse();
   }
-  return ops.reverse();
+
+  // Add prefix context: last `context` lines from prefix as eq ops.
+  // Add suffix context: first `context` lines from suffix as eq ops.
+  // This ensures context lines from trim boundaries are available for hunk grouping.
+  const prefixContextOps: Op[] = [];
+  for (let i = Math.max(0, prefix - 3); i < prefix; i++) {
+    prefixContextOps.push({ tag: "eq", a: i, b: i });
+  }
+  const suffixContextOps: Op[] = [];
+  for (let i = 0; i < Math.min(3, suffix); i++) {
+    suffixContextOps.push({ tag: "eq", a: a.length - suffix + i, b: b.length - suffix + i });
+  }
+
+  return [...prefixContextOps, ...ops, ...suffixContextOps];
 }
 
 function renderLine(prefix: string, line: Line): string {
