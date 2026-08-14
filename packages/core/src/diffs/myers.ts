@@ -25,10 +25,7 @@ function linesEqual(a: Line, b: Line): boolean {
   return a.text === b.text && a.eol === b.eol;
 }
 
-function myersOps(a: Line[], b: Line[]): Op[] {
-  // Handle empty input.
-  if (a.length === 0 && b.length === 0) return [];
-
+function myersOps(a: Line[], b: Line[], context: number): Op[] {
   // Compute prefix: leading equal lines.
   let prefix = 0;
   while (prefix < a.length && prefix < b.length && linesEqual(a[prefix]!, b[prefix]!)) {
@@ -45,6 +42,9 @@ function myersOps(a: Line[], b: Line[]): Op[] {
   // Extract middle slices.
   const aMid = a.slice(prefix, a.length - suffix);
   const bMid = b.slice(prefix, b.length - suffix);
+
+  // Handle empty middle after trimming.
+  if (aMid.length === 0 && bMid.length === 0) return [];
 
   // Standard O(ND) greedy with trace on the middle; falls back to replace-everything when memory-constrained.
   const N = aMid.length, M = bMid.length;
@@ -97,11 +97,11 @@ function myersOps(a: Line[], b: Line[]): Op[] {
   // Add suffix context: first `context` lines from suffix as eq ops.
   // This ensures context lines from trim boundaries are available for hunk grouping.
   const prefixContextOps: Op[] = [];
-  for (let i = Math.max(0, prefix - 3); i < prefix; i++) {
+  for (let i = Math.max(0, prefix - context); i < prefix; i++) {
     prefixContextOps.push({ tag: "eq", a: i, b: i });
   }
   const suffixContextOps: Op[] = [];
-  for (let i = 0; i < Math.min(3, suffix); i++) {
+  for (let i = 0; i < Math.min(context, suffix); i++) {
     suffixContextOps.push({ tag: "eq", a: a.length - suffix + i, b: b.length - suffix + i });
   }
 
@@ -114,7 +114,7 @@ function renderLine(prefix: string, line: Line): string {
 
 export function computeLineDiff(before: string, after: string, context = 3): LineDiff {
   const a = splitLines(before), b = splitLines(after);
-  const ops = myersOps(a, b);
+  const ops = myersOps(a, b, context);
   if (!ops.some((o) => o.tag !== "eq")) return { patch: "", added: 0, removed: 0, hunkCount: 0 };
 
   // Group ops into hunks: a hunk is a run of changes plus `context` eq-lines either side;

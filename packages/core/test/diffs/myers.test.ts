@@ -70,6 +70,18 @@ describe("computeLineDiff", () => {
     expect(d.patch).toBe("@@ -2,3 +2,3 @@\n 2\n-3\n+X\n 4\n");
   });
 
+  test("context: 5 respects requested context at trim boundaries", () => {
+    // 20-line shared prefix + 1 changed line + 20-line shared suffix
+    const prefix = Array.from({ length: 20 }, (_, i) => `pre_${i}`).join("\n") + "\n";
+    const before = prefix + "CHANGE\n" + Array.from({ length: 20 }, (_, i) => `post_${i}`).join("\n") + "\n";
+    const after = prefix + "MODIFIED\n" + Array.from({ length: 20 }, (_, i) => `post_${i}`).join("\n") + "\n";
+    const d = computeLineDiff(before, after, 5);
+    expect(d.added).toBe(1); expect(d.removed).toBe(1); expect(d.hunkCount).toBe(1);
+    // Hunk header should show exactly 5 context lines before and after the change.
+    // Change is at line 21 (1-indexed), so with 5 context: lines 16-26 = 11 lines total
+    expect(d.patch).toBe("@@ -16,11 +16,11 @@\n pre_15\n pre_16\n pre_17\n pre_18\n pre_19\n-CHANGE\n+MODIFIED\n post_0\n post_1\n post_2\n post_3\n post_4\n");
+  });
+
   test("large file with single small change stays cheap and exact", () => {
     const lines = Array.from({ length: 50_000 }, (_, i) => String(i));
     const before = lines.join("\n") + "\n";
@@ -92,9 +104,9 @@ describe("computeLineDiff", () => {
     expect(d.hunkCount).toBe(1);
   });
 
-  test("property: diff produces consistent counts across 200 randomized trials", () => {
-    // Generate random before/after, compute diff, verify counts are consistent with patch content.
-    const contextValues = [0, 1, 3];
+  test("property: diff round-trips correctly across 200 randomized trials", () => {
+    // Generate random before/after, compute diff, apply patch, verify reconstruction equals after.
+    const contextValues = [0, 1, 3, 5];
     let trialCount = 0;
 
     for (let trial = 0; trial < 200; trial++) {
@@ -137,64 +149,121 @@ describe("computeLineDiff", () => {
       const hunkCount = (d.patch.match(/^@@/gm) ?? []).length;
       expect(d.hunkCount).toBe(hunkCount);
 
+      // Round-trip: apply patch to before and verify we get after.
+      const applied = applyPatch(before, d.patch);
+      expect(applied).toBe(after);
+
       trialCount++;
     }
     expect(trialCount).toBe(200);
   });
 });
 
-// Helper: parse and apply a unified diff patch.
+// Helper: parse and apply a unified diff patch, reconstructing the target.
+// Properly handles zero-count headers, cumulative offsets across hunks, and per-line eol flags.
 function applyPatch(before: string, patch: string): string {
   if (patch === "") return before;
 
-  // Split before into lines, tracking if it ends with a newline.
-  const beforeLines = before.length === 0
-    ? []
-    : before.endsWith("\n")
-      ? before.slice(0, -1).split("\n")
-      : before.split("\n");
-
-  let lines = beforeLines.slice();
-
-  // Split patch into hunks.
-  const hunkMatches = Array.from(patch.matchAll(/@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@([^\n]*)\n/g));
-
-  for (const match of hunkMatches) {
-    const aStart = parseInt(match[1]!, 10) - 1; // Convert to 0-indexed
-    const bStart = parseInt(match[3]!, 10) - 1;
-
-    // Find the body of this hunk (from end of header to start of next hunk or end).
-    const hunkStartIdx = match.index + match[0].length;
-    const nextHunkIdx = patch.indexOf("\n@@", hunkStartIdx);
-    const hunkEndIdx = nextHunkIdx === -1 ? patch.length : nextHunkIdx;
-    const hunkBody = patch.slice(hunkStartIdx, hunkEndIdx);
-    const hunkLines = hunkBody.split("\n");
-
-    // Process hunk lines.
-    let lineIdx = aStart;
-    for (const line of hunkLines) {
-      if (line === "") continue;
-      if (line === "\\ No newline at end of file") continue;
-
-      const op = line[0];
-      const content = line.slice(1);
-
-      if (op === " ") {
-        // Context line
-        lineIdx++;
-      } else if (op === "-") {
-        // Deletion
-        lines.splice(lineIdx, 1);
-      } else if (op === "+") {
-        // Addition
-        lines.splice(lineIdx, 0, content);
-        lineIdx++;
+  // Split before into lines. Lines preserve their text; we track eol separately.
+  interface LineData { text: string; eol: boolean }
+  const beforeLines: LineData[] = [];
+  if (before.length > 0) {
+    let start = 0;
+    for (let i = 0; i < before.length; i++) {
+      if (before[i] === "\n") {
+        beforeLines.push({ text: before.slice(start, i), eol: true });
+        start = i + 1;
       }
+    }
+    if (start < before.length) {
+      beforeLines.push({ text: before.slice(start), eol: false });
     }
   }
 
-  // Reconstruct: join with newlines, add final newline if before had one or lines exist.
-  if (lines.length === 0) return "";
-  return lines.join("\n") + "\n";
+  let lines = beforeLines.slice();
+  let cumOffset = 0; // Cumulative offset across hunks due to adds/removes.
+
+  // Parse and apply each hunk.
+  const hunkMatches = Array.from(patch.matchAll(/@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/g));
+
+  for (const match of hunkMatches) {
+    const a = parseInt(match[1]!, 10);
+    const aCount = parseInt(match[2] || "1", 10);
+    const cCount = parseInt(match[4] || "1", 10);
+
+    // Determine the starting index for this hunk in the current working copy.
+    // If aCount === 0, it's an insertion after line a (0-indexed: position = a + cumOffset).
+    // Otherwise, start at line a (0-indexed: position = (a - 1) + cumOffset).
+    const startIdx = (aCount === 0 ? a : a - 1) + cumOffset;
+
+    // Extract hunk body (from end of header to start of next hunk or end).
+    const hunkEndInPatch = match.index + match[0].length;
+    const nextHunkMatch = hunkMatches[hunkMatches.indexOf(match) + 1];
+    const nextHunkIdx = nextHunkMatch ? patch.indexOf("@@", nextHunkMatch.index) : patch.length;
+    const bodyEndIdx = nextHunkIdx === -1 ? patch.length : patch.lastIndexOf("\n", nextHunkIdx - 1);
+    const hunkBodyStr = patch.slice(hunkEndInPatch, bodyEndIdx).trimEnd();
+    const bodyLines = hunkBodyStr.split("\n");
+
+    // Apply hunk lines to the working copy.
+    let lineIdx = startIdx;
+    let hunkAdded = 0, hunkRemoved = 0;
+    let lastLineHasNoEol = false;
+
+    for (let i = 0; i < bodyLines.length; i++) {
+      const bodyLine = bodyLines[i]!;
+      if (bodyLine === "") continue;
+      if (bodyLine === "\\ No newline at end of file") {
+        lastLineHasNoEol = true;
+        continue;
+      }
+
+      const op = bodyLine[0];
+      const content = bodyLine.slice(1);
+
+      if (op === " ") {
+        // Context line: must match the working copy.
+        if (lineIdx < lines.length) {
+          const workingLine = lines[lineIdx]!;
+          // Context line text must match (eol flag handled separately).
+          if (workingLine.text !== content) {
+            throw new Error(`Context mismatch at line ${lineIdx + 1}: expected "${content}", got "${workingLine.text}"`);
+          }
+        }
+        lineIdx++;
+      } else if (op === "-") {
+        // Deletion: remove from working copy.
+        if (lineIdx < lines.length) {
+          const workingLine = lines[lineIdx]!;
+          if (workingLine.text !== content) {
+            throw new Error(`Deletion mismatch at line ${lineIdx + 1}: expected "${content}", got "${workingLine.text}"`);
+          }
+          lines.splice(lineIdx, 1);
+          hunkRemoved++;
+        }
+      } else if (op === "+") {
+        // Insertion: add to working copy.
+        const eol = !(lastLineHasNoEol && i === bodyLines.length - 2);
+        lines.splice(lineIdx, 0, { text: content, eol });
+        lineIdx++;
+        hunkAdded++;
+      }
+    }
+
+    // Apply the "no newline at end of file" marker to the previous line if present.
+    if (lastLineHasNoEol && lineIdx > 0) {
+      lines[lineIdx - 1]!.eol = false;
+    }
+
+    // Update cumulative offset for the next hunk.
+    cumOffset += (hunkAdded - hunkRemoved);
+  }
+
+  // Reconstruct the final string from the lines, respecting eol flags.
+  let result = "";
+  for (const lineData of lines) {
+    result += lineData.text;
+    if (lineData.eol) result += "\n";
+  }
+  return result;
 }
 
