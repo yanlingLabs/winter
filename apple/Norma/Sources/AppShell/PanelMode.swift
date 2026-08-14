@@ -108,4 +108,18 @@ struct PanelPresentation: Equatable {
     mutating func toggleMaximized() {
         mode = (mode == .maximized) ? .side : .maximized
     }
+
+    /// diff-tabs Task 9: **show the panel, and change nothing if it is already showing.**
+    ///
+    /// What a transcript diff chip needs (`ShellSessionHost.openDiffTab` → `onRevealPanel`): the tab
+    /// it just opened has to be visible, and a click that toggled a VISIBLE panel shut would be the
+    /// opposite of what was asked for — which is exactly what reusing `toggleVisible` above would
+    /// have done.
+    ///
+    /// `.maximized` is deliberately left alone rather than "restored" to `.side`: it is already
+    /// showing the panel, more of it, and demoting a user's own maximize as a side effect of opening
+    /// a tab would be taking away a choice they made.
+    mutating func revealIfHidden() {
+        if mode == .hidden { mode = .side }
+    }
 }

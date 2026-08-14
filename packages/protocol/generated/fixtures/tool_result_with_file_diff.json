@@ -1,0 +1,16 @@
+{
+  "seq": 7,
+  "sessionId": "s_fixture",
+  "ts": 1781270000000,
+  "threadId": "main",
+  "type": "tool_result",
+  "callId": "call_60",
+  "output": "edited /tmp/fixture.swift (-33 +198)",
+  "isError": false,
+  "fileDiff": {
+    "path": "/tmp/fixture.swift",
+    "added": 198,
+    "removed": 33,
+    "diffId": "d1f2e3"
+  }
+}

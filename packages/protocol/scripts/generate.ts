@@ -28,6 +28,12 @@ const fixtures: Record<string, unknown> = {
   "assistant_delta": { ...base, threadId: "main", type: "assistant_delta", delta: "wor" },
   "tool_call": { ...base, threadId: "main", type: "tool_call", callId: "call_1", name: "read", argsJson: '{"path":"a.txt"}' },
   "tool_result": { ...base, threadId: "main", type: "tool_result", callId: "call_1", output: "line1\nline2", isError: false },
+  // diff-tabs Task 3: fileDiff is additive/optional on the EXISTING tool_result shape — a dedicated
+  // fixture (distinct from tool_result.json above) so Swift round-trips one carrying it, mirroring
+  // approval_requested_with_reviewer_reason's with/without pattern. added/removed deliberately
+  // unequal (198 vs 33) so a swapped-argument Swift decode fails this fixture's content check, not
+  // just its optionality.
+  "tool_result_with_file_diff": { ...base, threadId: "main", type: "tool_result", callId: "call_60", output: "edited /tmp/fixture.swift (-33 +198)", isError: false, fileDiff: { path: "/tmp/fixture.swift", added: 198, removed: 33, diffId: "d1f2e3" } },
   // SP3 T4b review fix (Phase-A CRITICAL): this BASE fixture deliberately carries NO issuedAt/
   // expiresAt — it is the pre-T4b persisted shape, and Swift round-tripping it proves an OLD
   // session-JSONL approval_requested still decodes with the fields ABSENT (they are optional).
@@ -151,6 +157,12 @@ const fixtures: Record<string, unknown> = {
   // assistant_delta/session_activity do: Swift mirrors the variant, and the round-trip gate is what
   // proves the mirror decodes it.
   "panel_tab_opened": { ...base, type: "panel_tab_opened", tabId: "tab_1", kind: "web", url: "https://example.com", title: "Example Domain" },
+  // diff-tabs Task 3: "diff" is a NEW PanelTabKind value on the EXISTING panel_tab_opened shape
+  // (not a new variant), mirroring thread_completed_stalled's new-value pattern above. diffId is
+  // additive/optional and set ONLY alongside kind:"diff" (events.ts's own doc comment on the
+  // field); no url — matches the shape the app's diff-tab door actually mints (title is the path's
+  // basename). Shares its diffId with tool_result_with_file_diff above: same underlying diff.
+  "panel_tab_opened_diff": { ...base, type: "panel_tab_opened", tabId: "tab_2", kind: "diff", diffId: "d1f2e3", title: "fixture.swift" },
   "panel_tab_closed": { ...base, type: "panel_tab_closed", tabId: "tab_1" },
   "panel_tab_activated": { ...base, type: "panel_tab_activated", tabId: "tab_1" },
   "panel_tab_navigated": { ...base, type: "panel_tab_navigated", tabId: "tab_1", url: "https://example.com/pricing", title: "Pricing" },

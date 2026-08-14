@@ -134,6 +134,110 @@ Two consequences.
 
 `.primary`, `.secondary`, `.green` and `.red` all remain sanctioned system semantic colors under § 3.1 — this rule is about the *faint* end, plus that one warning.
 
+### 3.6 Diff colors — the one place colour carries meaning
+
+Everywhere else in Norma, colour is *surface*: § 3.4 records that this palette has had no danger and no success tone at all, which is why the transcript's failure lines are set in `.primary` and its status glyphs are shape-only. A diff is the exception, and not by preference — red and green **are** what the two columns mean, on every diff surface a person has ever read.
+
+Four tokens, both schemes: a **foreground pair** (the transcript chip's `-N +M`, the diff tab's gutter numbers and `±` markers) and a **row-wash pair** (the full-row background tint on changed rows).
+
+| Token | Light | Dark |
+| --- | --- | --- |
+| `DiffAdded` | `#1F7A3D` | `#4CC38A` |
+| `DiffRemoved` | `#B3261E` | `#FF6B70` |
+| `DiffAddedWash` | `#22C55E` @ 10% | `#22C55E` @ 16% |
+| `DiffRemovedWash` | `#EF4444` @ 10% | `#EF4444` @ 16% |
+
+The washes are authored per appearance rather than as an `.opacity()` on the role — § 3.1's derived-value rule. Their two alphas differ because the two grounds do: the same 10% that reads as a clear tint on the cream `CardSurface` all but disappears on the dark one.
+
+**Measured**, by § 3.5's method (WCAG relative contrast, sRGB, composited — a wash is alpha-composited over `CardSurface` before anything on it is measured). Grounds: `CardSurface` `#F9F9F7` / `#20201F`; added wash over it `#E3F4E8` / `#203A29`; removed wash over it `#F8E7E5` / `#412625`.
+
+| | On `CardSurface` | On its own wash | On `ControlSurface` (the chip) |
+| --- | --- | --- | --- |
+| `DiffAdded` light | 5.10:1 | 4.70:1 | 4.67:1 |
+| `DiffAdded` dark | 7.36:1 | 5.55:1 | 5.81:1 |
+| `DiffRemoved` light | 6.20:1 | 5.46:1 | 5.68:1 |
+| `DiffRemoved` dark | 5.89:1 | 4.97:1 | 4.65:1 |
+
+All eight clear the 4.5:1 body floor. **One value moved to get there:** the dark red was provisionally `#F2555A`, which measures 4.83:1 on the panel — and **4.08:1 on its own wash**, which is the ground those numbers are actually drawn on. `#FF6B70` is that value lifted until the real ground passes. `TranscriptBrandTests.testTheDiffRolesClearTheBodyTextFloorOnEveryGroundTheyAreDrawnOn` pins all three grounds so the next tune cannot repeat it.
+
+How visible the washes themselves are, against the plane they tint: added 1.085:1 light / 1.326:1 dark, removed 1.136:1 / 1.185:1. Deliberately faint — this is the background of ordinary code, not a highlight.
+
+**What lands on the washes** (a diff row's text is `SyntaxHighlighter`'s output: `labelColor` body with the system-colour syntax palette on top):
+
+| Ink | Light: card → +wash → −wash | Dark: card → +wash → −wash |
+| --- | --- | --- |
+| `labelColor` (the body) | 14.35 → 13.46 → 12.99 | 11.99 → 9.31 → 10.29 |
+| `systemBlue` (keywords) | 3.34 → 3.08 → 2.94 | 5.04 → 3.80 → 4.25 |
+| `systemGreen` (strings) | 2.11 → 1.94 → 1.85 | 8.07 → 6.08 → 6.80 |
+| `systemPurple` (numbers) | 3.95 → 3.64 → 3.48 | 4.49 → 3.39 → 3.79 |
+| `secondaryLabelColor` (comments) | 3.91 → 3.85 → 3.81 | 5.82 → 4.90 → 5.24 |
+
+**A recorded limitation, in § 3.4's sense — and the wash is not its cause.** The syntax palette's light-mode ratios are below the body floor *already on the plain surface*: Apple's `systemGreen` is 2.11:1 on `CardSurface`, which is true of every code block in the transcript today and has nothing to do with diffs. What a wash adds is at most 0.47 of a ratio point — measurably negligible against a shortfall of 2.4. The body text itself (`labelColor`, which is the great majority of every line) is 9.31:1 or better on every ground here. Fixing the syntax palette is a separate change to a shared surface; tracked here, not fixed here, and explicitly **not** a reason to weaken the washes.
+
+**Two channels, always.** The `-N`/`+M` signs and the `±` markers are TEXT, not glyphs, precisely because colour is the one channel that does not survive greyscale, colour blindness or a screen reader.
+
+### 3.7 Panel kind tints
+
+**Mac-only** — the panel strip (`apple/Norma/Sources/AppShell/ShellPanel.swift`) has no iOS surface, so there is nothing on the phone for these to mirror, the same declared-exception class as § 1's four Mac-only tokens.
+
+Five soft washes, one per `PanelTabKind` (`web`/`document`/`code`/`note`/`diff`), on a pill's own fill at rest and a group chip's fill at double opacity — a single colorset per kind (`Theme.panelKindTint(_:)`'s own exhaustive switch, no `default:`), never two. The chip's stronger version is *derived* — `Theme.panelKindChipTint(_:) = panelKindTint(_:).opacity(panelKindChipTintOpacityMultiplier)` — rather than a second colorset per kind, so the switch that names a kind's hue stays the only one. `Color.opacity(_:)` was measured to MULTIPLY an already-translucent colour's stored alpha (0.08 → 0.16 exactly) rather than replace or clamp it, which is what lets a single authored value scale correctly in both appearances.
+
+| Kind | Hue | Light α | Dark α |
+| --- | --- | --- | --- |
+| `PanelKindWebTint` | `#3B82F6` | 4.7% | 14% |
+| `PanelKindDocumentTint` | `#F59E0B` | 8.0% | 14% |
+| `PanelKindCodeTint` | `#8B5CF6` | 4.4% | 14% |
+| `PanelKindNoteTint` | `#EAB308` | 8.0% | 14% |
+| `PanelKindDiffTint` | `#22C55E` | 6.4% | 14% |
+
+**Three of the five light values moved off the brief's uniform 8% provisional — measured, not eyeballed.** The pill's fill sits *underneath* `ShellSidebarRowStyle`'s own hover/selected fill (opaque `RowHover`, painted over the tint the instant a pill is hovered or active — never blended, since `RowHover` is fully opaque), so the same alpha that makes the wash read at rest is also what a user has to see CHANGE on hover. At the flat 8% provisional, `web` and `code` measured a hover-vs-tinted-rest contrast of 1.016:1 and 1.009:1 — barely above 1:1, i.e. hovering those two kinds' tabs would have been nearly imperceptible.
+
+The reason is an exact identity, not a coincidence of these particular hues. In **light**, every one of the five composites lands between `RowHover`'s luminance and `CardSurface`'s, so the two ratios telescope:
+
+```
+contrast(RowHover, tinted) × contrast(tinted, CardSurface) = contrast(RowHover, CardSurface) = 1.10988
+```
+
+That product is fixed by two tokens this task does not own, so neither ratio can individually exceed its square root, **√1.10988 ≈ 1.0535** — a hard ceiling no alpha can beat. The best available trade-off is the alpha where the two are equal, which is what `web`/`code`/`diff` are now tuned to (`document`/`note` were already close to that point at the provisional 8% and are unchanged):
+
+| Kind | Light hover Δ | Light visibility | Dark hover Δ | Dark visibility |
+| --- | --- | --- | --- | --- |
+| `web` | 1.054 | 1.053 | 1.385 | 1.187 |
+| `document` | 1.048 | 1.059 | 1.514 | 1.297 |
+| `code` | 1.053 | 1.054 | 1.357 | 1.163 |
+| `note` | 1.057 | 1.050 | 1.551 | 1.329 |
+| `diff` | 1.053 | 1.054 | 1.487 | 1.274 |
+
+("Hover Δ" is `contrast(RowHover, tinted)` — the measured requirement itself, the pill's rest fill versus what replaces it the instant it is hovered or active. "Visibility" is `contrast(tinted, CardSurface)` — how visible the wash is against the plain panel, recorded for completeness, never gated the same way: jointly requiring both a hover floor AND a diff-wash-style ≥1.05 visibility floor is unsatisfiable except at the single equal-split point above, so only the hover delta is a pass/fail floor here — `PanelKindTintTests.testHoverFillStaysDistinguishableFromEveryTintedPillAtRest`, floored at 1.040 light / 1.30 dark, both with real margin under every measured value. `testLightHoverDeltaTimesVisibilityEqualsTheFixedRowHoverCardSurfaceContrast` pins the identity itself, so the next tune cannot silently reopen the drowned-hover-delta failure by "fixing" the floor instead of the alpha.)
+
+**Dark needed no retuning at all, for the mirror reason.** In dark, `CardSurface` sits *between* the tinted composite and `RowHover` rather than the composite sitting between the other two — every hue here pushes the dark composite past `CardSurface` toward black, not partway toward `RowHover` — so the ratios *reinforce* instead of trading off: `contrast(RowHover, tinted) = contrast(RowHover, CardSurface) × contrast(tinted, CardSurface)`. Raising alpha in dark only helps the hover delta; there is no ceiling to solve for, which is why the brief's provisional 14% stands unchanged for all five kinds. `PanelKindTintTests.testDarkHoverDeltaEqualsTheFixedBaselineTimesVisibility` pins that direction too.
+
+**Text on the tinted pill**, measured by § 3.5's method (composited over `CardSurface`, then the ink composited over *that* — `NSColor.labelColor` is not opaque, measured at 84.7% alpha both appearances, so the naive uncomposited contrast overstates by roughly 30%; this reproduces § 3.6's own 14.35 / 11.99 figure for `labelColor` on plain `CardSurface` exactly once the ink is composited the same way a wash is):
+
+| | `labelColor` (title) light | dark | `TextMuted` (meta/icon) light | dark |
+| --- | --- | --- | --- | --- |
+| `web` | 13.78 | 10.30 | 3.93 | 5.05 |
+| `document` | 13.72 | 9.50 | 3.91 | 4.62 |
+| `code` | 13.78 | 10.49 | 3.93 | 5.15 |
+| `note` | 13.81 | 9.29 | 3.94 | 4.51 |
+| `diff` | 13.78 | 9.65 | 3.93 | 4.70 |
+
+`labelColor` (the pill's title, `.primary`) stays nowhere near the 4.5:1 body floor on a wash this faint — worst case 9.29:1. `TextMuted` (the favicon and close-glyph ink) is § 3.5's own established "quiet meta" register, never held to the body floor even on the plain surface (4.14 light / 5.99 dark baseline) — the tint costs it a further 0.20–0.25 in light and, asymmetrically, 0.85–1.48 in dark, the same "a wash costs a small further amount, recorded rather than fixed" shape § 3.6 already applies to the syntax palette on the diff washes. Every figure stays well inside `TextMuted`'s own already-established range elsewhere in the app; none of the five is a new low.
+
+**The favicon glyph and, on the chip, the count digit are deliberately NOT tinted** — "the tint is the surface, not the icon" (echoing the identical rule Task 9 already wrote for the diff favicon). This is not merely leaving them alone: at the chip's own double opacity the wash composites to roughly 1.1–1.2:1 against `CardSurface`, which as literal text ink would be close to invisible — the measurement that settles which of the brief's two sanctioned shapes ("stronger version" as ink vs. as surface) was meant.
+
+**The chip, at double opacity** (`Theme.panelKindChipTint`) — recorded, not gated the same way, since the chip's own affordance does not depend on fill alone the way the pill's does:
+
+| Kind | Light composite | Dark composite | Light visibility | Dark visibility |
+| --- | --- | --- | --- | --- |
+| `web` | `#E7EEF7` | `#283B5B` | 1.110 | 1.456 |
+| `document` | `#F8EAD1` | `#5C4319` | 1.123 | 1.767 |
+| `code` | `#EFEBF7` | `#3E315B` | 1.111 | 1.392 |
+| `note` | `#F7EED1` | `#594919` | 1.103 | 1.857 |
+| `diff` | `#DDF2E3` | `#214E31` | 1.110 | 1.710 |
+
+**A live-gate note, not a fixed problem:** doubling each kind's already hover-delta-tuned light alpha pushes the chip's light composite luminance essentially onto `RowHover`'s own — the measured hover delta there is 1.000–1.011, i.e. a chip's fill alone would not read as "hovered" in light mode. Left as-is deliberately: a chip is a lower-stakes accordion toggle (not a primary navigation target), it already carries the usual cursor/help-text/press feedback independent of fill, and shrinking the pill's own alpha further to leave headroom for 2× would spend REST VISIBILITY, not hover delta — the wash would simply read fainter at rest, since hover delta only keeps improving as alpha drops further below the equal-split point tuned above (the failure this section fixed was the flat 8% provisional carrying too MUCH alpha, not too little). Dark carries no such risk — the chip's dark hover delta (1.624–2.167) is stronger than the pill's own.
+
 ---
 
 ## 4. Type

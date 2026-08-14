@@ -105,6 +105,25 @@ struct ShellRootView: View {
                     guard panelFitsInContent(newContentWidth) else { return }
                     presentation.sideWidth = panelClampWidth(presentation.sideWidth, contentWidth: newContentWidth)
                 }
+                // diff-tabs Task 9: **the ONE channel from the host into this view's panel state.**
+                //
+                // A transcript diff chip opens a tab through `ShellSessionHost.openDiffTab`, and the
+                // tab has to become visible — but the requested panel mode is `@State` HERE, and
+                // `host` is a plain unobserved `var` (see its own doc, and `panelStore`'s), so
+                // nothing published on the host could drive this view. Handing the host a closure
+                // that owns this state is the only direction that works; `$presentation` is captured
+                // rather than `presentation` so the write lands on this view's own storage however
+                // many times SwiftUI reconstructs the struct around it.
+                //
+                // Re-registered on every appear, which is idempotent — it is the same closure over
+                // the same state — and cheap. `.snappy` matches the sidebar/panel toggles beside it,
+                // so a revealed panel slides in exactly like a toggled one.
+                .onAppear {
+                    let presentationBinding = $presentation
+                    host?.onRevealPanel = {
+                        withAnimation(.snappy) { presentationBinding.wrappedValue.revealIfHidden() }
+                    }
+                }
                 #if DEBUG
                 // panel-cef Task 6a — a DEBUG-ONLY door for driving the panel from outside the UI.
                 //

@@ -13,7 +13,7 @@ import { canonicalizeDirPath, type SessionDirs } from "../sessions/dirs";
 import { setSessionDirs, lockDir, type SetDirsDeps } from "../sessions/set-dirs";
 import type { ModelInfo, Provider, ProviderEvent, TurnInputItem } from "../providers/types";
 import { isContextLengthError } from "../providers/errors";
-import type { ToolRegistry, Mode } from "./tools/registry";
+import type { ToolRegistry, Mode, ToolOutcome } from "./tools/registry";
 import { isExternalToolName } from "./tools/registry";
 import type { PermissionGate, SessionApprovalPolicy } from "./gate";
 import type { ApprovalBroker } from "./approvals";
@@ -49,6 +49,7 @@ import { DISPATCH_MODEL, DISPATCH_EFFORT } from "./dispatch-config";
 import { CHAT_SYSTEM_PROMPT } from "./chat-prompt";
 import type { DispatchChildren } from "./dispatch-children";
 import type { WorkflowRuntime } from "../workflows/runtime";
+import type { DiffHeader } from "../diffs/store";
 // provider-correctness T5: the Norma-level effort tier vocabulary. `wireEffort` is what makes
 // `resolveSel` a total function into the wire-valid set; the other two decide whether the tier's
 // PROMPT half applies. See settings.ts for why the two vocabularies are deliberately disjoint.
@@ -978,6 +979,20 @@ export interface EngineConfig {
   // never wires it) → `ctx.outDir` stays undefined and bash's env/writable-set additions are
   // skipped entirely — byte-identical to before this feature.
   outDirOf?: (sessionId: string) => string;
+  // diff-tabs Task 6: bridges edit/write/notebook_edit to the diff store's `writeDiff`
+  // (diffs/store.ts) WITHOUT exposing raw `normaHome` on ToolContext — daemon.ts closes over its
+  // own `normaHome` (already in scope, same as `outDirOf`'s `(sid) => ensureOutdir(normaHome,
+  // sid)` just above) and wires this as `(sid, diffId, header, patch) => writeDiff(normaHome, sid,
+  // diffId, header, patch)`. Action- rather than value-shaped (unlike outDirOf/tmpDirOf, which
+  // resolve to a single per-session VALUE with no further params) because a diff write needs
+  // per-call diffId/header/patch a resolved path alone can't carry — see ToolContext.diffSink's
+  // own doc comment for the fuller ask/taskEvent/notify-vs-outDir/tmpDir precedent comparison.
+  // Read fresh per call in executeCall (below, alongside outDir/tmpDir), pre-bound to THIS call's
+  // sessionId before landing on `ctx.diffSink` — the tool itself never sees normaHome or re-passes
+  // sessionId. Absent (a test harness, or a caller that never wires it) → `ctx.diffSink` stays
+  // undefined and edit/write/notebook_edit (Task 6) fall back to their pre-Task-6 plain-string
+  // return, byte-identical to before this field existed.
+  persistDiff?: (sessionId: string, diffId: string, header: Omit<DiffHeader, "truncated">, patch: string) => Promise<{ truncated: boolean }>;
   // working-directories T4 fix round 1: the session's project MEMDIR for a given `cwd` — the SAME
   // computation daemon.ts's `sessionDirs` roots callback already folds into the session's write
   // roots when `memory.enabled` is on (`memoryDirOf`, gated on `memoryEnabledHot()`), exposed here
@@ -3927,7 +3942,12 @@ export class AgentEngine {
         this.emit(sessionId, { type: "tool_call", sessionId, threadId, callId: call.callId, name: call.name, argsJson: call.argsJson });
         input.push({ type: "function_call", callId: call.callId, name: call.name, argsJson: call.argsJson });
 
-        let outcome: { output: string; isError: boolean; deniedByHuman?: boolean };
+        // diff-tabs Task 5: `ToolOutcome` (registry.ts) is the single source of truth for the
+        // {output, isError, fileDiff?} shape — reused here rather than hand-copied so a future
+        // field added there never needs a parallel edit in this dispatch loop. `deniedByHuman?`
+        // stays local (registry.ts's ToolOutcome has no reason to know about human approval
+        // denial — that's an engine-only concept, requestApproval's own addition).
+        let outcome: ToolOutcome & { deniedByHuman?: boolean };
         // A precomputed outcome from the spawn OR send_message bridge above becomes this call's
         // tool_result verbatim (both are computed BEFORE this loop so N spawns/messages in one
         // assistant message don't serialize the dispatch), so it never falls through to executeCall.
@@ -4752,7 +4772,24 @@ export class AgentEngine {
           outcome = await this.executeCall(call, cwd, sessionId, threadId, signal, loaded, pins, rootsOverride, visionCapable, excludeTools, allowTools);
         }
 
-        this.emit(sessionId, { type: "tool_result", sessionId, threadId, callId: call.callId, output: outcome.output, isError: outcome.isError });
+        // diff-tabs Task 5: the ONE tool_result emission site (of six in this dispatch loop) that
+        // can EVER carry a real `fileDiff` — it's the only one downstream of an actual
+        // `registry.execute()` call (reached via executeCall, possibly through reviewAndDispatch's
+        // "safe" verdict or requestApproval's approved onApprove, both of which pass executeCall's
+        // result through by reference, untouched, regardless of their own narrower declared return
+        // types — see executeCall's own doc comment). The other five sites in this loop (preOutcome
+        // bridge, depth-cap, deferred-builtin, not-offered, hook-blocked — all `continue` before
+        // this point) short-circuit BEFORE any tool ever runs, so `outcome.fileDiff` is not merely
+        // unset there today, it can never be set there, by construction. Conditional spread (not
+        // `fileDiff: outcome.fileDiff`) keeps every OTHER tool's event byte-identical to
+        // pre-Task-5 — the key is genuinely ABSENT, not undefined-valued, matching
+        // ToolResultEvent's own "set only... ; chat-mode engines never produce it" contract
+        // (packages/protocol/src/events.ts) even though JSON.stringify would already drop an
+        // undefined-valued key on the wire (store.ts's `append` persists via JSON.stringify).
+        this.emit(sessionId, {
+          type: "tool_result", sessionId, threadId, callId: call.callId, output: outcome.output, isError: outcome.isError,
+          ...(outcome.fileDiff ? { fileDiff: outcome.fileDiff } : {}),
+        });
         input.push({ type: "tool_result", callId: call.callId, output: outcome.output, isError: outcome.isError });
         // [4f post-tool — normal outcome] observe the executed call's result (success or isError).
         // A pre-tool-blocked normal call `continue`d at Site 2 and never reached here, so it's
@@ -6087,7 +6124,16 @@ export class AgentEngine {
     // rejected call can tell which failure mode it hit.
     excludeTools?: Set<string>,
     allowTools?: Set<string>,
-  ): Promise<{ output: string; isError: boolean }> {
+    // diff-tabs Task 5: `Promise<ToolOutcome>`, not the old hand-written `Promise<{output;
+    // isError}>` — this method's whole body is a passthrough to `this.cfg.registry.execute()`
+    // (below) or an early typed rejection narrower than ToolOutcome, so the honest return type is
+    // registry.ts's own ToolOutcome. This is what lets `outcome.fileDiff` (the dispatch loop's
+    // shared local, above) see a real value on this path — every caller either awaits this
+    // directly or forwards it verbatim (reviewAndDispatch's "safe" verdict,
+    // requestApproval's default onApprove) without reconstructing the object, so the actual
+    // runtime value was ALREADY flowing through before this annotation changed; this only makes
+    // the signature stop lying about it.
+  ): Promise<ToolOutcome> {
     // CM branch review (Important 2): reject BEFORE any other work — no args parsing, no roots
     // resolution, no registry.execute() — for a call the thread's own allowTools/excludeTools never
     // offered. This is a HARDENING, not a new capability: every legitimate call already arrives here
@@ -6113,6 +6159,11 @@ export class AgentEngine {
     // working-directories T4: read fresh per call (mirrors `tmpDir` just above) — independent of
     // `rootsOverride` on purpose, see `outDirOf`'s own doc comment on EngineConfig.
     const outDir = this.cfg.outDirOf?.(sessionId);
+    // diff-tabs Task 6: pre-bind THIS call's sessionId into EngineConfig.persistDiff (if wired) —
+    // see that field's own doc comment. The tool never sees normaHome or passes sessionId itself.
+    const diffSink = this.cfg.persistDiff
+      ? (diffId: string, header: Omit<DiffHeader, "truncated">, patch: string) => this.cfg.persistDiff!(sessionId, diffId, header, patch)
+      : undefined;
     const markSkillLoaded = (n: string) => {
       let set = this.loadedSkills.get(sessionId);
       if (!set) { set = new Set(); this.loadedSkills.set(sessionId, set); }
@@ -6210,7 +6261,7 @@ export class AgentEngine {
         }
       : undefined;
     const result = await this.cfg.registry.execute(call.name, args, {
-      cwd, roots, tmpDir, outDir, sessionId, signal, markSkillLoaded,
+      cwd, roots, tmpDir, outDir, diffSink, sessionId, signal, markSkillLoaded,
       markToolLoaded,
       loadedTools: effectiveLoaded,
       deferThreshold: this.toolSearchThreshold(cwd),

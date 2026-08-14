@@ -118,6 +118,98 @@ enum Theme {
     /// `cardSurface` — the wrong direction for something floating.
     static let paletteSurface = Color("PaletteSurface")
 
+    // MARK: - Color: the diff pair (diff-tabs) — two foreground roles, two row washes
+
+    /// The removed-lines role — the `-N` half of the transcript's diff chip, and the removed-side
+    /// gutter numbers and `-` markers in the diff tab.
+    ///
+    /// **FINAL, and measured** (Task 10, superseding Task 9's provisional): light `#B3261E`, dark
+    /// `#FF6B70`. Every ratio is published in `docs/brand.md` § 3.6, measured by the method § 3.5
+    /// uses. The dark half MOVED during that measurement — the provisional `#F2555A` measured
+    /// **4.08:1 on its own wash**, under the 4.5:1 floor for 12.5 pt text, and the wash is exactly
+    /// the ground these numbers are drawn on. `#FF6B70` measures 4.97:1 there and 5.89:1 on the
+    /// panel's `CardSurface`.
+    ///
+    /// It is the first colour in this file to carry MEANING rather than surface (§ 3.4 records that
+    /// the palette has had no danger or success tone at all, which is why the transcript's failure
+    /// lines are set in `.primary` and its status glyphs are shape-only). A diff is the one place
+    /// where red and green are not decoration: they are what the two columns of numbers MEAN, and
+    /// they are what every other diff surface the user reads uses.
+    static let diffRemovedRole = Color("DiffRemoved")
+
+    /// The added-lines role — the `+M` half, and the added-side gutter numbers. FINAL and measured
+    /// on the same terms as `diffRemovedRole`: light `#1F7A3D` (5.10:1 on `CardSurface`, 4.70:1 on
+    /// its own wash), dark `#4CC38A` (7.36:1 / 5.55:1). Both halves were already clear of the floor,
+    /// so this one is unchanged from Task 9's provisional.
+    static let diffAddedRole = Color("DiffAdded")
+
+    /// The added row's FULL-ROW background tint — `#22C55E` at 10% (light) / 16% (dark), authored
+    /// per appearance rather than as an `.opacity()` on the role (§ 3.1's derived-value rule: a
+    /// runtime alpha hack has no dark variant and no way to be tuned per appearance).
+    ///
+    /// The two alphas differ because the two grounds do: the same wash that reads as a clear tint on
+    /// the cream `CardSurface` (1.085:1 against it) all but disappears on the dark one, so dark takes
+    /// 16% to reach a comparable 1.326:1. They are DELIBERATELY faint — this is the background of
+    /// ordinary code, and every ink that lands on it (`labelColor` at ≥ 9.31:1, both diff roles, the
+    /// syntax palette) must stay readable, which § 3.6 records for each.
+    static let diffAddedWash = Color("DiffAddedWash")
+
+    /// The removed row's full-row tint — `#EF4444` at 10% / 16%, on the same terms as
+    /// `diffAddedWash`.
+    static let diffRemovedWash = Color("DiffRemovedWash")
+
+    // MARK: - Color: the five panel-kind tints (diff-tabs Task 12) — Mac-only
+
+    /// **Mac-only**, like `rowHover`/`hairline`/`hairlineElevated`/`paletteSurface` (§ 1): the
+    /// panel strip itself has no iOS surface, so there is nothing on the phone for these to
+    /// mirror. `docs/brand.md` § 3.7 publishes every measurement below.
+    ///
+    /// Five soft washes, one per `PanelTabKind`, on the SAME hue at two strengths: a faint pill
+    /// fill (`panelKindTint`, this token) and a stronger chip fill (`panelKindChipTint`, derived
+    /// below at `panelKindChipTintOpacityMultiplier`× this token's alpha) — never two colorsets
+    /// per kind, so `Theme.panelKindTint`'s switch stays the ONE place a kind maps to a hue.
+    ///
+    /// **The light alpha is tuned PER KIND, not the brief's uniform 8% provisional — measured,
+    /// not eyeballed.** `ShellSidebarRowStyle`'s hover/selected fill (`Theme.rowHover`, opaque)
+    /// paints OVER this wash whenever it is active, so the wash only shows at rest — which means
+    /// the SAME faint tint that makes the pill legible at rest also competes with the very hover
+    /// cue that has to read as a state change on top of it. At the brief's flat 8%, `web` and
+    /// `code` measured a hover-vs-tinted-rest contrast of 1.016:1 / 1.009:1 — barely above 1:1,
+    /// i.e. hovering a web or code tab would have been nearly imperceptible. `document`/`note`
+    /// were already close to their own ceiling at 8% and are UNCHANGED; `web`/`code`/`diff` move
+    /// down (4.7% / 4.4% / 6.4%) to the alpha where the hover delta and the wash's own visibility
+    /// against `CardSurface` are EQUAL — the mathematically best achievable trade-off, since
+    /// `RowHover` and `CardSurface` are both fixed and (proven in brand.md § 3.7) their own
+    /// contrast caps the product of what any alpha can buy. Dark needed no change at all: dark's
+    /// hover delta and visibility REINFORCE rather than compete (also proven in § 3.7), so every
+    /// kind keeps the provisional 14%.
+    static func panelKindTint(_ kind: PanelTabKind) -> Color {
+        switch kind {
+        case .web: return Color("PanelKindWebTint")
+        case .document: return Color("PanelKindDocumentTint")
+        case .code: return Color("PanelKindCodeTint")
+        case .note: return Color("PanelKindNoteTint")
+        case .diff: return Color("PanelKindDiffTint")
+        }
+    }
+
+    /// The ONE named exception to "no raw literals" this task's global constraints carve out —
+    /// every hue and every alpha stays authored in the colorset (§ 3.1); this only SCALES an
+    /// already-authored, already-per-appearance-tuned value by a fixed, named factor. Measured
+    /// (not assumed) that `Color.opacity(_:)` MULTIPLIES an already-translucent color's stored
+    /// alpha rather than replacing or clamping it: a 0.08-alpha color at `.opacity(2.0)` resolved
+    /// to exactly 0.16. That is what makes "one colorset, times a constant" produce the SAME
+    /// result in both appearances as authoring a second colorset by hand would have — the brief's
+    /// other sanctioned shape — without the second exhaustive switch that shape would have cost.
+    static let panelKindChipTintOpacityMultiplier: Double = 2.0
+
+    /// The group chip's stronger tint (Task 11's slot: `PanelTabKindChip`, `ShellPanel.swift`) —
+    /// "the same hue at DOUBLE opacity." Derived from `panelKindTint`, never a second switch: one
+    /// switch stays the single place a kind names its hue, and this only scales what it returns.
+    static func panelKindChipTint(_ kind: PanelTabKind) -> Color {
+        panelKindTint(kind).opacity(panelKindChipTintOpacityMultiplier)
+    }
+
     // MARK: - Type
 
     /// The wordmark register — New York (the system serif, `Font.Design.serif`), Norma's ONE
@@ -183,5 +275,12 @@ enum Theme {
         "Canvas", "CardSurface", "SelectionPill", "ElevatedSurface", "ControlSurface",
         "BubbleUser", "ComposerSurface", "ComposerRim", "TextMuted", "InverseCanvas",
         "AccentColor", "RowHover", "Hairline", "HairlineElevated", "PaletteSurface",
+        // diff-tabs — the diff pair: two foreground roles, two row washes. FINAL and measured
+        // (Task 10); `docs/brand.md` § 3.6 publishes every ratio.
+        "DiffRemoved", "DiffAdded", "DiffAddedWash", "DiffRemovedWash",
+        // diff-tabs Task 12 — the five panel-kind tints (Mac-only, `panelKindTint`'s switch).
+        // FINAL and measured; `docs/brand.md` § 3.7 publishes every ratio.
+        "PanelKindWebTint", "PanelKindDocumentTint", "PanelKindCodeTint", "PanelKindNoteTint",
+        "PanelKindDiffTint",
     ]
 }

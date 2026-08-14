@@ -356,6 +356,37 @@
         },
         "isError": {
           "type": "boolean"
+        },
+        "fileDiff": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            },
+            "added": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "removed": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "diffId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,64}$"
+            }
+          },
+          "required": [
+            "path",
+            "added",
+            "removed",
+            "diffId"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [
@@ -2407,7 +2438,8 @@
             "web",
             "document",
             "code",
-            "note"
+            "note",
+            "diff"
           ]
         },
         "url": {
@@ -2417,6 +2449,10 @@
         "title": {
           "type": "string",
           "maxLength": 256
+        },
+        "diffId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,64}$"
         }
       },
       "required": [

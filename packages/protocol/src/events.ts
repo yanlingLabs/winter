@@ -61,8 +61,32 @@ export const AssistantDeltaEvent = ThreadBase.extend({ type: z.literal("assistan
 export const ToolCallEvent = ThreadBase.extend({
   type: z.literal("tool_call"), callId: z.string().min(1), name: z.string().min(1), argsJson: z.string(),
 });
+
+/** Shape shared by the diff store's on-disk id (`packages/core/src/diffs/store.ts`'s `DIFF_ID_RE`)
+ *  and every wire reference to one. Kept as two separate constants in two packages deliberately —
+ *  core has no reason to depend on protocol's zod schemas — but the PATTERN must match exactly: a
+ *  diffId that fails this regex can never reach `writeDiff`/`readStoredDiff`'s path-join guard. */
+export const DIFF_ID_SHAPE = /^[A-Za-z0-9_-]{1,64}$/;
+
+/** Summary of one file's diff, stamped onto `ToolResultEvent.fileDiff` below and returned (with a
+ *  patch body) by `panel.readDiff` (methods.ts). `path`/`diffId` are bounded (1024 / 64 chars) —
+ *  load-bearing, not tidiness: this shape rides inside a PERSISTED, remote-streamed `tool_result`
+ *  event, so an unbounded field would be exactly the silent-connection-killer hazard
+ *  `PANEL_URL_MAX_LENGTH`'s doc (further down this file) names for panel fields — `capEvent`'s
+ *  whole-event ceiling and the phone's frame limit are the real bounds a value here must stay
+ *  under. */
+export const FileDiffSummary = z.object({
+  path: z.string().min(1).max(1024),
+  added: z.number().int().nonnegative(),
+  removed: z.number().int().nonnegative(),
+  diffId: z.string().regex(DIFF_ID_SHAPE),
+});
+export type FileDiffSummary = z.infer<typeof FileDiffSummary>;
+
 export const ToolResultEvent = ThreadBase.extend({
   type: z.literal("tool_result"), callId: z.string().min(1), output: z.string(), isError: z.boolean(),
+  /** Set only by the daemon engine for edit/write/notebook_edit; chat-mode engines never produce it. */
+  fileDiff: FileDiffSummary.optional(),
 });
 /** Opaque provider reasoning item (Responses API), captured at output_item.done and replayed
  *  verbatim into later requests (CC/Codex parity — see the history-parity spec). itemJson is
@@ -496,7 +520,7 @@ export const SessionActivityEvent = Base.extend({
   activity: SessionActivity,
 });
 
-export const PanelTabKind = z.enum(["web", "document", "code", "note"]);
+export const PanelTabKind = z.enum(["web", "document", "code", "note", "diff"]);
 
 /** panel-cef Task 6b: the field-size caps on every panel `url`/`title`, carried from Plan A (which
  *  surfaced them and owned none) and made LIVE by this task — Task 6b builds the first producer of
@@ -551,6 +575,8 @@ export const PanelTabOpenedEvent = Base.extend({
   kind: PanelTabKind,
   url: z.string().max(PANEL_URL_MAX_LENGTH).optional(),
   title: z.string().max(PANEL_TITLE_MAX_LENGTH).optional(),
+  /** Set only when kind === "diff". */
+  diffId: z.string().regex(DIFF_ID_SHAPE).optional(),
 });
 
 export const PanelTabClosedEvent = Base.extend({

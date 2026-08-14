@@ -1440,4 +1440,98 @@ extension MethodWrapperTests {
             XCTAssertEqual(error.message, "unknown commandId: pcmd_ghost")
         }
     }
+
+    // ============================================================================================
+    // diff-tabs Task 8 — `readPanelDiff` + `diffId` on `openPanelTab`/`panel.list`.
+    // ============================================================================================
+
+    /// The full round trip: the request encodes both params under `panel.readDiff`'s own field
+    /// names, and the canned result decodes into every `PanelDiffPayload` field — the closest
+    /// sibling shape is `testSkillsReadDecodesFullBody`'s bare `{id} -> full object` read.
+    func testReadPanelDiffEncodesRequestAndDecodesEveryField() async throws {
+        let (client, t) = try await connected()
+
+        let (req, payload) = try await roundTrip(t, sentIndex: 1,
+            result: #"{"path":"/Users/me/norma v2/core/x.ts","added":3,"removed":1,"patch":"@@ -1,2 +1,2 @@\n-old\n+new\n","truncated":false}"#
+        ) { try await client.readPanelDiff(sessionId: "s_9", diffId: "diff_1") }
+
+        XCTAssertEqual(req["method"] as? String, "panel.readDiff")
+        let params = req["params"] as? [String: Any]
+        XCTAssertEqual(params?["sessionId"] as? String, "s_9")
+        XCTAssertEqual(params?["diffId"] as? String, "diff_1")
+        XCTAssertEqual(payload.path, "/Users/me/norma v2/core/x.ts")
+        XCTAssertEqual(payload.added, 3)
+        XCTAssertEqual(payload.removed, 1)
+        XCTAssertEqual(payload.patch, "@@ -1,2 +1,2 @@\n-old\n+new\n")
+        XCTAssertEqual(payload.truncated, false)
+    }
+
+    /// `readPanelDiff` does no special casing of its own (its doc comment's claim) — a server
+    /// refusal, whatever its code or wording, must reach the caller as a thrown `RpcError`
+    /// unchanged. Same shape as `testPanelCommandResultSurfacesAnUnknownCommandIdRefusal`; the
+    /// `code` assertion matters MORE here than there, because `panel.readDiff` deliberately answers
+    /// two DIFFERENT refusals (INVALID_PARAMS for a shape-bad id, NOT_FOUND for a well-shaped one
+    /// with nothing stored) so a caller can branch on which — this pins that the number survives
+    /// the round trip, not just the message.
+    func testReadPanelDiffSurfacesANotFoundRefusalVerbatim() async throws {
+        let (client, t) = try await connected()
+        async let call: PanelDiffPayload = client.readPanelDiff(sessionId: "s_9", diffId: "diff_ghost")
+        let sent = try await waitForSent(t, count: 2)
+        let req = decodeLine(sent[1])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"error":{"code":-32004,"message":"diff not found: diff_ghost"}}"#)
+        do {
+            _ = try await call
+            XCTFail("expected a missing diff to throw")
+        } catch let error as RpcError {
+            XCTAssertEqual(error.code, -32004)
+            XCTAssertEqual(error.message, "diff not found: diff_ghost")
+        }
+    }
+
+    /// `diffId` rides `openPanelTab` only when the caller supplies one — `url`/`title`'s own
+    /// contract, `obj(_:)`'s `compactMapValues` dropping any nil-valued key before the request is
+    /// ever encoded. The omitted case is checked with `.keys.contains` rather than
+    /// `XCTAssertNil(params?["diffId"])`, which cannot tell "absent" from "sent as a literal null" —
+    /// `testSetActivityEncodesEachVerbAndReadsBackTheDerivedState`'s `resumeParams` check uses the
+    /// identical idiom for the identical reason.
+    func testOpenPanelTabDiffIdEncodedOnlyWhenPresent() async throws {
+        let (client, t) = try await connected()
+
+        let (withReq, withTabId) = try await roundTrip(t, sentIndex: 1, result: #"{"tabId":"tab_diff_1"}"#) {
+            try await client.openPanelTab(sessionId: "s_9", kind: "diff", diffId: "diff_1")
+        }
+        XCTAssertEqual(withReq["method"] as? String, "panel.openTab")
+        let withParams = withReq["params"] as? [String: Any]
+        XCTAssertEqual(withParams?["kind"] as? String, "diff")
+        XCTAssertEqual(withParams?["diffId"] as? String, "diff_1")
+        XCTAssertEqual(withTabId, "tab_diff_1")
+
+        let (withoutReq, _) = try await roundTrip(t, sentIndex: 2, result: #"{"tabId":"tab_web_1"}"#) {
+            try await client.openPanelTab(sessionId: "s_9", kind: "web")
+        }
+        let withoutParams = withoutReq["params"] as? [String: Any]
+        XCTAssertFalse(withoutParams?.keys.contains("diffId") ?? true,
+                       "an absent diffId must be OMITTED, never sent as a literal null key")
+    }
+
+    /// `panel.list`'s per-tab decode must carry `diffId` through in BOTH directions — present for a
+    /// `diff` tab, nil for anything else — because `applyFetchedSnapshot` (app side) re-seeds the
+    /// ENTIRE panel store from this call on every attach/session-hop, never from the one-time
+    /// `panel_tab_opened` event again. A decode that dropped the field here would silently
+    /// un-identify every diff tab the instant a session is reattached (`PanelTabInfo.diffId`'s own
+    /// doc comment).
+    func testListPanelTabsDecodesDiffIdBothDirections() async throws {
+        let (client, t) = try await connected()
+
+        let (_, result) = try await roundTrip(t, sentIndex: 1,
+            result: #"{"tabs":[{"tabId":"t1","kind":"diff","title":"x.ts","diffId":"diff_1"},{"tabId":"t2","kind":"web","url":"https://example.com"}],"activeTabId":"t1"}"#
+        ) { try await client.listPanelTabs(sessionId: "s_9") }
+
+        XCTAssertEqual(result.tabs.count, 2)
+        XCTAssertEqual(result.tabs[0].kind, "diff")
+        XCTAssertEqual(result.tabs[0].diffId, "diff_1")
+        XCTAssertEqual(result.tabs[1].kind, "web")
+        XCTAssertNil(result.tabs[1].diffId, "a non-diff tab (and an older daemon's row) decodes diffId as nil, never a guessed value")
+        XCTAssertEqual(result.activeTabId, "t1")
+    }
 }

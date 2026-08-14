@@ -588,6 +588,43 @@ describe("panel RPC methods (panel-shell T6)", () => {
   });
 
   // -------------------------------------------------------------------------------------------
+  // diff-tabs Task 7: `diffId` passthrough. `panel.openTab` -> `mintPanelTab` (panel/open-tab.ts)
+  // -> the persisted `panel_tab_opened` -> `foldPanelTabs`'s own `PanelTab.diffId` (Task 7's other
+  // pin, test/panel/store.test.ts, covers the pure fold in isolation). This is the end-to-end
+  // proof over the real RPC + real persisted log, the same depth panel.openTab's other fields
+  // (kind/url/title) are already held to above.
+  // -------------------------------------------------------------------------------------------
+  test("panel.openTab passes diffId through to the persisted panel_tab_opened, and panel.list's fold exposes it", async () => {
+    const { store, socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "panel-tester");
+    const sessionId = store.createSession("global");
+    const diffId = "a".repeat(32);
+
+    const res = await c.request(METHODS.panelOpenTab, { sessionId, kind: "diff", diffId, title: "x.ts" });
+    expect(res.error).toBeUndefined();
+
+    const opened = store.read(sessionId).find((e) => e.type === "panel_tab_opened") as any;
+    expect(opened.diffId).toBe(diffId);
+
+    const listed = await c.request(METHODS.panelList, { sessionId });
+    expect(listed.result.tabs[0].diffId).toBe(diffId);
+    c.close();
+  });
+
+  test("panel.openTab with no diffId (every non-diff kind): the fold exposes no diffId at all", async () => {
+    const { store, socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "panel-tester");
+    const sessionId = store.createSession("global");
+
+    await c.request(METHODS.panelOpenTab, { sessionId, kind: "web" });
+    const listed = await c.request(METHODS.panelList, { sessionId });
+    expect(listed.result.tabs[0].diffId).toBeUndefined();
+    c.close();
+  });
+
+  // -------------------------------------------------------------------------------------------
   // No panel.navigate — the method name must not exist on the wire at all (see the module doc
   // comment above, and PanelReportNavigationParams's own doc comment in methods.ts).
   // -------------------------------------------------------------------------------------------

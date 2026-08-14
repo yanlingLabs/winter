@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { SessionEvent } from "@norma/protocol";
+import { ToolResultEvent, FileDiffSummary, type SessionEvent } from "@norma/protocol";
 import { SessionStore } from "../../src/sessions/store";
 import { HISTORY_EVENT_TYPES, readHistoryPage, capEvent, WHOLE_EVENT_CEILING } from "../../src/sessions/history";
 
@@ -295,5 +295,32 @@ describe("readHistoryPage", () => {
     // Control: at the same cap, an event genuinely under the ceiling still short-circuits.
     const small = { type: "assistant_message", sessionId: "s", threadId: "main", seq: 2, ts: 1, text: "ok" } as any;
     expect(capEvent(small, 512 * 1024)).toBe(small);
+  });
+
+  /** diff-tabs Task 7: `capEvent` bound for `tool_result.fileDiff` (Task 3/5) — stated as a test
+   *  per the design doc's own instruction, even though every `fileDiff` field is ALREADY
+   *  schema-bounded (path <= 1024 chars, diffId <= 64 chars by regex, added/removed plain ints) and
+   *  so can never itself be why an event needs capping. Built through the REAL `ToolResultEvent`/
+   *  `FileDiffSummary` zod schemas (not a hand-typed `as any` fixture, unlike this file's other
+   *  capEvent pins above) so the max-size shape is provably the worst case the wire can ever carry,
+   *  not merely a plausible one. */
+  test("CAP BOUND: capEvent leaves a tool_result carrying a max-size fileDiff intact, under WHOLE_EVENT_CEILING", () => {
+    const fileDiff = FileDiffSummary.parse({
+      path: "p".repeat(1024),
+      added: Number.MAX_SAFE_INTEGER,
+      removed: Number.MAX_SAFE_INTEGER,
+      diffId: "d".repeat(64),
+    });
+    const event = ToolResultEvent.parse({
+      type: "tool_result", sessionId: "s", threadId: "main", seq: 1, ts: 1,
+      callId: "c1", output: "wrote the file", isError: false, fileDiff,
+    });
+    const capped = capEvent(event);
+    // SAME reference: the fast path is provably a no-op here (every string well under 64 KiB), so
+    // this is also a control proving the schema bounds hold in practice, not just on paper.
+    expect(capped).toBe(event);
+    expect(Buffer.byteLength(JSON.stringify(capped), "utf8")).toBeLessThan(WHOLE_EVENT_CEILING);
+    expect((capped as any).fileDiff.diffId).toBe("d".repeat(64));
+    expect((capped as any).fileDiff.path).toBe("p".repeat(1024));
   });
 });

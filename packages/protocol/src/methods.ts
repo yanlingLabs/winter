@@ -4,7 +4,7 @@ import { z } from "zod";
 // from this file — methods.ts already imports from events.ts, so the reverse edge would be a module
 // cycle whose `z.enum(...)` const would be in the TDZ at events.ts's evaluation. Re-exported by the
 // package index either way, so `@norma/protocol` consumers see no difference.
-import { SessionEvent, SessionActivity, TaskSchema, PeripheralClassSchema, HolderSchema, ApprovalOption, PanelTabKind, PANEL_URL_MAX_LENGTH, PANEL_TITLE_MAX_LENGTH } from "./events";
+import { SessionEvent, SessionActivity, TaskSchema, PeripheralClassSchema, HolderSchema, ApprovalOption, PanelTabKind, PANEL_URL_MAX_LENGTH, PANEL_TITLE_MAX_LENGTH, DIFF_ID_SHAPE } from "./events";
 
 export const PROTOCOL_VERSION = 0;
 
@@ -1487,8 +1487,9 @@ export type SyncMemoryResult = z.infer<typeof SyncMemoryResult>;
 /** panel-shell T6: the RPC surface over Task 5's `foldPanelTabs` (packages/core/src/panel/store.ts)
  *  — five methods, all harness/admin-only (never added to REMOTE_ALLOWED_METHODS or
  *  PLUGIN_ALLOWED_METHODS in ipc/server.ts: the phone has no panel, and a plugin has no reason to
- *  drive one). B2 Task 2 added a SIXTH under the same rule, `panel.commandResult` at the end of this
- *  section — so "five" below counts the tab methods, not the panel surface.
+ *  drive one). B2 Task 2 added a SIXTH under the same rule, `panel.commandResult`; diff-tabs Task 3
+ *  added a SEVENTH, `panel.readDiff`, at the end of this section — so "five" below counts the tab
+ *  methods, not the panel surface.
  *
  *  There is deliberately NO `panel.navigate`. A navigation has two producers that must not be
  *  conflated: the agent's navigation is a REQUEST and travels later as a `panel_command` (transient,
@@ -1501,6 +1502,14 @@ export const PanelTabSchema = z.object({
   kind: PanelTabKind,
   url: z.string().max(PANEL_URL_MAX_LENGTH).optional(),
   title: z.string().max(PANEL_TITLE_MAX_LENGTH).optional(),
+  // diff-tabs Task 7 (fix round 1): restores the doc comment above's "mirrors PanelTabState
+  // (core/src/panel/store.ts) field-for-field" promise to truth. Task 7 added `diffId` to
+  // `PanelTabState`/`PanelTab` (the daemon's own fold, and the actual bytes `panel.list` serializes
+  // — a zod schema does not gate a handler's own return value on the way out) but missed this
+  // schema, its documented mirror, leaving it stale for however long nobody read both comments at
+  // once. Same regex as `PanelTabOpenedEvent.diffId` (events.ts) and `PanelOpenTabParams.diffId`
+  // above: set only when `kind === "diff"`.
+  diffId: z.string().regex(DIFF_ID_SHAPE).optional(),
 });
 
 /** panel-cef Task 6b — the URL SCHEME POLICY, and the one place it is expressed on the wire.
@@ -1588,6 +1597,8 @@ export const PanelOpenTabParams = z.object({
   kind: PanelTabKind,
   url: z.string().max(PANEL_URL_MAX_LENGTH).optional(),
   title: z.string().max(PANEL_TITLE_MAX_LENGTH).optional(),
+  /** Set only when kind === "diff"; mirrors `PanelTabOpenedEvent.diffId` (events.ts) verbatim. */
+  diffId: z.string().regex(DIFF_ID_SHAPE).optional(),
 }).superRefine((p, ctx) => {
   // Kind-conditional, for the reason `isPersistablePanelWebUrl`'s own doc gives: a `.document` or
   // `.code` tab legitimately carries a local path, a `.web` tab never does. Written as a
@@ -1601,6 +1612,19 @@ export const PanelOpenTabParams = z.object({
     ctx.addIssue({
       code: z.ZodIssueCode.custom, path: ["url"],
       message: "a web tab's url must be http or https",
+    });
+  }
+  // fix-wave 2026-08-14, Item 1: `diffId` pairs with `kind === "diff"` in the PRESENT-implies
+  // direction only. Three shipped comments (NormaKit's `NormaClient+Methods.swift`,
+  // ShellSessionHost.swift ×2) already claimed this refinement enforced that pairing
+  // server-side; until this issue, it only checked the url scheme above, so those comments were
+  // aspirational rather than true. The REVERSE is deliberately not required here — an id-less
+  // diff tab is a supported render state (`PanelDiffTabModel`'s unavailable-by-inspection branch
+  // depends on being able to parse one).
+  if (p.kind !== "diff" && p.diffId !== undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom, path: ["diffId"],
+      message: "a non-diff tab's diffId must be unset",
     });
   }
 });
@@ -1679,6 +1703,23 @@ export const PanelCommandResultParams = z.object({
 });
 export const PanelCommandResultResult = z.object({ ok: z.literal(true) });
 export type PanelCommandResultParams = z.infer<typeof PanelCommandResultParams>;
+
+/** diff-tabs Task 3 — the SEVENTH harness/admin-only panel method (same rule as the five tab
+ *  methods and `panel.commandResult` above: absent from `REMOTE_ALLOWED_METHODS` and
+ *  `PLUGIN_ALLOWED_METHODS` in ipc/server.ts, so a remote or plugin connection is role-rejected
+ *  before dispatch — the phone has no panel, and a plugin has no reason to read one). Reads back the
+ *  patch a `tool_result.fileDiff` (events.ts) only summarizes. `diffId` is validated against
+ *  `DIFF_ID_SHAPE` before it ever reaches a path — mirrors `packages/core/src/diffs/store.ts`'s own
+ *  `DIFF_ID_RE` guard, two separate constants in two packages holding the same pattern by design.
+ *  `truncated` echoes the store's own truncation flag verbatim; this RPC never re-truncates. */
+export const PanelReadDiffParams = z.object({ sessionId: z.string().min(1), diffId: z.string().regex(DIFF_ID_SHAPE) });
+export const PanelReadDiffResult = z.object({
+  path: z.string(),
+  added: z.number().int().nonnegative(),
+  removed: z.number().int().nonnegative(),
+  patch: z.string(),
+  truncated: z.boolean(),
+});
 
 export const METHODS = {
   hello: "protocol.hello",
@@ -1772,4 +1813,5 @@ export const METHODS = {
   panelActivateTab: "panel.activateTab",
   panelReportNavigation: "panel.reportNavigation",
   panelCommandResult: "panel.commandResult",
+  panelReadDiff: "panel.readDiff",
 } as const;

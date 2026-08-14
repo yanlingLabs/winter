@@ -84,6 +84,15 @@ func panelTabContent(for tab: PanelTab, host: ShellSessionHost? = nil,
                            runtime: .shared)
     case .document, .code, .note:
         return PanelPlaceholderTab(tab: tab)
+    // diff-tabs Task 10: the second kind with a real surface — Task 9's TEMPORARY placeholder arm,
+    // replaced. The model is looked up (not built) here for the same reason `.web`'s is: this
+    // function runs on every render pass, and a model born here would be reborn here, re-fetching
+    // the frozen patch on every tab switch. `PanelDiffTabModels` keys by tabId and the fetch closure
+    // it builds holds the host WEAKLY — nothing on this line touches the daemon; the first
+    // `onAppear` is what starts the one request.
+    case .diff:
+        return PanelDiffTab(tab: tab,
+                            model: PanelDiffTabModels.model(for: tab, host: host, sessionId: sessionId))
     }
 }
 

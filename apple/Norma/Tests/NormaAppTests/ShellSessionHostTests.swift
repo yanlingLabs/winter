@@ -1373,6 +1373,132 @@ final class ShellSessionHostTests: XCTestCase {
                        "file:///Users/someone/report.docx")
     }
 
+    // MARK: - diff-tabs Task 9: the transcript chip's door
+
+    private func diffRef(_ path: String = "packages/core/src/agent/engine.ts",
+                         diffId: String = "d_9f2a") -> FileDiffRef {
+        FileDiffRef(path: path, added: 198, removed: 33, diffId: diffId)
+    }
+
+    /// The DECISION, on its own: dedupe by `diffId`, else mint titled with the file's last path
+    /// component. Pure, so every edge is cheap to state — and the edges are the point, because each
+    /// one is a way a duplicate tab or a wrong activation gets shipped.
+    func testTheDiffChipDecisionDedupesByDiffIdAndTitlesTheMintWithTheBasename() {
+        let ref = diffRef()
+        XCTAssertEqual(panelDiffTabAction(tabs: [], ref: ref), .mint(title: "engine.ts"))
+
+        let open = PanelTab(tabId: "t7", kind: .diff, url: nil, title: "engine.ts", diffId: "d_9f2a")
+        XCTAssertEqual(panelDiffTabAction(tabs: [open], ref: ref), .activate(tabId: "t7"))
+
+        // A DIFFERENT diff of the same file is a different tab — the file is not the key.
+        XCTAssertEqual(panelDiffTabAction(tabs: [open], ref: diffRef(diffId: "d_other")),
+                       .mint(title: "engine.ts"))
+        // Tabs that carry no diffId (every web tab, every pre-feature tab) never match.
+        let web = PanelTab(tabId: "t1", kind: .web, url: "https://a", title: "A")
+        XCTAssertEqual(panelDiffTabAction(tabs: [web], ref: ref), .mint(title: "engine.ts"))
+        // A relative path titles from its last component, same as an absolute one.
+        XCTAssertEqual(panelDiffTabAction(tabs: [], ref: diffRef("src/a.ts")),
+                       .mint(title: "a.ts"))
+    }
+
+    /// **The first click: one `panel.openTab`, kind `diff`, carrying the `diffId` and the basename —
+    /// and the panel is revealed.**
+    ///
+    /// The wire shape is what bites: a mint that dropped `diffId` would open a tab the renderer
+    /// (Task 10) cannot read a patch for, and one that dropped `kind` would open a web tab. The
+    /// `tabId` is still the daemon's to mint, exactly as for the strip's "+".
+    func testAChipClickMintsADiffTabWithItsDiffIdAndBasenameAndRevealsThePanel() async {
+        let (host, factory, mgmt) = await makeHostWithManagement()
+        defer { host.deselect() }
+        host.setShellVisible(true)
+        host.select("S1")
+        await waitUntilMade(factory, 1)
+        await answerHandshake(factory.made[0], sessionId: "S1")
+
+        var revealed = 0
+        host.onRevealPanel = { revealed += 1 }
+
+        host.openDiffTab(diffRef(), sessionId: "S1")
+        await feedWaitUntil { mgmt.methods.contains("panel.openTab") }
+        guard let open = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.openTab" }) else {
+            return XCTFail("a chip click with nothing open must mint a tab: \(mgmt.methods)")
+        }
+        let params = open["params"] as? [String: Any]
+        XCTAssertEqual(params?["sessionId"] as? String, "S1")
+        XCTAssertEqual(params?["kind"] as? String, "diff")
+        XCTAssertEqual(params?["diffId"] as? String, "d_9f2a")
+        XCTAssertEqual(params?["title"] as? String, "engine.ts")
+        XCTAssertNil(params?["tabId"], "the daemon mints tabId — the chip must never send one")
+        XCTAssertNil(params?["url"], "a diff tab has no url at all")
+        XCTAssertEqual(mgmt.methods.filter { $0 == "panel.activateTab" }.count, 0,
+                       "nothing was open to activate: \(mgmt.methods)")
+        XCTAssertEqual(revealed, 1, "a tab nobody can see is not an opened diff")
+    }
+
+    /// **The second click: `panel.activateTab` on the tab the first click opened, and NO second
+    /// mint.** The store is seeded the way production seeds it after an attach — through
+    /// `applyFetchedSnapshot`, the `panel.list` path — so this exercises the same state the dedupe
+    /// actually reads in the field.
+    func testASecondChipClickActivatesTheOpenTabInsteadOfMintingASecond() async {
+        let (host, factory, mgmt) = await makeHostWithManagement()
+        defer { host.deselect() }
+        host.setShellVisible(true)
+        host.select("S1")
+        await waitUntilMade(factory, 1)
+        await answerHandshake(factory.made[0], sessionId: "S1")
+
+        host.panelStore.applyFetchedSnapshot(
+            sessionId: "S1",
+            tabs: [PanelTab(tabId: "t7", kind: .diff, url: nil, title: "engine.ts", diffId: "d_9f2a")],
+            activeTabId: nil)
+
+        var revealed = 0
+        host.onRevealPanel = { revealed += 1 }
+
+        host.openDiffTab(diffRef(), sessionId: "S1")
+        await feedWaitUntil { mgmt.methods.contains("panel.activateTab") }
+        guard let activate = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.activateTab" }) else {
+            return XCTFail("a chip for an already-open diff must activate it: \(mgmt.methods)")
+        }
+        let params = activate["params"] as? [String: Any]
+        XCTAssertEqual(params?["sessionId"] as? String, "S1")
+        XCTAssertEqual(params?["tabId"] as? String, "t7")
+        // The whole point: no duplicate tab. Given a beat, in case a mint were racing behind it.
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertEqual(mgmt.methods.filter { $0 == "panel.openTab" }.count, 0,
+                       "one frozen tab per edit — a second click must never mint: \(mgmt.methods)")
+        XCTAssertEqual(revealed, 1, "an activate behind a hidden panel is a click that does nothing")
+    }
+
+    /// The dedupe reads the CHIP'S OWN session, not whatever the shell is attached to. Here the
+    /// shell is attached to `S2` while the chip belongs to `S1` — the shape a hop between click and
+    /// call produces — so an implementation that read `attachedSessionId` would miss `S1`'s open tab
+    /// and mint a duplicate. With both ids equal the assertion would pass either way, which is why
+    /// they differ.
+    func testTheDedupeReadsTheChipsOwnSessionNotTheAttachedOne() async {
+        let (host, factory, mgmt) = await makeHostWithManagement()
+        defer { host.deselect() }
+        host.setShellVisible(true)
+        host.select("S2")
+        await waitUntilMade(factory, 1)
+        await answerHandshake(factory.made[0], sessionId: "S2")
+        XCTAssertEqual(host.attachedSessionId, "S2")
+
+        host.panelStore.applyFetchedSnapshot(
+            sessionId: "S1",
+            tabs: [PanelTab(tabId: "t7", kind: .diff, url: nil, title: "engine.ts", diffId: "d_9f2a")],
+            activeTabId: nil)
+
+        host.openDiffTab(diffRef(), sessionId: "S1")
+        await feedWaitUntil { mgmt.methods.contains("panel.activateTab") }
+        guard let activate = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.activateTab" }) else {
+            return XCTFail("the chip's own session's tab must be activated: \(mgmt.methods)")
+        }
+        XCTAssertEqual((activate["params"] as? [String: Any])?["sessionId"] as? String, "S1",
+                       "the activate targets the chip's session, not the attached one")
+        XCTAssertEqual(mgmt.methods.filter { $0 == "panel.openTab" }.count, 0)
+    }
+
     /// **A popup opens a panel tab in the session ITS OWN browser belongs to** — the whole Swift
     /// half of the popup route, from the model CEF drives down to the bytes on the socket.
     ///

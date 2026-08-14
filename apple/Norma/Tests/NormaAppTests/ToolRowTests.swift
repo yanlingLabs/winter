@@ -16,9 +16,11 @@ final class ToolRowTests: XCTestCase {
         detail: String? = nil,
         output: String? = nil,
         isError: Bool = false,
-        callId: String? = nil
+        callId: String? = nil,
+        fileDiff: FileDiffRef? = nil
     ) -> ToolCallRecord {
-        ToolCallRecord(callId: callId, detail: detail, output: output, isError: isError)
+        ToolCallRecord(callId: callId, detail: detail, output: output, isError: isError,
+                       fileDiff: fileDiff)
     }
 
     private func run(_ name: String, _ calls: [ToolCallRecord]) -> [ToolRunEntry] {
@@ -351,5 +353,132 @@ final class ToolRowTests: XCTestCase {
         XCTAssertEqual(expansion.lines, [])
         XCTAssertNil(expansion.note)
         XCTAssertEqual(toolRunStatus([], turnIsLive: false), .succeeded)
+    }
+
+    // MARK: - diff-tabs Task 9: the diff chip
+
+    private func diff(_ path: String, added: Int, removed: Int, diffId: String = "d1") -> FileDiffRef {
+        FileDiffRef(path: path, added: added, removed: removed, diffId: diffId)
+    }
+
+    /// The chip PRINTS the last two path components and the counts in the ruled order — `-N` first,
+    /// then `+M` (design spec §3's `path -33 +198`). The order is not cosmetic: it is the same order
+    /// the daemon's own confirmation string uses, so the transcript and the tool's own words agree.
+    func testTheChipShowsTheLastTwoPathComponentsAndTheCountsRemovedFirst() {
+        let ref = diff("packages/core/src/agent/engine.ts", added: 198, removed: 33)
+        XCTAssertEqual(fileDiffChipDisplayPath(ref.path), "agent/engine.ts")
+        XCTAssertEqual(fileDiffChipRemovedText(ref), "-33")
+        XCTAssertEqual(fileDiffChipAddedText(ref), "+198")
+        XCTAssertEqual(fileDiffChipText(ref), "agent/engine.ts -33 +198")
+    }
+
+    /// The path is the tool argument AS RECEIVED (`FileDiffRef`'s own doc) — relative, absolute, a
+    /// bare filename, spaces and all. Every one of these is a STRING operation; nothing resolves a
+    /// path or touches the disk.
+    func testTheChipPathTailIsTotalOverEveryShapeTheWireCanCarry() {
+        XCTAssertEqual(fileDiffChipDisplayPath("/Users/k/norma v2/core.ts"), "norma v2/core.ts")
+        XCTAssertEqual(fileDiffChipDisplayPath("src/engine.ts"), "src/engine.ts")
+        XCTAssertEqual(fileDiffChipDisplayPath("engine.ts"), "engine.ts",
+                       "one component is the whole answer, not a truncated two")
+        XCTAssertEqual(fileDiffChipDisplayPath("./engine.ts"), "./engine.ts")
+        XCTAssertEqual(fileDiffChipDisplayPath("a//b//c.ts"), "b/c.ts",
+                       "an empty component must not eat one of the two")
+        XCTAssertEqual(fileDiffChipDisplayPath("/engine.ts"), "engine.ts")
+        XCTAssertEqual(fileDiffChipDisplayPath(""), "")
+    }
+
+    /// **Notebook reserialization, carried from Task 6's review as a display obligation.** A first
+    /// edit to an externally-formatted `.ipynb` legitimately reports whole-file-scale counts, because
+    /// the tool diffs against its own reserialization. The chip renders what the counts say — it does
+    /// not second-guess, clamp or abbreviate them.
+    func testTheChipRendersWholeFileScaleNotebookCountsVerbatim() {
+        let ref = diff("notebooks/analysis.ipynb", added: 4_812, removed: 4_796)
+        XCTAssertEqual(fileDiffChipText(ref), "notebooks/analysis.ipynb -4796 +4812")
+    }
+
+    /// A run with no diffs offers no chip — which is every run in every session that predates the
+    /// feature, and every run of tools that touch no files.
+    func testARunWithNoDiffsOffersNoChip() {
+        let entries = run("bash", [call(detail: "pnpm test", output: "1146 pass")])
+        XCTAssertTrue(toolRunDiffChips(entries).isEmpty)
+        XCTAssertEqual(toolRunCollapsedDiffChips(entries), ToolRunDiffChips(chips: [], note: nil))
+        XCTAssertNil(toolRunExpansion(entries, turnIsLive: false).lines[0].fileDiff)
+    }
+
+    /// Chips come from the calls that CARRY a diff, in call order, across entries — and only from
+    /// those. The gate is the diff's presence, never the tool's name (`ToolCallRecord.fileDiff`).
+    func testChipsComeFromTheCallsThatCarryADiffInOrder() {
+        let entries = [
+            ToolRunEntry(name: "edit", calls: [
+                call(detail: "a.ts", output: "ok", fileDiff: diff("src/a.ts", added: 3, removed: 1, diffId: "d1")),
+                call(detail: "b.ts", output: "ok"),
+            ]),
+            ToolRunEntry(name: "read", calls: [call(detail: "c.ts", output: "…")]),
+            ToolRunEntry(name: "write", calls: [
+                call(detail: "d.ts", output: "ok", fileDiff: diff("src/d.ts", added: 9, removed: 0, diffId: "d2")),
+            ]),
+        ]
+        XCTAssertEqual(toolRunDiffChips(entries).map(\.diffId), ["d1", "d2"])
+        // The expansion carries each call's own diff on its own line — so every chip the collapsed
+        // row bounds away is still reachable by expanding.
+        XCTAssertEqual(toolRunExpansion(entries, turnIsLive: false).lines.map { $0.fileDiff?.diffId },
+                       ["d1", nil, nil, "d2"])
+    }
+
+    /// The collapsed row is BOUNDED — a 40-edit turn must not push forty chip rows between two
+    /// sentences of prose — and it SAYS what it withheld, so a diff is never silently unreachable.
+    func testTheCollapsedRowBoundsItsChipsAndNamesWhatItWithheld() {
+        let entries = run("edit", (0..<9).map {
+            call(detail: "f\($0).ts", output: "ok", fileDiff: diff("src/f\($0).ts", added: 1, removed: 1, diffId: "d\($0)"))
+        })
+        let bounded = toolRunCollapsedDiffChips(entries, max: 6)
+        XCTAssertEqual(bounded.chips.map(\.diffId), ["d0", "d1", "d2", "d3", "d4", "d5"])
+        XCTAssertEqual(bounded.note, "… 3 more files — expand to open their diffs")
+        // Under the bound: every chip, no note. (A fresh single-call run — `run(_:_:)` builds ONE
+        // entry holding every call, so slicing the entry array above would not have shortened it.)
+        let few = toolRunCollapsedDiffChips(
+            run("edit", [call(output: "ok", fileDiff: diff("src/only.ts", added: 1, removed: 1))]),
+            max: 6)
+        XCTAssertEqual(few.chips.count, 1)
+        XCTAssertNil(few.note)
+        // Exactly one over: singular prose, not "1 more files".
+        let seven = run("edit", (0..<7).map {
+            call(output: "ok", fileDiff: diff("src/g\($0).ts", added: 1, removed: 1, diffId: "g\($0)"))
+        })
+        XCTAssertEqual(toolRunCollapsedDiffChips(seven, max: 6).note,
+                       "… 1 more file — expand to open its diff")
+    }
+
+    /// **The transcript never reaches for the shell.**
+    ///
+    /// The diff chip is the first thing in `ChatContent/` that causes a panel tab to open, and the
+    /// obvious way to build it — read `ShellSessionHost` directly — would weld this shared surface to
+    /// the one window that has a panel, breaking the orb's morph window and every detached window
+    /// that render the very same views. The door is a plain closure (`WindowContentView.onOpenDiff`)
+    /// and this is what keeps it one.
+    ///
+    /// Comments are stripped first, so writing down the reason (this file's own doc comments name the
+    /// type repeatedly) is not itself a violation — the `TranscriptBrandTests`/`ComposerChromeTests`
+    /// convention.
+    func testChatContentNeverReachesForTheShellHost() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/ChatContent")
+        var scanned = 0
+        let walker = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)
+        while let url = walker?.nextObject() as? URL {
+            guard url.pathExtension == "swift" else { continue }
+            let code = try String(contentsOf: url, encoding: .utf8)
+                .split(separator: "\n", omittingEmptySubsequences: false)
+                .map { $0.drop(while: { $0 == " " }).hasPrefix("//") ? "" : String($0) }
+                .joined(separator: "\n")
+            for name in ["ShellSessionHost", "PanelStore", "openPanelTab", "activatePanelTab"] {
+                XCTAssertFalse(code.contains(name),
+                               "\(url.lastPathComponent) reaches for \(name) — the diff door must "
+                               + "stay a closure the window layer injects")
+            }
+            scanned += 1
+        }
+        XCTAssertEqual(scanned, 12, "ChatContent's file count changed — confirm the new file is scanned")
     }
 }

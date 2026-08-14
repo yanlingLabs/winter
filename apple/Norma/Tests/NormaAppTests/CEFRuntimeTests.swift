@@ -813,15 +813,45 @@ final class CEFRuntimeTests: XCTestCase {
         }
     }
 
-    /// `.web` resolves to the CEF surface; every other kind keeps Plan A's blank placeholder.
+    /// `.web` resolves to the CEF surface, `.diff` to the diff renderer, and the three kinds with no
+    /// surface yet keep Plan A's blank placeholder.
+    ///
+    /// **diff-tabs Task 10 took `.diff` out of the placeholder list — the handoff Task 9 designed.**
+    /// Task 9 minted diff tabs (the transcript chip → `ShellSessionHost.openDiffTab`) without
+    /// rendering one, and listed `.diff` here TEMPORARILY so this replacement could not be a silent
+    /// behaviour change: the loop below failed the moment `PanelDiffTab` landed, and the fix was to
+    /// move the case up into its own assertion rather than to delete a pin.
+    ///
+    /// `.diff` must ALSO never render a browser, which the type check states directly (a `.diff` tab
+    /// that resolved to `PanelWebTab` would stand Chromium up for a patch file).
     func testWebTabsResolveToTheCEFSurfaceAndOtherKindsDoNot() {
         let web = PanelTab(tabId: "t1", kind: .web, url: nil, title: nil)
         XCTAssertTrue(panelTabContent(for: web) is PanelWebTab)
+
+        let diff = PanelTab(tabId: "t3", kind: .diff, url: nil, title: "engine.ts", diffId: "diff_1")
+        let diffContent = panelTabContent(for: diff)
+        XCTAssertTrue(diffContent is PanelDiffTab, "a diff tab renders the diff surface")
+        XCTAssertFalse(diffContent is PanelWebTab, "…and never a browser")
+        PanelDiffTabModels.removeAllForTesting()
+
         for kind in [PanelTabKind.document, .code, .note] {
             let tab = PanelTab(tabId: "t2", kind: kind, url: nil, title: nil)
             XCTAssertTrue(panelTabContent(for: tab) is PanelPlaceholderTab,
                           "\(kind) must not render a browser")
         }
+    }
+
+    /// Every kind resolves to a REAL SF Symbol, `.diff` included (diff-tabs Task 9's
+    /// `plus.forwardslash.minus`) — a favicon name that resolves to nothing draws an empty pill, and
+    /// nothing else in the suite would notice.
+    func testEveryPanelTabKindHasARealFaviconGlyph() {
+        for kind in [PanelTabKind.web, .document, .code, .note, .diff] {
+            let name = panelTabFaviconSystemImage(kind)
+            XCTAssertNotNil(NSImage(systemSymbolName: name, accessibilityDescription: nil),
+                            "\(kind)'s favicon `\(name)` is not a real SF Symbol")
+        }
+        XCTAssertEqual(panelTabFaviconSystemImage(.diff), "plus.forwardslash.minus",
+                       "the diff pill speaks the chip's own -N/+M vocabulary")
     }
 
     /// The panel renders the active tab — and, when nothing is active, the first one.

@@ -9,6 +9,7 @@ import { SessionStore } from "./sessions/store";
 import { SessionHub } from "./sessions/hub";
 import { reapEmptySessions } from "./sessions/reaper";
 import { ensureOutdir } from "./sessions/outdir";
+import { writeDiff, type DiffHeader } from "./diffs/store";
 import type { ActivityDeriver } from "./sessions/activity";
 import { startIpcServer, type IpcServer, type IpcServerOptions } from "./ipc/server";
 import { loadSettings, loadPermissionDirs, hooksEnabledFrom, memoryEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom } from "./settings";
@@ -931,6 +932,10 @@ export async function startDaemon(opts: {
     // alongside `tmpDir` (executeCall), independent of `sessionDirs`/`rootsOverride` (see that
     // field's own doc comment for why: mirrors `tmpDir`'s own rootsOverride-independence).
     const outDirOf = (sid: string) => ensureOutdir(normaHome, sid);
+    // diff-tabs Task 6: engine.ts's `EngineConfig.persistDiff` — same normaHome-closure shape as
+    // outDirOf just above, action- rather than value-shaped (see persistDiff's own doc comment).
+    const persistDiff = (sid: string, diffId: string, header: Omit<DiffHeader, "truncated">, patch: string) =>
+      writeDiff(normaHome, sid, diffId, header, patch);
     if (lspCfg?.enabled !== false) {
       lspManager = new LspManager({ idleShutdownMs: lspCfg?.idleShutdownMs });
       registerLspTools(registry, { lsp: lspManager, cwdOf, rootsOf, tmpDirOf });
@@ -1229,6 +1234,8 @@ export async function startDaemon(opts: {
       // working-directories T4: bash's $OUTDIR splice + explicit seatbelt-writable union
       // (tools/bash.ts) — see `outDirOf`'s own local doc comment above.
       outDirOf,
+      // diff-tabs Task 6: see `persistDiff`'s own local doc comment above.
+      persistDiff,
       // working-directories T4 fix round 1: the SAME memoryDirOf/memoryEnabledHot closures
       // `sessionDirs` above already uses to fold the MEMDIR into the session's write roots —
       // exposed to the fs-reviewer's `fsWriteIsUnusual` call (engine.ts) so it treats the MEMDIR

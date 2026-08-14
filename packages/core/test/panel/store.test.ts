@@ -49,4 +49,24 @@ describe("foldPanelTabs", () => {
     expect(state.tabs).toHaveLength(1);
     expect(state.tabs[0]?.url).toBeUndefined();
   });
+
+  // diff-tabs Task 7: `panel_tab_opened.diffId` (protocol Task 3) carried through the fold — the
+  // mint-side half lives in `mintPanelTab` (panel/open-tab.ts), exercised over the real RPC in
+  // test/ipc/panel-methods.test.ts; this is the PURE fold's own copy of the same guarantee.
+  test("panel_tab_opened carries diffId through the fold", () => {
+    const state = foldPanelTabs([
+      { ...base, type: "panel_tab_opened", tabId: "t1", kind: "diff", diffId: "abc123" },
+    ] as any);
+    expect(state.tabs).toHaveLength(1);
+    expect(state.tabs[0]?.diffId).toBe("abc123");
+    expect(state.tabs[0]?.kind).toBe("diff");
+  });
+
+  test("panel_tab_opened with no diffId folds with diffId left undefined (every non-diff kind)", () => {
+    const state = foldPanelTabs([
+      { ...base, type: "panel_tab_opened", tabId: "t1", kind: "web" },
+    ] as any);
+    expect(state.tabs).toHaveLength(1);
+    expect(state.tabs[0]?.diffId).toBeUndefined();
+  });
 });

@@ -332,7 +332,11 @@ final class PanelWebChromeTests: XCTestCase {
         let overTitle = String(repeating: "t", count: PanelURLPolicy.titleMaxLength + 1)
         let overURL = "https://a.example/" + String(repeating: "p", count: PanelURLPolicy.urlMaxLength)
 
-        for kind in [PanelTabKind.web, .document, .code, .note] {
+        // diff-tabs Task 9: `.diff` joins the list — a kind added without one is exactly the
+        // sweep-by-meaning miss the compile cascade cannot catch (nothing here fails to compile when
+        // a fifth case appears), and a diff tab's title IS caller-supplied (the edited file's
+        // basename), so the title cap genuinely applies to it.
+        for kind in [PanelTabKind.web, .document, .code, .note, .diff] {
             XCTAssertFalse(PanelURLPolicy.mayOpenTab(kind: kind, url: nil, title: overTitle),
                            "\(kind): an over-cap title is refused by the daemon for every kind")
             XCTAssertFalse(PanelURLPolicy.mayOpenTab(kind: kind, url: overURL),

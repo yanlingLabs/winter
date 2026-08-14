@@ -7,6 +7,7 @@ import type { SessionApprovalPolicy } from "../agent/gate";
 import { hasOpenPanelTabs } from "../panel/store";
 import type { SessionDirs } from "./dirs";
 import { outdirPath } from "./outdir";
+import { removeSessionDiffs } from "../diffs/store";
 
 // Keep in sync with SessionCreateParams scope regex (packages/protocol/src/methods.ts).
 const SCOPE_RE = /^[a-z0-9]([a-z0-9-]{0,39}[a-z0-9])?$/;
@@ -832,7 +833,22 @@ export class SessionStore {
    *  never thrown. A session that never wrote anything into its outputs dir (the common
    *  empty-session-reaper case) has no such directory at all — `rmSync(..., { force: true })`
    *  tolerates a missing path exactly like `unlinkSync`'s own `existsSync` guard above does for the
-   *  log file, so the reaper's sweep stays vacuous-safe for it. */
+   *  log file, so the reaper's sweep stays vacuous-safe for it.
+   *
+   *  diff-tabs Task 7: the SAME best-effort sweep, beside the outputs dir, for the session's
+   *  captured diffs (`diffs/store.ts`'s `removeSessionDiffs`) — a disposable derivative of an edit
+   *  the session's own JSONL already fully describes, never the thing this method's own contract
+   *  (JSONL + index row) is responsible for. This is THE one shared deletion path: `reapEmptySessions`
+   *  (reaper.ts) and `SessionCleaner.runPass` (cleaner.ts) — the system's only two sanctioned
+   *  auto-delete doors — both call this method and nothing else, so sweeping here covers both by
+   *  construction; no separate "user-delete" door exists in `packages/protocol`/`packages/core`
+   *  today. `removeSessionDiffs` is async-typed but has no `await` in its own body as of this
+   *  writing (diffs/store.ts) — its `rmSync` therefore runs to completion synchronously, before this
+   *  statement finishes evaluating, exactly like the outputs-dir `rmSync` just above; `.catch` exists
+   *  only so a genuine failure (e.g. a permissions error) is logged rather than becoming an unhandled
+   *  rejection, never to undo or retry a delete that already happened. `void` rather than `await`
+   *  because this method's own signature (and both `ReaperStore`/`CleanerStore`'s narrower slices of
+   *  it) is synchronous, a contract this task does not touch. */
   deleteSession(sessionId: string): void {
     const row = this.db.query("SELECT scope, mode FROM sessions WHERE session_id = ?").get(sessionId) as
       | { scope: string; mode: string | null } | null;
@@ -846,6 +862,9 @@ export class SessionStore {
     } catch (err) {
       console.error(`[store] failed to remove outputs dir for ${sessionId}:`, err);
     }
+    void removeSessionDiffs(this.homeDir, sessionId).catch((err) => {
+      console.error(`[store] failed to remove diffs dir for ${sessionId}:`, err);
+    });
   }
 
   // -----------------------------------------------------------------------------------------

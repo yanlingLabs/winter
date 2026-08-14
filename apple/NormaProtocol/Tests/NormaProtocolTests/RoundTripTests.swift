@@ -4,7 +4,7 @@ import XCTest
 final class RoundTripTests: XCTestCase {
     func fixtureURLs() throws -> [URL] {
         let urls = Bundle.module.urls(forResourcesWithExtension: "json", subdirectory: "Fixtures") ?? []
-        XCTAssertEqual(urls.count, 65, "expected 65 fixtures — regenerate via pnpm protocol:generate")
+        XCTAssertEqual(urls.count, 67, "expected 67 fixtures — regenerate via pnpm protocol:generate")
         return urls
     }
 
@@ -248,5 +248,76 @@ final class RoundTripTests: XCTestCase {
         }
         XCTAssertEqual(v.action, "drag")
         XCTAssertEqual(v.args?["from"], .string("#a"))
+    }
+
+    /// diff-tabs T4: `tool_result.fileDiff` is additive/optional — mirrors
+    /// `testTurnCompletedContextTokensOptional`'s with/without + absent-stays-absent pattern, via
+    /// the TS-generated `tool_result_with_file_diff.json` fixture (present) vs. the pre-existing
+    /// `tool_result.json` (predates this field, absent). Checks CONTENT, not just the fixture-count
+    /// tripwire above — proves `FileDiffSummary` decodes path/added/removed/diffId correctly, not
+    /// merely that the struct compiles.
+    func testToolResultFileDiffOptional() throws {
+        guard let withURL = Bundle.module.url(forResource: "tool_result_with_file_diff", withExtension: "json", subdirectory: "Fixtures") else {
+            return XCTFail("missing tool_result_with_file_diff.json fixture")
+        }
+        let withData = try Data(contentsOf: withURL)
+        guard case .toolResult(let with) = try JSONDecoder().decode(SessionEvent.self, from: withData) else { return XCTFail() }
+        XCTAssertEqual(with.fileDiff, SessionEvent.FileDiffSummary(path: "/tmp/fixture.swift", added: 198, removed: 33, diffId: "d1f2e3"))
+
+        // Round-trips losslessly: re-encoding a present fileDiff must not drop it.
+        let reencoded = try JSONEncoder().encode(SessionEvent.toolResult(with))
+        guard case .toolResult(let redecoded) = try JSONDecoder().decode(SessionEvent.self, from: reencoded) else { return XCTFail() }
+        XCTAssertEqual(with, redecoded)
+        let obj = try JSONSerialization.jsonObject(with: reencoded) as? [String: Any]
+        XCTAssertEqual((obj?["fileDiff"] as? [String: Any])?["diffId"] as? String, "d1f2e3")
+
+        guard let withoutURL = Bundle.module.url(forResource: "tool_result", withExtension: "json", subdirectory: "Fixtures") else {
+            return XCTFail("missing tool_result.json fixture")
+        }
+        let withoutData = try Data(contentsOf: withoutURL)
+        guard case .toolResult(let without) = try JSONDecoder().decode(SessionEvent.self, from: withoutData) else { return XCTFail() }
+        XCTAssertNil(without.fileDiff)
+        // Re-encoding an ABSENT fileDiff must not invent the key (encodeIfPresent semantics) —
+        // load-bearing for byte-verbatim replication of an older/absent-field event.
+        let withoutReencoded = try JSONEncoder().encode(SessionEvent.toolResult(without))
+        let withoutObj = try JSONSerialization.jsonObject(with: withoutReencoded) as? [String: Any]
+        XCTAssertNil(withoutObj?["fileDiff"], "an absent fileDiff must stay absent on re-encode")
+    }
+
+    /// diff-tabs T4: `PanelTabKind.diff` is a NEW ENUM CASE (not just a new field) on the wire's
+    /// CLOSED panel-tab-kind enum — this proves the mirror actually added the case with the right
+    /// content, mirroring `testToolReviewDecodes`'s new-variant-content-check style adapted for a
+    /// new-case-not-variant change (`testAllFixturesRoundTrip` above already proves it decodes at
+    /// all — a missing case fails that test's decode, loudly). `panel_tab_opened.diffId` is
+    /// additive/optional alongside it — with/without via the TS-generated `panel_tab_opened_diff
+    /// .json` fixture vs. the pre-existing `panel_tab_opened.json` (predates both, kind stays
+    /// `.web`, diffId absent).
+    func testPanelTabOpenedDiffKindAndDiffIdOptional() throws {
+        guard let withURL = Bundle.module.url(forResource: "panel_tab_opened_diff", withExtension: "json", subdirectory: "Fixtures") else {
+            return XCTFail("missing panel_tab_opened_diff.json fixture")
+        }
+        let withData = try Data(contentsOf: withURL)
+        guard case .panelTabOpened(let with) = try JSONDecoder().decode(SessionEvent.self, from: withData) else { return XCTFail() }
+        XCTAssertEqual(with.kind, .diff)
+        XCTAssertEqual(with.diffId, "d1f2e3")
+
+        let reencoded = try JSONEncoder().encode(SessionEvent.panelTabOpened(with))
+        guard case .panelTabOpened(let redecoded) = try JSONDecoder().decode(SessionEvent.self, from: reencoded) else { return XCTFail() }
+        XCTAssertEqual(with, redecoded)
+        let obj = try JSONSerialization.jsonObject(with: reencoded) as? [String: Any]
+        XCTAssertEqual(obj?["kind"] as? String, "diff")
+        XCTAssertEqual(obj?["diffId"] as? String, "d1f2e3")
+
+        guard let withoutURL = Bundle.module.url(forResource: "panel_tab_opened", withExtension: "json", subdirectory: "Fixtures") else {
+            return XCTFail("missing panel_tab_opened.json fixture")
+        }
+        let withoutData = try Data(contentsOf: withoutURL)
+        guard case .panelTabOpened(let without) = try JSONDecoder().decode(SessionEvent.self, from: withoutData) else { return XCTFail() }
+        XCTAssertEqual(without.kind, .web)
+        XCTAssertNil(without.diffId)
+        // Re-encoding an ABSENT diffId must not invent the key (encodeIfPresent semantics).
+        let withoutReencoded = try JSONEncoder().encode(SessionEvent.panelTabOpened(without))
+        let withoutObj = try JSONSerialization.jsonObject(with: withoutReencoded) as? [String: Any]
+        XCTAssertNil(withoutObj?["diffId"], "an absent diffId must stay absent on re-encode")
     }
 }

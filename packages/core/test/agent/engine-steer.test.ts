@@ -23,6 +23,7 @@ import { Compactor } from "../../src/agent/compactor";
 import type { McpManager } from "../../src/agent/mcp/manager";
 import type { BashReviewer } from "../../src/agent/reviewer";
 import type { PermissionRules } from "../../src/agent/permission-rules";
+import { writeDiff, type DiffHeader } from "../../src/diffs/store";
 
 // Mirrors packages/core/test/agent/engine.test.ts's setup(). Exported so other engine test
 // files (e.g. engine-interrupt.test.ts, engine-context.test.ts) can reuse the same harness
@@ -35,7 +36,11 @@ export function setupEngine(provider: Provider, opts?: {
   // SP-policies Task 7: widened to include "dont-ask" (policy-dont-ask.test.ts drives a dont-ask
   // session). The value flows straight through to store.createSession's approvalPolicy — the full
   // 6-value SessionApprovalPolicy is valid there; this union just lists the ones tests actually use.
-  reviewer?: BashReviewer; reviewerEnabled?: boolean | (() => boolean | undefined); reviewerAllow?: string[]; policy?: "ask" | "auto" | "plan" | "dont-ask";
+  // diff-tabs Task 5: widened again to include "bypass" (registry-file-diff.test.ts's engine-level
+  // fileDiff tests register an arbitrary fake tool name — gate.ts's evaluate() fails an
+  // unclassified name closed to "ask" under every OTHER policy, and "bypass" is the one verdict
+  // that resolves "allow" with no card, so those tests can reach registry.execute() directly).
+  reviewer?: BashReviewer; reviewerEnabled?: boolean | (() => boolean | undefined); reviewerAllow?: string[]; policy?: "ask" | "auto" | "plan" | "dont-ask" | "bypass";
   // phase 5e T3: per-class review on/off — undefined (every pre-5e-T3 test) leaves every class
   // enabled, unchanged. See EngineConfig.reviewerClasses's own doc comment. Also accepts a getter
   // directly (hot-settings T2's engine-hot-config.test.ts passes `() => live.reviewer?.classes`
@@ -73,6 +78,13 @@ export function setupEngine(provider: Provider, opts?: {
   // leaves EngineConfig.dangerousDomainsAdded absent, so the engine's webFetchGate check only ever
   // consults the SHIPPED list, unchanged behavior for every existing caller.
   dangerousDomainsAdded?: string[];
+  // diff-tabs Task 6: when set, wires EngineConfig.persistDiff to the REAL diffs/store.ts
+  // `writeDiff`, rooted at this caller-supplied temp dir — mirrors reviewerAllow/
+  // dangerousDomainsAdded's "plain value here, wrapped below" shape. Undefined (every pre-Task-6
+  // caller of this harness) leaves `persistDiff` absent, so `ctx.diffSink` stays undefined and
+  // write/edit/notebook_edit resolve through this harness exactly as before this opt existed —
+  // only a test that explicitly opts in (tools-file-diff.test.ts's engine-level test) sees it.
+  diffHome?: string;
 }) {
   const home = mkdtempSync(join(tmpdir(), "norma-engine-steer-"));
   const cwd = opts?.cwd ?? realpathSync(mkdtempSync(join(tmpdir(), "norma-engine-steer-cwd-")));
@@ -144,6 +156,10 @@ export function setupEngine(provider: Provider, opts?: {
       : undefined,
     worktrees: opts?.worktrees,
     bgRegistry: opts?.bgRegistry,
+    // diff-tabs Task 6: see `diffHome`'s own doc comment above.
+    persistDiff: opts?.diffHome
+      ? (sid: string, diffId: string, header: Omit<DiffHeader, "truncated">, patch: string) => writeDiff(opts.diffHome!, sid, diffId, header, patch)
+      : undefined,
   });
   const sessionId = store.createSession("global", { cwd, approvalPolicy: opts?.policy ?? "auto" });
   // Collect every SessionEvent broadcast for this session (live, via a hub subscriber) so

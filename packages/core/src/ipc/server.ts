@@ -27,7 +27,7 @@ import {
   WorkflowListParams, WorkflowRunParams, WorkflowStopParams, WorkflowGetParams,
   SyncHeadsParams, SyncPullParams, SyncPushParams, SyncConfigParams, SyncMemoryParams,
   PanelListParams, PanelOpenTabParams, PanelCloseTabParams, PanelActivateTabParams, PanelReportNavigationParams,
-  PanelCommandResultParams,
+  PanelCommandResultParams, PanelReadDiffParams,
   SYSTEM_SESSION_ID,
   type SessionEvent, ConnWriter, type WritableSocket,
 } from "@norma/protocol";
@@ -53,6 +53,7 @@ import { filterRemoteStreamEvent } from "../sessions/remote-stream";
 import { foldPanelTabs } from "../panel/store";
 import { mintPanelTab } from "../panel/open-tab";
 import type { PanelCommandRegistry } from "../panel/commands";
+import { readStoredDiff } from "../diffs/store";
 import { SyncPushBuffers, syncHeads, syncPull, syncPush, syncConfig, syncMemory, effortsForModel } from "./sync";
 import { SessionHub, type HubClient } from "../sessions/hub";
 import type { AgentEngine } from "../agent/engine";
@@ -2495,15 +2496,16 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
 
       // -----------------------------------------------------------------------------------------
       // Panel (panel-shell T6): the RPC surface over Task 5's `foldPanelTabs` (panel/store.ts), plus
-      // B2 Task 2's `panel.commandResult` at the end of the block.
-      // Harness/admin-only by construction — none of the six are in REMOTE_ALLOWED_METHODS or
+      // B2 Task 2's `panel.commandResult` and diff-tabs Task 7's `panel.readDiff`, both at the end
+      // of the block — seven methods total (methods.ts's own count).
+      // Harness/admin-only by construction — none of the seven are in REMOTE_ALLOWED_METHODS or
       // PLUGIN_ALLOWED_METHODS above, so a remote/plugin connection is role-rejected before dispatch
       // ever reaches this switch (the pre-switch gate a few hundred lines up). Every TAB handler
       // below maps an unknown SESSION to NOT_FOUND (the sessionHistory/directory_added precedent) —
-      // `panel.commandResult` is keyed on a commandId rather than a session and has its own
-      // NOT_FOUND rule, stated at its case. Of the five tab handlers, deliberately, none
-      // additionally check that a `tabId` currently exists before appending. See panel.closeTab's
-      // own comment just below for why.
+      // `panel.commandResult` is keyed on a commandId rather than a session, and `panel.readDiff` on
+      // a (sessionId, diffId) pair; both have their own NOT_FOUND rule, stated at their own case. Of
+      // the five tab handlers, deliberately, none additionally check that a `tabId` currently exists
+      // before appending. See panel.closeTab's own comment just below for why.
       // -----------------------------------------------------------------------------------------
       case METHODS.panelList: {
         const p = parseParams(PanelListParams, params);
@@ -2621,6 +2623,34 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const verdict = opts.panelCommands.resolve(p);
         if (verdict === "unknown") throw new RpcFailure(ERR.NOT_FOUND, `unknown commandId: ${p.commandId}`);
         return { ok: true };
+      }
+
+      // diff-tabs Task 7 — the seventh panel method (methods.ts's own count): reads back the patch
+      // a `tool_result.fileDiff` (Task 5) only summarizes. Harness/admin-only, same omission as the
+      // six methods above: absent from REMOTE_ALLOWED_METHODS and PLUGIN_ALLOWED_METHODS, so a
+      // remote or plugin connection is role-rejected before dispatch ever reaches this case
+      // (test/ipc/panel-read-diff.test.ts + remote-allowlist-parity.test.ts pin it from both
+      // sides — deliberately WITHOUT touching either allowlist).
+      //
+      // `PanelReadDiffParams.diffId` carries `DIFF_ID_SHAPE` — the SAME regex the diff store's own
+      // `DIFF_ID_RE` (diffs/store.ts) enforces. An invalid shape is refused by `parseParams` BELOW,
+      // which throws before this handler's body reaches `readStoredDiff` at all — so a malformed id
+      // never causes a file read. A valid-shaped id with nothing on disk (deleted, never captured,
+      // a diffId for a different session) reads back `null` (`readStoredDiff`'s own "fail soft"
+      // contract, diffs/store.ts) and becomes NOT_FOUND here — mirrors `case METHODS.skillsRead`'s
+      // "not found" convention elsewhere in this switch (`skill not found: "${p.name}"`, a single
+      // fact read keyed by an id, refused the same way when the id is well-formed but the fact isn't
+      // there) — a DIFFERENT numeric code from the shape refusal above, on purpose, so the app can
+      // branch on which one it got.
+      case METHODS.panelReadDiff: {
+        const p = parseParams(PanelReadDiffParams, params);
+        if (!opts.normaHome) throw new RpcFailure(ERR.INTERNAL, "panel.readDiff is not available on this server (no normaHome configured)");
+        const found = await readStoredDiff(opts.normaHome, p.sessionId, p.diffId);
+        if (!found) throw new RpcFailure(ERR.NOT_FOUND, `diff not found: "${p.diffId}"`);
+        return {
+          path: found.header.path, added: found.header.added, removed: found.header.removed,
+          patch: found.patch, truncated: found.header.truncated,
+        };
       }
 
       default:
