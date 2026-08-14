@@ -139,6 +139,18 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         }
     }
 
+    /// Summary of one file's diff, stamped onto `ToolResult.fileDiff` below — mirrors TS
+    /// `FileDiffSummary` (`packages/protocol/src/events.ts`). Plain fields only: this package
+    /// mirrors WIRE SHAPE, not zod's runtime validation (`path`/`diffId` length caps, the
+    /// `DIFF_ID_SHAPE` regex) — those are enforced daemon-side before a value like this is ever
+    /// put on the wire, so decode-only fidelity is all this struct needs to provide.
+    public struct FileDiffSummary: Codable, Equatable, Sendable {
+        public let path: String
+        public let added: Int
+        public let removed: Int
+        public let diffId: String
+    }
+
     public struct ToolResult: Codable, Equatable, Sendable {
         public let seq: Int
         public let sessionId: String
@@ -147,9 +159,13 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         public let callId: String
         public let output: String
         public let isError: Bool
-        public init(seq: Int, sessionId: String, ts: Int, threadId: String, callId: String, output: String, isError: Bool) {
+        /// Set only by the daemon engine for edit/write/notebook_edit; chat-mode engines never
+        /// produce it. Optional/additive — decode only, absent on older-shaped payloads and on
+        /// results from tools that don't touch a file.
+        public let fileDiff: FileDiffSummary?
+        public init(seq: Int, sessionId: String, ts: Int, threadId: String, callId: String, output: String, isError: Bool, fileDiff: FileDiffSummary? = nil) {
             self.seq = seq; self.sessionId = sessionId; self.ts = ts; self.threadId = threadId
-            self.callId = callId; self.output = output; self.isError = isError
+            self.callId = callId; self.output = output; self.isError = isError; self.fileDiff = fileDiff
         }
     }
 
@@ -739,7 +755,7 @@ public enum SessionEvent: Codable, Equatable, Sendable {
     /// fallback, and a new kind is exactly the sort of protocol change that already means walking
     /// this file's variant checklist.
     public enum PanelTabKind: String, Codable, Equatable, Sendable {
-        case web, document, code, note
+        case web, document, code, note, diff
     }
 
     /// panel-shell T3: the daemon-driven browsing/document panel's tab lifecycle. This event and
@@ -757,6 +773,8 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         public let kind: PanelTabKind
         public let url: String?
         public let title: String?
+        /// Set only when kind == .diff.
+        public let diffId: String?
     }
 
     /// See PanelTabOpened above.

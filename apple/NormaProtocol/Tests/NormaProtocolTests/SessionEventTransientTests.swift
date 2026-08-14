@@ -101,7 +101,7 @@ final class SessionEventTransientTests: XCTestCase {
         XCTAssertTrue(command.isTransient)
         XCTAssertTrue(SessionEvent.transientTypes.contains("panel_command"))
 
-        let tabOpened = SessionEvent.panelTabOpened(.init(seq: 2, sessionId: "s1", ts: 0, tabId: "tab_1", kind: .web, url: nil, title: nil))
+        let tabOpened = SessionEvent.panelTabOpened(.init(seq: 2, sessionId: "s1", ts: 0, tabId: "tab_1", kind: .web, url: nil, title: nil, diffId: nil))
         XCTAssertFalse(tabOpened.isTransient, "panel_tab_opened is PERSISTED — it consumes a real seq slot, unlike panel_command")
         XCTAssertFalse(SessionEvent.transientTypes.contains("panel_tab_opened"))
     }
