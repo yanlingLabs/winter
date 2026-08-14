@@ -6,6 +6,8 @@ import { ToolRegistry, type ToolContext } from "../../src/agent/tools/registry";
 import { registerWriteTools } from "../../src/agent/tools/fs-write";
 import { registerNotebookTool } from "../../src/agent/tools/notebook";
 import { writeDiff, readStoredDiff, diffDirPath, type DiffHeader } from "../../src/diffs/store";
+import { FakeProvider } from "../../src/agent/fake-provider";
+import { setupEngine } from "./engine-steer.test";
 
 // diff-tabs Task 6: edit/write/notebook_edit actually computing, persisting, and reporting
 // per-edit diffs (myers.ts/store.ts/registry.ts's fileDiff channel are Tasks 1/2/5, already
@@ -126,5 +128,38 @@ describe("notebook_edit: diff computation + persistence", () => {
     expect(res.isError).toBe(false);
     expect(res.fileDiff).toMatchObject({ path: "n.ipynb", added: 1, removed: 1 });
     expect(res.output).toBe("notebook_edit replace on n.ipynb (cell c1) — 1 cells (-1 +1)");
+  });
+});
+
+// -------------------------------------------------------------------------------------------
+// Engine-level: the seam Task 6 alone adds — EngineConfig.persistDiff → executeCall's per-call
+// `ctx.diffSink` binding (engine.ts) → a REAL `write` tool call. Task 5's registry-file-diff.
+// test.ts already proves a fake tool's fileDiff rides the tool_result event; every test above
+// proves the tools produce fileDiff given a ctx-level diffSink. Neither exercises the binding
+// itself — in `persistDiff(sessionId, diffId, header, patch)` both leading params are strings, so
+// a transposition there would compile and pass both of those test layers while silently storing
+// every diff under the wrong session (readStoredDiff below reads back by the SAME sessionId the
+// event reports, so a swap makes this assertion fail rather than the bug going unnoticed).
+// -------------------------------------------------------------------------------------------
+describe("engine: cfg.persistDiff reaches the real store through a live `write` call (Task 6)", () => {
+  test("tool_result.fileDiff is stamped AND the patch is retrievable under the reported sessionId", async () => {
+    const diffHome = mkdtempSync(join(tmpdir(), "norma-fdiff-engine-home-"));
+    const provider = new FakeProvider([
+      [{ type: "tool_call", callId: "c1", name: "write", argsJson: JSON.stringify({ path: "out.txt", content: "a\nb\n" }) }, { type: "done", stopReason: "tool_calls" }],
+      [{ type: "text_delta", delta: "ok" }, { type: "done", stopReason: "end_turn" }],
+    ]);
+    const { engine, sessionId, events } = setupEngine(provider, { policy: "bypass", diffHome });
+    await engine.runTurn(sessionId);
+    const toolResult = events.find((e) => e.type === "tool_result") as { isError: boolean; fileDiff?: { path: string; added: number; removed: number; diffId: string } } | undefined;
+    expect(toolResult).toBeDefined();
+    expect(toolResult!.isError).toBe(false);
+    expect(toolResult!.fileDiff).toBeDefined();
+    expect(toolResult!.fileDiff!.added).toBe(2);
+    expect(toolResult!.fileDiff!.removed).toBe(0);
+    // Retrievable under the SAME sessionId the event itself reports — this is what would fail if
+    // executeCall's persistDiff→diffSink binding ever transposed sessionId/diffId (see above).
+    const stored = await readStoredDiff(diffHome, sessionId, toolResult!.fileDiff!.diffId);
+    expect(stored).not.toBeNull();
+    expect(stored!.header).toEqual({ path: "out.txt", added: 2, removed: 0, truncated: false });
   });
 });
