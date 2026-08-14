@@ -135,7 +135,7 @@ export async function writeDiff(
   const { patch: storedPatch, truncated } = truncatePatch(patch);
   const fullHeader: DiffHeader = { path: header.path, added: header.added, removed: header.removed, truncated };
   const content = `${JSON.stringify(fullHeader)}\n${storedPatch}`;
-  writeFileAtomic(join(dir, `${diffId}.diff`), content);
+  writeFileAtomic(diffFilePath(home, sessionId, diffId), content);
 
   return { truncated };
 }
