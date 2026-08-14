@@ -133,6 +133,14 @@ let panelShape = UnevenRoundedRectangle(
     style: .continuous
 )
 
+/// diff-tabs Task 11: the ONE new animation this task introduces — the accordion swap, whether
+/// fired by a collapsed chip's click or by the `activeTabId` auto-expand rule
+/// (`PanelTabStrip.body`). Named so both call sites share the brief's literal duration
+/// (`.smooth(duration: 0.25)`) instead of each spelling `0.25` on its own — this file's usual
+/// objection to two call sites "agreeing" on a number instead of sharing one applies to a duration
+/// exactly as much as to a width.
+let panelStripExpandAnimationDuration: Double = 0.25
+
 /// The panel column. Owns the chrome band and the content area. panel-shell T8 fills the chrome
 /// band's top 45pt (`panelTitlebarBandHeight`) with the tab strip; panel-cef Task 6b fills the rest
 /// of the band (`panelUrlRowHeight`) with the shown tab's own chrome, and Task 6a filled the
@@ -335,6 +343,15 @@ struct PanelTabStrip: View {
     var onActivateTab: (String) -> Void = { _ in }
     var onCloseTab: (String) -> Void = { _ in }
 
+    /// diff-tabs Task 11: the tab-strip kind-grouping accordion's mode — per-window view state,
+    /// never persisted and never daemon-visible (the brief's own words: this is presentation, not
+    /// a fact the daemon or any other window knows about). `.flat` to start; the mode-transition
+    /// `.onChange` below (`initial: true`) corrects it on the very first layout pass if the strip
+    /// opens already overflowing, so this default is never actually SHOWN un-corrected — see
+    /// `panelStripNextMode`'s own doc (`PanelStripLayout.swift`) for why that first correction has
+    /// to go through the identical guarded transition as every later one, not a special case.
+    @State private var mode: PanelStripMode = .flat
+
     var body: some View {
         GeometryReader { geo in
             let pillWidth = panelTabPillWidth(tabCount: store.tabs.count, availableWidth: geo.size.width)
@@ -347,32 +364,17 @@ struct PanelTabStrip: View {
                     // pill to "+" — is made up on `newTabButton`'s own leading edge below instead
                     // of by a second `spacing:`.
                     HStack(spacing: panelTabSpacing) {
-                        ForEach(store.tabs) { tab in
-                            // live-gate fix E. The TITLE is `panelTabStripTitle(tab)` on BOTH
-                            // branches — this conditional decides only whether SwiftUI has a
-                            // publisher to invalidate on, never what the pill says. A tab with a
-                            // live model gets `PanelTabPillLive`, whose `@ObservedObject` is the
-                            // channel `OnTitleChange` arrives down; a tab without one has no title
-                            // that can change out from under the fold, so there is nothing to
-                            // observe and the plain pill is correct.
-                            if let model = PanelWebTabModels.existing(tabId: tab.tabId) {
-                                PanelTabPillLive(
-                                    model: model,
-                                    tab: tab,
-                                    width: pillWidth,
-                                    isActive: tab.tabId == shownTabId,
-                                    onActivate: { onActivateTab(tab.tabId) },
-                                    onClose: { onCloseTab(tab.tabId) }
-                                )
-                            } else {
-                                PanelTabPill(
-                                    tab: tab,
-                                    title: panelTabStripTitle(tab),
-                                    width: pillWidth,
-                                    isActive: tab.tabId == shownTabId,
-                                    onActivate: { onActivateTab(tab.tabId) },
-                                    onClose: { onCloseTab(tab.tabId) }
-                                )
+                        // diff-tabs Task 11: flat is UNCHANGED — same `ForEach(store.tabs)`, same
+                        // `pillWidth`, same per-tab live/plain branch (live-gate fix E's own
+                        // comment on `pill(for:width:)` below explains that conditional; it is
+                        // untouched, just given one address instead of being inlined here so
+                        // grouped mode's expanded group can share it). Grouped mode never runs
+                        // this branch at all — `mode` starts `.flat` and nothing here reads it.
+                        if case .grouped = mode {
+                            groupedTabRow
+                        } else {
+                            ForEach(store.tabs) { tab in
+                                pill(for: tab, width: pillWidth)
                             }
                         }
                         newTabButton
@@ -409,6 +411,104 @@ struct PanelTabStrip: View {
             }
             .padding(.top, panelTabPillInset)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            // diff-tabs Task 11: the ONE place `mode` transitions on a resize/tab-count change —
+            // see `panelStripNextMode`'s own doc (`PanelStripLayout.swift`) for why this has to be
+            // a single combined `.onChange` over BOTH inputs at once, why `initial: true` is
+            // load-bearing (a strip that OPENS already overflowing must group on its very first
+            // layout pass, not wait for a subsequent resize), and why that function itself — not
+            // this call site — is what guards the zero-width first pass `GeometryReader` can
+            // report. `panelShownTab` supplies the fallback kind for a FRESH entry into grouped
+            // mode — the exact same "active, else first" rule the strip already highlights by,
+            // not a second one invented for this task.
+            .onChange(of: PanelStripModeInputs(tabCount: store.tabs.count, availableWidth: geo.size.width),
+                     initial: true) { _, inputs in
+                let fallbackKind = panelShownTab(tabs: store.tabs, activeTabId: shownTabId)?.kind
+                mode = panelStripNextMode(current: mode, tabCount: inputs.tabCount,
+                                          availableWidth: inputs.availableWidth, fallbackKind: fallbackKind)
+            }
+            // diff-tabs Task 11: the auto-expand rule (brief: "when store.activeTabId changes to a
+            // tab of a collapsed kind ... auto-expand that kind") — a transcript diff chip's click,
+            // a browser popup, "+", or an agent-opened tab all change `activeTabId` this way.
+            // Reads `store.activeTabId` directly, per that wording, not `shownTabId` — the two
+            // agree whenever a real activation lands (every one of the brief's four triggers mints
+            // AND activates in the same event), and `shownTabId` additionally falls back to the
+            // FIRST tab when `activeTabId` goes nil (`panelShownTab`'s own doc), which is not an
+            // activation this rule should react to. A nil transition (the active tab just closed)
+            // or a tab id this strip cannot resolve to a kind (should not happen; defensive
+            // regardless) both simply have nothing to auto-expand TO, so both no-op.
+            .onChange(of: store.activeTabId, initial: false) { _, newActiveTabId in
+                guard let newActiveTabId,
+                      let newActiveKind = store.tabs.first(where: { $0.tabId == newActiveTabId })?.kind
+                else { return }
+                withAnimation(.smooth(duration: panelStripExpandAnimationDuration)) {
+                    mode = panelStripAutoExpand(mode: mode, newActiveKind: newActiveKind)
+                }
+            }
+        }
+    }
+
+    /// diff-tabs Task 11: the two inputs `panelStripNextMode` needs, combined into ONE `Equatable`
+    /// value so a single `.onChange` drives the transition — two independent `.onChange`s would
+    /// each see only its OWN new value, forcing the other to be read out of the surrounding
+    /// closure's capture instead of from a value SwiftUI actually diffed this frame.
+    private struct PanelStripModeInputs: Equatable {
+        let tabCount: Int
+        let availableWidth: CGFloat
+    }
+
+    /// diff-tabs Task 11: one tab → its pill, live or plain — factored out of the flat branch above
+    /// so grouped mode's expanded group (`groupedTabRow` below) renders through the IDENTICAL
+    /// branch rather than a second copy of the `PanelWebTabModels.existing` check drifting from it.
+    /// live-gate fix E's own comment (on the flat branch above) explains why the conditional exists
+    /// at all — unchanged by this task.
+    @ViewBuilder
+    private func pill(for tab: PanelTab, width: CGFloat) -> some View {
+        if let model = PanelWebTabModels.existing(tabId: tab.tabId) {
+            PanelTabPillLive(
+                model: model,
+                tab: tab,
+                width: width,
+                isActive: tab.tabId == shownTabId,
+                onActivate: { onActivateTab(tab.tabId) },
+                onClose: { onCloseTab(tab.tabId) }
+            )
+        } else {
+            PanelTabPill(
+                tab: tab,
+                title: panelTabStripTitle(tab),
+                width: width,
+                isActive: tab.tabId == shownTabId,
+                onActivate: { onActivateTab(tab.tabId) },
+                onClose: { onCloseTab(tab.tabId) }
+            )
+        }
+    }
+
+    /// diff-tabs Task 11: grouped mode's row — `panelStripKindGroups`' clusters, in first-open
+    /// order, each rendered as either the expanded kind's real pills or a collapsed chip.
+    ///
+    /// Pills render at the FULL measured cap (`panelTabPillSize.width`), not `pillWidth`'s
+    /// compressed share — a deliberate reading of the brief, not a literal instruction: grouping
+    /// exists precisely because compression alone stopped being enough to fit the flat row, so
+    /// re-compressing the pills that DO show would fight the very mechanism that replaced it, and
+    /// `panelTabPillWidth`'s compression formula has no term for a collapsed chip's width to begin
+    /// with. The `ScrollView` already wrapping this row (unchanged from flat mode) is what absorbs
+    /// an expanded group wider than the panel, exactly as the brief asks ("still horizontal-scrolls
+    /// in grouped mode if the expanded group overflows").
+    private var groupedTabRow: some View {
+        let groups = panelStripKindGroups(tabs: store.tabs)
+        return ForEach(groups) { group in
+            if panelStripIsExpanded(group.kind, mode: mode, groups: groups) {
+                ForEach(group.tabs) { tab in
+                    pill(for: tab, width: panelTabPillSize.width)
+                }
+            } else {
+                PanelTabKindChip(kind: group.kind, count: group.tabs.count) {
+                    withAnimation(.smooth(duration: panelStripExpandAnimationDuration)) {
+                        mode = panelStripExpand(group.kind)
+                    }
+                }
+            }
         }
     }
 
@@ -599,6 +699,47 @@ private struct PanelTabPillLive: View {
     var body: some View {
         PanelTabPill(tab: tab, title: panelTabStripTitle(tab), width: width, isActive: isActive,
                      onActivate: onActivate, onClose: onClose)
+    }
+}
+
+/// diff-tabs Task 11: one COLLAPSED kind, in the grouping accordion (`PanelTabStrip.groupedTabRow`)
+/// — the kind's favicon (the same glyph a pill for it would show, `panelTabFaviconSystemImage`)
+/// plus how many tabs are folded into it. No close box: a chip represents a CATEGORY, not one tab,
+/// so there is nothing here for a close action to mean — clicking it only changes which kind is
+/// EXPANDED (`onExpand`), never activates or closes any individual tab.
+///
+/// **Smaller than a pill by shape, not by a second visual language.** Same height
+/// (`panelTabPillSize.height`) and the same `ShellSidebarRowStyle` neutral fill `newTabButton`
+/// already wears — a natural (unset) width instead of a fixed 156pt cap is what actually reads as
+/// smaller against a full pill. The stronger per-kind tint the design spec describes is Task 12's
+/// brand pass, not invented here — same coordination note Tasks 9/10 already carried for this file.
+private struct PanelTabKindChip: View {
+    let kind: PanelTabKind
+    let count: Int
+    let onExpand: () -> Void
+
+    var body: some View {
+        Button(action: onExpand) {
+            // `spacing: 4` matches the app's other icon+label chip (`ActivityChip.swift`) rather
+            // than inventing a new inner-gap number for the identical icon-then-text shape.
+            HStack(spacing: 4) {
+                Image(systemName: panelTabFaviconSystemImage(kind))
+                    .font(Typography.caption())
+                    .foregroundStyle(Theme.textMuted)
+                Text("\(count)")
+                    .font(Typography.label())
+                    .foregroundStyle(Theme.textMuted)
+                    // Task 12 wires Theme.panelKindTint here — the chip's stronger per-kind tint.
+                    // Left at the pill's own neutral `textMuted` until then, deliberately: this
+                    // task's brief is explicit that inventing a tint value is out of scope.
+            }
+            .padding(.horizontal, panelTabPillInset)
+            .frame(height: panelTabPillSize.height)
+            .contentShape(RoundedRectangle(cornerRadius: panelTabPillRadius, style: .continuous))
+        }
+        .buttonStyle(ShellSidebarRowStyle(isSelected: false))
+        .help("\(count) \(kind.rawValue.capitalized) tab\(count == 1 ? "" : "s")")
+        .accessibilityLabel("\(count) \(kind.rawValue.capitalized) tabs, collapsed")
     }
 }
 
