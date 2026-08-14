@@ -1297,14 +1297,21 @@ extension NormaClient {
     // no reason to depend on the App target's own UI-side `PanelTabKind`, and the wire values are
     // already plain strings (`methods.ts`'s `PanelTabKind` zod enum).
 
-    /// `panel.openTab {sessionId, kind, url?, title?}` (methods.ts `PanelOpenTabParams`). The
-    /// daemon MINTS `tabId` (`PanelOpenTabResult.tabId`, returned here) — there is no way to pass
-    /// one in, on purpose: that is what makes an agent-opened tab and a user-opened tab
+    /// `panel.openTab {sessionId, kind, url?, title?, diffId?}` (methods.ts `PanelOpenTabParams`).
+    /// The daemon MINTS `tabId` (`PanelOpenTabResult.tabId`, returned here) — there is no way to
+    /// pass one in, on purpose: that is what makes an agent-opened tab and a user-opened tab
     /// indistinguishable downstream (methods.ts's own doc comment on this RPC).
-    public func openPanelTab(sessionId: String, kind: String, url: String? = nil, title: String? = nil) async throws -> String {
+    ///
+    /// diff-tabs Task 8: `diffId` is set only when `kind == "diff"` — the daemon's own
+    /// `PanelOpenTabParams` refinement enforces that pairing server-side, so this wrapper does no
+    /// kind-conditional gating of its own, same relationship `url`'s scheme policy has with
+    /// `PanelURLPolicy` (app side is a courtesy, the daemon is the actual gate). Encoded ONLY when
+    /// non-nil — `obj(_:)`'s usual contract, never a literal `null` key, matching `url`/`title`.
+    public func openPanelTab(sessionId: String, kind: String, url: String? = nil, title: String? = nil, diffId: String? = nil) async throws -> String {
         let r = try await request("panel.openTab", params: obj([
             "sessionId": .string(sessionId), "kind": .string(kind),
             "url": url.map { .string($0) }, "title": title.map { .string($0) },
+            "diffId": diffId.map { .string($0) },
         ]))
         guard let tabId = r["tabId"]?.stringValue else {
             throw RpcError(code: -3, message: "invalid result from server for panel.openTab")
@@ -1382,9 +1389,34 @@ extension NormaClient {
         let r = try await request("panel.list", params: obj(["sessionId": .string(sessionId)]))
         let tabs: [PanelTabInfo] = (r["tabs"]?.arrayValue ?? []).compactMap { t in
             guard let tabId = t["tabId"]?.stringValue, let kind = t["kind"]?.stringValue else { return nil }
-            return PanelTabInfo(tabId: tabId, kind: kind, url: t["url"]?.stringValue, title: t["title"]?.stringValue)
+            return PanelTabInfo(tabId: tabId, kind: kind, url: t["url"]?.stringValue, title: t["title"]?.stringValue, diffId: t["diffId"]?.stringValue)
         }
         return (tabs, r["activeTabId"]?.stringValue)
+    }
+
+    /// diff-tabs Task 8: `panel.readDiff {sessionId, diffId}` (methods.ts `PanelReadDiffParams`/
+    /// `PanelReadDiffResult`) — the seventh panel method (methods.ts's own count), reading back the
+    /// full patch a `tool_result.fileDiff` (events.ts) only summarizes. Harness/admin-only like
+    /// every other `panel.*` method: absent from `REMOTE_ALLOWED_METHODS`, so a remote connection
+    /// never reaches this.
+    ///
+    /// **No special-case error handling here, on purpose.** The daemon throws two DIFFERENT typed
+    /// refusals and this wrapper surfaces both verbatim, exactly as `request()` already does for
+    /// every other method:
+    ///  - a shape-invalid `diffId` is INVALID_PARAMS, thrown by `parseParams` before the handler
+    ///    body ever runs (never touches disk);
+    ///  - a well-shaped `diffId` with nothing stored (deleted, never captured, minted for a
+    ///    different session) is NOT_FOUND — `case METHODS.skillsRead`'s "not found" convention
+    ///    (ipc/server.ts), reused here rather than re-invented.
+    /// Task 10's renderer is expected to catch either as "Diff unavailable"; this layer's job ends
+    /// at "don't swallow it".
+    public func readPanelDiff(sessionId: String, diffId: String) async throws -> PanelDiffPayload {
+        let r = try await request("panel.readDiff", params: obj(["sessionId": .string(sessionId), "diffId": .string(diffId)]))
+        guard let path = r["path"]?.stringValue, let added = r["added"]?.intValue, let removed = r["removed"]?.intValue,
+              let patch = r["patch"]?.stringValue, let truncated = r["truncated"]?.boolValue else {
+            throw RpcError(code: -3, message: "invalid result from server for panel.readDiff")
+        }
+        return PanelDiffPayload(path: path, added: added, removed: removed, patch: patch, truncated: truncated)
     }
 }
 
@@ -1396,11 +1428,41 @@ public struct PanelTabInfo: Equatable, Sendable {
     public let kind: String
     public let url: String?
     public let title: String?
+    /// diff-tabs Task 8: set only when `kind == "diff"`, same pairing `openPanelTab(diffId:)`
+    /// encodes going the other way. **This is the app's ONLY source of a diff tab's identity after
+    /// a reattach or a session hop** — `applyFetchedSnapshot` (app side) seeds its panel store from
+    /// this call on every attach, never from the transient `panel_tab_opened` event a second time,
+    /// so a decode that dropped this field would silently strip diff-tab identity from every tab
+    /// that survives past the moment it was opened. `nil` for every other kind, and for an older
+    /// daemon that predates this field.
+    public let diffId: String?
 
-    public init(tabId: String, kind: String, url: String?, title: String?) {
+    public init(tabId: String, kind: String, url: String?, title: String?, diffId: String? = nil) {
         self.tabId = tabId
         self.kind = kind
         self.url = url
         self.title = title
+        self.diffId = diffId
+    }
+}
+
+/// Mirrors `PanelReadDiffResult` (methods.ts) field-for-field — `readPanelDiff`'s return shape.
+/// `Codable` (unlike this file's other hand-decoded panel structs): a pure data carrier for a
+/// consumer that may want to persist or re-serialize it, not just render it once. `added`/
+/// `removed` mirror the store's own counts verbatim (never re-derived here); `truncated` echoes
+/// the store's own truncation flag — this RPC never re-truncates on top of it.
+public struct PanelDiffPayload: Codable, Equatable, Sendable {
+    public let path: String
+    public let added: Int
+    public let removed: Int
+    public let patch: String
+    public let truncated: Bool
+
+    public init(path: String, added: Int, removed: Int, patch: String, truncated: Bool) {
+        self.path = path
+        self.added = added
+        self.removed = removed
+        self.patch = patch
+        self.truncated = truncated
     }
 }
