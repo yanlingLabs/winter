@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { Question, Task } from "@norma/protocol";
+import type { FileDiffSummary, Question, Task } from "@norma/protocol";
 import type { ToolSpec } from "../../providers/types";
 import { isWithin } from "../paths";
 import type { AskOutcome } from "../questions";
@@ -90,7 +90,19 @@ export interface ToolContext {
   excludeTools?: Set<string>;
   allowTools?: Set<string>;
 }
-export interface ToolOutcome { output: string; isError: boolean }
+/** diff-tabs Task 5: `fileDiff` rides verbatim from a tool's structured `run()` return (see
+ *  `ToolRunResult` below) through `execute()`'s MAX_OUTPUT truncation — which applies to `output`
+ *  ONLY — untouched. Absent for every tool that returns a plain string (the overwhelming
+ *  majority, unchanged). The engine (engine.ts's per-call dispatch loop) spreads it onto the
+ *  emitted `tool_result` event when present. */
+export interface ToolOutcome { output: string; isError: boolean; fileDiff?: FileDiffSummary }
+
+/** What `ToolDefinition.run` may return in place of a plain string — the diff-tabs
+ *  structured-return channel. `output` is still the only model-visible text (and the only field
+ *  MAX_OUTPUT truncation ever touches); `fileDiff`, when set, threads straight onto the returned
+ *  `ToolOutcome` and from there onto the `tool_result` event (engine.ts). No built-in tool sets
+ *  it yet — Task 6 is the first producer. */
+export type ToolRunResult = string | { output: string; fileDiff?: FileDiffSummary };
 
 /** The three session modes a tool's `modes`/`deferred` fields (and every `isDeferred`-adjacent
  *  registry method below) resolve against. One alias so a fourth mode, were one ever added, is a
@@ -155,8 +167,9 @@ export interface ToolDefinition<S extends z.ZodTypeAny = z.ZodTypeAny> {
    *  CHAT_ONLY_TOOLS exclusion lists; dynamically registered mcp__/plugin__ tools take the
    *  default and so stay code-only, matching their reachability today. */
   modes?: Mode[];
-  /** May throw — the registry converts throws into isError outcomes. */
-  run(args: z.infer<S>, ctx: ToolContext): Promise<string> | string;
+  /** May throw — the registry converts throws into isError outcomes. May return a plain string
+   *  (shorthand for `{ output }`) or a `ToolRunResult` object carrying an optional `fileDiff`. */
+  run(args: z.infer<S>, ctx: ToolContext): Promise<ToolRunResult> | ToolRunResult;
 }
 
 /** Tool outputs are model input — cap them.
@@ -383,9 +396,19 @@ export class ToolRegistry {
       return { output: `tool ${name} is deferred — load its schema via ToolSearch first`, isError: true };
     }
     try {
-      let out = String(await def.run(parsed.data, ctx));
+      // diff-tabs Task 5: a string return is shorthand for `{ output }` — normalize BOTH shapes
+      // to `structured` before anything else touches them, so every line below (truncation
+      // included) runs identically regardless of which shape `run()` chose. MAX_OUTPUT applies to
+      // `output` ONLY; `fileDiff` (absent for every tool today — no producer until Task 6) rides
+      // the returned outcome untouched. Conditional spread (not `fileDiff: structured.fileDiff`)
+      // keeps a plain-string tool's outcome object exactly the shape it was before this task —
+      // no `fileDiff: undefined` key added — matching the "absent, not undefined" contract the
+      // emitted tool_result event itself must also honor (engine.ts).
+      const raw = await def.run(parsed.data, ctx);
+      const structured = typeof raw === "string" ? { output: raw } : raw;
+      let out = String(structured.output);
       if (out.length > MAX_OUTPUT) out = out.slice(0, MAX_OUTPUT) + `\n[truncated at ${MAX_OUTPUT} bytes]`;
-      return { output: out, isError: false };
+      return { output: out, isError: false, ...(structured.fileDiff ? { fileDiff: structured.fileDiff } : {}) };
     } catch (err) {
       return { output: err instanceof Error ? err.message : String(err), isError: true };
     }

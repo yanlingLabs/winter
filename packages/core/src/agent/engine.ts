@@ -13,7 +13,7 @@ import { canonicalizeDirPath, type SessionDirs } from "../sessions/dirs";
 import { setSessionDirs, lockDir, type SetDirsDeps } from "../sessions/set-dirs";
 import type { ModelInfo, Provider, ProviderEvent, TurnInputItem } from "../providers/types";
 import { isContextLengthError } from "../providers/errors";
-import type { ToolRegistry, Mode } from "./tools/registry";
+import type { ToolRegistry, Mode, ToolOutcome } from "./tools/registry";
 import { isExternalToolName } from "./tools/registry";
 import type { PermissionGate, SessionApprovalPolicy } from "./gate";
 import type { ApprovalBroker } from "./approvals";
@@ -3927,7 +3927,12 @@ export class AgentEngine {
         this.emit(sessionId, { type: "tool_call", sessionId, threadId, callId: call.callId, name: call.name, argsJson: call.argsJson });
         input.push({ type: "function_call", callId: call.callId, name: call.name, argsJson: call.argsJson });
 
-        let outcome: { output: string; isError: boolean; deniedByHuman?: boolean };
+        // diff-tabs Task 5: `ToolOutcome` (registry.ts) is the single source of truth for the
+        // {output, isError, fileDiff?} shape — reused here rather than hand-copied so a future
+        // field added there never needs a parallel edit in this dispatch loop. `deniedByHuman?`
+        // stays local (registry.ts's ToolOutcome has no reason to know about human approval
+        // denial — that's an engine-only concept, requestApproval's own addition).
+        let outcome: ToolOutcome & { deniedByHuman?: boolean };
         // A precomputed outcome from the spawn OR send_message bridge above becomes this call's
         // tool_result verbatim (both are computed BEFORE this loop so N spawns/messages in one
         // assistant message don't serialize the dispatch), so it never falls through to executeCall.
@@ -4752,7 +4757,24 @@ export class AgentEngine {
           outcome = await this.executeCall(call, cwd, sessionId, threadId, signal, loaded, pins, rootsOverride, visionCapable, excludeTools, allowTools);
         }
 
-        this.emit(sessionId, { type: "tool_result", sessionId, threadId, callId: call.callId, output: outcome.output, isError: outcome.isError });
+        // diff-tabs Task 5: the ONE tool_result emission site (of six in this dispatch loop) that
+        // can EVER carry a real `fileDiff` — it's the only one downstream of an actual
+        // `registry.execute()` call (reached via executeCall, possibly through reviewAndDispatch's
+        // "safe" verdict or requestApproval's approved onApprove, both of which pass executeCall's
+        // result through by reference, untouched, regardless of their own narrower declared return
+        // types — see executeCall's own doc comment). The other five sites in this loop (preOutcome
+        // bridge, depth-cap, deferred-builtin, not-offered, hook-blocked — all `continue` before
+        // this point) short-circuit BEFORE any tool ever runs, so `outcome.fileDiff` is not merely
+        // unset there today, it can never be set there, by construction. Conditional spread (not
+        // `fileDiff: outcome.fileDiff`) keeps every OTHER tool's event byte-identical to
+        // pre-Task-5 — the key is genuinely ABSENT, not undefined-valued, matching
+        // ToolResultEvent's own "set only... ; chat-mode engines never produce it" contract
+        // (packages/protocol/src/events.ts) even though JSON.stringify would already drop an
+        // undefined-valued key on the wire (store.ts's `append` persists via JSON.stringify).
+        this.emit(sessionId, {
+          type: "tool_result", sessionId, threadId, callId: call.callId, output: outcome.output, isError: outcome.isError,
+          ...(outcome.fileDiff ? { fileDiff: outcome.fileDiff } : {}),
+        });
         input.push({ type: "tool_result", callId: call.callId, output: outcome.output, isError: outcome.isError });
         // [4f post-tool — normal outcome] observe the executed call's result (success or isError).
         // A pre-tool-blocked normal call `continue`d at Site 2 and never reached here, so it's
@@ -6087,7 +6109,16 @@ export class AgentEngine {
     // rejected call can tell which failure mode it hit.
     excludeTools?: Set<string>,
     allowTools?: Set<string>,
-  ): Promise<{ output: string; isError: boolean }> {
+    // diff-tabs Task 5: `Promise<ToolOutcome>`, not the old hand-written `Promise<{output;
+    // isError}>` — this method's whole body is a passthrough to `this.cfg.registry.execute()`
+    // (below) or an early typed rejection narrower than ToolOutcome, so the honest return type is
+    // registry.ts's own ToolOutcome. This is what lets `outcome.fileDiff` (the dispatch loop's
+    // shared local, above) see a real value on this path — every caller either awaits this
+    // directly or forwards it verbatim (reviewAndDispatch's "safe" verdict,
+    // requestApproval's default onApprove) without reconstructing the object, so the actual
+    // runtime value was ALREADY flowing through before this annotation changed; this only makes
+    // the signature stop lying about it.
+  ): Promise<ToolOutcome> {
     // CM branch review (Important 2): reject BEFORE any other work — no args parsing, no roots
     // resolution, no registry.execute() — for a call the thread's own allowTools/excludeTools never
     // offered. This is a HARDENING, not a new capability: every legitimate call already arrives here

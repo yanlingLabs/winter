@@ -35,7 +35,11 @@ export function setupEngine(provider: Provider, opts?: {
   // SP-policies Task 7: widened to include "dont-ask" (policy-dont-ask.test.ts drives a dont-ask
   // session). The value flows straight through to store.createSession's approvalPolicy — the full
   // 6-value SessionApprovalPolicy is valid there; this union just lists the ones tests actually use.
-  reviewer?: BashReviewer; reviewerEnabled?: boolean | (() => boolean | undefined); reviewerAllow?: string[]; policy?: "ask" | "auto" | "plan" | "dont-ask";
+  // diff-tabs Task 5: widened again to include "bypass" (registry-file-diff.test.ts's engine-level
+  // fileDiff tests register an arbitrary fake tool name — gate.ts's evaluate() fails an
+  // unclassified name closed to "ask" under every OTHER policy, and "bypass" is the one verdict
+  // that resolves "allow" with no card, so those tests can reach registry.execute() directly).
+  reviewer?: BashReviewer; reviewerEnabled?: boolean | (() => boolean | undefined); reviewerAllow?: string[]; policy?: "ask" | "auto" | "plan" | "dont-ask" | "bypass";
   // phase 5e T3: per-class review on/off — undefined (every pre-5e-T3 test) leaves every class
   // enabled, unchanged. See EngineConfig.reviewerClasses's own doc comment. Also accepts a getter
   // directly (hot-settings T2's engine-hot-config.test.ts passes `() => live.reviewer?.classes`
