@@ -813,18 +813,28 @@ final class CEFRuntimeTests: XCTestCase {
         }
     }
 
-    /// `.web` resolves to the CEF surface; every other kind keeps Plan A's blank placeholder.
+    /// `.web` resolves to the CEF surface, `.diff` to the diff renderer, and the three kinds with no
+    /// surface yet keep Plan A's blank placeholder.
     ///
-    /// **diff-tabs Task 9: `.diff` is in this list TEMPORARILY, and Task 10 takes it out.** Task 9
-    /// mints diff tabs (the transcript chip → `ShellSessionHost.openDiffTab`) without rendering one,
-    /// so the factory routes `.diff` to the same placeholder the other non-web kinds get. Listing it
-    /// here rather than leaving it untested is what makes Task 10's `PanelDiffTab` show up as a
-    /// deliberate edit to a test that names it — the assertion below FAILS the moment the renderer
-    /// lands, which is the intended handoff, not a regression.
+    /// **diff-tabs Task 10 took `.diff` out of the placeholder list — the handoff Task 9 designed.**
+    /// Task 9 minted diff tabs (the transcript chip → `ShellSessionHost.openDiffTab`) without
+    /// rendering one, and listed `.diff` here TEMPORARILY so this replacement could not be a silent
+    /// behaviour change: the loop below failed the moment `PanelDiffTab` landed, and the fix was to
+    /// move the case up into its own assertion rather than to delete a pin.
+    ///
+    /// `.diff` must ALSO never render a browser, which the type check states directly (a `.diff` tab
+    /// that resolved to `PanelWebTab` would stand Chromium up for a patch file).
     func testWebTabsResolveToTheCEFSurfaceAndOtherKindsDoNot() {
         let web = PanelTab(tabId: "t1", kind: .web, url: nil, title: nil)
         XCTAssertTrue(panelTabContent(for: web) is PanelWebTab)
-        for kind in [PanelTabKind.document, .code, .note, .diff] {
+
+        let diff = PanelTab(tabId: "t3", kind: .diff, url: nil, title: "engine.ts", diffId: "diff_1")
+        let diffContent = panelTabContent(for: diff)
+        XCTAssertTrue(diffContent is PanelDiffTab, "a diff tab renders the diff surface")
+        XCTAssertFalse(diffContent is PanelWebTab, "…and never a browser")
+        PanelDiffTabModels.removeAllForTesting()
+
+        for kind in [PanelTabKind.document, .code, .note] {
             let tab = PanelTab(tabId: "t2", kind: kind, url: nil, title: nil)
             XCTAssertTrue(panelTabContent(for: tab) is PanelPlaceholderTab,
                           "\(kind) must not render a browser")

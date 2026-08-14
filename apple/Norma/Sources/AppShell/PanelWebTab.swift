@@ -84,20 +84,15 @@ func panelTabContent(for tab: PanelTab, host: ShellSessionHost? = nil,
                            runtime: .shared)
     case .document, .code, .note:
         return PanelPlaceholderTab(tab: tab)
-    // **TEMPORARY — diff-tabs Task 10 replaces this arm with `PanelDiffTab`.**
-    //
-    // Task 9 owns everything that MINTS a diff tab (the transcript chip and
-    // `ShellSessionHost.openDiffTab`) and nothing that renders one, so until Task 10 lands a
-    // clicked chip opens a real, daemon-persisted, correctly-titled tab that draws the same blank
-    // rectangle every other non-web kind draws. Routing it here rather than leaving it unhandled is
-    // deliberate: this switch is exhaustive with no `default:` (see `PanelPlaceholderTab`'s doc), so
-    // the alternative was not "a placeholder later" but "the app does not compile at all".
-    //
-    // Pinned by `CEFRuntimeTests.testWebTabsResolveToTheCEFSurfaceAndOtherKindsDoNot`, which lists
-    // `.diff` alongside the other placeholder kinds — so Task 10's replacement shows up as a
-    // deliberate edit to a test that names it, not as a silent behaviour change.
+    // diff-tabs Task 10: the second kind with a real surface — Task 9's TEMPORARY placeholder arm,
+    // replaced. The model is looked up (not built) here for the same reason `.web`'s is: this
+    // function runs on every render pass, and a model born here would be reborn here, re-fetching
+    // the frozen patch on every tab switch. `PanelDiffTabModels` keys by tabId and the fetch closure
+    // it builds holds the host WEAKLY — nothing on this line touches the daemon; the first
+    // `onAppear` is what starts the one request.
     case .diff:
-        return PanelPlaceholderTab(tab: tab)
+        return PanelDiffTab(tab: tab,
+                            model: PanelDiffTabModels.model(for: tab, host: host, sessionId: sessionId))
     }
 }
 

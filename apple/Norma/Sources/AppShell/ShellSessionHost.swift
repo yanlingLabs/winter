@@ -604,6 +604,11 @@ final class ShellSessionHost: ObservableObject {
         // panel-cef Task 6b: the tab's chrome model goes with it. See `PanelWebTabModels.discard`
         // for the bounded case this does NOT cover (a tab closed by some other producer).
         PanelWebTabModels.discard(tabId: tabId)
+        // diff-tabs Task 10: and the diff tab's. A tabId belongs to exactly one kind, so at most one
+        // of these two ever finds anything — the pair is cheaper than asking which kind it was.
+        // Heavier than the web case, which is why it is not merely tidy: a loaded diff model holds
+        // the patch string (capped at 1 MiB) and its parsed rows for the life of the process.
+        PanelDiffTabModels.discard(tabId: tabId)
         Task { @MainActor [weak self] in
             _ = try? await client.closePanelTab(sessionId: sessionId, tabId: tabId)
             if self?.attachedSessionId == nil { self?.refreshPanelTabs(for: sessionId) }
@@ -632,6 +637,23 @@ final class ShellSessionHost: ObservableObject {
             _ = try? await client.activatePanelTab(sessionId: sessionId, tabId: tabId)
             if self?.attachedSessionId != sessionId { self?.refreshPanelTabs(for: sessionId) }
         }
+    }
+
+    /// diff-tabs Task 10: **the diff tab's READ door** — the one way `PanelDiffTabModel` reaches
+    /// `panel.readDiff`, because `managementClient` is private to this type.
+    ///
+    /// Unlike every other verb in this section it is `async throws` and RETURNS: the caller is not
+    /// firing an intent at the daemon, it is asking a question whose answer is the whole surface. So
+    /// the failure cannot be swallowed here — a `try?` at this layer would collapse "the patch is
+    /// gone" and "there is no daemon" into a silent empty result, and the model needs to reach its
+    /// unavailable state (`PanelDiffUnavailable`, `PanelDiffTab.swift`). NormaKit's own wrapper takes
+    /// the same posture for the same reason (`readPanelDiff`'s doc: "don't swallow it").
+    ///
+    /// Read-only, idempotent, and called at most once per tab — so it needs none of the re-fetch,
+    /// hop or in-flight guards the mutating verbs above carry.
+    func readPanelDiff(sessionId: String, diffId: String) async throws -> PanelDiffPayload {
+        guard let client = managementClient else { throw PanelDiffUnavailable.noClient }
+        return try await client.readPanelDiff(sessionId: sessionId, diffId: diffId)
     }
 
     /// diff-tabs Task 9: **the transcript chip's door — the first path from the transcript into the
