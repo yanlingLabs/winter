@@ -14,6 +14,14 @@ struct TranscriptView: View {
     /// transcript needs the respond closures the pinned band below it used to hold. Bundled as one
     /// value (see `InteractionCardWiring`) rather than six parameters threaded through every row.
     let cardWiring: InteractionCardWiring
+    /// diff-tabs Task 9: the transcript's diff door — a plain closure, injected from the window
+    /// layer, that a diff chip on an edit/write/notebook row calls with its own `FileDiffRef`
+    /// (`TranscriptDiffChip`). Deliberately NOT folded into `InteractionCardWiring`: that value is
+    /// the approval/question/plan cards' respond bundle, and a diff has nothing to do with an ask.
+    ///
+    /// `nil` — the default, which every existing call site takes — draws the chips as plain text on
+    /// a surface with no panel to open a tab in (the orb's morph window, every detached window).
+    var onOpenDiff: ((FileDiffRef) -> Void)? = nil
     @State private var nearBottom = true
     @State private var showLatestPill = false
 
@@ -26,6 +34,7 @@ struct TranscriptView: View {
                         TranscriptExchangeRow(
                             exchange: exchange,
                             cardWiring: cardWiring,
+                            onOpenDiff: onOpenDiff,
                             streamingText: isLast ? adapter.liveStreamingText : nil,
                             // Live only for the newest exchange (mac-chat-parity Task 2). That is
                             // not quite the same as "every in-flight call lives here": a main-thread
@@ -141,6 +150,9 @@ private struct TranscriptExchangeRow: View {
     let exchange: Exchange
     /// mac-chat-parity Task 3 — see `TranscriptView.cardWiring`.
     let cardWiring: InteractionCardWiring
+    /// diff-tabs Task 9 — see `TranscriptView.onOpenDiff`. Carried, never captured: this view is a
+    /// pure function of its inputs and the closure is one of them.
+    var onOpenDiff: ((FileDiffRef) -> Void)? = nil
     /// Non-nil only for the LAST exchange while a reply is actively streaming (v1's synthetic
     /// trailing-stream mechanism) — `TranscriptView.body` computes this per-index so this view
     /// stays a pure function of its own inputs.
@@ -166,7 +178,8 @@ private struct TranscriptExchangeRow: View {
                         entries: entries,
                         turnIsLive: turnIsLive,
                         isExpanded: expandedRuns.contains(key),
-                        toggle: { toggle(key) }
+                        toggle: { toggle(key) },
+                        onOpenDiff: onOpenDiff
                     )
                 case .single(let item):
                     // mac-chat-parity Task 3: an approval/question/plan draws its CARD here, in the

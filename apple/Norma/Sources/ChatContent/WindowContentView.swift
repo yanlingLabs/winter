@@ -33,6 +33,25 @@ struct WindowContentView<Accessory: View>: View {
     /// session's carries one (mac-chat-parity Task 6, spec §4 — `composerCard` below wires it);
     /// neither shows the Chat/Cowork segment, which belongs to the two modes it names.
     var composerCardMode: SessionMode? = nil
+    /// diff-tabs Task 9: **the first transcript→panel door, and it crosses this boundary as a plain
+    /// closure.**
+    ///
+    /// A diff chip on an edit/write/notebook row calls it with its own `FileDiffRef`; the SHELL
+    /// decides what that means (`ShellSessionHost.openDiffTab` — dedupe by `diffId`, else mint a
+    /// `.diff` tab, and reveal the panel either way). Nothing in `ChatContent/` imports, names or
+    /// knows about `ShellSessionHost`, `PanelStore` or the panel — pinned by a source scan
+    /// (`ToolRowTests.testChatContentNeverReachesForTheShellHost`), because the natural shortcut
+    /// here is to reach for the host directly and that shortcut is what would make this shared view
+    /// unusable in its other two homes.
+    ///
+    /// **Opt-in, exactly like `composerCardMode` above, and for the same reason: this view has THREE
+    /// homes and only one of them has a panel.** The shell's chat page passes it; the orb's morph
+    /// window and every detached window do not, and their chips render as plain text (see
+    /// `TranscriptDiffChip`) rather than as buttons that would do nothing.
+    ///
+    /// Declared BEFORE `headerAccessory` so the memberwise init keeps the `@ViewBuilder` accessory
+    /// last — the same ordering constraint `sidebars`' own doc records.
+    var onOpenDiff: ((FileDiffRef) -> Void)? = nil
     @ViewBuilder let headerAccessory: () -> Accessory
 
     /// Task 4 (2d-iii): the ⋯ menu's popover presentation state — local to this view (not the
@@ -182,7 +201,7 @@ struct WindowContentView<Accessory: View>: View {
                 onApproval: adapter.onApprovalRespond,
                 onQuestion: adapter.onQuestionRespond,
                 onPlan: adapter.onPlanRespond
-            ))
+            ), onOpenDiff: onOpenDiff)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             // The composer FLOATS over the transcript (user call, 2026-08-12: "the composer should
             // float over the transcript and not have that hard background"). It used to be the next

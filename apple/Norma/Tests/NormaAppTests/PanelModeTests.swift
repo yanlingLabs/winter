@@ -99,6 +99,26 @@ final class PanelModeTests: XCTestCase {
         XCTAssertEqual(p.mode, .maximized)
     }
 
+    /// diff-tabs Task 9: a transcript chip REVEALS the panel — it never toggles it. The two ways
+    /// this can be wrong are both silent: reusing `toggleVisible` would CLOSE a panel that was
+    /// already showing (the click reads as "nothing happened, and my panel disappeared"), and
+    /// "restoring" `.maximized` to `.side` would undo a choice the user made, as a side effect of
+    /// opening a tab.
+    func testRevealShowsAHiddenPanelAndLeavesEveryOtherStateAlone() {
+        var hidden = PanelPresentation(mode: .hidden, sideWidth: 640)
+        hidden.revealIfHidden()
+        XCTAssertEqual(hidden.mode, .side)
+        XCTAssertEqual(hidden.sideWidth, 640, "revealing must not disturb the dragged width")
+
+        var side = PanelPresentation(mode: .side, sideWidth: 640)
+        side.revealIfHidden()
+        XCTAssertEqual(side.mode, .side)
+
+        var maximized = PanelPresentation(mode: .maximized, sideWidth: 640)
+        maximized.revealIfHidden()
+        XCTAssertEqual(maximized.mode, .maximized, "already showing, and more of it — leave it")
+    }
+
     func testExpandButtonMatchesTheMeasuredReference() {
         XCTAssertEqual(panelExpandButtonSize, 28)
         XCTAssertEqual(panelExpandButtonInset, 8)

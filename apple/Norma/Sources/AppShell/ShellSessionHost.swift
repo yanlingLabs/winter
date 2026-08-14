@@ -463,6 +463,20 @@ final class ShellSessionHost: ObservableObject {
     /// `attachedSessionId` filter that `panelStore.apply` sits inside.
     var onPanelCommand: ((SessionEvent.PanelCommand) -> Void)?
 
+    /// diff-tabs Task 9: **"show the panel"** — the ONE channel from this object into the shell's
+    /// panel presentation, registered by `ShellRootView` (`ShellSidebar.swift`).
+    ///
+    /// A closure for the same reason `onPanelCommand` above is one, plus a structural one: the
+    /// requested panel mode is `@State` on `ShellRootView` (`presentation`), a view-local value with
+    /// no channel back into it — that view holds `host` as a PLAIN, unobserved `var`, so publishing
+    /// a flag here would drive nothing (its own doc records exactly that trap, and Task 8's review
+    /// deleted a gate that had fallen into it). Registering a closure the view owns is the only
+    /// direction that works.
+    ///
+    /// `nil` in every test and in every shell built without that view: `openDiffTab` still opens the
+    /// tab, it simply cannot reveal a panel that nothing is drawing.
+    var onRevealPanel: (() -> Void)?
+
     /// The strip's `+`. Sends no `tabId` — the daemon mints one (`PanelOpenTabResult.tabId`),
     /// which this deliberately discards: nothing here needs it, and seeding it anywhere would be
     /// exactly the second, optimistic code path the design forbids.
@@ -600,12 +614,61 @@ final class ShellSessionHost: ObservableObject {
     /// just above, for the identical reason — leaving this one behind while fixing only the "×"
     /// would be a visible, confusing half-fix: a tab the panel shows while bound-but-unattached that
     /// silently refuses to respond to a click.
-    func activatePanelTab(_ tabId: String) {
-        guard let client = managementClient, let sessionId = panelTargetSessionId else { return }
+    ///
+    /// diff-tabs Task 9: `sessionId:` names the session EXPLICITLY, exactly as `openPanelTab`'s own
+    /// parameter of that name does and for the identical reason — the transcript chip's door
+    /// (`openDiffTab`) acts on the session its transcript belongs to, which a hop between the click
+    /// and this call would otherwise silently change out from under it. Omitted everywhere else, so
+    /// the strip's own pills keep today's `panelTargetSessionId` behaviour untouched.
+    ///
+    /// The re-fetch guard generalises from "nothing is attached" to "the target is not the attached
+    /// session" — the same widening `openPanelTab`'s explicit door already carries, and a NO-OP for
+    /// every pre-existing caller by construction: without an explicit id the target IS
+    /// `attachedSessionId` whenever one exists, so the two predicates agree on both branches.
+    func activatePanelTab(_ tabId: String, sessionId explicitSessionId: String? = nil) {
+        guard let client = managementClient,
+              let sessionId = explicitSessionId ?? panelTargetSessionId else { return }
         Task { @MainActor [weak self] in
             _ = try? await client.activatePanelTab(sessionId: sessionId, tabId: tabId)
-            if self?.attachedSessionId == nil { self?.refreshPanelTabs(for: sessionId) }
+            if self?.attachedSessionId != sessionId { self?.refreshPanelTabs(for: sessionId) }
         }
+    }
+
+    /// diff-tabs Task 9: **the transcript chip's door — the first path from the transcript into the
+    /// panel.**
+    ///
+    /// One frozen tab per edit (design spec §1), and clicking the same chip twice must land on the
+    /// tab the first click opened rather than mint a second one — so the decision is dedupe-by-
+    /// `diffId`, made by the pure `panelDiffTabAction` below against the session's own folded tab
+    /// list, and performed through the SAME two doors the strip's pills already use
+    /// (`activatePanelTab` / `openPanelTab`). No third path, and in particular no optimistic local
+    /// mutation: the tab appears when the daemon's `panel_tab_opened` folds, exactly like every tab
+    /// the "+" opens (`PanelStore`'s own doc comment).
+    ///
+    /// **The session is NAMED by the caller rather than read here**, and the caller reads it fresh
+    /// at click time (`ShellSessionView`) — this file's standing rule. The transcript the chip lives
+    /// in belongs to one specific session, and a hop between the click and this call must not file
+    /// the tab into whatever the shell is showing by then; `openPanelTab`'s explicit-`sessionId`
+    /// door exists for precisely this case (a popup used it first) and brings its `mayOpenTab` guard
+    /// and its unattached re-fetch with it.
+    ///
+    /// **The panel is revealed on BOTH branches**, mirroring the "+"'s own behaviour: a chip click
+    /// that activates an already-open tab behind a hidden panel would otherwise be a click that
+    /// visibly does nothing. `onRevealPanel` is `nil`-safe (see its doc).
+    ///
+    /// KNOWN, disclosed rather than guarded: two clicks in the beat before the first mint's
+    /// `panel_tab_opened` folds can open two tabs for one diff — the dedupe reads folded state and
+    /// there is nothing on the wire that dedupes by `diffId`. Same class as the double-create race
+    /// `panelAutoCreateInFlight` covers for the "+"; a guard here is deliberately out of this task's
+    /// scope.
+    func openDiffTab(_ ref: FileDiffRef, sessionId: String) {
+        switch panelDiffTabAction(tabs: panelStore.allSessionTabStates[sessionId]?.tabs ?? [], ref: ref) {
+        case .activate(let tabId):
+            activatePanelTab(tabId, sessionId: sessionId)
+        case .mint(let title):
+            openPanelTab(kind: .diff, title: title, diffId: ref.diffId, sessionId: sessionId)
+        }
+        onRevealPanel?()
     }
 
     /// panel-shell T15: the new-chat page's OWN "+" — creates (once) and BINDS rather than
@@ -2007,6 +2070,44 @@ func panelTabs(fromSnapshot infos: [PanelTabInfo]) -> [PanelTab] {
     }
 }
 
+// MARK: - diff-tabs Task 9: what a chip click does
+
+/// The two things a diff chip can ask for. Named rather than expressed as an `if` inside
+/// `openDiffTab` so the DECISION is testable without a daemon, a socket or a window — the same split
+/// this file already makes for `createSession(with:onCreated:)` (the testable seam beside an
+/// undrivable sheet).
+enum PanelDiffTabAction: Equatable {
+    /// A tab for this diff is already open: activate it. Carries the daemon-minted `tabId`, which is
+    /// the only identity the activate RPC accepts.
+    case activate(tabId: String)
+    /// No tab for this diff: mint one, titled with the edited file's last path component.
+    case mint(title: String)
+}
+
+/// PURE: dedupe a chip click against a session's folded tab list.
+///
+/// **`diffId` is the key, and it has to be** — `tabId` is minted per tab, so two tabs for one diff
+/// would be indistinguishable by it; `title` is a basename, which repeats constantly (`index.ts`);
+/// and a diff tab is FROZEN by construction (the patch file never changes after write, design spec
+/// §4), so the tab that is already open is not merely equivalent to a fresh one, it is identical.
+///
+/// A tab whose `diffId` is `nil` can never match: `first(where:)` compares against a non-optional
+/// `ref.diffId`, so a `.web` tab and a pre-feature diff tab both fall through to the mint. That is
+/// the correct failure — a duplicate tab is recoverable, activating an unrelated page is not.
+///
+/// The KIND is deliberately not part of the match. `diffId` is only ever set on a `.diff` tab (the
+/// daemon's own `PanelOpenTabParams` refinement pairs them), so adding a kind test would guard a
+/// case that cannot exist while implying the id alone is not trusted here.
+///
+/// `lastPathComponent` on the AS-RECEIVED path (`FileDiffRef.path` may be relative) — a string
+/// operation on a string, never a filesystem question.
+func panelDiffTabAction(tabs: [PanelTab], ref: FileDiffRef) -> PanelDiffTabAction {
+    if let open = tabs.first(where: { $0.diffId == ref.diffId }) {
+        return .activate(tabId: open.tabId)
+    }
+    return .mint(title: (ref.path as NSString).lastPathComponent)
+}
+
 // MARK: - The hosted surface
 
 /// The shell's session surface: the shared `WindowContentView`, in its right-only configuration.
@@ -2060,7 +2161,20 @@ struct ShellSessionView: View {
                         composerCardMode: SessionMode(
                             wire: directory.rows
                                 .first { $0.sessionId == host.attachedSessionId }?.mode
-                        )
+                        ),
+                        // diff-tabs Task 9: the transcript's diff door, wired ONLY here — the orb's
+                        // morph window and every detached window render the same
+                        // `WindowContentView` with no panel to open a tab in, so they leave it nil
+                        // and their chips draw as plain text (`TranscriptDiffChip`).
+                        //
+                        // `host.attachedSessionId` is read INSIDE the closure, at click time, per
+                        // this type's standing rule (see `ShellSessionHost`'s own doc: every closure
+                        // reads it at call time rather than capturing an id) — a captured id would
+                        // survive a hop and file the tab into a session the user has left.
+                        onOpenDiff: { ref in
+                            guard let sessionId = host.attachedSessionId else { return }
+                            host.openDiffTab(ref, sessionId: sessionId)
+                        }
                     ) {
                         // cli-handoff T3's open-session "Move to CLI", RE-HOSTED (custom-sidebar
                         // rework): the window toolbar it rode died with the native chrome
