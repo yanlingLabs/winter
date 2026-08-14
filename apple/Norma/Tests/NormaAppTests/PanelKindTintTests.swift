@@ -181,7 +181,7 @@ final class PanelKindTintTests: XCTestCase {
     /// `TextMuted` is § 3.5's OWN established "quiet meta" register — never held to 4.5:1 even on
     /// the plain surface (4.14 light / 5.99 dark baseline) — so its floor here is relative to
     /// THAT baseline, not the body floor: the tint may cost some contrast, as any wash does
-    /// (§ 3.6's own precedent: "at most 0.31 of a ratio point" for the diff washes), but not
+    /// (§ 3.6's own precedent: "at most 0.47 of a ratio point" for the diff washes), but not
     /// collapse it.
     func testTintedTextStaysLegibleOnEveryPillTint() {
         let labelLight = srgb(.labelColor, .aqua)

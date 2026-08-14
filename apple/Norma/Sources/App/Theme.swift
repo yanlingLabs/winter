@@ -180,7 +180,7 @@ enum Theme {
     /// down (4.7% / 4.4% / 6.4%) to the alpha where the hover delta and the wash's own visibility
     /// against `CardSurface` are EQUAL — the mathematically best achievable trade-off, since
     /// `RowHover` and `CardSurface` are both fixed and (proven in brand.md § 3.7) their own
-    /// contrast caps the sum of what any alpha can buy. Dark needed no change at all: dark's
+    /// contrast caps the product of what any alpha can buy. Dark needed no change at all: dark's
     /// hover delta and visibility REINFORCE rather than compete (also proven in § 3.7), so every
     /// kind keeps the provisional 14%.
     static func panelKindTint(_ kind: PanelTabKind) -> Color {

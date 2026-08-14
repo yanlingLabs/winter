@@ -143,6 +143,7 @@ import {
   SyncPushParams,
   METHODS,
   PanelTabSchema,
+  PanelOpenTabParams,
 } from "../src/methods";
 
 describe("SessionAttachParams", () => {
@@ -1360,5 +1361,23 @@ describe("PanelTabSchema (diff-tabs Task 7 fix round 1 — the mirror-staleness 
   test("diffId is a DECLARED field — parse retains it (an undeclared key would be silently stripped)", () => {
     const parsed = PanelTabSchema.parse({ tabId: "t1", kind: "diff", diffId: "abc" });
     expect(parsed.diffId).toBe("abc");
+  });
+});
+
+// fix-wave 2026-08-14, Item 1: `PanelOpenTabParams`'s `superRefine` gained a second issue —
+// `diffId` present with `kind !== "diff"` is now refused, closing the gap three shipped Swift
+// comments already claimed was closed (NormaClient+Methods.swift, ShellSessionHost.swift ×2).
+describe("PanelOpenTabParams diffId/kind pairing (fix-wave 2026-08-14, Item 1)", () => {
+  test('diffId present with kind "web" is refused; kind "diff" with no diffId still parses (the reverse is NOT required)', () => {
+    const result = PanelOpenTabParams.safeParse({ sessionId: "s1", kind: "web", diffId: "a".repeat(8) });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues).toHaveLength(1);
+      expect(result.error.issues[0]?.path).toEqual(["diffId"]);
+      expect(result.error.issues[0]?.message).toBe("a non-diff tab's diffId must be unset");
+    }
+    // An id-less diff tab is a supported render state (PanelDiffTabModel's unavailable-by-
+    // inspection branch) — the params schema must not start requiring diffId on kind "diff".
+    expect(PanelOpenTabParams.safeParse({ sessionId: "s1", kind: "diff" }).success).toBe(true);
   });
 });

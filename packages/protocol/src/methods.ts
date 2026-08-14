@@ -1614,6 +1614,19 @@ export const PanelOpenTabParams = z.object({
       message: "a web tab's url must be http or https",
     });
   }
+  // fix-wave 2026-08-14, Item 1: `diffId` pairs with `kind === "diff"` in the PRESENT-implies
+  // direction only. Three shipped comments (NormaKit's `NormaClient+Methods.swift`,
+  // ShellSessionHost.swift ×2) already claimed this refinement enforced that pairing
+  // server-side; until this issue, it only checked the url scheme above, so those comments were
+  // aspirational rather than true. The REVERSE is deliberately not required here — an id-less
+  // diff tab is a supported render state (`PanelDiffTabModel`'s unavailable-by-inspection branch
+  // depends on being able to parse one).
+  if (p.kind !== "diff" && p.diffId !== undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom, path: ["diffId"],
+      message: "a non-diff tab's diffId must be unset",
+    });
+  }
 });
 export const PanelOpenTabResult = z.object({ ok: z.literal(true), tabId: z.string().min(1) });
 

@@ -777,7 +777,7 @@ private struct PanelTabKindChip: View {
         }
         .buttonStyle(ShellSidebarRowStyle(isSelected: false))
         .help("\(count) \(kind.rawValue.capitalized) tab\(count == 1 ? "" : "s")")
-        .accessibilityLabel("\(count) \(kind.rawValue.capitalized) tabs, collapsed")
+        .accessibilityLabel("\(count) \(kind.rawValue.capitalized) tab\(count == 1 ? "" : "s"), collapsed")
     }
 }
 
