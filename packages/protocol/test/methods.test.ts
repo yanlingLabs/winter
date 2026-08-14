@@ -142,6 +142,7 @@ import {
   SyncConfigResult,
   SyncPushParams,
   METHODS,
+  PanelTabSchema,
 } from "../src/methods";
 
 describe("SessionAttachParams", () => {
@@ -1342,5 +1343,22 @@ describe("sync.config schema (provider-correctness T3)", () => {
       "models",
       "provider",
     ]);
+  });
+});
+
+// diff-tabs Task 7, fix round 1: `PanelTabSchema`'s own doc comment (methods.ts) promises it
+// "Mirrors PanelTabState (core/src/panel/store.ts) field-for-field — this IS the fold, verbatim."
+// Task 7 broke that promise silently — it added `diffId` to the daemon's own `PanelTabState`/
+// `PanelTab` fold but missed this, its documented mirror — because a zod `z.object()` parse SILENTLY
+// STRIPS any key not declared in the schema rather than erroring, so nothing failed anywhere: no
+// compile error (a field, not a variant — CLAUDE.md's protocol-checklist addendum names exactly this
+// failure mode), no runtime throw, just a byte quietly dropped on the floor. This retention pin is
+// what makes that class of regression visible: if `diffId` is ever removed from `PanelTabSchema`
+// again, `.parse()`'s OUTPUT (not the input object, which zod never consults again) stops carrying
+// it, and this test starts failing instead of the mirror silently going stale a second time.
+describe("PanelTabSchema (diff-tabs Task 7 fix round 1 — the mirror-staleness pin)", () => {
+  test("diffId is a DECLARED field — parse retains it (an undeclared key would be silently stripped)", () => {
+    const parsed = PanelTabSchema.parse({ tabId: "t1", kind: "diff", diffId: "abc" });
+    expect(parsed.diffId).toBe("abc");
   });
 });

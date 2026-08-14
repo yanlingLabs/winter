@@ -1502,6 +1502,14 @@ export const PanelTabSchema = z.object({
   kind: PanelTabKind,
   url: z.string().max(PANEL_URL_MAX_LENGTH).optional(),
   title: z.string().max(PANEL_TITLE_MAX_LENGTH).optional(),
+  // diff-tabs Task 7 (fix round 1): restores the doc comment above's "mirrors PanelTabState
+  // (core/src/panel/store.ts) field-for-field" promise to truth. Task 7 added `diffId` to
+  // `PanelTabState`/`PanelTab` (the daemon's own fold, and the actual bytes `panel.list` serializes
+  // — a zod schema does not gate a handler's own return value on the way out) but missed this
+  // schema, its documented mirror, leaving it stale for however long nobody read both comments at
+  // once. Same regex as `PanelTabOpenedEvent.diffId` (events.ts) and `PanelOpenTabParams.diffId`
+  // above: set only when `kind === "diff"`.
+  diffId: z.string().regex(DIFF_ID_SHAPE).optional(),
 });
 
 /** panel-cef Task 6b — the URL SCHEME POLICY, and the one place it is expressed on the wire.
