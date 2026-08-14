@@ -134,6 +134,48 @@ Two consequences.
 
 `.primary`, `.secondary`, `.green` and `.red` all remain sanctioned system semantic colors under § 3.1 — this rule is about the *faint* end, plus that one warning.
 
+### 3.6 Diff colors — the one place colour carries meaning
+
+Everywhere else in Norma, colour is *surface*: § 3.4 records that this palette has had no danger and no success tone at all, which is why the transcript's failure lines are set in `.primary` and its status glyphs are shape-only. A diff is the exception, and not by preference — red and green **are** what the two columns mean, on every diff surface a person has ever read.
+
+Four tokens, both schemes: a **foreground pair** (the transcript chip's `-N +M`, the diff tab's gutter numbers and `±` markers) and a **row-wash pair** (the full-row background tint on changed rows).
+
+| Token | Light | Dark |
+| --- | --- | --- |
+| `DiffAdded` | `#1F7A3D` | `#4CC38A` |
+| `DiffRemoved` | `#B3261E` | `#FF6B70` |
+| `DiffAddedWash` | `#22C55E` @ 10% | `#22C55E` @ 16% |
+| `DiffRemovedWash` | `#EF4444` @ 10% | `#EF4444` @ 16% |
+
+The washes are authored per appearance rather than as an `.opacity()` on the role — § 3.1's derived-value rule. Their two alphas differ because the two grounds do: the same 10% that reads as a clear tint on the cream `CardSurface` all but disappears on the dark one.
+
+**Measured**, by § 3.5's method (WCAG relative contrast, sRGB, composited — a wash is alpha-composited over `CardSurface` before anything on it is measured). Grounds: `CardSurface` `#F9F9F7` / `#20201F`; added wash over it `#E3F4E8` / `#203A29`; removed wash over it `#F8E7E5` / `#412625`.
+
+| | On `CardSurface` | On its own wash | On `ControlSurface` (the chip) |
+| --- | --- | --- | --- |
+| `DiffAdded` light | 5.10:1 | 4.70:1 | 4.67:1 |
+| `DiffAdded` dark | 7.36:1 | 5.55:1 | 5.81:1 |
+| `DiffRemoved` light | 6.20:1 | 5.46:1 | 5.68:1 |
+| `DiffRemoved` dark | 5.89:1 | 4.97:1 | 4.65:1 |
+
+All eight clear the 4.5:1 body floor. **One value moved to get there:** the dark red was provisionally `#F2555A`, which measures 4.83:1 on the panel — and **4.08:1 on its own wash**, which is the ground those numbers are actually drawn on. `#FF6B70` is that value lifted until the real ground passes. `TranscriptBrandTests.testTheDiffRolesClearTheBodyTextFloorOnEveryGroundTheyAreDrawnOn` pins all three grounds so the next tune cannot repeat it.
+
+How visible the washes themselves are, against the plane they tint: added 1.085:1 light / 1.326:1 dark, removed 1.136:1 / 1.185:1. Deliberately faint — this is the background of ordinary code, not a highlight.
+
+**What lands on the washes** (a diff row's text is `SyntaxHighlighter`'s output: `labelColor` body with the system-colour syntax palette on top):
+
+| Ink | Light: card → +wash → −wash | Dark: card → +wash → −wash |
+| --- | --- | --- |
+| `labelColor` (the body) | 14.35 → 13.46 → 12.99 | 11.99 → 9.31 → 10.29 |
+| `systemBlue` (keywords) | 3.34 → 3.08 → 2.94 | 5.04 → 3.80 → 4.25 |
+| `systemGreen` (strings) | 2.11 → 1.94 → 1.85 | 8.07 → 6.08 → 6.80 |
+| `systemPurple` (numbers) | 3.95 → 3.64 → 3.48 | 4.49 → 3.39 → 3.79 |
+| `secondaryLabelColor` (comments) | 3.91 → 3.85 → 3.81 | 5.82 → 4.90 → 5.24 |
+
+**A recorded limitation, in § 3.4's sense — and the wash is not its cause.** The syntax palette's light-mode ratios are below the body floor *already on the plain surface*: Apple's `systemGreen` is 2.11:1 on `CardSurface`, which is true of every code block in the transcript today and has nothing to do with diffs. What a wash adds is at most 0.31 of a ratio point — measurably negligible against a shortfall of 2.4. The body text itself (`labelColor`, which is the great majority of every line) is 9.31:1 or better on every ground here. Fixing the syntax palette is a separate change to a shared surface; tracked here, not fixed here, and explicitly **not** a reason to weaken the washes.
+
+**Two channels, always.** The `-N`/`+M` signs and the `±` markers are TEXT, not glyphs, precisely because colour is the one channel that does not survive greyscale, colour blindness or a screen reader.
+
 ---
 
 ## 4. Type

@@ -118,18 +118,17 @@ enum Theme {
     /// `cardSurface` — the wrong direction for something floating.
     static let paletteSurface = Color("PaletteSurface")
 
-    // MARK: - Color: the diff foreground roles (diff-tabs)
+    // MARK: - Color: the diff pair (diff-tabs) — two foreground roles, two row washes
 
-    /// The removed-lines role — the `-N` half of the transcript's diff chip, and (Task 10) the
-    /// removed-side gutter numbers in the diff tab itself.
+    /// The removed-lines role — the `-N` half of the transcript's diff chip, and the removed-side
+    /// gutter numbers and `-` markers in the diff tab.
     ///
-    /// **PROVISIONAL — Task 12/10 measures and finalizes per `docs/brand.md` § 3.5.** Task 9 needs a
-    /// named token to consume; the brand pass that OWNS these two values (design spec § 6: the diff
-    /// foreground pair plus the diff row washes, four tokens, both schemes, contrast-measured
-    /// against the syntax palette and `labelColor`) runs after it. The values below are a plausible
-    /// starting point, not a measurement — light #B3261E, dark #F2555A — and the only thing this
-    /// commit claims about them is that they are ASSETS rather than hexes in Swift (§ 3.1's
-    /// anti-rule), so finalizing them is a JSON edit that touches no call site.
+    /// **FINAL, and measured** (Task 10, superseding Task 9's provisional): light `#B3261E`, dark
+    /// `#FF6B70`. Every ratio is published in `docs/brand.md` § 3.6, measured by the method § 3.5
+    /// uses. The dark half MOVED during that measurement — the provisional `#F2555A` measured
+    /// **4.08:1 on its own wash**, under the 4.5:1 floor for 12.5 pt text, and the wash is exactly
+    /// the ground these numbers are drawn on. `#FF6B70` measures 4.97:1 there and 5.89:1 on the
+    /// panel's `CardSurface`.
     ///
     /// It is the first colour in this file to carry MEANING rather than surface (§ 3.4 records that
     /// the palette has had no danger or success tone at all, which is why the transcript's failure
@@ -138,10 +137,26 @@ enum Theme {
     /// they are what every other diff surface the user reads uses.
     static let diffRemovedRole = Color("DiffRemoved")
 
-    /// The added-lines role — the `+M` half. PROVISIONAL on the same terms as `diffRemovedRole`
-    /// above (light #1F7A3D, dark #4CC38A); Task 12/10 measures and finalizes per `docs/brand.md`
-    /// § 3.5.
+    /// The added-lines role — the `+M` half, and the added-side gutter numbers. FINAL and measured
+    /// on the same terms as `diffRemovedRole`: light `#1F7A3D` (5.10:1 on `CardSurface`, 4.70:1 on
+    /// its own wash), dark `#4CC38A` (7.36:1 / 5.55:1). Both halves were already clear of the floor,
+    /// so this one is unchanged from Task 9's provisional.
     static let diffAddedRole = Color("DiffAdded")
+
+    /// The added row's FULL-ROW background tint — `#22C55E` at 10% (light) / 16% (dark), authored
+    /// per appearance rather than as an `.opacity()` on the role (§ 3.1's derived-value rule: a
+    /// runtime alpha hack has no dark variant and no way to be tuned per appearance).
+    ///
+    /// The two alphas differ because the two grounds do: the same wash that reads as a clear tint on
+    /// the cream `CardSurface` (1.085:1 against it) all but disappears on the dark one, so dark takes
+    /// 16% to reach a comparable 1.326:1. They are DELIBERATELY faint — this is the background of
+    /// ordinary code, and every ink that lands on it (`labelColor` at ≥ 9.31:1, both diff roles, the
+    /// syntax palette) must stay readable, which § 3.6 records for each.
+    static let diffAddedWash = Color("DiffAddedWash")
+
+    /// The removed row's full-row tint — `#EF4444` at 10% / 16%, on the same terms as
+    /// `diffAddedWash`.
+    static let diffRemovedWash = Color("DiffRemovedWash")
 
     // MARK: - Type
 
@@ -208,7 +223,8 @@ enum Theme {
         "Canvas", "CardSurface", "SelectionPill", "ElevatedSurface", "ControlSurface",
         "BubbleUser", "ComposerSurface", "ComposerRim", "TextMuted", "InverseCanvas",
         "AccentColor", "RowHover", "Hairline", "HairlineElevated", "PaletteSurface",
-        // diff-tabs Task 9 — PROVISIONAL values, see the two accessors above.
-        "DiffRemoved", "DiffAdded",
+        // diff-tabs — the diff pair: two foreground roles, two row washes. FINAL and measured
+        // (Task 10); `docs/brand.md` § 3.6 publishes every ratio.
+        "DiffRemoved", "DiffAdded", "DiffAddedWash", "DiffRemovedWash",
     ]
 }

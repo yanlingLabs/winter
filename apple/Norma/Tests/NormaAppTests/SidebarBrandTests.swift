@@ -27,10 +27,11 @@ final class SidebarBrandTests: XCTestCase {
     /// The list is meant to be TOTAL — every color `Theme` names appears in it, or the pin above
     /// silently stops covering the ones it forgot. Bump deliberately when adding a token.
     func testThemeAssetColorNameListIsComplete() {
-        // 15 + diff-tabs Task 9's PROVISIONAL diff foreground pair (`DiffRemoved`/`DiffAdded`,
-        // finalized by Task 12/10's brand pass — the NAMES are final, only the values are not).
-        XCTAssertEqual(Theme.assetColorNames.count, 17)
-        XCTAssertEqual(Set(Theme.assetColorNames).count, 17, "no duplicates")
+        // 15 + diff-tabs' diff pair: the foreground roles (`DiffRemoved`/`DiffAdded`, Task 9) and
+        // the row washes (`DiffAddedWash`/`DiffRemovedWash`, Task 10). All four FINAL and measured
+        // — `docs/brand.md` § 3.6.
+        XCTAssertEqual(Theme.assetColorNames.count, 19)
+        XCTAssertEqual(Set(Theme.assetColorNames).count, 19, "no duplicates")
     }
 
     /// The plane mapping (`docs/brand.md`): the content card must be BRIGHTER than the sidebar

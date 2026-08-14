@@ -43,15 +43,16 @@ final class TranscriptBrandTests: XCTestCase {
         "Hairline": ("E5E2DC", "2A2A28", 1, 1),
         "HairlineElevated": ("D8D5CF", "3A3A38", 1, 1),
         "PaletteSurface": ("FFFFFF", "272726", 1, 1),
-        // diff-tabs Task 9 — the diff foreground pair. **PROVISIONAL**, and the ONE pair of rows in
-        // this table that is NOT transcribed from `docs/brand.md`: the brand pass that owns these
-        // values (design spec § 6 — the foreground pair plus the row washes, contrast-measured) is
-        // Task 12/10, and it runs after the surface that consumes them. Until then this table is
-        // what pins them, so a value edited in the catalog and nowhere else still fails here.
-        // Task 12/10: update these two rows WITH the assets, and add the brand.md § 3.5 entry the
-        // rest of this table is transcribed from.
-        "DiffRemoved": ("B3261E", "F2555A", 1, 1),
+        // diff-tabs — the diff pair (two foreground roles, two row washes). Task 9 landed the roles
+        // PROVISIONALLY; Task 10 measured them and this table is now transcribed from
+        // `docs/brand.md` § 3.6 like every row above it. The dark red MOVED in that measurement
+        // (`F2555A` → `FF6B70`): the provisional measured 4.08:1 on its own wash, under the 4.5:1
+        // floor, and the wash is exactly the ground those numbers are drawn on.
+        // The washes are the second and third rows in this table to carry an alpha at all.
+        "DiffRemoved": ("B3261E", "FF6B70", 1, 1),
         "DiffAdded": ("1F7A3D", "4CC38A", 1, 1),
+        "DiffAddedWash": ("22C55E", "22C55E", 0.10, 0.16),
+        "DiffRemovedWash": ("EF4444", "EF4444", 0.10, 0.16),
     ]
 
     /// The catalog IS the palette brand.md publishes. `SidebarBrandTests` already pins that every
@@ -148,6 +149,64 @@ final class TranscriptBrandTests: XCTestCase {
             XCTAssertNotEqual(hexString(card), hexString(elevated),
                               "ElevatedSurface must not equal CardSurface in \(appearance.rawValue)")
         }
+    }
+
+    /// **The pin that would have caught the value this task had to change** (diff-tabs Task 10).
+    ///
+    /// A diff role is TEXT — the gutter numbers, the ± markers, the chip's `-N +M` — so it owes the
+    /// 4.5:1 body floor, and it owes it on every ground it is actually drawn on. Three, and the
+    /// second is the one that bites: `CardSurface` (the panel's own plane, and the transcript's),
+    /// **its own wash** (an added row's numbers sit on the added tint), and `ControlSurface` (the
+    /// transcript chip's capsule fill). Task 9's provisional dark red measured 4.83:1 on the panel
+    /// and 4.08:1 on its own wash — passing the obvious check and failing the real one.
+    ///
+    /// Ratios are asserted against a FLOOR rather than pinned to the published figures: § 3.6's
+    /// table is what records the measurements, and pinning them twice would make a deliberate tune
+    /// fail here for no reason. What must not change is that they clear the floor.
+    func testTheDiffRolesClearTheBodyTextFloorOnEveryGroundTheyAreDrawnOn() {
+        for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+            let card = srgb(NSColor(named: "CardSurface")!, appearance)
+            let control = srgb(NSColor(named: "ControlSurface")!, appearance)
+            for (role, wash) in [("DiffAdded", "DiffAddedWash"), ("DiffRemoved", "DiffRemovedWash")] {
+                let ink = srgb(NSColor(named: role)!, appearance)
+                let tint = srgb(NSColor(named: wash)!, appearance)
+                for (groundName, ground) in [("CardSurface", card), ("ControlSurface", control),
+                                             ("its own wash", composite(tint, over: card))] {
+                    XCTAssertGreaterThanOrEqual(
+                        contrast(ink, ground), 4.5,
+                        "\(role) on \(groundName) in \(appearance.rawValue) is under the 4.5:1 body "
+                            + "floor — brand.md § 3.6 publishes the measurement")
+                }
+            }
+        }
+    }
+
+    /// The washes must actually be VISIBLE against the plane they tint, in both appearances — a
+    /// full-row tint nobody can see is a feature that silently is not there. The floor is
+    /// deliberately low (`Hairline` manages 1.175:1 on its own ground): this is a background tint
+    /// under code, not a border.
+    func testTheDiffWashesAreVisibleAgainstThePanelPlane() {
+        for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+            let card = srgb(NSColor(named: "CardSurface")!, appearance)
+            for wash in ["DiffAddedWash", "DiffRemovedWash"] {
+                let ground = composite(srgb(NSColor(named: wash)!, appearance), over: card)
+                XCTAssertGreaterThan(contrast(ground, card), 1.05,
+                                     "\(wash) is invisible on CardSurface in \(appearance.rawValue)")
+                // …and still a WASH: a tint this heavy would be a highlight, and the code on it
+                // would be reading against a colour rather than against the panel.
+                XCTAssertLessThan(contrast(ground, card), 1.6,
+                                  "\(wash) has stopped being a wash in \(appearance.rawValue)")
+            }
+        }
+    }
+
+    /// Alpha-composite `top` over an opaque `bottom` — how a wash actually reaches the eye, and the
+    /// only honest ground to measure text contrast against on a tinted row.
+    private func composite(_ top: NSColor, over bottom: NSColor) -> NSColor {
+        let a = top.alphaComponent
+        return NSColor(srgbRed: top.redComponent * a + bottom.redComponent * (1 - a),
+                       green: top.greenComponent * a + bottom.greenComponent * (1 - a),
+                       blue: top.blueComponent * a + bottom.blueComponent * (1 - a), alpha: 1)
     }
 
     private func assertColor(_ color: NSColor, name: String, appearance: NSAppearance.Name,
