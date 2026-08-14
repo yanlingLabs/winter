@@ -645,6 +645,31 @@ private struct PanelTabPill: View {
             .frame(width: width, height: panelTabPillSize.height, alignment: .leading)
             .contentShape(RoundedRectangle(cornerRadius: panelTabPillRadius, style: .continuous))
         }
+        // diff-tabs Task 12: the soft per-kind tint, layered UNDER `ShellSidebarRowStyle`'s own
+        // hover/selected fill — placed BEFORE `.buttonStyle` below, which is what makes it UNDER
+        // rather than merely "also present". `.buttonStyle` reads the button's original label
+        // through the environment and wraps it in the style's OWN `.background(RoundedRectangle
+        // .fill(...))` (`ShellSidebarRowStyle.RowBody`, `ShellSidebar.swift`); a modifier attached
+        // to the `Button` BEFORE that style application sits BEHIND everything the style itself
+        // draws, at the identical bounds (`.background` sizes to the content it decorates, and
+        // both rounded rects share `panelTabPillRadius`). Concretely: at rest the style's own fill
+        // is `.clear` (`shellSidebarRowFill(.none)`), so this tint shows through untouched; on
+        // hover/selected the style's fill becomes OPAQUE `Theme.rowHover`
+        // (`selectedUsesHoverTone: true` below), which fully occludes this tint — "layers under"
+        // in the plan's own words, not a blend. `RoundedRectangle(...).fill(...)` rather than a
+        // bare `Color`, or the tint would paint the pill's full square frame past its rounded
+        // corners (`Color` has no shape of its own; a plain `.background(Color)` fills the whole
+        // rectangular frame).
+        //
+        // MEASURED, not the brief's flat 8%/14% provisional — `Theme.panelKindTint`'s own doc
+        // comment carries the full reasoning: `RowHover` painting OVER this wash on hover means
+        // the tint's own alpha and the hover cue's legibility trade against each other, and three
+        // of the five kinds needed a lower light alpha than the provisional to keep that hover
+        // delta from drowning. `docs/brand.md` § 3.7 publishes every ratio.
+        .background {
+            RoundedRectangle(cornerRadius: panelTabPillRadius, style: .continuous)
+                .fill(Theme.panelKindTint(tab.kind))
+        }
         // panel-shell T13: the app's ONE row treatment, not a second hover mechanism beside it —
         // same pure fill decision (`shellSidebarRowFill`), same `@State isHovered` + `.onHover`,
         // same `shellSidebarRowCornerRadius` background every sidebar row and titlebar button
@@ -711,8 +736,14 @@ private struct PanelTabPillLive: View {
 /// **Smaller than a pill by shape, not by a second visual language.** Same height
 /// (`panelTabPillSize.height`) and the same `ShellSidebarRowStyle` neutral fill `newTabButton`
 /// already wears — a natural (unset) width instead of a fixed 156pt cap is what actually reads as
-/// smaller against a full pill. The stronger per-kind tint the design spec describes is Task 12's
-/// brand pass, not invented here — same coordination note Tasks 9/10 already carried for this file.
+/// smaller against a full pill. diff-tabs Task 12 wires the stronger per-kind tint the design spec
+/// describes (`Theme.panelKindChipTint`) as a background wash, same mechanism as the pill
+/// (`PanelTabPill`'s own doc comment) — NOT the favicon or the count text, both of which stay
+/// `Theme.textMuted`: the pill's own rule ("the tint is the surface, not the icon") reads as "the
+/// glyph is left exactly as it already is", and it extends here for a stronger, measured reason —
+/// this wash at 2× opacity composites to only ~1.1–1.2:1 against `CardSurface`, which as literal
+/// TEXT ink would be all but invisible (`docs/brand.md` § 3.7 records the numbers). "Stronger
+/// version" is the SURFACE being stronger, not the ink changing meaning.
 private struct PanelTabKindChip: View {
     let kind: PanelTabKind
     let count: Int
@@ -729,13 +760,20 @@ private struct PanelTabKindChip: View {
                 Text("\(count)")
                     .font(Typography.label())
                     .foregroundStyle(Theme.textMuted)
-                    // Task 12 wires Theme.panelKindTint here — the chip's stronger per-kind tint.
-                    // Left at the pill's own neutral `textMuted` until then, deliberately: this
-                    // task's brief is explicit that inventing a tint value is out of scope.
             }
             .padding(.horizontal, panelTabPillInset)
             .frame(height: panelTabPillSize.height)
             .contentShape(RoundedRectangle(cornerRadius: panelTabPillRadius, style: .continuous))
+        }
+        // diff-tabs Task 12: the SAME "layers under the style's own fill" mechanism as the pill
+        // (`PanelTabPill`'s own doc comment walks the SwiftUI mechanics in full) — `.background`
+        // attached BEFORE `.buttonStyle` sits behind the style's `.clear`-at-rest /
+        // opaque-on-hover fill. `panelKindChipTint` is the SAME switch as the pill's tint, scaled
+        // by the named multiplier (`Theme.panelKindChipTintOpacityMultiplier`), never a second
+        // exhaustive switch.
+        .background {
+            RoundedRectangle(cornerRadius: panelTabPillRadius, style: .continuous)
+                .fill(Theme.panelKindChipTint(kind))
         }
         .buttonStyle(ShellSidebarRowStyle(isSelected: false))
         .help("\(count) \(kind.rawValue.capitalized) tab\(count == 1 ? "" : "s")")
