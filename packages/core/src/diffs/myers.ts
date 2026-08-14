@@ -114,6 +114,13 @@ function renderLine(prefix: string, line: Line): string {
 
 export function computeLineDiff(before: string, after: string, context = 3): LineDiff {
   const a = splitLines(before), b = splitLines(after);
+
+  // Compute prefix to resolve fallback values in context helpers.
+  let prefix = 0;
+  while (prefix < a.length && prefix < b.length && linesEqual(a[prefix]!, b[prefix]!)) {
+    prefix++;
+  }
+
   const ops = myersOps(a, b, context);
   if (!ops.some((o) => o.tag !== "eq")) return { patch: "", added: 0, removed: 0, hunkCount: 0 };
 
@@ -139,10 +146,10 @@ export function computeLineDiff(before: string, after: string, context = 3): Lin
         if (aStart < 0) { aStart = op.a!; bStart = op.b!; }
         aCount++; bCount++; body += renderLine(" ", a[op.a!]!);
       } else if (op.tag === "del") {
-        if (aStart < 0) { aStart = op.a!; bStart = op.b ?? bStartFromContext(ops, i); }
+        if (aStart < 0) { aStart = op.a!; bStart = op.b ?? bStartFromContext(ops, i, prefix); }
         aCount++; removed++; body += renderLine("-", a[op.a!]!);
       } else {
-        if (bStart < 0) { bStart = op.b!; aStart = aStartFromContext(ops, i); }
+        if (bStart < 0) { bStart = op.b!; aStart = aStartFromContext(ops, i, prefix); }
         bCount++; added++; body += renderLine("+", b[op.b!]!);
       }
     }
@@ -156,14 +163,15 @@ export function computeLineDiff(before: string, after: string, context = 3): Lin
 }
 
 // When a hunk opens on a del/ins, derive the counterpart start from the nearest
-// neighbouring op so hunk headers stay correct.
-function bStartFromContext(ops: Op[], i: number): number {
+// neighbouring op so hunk headers stay correct. Fallback to prefix when no ops found
+// (context=0 with pure insertion/deletion hunks).
+function bStartFromContext(ops: Op[], i: number, prefix: number): number {
   for (let j = i - 1; j >= 0; j--) { const o = ops[j]!; if (o.b !== undefined) return o.b + 1; }
   for (let j = i + 1; j < ops.length; j++) { const o = ops[j]!; if (o.b !== undefined) return o.b; }
-  return 0;
+  return prefix;
 }
-function aStartFromContext(ops: Op[], i: number): number {
+function aStartFromContext(ops: Op[], i: number, prefix: number): number {
   for (let j = i - 1; j >= 0; j--) { const o = ops[j]!; if (o.a !== undefined) return o.a + 1; }
   for (let j = i + 1; j < ops.length; j++) { const o = ops[j]!; if (o.a !== undefined) return o.a; }
-  return 0;
+  return prefix;
 }

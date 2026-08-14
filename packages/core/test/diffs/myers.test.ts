@@ -104,6 +104,26 @@ describe("computeLineDiff", () => {
     expect(d.hunkCount).toBe(1);
   });
 
+  test("context: 0 with pure insertion after shared prefix", () => {
+    // Regression: context=0 has no reattachment ops, so helpers fall back to finding ops.
+    // When all ops are insertions (no eq ops), fallback must use prefix, not 0.
+    const before = "b\n";
+    const after = "b\na\nRRR\n";
+    const d = computeLineDiff(before, after, 0);
+    // Insertion is AFTER line 1 (the shared "b"), so hunk header must be @@ -1,0 +2,2 @@
+    expect(d.patch).toBe("@@ -1,0 +2,2 @@\n+a\n+RRR\n");
+  });
+
+  test("context: 0 with pure deletion after shared prefix", () => {
+    // Regression: when all ops are deletions (no eq ops), fallback must use prefix, not 0.
+    const before = "b\nX\n";
+    const after = "b\n";
+    const d = computeLineDiff(before, after, 0);
+    // Deletion is at line 2 (index 1), with shared prefix of 1 line (the "b").
+    // +side must be +1,0 (before the middle, both files share the prefix).
+    expect(d.patch).toBe("@@ -2,1 +1,0 @@\n-X\n");
+  });
+
   test("property: diff round-trips correctly across 200 randomized trials", () => {
     // Generate random before/after, compute diff, apply patch, verify reconstruction equals after.
     const contextValues = [0, 1, 3, 5];
@@ -189,7 +209,6 @@ function applyPatch(before: string, patch: string): string {
   for (const match of hunkMatches) {
     const a = parseInt(match[1]!, 10);
     const aCount = parseInt(match[2] || "1", 10);
-    const cCount = parseInt(match[4] || "1", 10);
 
     // Determine the starting index for this hunk in the current working copy.
     // If aCount === 0, it's an insertion after line a (0-indexed: position = a + cumOffset).
