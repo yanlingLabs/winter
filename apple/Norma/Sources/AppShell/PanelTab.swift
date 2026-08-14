@@ -2,14 +2,21 @@ import SwiftUI
 import NormaProtocol
 
 /// panel-shell T7: UI-drawn categories for a panel tab. A separate type from the wire's
-/// `SessionEvent.PanelTabKind` (NormaProtocol) — same four cases, deliberately not reused directly
+/// `SessionEvent.PanelTabKind` (NormaProtocol) — same cases, deliberately not reused directly
 /// so the tab-content boundary below never depends on the protocol module. `init(_:)` converts the
 /// wire type to this one with an EXHAUSTIVE SWITCH, never a `rawValue` force-unwrap: the wire type
 /// is CLOSED by design (its own doc comment, `SessionEvent.swift`, explains why a tab's kind picks
 /// the rendering view and so can't have a reasonable fallback), so a future case added there must
 /// fail THIS switch to compile rather than crash at runtime on an un-mapped raw string.
+///
+/// **diff-tabs Task 9: `.diff` is the fifth case, and its arrival is the tripwire above working as
+/// designed.** Task 4 added `diff` to the WIRE enum, which broke `init(_:)` below and nothing else —
+/// exactly the failure the doc comment promised, and the reason the app target sat red from Task 4
+/// until this one. Adding it here then reds every exhaustive switch over THIS enum in turn (the
+/// favicon glyph, the display title, the content factory), which is the same mechanism one layer
+/// down.
 enum PanelTabKind: String, Codable, Equatable {
-    case web, document, code, note
+    case web, document, code, note, diff
 
     init(_ wire: SessionEvent.PanelTabKind) {
         switch wire {
@@ -17,6 +24,7 @@ enum PanelTabKind: String, Codable, Equatable {
         case .document: self = .document
         case .code: self = .code
         case .note: self = .note
+        case .diff: self = .diff
         }
     }
 }
@@ -31,6 +39,22 @@ struct PanelTab: Identifiable, Equatable {
     let kind: PanelTabKind
     var url: String?
     var title: String?
+    /// diff-tabs Task 9: which persisted diff this tab shows — set only on a `.diff` tab, `nil` on
+    /// every other kind and on every tab minted before this feature existed.
+    ///
+    /// **It is the DEDUPE KEY, which is why it has to survive both of the app's fold paths.** A
+    /// transcript chip's second click must ACTIVATE the tab its first click opened rather than mint
+    /// a duplicate (`ShellSessionHost.openDiffTab`), and the only thing the two clicks share is this
+    /// id — `tabId` is daemon-minted per tab, so a duplicate would be indistinguishable from the
+    /// original by every other field. The two paths are `foldPanelTabs` below (the live/replayed
+    /// `panel_tab_opened` event) and `ShellSessionHost.refreshPanelTabs`'s `panel.list` snapshot;
+    /// dropping it from EITHER makes the dedupe fail silently after the corresponding transition
+    /// (a replay, or an attach/hop respectively).
+    ///
+    /// Defaulted, like `url`/`title` are optional, so every pre-existing construction site
+    /// (`BrowserRuntime`, `SpikeCloseLeak`, the fold tests) keeps compiling and keeps meaning
+    /// exactly what it meant: a tab with no diff.
+    var diffId: String? = nil
     var id: String { tabId }
 }
 
@@ -92,7 +116,10 @@ func foldPanelTabs(_ events: [SessionEvent], startingFrom initial: PanelTabState
         switch event {
         case .panelTabOpened(let v):
             if !tabs.contains(where: { $0.tabId == v.tabId }) {
-                tabs.append(PanelTab(tabId: v.tabId, kind: PanelTabKind(v.kind), url: v.url, title: v.title))
+                // diff-tabs Task 9: `diffId` rides through — see `PanelTab.diffId` for why losing it
+                // on this path (or on the `panel.list` snapshot path) breaks chip dedupe silently.
+                tabs.append(PanelTab(tabId: v.tabId, kind: PanelTabKind(v.kind), url: v.url,
+                                     title: v.title, diffId: v.diffId))
             }
         case .panelTabClosed(let v):
             tabs.removeAll { $0.tabId == v.tabId }

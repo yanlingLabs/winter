@@ -597,6 +597,11 @@ func panelTabFaviconSystemImage(_ kind: PanelTabKind) -> String {
     case .document: return "doc.text"
     case .code: return "chevron.left.forwardslash.chevron.right"
     case .note: return "note.text"
+    // diff-tabs Task 9: the minus/plus pair IS the vocabulary the chip that opens this tab already
+    // speaks (`-33 +198`), so the pill and the chip read as one thing. FINAL, not provisional — the
+    // per-kind TINT the strip eventually wears is Task 12's brand pass, and the glyph deliberately
+    // keeps `labelColor` either way (design spec §6: "the tint is the surface, not the icon").
+    case .diff: return "plus.forwardslash.minus"
     }
 }
 
@@ -610,6 +615,9 @@ func panelTabDisplayTitle(_ tab: PanelTab) -> String {
     case .document: return "Document"
     case .code: return "Code"
     case .note: return "Note"
+    // Reached only if a diff tab somehow carries no title — `openDiffTab` always sends the edited
+    // file's basename, so in practice the pill names the file rather than the category.
+    case .diff: return "Diff"
     }
 }
 

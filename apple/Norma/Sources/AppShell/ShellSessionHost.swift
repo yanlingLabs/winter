@@ -523,7 +523,16 @@ final class ShellSessionHost: ObservableObject {
     /// fired `window.open`. Nothing else passes it; every existing caller keeps today's behaviour by
     /// omitting it. The policy guard above still runs first, for this door as for the other two —
     /// which is the whole point of putting the popup through this method rather than beside it.
+    ///
+    /// **`diffId:` (diff-tabs Task 9) pairs with `kind: .diff` and nothing else** — the daemon's own
+    /// `PanelOpenTabParams` refinement enforces that pairing server-side (methods.ts), so this door
+    /// does no kind-conditional gating of its own, exactly the relationship `url` already has with
+    /// `PanelURLPolicy` (app side is a courtesy, the daemon is the gate). It rides all three
+    /// branches below rather than only the explicit-`sessionId` one `openDiffTab` uses: a signature
+    /// that silently drops a caller's argument on two of its three paths is the same coincidence-
+    /// not-invariant shape this file's other comments keep warning about.
     func openPanelTab(kind: PanelTabKind = .web, url: String? = nil, title: String? = nil,
+                       diffId: String? = nil,
                        sessionId: String? = nil,
                        onSessionCreated: ((String) -> Void)? = nil) {
         guard let client = managementClient else { return }
@@ -542,7 +551,7 @@ final class ShellSessionHost: ObservableObject {
         // nor the auto-create, and `onSessionCreated` is meaningless here (nothing is created).
         if let sessionId {
             Task { @MainActor [weak self] in
-                _ = try? await client.openPanelTab(sessionId: sessionId, kind: kindRaw, url: url, title: title)
+                _ = try? await client.openPanelTab(sessionId: sessionId, kind: kindRaw, url: url, title: title, diffId: diffId)
                 // The re-fetch `closePanelTab` makes while unattached, for the identical reason and
                 // generalised to "not the attached session" because this door can name ANY session
                 // rather than only the attached-or-bound one: only the ATTACHED session has a live
@@ -559,13 +568,13 @@ final class ShellSessionHost: ObservableObject {
             Task { @MainActor [weak self] in
                 defer { self?.panelAutoCreateInFlight = false }
                 guard let created = try? await client.createSession(scope: "global", approvalPolicy: "auto", mode: "chat") else { return }
-                _ = try? await client.openPanelTab(sessionId: created.sessionId, kind: kindRaw, url: url, title: title)
+                _ = try? await client.openPanelTab(sessionId: created.sessionId, kind: kindRaw, url: url, title: title, diffId: diffId)
                 onSessionCreated?(created.sessionId)
             }
             return
         }
         Task { @MainActor in
-            _ = try? await client.openPanelTab(sessionId: attached, kind: kindRaw, url: url, title: title)
+            _ = try? await client.openPanelTab(sessionId: attached, kind: kindRaw, url: url, title: title, diffId: diffId)
         }
     }
 
@@ -720,11 +729,9 @@ final class ShellSessionHost: ObservableObject {
         guard let client = managementClient else { return }
         Task { @MainActor [weak self] in
             guard let result = try? await client.listPanelTabs(sessionId: sessionId) else { return }
-            let tabs: [PanelTab] = result.tabs.compactMap { info in
-                guard let kind = PanelTabKind(rawValue: info.kind) else { return nil }
-                return PanelTab(tabId: info.tabId, kind: kind, url: info.url, title: info.title)
-            }
-            self?.panelStore.applyFetchedSnapshot(sessionId: sessionId, tabs: tabs, activeTabId: result.activeTabId)
+            self?.panelStore.applyFetchedSnapshot(sessionId: sessionId,
+                                                  tabs: panelTabs(fromSnapshot: result.tabs),
+                                                  activeTabId: result.activeTabId)
         }
     }
 
@@ -1972,6 +1979,31 @@ final class ShellSessionHost: ObservableObject {
     /// The panel's own close button.
     func closeOutputFile() {
         openOutputFile = nil
+    }
+}
+
+// MARK: - The `panel.list` snapshot fold (the app's SECOND fold path)
+
+/// PURE: `panel.list`'s wire rows → the app's own `PanelTab`s. The snapshot half of the pair
+/// `foldPanelTabs` (`PanelTab.swift`) forms — that one folds live/replayed EVENTS, this one seeds
+/// from a fetch — and it is extracted from `refreshPanelTabs`'s async body precisely so it can be
+/// tested without a daemon.
+///
+/// **`diffId` rides through, and diff-tabs Task 9 exists partly because it did not.** This is the
+/// app's ONLY source of a diff tab's identity after an attach or a hop (`PanelTabInfo.diffId`'s own
+/// doc in NormaKit says the same from the other side): the panel store is re-seeded from
+/// `panel.list` on every switch, so a mapping that dropped the field would leave every surviving
+/// diff tab with `diffId == nil` and make the chip's dedupe silently re-mint a duplicate tab for a
+/// diff that is already open — visible only after a reattach, which is exactly the kind of bug that
+/// ships.
+///
+/// An unparseable `kind` DROPS that tab rather than guessing `.web` — see `refreshPanelTabs`'s own
+/// doc for why that mirrors what a replayed event with the same unknown value does.
+func panelTabs(fromSnapshot infos: [PanelTabInfo]) -> [PanelTab] {
+    infos.compactMap { info in
+        guard let kind = PanelTabKind(rawValue: info.kind) else { return nil }
+        return PanelTab(tabId: info.tabId, kind: kind, url: info.url, title: info.title,
+                        diffId: info.diffId)
     }
 }
 

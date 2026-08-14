@@ -814,14 +814,34 @@ final class CEFRuntimeTests: XCTestCase {
     }
 
     /// `.web` resolves to the CEF surface; every other kind keeps Plan A's blank placeholder.
+    ///
+    /// **diff-tabs Task 9: `.diff` is in this list TEMPORARILY, and Task 10 takes it out.** Task 9
+    /// mints diff tabs (the transcript chip → `ShellSessionHost.openDiffTab`) without rendering one,
+    /// so the factory routes `.diff` to the same placeholder the other non-web kinds get. Listing it
+    /// here rather than leaving it untested is what makes Task 10's `PanelDiffTab` show up as a
+    /// deliberate edit to a test that names it — the assertion below FAILS the moment the renderer
+    /// lands, which is the intended handoff, not a regression.
     func testWebTabsResolveToTheCEFSurfaceAndOtherKindsDoNot() {
         let web = PanelTab(tabId: "t1", kind: .web, url: nil, title: nil)
         XCTAssertTrue(panelTabContent(for: web) is PanelWebTab)
-        for kind in [PanelTabKind.document, .code, .note] {
+        for kind in [PanelTabKind.document, .code, .note, .diff] {
             let tab = PanelTab(tabId: "t2", kind: kind, url: nil, title: nil)
             XCTAssertTrue(panelTabContent(for: tab) is PanelPlaceholderTab,
                           "\(kind) must not render a browser")
         }
+    }
+
+    /// Every kind resolves to a REAL SF Symbol, `.diff` included (diff-tabs Task 9's
+    /// `plus.forwardslash.minus`) — a favicon name that resolves to nothing draws an empty pill, and
+    /// nothing else in the suite would notice.
+    func testEveryPanelTabKindHasARealFaviconGlyph() {
+        for kind in [PanelTabKind.web, .document, .code, .note, .diff] {
+            let name = panelTabFaviconSystemImage(kind)
+            XCTAssertNotNil(NSImage(systemSymbolName: name, accessibilityDescription: nil),
+                            "\(kind)'s favicon `\(name)` is not a real SF Symbol")
+        }
+        XCTAssertEqual(panelTabFaviconSystemImage(.diff), "plus.forwardslash.minus",
+                       "the diff pill speaks the chip's own -N/+M vocabulary")
     }
 
     /// The panel renders the active tab — and, when nothing is active, the first one.
