@@ -27,6 +27,12 @@ export interface PanelTabMint {
   kind: z.infer<typeof PanelTabKind>;
   url?: string;
   title?: string;
+  /** diff-tabs Task 7: set only when `kind === "diff"` — mirrors `PanelTabOpenedEvent.diffId`/
+   *  `PanelOpenTabParams.diffId` (protocol/events.ts and methods.ts, both Task 3) verbatim. Pure
+   *  passthrough, exactly like `url`/`title` above: this function neither mints nor validates it —
+   *  `PanelOpenTabParams`'s own regex (`DIFF_ID_SHAPE`) is the one and only shape gate, run by
+   *  `parseParams` before either caller ever reaches here. */
+  diffId?: string;
 }
 
 /** Mint a tab and return its daemon-generated id. THROWS whatever `hub.append` throws — in practice
@@ -43,6 +49,7 @@ export function mintPanelTab(hub: Pick<SessionHub, "append">, p: PanelTabMint): 
   const tabId = randomUUID();
   hub.append(p.sessionId, {
     type: "panel_tab_opened", sessionId: p.sessionId, tabId, kind: p.kind, url: p.url, title: p.title,
+    diffId: p.diffId,
   });
   hub.append(p.sessionId, { type: "panel_tab_activated", sessionId: p.sessionId, tabId });
   return tabId;

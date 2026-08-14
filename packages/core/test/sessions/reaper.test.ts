@@ -8,6 +8,7 @@ import { SessionHub } from "../../src/sessions/hub";
 import { appendCleanerLog } from "../../src/sessions/cleaner-log";
 import { reapEmptySessions, type ReaperStore } from "../../src/sessions/reaper";
 import { ensureOutdir, outdirPath } from "../../src/sessions/outdir";
+import { writeDiff, mintDiffId, diffDirPath } from "../../src/diffs/store";
 import { startIpcServer } from "../../src/ipc/server";
 import { startDaemon, type RunningDaemon } from "../../src/daemon";
 import { FileSecretStore } from "../../src/auth/secret-store";
@@ -255,6 +256,42 @@ describe("SessionStore.deleteSession (session-activity-hygiene T6)", () => {
     expect(() => store.deleteSession(id)).not.toThrow();
     store.close();
   });
+
+  // diff-tabs Task 7: `deleteSession` also best-effort removes the session's captured diffs
+  // (`diffs/store.ts`'s `removeSessionDiffs`) — same spot, same audit-order precedent as the
+  // outputs-dir sweep just above. This is THE deletion door both of the system's two sanctioned
+  // auto-delete paths share: `reapEmptySessions` (this file, below) and `SessionCleaner.runPass`
+  // (sessions/cleaner.ts) both call `store.deleteSession` and nothing else — there is no separate
+  // "user-delete RPC" anywhere in packages/protocol/packages/core today (verified by reading: no
+  // `session.delete` method exists, and `deleteSession`'s only two production callers are
+  // reaper.ts and cleaner.ts — cleaner.ts's own doc comment calls itself "the second and LAST
+  // sanctioned deletion path"). Sweeping here, once, covers both real doors and any future
+  // user-delete RPC by construction, since `deleteSession` is documented as the FULL deletion
+  // method (JSONL + index row) — see this describe block's own name.
+  test("also removes the session's diffs dir, best-effort, once one exists", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "norma-reaper-test-"));
+    const store = new SessionStore(dir);
+    const id = store.createSession("global");
+    const diffId = mintDiffId();
+    await writeDiff(dir, id, diffId, { path: "/tmp/x.ts", added: 1, removed: 0 }, "@@ -0,0 +1,1 @@\n+x\n");
+    expect(existsSync(diffDirPath(dir, id))).toBe(true);
+    store.deleteSession(id);
+    // `removeSessionDiffs` is async-typed but has no `await` in its own body TODAY (diffs/store.ts)
+    // — its `rmSync` runs synchronously before the call expression finishes evaluating, so the
+    // directory is already gone the instant `deleteSession` returns. If that ever changes (a real
+    // `await` lands in `removeSessionDiffs`), THIS assertion is the tripwire that would catch it.
+    expect(existsSync(diffDirPath(dir, id))).toBe(false);
+    store.close();
+  });
+
+  test("a session with NO diffs dir at all deletes cleanly — vacuous, never throws (no edits, no diffs)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "norma-reaper-test-"));
+    const store = new SessionStore(dir);
+    const id = store.createSession("global");
+    expect(existsSync(diffDirPath(dir, id))).toBe(false); // never created
+    expect(() => store.deleteSession(id)).not.toThrow();
+    store.close();
+  });
 });
 
 describe("appendCleanerLog (session-activity-hygiene T6)", () => {
@@ -335,6 +372,31 @@ describe("reapEmptySessions (session-activity-hygiene T6)", () => {
     expect(reaped.sort()).toEqual([withOutdir, withoutOutdir].sort());
     expect(existsSync(outDir)).toBe(false);
     expect(existsSync(outdirPath(home, withoutOutdir))).toBe(false); // still absent, never threw
+    store.close();
+  });
+
+  // diff-tabs Task 7: the same "two ways in one pass" proof as the outputs-dir test just above,
+  // for `diffs/<sessionId>/` — through the REAL reap sweep (`reapEmptySessions` -> the unchanged
+  // `store.deleteSession` call shape), not just through `deleteSession` in isolation. A reaper
+  // candidate holding a diff is an edge case rather than the ordinary path (the reaper's own
+  // eligibility check never looks at tool_calls or diffs, only user/assistant messages and open
+  // panel tabs — see `emptySessionIds`'s own doc comment above), which is exactly why it is worth
+  // pinning here rather than assuming: nothing stops a session with zero chat messages from having
+  // run a tool.
+  test("reaping removes a candidate's diffs dir too, and a candidate with none reaps vacuous-safe", async () => {
+    const home = tempHome();
+    const store = new SessionStore(home);
+    const withDiff = store.createSession("global");
+    const withoutDiff = store.createSession("global");
+    await writeDiff(home, withDiff, mintDiffId(), { path: "/p", added: 1, removed: 0 }, "@@ -0,0 +1,1 @@\n+x\n");
+    expect(existsSync(diffDirPath(home, withoutDiff))).toBe(false); // never created
+
+    const nowMs = Math.max(agedNow(store, withDiff, 1), agedNow(store, withoutDiff, 1));
+    const reaped = reapEmptySessions({ store, attachedCount: NOBODY_ATTACHED, home, now: () => nowMs });
+
+    expect(reaped.sort()).toEqual([withDiff, withoutDiff].sort());
+    expect(existsSync(diffDirPath(home, withDiff))).toBe(false);
+    expect(existsSync(diffDirPath(home, withoutDiff))).toBe(false); // still absent, never threw
     store.close();
   });
 

@@ -101,6 +101,18 @@ describe("remote allowlist parity (SP2a gate G7)", () => {
       ].sort(),
     );
   });
+
+  // diff-tabs Task 7: `panel.readDiff` (protocol Task 3) is harness/admin-only by construction —
+  // panel state is Mac-only, same as every other `panel.*` method (none of the seven is on this
+  // list; panel-methods.test.ts / panel-read-diff.test.ts pin the role-rejection behavior over the
+  // real RPC). This assertion is TRUE both before and after Task 7's own implementation work — an
+  // absent METHODS key is `undefined`, and `undefined` is not in the set either — so it is a PIN
+  // against a future regression (someone later adding it here without updating the Swift mirror or
+  // its own parity test), not a RED driver for this task's TDD cycle. The mirrored lists
+  // themselves (TWENTY_ONE above, and its Swift twin) are DELIBERATELY untouched by this line.
+  test("panel.readDiff (diff-tabs Task 7) is NOT in REMOTE_ALLOWED_METHODS", () => {
+    expect(REMOTE_ALLOWED_METHODS.has(METHODS.panelReadDiff)).toBe(false);
+  });
 });
 
 describe("RunningDaemon.tokens.remote (SP2a gate G8)", () => {

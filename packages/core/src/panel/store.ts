@@ -1,6 +1,6 @@
 import type { SessionEvent } from "@norma/protocol";
 
-export type PanelTab = { tabId: string; kind: string; url?: string; title?: string };
+export type PanelTab = { tabId: string; kind: string; url?: string; title?: string; diffId?: string };
 export type PanelTabState = { tabs: PanelTab[]; activeTabId?: string };
 
 /** PURE: rebuild tab state by replaying persisted panel events in order.
@@ -16,7 +16,10 @@ export function foldPanelTabs(events: readonly SessionEvent[]): PanelTabState {
     switch (e.type) {
       case "panel_tab_opened":
         if (!tabs.some((t) => t.tabId === e.tabId)) {
-          tabs.push({ tabId: e.tabId, kind: e.kind, url: e.url, title: e.title });
+          // diff-tabs Task 7: `diffId` (protocol Task 3) rides along verbatim, set only when the
+          // opening event carried one (kind === "diff") — undefined for every other kind, exactly
+          // like `url`/`title` above.
+          tabs.push({ tabId: e.tabId, kind: e.kind, url: e.url, title: e.title, diffId: e.diffId });
         }
         break;
       case "panel_tab_closed": {
