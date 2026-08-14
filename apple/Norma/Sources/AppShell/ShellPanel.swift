@@ -59,12 +59,11 @@ let panelTrailingClusterWidth: CGFloat = 3 * panelExpandButtonSize
     + 2 * shellTitlebarClusterSpacing
     + panelExpandButtonInset
 
-/// PURE: the width one pill renders at, given how many tabs are open and how much width the strip
-/// has to lay them out in — capped at `panelTabPillSize.width`, floored at `panelTabPillMinWidth`.
-/// Every pill shares whatever is left after the fixed overhead:
+/// PURE: every fixed-width cost the strip's layout reserves OUTSIDE the pills themselves, for a
+/// row of `tabCount` pills:
 ///   - the leading inset (`panelTabPillInset`)
 ///   - panel-shell T13: `(tabCount - 1)` gaps of `panelTabSpacing` BETWEEN pills — zero for a
-///     single tab, which is why splitting this out changes nothing for `tabCount == 1`
+///     single tab, which is why this changes nothing for `tabCount == 1`
 ///   - one `panelNewTabButtonGap`, the LAST pill to the "+" button
 ///   - the "+" button itself (`panelTabPillSize.height` square)
 ///   - one more `panelNewTabButtonGap` — `PanelTabStrip`'s OUTER `HStack` spacing, between the
@@ -73,23 +72,39 @@ let panelTrailingClusterWidth: CGFloat = 3 * panelExpandButtonSize
 ///     NOT touch this term — it stays the measured pill->"+" figure, same as before T13.
 ///   - the trailing cluster (`panelTrailingClusterWidth`)
 /// `PanelTabStrip`'s own layout below uses the IDENTICAL named constants for every one of these
-/// terms, so this function's answer and what actually renders can never drift apart. In particular
-/// the `ScrollView`'s own `.frame(width:)` subtracts exactly the LAST two terms (the outer gap and
-/// the cluster) from `availableWidth` — the first three terms are spent INSIDE that frame, on the
-/// pills themselves — which is what keeps the two subtractions equal by construction rather than by
-/// two call sites agreeing to use the same numbers. (`testTabPillWidthAtTwoTabsUsesTheSplitGapArithmetic`
-/// pins the arithmetic itself; this comment is the proof the two sides still agree.)
+/// terms, so this and what actually renders can never drift apart. In particular the `ScrollView`'s
+/// own `.frame(width:)` subtracts exactly the LAST two terms (the outer gap and the cluster) from
+/// `availableWidth` — the first three terms are spent INSIDE that frame, on the pills themselves —
+/// which is what keeps the two subtractions equal by construction rather than by two call sites
+/// agreeing to use the same numbers. (`testTabPillWidthAtTwoTabsUsesTheSplitGapArithmetic` pins the
+/// arithmetic itself; this comment is the proof the two sides still agree.)
+///
+/// diff-tabs Task 11: extracted out of `panelTabPillWidth` (unchanged expression, just named) so
+/// `panelStripFitsFlat`/`panelStripLeavesGrouped` (`PanelStripLayout.swift`) can ask "do `tabCount`
+/// pills AT THE FLOOR still fit?" against the SAME reserved chrome `panelTabPillWidth` divides its
+/// own leftover share by — one more case of this file's "can never drift apart" property, not a
+/// second formula that merely agrees with this one today. **Precondition: `tabCount > 0`** — a
+/// zero-tab row has no "`(tabCount - 1)` gaps" term to speak of, and both of this function's
+/// callers already guard that before calling in (this mirrors `panelTabPillWidth`'s own
+/// pre-extraction guard verbatim rather than changing it).
+func panelTabStripOverhead(tabCount: Int) -> CGFloat {
+    panelTabPillInset
+        + CGFloat(tabCount - 1) * panelTabSpacing
+        + 2 * panelNewTabButtonGap
+        + panelTabPillSize.height
+        + panelTrailingClusterWidth
+}
+
+/// PURE: the width one pill renders at, given how many tabs are open and how much width the strip
+/// has to lay them out in — capped at `panelTabPillSize.width`, floored at `panelTabPillMinWidth`.
+/// Every pill shares whatever is left after `panelTabStripOverhead`'s fixed overhead; see that
+/// function's own doc for what each term is.
 ///
 /// Always returns a value — even floored, this never "fails". Below the floor there is nothing
 /// left for THIS function to do; `PanelTabStrip`'s own `ScrollView` is what takes over from there.
 func panelTabPillWidth(tabCount: Int, availableWidth: CGFloat) -> CGFloat {
     guard tabCount > 0 else { return panelTabPillSize.width }
-    let overhead = panelTabPillInset
-        + CGFloat(tabCount - 1) * panelTabSpacing
-        + 2 * panelNewTabButtonGap
-        + panelTabPillSize.height
-        + panelTrailingClusterWidth
-    let share = (availableWidth - overhead) / CGFloat(tabCount)
+    let share = (availableWidth - panelTabStripOverhead(tabCount: tabCount)) / CGFloat(tabCount)
     return min(panelTabPillSize.width, max(panelTabPillMinWidth, share))
 }
 
