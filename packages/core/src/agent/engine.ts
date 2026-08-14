@@ -49,6 +49,7 @@ import { DISPATCH_MODEL, DISPATCH_EFFORT } from "./dispatch-config";
 import { CHAT_SYSTEM_PROMPT } from "./chat-prompt";
 import type { DispatchChildren } from "./dispatch-children";
 import type { WorkflowRuntime } from "../workflows/runtime";
+import type { DiffHeader } from "../diffs/store";
 // provider-correctness T5: the Norma-level effort tier vocabulary. `wireEffort` is what makes
 // `resolveSel` a total function into the wire-valid set; the other two decide whether the tier's
 // PROMPT half applies. See settings.ts for why the two vocabularies are deliberately disjoint.
@@ -978,6 +979,20 @@ export interface EngineConfig {
   // never wires it) → `ctx.outDir` stays undefined and bash's env/writable-set additions are
   // skipped entirely — byte-identical to before this feature.
   outDirOf?: (sessionId: string) => string;
+  // diff-tabs Task 6: bridges edit/write/notebook_edit to the diff store's `writeDiff`
+  // (diffs/store.ts) WITHOUT exposing raw `normaHome` on ToolContext — daemon.ts closes over its
+  // own `normaHome` (already in scope, same as `outDirOf`'s `(sid) => ensureOutdir(normaHome,
+  // sid)` just above) and wires this as `(sid, diffId, header, patch) => writeDiff(normaHome, sid,
+  // diffId, header, patch)`. Action- rather than value-shaped (unlike outDirOf/tmpDirOf, which
+  // resolve to a single per-session VALUE with no further params) because a diff write needs
+  // per-call diffId/header/patch a resolved path alone can't carry — see ToolContext.diffSink's
+  // own doc comment for the fuller ask/taskEvent/notify-vs-outDir/tmpDir precedent comparison.
+  // Read fresh per call in executeCall (below, alongside outDir/tmpDir), pre-bound to THIS call's
+  // sessionId before landing on `ctx.diffSink` — the tool itself never sees normaHome or re-passes
+  // sessionId. Absent (a test harness, or a caller that never wires it) → `ctx.diffSink` stays
+  // undefined and edit/write/notebook_edit (Task 6) fall back to their pre-Task-6 plain-string
+  // return, byte-identical to before this field existed.
+  persistDiff?: (sessionId: string, diffId: string, header: Omit<DiffHeader, "truncated">, patch: string) => Promise<{ truncated: boolean }>;
   // working-directories T4 fix round 1: the session's project MEMDIR for a given `cwd` — the SAME
   // computation daemon.ts's `sessionDirs` roots callback already folds into the session's write
   // roots when `memory.enabled` is on (`memoryDirOf`, gated on `memoryEnabledHot()`), exposed here
@@ -6144,6 +6159,11 @@ export class AgentEngine {
     // working-directories T4: read fresh per call (mirrors `tmpDir` just above) — independent of
     // `rootsOverride` on purpose, see `outDirOf`'s own doc comment on EngineConfig.
     const outDir = this.cfg.outDirOf?.(sessionId);
+    // diff-tabs Task 6: pre-bind THIS call's sessionId into EngineConfig.persistDiff (if wired) —
+    // see that field's own doc comment. The tool never sees normaHome or passes sessionId itself.
+    const diffSink = this.cfg.persistDiff
+      ? (diffId: string, header: Omit<DiffHeader, "truncated">, patch: string) => this.cfg.persistDiff!(sessionId, diffId, header, patch)
+      : undefined;
     const markSkillLoaded = (n: string) => {
       let set = this.loadedSkills.get(sessionId);
       if (!set) { set = new Set(); this.loadedSkills.set(sessionId, set); }
@@ -6241,7 +6261,7 @@ export class AgentEngine {
         }
       : undefined;
     const result = await this.cfg.registry.execute(call.name, args, {
-      cwd, roots, tmpDir, outDir, sessionId, signal, markSkillLoaded,
+      cwd, roots, tmpDir, outDir, diffSink, sessionId, signal, markSkillLoaded,
       markToolLoaded,
       loadedTools: effectiveLoaded,
       deferThreshold: this.toolSearchThreshold(cwd),

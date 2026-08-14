@@ -4,6 +4,7 @@ import type { ToolSpec } from "../../providers/types";
 import { isWithin } from "../paths";
 import type { AskOutcome } from "../questions";
 import type { ComputerUseService } from "../computer-use";
+import type { DiffHeader } from "../../diffs/store";
 
 export interface ToolContext {
   cwd: string;
@@ -45,6 +46,18 @@ export interface ToolContext {
   // optional subsystem (SessionHub is a mandatory EngineConfig field), so it's always set when a
   // tool runs through the real engine — absent only for a direct registry.execute() call in tests.
   notify?: (title: string, message: string) => void;
+  // diff-tabs Task 6: engine bridge for edit/write/notebook_edit (diff-report.ts's `withFileDiff`)
+  // to persist a computed diff — bound to THIS call's sessionId by executeCall (engine.ts), which
+  // pre-binds it from `EngineConfig.persistDiff` (see that field's own doc comment for why this is
+  // a closure — the ask/taskEvent/notify shape, a capability scoped to exactly one side effect —
+  // rather than a raw `normaHome` field the outDir/tmpDir precedent might otherwise suggest:
+  // normaHome is deliberately kept OUT of tool reach elsewhere in this file, see
+  // `grantDeniedPrefixes` on EngineConfig). Absent (a direct `registry.execute()` call in a test,
+  // or any caller that never wires `persistDiff`) → the three tools skip diff computation entirely
+  // and return their pre-Task-6 plain string, byte-identical to before this field existed. Header
+  // is `Omit<DiffHeader, "truncated">` because `truncated` is decided INSIDE `writeDiff` (after
+  // the patch is capped) — a caller could never supply it truthfully.
+  diffSink?: (diffId: string, header: Omit<DiffHeader, "truncated">, patch: string) => Promise<{ truncated: boolean }>;
   // Computer use (Phase 5 CU): the lease-holding service the `computer` tool drives (screenshot/
   // ax-read/input-drive via the peripheral broker). Absent → the computer tool isn't wired for this
   // session (it's registered only when settings.computerUse.enabled, so normally both are set or

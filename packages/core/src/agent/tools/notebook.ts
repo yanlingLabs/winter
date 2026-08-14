@@ -3,6 +3,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import type { ToolRegistry } from "./registry";
 import { resolveWithinAny } from "../paths";
+import { withFileDiff } from "./diff-report";
 
 const NotebookEditArgs = z.object({
   notebook_path: z.string().min(1),
@@ -29,11 +30,15 @@ export function registerNotebookTool(r: ToolRegistry, opts?: { deferred?: boolea
       "Edit a Jupyter notebook (.ipynb) at the cell level. edit_mode 'replace' (default) overwrites the cell's source (and cell_type if given); 'insert' adds a new cell after cell_id (or at the top if cell_id is omitted); 'delete' removes the cell. cell_id is required for replace and delete.",
     args: NotebookEditArgs,
     deferred: opts?.deferred,
-    run({ notebook_path, new_source, cell_id, cell_type, edit_mode }: z.infer<typeof NotebookEditArgs>, { roots }) {
+    async run({ notebook_path, new_source, cell_id, cell_type, edit_mode }: z.infer<typeof NotebookEditArgs>, { roots, diffSink }) {
       const mode = edit_mode ?? "replace";
       const target = resolveWithinAny(roots, notebook_path);
+      let beforeText: string;
       let nb: Notebook;
-      try { nb = JSON.parse(readFileSync(target, "utf8")); } catch (e) { throw new Error(`could not read/parse notebook ${notebook_path}: ${(e as Error).message}`); }
+      // diff-tabs Task 6: `beforeText` is the exact on-disk bytes, captured before JSON.parse
+      // (which doesn't preserve formatting) — the diff is over the SERIALIZED notebook JSON, the
+      // whole file, same as write/edit conceptually (design spec §2).
+      try { beforeText = readFileSync(target, "utf8"); nb = JSON.parse(beforeText); } catch (e) { throw new Error(`could not read/parse notebook ${notebook_path}: ${(e as Error).message}`); }
       if (!Array.isArray(nb.cells)) throw new Error(`${notebook_path} is not a valid notebook (no cells array)`);
       const idx = (id: string) => nb.cells.findIndex((c, i) => (c.id ?? String(i)) === id);
 
@@ -56,8 +61,10 @@ export function registerNotebookTool(r: ToolRegistry, opts?: { deferred?: boolea
           else { delete c.outputs; delete c.execution_count; }
         }
       }
-      writeFileSync(target, JSON.stringify(nb, null, 1) + "\n");
-      return `notebook_edit ${mode} on ${notebook_path}${cell_id ? ` (cell ${cell_id})` : ""} — ${nb.cells.length} cells`;
+      const afterText = JSON.stringify(nb, null, 1) + "\n";
+      writeFileSync(target, afterText);
+      const plain = `notebook_edit ${mode} on ${notebook_path}${cell_id ? ` (cell ${cell_id})` : ""} — ${nb.cells.length} cells`;
+      return withFileDiff(plain, notebook_path, beforeText, afterText, diffSink);
     },
   });
 }
