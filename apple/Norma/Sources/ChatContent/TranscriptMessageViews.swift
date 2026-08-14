@@ -394,7 +394,7 @@ private func transcriptCopyForeground(isHovering: Bool, didCopy: Bool) -> Color 
 ///     `ActivityRowTests`) rather than deleted.
 func activityGlyphAndLabel(_ item: ActivityItem) -> (glyph: String, label: String) {
     switch item.kind {
-    case .tool(let name, let detail, _, _, _):
+    case .tool(let name, let detail, _, _, _, _):
         return ("⚙", detail.map { "\(name): \($0)" } ?? name)
     case .task(let subject, let status):
         return (taskGlyph(for: status), subject)
@@ -484,6 +484,24 @@ struct ToolCallRecord: Equatable {
     let output: String?
     /// The wire's `tool_result.isError`.
     let isError: Bool
+    /// diff-tabs Task 9: the per-edit diff this call produced, folded from the same `tool_result`
+    /// (`FileDiffRef`, `Model/SessionModel.swift`). Non-nil only for an `edit`/`write`/
+    /// `notebook_edit` that actually changed the file; `nil` for every other call, every no-op edit,
+    /// and every event from before the field existed.
+    ///
+    /// **It is what the chip renders from, and the chip is gated on THIS rather than on the tool's
+    /// name.** The daemon is the only producer and it sets the field for exactly three tools — so a
+    /// name list here would be a second, hand-maintained copy of that fact, of exactly the kind this
+    /// repo has already been bitten by (`turn_completed.contextTokens`: a second producer emitting
+    /// past a consumer with no gate). Presence of the diff IS the contract; a fourth tool that one
+    /// day reports one gets a chip for free, and a session that never had one renders as it always
+    /// did.
+    ///
+    /// A defaulted `var` so every pre-existing `ToolCallRecord(callId:detail:output:isError:)`
+    /// construction site — the grouping function and three test files — keeps compiling unchanged
+    /// (a `let` with a default is dropped from the memberwise init entirely; a `let` without one
+    /// would break all four).
+    var fileDiff: FileDiffRef? = nil
 }
 
 /// Stable identity for one `.toolRun` group's EXPANSION state.
@@ -558,8 +576,9 @@ func groupActivity(_ items: [ActivityItem]) -> [ActivityGroup] {
         switch item.kind {
         case .task:
             continue // deliberate — see doc comment above
-        case .tool(let name, let detail, let callId, let output, let isError):
-            let record = ToolCallRecord(callId: callId, detail: detail, output: output, isError: isError)
+        case .tool(let name, let detail, let callId, let output, let isError, let fileDiff):
+            let record = ToolCallRecord(callId: callId, detail: detail, output: output,
+                                        isError: isError, fileDiff: fileDiff)
             if case .toolRun(var entries) = groups.last {
                 if let last = entries.last, last.name == name {
                     entries[entries.count - 1] = ToolRunEntry(name: name, calls: last.calls + [record])
@@ -855,6 +874,71 @@ func toolCallOutputPlaceholder(_ status: ToolCallStatus) -> String? {
     status == .running ? "Running…" : nil
 }
 
+// MARK: - diff-tabs Task 9: the diff chip's pure logic
+
+/// What the chip PRINTS for a path: its last two components (`core/engine.ts`), or the whole thing
+/// when it has only one.
+///
+/// The wire's `path` is the tool argument AS RECEIVED and may be relative (`FileDiffRef`'s own doc);
+/// this is a STRING operation on it, never a filesystem one — nothing here resolves, canonicalises
+/// or touches the disk, because the string is all the wire ever carried. Two components is the
+/// user's own figure (design spec §3, "like the `norma v2/core` example"): enough to disambiguate
+/// the dozen `index.ts`es a real project has, short enough to sit inside a transcript row.
+///
+/// Empty components are dropped, so a trailing or doubled separator cannot eat one of the two.
+func fileDiffChipDisplayPath(_ path: String) -> String {
+    let parts = path.split(separator: "/", omittingEmptySubsequences: true)
+    guard !parts.isEmpty else { return path }
+    return parts.suffix(2).joined(separator: "/")
+}
+
+/// The removed half — always signed, always FIRST (design spec §3's `path -33 +198`). Rendered in
+/// `Theme.diffRemovedRole`; the sign is part of the text rather than a glyph so it survives being
+/// read aloud and copied.
+func fileDiffChipRemovedText(_ ref: FileDiffRef) -> String { "-\(ref.removed)" }
+
+/// The added half, in `Theme.diffAddedRole`.
+func fileDiffChipAddedText(_ ref: FileDiffRef) -> String { "+\(ref.added)" }
+
+/// The whole chip as ONE string — what VoiceOver says, and what a test can assert on without
+/// mounting a view. The colour carries no information a screen reader can reach, so the sign does.
+func fileDiffChipText(_ ref: FileDiffRef) -> String {
+    "\(fileDiffChipDisplayPath(ref.path)) \(fileDiffChipRemovedText(ref)) \(fileDiffChipAddedText(ref))"
+}
+
+/// Every diff a run carries, in call order — the chips the row draws, and empty for every run of
+/// tools that touch no files (which is nearly all of them).
+///
+/// Gated on the DIFF being present, not on the tool's name — see `ToolCallRecord.fileDiff` for why
+/// a name list here would be a second copy of a fact only the daemon owns.
+func toolRunDiffChips(_ entries: [ToolRunEntry]) -> [FileDiffRef] {
+    entries.flatMap(\.calls).compactMap(\.fileDiff)
+}
+
+/// How many chips a COLLAPSED row may draw. The collapsed row is the scannable layer (see
+/// `TranscriptToolGroupRow`'s own doc for why grouping stays), and a 40-edit turn would otherwise
+/// push forty chip rows between two sentences of prose — the exact readability the grouping exists
+/// to protect. Every diff is still reachable: expanding lists all of them, one per call line.
+let maxCollapsedDiffChips = 6
+
+/// What the collapsed row draws: the first `max` chips, plus a note naming what it is withholding —
+/// the same "say what is not being shown" contract `toolOutputPreview`/`toolRunExpansion` already
+/// keep, so a withheld chip is never a silently missing door.
+struct ToolRunDiffChips: Equatable {
+    let chips: [FileDiffRef]
+    let note: String?
+}
+
+func toolRunCollapsedDiffChips(_ entries: [ToolRunEntry],
+                               max limit: Int = maxCollapsedDiffChips) -> ToolRunDiffChips {
+    let all = toolRunDiffChips(entries)
+    guard all.count > limit else { return ToolRunDiffChips(chips: all, note: nil) }
+    let withheld = all.count - limit
+    return ToolRunDiffChips(
+        chips: Array(all.prefix(limit)),
+        note: "… \(withheld) more file\(withheld == 1 ? "" : "s") — expand to open \(withheld == 1 ? "its diff" : "their diffs")")
+}
+
 /// One call's row inside an expanded run. `output == nil` means no block is drawn — either nothing
 /// came back, or the run's block budget was already spent.
 struct ToolRunCallLine: Equatable {
@@ -862,6 +946,10 @@ struct ToolRunCallLine: Equatable {
     let detail: String?
     let status: ToolCallStatus
     let output: ToolOutputPreview?
+    /// diff-tabs Task 9: this call's diff, if it made one — the expanded row draws the same chip the
+    /// collapsed one does, which is what keeps every diff reachable past
+    /// `maxCollapsedDiffChips`.
+    let fileDiff: FileDiffRef?
 }
 
 /// Everything an expanded run draws: one line per call, plus a note when the block budget bit.
@@ -902,7 +990,11 @@ func toolRunExpansion(_ entries: [ToolRunEntry],
                 name: entry.name,
                 detail: call.detail,
                 status: toolCallStatus(output: call.output, isError: call.isError, turnIsLive: turnIsLive),
-                output: preview
+                output: preview,
+                // Unbudgeted, deliberately: a chip is one short row, not a monospaced block, and it
+                // is the only door to its diff — withholding one would remove an affordance rather
+                // than defer some drawing.
+                fileDiff: call.fileDiff
             ))
         }
     }
@@ -940,6 +1032,70 @@ func toolRunExpansion(_ entries: [ToolRunEntry],
 /// content-derived default would keep re-opening — is true of the CURRENT structure only: hoisting
 /// that state to `TranscriptView` would survive recycling. Do not read it as a reason the decision
 /// itself is right.)
+/// diff-tabs Task 9: **the transcript's diff chip — `core/engine.ts  -33 +198`, and the first thing
+/// in this directory that opens a panel tab.**
+///
+/// One edit, one chip: the daemon persists a frozen patch per successful `edit`/`write`/
+/// `notebook_edit` and stamps its summary onto the `tool_result`, and this is where that reaches a
+/// person. Clicking it hands the ref to `onOpen` — a closure the shell injects
+/// (`WindowContentView.onOpenDiff`) — and nothing in `ChatContent/` knows that a `ShellSessionHost`,
+/// a `PanelStore` or a panel exists at all. That separation is pinned by a source scan
+/// (`ToolRowTests.testChatContentNeverReachesForTheShellHost`), not merely intended.
+///
+/// **`onOpen == nil` renders the chip as plain text, with no hover and no hit target.** Two of this
+/// view's three homes — the orb's morph window and every detached window — have no panel to open a
+/// tab in, and a chip that visibly invites a click and then does nothing is worse than one that
+/// simply reports what changed. The counts are still worth showing there; the door is not.
+///
+/// Hover follows this file's existing grammar (`TranscriptCodeBlock`'s own `.onHover` + short
+/// `easeOut`): the fill lifts from the small-control token to the hover token. No repeating
+/// animation — the file's law at the top forbids it, because transcript content renders under the
+/// orb morph's scale/blur/opacity bands.
+struct TranscriptDiffChip: View {
+    let ref: FileDiffRef
+    /// `nil` on a surface with no panel — see this type's own doc.
+    let onOpen: ((FileDiffRef) -> Void)?
+
+    @State private var isHovering = false
+
+    var body: some View {
+        if let onOpen {
+            Button {
+                onOpen(ref)
+            } label: {
+                chip.contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .onHover { isHovering = $0 }
+            .help("Open this diff in the panel")
+            .accessibilityLabel("Open the diff for \(fileDiffChipText(ref))")
+        } else {
+            chip.accessibilityLabel(fileDiffChipText(ref))
+        }
+    }
+
+    /// The drawn chip. `-N` before `+M` (design spec §3), both in the diff roles — the ONLY place in
+    /// the transcript where colour carries meaning rather than surface, and the reason those two
+    /// tokens exist (`Theme.diffRemovedRole`'s own doc).
+    private var chip: some View {
+        HStack(spacing: 6) {
+            Text(fileDiffChipDisplayPath(ref.path))
+                .foregroundStyle(Theme.textMuted)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Text(fileDiffChipRemovedText(ref))
+                .foregroundStyle(Theme.diffRemovedRole)
+            Text(fileDiffChipAddedText(ref))
+                .foregroundStyle(Theme.diffAddedRole)
+        }
+        .font(Typography.captionMono())
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .background(Capsule().fill(isHovering ? Theme.rowHover : Theme.controlSurface))
+        .animation(.easeOut(duration: 0.14), value: isHovering)
+    }
+}
+
 struct TranscriptToolGroupRow: View {
     let entries: [ToolRunEntry]
     /// Whether this run's turn is STILL RUNNING. Only a live turn may draw a running glyph:
@@ -951,6 +1107,10 @@ struct TranscriptToolGroupRow: View {
     let turnIsLive: Bool
     let isExpanded: Bool
     let toggle: () -> Void
+    /// diff-tabs Task 9: the diff door, injected from the window layer — see `TranscriptDiffChip`.
+    /// `nil` (the default, kept so every existing construction site is untouched) draws the chips as
+    /// plain text on a surface that has no panel.
+    var onOpenDiff: ((FileDiffRef) -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -989,9 +1149,34 @@ struct TranscriptToolGroupRow: View {
                     .padding(.leading, 32)
             }
 
+            // diff-tabs Task 9: the chips ride the COLLAPSED row too, on the failure summary's own
+            // ledge. Not behind the expander, because a chip is the only door to its diff (design
+            // spec §2: "tabs mint only on chip click") and hiding every door behind a disclosure
+            // would make the feature invisible in the state the row spends nearly all its time in.
+            // Bounded — `toolRunCollapsedDiffChips` — with the rest reachable by expanding.
+            if !isExpanded { collapsedDiffChips }
+
             if isExpanded { expandedCalls }
         }
         .animation(.easeOut(duration: 0.15), value: isExpanded)
+    }
+
+    /// The collapsed row's diff chips — one per edit, bounded, with a note when the bound bites.
+    @ViewBuilder private var collapsedDiffChips: some View {
+        let bounded = toolRunCollapsedDiffChips(entries)
+        if !bounded.chips.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(Array(bounded.chips.enumerated()), id: \.offset) { _, ref in
+                    TranscriptDiffChip(ref: ref, onOpen: onOpenDiff)
+                }
+                if let note = bounded.note {
+                    Text(note)
+                        .font(Typography.tiny())
+                        .foregroundStyle(Theme.textMuted)
+                }
+            }
+            .padding(.leading, 32)
+        }
     }
 
     /// Every call in the run, in order — including the ones with no detail and no result, which
@@ -1009,6 +1194,13 @@ struct TranscriptToolGroupRow: View {
                     }
                     .font(Typography.captionMono())
                     .foregroundStyle(Theme.textMuted)
+
+                    // diff-tabs Task 9: the same chip, per call — this is where the diffs the
+                    // collapsed row bounded away become reachable.
+                    if let ref = line.fileDiff {
+                        TranscriptDiffChip(ref: ref, onOpen: onOpenDiff)
+                            .padding(.leading, 16)
+                    }
 
                     if let output = line.output {
                         outputBlock(output)

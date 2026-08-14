@@ -201,7 +201,7 @@ final class ActivityCaptureTests: XCTestCase {
         // Fail loudly rather than returning nil if no `.tool` item was captured at all — otherwise
         // a reducer that stopped appending would make every `XCTAssertNil` below pass for the
         // wrong reason.
-        guard let kind = lastActivity(s).first?.kind, case .tool(_, let d, _, _, _) = kind else {
+        guard let kind = lastActivity(s).first?.kind, case .tool(_, let d, _, _, _, _) = kind else {
             XCTFail("no .tool activity captured for \(tool)", file: file, line: line)
             return nil
         }
@@ -754,8 +754,16 @@ final class ActivityCaptureTests: XCTestCase {
     }
 
     private func resultFields(_ item: ActivityItem?) -> (output: String?, isError: Bool)? {
-        guard let kind = item?.kind, case .tool(_, _, _, let output, let isError) = kind else { return nil }
+        guard let kind = item?.kind, case .tool(_, _, _, let output, let isError, _) = kind else { return nil }
         return (output, isError)
+    }
+
+    /// diff-tabs Task 9: the sixth associated value, read on its own — `resultFields` above
+    /// deliberately keeps its pre-task shape so every assertion written against it still means
+    /// exactly what it meant.
+    private func foldedFileDiff(_ item: ActivityItem?) -> FileDiffRef? {
+        guard let kind = item?.kind, case .tool(_, _, _, _, _, let fileDiff) = kind else { return nil }
+        return fileDiff
     }
 
     func testToolResultCarriesOutputAndIsErrorOntoTheFoldedItem() {
@@ -768,6 +776,81 @@ final class ActivityCaptureTests: XCTestCase {
         XCTAssertEqual(resultFields(lastActivity(s).first)?.isError, true)
         // The name/detail the item was opened with survive the fold untouched.
         XCTAssertEqual(lastActivity(s).first?.kind, .tool(name: "bash", detail: nil, callId: "c3", output: "ENOENT: no such file", isError: true))
+    }
+
+    // MARK: - diff-tabs Task 9: the per-edit diff on the same fold
+
+    /// A `tool_result` carrying the daemon's `fileDiff` summary. Wire-shaped, decoded through the
+    /// real `SessionEvent` decoder like every other fixture in this file — the field is genuinely
+    /// optional on the wire, so `toolResult` above (which omits the KEY entirely, not a `null`) is
+    /// the other half of this pair.
+    func toolResultWithDiff(callId: String, path: String, added: Int, removed: Int, diffId: String,
+                            output: String = "ok", seq: Int = 4) -> SessionEvent {
+        ev(#"{"type":"tool_result","seq":\#(seq),"sessionId":"s","ts":0,"threadId":"main","callId":"\#(callId)","output":"\#(output)","isError":false,"fileDiff":{"path":"\#(path)","added":\#(added),"removed":\#(removed),"diffId":"\#(diffId)"}}"#)
+    }
+
+    func testToolResultCarriesTheFileDiffOntoTheFoldedItem() {
+        var s = openTurnState()
+        s = SessionReducer.reduce(s, toolCall("edit", seq: 3, argsJson: #"{"file_path":"packages/core/src/agent/engine.ts"}"#))
+        XCTAssertNil(foldedFileDiff(lastActivity(s).first), "no result yet — no diff yet")
+
+        s = SessionReducer.reduce(s, toolResultWithDiff(
+            callId: "c3", path: "packages/core/src/agent/engine.ts", added: 198, removed: 33,
+            diffId: "d_9f2a", output: "edited packages/core/src/agent/engine.ts (-33 +198)", seq: 4))
+
+        XCTAssertEqual(foldedFileDiff(lastActivity(s).first),
+                       FileDiffRef(path: "packages/core/src/agent/engine.ts", added: 198,
+                                   removed: 33, diffId: "d_9f2a"))
+        // The rest of the fold is untouched — the diff rides ALONGSIDE output/isError, it does not
+        // replace them.
+        XCTAssertEqual(resultFields(lastActivity(s).first)?.output,
+                       "edited packages/core/src/agent/engine.ts (-33 +198)")
+        XCTAssertEqual(resultFields(lastActivity(s).first)?.isError, false)
+    }
+
+    /// **The protect-every-existing-session pin.** A `tool_result` with NO `fileDiff` key — which is
+    /// every event in every session that exists today, and every result from a tool that touches no
+    /// file — must fold to `nil` AND must drive the whole transcript pipeline to exactly the values
+    /// it drove before this feature existed.
+    ///
+    /// The expectations below are written as LITERALS of the pre-task behaviour rather than derived
+    /// from anything this task added, so a change that quietly re-shaped a sentence, a status, an
+    /// output preview or an expansion line fails here instead of shipping.
+    func testAResultWithoutAFileDiffFoldsToNilAndRendersExactlyAsBefore() {
+        var s = openTurnState()
+        s = SessionReducer.reduce(s, toolCall("write", seq: 3, argsJson: #"{"file_path":"/tmp/x.ts"}"#))
+        s = SessionReducer.reduce(s, toolResult(callId: "c3", output: "wrote 3 lines", seq: 4))
+
+        // 1. The reducer's item, whole — the memberwise defaults make this assert `fileDiff: nil`.
+        XCTAssertEqual(lastActivity(s).first?.kind,
+                       .tool(name: "write", detail: "/tmp/x.ts", callId: "c3",
+                             output: "wrote 3 lines", isError: false))
+        XCTAssertNil(foldedFileDiff(lastActivity(s).first))
+
+        // 2. The grouping and everything the collapsed row draws from it.
+        let groups = groupActivity(lastActivity(s))
+        guard case .toolRun(let entries) = groups.first, groups.count == 1 else {
+            return XCTFail("one write call must group to exactly one tool run: \(groups)")
+        }
+        XCTAssertEqual(entries.map(\.name), ["write"])
+        XCTAssertEqual(entries.map(\.count), [1])
+        XCTAssertEqual(toolRunSentence(entries), "Wrote a file")
+        XCTAssertEqual(toolRunStatus(entries, turnIsLive: false), .succeeded)
+        XCTAssertNil(toolRunFailureSummary(entries))
+
+        // 3. And everything the expanded row draws.
+        let expansion = toolRunExpansion(entries, turnIsLive: false)
+        XCTAssertEqual(expansion.lines.count, 1)
+        XCTAssertEqual(expansion.lines[0].name, "write")
+        XCTAssertEqual(expansion.lines[0].detail, "/tmp/x.ts")
+        XCTAssertEqual(expansion.lines[0].status, .succeeded)
+        XCTAssertEqual(expansion.lines[0].output, ToolOutputPreview(text: "wrote 3 lines", elision: nil))
+        XCTAssertNil(expansion.note)
+
+        // 4. …and NO chip is offered anywhere, in either state of the row.
+        XCTAssertNil(expansion.lines[0].fileDiff)
+        XCTAssertTrue(toolRunDiffChips(entries).isEmpty)
+        XCTAssertEqual(toolRunCollapsedDiffChips(entries), ToolRunDiffChips(chips: [], note: nil))
     }
 
     /// The existing side effect the fold must NOT disturb: a main-thread `tool_result` with no

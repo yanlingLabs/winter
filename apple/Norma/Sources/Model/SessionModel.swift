@@ -236,6 +236,35 @@ func interactionOutcomeMayBeReplaced(current: InteractionRecord.Outcome?, with n
     }
 }
 
+/// diff-tabs Task 9: one file edit's diff, as the transcript knows it — folded from
+/// `tool_result.fileDiff` (`SessionEvent.FileDiffSummary`, NormaProtocol) and rendered as the
+/// clickable chip on an edit/write/notebook row.
+///
+/// **A separate app type from the wire's `FileDiffSummary`, the same deliberate separation
+/// `PanelTabKind` makes from `SessionEvent.PanelTabKind`**: this is the value a VIEW consumes and a
+/// closure carries (`onOpenDiff`), and the transcript surface has no reason to depend on the
+/// protocol module for it. The mapping is one line, in the reducer, where every other wire→model
+/// translation in this file already lives.
+///
+/// **`path` is the tool argument AS RECEIVED, so it may be relative** — the daemon deliberately
+/// reports the string the tool echoed rather than a resolved absolute path (diff-tabs Task 6's
+/// ruling). Nothing here resolves it: the chip DISPLAYS the tail of whatever string arrived
+/// (`fileDiffChipDisplayPath`) and the tab titles itself from its last component. Reading it as a
+/// filesystem path would be inventing a fact the wire never carried.
+///
+/// **`added`/`removed` are the daemon's own line counts and are rendered verbatim, however large.**
+/// A first edit to an externally-formatted `.ipynb` can legitimately report whole-file-scale counts,
+/// because the tool reserializes the notebook and the diff is against the reserialized form (Task
+/// 6's review recorded this as display-only). The chip says what the counts say.
+struct FileDiffRef: Equatable {
+    let path: String
+    let added: Int
+    let removed: Int
+    /// The daemon-minted id of the persisted patch — the key `panel.readDiff` reads by, and the key
+    /// `ShellSessionHost.openDiffTab` dedupes an already-open tab by.
+    let diffId: String
+}
+
 /// One line of "what happened during this exchange" — tools run, task transitions, subagents
 /// spawned/finished, worktree enters/exits, and interaction points (approvals/questions/plans).
 /// Captured per-exchange by `SessionReducer.reduce` (2d-ii-a task 1) so the transcript can show
@@ -270,9 +299,17 @@ struct ActivityItem: Equatable {
         /// turn that ended cleanly can still hold a resultless call, because `appendActivity`'s
         /// 200-item drop-oldest cap can evict the item before its result arrives — `foldToolResult`
         /// names that same case. The transcript gates on `turnRunning` alone.)
-        /// All three are defaulted so every `.tool(name:detail:)` construction site written before
-        /// they existed compiles and means the same thing; pattern matches must bind all five.
-        case tool(name: String, detail: String?, callId: String? = nil, output: String? = nil, isError: Bool = false)
+        /// `fileDiff` (diff-tabs Task 9) is the per-edit diff the daemon stamped onto the SAME
+        /// `tool_result` — set only for `edit`/`write`/`notebook_edit`, and only when the mutation
+        /// actually changed something (an identical no-op edit produces none). It lands here through
+        /// `foldToolResult`, exactly like `output`/`isError`, and is what the transcript's diff chip
+        /// renders from. Absent everywhere else, forever: every pre-feature session replays with it
+        /// `nil` and must render byte-identically to before.
+        ///
+        /// All four are defaulted so every `.tool(name:detail:)` construction site written before
+        /// they existed compiles and means the same thing; pattern matches must bind all six.
+        case tool(name: String, detail: String?, callId: String? = nil, output: String? = nil,
+                  isError: Bool = false, fileDiff: FileDiffRef? = nil)
         case task(subject: String, status: String)
         case subagent(agentType: String)
         case subagentDone
@@ -293,7 +330,7 @@ extension ActivityItem {
     /// accessor rather than a stored field on `ActivityItem`, so that tool-only data stays on the
     /// tool case where a `.task`/`.worktree` item can't carry a meaningless one.
     var toolCallId: String? {
-        if case .tool(_, _, let callId, _, _) = kind { return callId }
+        if case .tool(_, _, let callId, _, _, _) = kind { return callId }
         return nil
     }
 
@@ -600,7 +637,14 @@ enum SessionReducer {
             // this case has always had, and it must not become contingent on whether the fold
             // below finds an item to land on.
             if s.pendingInteractions.isEmpty { s.status = .thinking }
-            foldToolResult(&s, callId: v.callId, output: v.output, isError: v.isError)
+            // diff-tabs Task 9: the wire's `FileDiffSummary` becomes the app's `FileDiffRef` HERE —
+            // the one translation point, `nil` in ⇒ `nil` out, so a session whose events predate the
+            // field (every session that exists today) folds to exactly what it folded to before.
+            foldToolResult(&s, callId: v.callId, output: v.output, isError: v.isError,
+                           fileDiff: v.fileDiff.map {
+                               FileDiffRef(path: $0.path, added: $0.added, removed: $0.removed,
+                                           diffId: $0.diffId)
+                           })
         case .approvalRequested(let v) where v.threadId == mainThread:
             appendPending(.approval(callId: v.callId, toolName: v.toolName, summary: v.summary, reviewerReason: v.reviewerReason, childSessionId: v.childSessionId, options: v.options), to: &s)
             appendInteraction(InteractionRecord(
@@ -890,10 +934,16 @@ enum SessionReducer {
     /// reachable whenever a turn makes more than 200 tool calls, which `c1370fd7` on this branch made
     /// an explicitly supported shape by removing the main thread's tool-iteration limit. Either way
     /// there is nothing to fold into, exactly as before this existed.
-    private static func foldToolResult(_ state: inout OrbSessionState, callId: String, output: String, isError: Bool) {
+    /// diff-tabs Task 9: `fileDiff` lands on the same item, by the same join, at the same moment —
+    /// it arrives on the `tool_result` event itself, so there is no second fold and no second miss
+    /// path to reason about. A result with no diff (every tool that isn't edit/write/notebook_edit,
+    /// every no-op edit, and every event from before the field existed) writes `nil`, which is what
+    /// the item already held.
+    private static func foldToolResult(_ state: inout OrbSessionState, callId: String, output: String,
+                                       isError: Bool, fileDiff: FileDiffRef? = nil) {
         for e in state.exchanges.indices.reversed().prefix(toolResultFoldSearchDepth) {
             guard let i = state.exchanges[e].activity.lastIndex(where: { $0.toolCallId == callId }),
-                  case .tool(let name, let detail, let itemCallId, _, _) = state.exchanges[e].activity[i].kind else {
+                  case .tool(let name, let detail, let itemCallId, _, _, _) = state.exchanges[e].activity[i].kind else {
                 continue
             }
             state.exchanges[e].activity[i].kind = .tool(
@@ -901,7 +951,8 @@ enum SessionReducer {
                 detail: detail,
                 callId: itemCallId,
                 output: capToolOutput(output),
-                isError: isError
+                isError: isError,
+                fileDiff: fileDiff
             )
             return
         }
