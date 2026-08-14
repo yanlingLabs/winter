@@ -118,6 +118,31 @@ enum Theme {
     /// `cardSurface` — the wrong direction for something floating.
     static let paletteSurface = Color("PaletteSurface")
 
+    // MARK: - Color: the diff foreground roles (diff-tabs)
+
+    /// The removed-lines role — the `-N` half of the transcript's diff chip, and (Task 10) the
+    /// removed-side gutter numbers in the diff tab itself.
+    ///
+    /// **PROVISIONAL — Task 12/10 measures and finalizes per `docs/brand.md` § 3.5.** Task 9 needs a
+    /// named token to consume; the brand pass that OWNS these two values (design spec § 6: the diff
+    /// foreground pair plus the diff row washes, four tokens, both schemes, contrast-measured
+    /// against the syntax palette and `labelColor`) runs after it. The values below are a plausible
+    /// starting point, not a measurement — light #B3261E, dark #F2555A — and the only thing this
+    /// commit claims about them is that they are ASSETS rather than hexes in Swift (§ 3.1's
+    /// anti-rule), so finalizing them is a JSON edit that touches no call site.
+    ///
+    /// It is the first colour in this file to carry MEANING rather than surface (§ 3.4 records that
+    /// the palette has had no danger or success tone at all, which is why the transcript's failure
+    /// lines are set in `.primary` and its status glyphs are shape-only). A diff is the one place
+    /// where red and green are not decoration: they are what the two columns of numbers MEAN, and
+    /// they are what every other diff surface the user reads uses.
+    static let diffRemovedRole = Color("DiffRemoved")
+
+    /// The added-lines role — the `+M` half. PROVISIONAL on the same terms as `diffRemovedRole`
+    /// above (light #1F7A3D, dark #4CC38A); Task 12/10 measures and finalizes per `docs/brand.md`
+    /// § 3.5.
+    static let diffAddedRole = Color("DiffAdded")
+
     // MARK: - Type
 
     /// The wordmark register — New York (the system serif, `Font.Design.serif`), Norma's ONE
@@ -183,5 +208,7 @@ enum Theme {
         "Canvas", "CardSurface", "SelectionPill", "ElevatedSurface", "ControlSurface",
         "BubbleUser", "ComposerSurface", "ComposerRim", "TextMuted", "InverseCanvas",
         "AccentColor", "RowHover", "Hairline", "HairlineElevated", "PaletteSurface",
+        // diff-tabs Task 9 — PROVISIONAL values, see the two accessors above.
+        "DiffRemoved", "DiffAdded",
     ]
 }

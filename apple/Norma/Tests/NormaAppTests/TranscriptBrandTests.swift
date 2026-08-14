@@ -43,6 +43,15 @@ final class TranscriptBrandTests: XCTestCase {
         "Hairline": ("E5E2DC", "2A2A28", 1, 1),
         "HairlineElevated": ("D8D5CF", "3A3A38", 1, 1),
         "PaletteSurface": ("FFFFFF", "272726", 1, 1),
+        // diff-tabs Task 9 — the diff foreground pair. **PROVISIONAL**, and the ONE pair of rows in
+        // this table that is NOT transcribed from `docs/brand.md`: the brand pass that owns these
+        // values (design spec § 6 — the foreground pair plus the row washes, contrast-measured) is
+        // Task 12/10, and it runs after the surface that consumes them. Until then this table is
+        // what pins them, so a value edited in the catalog and nowhere else still fails here.
+        // Task 12/10: update these two rows WITH the assets, and add the brand.md § 3.5 entry the
+        // rest of this table is transcribed from.
+        "DiffRemoved": ("B3261E", "F2555A", 1, 1),
+        "DiffAdded": ("1F7A3D", "4CC38A", 1, 1),
     ]
 
     /// The catalog IS the palette brand.md publishes. `SidebarBrandTests` already pins that every
