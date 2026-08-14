@@ -36,9 +36,9 @@ function myersOps(a: Line[], b: Line[]): Op[] {
   outer: for (let d = 0; d <= max; d++) {
     trace.push(v.slice());
     for (let k = -d; k <= d; k += 2) {
-      let x = (k === -d || (k !== d && v[offset + k - 1] < v[offset + k + 1]))
-        ? v[offset + k + 1]
-        : v[offset + k - 1] + 1;
+      let x = (k === -d || (k !== d && v[offset + k - 1]! < v[offset + k + 1]!))
+        ? v[offset + k + 1]!
+        : v[offset + k - 1]! + 1;
       let y = x - k;
       while (x < N && y < M && a[x]!.text === b[y]!.text && a[x]!.eol === b[y]!.eol) { x++; y++; }
       v[offset + k] = x;
@@ -51,8 +51,8 @@ function myersOps(a: Line[], b: Line[]): Op[] {
   for (let d = trace.length - 2; d >= 0 && (x > 0 || y > 0); d--) {
     const vd = trace[d]!;
     const k = x - y;
-    const prevK = (k === -d || (k !== d && vd[offset + k - 1] < vd[offset + k + 1])) ? k + 1 : k - 1;
-    const prevX = vd[offset + prevK];
+    const prevK = (k === -d || (k !== d && vd[offset + k - 1]! < vd[offset + k + 1]!)) ? k + 1 : k - 1;
+    const prevX = vd[offset + prevK]!;
     const prevY = prevX - prevK;
     while (x > prevX && y > prevY) { x--; y--; ops.push({ tag: "eq", a: x, b: y }); }
     if (d > 0) {
