@@ -122,6 +122,9 @@ function dispatch(message) {
             case "setTheme":
                 setTheme(message.tokens);
                 break;
+            case "markSaved":
+                markSaved(message.path);
+                break;
         }
     } catch (error) {
         console.error("normaEditor: " + type + " failed", error);
@@ -226,6 +229,26 @@ function applyExternalContent(path, text) {
     entry.model.setValue(text);
     entry.savedVersionId = entry.model.getAlternativeVersionId();
     entry.applyingExternal = false;
+    refreshDirty(entry);
+}
+
+/**
+ * Swift wrote this model's content to disk: the saved point moves to the text the model has RIGHT
+ * NOW, and the dirty flag clears through the ordinary transition machinery (so a `modelDirtyChanged`
+ * with `dirty: false` follows, exactly as it would after an undo back to the saved text).
+ *
+ * It touches nothing else — not the buffer, not the undo stack, not the view state, not the content
+ * listener. That is the whole reason this message exists rather than Swift acking a save with
+ * `applyExternalContent`: that route goes through `setValue`, whose `_setValueFromTextBuffer` clears
+ * the model's command manager, so every save would silently destroy the user's undo history.
+ */
+function markSaved(path) {
+    const entry = page.models.get(path);
+    if (!entry) {
+        console.warn("normaEditor: markSaved for a path that is not open:", path);
+        return;
+    }
+    entry.savedVersionId = entry.model.getAlternativeVersionId();
     refreshDirty(entry);
 }
 

@@ -149,11 +149,24 @@ enum EditorBridgeOutbound {
     /// Restyle the editor. `tokensJSON` is a JSON OBJECT as a string — Norma's own theme tokens —
     /// embedded as an object so the page reads `message.tokens.…` rather than parsing a string.
     case setTheme(tokensJSON: String)
+    /// **The save acknowledgement**: Swift has written this model's content to disk, so the page's
+    /// saved point moves to the text it has right now and the dirty flag clears (the page emits the
+    /// resulting `modelDirtyChanged`, as for any other transition).
+    ///
+    /// This case exists because nothing else could say it. The page's dirty flag is
+    /// `alternativeVersionId != savedVersionId`, and `savedVersionId` otherwise moves only when a
+    /// model is opened or externally replaced — so a saved file would keep its modified dot forever.
+    /// The tempting shortcut, acking a save with `applyExternalContent(text: whatWasWritten)`, is a
+    /// trap: it routes through Monaco's `setValue`, whose `_setValueFromTextBuffer` clears the
+    /// model's command manager, and would silently throw away the user's undo history on every save.
+    /// This message touches no content, no undo stack and no view state.
+    case markSaved(path: String)
 
     /// The wire vocabulary, in order. See `EditorBridgeInbound.wireTypes` — the page's
     /// `OUTBOUND_MESSAGE_TYPES` is the other half, and a test compares them literally.
     static let wireTypes: [String] = [
-        "openModel", "activateModel", "closeModel", "pullContent", "applyExternalContent", "setTheme"
+        "openModel", "activateModel", "closeModel", "pullContent", "applyExternalContent",
+        "setTheme", "markSaved"
     ]
 
     var wireType: String {
@@ -164,6 +177,7 @@ enum EditorBridgeOutbound {
         case .pullContent: return "pullContent"
         case .applyExternalContent: return "applyExternalContent"
         case .setTheme: return "setTheme"
+        case .markSaved: return "markSaved"
         }
     }
 
@@ -188,6 +202,8 @@ enum EditorBridgeOutbound {
             return ["type": wireType, "path": path, "seq": seq]
         case .applyExternalContent(let path, let text):
             return ["type": wireType, "path": path, "text": text]
+        case .markSaved(let path):
+            return ["type": wireType, "path": path]
         case .setTheme(let tokensJSON):
             // Unparseable or non-object tokens become an empty object rather than invalid
             // JavaScript. `javascript` must ALWAYS produce one well-formed call: a syntax error in

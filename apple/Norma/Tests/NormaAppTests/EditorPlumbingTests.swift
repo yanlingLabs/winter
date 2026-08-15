@@ -368,6 +368,39 @@ final class EditorPlumbingTests: XCTestCase {
         XCTAssertEqual(js, expected)
     }
 
+    /// **`markSaved`'s exact bytes** — the save acknowledgement, pinned like `openModel` because it
+    /// carries the same attacker-shaped value (a real filesystem path) through the same renderer.
+    ///
+    /// The path here contains a quote and a literal backslash, both legal in a POSIX filename and
+    /// both the shapes that turn a mis-escaped payload into JavaScript SYNTAX rather than data. Two
+    /// fields and no more: this message says "what you have is what is on disk", so a `text` member
+    /// would be the very content-carrying shortcut the case exists to avoid.
+    func testMarkSavedRendersExactlyTheseBytes() throws {
+        // Assembled rather than typed, like `openModel`'s pin, so this file never contains the
+        // escape sequences it is asserting about.
+        let backslash = #"\"#
+        let quote = "\""
+        let path = "/tmp/a " + backslash + quote + "b" + quote + ".swift"
+
+        let js = EditorBridgeOutbound.markSaved(path: path).javascript
+
+        let expected = #"window.normaEditor.dispatch({"path":"/tmp/a "#
+            + backslash + backslash          // the lone backslash, doubled
+            + backslash + quote + "b"        // the opening quote, escaped
+            + backslash + quote              // and the closing one
+            + #".swift","type":"markSaved"})"#
+        XCTAssertEqual(js, expected)
+
+        // It round-trips with the path intact — the escaping above belongs to the wire, not to the
+        // value — and it carries nothing else. A `text` member here would be the content-carrying
+        // shortcut this case exists to avoid.
+        let payload = String(js.dropFirst("window.normaEditor.dispatch(".count).dropLast())
+        let object = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any])
+        XCTAssertEqual(object["path"] as? String, path)
+        XCTAssertEqual(object.count, 2, "markSaved carries a path and a type, and nothing else")
+    }
+
     /// Every outbound case renders as the ONE entry point with a valid-JSON argument, and the
     /// argument carries the case's own wire name plus its fields. The entry point is a literal in
     /// exactly one place in the app — the page's whole Swift-facing API is this single function.
@@ -381,7 +414,8 @@ final class EditorPlumbingTests: XCTestCase {
             (.applyExternalContent(path: "/a.swift", text: "y"),
              "applyExternalContent", ["path": "/a.swift", "text": "y"]),
             (.setTheme(tokensJSON: #"{"background":"black"}"#),
-             "setTheme", ["tokens": ["background": "black"]])
+             "setTheme", ["tokens": ["background": "black"]]),
+            (.markSaved(path: "/a.swift"), "markSaved", ["path": "/a.swift"])
         ]
 
         for (message, wireType, expectedFields) in cases {
@@ -501,7 +535,7 @@ final class EditorPlumbingTests: XCTestCase {
                        ["ready", "modelDirtyChanged", "saveRequested", "contentResponse"])
         XCTAssertEqual(EditorBridgeOutbound.wireTypes,
                        ["openModel", "activateModel", "closeModel", "pullContent",
-                        "applyExternalContent", "setTheme"])
+                        "applyExternalContent", "setTheme", "markSaved"])
 
         // Every name in the inbound list is a name `decode` actually answers to. The fixture per
         // name is minimal-but-complete; a name in the list that decode rejects fails here.
@@ -525,7 +559,8 @@ final class EditorPlumbingTests: XCTestCase {
             .closeModel(path: "/a"),
             .pullContent(path: "/a", seq: 0),
             .applyExternalContent(path: "/a", text: ""),
-            .setTheme(tokensJSON: "{}")
+            .setTheme(tokensJSON: "{}"),
+            .markSaved(path: "/a")
         ]
         XCTAssertEqual(everyOutbound.map(\.wireType), EditorBridgeOutbound.wireTypes,
                        "the list must be the cases, in order, with none missing")
@@ -582,6 +617,50 @@ final class EditorPlumbingTests: XCTestCase {
         XCTAssertEqual(Self.jsStringArray(named: "OUTBOUND_MESSAGE_TYPES", in: js),
                        EditorBridgeOutbound.wireTypes,
                        "the page's OUTBOUND_MESSAGE_TYPES must equal EditorBridgeOutbound.wireTypes")
+    }
+
+    /// **The vocabulary lists agreeing is not the same as the page ACTING on them**, and the gap
+    /// between the two is silent by construction: `dispatch` refuses a type that is not in
+    /// `OUTBOUND_MESSAGE_TYPES`, so a name added to the array without a matching `case` in the
+    /// switch is *accepted* and then does nothing at all — no error, no effect, no clue. That is
+    /// exactly the shape of the miss this suite exists to catch, and the parity pin above cannot
+    /// see it: both lists would be perfectly equal.
+    ///
+    /// `markSaved` is why this test exists. It arrived as a seventh outbound type after review, and
+    /// the whole point of that message is a transition the user watches for (the modified dot
+    /// clearing after a save) — the failure mode of a missing arm is a dot that never clears, which
+    /// looks exactly like the bug the message was added to fix.
+    ///
+    /// Comments are stripped first, for the same reason the parity reader strips them: a `case`
+    /// spelled in a doc comment must not satisfy this.
+    func testThePagesDispatchSwitchHandlesEveryOutboundType() throws {
+        let source = try XCTUnwrap(Self.pageFile(named: "editor.js"),
+                                   "editor.js is in neither the built bundle nor the source tree")
+        let code = Self.strippingJavaScriptComments(
+            try String(contentsOf: source, encoding: .utf8))
+
+        for name in EditorBridgeOutbound.wireTypes {
+            XCTAssertTrue(code.contains("case \"\(name)\":"),
+                          "editor.js's dispatch switch has no arm for `\(name)` — the page would "
+                            + "accept that message (it is in OUTBOUND_MESSAGE_TYPES) and silently "
+                            + "ignore it")
+        }
+    }
+
+    /// One of the page's own files, wherever it can be found: the built bundle first, then the
+    /// source tree. Same two-place search as the parity pin, and for the same reason — a test that
+    /// could only read the built copy would go quiet if the embed phase stopped running.
+    private static func pageFile(named name: String) -> URL? {
+        let bundled = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/Resources/EditorAssets/app/\(name)")
+        // `#filePath` is this file at `apple/Norma/Tests/NormaAppTests/`; three deletions up is
+        // `apple/Norma`, where `Resources/` lives.
+        let source = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // NormaAppTests
+            .deletingLastPathComponent()   // Tests
+            .deletingLastPathComponent()   // Norma
+            .appendingPathComponent("Resources/EditorAssets/app/\(name)")
+        return [bundled, source].first { FileManager.default.fileExists(atPath: $0.path) }
     }
 
     /// **The reader's own regression cases — the two ways it was measured to be wrong**, both

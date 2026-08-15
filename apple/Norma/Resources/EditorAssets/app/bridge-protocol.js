@@ -19,7 +19,7 @@ export const INBOUND_MESSAGE_TYPES = ["ready", "modelDirtyChanged", "saveRequest
 
 // Swift -> page. Every name here is one `EditorBridgeOutbound` case, and one arm of the page's
 // `dispatch` switch (`editor.js`).
-export const OUTBOUND_MESSAGE_TYPES = ["openModel", "activateModel", "closeModel", "pullContent", "applyExternalContent", "setTheme"];
+export const OUTBOUND_MESSAGE_TYPES = ["openModel", "activateModel", "closeModel", "pullContent", "applyExternalContent", "setTheme", "markSaved"];
 
 Object.freeze(INBOUND_MESSAGE_TYPES);
 Object.freeze(OUTBOUND_MESSAGE_TYPES);
