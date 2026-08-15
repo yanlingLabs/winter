@@ -256,6 +256,320 @@ final class EditorPlumbingTests: XCTestCase {
         }
     }
 
+    // MARK: - Task 3: the bridge codec, JS → Swift
+
+    /// The four inbound shapes, decoded from the exact bytes the page will send. Fixtures are
+    /// written out literally rather than built from the enum, so a change to either side of the
+    /// wire has to be made twice — which is the point of a fixture.
+    func testEveryInboundMessageDecodesFromItsExactWireBytes() throws {
+        XCTAssertEqual(EditorBridgeInbound.decode(#"{"type":"ready"}"#), .ready)
+
+        XCTAssertEqual(
+            EditorBridgeInbound.decode(#"{"type":"modelDirtyChanged","path":"/a/b.swift","dirty":true}"#),
+            .modelDirtyChanged(path: "/a/b.swift", dirty: true))
+        XCTAssertEqual(
+            EditorBridgeInbound.decode(#"{"type":"modelDirtyChanged","path":"/a/b.swift","dirty":false}"#),
+            .modelDirtyChanged(path: "/a/b.swift", dirty: false))
+
+        XCTAssertEqual(EditorBridgeInbound.decode(#"{"type":"saveRequested","path":"/a/b.swift"}"#),
+                       .saveRequested(path: "/a/b.swift"))
+
+        XCTAssertEqual(
+            EditorBridgeInbound.decode(#"{"type":"contentResponse","path":"/a/b.swift","seq":7,"text":"let x = 1\n"}"#),
+            .contentResponse(path: "/a/b.swift", seq: 7, text: "let x = 1\n"))
+
+        // Key ORDER is not part of the wire, and a page's JSON.stringify makes no promise about it.
+        XCTAssertEqual(EditorBridgeInbound.decode(#"{"path":"/a/b.swift","type":"saveRequested"}"#),
+                       .saveRequested(path: "/a/b.swift"))
+        // Unknown members are ignored, not fatal — the page may gain a field before Swift reads it.
+        XCTAssertEqual(EditorBridgeInbound.decode(#"{"type":"ready","version":2}"#), .ready)
+    }
+
+    /// Malformed, unknown, and wrong-shaped input all answer `nil` — never a partially-built case
+    /// and never a crash. The page is the least trusted producer in the app: it is the only place
+    /// user files and third-party editor code meet Swift.
+    func testInboundDecodeRefusesEverythingItDoesNotUnderstand() throws {
+        XCTAssertNil(EditorBridgeInbound.decode(""), "empty is not JSON")
+        XCTAssertNil(EditorBridgeInbound.decode("{"), "truncated JSON")
+        XCTAssertNil(EditorBridgeInbound.decode("not json at all"), "not JSON")
+        XCTAssertNil(EditorBridgeInbound.decode(#"["ready"]"#), "an array is not a message")
+        XCTAssertNil(EditorBridgeInbound.decode(#""ready""#), "a bare string is not a message")
+
+        XCTAssertNil(EditorBridgeInbound.decode(#"{"type":"quit"}"#), "unknown type")
+        XCTAssertNil(EditorBridgeInbound.decode(#"{"type":""}"#), "empty type")
+        XCTAssertNil(EditorBridgeInbound.decode(#"{"path":"/a"}"#), "no type at all")
+        XCTAssertNil(EditorBridgeInbound.decode(#"{"type":42}"#), "a non-string type")
+        // Case matters: the wire names are literals, not a case-insensitive vocabulary.
+        XCTAssertNil(EditorBridgeInbound.decode(#"{"type":"Ready"}"#), "wire names are exact")
+
+        // A known type with a missing or wrongly-typed field is refused outright rather than
+        // defaulted — a `saveRequested` with no path would otherwise become a save of "".
+        XCTAssertNil(EditorBridgeInbound.decode(#"{"type":"saveRequested"}"#), "no path")
+        XCTAssertNil(EditorBridgeInbound.decode(#"{"type":"saveRequested","path":7}"#), "path is not a string")
+        XCTAssertNil(EditorBridgeInbound.decode(#"{"type":"modelDirtyChanged","path":"/a"}"#), "no dirty")
+        // Foundation hands JSON booleans and JSON numbers back as the same class, so `as? Bool`
+        // alone would accept `1` here. A flag that arrives as a number means the page is not
+        // sending what this side thinks it is.
+        XCTAssertNil(EditorBridgeInbound.decode(#"{"type":"modelDirtyChanged","path":"/a","dirty":1}"#),
+                     "a number is not a boolean")
+        XCTAssertNil(EditorBridgeInbound.decode(#"{"type":"contentResponse","path":"/a","seq":1}"#), "no text")
+        XCTAssertNil(EditorBridgeInbound.decode(#"{"type":"contentResponse","path":"/a","seq":-1,"text":""}"#),
+                     "a negative seq is not a UInt64")
+        XCTAssertNil(EditorBridgeInbound.decode(#"{"type":"contentResponse","path":"/a","seq":"1","text":""}"#),
+                     "a stringified seq is not a UInt64")
+    }
+
+    /// **The ceiling, pinned at the byte.** `editorBridgeMaxInboundBytes` is measured in UTF-8
+    /// bytes of the whole frame, and the boundary is tested from BOTH sides: exactly at the cap
+    /// must decode, one byte past it must not. The over-cap case alone would pass against a
+    /// decoder that refused every large payload for some unrelated reason.
+    func testInboundDecodeRefusesAnythingOverTheCapAndAcceptsExactlyTheCap() throws {
+        XCTAssertEqual(editorBridgeMaxInboundBytes, 8 * 1024 * 1024,
+                       "the ceiling is the NDJSON frame precedent — 8 MiB")
+
+        let prefix = #"{"type":"contentResponse","path":"/a","seq":1,"text":""#
+        let suffix = #""}"#
+        let fillerAtCap = editorBridgeMaxInboundBytes - prefix.utf8.count - suffix.utf8.count
+
+        let atCap = prefix + String(repeating: "a", count: fillerAtCap) + suffix
+        XCTAssertEqual(atCap.utf8.count, editorBridgeMaxInboundBytes, "the fixture must sit exactly on the cap")
+        XCTAssertNotNil(EditorBridgeInbound.decode(atCap), "exactly at the cap is allowed")
+
+        let overCap = prefix + String(repeating: "a", count: fillerAtCap + 1) + suffix
+        XCTAssertEqual(overCap.utf8.count, editorBridgeMaxInboundBytes + 1)
+        XCTAssertNil(EditorBridgeInbound.decode(overCap), "one byte over the cap is refused")
+    }
+
+    // MARK: - Task 3: the bridge codec, Swift → page
+
+    /// **The exact bytes, pinned.** Quotes, a newline, a non-ASCII dash and an emoji in one payload
+    /// — everything an escaper gets wrong. Key order is deterministic (`.sortedKeys`), slashes are
+    /// not escaped (`.withoutEscapingSlashes`), and non-ASCII stays literal UTF-8, which is valid
+    /// JSON and what every browser's `JSON.parse` reads.
+    func testOpenModelRendersExactlyTheseBytes() throws {
+        let js = EditorBridgeOutbound.openModel(
+            path: "/tmp/a b.swift",
+            language: "swift",
+            text: "let s = \"hi\"\nprint(s) — ✅"
+        ).javascript
+
+        XCTAssertEqual(
+            js,
+            #"window.normaEditor.dispatch({"language":"swift","path":"/tmp/a b.swift","text":"let s = \"hi\"\nprint(s) — ✅","type":"openModel"})"#
+        )
+    }
+
+    /// Every outbound case renders as the ONE entry point with a valid-JSON argument, and the
+    /// argument carries the case's own wire name plus its fields. The entry point is a literal in
+    /// exactly one place in the app — the page's whole Swift-facing API is this single function.
+    func testEveryOutboundMessageRendersAsOneDispatchCallWithValidJSON() throws {
+        let cases: [(EditorBridgeOutbound, String, [String: Any])] = [
+            (.openModel(path: "/a.swift", language: "swift", text: "x"),
+             "openModel", ["path": "/a.swift", "language": "swift", "text": "x"]),
+            (.activateModel(path: "/a.swift"), "activateModel", ["path": "/a.swift"]),
+            (.closeModel(path: "/a.swift"), "closeModel", ["path": "/a.swift"]),
+            (.pullContent(path: "/a.swift", seq: 9), "pullContent", ["path": "/a.swift", "seq": 9]),
+            (.applyExternalContent(path: "/a.swift", text: "y"),
+             "applyExternalContent", ["path": "/a.swift", "text": "y"]),
+            (.setTheme(tokensJSON: #"{"background":"black"}"#),
+             "setTheme", ["tokens": ["background": "black"]])
+        ]
+
+        for (message, wireType, expectedFields) in cases {
+            let js = message.javascript
+            XCTAssertTrue(js.hasPrefix("window.normaEditor.dispatch("),
+                          "\(wireType) must go through the single entry point, got: \(js)")
+            XCTAssertTrue(js.hasSuffix(")"), "\(wireType) must close the call")
+
+            let payload = String(js.dropFirst("window.normaEditor.dispatch(".count).dropLast())
+            let object = try XCTUnwrap(
+                try JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any],
+                "\(wireType) must render a JSON OBJECT — the page's payload is DATA, never code")
+
+            XCTAssertEqual(object["type"] as? String, wireType)
+            XCTAssertEqual(object.count, expectedFields.count + 1,
+                           "\(wireType) must carry exactly its own fields plus `type`")
+            for (key, value) in expectedFields {
+                switch value {
+                case let string as String: XCTAssertEqual(object[key] as? String, string, key)
+                case let number as Int: XCTAssertEqual(object[key] as? Int, number, key)
+                case let nested as [String: String]:
+                    XCTAssertEqual(object[key] as? [String: String], nested, key)
+                default: XCTFail("unhandled fixture value for \(key)")
+                }
+            }
+        }
+    }
+
+    /// **U+2028 and U+2029 are escaped, and that is about the JS parser rather than the JSON one.**
+    /// The rendered string is JavaScript SOURCE evaluated in the page, and those two characters are
+    /// legal inside a JSON string while having been line terminators in JavaScript source before
+    /// ES2019. Escaping them costs nothing (the escaped form is valid JSON too) and removes a
+    /// whole class of "this file breaks the editor" from a codec carrying arbitrary user text.
+    func testLineAndParagraphSeparatorsAreEscapedRatherThanEmittedRaw() throws {
+        let js = EditorBridgeOutbound.applyExternalContent(path: "/a.txt",
+                                                           text: "a\u{2028}b\u{2029}c").javascript
+
+        XCTAssertFalse(js.unicodeScalars.contains("\u{2028}"), "a raw U+2028 must never reach the page")
+        XCTAssertFalse(js.unicodeScalars.contains("\u{2029}"), "a raw U+2029 must never reach the page")
+        // The expected six-character escape, assembled from a lone backslash so this source file
+        // never has to contain the sequence it is asserting about.
+        let backslash = #"\"#
+        XCTAssertTrue(js.contains("a" + backslash + "u2028b" + backslash + "u2029c"),
+                      "they must be escaped, not dropped: \(js)")
+
+        // Still valid JSON, and still the same text on the other side.
+        let payload = String(js.dropFirst("window.normaEditor.dispatch(".count).dropLast())
+        let object = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any])
+        XCTAssertEqual(object["text"] as? String, "a\u{2028}b\u{2029}c")
+    }
+
+    /// `setTheme` takes JSON as a STRING and embeds it as an OBJECT — the page reads
+    /// `message.tokens.background`, not a string it has to parse itself. Unparseable or non-object
+    /// input becomes `{}` rather than invalid JavaScript: `javascript` must ALWAYS produce one
+    /// well-formed call, because a malformed one is a syntax error in the page with no reply path.
+    func testSetThemeEmbedsTokensAsAnObjectAndFallsBackToAnEmptyOne() throws {
+        let good = EditorBridgeOutbound.setTheme(tokensJSON: #"{"a":1}"#).javascript
+        XCTAssertEqual(good, #"window.normaEditor.dispatch({"tokens":{"a":1},"type":"setTheme"})"#)
+
+        for bad in ["", "{", "not json", "[1,2]", #""a string""#] {
+            let js = EditorBridgeOutbound.setTheme(tokensJSON: bad).javascript
+            XCTAssertEqual(js, #"window.normaEditor.dispatch({"tokens":{},"type":"setTheme"})"#,
+                           "unparseable tokens (\(bad)) must still render one valid call")
+        }
+    }
+
+    // MARK: - Task 3: the wire vocabulary, and the parity pin Task 4 lights up
+
+    /// The two `wireTypes` lists are what the parity test compares against the page's own
+    /// `MESSAGE_TYPES`, so they must not be able to drift from the code that actually encodes and
+    /// decodes. Every inbound name decodes; every outbound case renders a name from the list; and
+    /// the lists have no duplicates and no overlap between directions.
+    func testTheWireTypeListsAreExactlyWhatTheCodecSpeaks() throws {
+        XCTAssertEqual(EditorBridgeInbound.wireTypes,
+                       ["ready", "modelDirtyChanged", "saveRequested", "contentResponse"])
+        XCTAssertEqual(EditorBridgeOutbound.wireTypes,
+                       ["openModel", "activateModel", "closeModel", "pullContent",
+                        "applyExternalContent", "setTheme"])
+
+        // Every name in the inbound list is a name `decode` actually answers to. The fixture per
+        // name is minimal-but-complete; a name in the list that decode rejects fails here.
+        let minimalInbound: [String: String] = [
+            "ready": #"{"type":"ready"}"#,
+            "modelDirtyChanged": #"{"type":"modelDirtyChanged","path":"/a","dirty":false}"#,
+            "saveRequested": #"{"type":"saveRequested","path":"/a"}"#,
+            "contentResponse": #"{"type":"contentResponse","path":"/a","seq":0,"text":""}"#
+        ]
+        for name in EditorBridgeInbound.wireTypes {
+            let fixture = try XCTUnwrap(minimalInbound[name], "no fixture for inbound `\(name)`")
+            let decoded = try XCTUnwrap(EditorBridgeInbound.decode(fixture),
+                                        "`\(name)` is listed but does not decode")
+            XCTAssertEqual(decoded.wireType, name, "`\(name)` decodes to a case that names itself differently")
+        }
+
+        // And every outbound case renders a name from its list.
+        let everyOutbound: [EditorBridgeOutbound] = [
+            .openModel(path: "/a", language: "swift", text: ""),
+            .activateModel(path: "/a"),
+            .closeModel(path: "/a"),
+            .pullContent(path: "/a", seq: 0),
+            .applyExternalContent(path: "/a", text: ""),
+            .setTheme(tokensJSON: "{}")
+        ]
+        XCTAssertEqual(everyOutbound.map(\.wireType), EditorBridgeOutbound.wireTypes,
+                       "the list must be the cases, in order, with none missing")
+
+        XCTAssertEqual(Set(EditorBridgeInbound.wireTypes).count, EditorBridgeInbound.wireTypes.count)
+        XCTAssertEqual(Set(EditorBridgeOutbound.wireTypes).count, EditorBridgeOutbound.wireTypes.count)
+        XCTAssertTrue(Set(EditorBridgeInbound.wireTypes)
+                        .isDisjoint(with: Set(EditorBridgeOutbound.wireTypes)),
+                      "a name must mean one direction — the page switches on it too")
+    }
+
+    /// **The literal-parity pin between Swift and the page** — this repo's standing discipline for
+    /// a vocabulary that exists twice in two languages (`REMOTE_ALLOWED_METHODS` and its parity
+    /// test are the daemon's version of the same thing).
+    ///
+    /// **This test is SKIPPED until Task 4 creates the file, and it is a CONTRACT on what Task 4
+    /// must write**, not merely a reader of it. `Resources/EditorAssets/app/bridge-protocol.js`
+    /// must declare, at top level and each on one line:
+    ///
+    /// ```js
+    /// export const INBOUND_MESSAGE_TYPES = ["ready", "modelDirtyChanged", ...];   // page → Swift
+    /// export const OUTBOUND_MESSAGE_TYPES = ["openModel", "activateModel", ...];  // Swift → page
+    /// ```
+    ///
+    /// Two arrays rather than one, because the two directions are two vocabularies with two
+    /// switches; double-quoted or single-quoted strings both parse here. The names must equal the
+    /// Swift lists EXACTLY, including order.
+    ///
+    /// Both the built bundle and the source tree are searched, and the skip only happens if the
+    /// file is in NEITHER — a test that could only ever find the built copy would go on skipping
+    /// silently if Task 4 landed the file without wiring the embed phase, which is precisely the
+    /// failure the parity pin exists to catch.
+    func testTheJavaScriptSideSpeaksExactlyTheSameWireVocabulary() throws {
+        let bundled = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/Resources/EditorAssets/app/bridge-protocol.js")
+        // `#filePath` is this file at `apple/Norma/Tests/NormaAppTests/`; four levels up is
+        // `apple/Norma`, where `Resources/` lives.
+        let source = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // NormaAppTests
+            .deletingLastPathComponent()   // Tests
+            .deletingLastPathComponent()   // Norma
+            .appendingPathComponent("Resources/EditorAssets/app/bridge-protocol.js")
+
+        let found = [bundled, source].first { FileManager.default.fileExists(atPath: $0.path) }
+        try XCTSkipIf(found == nil,
+                      "Task 4 has not created Resources/EditorAssets/app/bridge-protocol.js yet — "
+                        + "this pin goes live the moment it does. Looked in \(bundled.path) and "
+                        + "\(source.path).")
+        let js = try String(contentsOf: try XCTUnwrap(found), encoding: .utf8)
+
+        XCTAssertEqual(Self.jsStringArray(named: "INBOUND_MESSAGE_TYPES", in: js),
+                       EditorBridgeInbound.wireTypes,
+                       "the page's INBOUND_MESSAGE_TYPES must equal EditorBridgeInbound.wireTypes")
+        XCTAssertEqual(Self.jsStringArray(named: "OUTBOUND_MESSAGE_TYPES", in: js),
+                       EditorBridgeOutbound.wireTypes,
+                       "the page's OUTBOUND_MESSAGE_TYPES must equal EditorBridgeOutbound.wireTypes")
+    }
+
+    /// Pull `NAME = [ "a", "b" ]` out of JavaScript source. Deliberately a small, strict reader
+    /// rather than a JS parser: it takes the first `NAME` followed by `=` and an array literal on
+    /// the same statement, and reads only quoted strings out of it. `nil` when the declaration is
+    /// absent, which fails the comparison above rather than silently matching an empty list.
+    private static func jsStringArray(named name: String, in source: String) -> [String]? {
+        guard let nameRange = source.range(of: name),
+              let open = source.range(of: "[", range: nameRange.upperBound..<source.endIndex),
+              let close = source.range(of: "]", range: open.upperBound..<source.endIndex) else {
+            return nil
+        }
+        // Nothing but whitespace and `=` may sit between the name and the bracket, or this matched
+        // some other statement entirely.
+        let between = source[nameRange.upperBound..<open.lowerBound]
+        guard between.allSatisfy({ $0 == "=" || $0.isWhitespace }) else { return nil }
+
+        let body = source[open.upperBound..<close.lowerBound]
+        var names: [String] = []
+        var current: String?
+        var quote: Character?
+        for character in body {
+            if let open = quote {
+                if character == open {
+                    names.append(current ?? "")
+                    current = nil
+                    quote = nil
+                } else {
+                    current = (current ?? "") + String(character)
+                }
+            } else if character == "\"" || character == "'" {
+                quote = character
+                current = ""
+            }
+        }
+        return quote == nil ? names : nil
+    }
+
     /// Search a built binary — and its `.debug.dylib` sibling, which is where a Debug build's code
     /// actually lives — for a literal.
     private static func binaryCarries(_ needle: String, at executable: URL) -> Bool {
