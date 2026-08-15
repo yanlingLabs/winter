@@ -620,30 +620,7 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
             }
 
         case "1.offline":
-            // Every URL the PAGE fetched. `default-src 'none'` plus the per-directive allowlist makes
-            // any http(s) dependency a hard failure, so this is the positive half of that claim: not
-            // "no errors were logged" but "here is the list, and nothing in it is off-scheme".
-            evaluate(editorContainer,
-                     "performance.getEntriesByType('resource').map(function(e){return e.name;})") { [weak self] result in
-                guard let self else { return }
-                switch result {
-                case .bad(let reason):
-                    self.local(step.id, false, reason)
-                case .ok(let value):
-                    let urls = (value as? [Any])?.map { "\($0)" } ?? []
-                    let offScheme = urls.filter {
-                        !$0.hasPrefix("norma-editor:") && !$0.hasPrefix("blob:") && !$0.hasPrefix("data:")
-                    }
-                    self.notes.append("page resources (\(urls.count)): "
-                                      + urls.prefix(12).joined(separator: ", ")
-                                      + (urls.count > 12 ? " …" : ""))
-                    self.local(step.id, offScheme.isEmpty && !urls.isEmpty,
-                               urls.isEmpty
-                               ? "the resource timeline was empty — nothing to judge"
-                               : "\(urls.count) resource(s), all norma-editor:/blob:"
-                               + (offScheme.isEmpty ? "" : " — OFF-SCHEME: \(offScheme.joined(separator: ", "))"))
-                }
-            }
+            performOfflineProof(step.id)
 
         case "1.hook":
             performInstallHook(step.id)
@@ -752,6 +729,12 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
             send(.markSaved(path: fixtures.pathA, seq: 2)) { _ in }
 
         case "6.stillDirty":
+            // **The buffer is read as well as the flag, and that is not belt-and-braces.** A
+            // `.silence` step cannot tell "silent because the model was already dirty" from "silent
+            // because the keystroke never landed" — and if "z" never arrived, `markSaved` would find
+            // the buffer exactly AT the pulled version and clear it legitimately, which looks
+            // identical to the race bug from the outside. Asserting the prefix turns that ambiguity
+            // into evidence in whichever direction it falls.
             readDebugState { [weak self] result in
                 guard let self else { return }
                 switch result {
@@ -759,9 +742,18 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
                     self.local(step.id, false, reason)
                 case .ok(let state):
                     let dirty = (state["dirtyMap"] as? [String: Any])?[self.fixtures.pathA] as? Bool
-                    self.local(step.id, dirty == true,
-                               "after the acknowledgement the page still reports dirty = "
-                               + "\(dirty.map(String.init) ?? "?") — \(self.describe(state))")
+                    self.currentValue { value in
+                        let text = value.value ?? ""
+                        let typed = text.hasPrefix("zyx")
+                        let reading = typed
+                            ? "both keystrokes landed"
+                            : "THE KEYSTROKE NEVER LANDED — the silence above proves nothing"
+                        self.local(step.id, dirty == true && typed,
+                                   "after the acknowledgement the page still reports dirty = "
+                                   + "\(dirty.map(String.init) ?? "?"); the buffer begins "
+                                   + String(text.prefix(4)) + " (" + reading + ") — "
+                                   + self.describe(state))
+                    }
                 }
             }
 
@@ -769,6 +761,32 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
             trigger("undo") { [weak self] error in
                 guard let self, let error else { return }
                 self.local(step.id, false, error)
+            }
+
+        case "6.undoneZ":
+            // **The anchor's claim, read off the buffer rather than inferred from the flag.** "Clean"
+            // arriving is only the right answer if the buffer is back at the version pull 2 handed
+            // over — an undo that overshot would ALSO change the flag, in the other direction, and
+            // that is exactly how run 1 failed. Recording the bytes makes the two distinguishable in
+            // the transcript whichever way the step falls.
+            currentValue { [weak self] result in
+                guard let self else { return }
+                switch result {
+                case .bad(let reason):
+                    self.local(step.id, false, reason)
+                case .ok(let text):
+                    let expected = "yx" + MonacoTextBuffer.normalisedEOL(self.fixtures.fixtureA)
+                    if let difference = EditorHarnessScript.firstByteDifference(expected: expected,
+                                                                               actual: text) {
+                        self.local(step.id, false,
+                                   "the undo did not land on the version pull 2 answered with: "
+                                   + difference)
+                    } else {
+                        self.local(step.id, true,
+                                   "the buffer is back at pull 2's exact text — \(text.utf8.count) "
+                                   + "byte(s), so the saved point really was that pull's version")
+                    }
+                }
             }
 
         case "6.stale":
@@ -904,6 +922,71 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
         }
         lines.append("CEF is up")
         local(stepId, true, lines.joined(separator: "; "))
+    }
+
+    /// **The offline claim, made positively.**
+    ///
+    /// The first shape of this step asked `performance.getEntriesByType("resource")` and got an
+    /// EMPTY array from a page that had just loaded four megabytes of Monaco — measured, run 1. That
+    /// is a real property of the embed rather than a bug: Chromium does not populate Resource Timing
+    /// for a scheme registered through CEF's custom-scheme door, so the API that names every fetch
+    /// names none of them here. An absent timeline is not evidence of an offline page; it is the
+    /// absence of evidence, and the step said so and failed rather than passing on it.
+    ///
+    /// What is observable instead is stronger than a list of URLs, because it is a CONSEQUENCE:
+    ///
+    ///   * every subresource the document declares, resolved to its absolute URL, is on the scheme;
+    ///   * **Monaco is up** — and under `default-src 'none'` with `script-src norma-editor:` there
+    ///     is no other origin its loader could have taken a single module from. A page that had
+    ///     reached out to a CDN would not be running; it would be a CSP violation and a dead editor.
+    private func performOfflineProof(_ stepId: String) {
+        let script = """
+        (function () {
+          var declared = [];
+          Array.prototype.forEach.call(document.querySelectorAll("script[src], link[href]"),
+            function (element) { declared.push(element.src || element.href); });
+          var timed = performance.getEntriesByType("resource").map(function (e) { return e.name; });
+          var onScheme = function (url) {
+            return url.indexOf("norma-editor:") === 0 || url.indexOf("blob:") === 0
+              || url.indexOf("data:") === 0;
+          };
+          return JSON.stringify({
+            declared: declared,
+            timed: timed,
+            monacoUp: typeof window.monaco === "object"
+              && typeof window.monaco.editor.create === "function",
+            offScheme: declared.concat(timed).filter(function (u) { return !onScheme(u); })
+          });
+        })()
+        """
+        evaluate(editorContainer, script) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .bad(let reason):
+                self.local(stepId, false, reason)
+            case .ok(let value):
+                guard let text = value as? String,
+                      let report = Self.jsonObject(text) else {
+                    self.local(stepId, false, "the offline probe did not answer")
+                    return
+                }
+                let declared = (report["declared"] as? [Any])?.map { "\($0)" } ?? []
+                let timed = (report["timed"] as? [Any])?.map { "\($0)" } ?? []
+                let offScheme = (report["offScheme"] as? [Any])?.map { "\($0)" } ?? []
+                let monacoUp = report["monacoUp"] as? Bool ?? false
+                self.notes.append("declared subresources: " + declared.joined(separator: ", "))
+                if timed.isEmpty {
+                    self.notes.append("Resource Timing is EMPTY for norma-editor: — Chromium does "
+                                      + "not populate it for a CEF custom scheme, so the offline "
+                                      + "claim rests on the declared URLs and on Monaco being up "
+                                      + "under a CSP that allows no other origin")
+                }
+                self.local(stepId, monacoUp && offScheme.isEmpty && declared.count >= 2,
+                           "\(declared.count) declared subresource(s), \(timed.count) timed; Monaco "
+                           + "is \(monacoUp ? "up" : "NOT up"); off-scheme: "
+                           + (offScheme.isEmpty ? "none" : offScheme.joined(separator: ", ")))
+            }
+        }
     }
 
     private func performInstallHook(_ stepId: String) {
@@ -1073,14 +1156,27 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
         }
     }
 
-    /// Put the caret back at 1,1 and commit one character the way an IME does. The caret reset is
-    /// what makes each expected value a plain concatenation: undo and redo move the cursor to the
-    /// edit they replay, so an insertion that trusted "wherever it is" would be unpredictable.
+    /// Put the caret back at 1,1, seal the previous edit as its own undo unit, and commit one
+    /// character the way an IME does.
+    ///
+    /// The caret reset is what makes each expected value a plain concatenation: undo and redo move
+    /// the cursor to the edit they replay, so an insertion that trusted "wherever it is" would be
+    /// unpredictable.
+    ///
+    /// **`pushUndoStop` is not decoration — run 1 failed without it.** Monaco coalesces consecutive
+    /// typing into one undo element, and a programmatic `setPosition` does not break the run. Two
+    /// `Input.insertText` calls milliseconds apart therefore undid TOGETHER, so drill 6's "undo the
+    /// extra keystroke" overshot the version the pull had answered with and the model stayed dirty —
+    /// which is the CORRECT answer to the question the buffer was actually asking, and the wrong
+    /// question. The two keystrokes the race models are separated by a save: a user types, Swift
+    /// pulls and writes, the user types again. This is that separation, made explicit, because a
+    /// synthesised burst has none of the timing the heuristic keys on.
     private func insertText(_ text: String, _ done: @escaping (String?) -> Void) {
         evaluate(editorContainer, """
         (function () {
           var editor = monaco.editor.getEditors()[0];
           editor.focus();
+          editor.pushUndoStop();
           editor.setPosition({ lineNumber: 1, column: 1 });
           return "ready";
         })()
@@ -1555,6 +1651,7 @@ struct EditorHarnessFixtures {
             step("6.stillDirty", 6, "the page still reports the model dirty", .local, 15),
             step("6.undoZ", 6, "undo the extra keystroke — clean arrives through the ordinary transition",
                  .dirty(path: pathA, dirty: false), 15),
+            step("6.undoneZ", 6, "the buffer is back at the exact text pull 2 answered with", .local, 15),
             step("6.stale", 6, "markSaved for the superseded seq 1 warns and clears nothing", .local, 20),
 
             step("7.typeW", 7, "type \"w\" so the external write has a transition to make",

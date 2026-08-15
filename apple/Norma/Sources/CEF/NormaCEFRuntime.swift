@@ -225,7 +225,26 @@ enum NormaCEFRuntime {
     ///
     /// Deliberately NOT under `~/.norma` / `~/.norma-dev`: that tree is the DAEMON's, and browser
     /// cache is app-side state. This is the ordinary macOS location for it.
+    ///
+    /// **The Debug-only override exists because that exclusive lock is exactly what an unattended
+    /// harness run collides with** (editor-plumbing Task 5). `NORMA_EDITOR_HARNESS=1` starts a
+    /// SECOND copy of the same Debug bundle while the developer's dev app is very likely already
+    /// running and holding this directory — and the collision surfaces as `CefInitialize` failing
+    /// with exit code 24, which the harness would report as "CEF did not start" for a reason that
+    /// has nothing to do with the editor. The alternative was killing the user's running app, whose
+    /// own quit gate refuses a scripted `quit` by design and would leave the stale `SingletonLock`
+    /// that is the *other* documented cause of the same exit code.
+    ///
+    /// It is the same escape hatch, and the same rule, as `NORMA_HOME` on the daemon side: a test
+    /// process points at a directory of its own and never touches the user's. `#if DEBUG` and
+    /// unset-by-default, so no shipped build has this door at all.
     private static func rootCachePath() -> String {
+        #if DEBUG
+        if let override = ProcessInfo.processInfo.environment["NORMA_CEF_CACHE_PATH"],
+           !override.isEmpty {
+            return override
+        }
+        #endif
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
         let bundleId = Bundle.main.bundleIdentifier ?? "com.norma.app"
