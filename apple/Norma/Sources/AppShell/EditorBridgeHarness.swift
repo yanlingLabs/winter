@@ -93,9 +93,12 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
     static var shared: EditorBridgeHarnessRun?
 
     /// `norma-editor://app/editor.html` — the shell host, with Monaco on the sibling `assets` host.
-    /// Written once, here, because two places writing it is two places for the scheme's URL shape to
-    /// drift from the one the asset root serves.
-    static let pageURL = "norma-editor://app/editor.html"
+    ///
+    /// **editor-product T3: written once in `EditorRuntime`, and read here.** It used to live here
+    /// because the harness was the only thing that ever created an editor browser; the product now
+    /// creates one per session, and two places writing this string is two places for the scheme's URL
+    /// shape to drift from the one the asset root serves.
+    static let pageURL = EditorRuntime.pageURL
 
     private unowned let delegate: AppDelegate
     private let quitWhenDone: Bool
@@ -106,9 +109,15 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
     private let editorContainer = PanelCEFContainerView()
 
     /// Drill 11's foreign page — an ordinary browser that is NOT the editor, in its own window, whose
-    /// `window.cefQuery` this harness must refuse.
+    /// `window.cefQuery` this harness must refuse. **Deliberately never registered with the hub**:
+    /// the refusal drill 11 judges is now the hub's own unknown-browser path, exercised for real.
     private var foreignWindow: NSWindow?
     private let foreignContainer = PanelCEFContainerView()
+
+    /// editor-product T3: the editor browser's id, learned after creation and the key this run's hub
+    /// registration lives under. 0 until CEF has a browser — which is why registration cannot happen
+    /// at setup time (`registerWithHub`).
+    private var editorBrowserId: Int32 = 0
 
     // MARK: Run state
 
@@ -196,9 +205,9 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    /// Closing the harness window tears its browsers down and takes the process-global bridge handler
-    /// with it — leaving a handler registered against a deallocated run would answer nothing and
-    /// strand every query in the app.
+    /// Closing the harness window tears its browsers down and gives the bridge registration back —
+    /// leaving a client registered against a deallocated run would answer nothing and strand every
+    /// query it was handed.
     func windowWillClose(_ notification: Notification) {
         guard (notification.object as? NSWindow) === window else { return }
         teardownCEF()
@@ -206,7 +215,10 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
     }
 
     private func teardownCEF() {
-        NormaCEFSetBridgeHandler(nil)
+        // editor-product T3: the hub owns the process slot now, so this gives back a REGISTRATION
+        // rather than clearing the slot itself — which is what lets a runtime coexist with this run.
+        EditorBridgeHub.shared.unregister(browserId: editorBrowserId)
+        EditorBridgeHub.shared.onRefusal = nil
         NormaCEFCloseBrowser(editorContainer)
         NormaCEFCloseBrowser(foreignContainer)
     }
@@ -404,57 +416,67 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
         ]
     }
 
-    // MARK: - The bridge handler
+    // MARK: - The bridge, through the hub
 
-    /// **One block, every page in the process, discriminated by browser and never ignored.**
+    /// **editor-product T3: this run is a hub CLIENT now, not the slot's owner.**
     ///
-    /// The id is resolved LIVE on every query rather than captured once: a container whose browser
-    /// was closed and re-made answers with the new id, and one with no browser answers 0 — which
-    /// this reads as "refuse", because `browserId == 0 == 0` would otherwise accept the whole
-    /// process's traffic (`NormaCEFBrowserIdentifierForParent`).
-    private func installBridgeHandler() {
-        // Registered on the MAIN thread: `g_bridge_handler` is read unlocked on CEF's UI thread,
-        // which under the external pump IS this thread.
-        NormaCEFSetBridgeHandler { [weak self] browserId, queryId, requestJSON in
-            let request = requestJSON.map { String(cString: $0) } ?? ""
-            guard let self else {
-                // No run to answer for it, but the query still MUST be answered — an ignored query
-                // strands a CEF callback for the life of the browser.
-                NormaCEFBridgeRespondCall(queryId, false,
-                                          "{\"message\":\"the editor harness is gone\"}")
+    /// Stage A registered `NormaCEFSetBridgeHandler` directly — legal while the harness was the only
+    /// thing in the process that ever wanted editor messages, and untenable the moment
+    /// `EditorRuntime` exists: the slot is single and register-replaces-outright, so two direct
+    /// registrants means last-writer-wins and the loser's page is answered `success = false` for the
+    /// life of its browser. `EditorBridgeHub` owns the slot; everything else registers with it by
+    /// `browserId` and it demuxes.
+    ///
+    /// **The registration therefore cannot happen in `0.setup` any more, and that is not a
+    /// rearrangement — it is the ordering the hub's key forces.** A `browserId` does not exist until
+    /// CEF's `OnAfterCreated` has run (`CreateBrowser` does not block, `NormaCEF.mm`), so this polls
+    /// from the moment the browser is asked for. The window it leaves is measured, not hoped at: the
+    /// page's `ready` cannot arrive before the page has been navigated to, which is after
+    /// `OnAfterCreated`, and `ready` took 234 ms in the Stage-A run against a 25 ms poll.
+    private func registerWithHub(attempt: Int) {
+        let id = NormaCEFBrowserIdentifierForParent(editorContainer)
+        guard id != 0 else {
+            guard attempt < 400 else {
+                notes.append("the editor browser never reported an id — every query it sends was "
+                             + "refused by the hub, because nothing could be registered for it")
+                log("the editor browser never reported an id — the bridge is UNREGISTERED")
                 return
             }
-            self.handleQuery(browserId: browserId, queryId: queryId, request: request)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.025) { [weak self] in
+                self?.registerWithHub(attempt: attempt + 1)
+            }
+            return
+        }
+        editorBrowserId = id
+        EditorBridgeHub.shared.register(browserId: id) { [weak self] message, respond in
+            // Answer BEFORE acting on it. The page's promise settles either way, and feeding the
+            // script can re-enter this file (a step's action sends the next message) — an entry
+            // still awaiting an answer across that re-entry is one a later failure could strand.
+            respond(true, "{}")
+            self?.handleMessage(message, browserId: id)
+        }
+        log("registered browser \(id) with the bridge hub after \(attempt + 1) look(s)")
+    }
+
+    /// **Drill 11's evidence, now produced by the hub.** The refusal itself is the hub's — the
+    /// harness never registers the foreign browser, so a query from it finds no client — and this
+    /// records what was refused, which is what the drill judges.
+    private func installRefusalObserver() {
+        EditorBridgeHub.shared.onRefusal = { [weak self] refusal in
+            guard let self else { return }
+            self.refusals.append([
+                "browserId": Int(refusal.browserId),
+                "editorBrowserId": Int(self.editorBrowserId),
+                "reason": refusal.reason.rawValue,
+                "request": refusal.request,
+                "answer": "success=false (refused by the hub — \(refusal.reason.rawValue))"
+            ])
+            self.log("REFUSED a cefQuery from browser \(refusal.browserId) "
+                     + "(\(refusal.reason.rawValue); the editor is \(self.editorBrowserId))")
         }
     }
 
-    private func handleQuery(browserId: Int32, queryId: UInt64, request: String) {
-        let mine = NormaCEFBrowserIdentifierForParent(editorContainer)
-        guard mine != 0, browserId == mine else {
-            refusals.append([
-                "browserId": Int(browserId),
-                "editorBrowserId": Int(mine),
-                "request": String(request.prefix(200)),
-                "answer": "success=false (refused — not the editor browser)"
-            ])
-            log("REFUSED a cefQuery from browser \(browserId) (the editor is \(mine))")
-            NormaCEFBridgeRespondCall(queryId, false,
-                                      "{\"message\":\"this browser is not the editor\"}")
-            return
-        }
-        guard let message = EditorBridgeInbound.decode(request) else {
-            bridgeLog.append(["browserId": Int(browserId), "raw": String(request.prefix(400)),
-                              "decoded": false])
-            log("UNDECODABLE bridge frame from the editor: \(request.prefix(160))")
-            NormaCEFBridgeRespondCall(queryId, false,
-                                      "{\"message\":\"this frame did not decode\"}")
-            return
-        }
-        // Answer BEFORE acting on it. The page's promise settles either way, and feeding the script
-        // can re-enter this file (a step's action sends the next message) — an entry still awaiting
-        // an answer across that re-entry is one a later failure could strand.
-        NormaCEFBridgeRespondCall(queryId, true, "{}")
-
+    private func handleMessage(_ message: EditorBridgeInbound, browserId: Int32) {
         var entry: [String: Any] = ["browserId": Int(browserId), "type": message.wireType,
                                     "decoded": true]
         switch message {
@@ -601,6 +623,10 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
         case "1.boot":
             browserCreatedAt = Date()
             NormaCEFCreateBrowser(editorContainer, Self.pageURL)
+            // editor-product T3: the hub's key is the browser's id, which does not exist until CEF
+            // says so — armed here, immediately after the create, so the registration is in place
+            // long before the page can send its `ready` (see `registerWithHub`).
+            registerWithHub(attempt: 0)
 
         case "1.bound":
             guard let elapsed = readyElapsedMs else {
@@ -915,8 +941,12 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
         NormaCEFRegisterEditorAssetRoot(resources.path)
         lines.append("asset root = \(resources.path)")
 
-        installBridgeHandler()
-        lines.append("bridge handler registered on the main thread")
+        // editor-product T3: the hub owns the slot, and a registration is keyed on a browser id
+        // that does not exist yet — so what happens HERE is only the refusal observer; the
+        // registration itself is armed by `1.boot`, right after the create (`registerWithHub`).
+        installRefusalObserver()
+        lines.append("the bridge hub's refusal observer is installed; this run registers with the "
+                     + "hub the moment its browser has an id")
 
         do {
             try fixtures.writeToDisk()
