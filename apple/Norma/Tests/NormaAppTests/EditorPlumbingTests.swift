@@ -372,9 +372,13 @@ final class EditorPlumbingTests: XCTestCase {
     /// carries the same attacker-shaped value (a real filesystem path) through the same renderer.
     ///
     /// The path here contains a quote and a literal backslash, both legal in a POSIX filename and
-    /// both the shapes that turn a mis-escaped payload into JavaScript SYNTAX rather than data. Two
-    /// fields and no more: this message says "what you have is what is on disk", so a `text` member
-    /// would be the very content-carrying shortcut the case exists to avoid.
+    /// both the shapes that turn a mis-escaped payload into JavaScript SYNTAX rather than data.
+    ///
+    /// **`seq` renders as a JSON NUMBER, and the bytes are what pin that.** The page matches it
+    /// against the `seq` it remembered for its own `pullContent` reply with `===`, so a quoted
+    /// `"41"` would never match anything: every acknowledgement would fail closed, every saved file
+    /// would keep its modified dot, and nothing anywhere would report an error. Three members and no
+    /// more — a `text` member here would be the content-carrying shortcut this case exists to avoid.
     func testMarkSavedRendersExactlyTheseBytes() throws {
         // Assembled rather than typed, like `openModel`'s pin, so this file never contains the
         // escape sequences it is asserting about.
@@ -382,23 +386,23 @@ final class EditorPlumbingTests: XCTestCase {
         let quote = "\""
         let path = "/tmp/a " + backslash + quote + "b" + quote + ".swift"
 
-        let js = EditorBridgeOutbound.markSaved(path: path).javascript
+        let js = EditorBridgeOutbound.markSaved(path: path, seq: 41).javascript
 
         let expected = #"window.normaEditor.dispatch({"path":"/tmp/a "#
             + backslash + backslash          // the lone backslash, doubled
             + backslash + quote + "b"        // the opening quote, escaped
             + backslash + quote              // and the closing one
-            + #".swift","type":"markSaved"})"#
+            + #".swift","seq":41,"type":"markSaved"})"#
         XCTAssertEqual(js, expected)
 
         // It round-trips with the path intact — the escaping above belongs to the wire, not to the
-        // value — and it carries nothing else. A `text` member here would be the content-carrying
-        // shortcut this case exists to avoid.
+        // value — and it carries exactly its three members.
         let payload = String(js.dropFirst("window.normaEditor.dispatch(".count).dropLast())
         let object = try XCTUnwrap(
             try JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any])
         XCTAssertEqual(object["path"] as? String, path)
-        XCTAssertEqual(object.count, 2, "markSaved carries a path and a type, and nothing else")
+        XCTAssertEqual(object["seq"] as? UInt64, 41)
+        XCTAssertEqual(object.count, 3, "markSaved carries a path, a seq and a type, and nothing else")
     }
 
     /// Every outbound case renders as the ONE entry point with a valid-JSON argument, and the
@@ -415,7 +419,7 @@ final class EditorPlumbingTests: XCTestCase {
              "applyExternalContent", ["path": "/a.swift", "text": "y"]),
             (.setTheme(tokensJSON: #"{"background":"black"}"#),
              "setTheme", ["tokens": ["background": "black"]]),
-            (.markSaved(path: "/a.swift"), "markSaved", ["path": "/a.swift"])
+            (.markSaved(path: "/a.swift", seq: 3), "markSaved", ["path": "/a.swift", "seq": 3])
         ]
 
         for (message, wireType, expectedFields) in cases {
@@ -560,7 +564,7 @@ final class EditorPlumbingTests: XCTestCase {
             .pullContent(path: "/a", seq: 0),
             .applyExternalContent(path: "/a", text: ""),
             .setTheme(tokensJSON: "{}"),
-            .markSaved(path: "/a")
+            .markSaved(path: "/a", seq: 0)
         ]
         XCTAssertEqual(everyOutbound.map(\.wireType), EditorBridgeOutbound.wireTypes,
                        "the list must be the cases, in order, with none missing")

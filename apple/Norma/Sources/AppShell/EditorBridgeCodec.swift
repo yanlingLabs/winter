@@ -149,9 +149,9 @@ enum EditorBridgeOutbound {
     /// Restyle the editor. `tokensJSON` is a JSON OBJECT as a string — Norma's own theme tokens —
     /// embedded as an object so the page reads `message.tokens.…` rather than parsing a string.
     case setTheme(tokensJSON: String)
-    /// **The save acknowledgement**: Swift has written this model's content to disk, so the page's
-    /// saved point moves to the text it has right now and the dirty flag clears (the page emits the
-    /// resulting `modelDirtyChanged`, as for any other transition).
+    /// **The save acknowledgement**: Swift has written to disk the content that `pullContent`'s
+    /// `seq` answered with, so the page moves that model's saved point to **that** version and
+    /// recomputes the dirty flag (emitting the resulting `modelDirtyChanged`, as for any transition).
     ///
     /// This case exists because nothing else could say it. The page's dirty flag is
     /// `alternativeVersionId != savedVersionId`, and `savedVersionId` otherwise moves only when a
@@ -160,7 +160,16 @@ enum EditorBridgeOutbound {
     /// trap: it routes through Monaco's `setValue`, whose `_setValueFromTextBuffer` clears the
     /// model's command manager, and would silently throw away the user's undo history on every save.
     /// This message touches no content, no undo stack and no view state.
-    case markSaved(path: String)
+    ///
+    /// **`seq` is not bookkeeping — it is the whole correctness of the acknowledgement.** Between
+    /// Swift reading `contentResponse` and sending this, the user may type. A path-only ack would
+    /// clear the dot against a buffer that no longer matches disk, and the trailing edits would be
+    /// lost at the next close-without-prompt. This side cannot detect that: a keystroke on an
+    /// already-dirty model emits nothing, because the page reports transitions only. Anchoring the
+    /// ack to the pull it acknowledges makes the page compute "still dirty" on its own. **Send the
+    /// `seq` of the pull whose text was written — never a fresh number**; the page fails closed on a
+    /// `seq` it does not recognise (it warns and clears nothing) rather than guessing.
+    case markSaved(path: String, seq: UInt64)
 
     /// The wire vocabulary, in order. See `EditorBridgeInbound.wireTypes` — the page's
     /// `OUTBOUND_MESSAGE_TYPES` is the other half, and a test compares them literally.
@@ -202,8 +211,8 @@ enum EditorBridgeOutbound {
             return ["type": wireType, "path": path, "seq": seq]
         case .applyExternalContent(let path, let text):
             return ["type": wireType, "path": path, "text": text]
-        case .markSaved(let path):
-            return ["type": wireType, "path": path]
+        case .markSaved(let path, let seq):
+            return ["type": wireType, "path": path, "seq": seq]
         case .setTheme(let tokensJSON):
             // Unparseable or non-object tokens become an empty object rather than invalid
             // JavaScript. `javascript` must ALWAYS produce one well-formed call: a syntax error in

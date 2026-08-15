@@ -19,7 +19,7 @@ const BUILTIN_THEME_BASES = ["vs", "vs-dark", "hc-black", "hc-light"];
 
 // ALL page state, in one object, deliberately: Task 5 adds `normaEditorDebugState()` and this is
 // what it reads. `models` maps an absolute path to
-// `{ path, model, savedVersionId, viewState, dirty, applyingExternal, listener }`.
+// `{ path, model, savedVersionId, viewState, dirty, applyingExternal, lastPull, listener }`.
 const page = {
     editor: null,
     models: new Map(),
@@ -123,7 +123,7 @@ function dispatch(message) {
                 setTheme(message.tokens);
                 break;
             case "markSaved":
-                markSaved(message.path);
+                markSaved(message.path, message.seq);
                 break;
         }
     } catch (error) {
@@ -149,6 +149,9 @@ function openModel(path, language, text) {
         viewState: null,
         dirty: false,
         applyingExternal: false,
+        // `{ seq, versionId }` of the most recent `pullContent` answered for this model — what
+        // `markSaved` clears the dirty flag TO. See `pullContent` for why only the latest is kept.
+        lastPull: null,
         listener: null
     };
     entry.listener = model.onDidChangeContent(function () {
@@ -209,9 +212,21 @@ function pullContent(path, seq) {
         console.error("normaEditor: pullContent for a path that is not open — no answer sent:", path);
         return;
     }
+    // The text and the version id that text belongs to are read as ONE step — no `await` between
+    // them, so nothing can edit the buffer in between — and the pair is remembered under this
+    // pull's `seq`. That pair is the whole point: `markSaved` clears the dirty flag to THIS id
+    // rather than to whatever the buffer holds when the acknowledgement arrives, so keystrokes made
+    // while Swift was writing leave the file dirty instead of being marked saved and lost.
+    const text = entry.model.getValue();
+    const versionId = entry.model.getAlternativeVersionId();
+    // ONLY THE LATEST PULL PER MODEL is remembered, and that bound is deliberate rather than
+    // economical: the save flow issues one pull per file and waits for its answer, so a second pull
+    // means the first is superseded. An acknowledgement for a `seq` this model no longer remembers
+    // fails closed (`markSaved` below warns and clears nothing) — never a guess.
+    entry.lastPull = { seq: seq, versionId: versionId };
     // `seq` is echoed exactly as it arrived: it is the pull's own number, and Swift uses it to tell
     // a late answer to a superseded pull from the current one.
-    sendToSwift("contentResponse", { path: path, seq: seq, text: entry.model.getValue() });
+    sendToSwift("contentResponse", { path: path, seq: seq, text: text });
 }
 
 function applyExternalContent(path, text) {
@@ -229,26 +244,56 @@ function applyExternalContent(path, text) {
     entry.model.setValue(text);
     entry.savedVersionId = entry.model.getAlternativeVersionId();
     entry.applyingExternal = false;
+    // Any pull still awaiting acknowledgement described text that no longer exists in this buffer,
+    // so it is forgotten: a late `markSaved` for it must warn rather than drag the saved point back
+    // to a superseded version and make a model that IS on disk look dirty.
+    entry.lastPull = null;
     refreshDirty(entry);
 }
 
 /**
- * Swift wrote this model's content to disk: the saved point moves to the text the model has RIGHT
- * NOW, and the dirty flag clears through the ordinary transition machinery (so a `modelDirtyChanged`
- * with `dirty: false` follows, exactly as it would after an undo back to the saved text).
+ * Swift wrote the content of pull `seq` to disk. The saved point moves to **the version that pull
+ * answered with**, and the dirty flag is recomputed through the ordinary transition machinery — so
+ * a `modelDirtyChanged { dirty: false }` follows when the buffer has not moved since.
+ *
+ * **The contract, in three lines, because no test in this repo can execute it:**
+ *
+ *   1. `pullContent` stores `{ seq, versionId }` — the id of the exact text it handed to Swift.
+ *   2. `markSaved` clears the saved point to THAT STORED id, never to the buffer's current one.
+ *   3. A buffer that moved past the pull therefore stays DIRTY: its current alternative id no longer
+ *      equals the saved point, which is the correct answer — those keystrokes are not on disk.
+ *
+ * Anchoring to the pull is what closes a race Swift cannot see from its side. Swift reads
+ * `contentResponse`, writes the file, then sends this; if the user types in that window, a
+ * path-only acknowledgement would clear the dot against a buffer that no longer matches disk, and
+ * the trailing edits would be lost at the next close-without-prompt. Swift cannot detect it either:
+ * a keystroke on an already-dirty model emits nothing, because transitions are all this page
+ * reports.
+ *
+ * An unknown or superseded `seq` clears NOTHING and says so. Fail closed: guessing here is the data
+ * loss this whole mechanism exists to prevent.
  *
  * It touches nothing else — not the buffer, not the undo stack, not the view state, not the content
- * listener. That is the whole reason this message exists rather than Swift acking a save with
+ * listener. That is the other reason this message exists rather than Swift acking a save with
  * `applyExternalContent`: that route goes through `setValue`, whose `_setValueFromTextBuffer` clears
  * the model's command manager, so every save would silently destroy the user's undo history.
  */
-function markSaved(path) {
+function markSaved(path, seq) {
     const entry = page.models.get(path);
     if (!entry) {
         console.warn("normaEditor: markSaved for a path that is not open:", path);
         return;
     }
-    entry.savedVersionId = entry.model.getAlternativeVersionId();
+    const pull = entry.lastPull;
+    if (!pull || pull.seq !== seq) {
+        console.warn("normaEditor: markSaved for an unknown or superseded pull — nothing cleared:",
+                     path, seq);
+        return;
+    }
+    // Idempotent on purpose: a duplicate acknowledgement re-applies the same id and changes nothing
+    // (`refreshDirty` only speaks on a transition). A duplicate must be a safe no-op; silence must
+    // not be.
+    entry.savedVersionId = pull.versionId;
     refreshDirty(entry);
 }
 
