@@ -180,7 +180,7 @@ How visible the washes themselves are, against the plane they tint: added 1.085:
 
 **Mac-only** — the panel strip (`apple/Norma/Sources/AppShell/ShellPanel.swift`) has no iOS surface, so there is nothing on the phone for these to mirror, the same declared-exception class as § 1's four Mac-only tokens.
 
-Five soft washes, one per `PanelTabKind` (`web`/`document`/`code`/`note`/`diff`) — a single colorset per kind (`Theme.panelKindTint(_:)`'s own exhaustive switch, no `default:`), never two. Every stronger use is *derived* by scaling the one authored alpha: the group chip at `panelKindChipTintOpacityMultiplier` (2.0×), and the pill's hover/selected rungs at `panelKindPillHoverOpacityMultiplier` (1.6×) / `panelKindPillSelectedOpacityMultiplier` (2.4×). `Color.opacity(_:)` was measured to MULTIPLY an already-translucent colour's stored alpha (0.08 → 0.16 exactly) rather than replace or clamp it, which is what lets a single authored value scale correctly in both appearances.
+Six soft washes, one per `PanelTabKind` (`web`/`document`/`code`/`note`/`diff`/`files`) — a single colorset per kind (`Theme.panelKindTint(_:)`'s own exhaustive switch, no `default:`), never two. Every stronger use is *derived* by scaling the one authored alpha: the group chip at `panelKindChipTintOpacityMultiplier` (2.0×), and the pill's hover/selected rungs at `panelKindPillHoverOpacityMultiplier` (1.6×) / `panelKindPillSelectedOpacityMultiplier` (2.4×). `Color.opacity(_:)` was measured to MULTIPLY an already-translucent colour's stored alpha (0.08 → 0.16 exactly) rather than replace or clamp it, which is what lets a single authored value scale correctly in both appearances.
 
 **The ladder model (user live-gate ruling, 2026-08-15).** The first shipped version painted the kind tint only at REST: `ShellSidebarRowStyle`'s opaque neutral `RowHover` covered it on hover *and* selection, and that fixed neutral luminance imposed a telescoping-identity ceiling (`hoverΔ × visibility = 1.10988`, fixed) that had forced `web` down to a 4.7% light alpha. The user's gate verdict — *"the selected tab should still show in the same color the tabs of that type do, just a litle stronger; the default accent should be a lil stronger; the browser tabs should have blue accent"* — replaced that model: a pill now paints ONE hue at three strengths (rest → hover 1.6× → selected 2.4×, `Theme.panelKindPillFill`, its own `PanelTabPillStyle`), every state change stays in the kind's colour, and the old ceiling no longer exists for pills. Rest alphas rose accordingly:
 
@@ -191,8 +191,9 @@ Five soft washes, one per `PanelTabKind` (`web`/`document`/`code`/`note`/`diff`)
 | `PanelKindCodeTint` | `#8B5CF6` | 12% | 19% |
 | `PanelKindNoteTint` | `#EAB308` | 12% | **17%** |
 | `PanelKindDiffTint` | `#22C55E` | 12% | 19% |
+| `PanelKindFilesTint` | `#64748B` | 12% | 19% |
 
-**The ceiling that sets the dark alphas is label legibility at the SELECTED rung**, not any hover identity: white `labelColor` on the 2.4× composite must hold the 4.5:1 body floor, and the bright ambers lift the selected composite fastest — `note` at 19% measured 4.22:1 (fail) and keeps 17% (4.73:1); `document` at 19% is the tightest pass (4.55:1). Ladder measurements, § 3.5's method, floors in **bold** where a value is the class minimum:
+**The ceiling that sets the dark alphas is label legibility at the SELECTED rung**, not any hover identity: white `labelColor` on the 2.4× composite must hold the 4.5:1 body floor, and the bright ambers lift the selected composite fastest — `note` at 19% measured 4.22:1 (fail) and keeps 17% (4.73:1); `document` at 19% is the tightest pass (4.55:1). `files` (editor-product Task 2, added under this same ladder model — it never saw the old RowHover-occlusion model at all) needed no such exception at a flat 19%. Ladder measurements, § 3.5's method, floors in **bold** where a value is the class minimum:
 
 | Kind | scheme | rest visibility (≥1.05) | rest→hover (≥1.040) | hover→selected (≥1.040) | `labelColor` @ selected (≥4.5) |
 | --- | --- | --- | --- | --- | --- |
@@ -201,19 +202,21 @@ Five soft washes, one per `PanelTabKind` (`web`/`document`/`code`/`note`/`diff`)
 | `code` | light | 1.156 | 1.094 | 1.132 | 10.02 |
 | `note` | light | 1.076 | **1.045** | 1.060 | 12.03 |
 | `diff` | light | 1.103 | 1.061 | 1.081 | 11.34 |
+| `files` | light | 1.155 | 1.094 | 1.133 | 10.77 |
 | `web` | dark | 1.273 | 1.187 | 1.274 | 6.23 |
 | `document` | dark | 1.444 | 1.292 | 1.411 | **4.55** |
-| `code` | dark | 1.236 | **1.163** | 1.241 | 6.72 |
+| `code` | dark | 1.236 | 1.163 | 1.241 | 6.72 |
 | `note` | dark | 1.425 | 1.278 | 1.391 | 4.73 |
 | `diff` | dark | 1.410 | 1.278 | 1.397 | 4.76 |
+| `files` | dark | 1.228 | **1.150** | 1.216 | 7.37 |
 
-(`PanelKindTintTests.testEveryAdjacentRungOfThePillLadderStaysDistinguishable` floors both rung deltas at 1.040 in both schemes; `testTheLadderIsMonotoneAgainstTheBareSurface` pins the ≥1.05 rest floor and strict rest < hover < selected ordering; `testTintedTextStaysLegibleAcrossTheLadder` pins the 4.5 label floor at the selected rung. A selected pill ignores hover — selection is terminal — pinned in `testPillFillResolvesTheLadderWithSelectedBeatingHover`.)
+(`PanelKindTintTests.testEveryAdjacentRungOfThePillLadderStaysDistinguishable` floors both rung deltas at 1.040 in both schemes; `testTheLadderIsMonotoneAgainstTheBareSurface` pins the ≥1.05 rest floor and strict rest < hover < selected ordering; `testTintedTextStaysLegibleAcrossTheLadder` pins the 4.5 label floor at the selected rung. A selected pill ignores hover — selection is terminal — pinned in `testPillFillResolvesTheLadderWithSelectedBeatingHover`. `files`'s dark rest→hover (1.150) is now the class minimum for that cell — bold moved off `code`'s 1.163, which stays the same measured value, just no longer the tightest.)
 
-**`TextMuted` (favicon/close-glyph ink), measured at REST** (its real home — unselected pills carry it too), against § 3.5's own quiet-meta register floors (3.5 light / 4.0 dark, baseline 4.14 / 5.99 on the plain surface): light 3.58–3.85 (worst `code`), dark 4.15–4.85 (worst `document`). All clear; the stronger washes cost more than the old rest alphas did, and the figures stay inside `TextMuted`'s established range.
+**`TextMuted` (favicon/close-glyph ink), measured at REST** (its real home — unselected pills carry it too), against § 3.5's own quiet-meta register floors (3.5 light / 4.0 dark, baseline 4.14 / 5.99 on the plain surface): light 3.58–3.85 (worst `code`), dark 4.15–4.88 (worst `document`; `files` at 4.88 is the new, safer end of that range). All clear; the stronger washes cost more than the old rest alphas did, and the figures stay inside `TextMuted`'s established range.
 
 **The favicon glyph and, on the chip, the count digit are deliberately NOT tinted** — "the tint is the surface, not the icon" (the identical rule Task 9 wrote for the diff favicon). At chip opacity the wash composites to ~1.2–1.35:1 against `CardSurface`; as literal text ink that would be near-invisible.
 
-**The chip kept the old model on purpose** — it has no selected state, so there was no occlusion complaint to fix; it still wears `ShellSidebarRowStyle` (neutral `RowHover` on hover) over its 2.0× fill, which sits BETWEEN the pill's hover (1.6×) and selected (2.4×) rungs by design. The stronger rest base incidentally FIXED what this section previously recorded as an accepted ~1.00–1.011 light-mode trade-off: the chip's neutral hover delta now measures 1.043–1.212 light / 1.867–2.590 dark, and what was a recorded weakness is a pinned floor (`testChipHoverFillStaysDistinguishableFromEveryChipAtRest`, 1.040 light / 1.30 dark). Chip visibility against `CardSurface`: 1.158–1.345 light, 1.600–2.219 dark; `labelColor` on every chip composite ≥ 5.40.
+**The chip kept the old model on purpose** — it has no selected state, so there was no occlusion complaint to fix; it still wears `ShellSidebarRowStyle` (neutral `RowHover` on hover) over its 2.0× fill, which sits BETWEEN the pill's hover (1.6×) and selected (2.4×) rungs by design. The stronger rest base incidentally FIXED what this section previously recorded as an accepted ~1.00–1.011 light-mode trade-off: the chip's neutral hover delta now measures 1.043–1.212 light / 1.816–2.590 dark (`files` dark, 1.816, is the new lower end — editor-product Task 2, still well clear of the 1.30 floor), and what was a recorded weakness is a pinned floor (`testChipHoverFillStaysDistinguishableFromEveryChipAtRest`, 1.040 light / 1.30 dark). Chip visibility against `CardSurface`: 1.158–1.345 light, 1.556–2.219 dark (`files` dark, 1.556, is the new lower end); `labelColor` on every chip composite ≥ 5.40.
 
 ---
 

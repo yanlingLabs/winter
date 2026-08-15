@@ -93,6 +93,13 @@ func panelTabContent(for tab: PanelTab, host: ShellSessionHost? = nil,
     case .diff:
         return PanelDiffTab(tab: tab,
                             model: PanelDiffTabModels.model(for: tab, host: host, sessionId: sessionId))
+    // TEMPORARY — Task 7 (PanelFilesTab) replaces this arm with the real file-browser surface.
+    // editor-product Task 2 only mints the wire value and this factory route — no producer opens a
+    // `.files` tab yet — so a blank placeholder is correct today and pinned as such in
+    // `CEFRuntimeTests` (the same handoff `.diff`'s own TEMPORARY arm used, cf7af62b, before
+    // diff-tabs Task 10 replaced it).
+    case .files:
+        return PanelPlaceholderTab(tab: tab)
     }
 }
 

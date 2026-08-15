@@ -68,6 +68,12 @@ final class TranscriptBrandTests: XCTestCase {
         "PanelKindCodeTint": ("8B5CF6", "8B5CF6", 0.12, 0.19),
         "PanelKindNoteTint": ("EAB308", "EAB308", 0.12, 0.17),
         "PanelKindDiffTint": ("22C55E", "22C55E", 0.12, 0.19),
+        // editor-product Task 2 — the sixth panel-kind tint, added under the SAME ladder model
+        // (this task shipped after the live-gate ruling, never saw the old RowHover-occlusion
+        // model at all). Slate, at the same flat 0.12 / 0.19 rest alphas as web/document/code/diff
+        // — measured to clear every § 3.7 floor with margin at those values, no note-style
+        // exception needed.
+        "PanelKindFilesTint": ("64748B", "64748B", 0.12, 0.19),
     ]
 
     /// The catalog IS the palette brand.md publishes. `SidebarBrandTests` already pins that every

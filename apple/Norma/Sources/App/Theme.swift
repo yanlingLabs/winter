@@ -158,13 +158,13 @@ enum Theme {
     /// `diffAddedWash`.
     static let diffRemovedWash = Color("DiffRemovedWash")
 
-    // MARK: - Color: the five panel-kind tints (diff-tabs Task 12) — Mac-only
+    // MARK: - Color: the six panel-kind tints (diff-tabs Task 12; sixth added editor-product Task 2) — Mac-only
 
     /// **Mac-only**, like `rowHover`/`hairline`/`hairlineElevated`/`paletteSurface` (§ 1): the
     /// panel strip itself has no iOS surface, so there is nothing on the phone for these to
     /// mirror. `docs/brand.md` § 3.7 publishes every measurement below.
     ///
-    /// Five soft washes, one per `PanelTabKind`, on the SAME hue at two strengths: a faint pill
+    /// Six soft washes, one per `PanelTabKind`, on the SAME hue at two strengths: a faint pill
     /// fill (`panelKindTint`, this token) and a stronger chip fill (`panelKindChipTint`, derived
     /// below at `panelKindChipTintOpacityMultiplier`× this token's alpha) — never two colorsets
     /// per kind, so `Theme.panelKindTint`'s switch stays the ONE place a kind maps to a hue.
@@ -194,6 +194,10 @@ enum Theme {
         case .code: return Color("PanelKindCodeTint")
         case .note: return Color("PanelKindNoteTint")
         case .diff: return Color("PanelKindDiffTint")
+        // editor-product Task 2: the sixth kind, same ladder-model alphas as web/document/code/diff
+        // (flat 12% light / 19% dark — no label-legibility ceiling forced a note-style exception
+        // here; measured, `docs/brand.md` § 3.7).
+        case .files: return Color("PanelKindFilesTint")
         }
     }
 
@@ -304,8 +308,9 @@ enum Theme {
         // (Task 10); `docs/brand.md` § 3.6 publishes every ratio.
         "DiffRemoved", "DiffAdded", "DiffAddedWash", "DiffRemovedWash",
         // diff-tabs Task 12 — the five panel-kind tints (Mac-only, `panelKindTint`'s switch).
-        // FINAL and measured; `docs/brand.md` § 3.7 publishes every ratio.
+        // FINAL and measured; `docs/brand.md` § 3.7 publishes every ratio. Sixth added
+        // editor-product Task 2 (`PanelKindFilesTint`), same measured discipline.
         "PanelKindWebTint", "PanelKindDocumentTint", "PanelKindCodeTint", "PanelKindNoteTint",
-        "PanelKindDiffTint",
+        "PanelKindDiffTint", "PanelKindFilesTint",
     ]
 }

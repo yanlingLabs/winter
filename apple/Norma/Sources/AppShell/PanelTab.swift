@@ -16,7 +16,7 @@ import NormaProtocol
 /// favicon glyph, the display title, the content factory), which is the same mechanism one layer
 /// down.
 enum PanelTabKind: String, Codable, Equatable {
-    case web, document, code, note, diff
+    case web, document, code, note, diff, files
 
     init(_ wire: SessionEvent.PanelTabKind) {
         switch wire {
@@ -25,6 +25,7 @@ enum PanelTabKind: String, Codable, Equatable {
         case .code: self = .code
         case .note: self = .note
         case .diff: self = .diff
+        case .files: self = .files
         }
     }
 }

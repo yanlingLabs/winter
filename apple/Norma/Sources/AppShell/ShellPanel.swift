@@ -805,6 +805,10 @@ func panelTabFaviconSystemImage(_ kind: PanelTabKind) -> String {
     // per-kind TINT the strip eventually wears is Task 12's brand pass, and the glyph deliberately
     // keeps `labelColor` either way (design spec §6: "the tint is the surface, not the icon").
     case .diff: return "plus.forwardslash.minus"
+    // editor-product Task 2: the system file-browser glyph — Task 7's PanelFilesTab is the real
+    // surface this fronts (`PanelWebTab.swift`'s TEMPORARY factory arm); the favicon ships now so
+    // the placeholder pill already reads as "files" rather than a generic blank one.
+    case .files: return "folder"
     }
 }
 
@@ -821,6 +825,10 @@ func panelTabDisplayTitle(_ tab: PanelTab) -> String {
     // Reached only if a diff tab somehow carries no title — `openDiffTab` always sends the edited
     // file's basename, so in practice the pill names the file rather than the category.
     case .diff: return "Diff"
+    // editor-product Task 2: unlike `.diff`, a files tab has no per-instance wire title at all
+    // (no analogous "the path's basename" producer) — this fallback IS the name every files tab
+    // shows, not an edge case reached only when a producer omits one.
+    case .files: return "Files"
     }
 }
 
