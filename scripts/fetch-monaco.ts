@@ -27,7 +27,8 @@
  * --- Artifact choice: min/vs only, not esm/dev/min-maps ---
  * The published package contains several build shapes (esm/, dev/, min/, min-maps/). Only
  * min/vs/ is vendored here: the minified AMD build that runs from static files via vs/loader.js
- * -- what a WKWebView-hosted local page loads, no bundler in between. package/LICENSE travels
+ * -- what the CEF-hosted local page loads (the `norma-editor://` custom scheme), no bundler in
+ * between. package/LICENSE travels
  * with it for the same reason CEF's LICENSE.txt does: a licence obligation, not a convenience
  * (see the "Embed Monaco editor assets" phase in project.yml).
  *

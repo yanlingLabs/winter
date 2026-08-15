@@ -310,8 +310,13 @@ struct EditorHarnessScript: Equatable {
 /// buffer from the NEW text through the same path — so an external write brings its own EOL with it
 /// rather than inheriting the model's.
 ///
-/// So the rule in one sentence: **the majority wins, ties and pure-CRLF go to CRLF, and a text that
-/// is already uniform is returned untouched.**
+/// So the rule in one sentence: **the majority wins, and it is a STRICT majority — an exact tie
+/// goes to LF, never CRLF**, because both the vendored `p > b/2` and this port use `>`, not `>=`.
+/// **"Uniform" is not "untouched", either** — a file that uses lone CRs throughout is internally
+/// uniform, but the majority rule still picks CRLF for it (every one of its terminators is
+/// CR-bearing), so every lone CR is rewritten to CRLF rather than left alone. Only a text whose
+/// terminators already match what the rule would pick — uniform LF, or uniform CRLF — survives
+/// untouched.
 enum MonacoTextBuffer {
     /// What `model.getValue()` will answer for a model created (or `setValue`d) with `text`.
     static func normalisedEOL(_ text: String) -> String {

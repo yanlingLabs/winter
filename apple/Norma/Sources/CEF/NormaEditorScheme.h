@@ -42,9 +42,7 @@ inline constexpr char kNormaEditorSchemeName[] = "norma-editor";
 /// The four options, and each one is load-bearing:
 ///
 ///   * `STANDARD` — makes `norma-editor://app/editor.html` a URL with a real origin and a
-///     hierarchical path. Without it relative URLs do not resolve and every other flag here is
-///     documented as having no effect (`cef_types.h`: CORS and CSP options apply "only for schemes
-///     where CEF_SCHEME_OPTION_STANDARD is set").
+///     hierarchical path. Without it, relative URL resolution breaks.
 ///   * `SECURE` — a secure context, which is what web workers, ES modules and `crypto.subtle`
 ///     require. Monaco runs its language services in workers.
 ///   * `CORS_ENABLED` — the page is served from host `app` and Monaco from host `assets`, i.e.

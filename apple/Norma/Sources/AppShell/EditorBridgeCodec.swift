@@ -142,6 +142,19 @@ enum EditorBridgeOutbound {
     case closeModel(path: String)
     /// Ask for a model's current text. The answer is an `EditorBridgeInbound.contentResponse`
     /// carrying the same `seq` — Swift never reads the editor's buffer directly.
+    ///
+    /// **A pull may LEGALLY go unanswered — that is the contract, not a bug to route around.**
+    /// Three unrelated causes all resolve to silence rather than to an error Swift can catch: the
+    /// page sends nothing for a path it does not hold open (`editor.js`'s `pullContent` — a
+    /// fabricated empty `contentResponse` would make Swift truncate a real file, so it refuses
+    /// instead and only logs); `model.getValue()` can throw on a model past Monaco's own heap
+    /// ceiling, which never reaches `sendToSwift` either; and a reply over
+    /// `editorBridgeMaxInboundBytes` (8 MiB, above) decodes to `nil` on THIS side, which looks
+    /// identical to no reply at all. Any Swift flow that calls this and then writes to disk — a
+    /// save — MUST therefore run its own timeout and treat expiry as failure rather than waiting
+    /// unconditionally. This harness's own steps bound a healthy round trip at 5 seconds
+    /// (`EditorBridgeHarness`'s `1.bound` step); a comparable figure is a reasonable starting point
+    /// for a production save flow, not a value measured for one.
     case pullContent(path: String, seq: UInt64)
     /// Replace a model's text with something that changed outside the editor (an agent edit, a
     /// reload from disk).
@@ -211,8 +224,6 @@ enum EditorBridgeOutbound {
             return ["type": wireType, "path": path, "seq": seq]
         case .applyExternalContent(let path, let text):
             return ["type": wireType, "path": path, "text": text]
-        case .markSaved(let path, let seq):
-            return ["type": wireType, "path": path, "seq": seq]
         case .setTheme(let tokensJSON):
             // Unparseable or non-object tokens become an empty object rather than invalid
             // JavaScript. `javascript` must ALWAYS produce one well-formed call: a syntax error in
@@ -220,6 +231,8 @@ enum EditorBridgeOutbound {
             // tokens are Swift-authored, so a bad one is a bug on this side to find in a log, not
             // input to defend against.
             return ["type": wireType, "tokens": Self.object(fromJSON: tokensJSON) ?? [:]]
+        case .markSaved(let path, let seq):
+            return ["type": wireType, "path": path, "seq": seq]
         }
     }
 

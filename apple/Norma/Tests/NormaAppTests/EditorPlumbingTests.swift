@@ -104,10 +104,16 @@ final class EditorPlumbingTests: XCTestCase {
         XCTAssertNotNil(resolved(root, "/vs/loader%2Ejs"),
                         "hex escapes are case-insensitive; %2E is '.'")
         // Decoded ONCE, never in a loop: `%252e%252e` is `%2e%2e` after one pass and `..` after
-        // two. One pass leaves a literal directory name that cannot exist; a loop reaches the
-        // parent. Same expectation either way — NULL — but for opposite reasons, so the case is
-        // paired with the positive ones above rather than trusted on its own.
-        XCTAssertNil(resolved(root, "/vs/%252e%252e/loader.js"),
+        // two. **This probe path is chosen so the two behaviors land on DIFFERENT targets rather
+        // than both reading NULL for unrelated reasons** — an earlier version used
+        // `/vs/%252e%252e/loader.js`, whose one-pass answer is NULL (no `%2e%2e` directory exists)
+        // and whose two-pass answer is ALSO NULL (`/vs/../loader.js` misses too, because the only
+        // real file lives at `vs/loader.js`, not at the root), so it could not tell a correct
+        // resolver from a decode-loop bug. Here, one pass leaves the literal, nonexistent segment
+        // `/vs/%2e%2e/vs/loader.js` — NULL, correctly. A decode-loop bug turns the SAME input into
+        // `/vs/../vs/loader.js`, which `realpath` walks straight back to the one real file this
+        // root has — a non-nil hit, so the assertion below is what actually fails under that bug.
+        XCTAssertNil(resolved(root, "/vs/%252e%252e/vs/loader.js"),
                      "double-decoding must not happen")
     }
 
@@ -376,9 +382,13 @@ final class EditorPlumbingTests: XCTestCase {
     ///
     /// **`seq` renders as a JSON NUMBER, and the bytes are what pin that.** The page matches it
     /// against the `seq` it remembered for its own `pullContent` reply with `===`, so a quoted
-    /// `"41"` would never match anything: every acknowledgement would fail closed, every saved file
-    /// would keep its modified dot, and nothing anywhere would report an error. Three members and no
-    /// more — a `text` member here would be the content-carrying shortcut this case exists to avoid.
+    /// `"41"` would never match anything: every acknowledgement would fail closed and every saved
+    /// file would keep its modified dot. `editor.js`'s `markSaved` DOES `console.warn` when that
+    /// happens ("an unknown or superseded pull — nothing cleared") — this is not a SILENT failure,
+    /// only one nobody is watching a console for during a live save, which is exactly the failure
+    /// mode this byte-level pin exists to keep out of the page in the first place. Three members
+    /// and no more — a `text` member here would be the content-carrying shortcut this case exists
+    /// to avoid.
     func testMarkSavedRendersExactlyTheseBytes() throws {
         // Assembled rather than typed, like `openModel`'s pin, so this file never contains the
         // escape sequences it is asserting about.
@@ -600,15 +610,17 @@ final class EditorPlumbingTests: XCTestCase {
     func testTheJavaScriptSideSpeaksExactlyTheSameWireVocabulary() throws {
         let bundled = Bundle.main.bundleURL
             .appendingPathComponent("Contents/Resources/EditorAssets/app/bridge-protocol.js")
-        // `#filePath` is this file at `apple/Norma/Tests/NormaAppTests/`; four levels up is
-        // `apple/Norma`, where `Resources/` lives.
+        // `#filePath` is this file at `apple/Norma/Tests/NormaAppTests/`; three deletions up is
+        // `apple/Norma`, where `Resources/` lives — the same computation `pageFile(named:)` below
+        // makes; kept local here (rather than reading it back out of that helper) only because the
+        // skip message below needs both candidate paths spelled out.
         let source = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()   // NormaAppTests
             .deletingLastPathComponent()   // Tests
             .deletingLastPathComponent()   // Norma
             .appendingPathComponent("Resources/EditorAssets/app/bridge-protocol.js")
 
-        let found = [bundled, source].first { FileManager.default.fileExists(atPath: $0.path) }
+        let found = Self.pageFile(named: "bridge-protocol.js")
         try XCTSkipIf(found == nil,
                       "Task 4 has not created Resources/EditorAssets/app/bridge-protocol.js yet — "
                         + "this pin goes live the moment it does. Looked in \(bundled.path) and "
@@ -816,7 +828,13 @@ final class EditorPlumbingTests: XCTestCase {
             }
 
             if character == "/", next == "/" {
-                while index < source.endIndex, source[index] != "\n" {
+                // `.isNewline`, not `!= "\n"`: Swift's `Character` is an extended grapheme
+                // cluster, so a CRLF line ending is ONE `Character`, equal to neither `"\n"` nor
+                // `"\r"` alone. The `!=` form never matches it and would run this loop past the
+                // end of the string on CRLF input, swallowing the rest of the file into the
+                // "comment" — a loud false-FAIL against a source file this repo authors as LF, but
+                // still worth being correct about.
+                while index < source.endIndex, !source[index].isNewline {
                     index = source.index(after: index)
                 }
                 continue   // the newline itself is kept by the next turn
@@ -1156,6 +1174,9 @@ final class EditorPlumbingTests: XCTestCase {
         XCTAssertEqual(MonacoTextBuffer.normalisedEOL("a\nb\nc\r\nd"), "a\nb\nc\nd")
         // Mixed, CR-bearing terminators in the majority: everything becomes CRLF.
         XCTAssertEqual(MonacoTextBuffer.normalisedEOL("a\r\nb\r\nc\nd"), "a\r\nb\r\nc\r\nd")
+        // An exact TIE — one CRLF against one bare LF, so `carriageBearing` is 1 of a total of 2.
+        // `1 * 2 > 2` is false, so the strict majority rule sends a tie to LF, not to CRLF.
+        XCTAssertEqual(MonacoTextBuffer.normalisedEOL("a\r\nb\nc"), "a\nb\nc")
         // A lone CR is a terminator too, and it is never left alone.
         XCTAssertEqual(MonacoTextBuffer.normalisedEOL("a\rb\nc"), "a\nb\nc")
         // No terminator at all: `defaultEOL` decides, and it decides nothing here.

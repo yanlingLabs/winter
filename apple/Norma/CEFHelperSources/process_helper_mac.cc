@@ -73,8 +73,9 @@ int main(int argc, char* argv[]) {
 
   // Constructed AFTER the loader, not before: `NormaSubprocessApp`'s reference counting is CEF's
   // (`IMPLEMENT_REFCOUNTING`), and this file never links the framework — it dlopens it above.
-  // One app for every role this executable is dispatched to; it registers the scheme and does
-  // nothing else.
+  // One app for every role this executable is dispatched to. It registers the scheme in all of
+  // them and, in a renderer specifically, also carries the editor bridge's renderer-side router —
+  // installing `window.cefQuery` and routing its replies. See `NormaEditorScheme.h` for both.
   CefMainArgs main_args(argc, argv);
   CefRefPtr<CefApp> app(new NormaSubprocessApp());
   return CefExecuteProcess(main_args, app, nullptr);
