@@ -818,6 +818,9 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
             performCommandS(step.id)
 
         // ---- drill 9: a second model, and the close/activate obligation --------------------------
+        case "9.setView":
+            performSetView(step.id)
+
         case "9.openC":
             send(.openModel(path: fixtures.pathC, language: "", text: fixtures.fixtureC)) {
                 [weak self] error in
@@ -841,6 +844,9 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
 
         case "9.activateA":
             performActivate(step.id, path: fixtures.pathA)
+
+        case "9.viewState":
+            performViewStateCheck(step.id)
 
         case "9.closeActive":
             // Closing the ACTIVE model leaves the editor holding nothing — the page detaches before
@@ -1251,6 +1257,102 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
         }
     }
 
+    /// **Sets the view state `9.viewState` later reads back**, on the CURRENT model — pathA, holding
+    /// fixture B by this point (drill 7's `applyExternalContent`) — the step immediately before
+    /// `9.openC` switches the editor away from it. That adjacency is load-bearing: it is the switch
+    /// AWAY that captures this as pathA's `viewState` (`activateModel`'s `saveViewState()`), and set
+    /// any earlier in the script, a later step's own `setPosition`/`insertText` call would have
+    /// overwritten it long before that capture ever happens.
+    ///
+    /// **Self-verifying**: the same evaluate reads `getScrollTop()`/`getPosition()` straight back
+    /// and fails the step if the SET itself did not take, so a later red at `9.viewState` can only
+    /// mean the round trip (save/restore) broke — not that this step's own set silently no-opped.
+    ///
+    /// Reached through `monaco.editor.getEditors()[0]` — the same door `insertText`/`trigger`/
+    /// `currentValue` already use elsewhere in this file — rather than a new bridge message or a new
+    /// debug setter on `editor.js`: `page` is module-scoped and unreachable from `window`, but
+    /// `window.monaco` is already global (`boot()` binds it from the AMD loader) and reaches the
+    /// same live editor a purpose-built setter would, so a setter would just be a second door to the
+    /// one room this door already opens.
+    private func performSetView(_ stepId: String) {
+        let line = EditorHarnessFixtures.viewStateLine
+        let column = EditorHarnessFixtures.viewStateColumn
+        let top = EditorHarnessFixtures.viewStateScrollTop
+        evaluate(editorContainer, """
+        (function () {
+          var editor = monaco.editor.getEditors()[0];
+          editor.setScrollTop(\(top));
+          editor.setPosition({ lineNumber: \(line), column: \(column) });
+          var position = editor.getPosition();
+          return JSON.stringify({
+            viewTop: editor.getScrollTop(),
+            line: position ? position.lineNumber : null,
+            column: position ? position.column : null
+          });
+        })()
+        """) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .bad(let reason):
+                self.local(stepId, false, reason)
+            case .ok(let value):
+                guard let text = value as? String, let report = Self.jsonObject(text) else {
+                    self.local(stepId, false, "the set-view probe did not answer")
+                    return
+                }
+                let gotTop = (report["viewTop"] as? NSNumber)?.doubleValue
+                let gotLine = (report["line"] as? NSNumber)?.intValue
+                let gotColumn = (report["column"] as? NSNumber)?.intValue
+                let tolerance = Double(EditorHarnessFixtures.viewStateScrollTolerance)
+                let scrollOK = gotTop.map { abs($0 - Double(top)) <= tolerance } ?? false
+                let positionOK = gotLine == line && gotColumn == column
+                self.local(stepId, scrollOK && positionOK,
+                           "set scrollTop → \(top), position → {\(line), \(column)} on the current "
+                           + "model before 9.openC switches away from it; read back immediately: "
+                           + "viewTop=\(gotTop.map { String(format: "%.1f", $0) } ?? "nil"), "
+                           + "position={\(gotLine.map(String.init) ?? "nil"),"
+                           + "\(gotColumn.map(String.init) ?? "nil")}")
+            }
+        }
+    }
+
+    /// **The round trip `9.setView` set up, judged.** `9.openC`'s `openModel` → `activateModel
+    /// (pathC)` switch captured pathA's view state on the way out (`saveViewState()`, inside
+    /// `activateModel`); `9.activateA`, immediately before this step, switched back and restored it
+    /// (`restoreViewState()`). This reads the LIVE editor state — `normaEditorDebugState()`'s
+    /// `viewTop`/`position`, not a cache of what `9.setView` set — because a restore that silently
+    /// no-opped would still leave `page.currentPath` reporting the right model.
+    ///
+    /// `viewTop` gets the same tolerance `9.setView` self-checks with: `restoreViewState` is not
+    /// contracted to land on the exact pixel `setScrollTop` was given. `position` gets none: cursor
+    /// state restores as the exact `{lineNumber, column}` it was saved with, because pathA's content
+    /// never changes between the save (at `9.openC`) and the restore (at `9.activateA`).
+    private func performViewStateCheck(_ stepId: String) {
+        readDebugState { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .bad(let reason):
+                self.local(stepId, false, reason)
+            case .ok(let state):
+                let viewTop = (state["viewTop"] as? NSNumber)?.doubleValue
+                let position = state["position"] as? [String: Any]
+                let line = (position?["lineNumber"] as? NSNumber)?.intValue
+                let column = (position?["column"] as? NSNumber)?.intValue
+                let wantLine = EditorHarnessFixtures.viewStateLine
+                let wantColumn = EditorHarnessFixtures.viewStateColumn
+                let wantTop = EditorHarnessFixtures.viewStateScrollTop
+                let tolerance = Double(EditorHarnessFixtures.viewStateScrollTolerance)
+                let scrollOK = viewTop.map { abs($0 - Double(wantTop)) <= tolerance } ?? false
+                let positionOK = line == wantLine && column == wantColumn
+                self.local(stepId, scrollOK && positionOK,
+                           "viewTop = \(viewTop.map { String(format: "%.1f", $0) } ?? "nil") "
+                           + "(want \(wantTop) ±\(Int(tolerance))); position = "
+                           + "{\(line.map(String.init) ?? "nil"), \(column.map(String.init) ?? "nil")} "
+                           + "(want {\(wantLine), \(wantColumn)})")
+            }
+        }
+    }
+
     private func performWritePulledText(_ stepId: String) {
         guard let text = lastPulledText else {
             local(stepId, false, "no contentResponse text was captured to write")
@@ -1465,6 +1567,18 @@ struct EditorHarnessFixtures {
     let fixtureB: String
     let fixtureC: String
 
+    /// **Task 1's view-state drill target — one place, four consumers.** `performSetView` sets
+    /// exactly this; `performViewStateCheck` asserts exactly this back; `buildFixtureB` builds its
+    /// line 30 AT this line/column so the fixture and the assertion cannot drift apart; the pinning
+    /// test in `EditorPlumbingTests` reads it too rather than re-typing the numbers a fifth time.
+    static let viewStateScrollTop = 400
+    /// `restoreViewState` is not contracted to land on the exact pixel `setScrollTop` was given
+    /// (line-height rounding, view-zone bookkeeping) — the claim under test is "the scroll survived
+    /// the round trip", not "the scroll is an exact pixel".
+    static let viewStateScrollTolerance = 50
+    static let viewStateLine = 30
+    static let viewStateColumn = 5
+
     init(scratch: URL) {
         pathA = scratch.appendingPathComponent("fixture-a.ts").path
         pathB = scratch.appendingPathComponent("fixture-b.ts").path
@@ -1559,14 +1673,40 @@ struct EditorHarnessFixtures {
     /// no lone CR and no lone LF there is nothing to rewrite, so this one must come back byte for
     /// byte as it went in. Fixture A proves the normalisation happens; this proves it does not
     /// happen to a file that never needed it.
+    ///
+    /// **Extended for Task 1's view-state drill** (a Stage B input the Stage-A exit gate never
+    /// asserted): by drill 9, THIS is what pathA's model holds — drill 7's `7.apply` replaced
+    /// fixture A's text with it, and nothing replaces it again before `9.setView`/`9.viewState` set
+    /// and read back the live editor's scroll position and cursor. The original 5-line fixture could
+    /// not carry that drill: 5 lines give the editor nothing to scroll (`setScrollTop` would clamp
+    /// to a few dozen px at most, nowhere near `viewStateScrollTop`) and no line 30 to put a cursor
+    /// on. The padding below is still uniformly CRLF — generated onto the SAME array the original
+    /// five lines start, joined by the SAME `"\r\n"` separator — so drill 7's byte-identical round
+    /// trip stays exactly as strict; only the length changed.
     private static func buildFixtureB() -> String {
-        return [
+        var lines: [String] = [
             "// Norma editor harness fixture B — written from OUTSIDE the editor.",
             "// Uniformly CRLF: Monaco keeps it, and the round trip must be byte-identical.",
             "export const source = \"an agent edit, or a reload from disk\";",
             "export const naïve = \"caf\u{00E9} / cafe\u{0301}\";",
             "export const answer = 42;"
-        ].joined(separator: "\r\n")
+        ]
+        // Padding, so there is real scrollable height to give — every line is content (a unique,
+        // syntactically plausible top-level declaration), not a wall of one repeated filler string.
+        while lines.count < viewStateLine - 1 {
+            lines.append("export const PADDING_\(lines.count) = \(lines.count);")
+        }
+        // Line `viewStateLine` (1-indexed — this append makes it the array's `viewStateLine`th
+        // element): real, indented content. `setPosition({ lineNumber: viewStateLine, column:
+        // viewStateColumn })` lands right after the indent, before a real word, on a line long
+        // enough that the column is never past its end.
+        let indent = String(repeating: " ", count: viewStateColumn - 1)
+        lines.append("\(indent)export const HARNESS_VIEW_STATE_TARGET = "
+                     + "\"line \(viewStateLine), column \(viewStateColumn)\";")
+        while lines.count < 90 {
+            lines.append("export const PADDING_\(lines.count) = \(lines.count);")
+        }
+        return lines.joined(separator: "\r\n")
     }
 
     /// The second model — `.json`, so a SECOND language worker has to boot, and deliberately
@@ -1591,7 +1731,7 @@ struct EditorHarnessFixtures {
         6: "the race a path-only acknowledgement cannot close",
         7: "an external write, and the acknowledgements it invalidates",
         8: "⌘S reaches Monaco and comes back as saveRequested",
-        9: "a second model, and the activate-after-close obligation",
+        9: "a second model, the activate-after-close obligation, and a view state that survives it",
         10: "setTheme repaints the editor",
         11: "a query from another browser is refused, not ignored"
     ]
@@ -1670,9 +1810,15 @@ struct EditorHarnessFixtures {
             step("8.save", 8, "⌘S through CEF's key handling reaches Monaco's command",
                  .saveRequested(path: pathA), 15),
 
+            step("9.setView", 9, "set scrollTop \(EditorHarnessFixtures.viewStateScrollTop) and cursor "
+                 + "{\(EditorHarnessFixtures.viewStateLine), \(EditorHarnessFixtures.viewStateColumn)} "
+                 + "on the current model, the step before it is switched away from", .local, 15),
             step("9.openC", 9, "open a second model (.json) — it becomes current, both are clean", .local, 20),
             step("9.jsonWorker", 9, "the JSON worker boots and reports on the malformed fixture", .local, 30),
             step("9.activateA", 9, "activate the first model again — the editor really shows it", .local, 15),
+            step("9.viewState", 9, "reactivating it restored the scroll + cursor the step before "
+                 + "9.openC set — the view-state round trip the Stage-A exit gate never asserted",
+                 .local, 15),
             step("9.closeActive", 9, "close the ACTIVE model — the editor is left showing nothing", .local, 15),
             step("9.activateC", 9, "activate the survivor — Swift's obligation after a close, exercised",
                  .local, 15),

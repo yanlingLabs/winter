@@ -39,19 +39,35 @@ window.normaEditor = { dispatch: dispatch };
  *
  * `page` is module-scoped, so nothing outside this file can see it; the harness reads this global
  * through CDP `Runtime.evaluate` with `returnByValue`, which is why every value below is a plain
- * string, boolean or array. Returning `page` itself would hand back Monaco models and disposables
- * that cannot be serialised at all.
+ * string, number, boolean, array or small plain object. Returning `page` itself would hand back
+ * Monaco models and disposables that cannot be serialised at all.
  *
  * Deliberately NOT an `EditorBridgeInbound` variant: it answers a question the app never asks
  * (Swift already knows which models it opened), so putting it on the wire would grow the protocol
  * for a debugger's benefit. `dirtyMap` is the page's own `entry.dirty` — the value the tab dot
  * follows — rather than a recomputation, so a harness comparing it against the
  * `modelDirtyChanged` messages it received is comparing two independent witnesses of the same fact.
+ *
+ * **Task 1 (Stage B hygiene) adds `viewTop`/`position`:** the LIVE editor's `getScrollTop()` and
+ * `getPosition()`, not a per-model cache. `activateModel` saves and restores view state PER MODEL
+ * (`saveViewState`/`restoreViewState`), but what is actually on screen right now is a property of
+ * the editor itself, not of whichever model happens to be current — which is exactly what the
+ * harness's view-state drill needs to prove survived a switch-away-and-back round trip.
  */
 window.normaEditorDebugState = function () {
     const dirtyMap = {};
     page.models.forEach(function (entry, path) { dirtyMap[path] = entry.dirty; });
-    return { paths: Array.from(page.models.keys()), current: page.currentPath, dirtyMap: dirtyMap };
+    // `page.editor` is null only before `boot()` completes, which is before the first `ready` — no
+    // drill ever calls this that early, but reading it this way answers 0/null instead of throwing
+    // rather than assume that holds forever.
+    const position = page.editor ? page.editor.getPosition() : null;
+    return {
+        paths: Array.from(page.models.keys()),
+        current: page.currentPath,
+        dirtyMap: dirtyMap,
+        viewTop: page.editor ? page.editor.getScrollTop() : 0,
+        position: position ? { lineNumber: position.lineNumber, column: position.column } : null
+    };
 };
 
 // --- Monaco boot -------------------------------------------------------------------------------
@@ -232,6 +248,13 @@ function pullContent(path, seq) {
         console.error("normaEditor: pullContent for a path that is not open — no answer sent:", path);
         return;
     }
+    // Superseded FIRST, before anything below that can throw: a second pull supersedes the first
+    // the instant it STARTS, not only once it manages to finish. `getValue()` throws on a model past
+    // Monaco's heap ceiling — if the clear happened after it, a throwing pull would leave the PRIOR
+    // pull's anchor in place, and a late `markSaved` for that stale seq would wrongly find a match
+    // instead of failing closed. Clearing here means a throw leaves `lastPull` null — the same
+    // fail-closed state an unanswered pull already gets — rather than a stale one that outlives it.
+    entry.lastPull = null;
     // The text and the version id that text belongs to are read as ONE step — no `await` between
     // them, so nothing can edit the buffer in between — and the pair is remembered under this
     // pull's `seq`. That pair is the whole point: `markSaved` clears the dirty flag to THIS id
@@ -241,8 +264,9 @@ function pullContent(path, seq) {
     const versionId = entry.model.getAlternativeVersionId();
     // ONLY THE LATEST PULL PER MODEL is remembered, and that bound is deliberate rather than
     // economical: the save flow issues one pull per file and waits for its answer, so a second pull
-    // means the first is superseded. An acknowledgement for a `seq` this model no longer remembers
-    // fails closed (`markSaved` below warns and clears nothing) — never a guess.
+    // means the first is superseded — true even when this line never runs, per the clear above.
+    // An acknowledgement for a `seq` this model no longer remembers fails closed (`markSaved` below
+    // warns and clears nothing) — never a guess.
     entry.lastPull = { seq: seq, versionId: versionId };
     // `seq` is echoed exactly as it arrived: it is the pull's own number, and Swift uses it to tell
     // a late answer to a superseded pull from the current one.
@@ -299,6 +323,9 @@ function applyExternalContent(path, text) {
  * the model's command manager, so every save would silently destroy the user's undo history.
  */
 function markSaved(path, seq) {
+    // Both branches below log with console.warn, not console.error: a markSaved for a path that
+    // already closed or a seq that is superseded is a benign RACE — a saved-ack landing after
+    // close/supersede — not a bug to alert on.
     const entry = page.models.get(path);
     if (!entry) {
         console.warn("normaEditor: markSaved for a path that is not open:", path);

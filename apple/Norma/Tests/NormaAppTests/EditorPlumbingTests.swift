@@ -974,7 +974,9 @@ final class EditorPlumbingTests: XCTestCase {
         XCTAssertTrue(code.contains("window.normaEditorDebugState"),
                       "editor.js no longer exposes normaEditorDebugState — Task 5's harness reads "
                         + "the model table through it and has no other door to `page`")
-        for member in ["paths", "current", "dirtyMap"] {
+        // `viewTop`/`position` are Task 1's addition (Stage B hygiene): the view-state drill's
+        // round-trip assertion has no other door to what the live editor is actually showing.
+        for member in ["paths", "current", "dirtyMap", "viewTop", "position"] {
             XCTAssertTrue(code.contains("\(member):"),
                           "normaEditorDebugState must still answer `\(member)` — the harness's "
                             + "model-table assertions read it by name")
@@ -1244,6 +1246,64 @@ final class EditorPlumbingTests: XCTestCase {
         XCTAssertTrue(fixtures.pathC.hasSuffix(".json"))
         XCTAssertFalse(fixtures.fixtureA.hasSuffix("\n"),
                        "fixture A must end without a trailing newline")
+    }
+
+    /// **Task 1 (Stage B hygiene): the view-state round trip the Stage-A exit gate never asserted.**
+    ///
+    /// `9.setView` sets a real scroll position and cursor on the CURRENT model — which by drill 9 is
+    /// pathA holding FIXTURE B's text, not fixture A's: drill 7's `7.apply` (`applyExternalContent`)
+    /// replaced it, and nothing replaces it again before drill 9 runs. `9.setView` has to be the
+    /// step immediately before `9.openC`, because `9.openC`'s implicit switch-away is what captures
+    /// the view state (`activateModel`'s `saveViewState()`) — set any earlier and a later step's own
+    /// cursor movement (`insertText`'s `setPosition({1,1})`) would overwrite it first. `9.viewState`
+    /// has to be immediately after `9.activateA`, which is the step that restores it
+    /// (`restoreViewState()`) and is therefore the earliest point the round trip can be judged.
+    ///
+    /// This also pins why fixture B could not stay 5 lines: a 5-line buffer has nothing to scroll —
+    /// `setScrollTop(400)` clamps to a few dozen px regardless of the target line, so extending the
+    /// TARGET LINE alone (the other option the brief allowed) could never satisfy a 400±50 assertion.
+    /// The fixture itself needed the extra height; the target position stayed {30, 5}.
+    func testTheViewStateStepsBracketTheSecondModelOpenAtExactlyTheRightPoints() throws {
+        let scratch = try scratchDir()
+        let fixtures = EditorHarnessFixtures(scratch: scratch)
+        let steps = EditorHarnessFixtures.steps(fixtures)
+        let ids = steps.map(\.id)
+
+        XCTAssertEqual(steps.count, 43, "two new steps (9.setView, 9.viewState) join the Stage-A "
+                       + "script's 41")
+
+        guard let setViewIndex = ids.firstIndex(of: "9.setView"),
+              let openCIndex = ids.firstIndex(of: "9.openC"),
+              let activateAIndex = ids.firstIndex(of: "9.activateA"),
+              let viewStateIndex = ids.firstIndex(of: "9.viewState"),
+              let closeActiveIndex = ids.firstIndex(of: "9.closeActive") else {
+            return XCTFail("one of the view-state steps or its neighbours is missing from the script")
+        }
+        XCTAssertEqual(setViewIndex + 1, openCIndex,
+                       "9.setView must be the step immediately before 9.openC — the switch-away it "
+                         + "provokes is what captures the view state")
+        XCTAssertEqual(activateAIndex + 1, viewStateIndex,
+                       "9.viewState must read back immediately after 9.activateA restores it")
+        XCTAssertLessThan(viewStateIndex, closeActiveIndex,
+                          "the view state must be judged before the model it lives on is closed")
+        XCTAssertEqual(steps[setViewIndex].drill, 9)
+        XCTAssertEqual(steps[viewStateIndex].drill, 9)
+
+        // Fixture B is what pathA holds at that point (drill 7's applyExternalContent) — long
+        // enough for `viewStateLine` to be real content and for a `viewStateScrollTop`-sized scroll
+        // not to clamp to nothing, without disturbing drill 7's own byte-identical expectation
+        // (asserted separately, above — this only checks the NEW shape this task added).
+        let lines = fixtures.fixtureB.components(separatedBy: "\r\n")
+        XCTAssertGreaterThanOrEqual(lines.count, EditorHarnessFixtures.viewStateLine,
+                                    "fixture B must have a real line \(EditorHarnessFixtures.viewStateLine) "
+                                      + "for setPosition to land on content instead of being clamped")
+        let targetLine = lines[EditorHarnessFixtures.viewStateLine - 1]
+        XCTAssertGreaterThanOrEqual(targetLine.count, EditorHarnessFixtures.viewStateColumn,
+                                    "line \(EditorHarnessFixtures.viewStateLine) must have at least "
+                                      + "column \(EditorHarnessFixtures.viewStateColumn) worth of content")
+        XCTAssertGreaterThanOrEqual(lines.count, 60, "fixture B must be tall enough that "
+                                    + "scrollTop(\(EditorHarnessFixtures.viewStateScrollTop)) is not "
+                                    + "clamped near 0 in the harness's ~600px-tall viewport")
     }
     #endif
 
