@@ -54,6 +54,32 @@ BOOL NormaCEFIsInitialized(void);
 /// The last failure reason, for the placeholder the panel shows instead of a page. Never NULL.
 const char *NormaCEFLastError(void);
 
+/// editor-plumbing Task 2 — the `norma-editor://` scheme, spelled once for the Swift side.
+///
+/// `"norma-editor"`. Two hosts map into ONE on-disk root: `norma-editor://assets/...` is the root
+/// itself (Monaco is embedded at `Contents/Resources/EditorAssets/vs`) and
+/// `norma-editor://app/...` is the page shell beside it (`.../EditorAssets/app`). They are separate
+/// ORIGINS on purpose — the shell is Norma's own code, the assets are vendored third-party bytes —
+/// which is why the scheme is registered CORS-enabled and the handler answers with an
+/// `Access-Control-Allow-Origin` naming the shell.
+extern const char *const kNormaEditorScheme;
+
+/// Point the `norma-editor://` scheme at the directory it serves — the app bundle's
+/// `Contents/Resources/EditorAssets`. Idempotent: calling it again replaces the root outright.
+///
+/// **Nothing outside that directory is reachable through this scheme, ever.** The handler resolves
+/// every request through `NormaCEFEditorAssetResolve` (`NormaCEFAssetResolve.h`), which
+/// canonicalises both sides and refuses anything landing outside the root — `..`, percent-encoded
+/// `..`, and symlinks pointing out of the tree included. The editor reads and writes the USER's
+/// files over the JS bridge, under Swift's control; the scheme is for Norma's own shipped assets
+/// and is not a filesystem door.
+///
+/// Safe before CEF is up, and safe when CEF never comes up: the root is plain process state that
+/// the scheme handler consults on the IO thread. Until it is called the root is empty and the
+/// handler answers 404 to everything — the fail-closed default, deliberately not "the working
+/// directory".
+void NormaCEFRegisterEditorAssetRoot(const char *absolutePath);
+
 /// Create a browser as a child of `parent` and navigate it to `url`. If the CEF context is not up
 /// yet the request is QUEUED and replayed from `OnContextInitialized`; `parent` is held weakly, so
 /// a view torn down before then simply drops out.

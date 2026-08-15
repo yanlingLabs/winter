@@ -798,6 +798,17 @@ targetTemplates:
         HEADER_SEARCH_PATHS:
           - $(inherited)
           - $(SRCROOT)/vendor/cef
+          # editor-plumbing Task 2: `Sources/CEF/NormaEditorScheme.h` — the ONE place the
+          # `norma-editor://` scheme's name and option flags are written. These five helper
+          # processes must register the identical scheme the browser process does (`cef_app.h`:
+          # "the registered schemes should be the same across all processes"), and a second copy of
+          # the flags in `process_helper_mac.cc` would drift from `NormaApp`'s the first time
+          # either changed, silently — no test in this repo can boot CEF to notice. One template
+          # entry covers all five targets, which is the whole point of the template.
+          # Array form, like the two entries above it: this checkout's SRCROOT contains a space,
+          # and each array element reaches Xcode as one already-quoted path (see the Norma
+          # target's own HEADER_SEARCH_PATHS comment for the quoting trap this avoids).
+          - $(SRCROOT)/Sources/CEF
         # CEF 151's public headers require C++20 — measured, not assumed (Task 3):
         # cef_scoped_refptr.h:101 uses std::same_as, and a probe compile at gnu++17 fails there
         # with 20 errors. xcodegen's setting preset leaves the project on gnu++14, same failure.

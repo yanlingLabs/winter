@@ -3,11 +3,14 @@
 #import <Cocoa/Cocoa.h>
 #import <objc/runtime.h>
 
+#include <algorithm>
 #include <climits>
 #include <cstdarg>
 #include <cstdio>
 #include <map>
+#include <mutex>
 #include <string>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
 
@@ -25,8 +28,22 @@
 #include "include/cef_devtools_message_observer.h"
 #include "include/cef_parser.h"
 #include "include/cef_registration.h"
+// editor-plumbing Task 2 — the `norma-editor://` scheme. `cef_resource_handler.h` and
+// `cef_response.h` both arrive transitively through `cef_scheme.h`; named because this file
+// IMPLEMENTS `CefResourceHandler` and `CefSchemeHandlerFactory`.
+#include "include/cef_resource_handler.h"
+#include "include/cef_response.h"
+#include "include/cef_scheme.h"
 #include "include/wrapper/cef_helpers.h"
 #include "include/wrapper/cef_library_loader.h"
+
+// editor-plumbing Task 2 — the two halves of the editor scheme that are NOT CEF's:
+// the containment fence (deliberately CEF-free so the app suite can execute it — CEF never starts
+// under XCTest) and the scheme's own registration, which is shared verbatim with the five helper
+// processes' `CefApp` (see that header for why they are a different class and must not be a
+// different scheme list).
+#import "NormaCEFAssetResolve.h"
+#include "NormaEditorScheme.h"
 
 // panel-cef Task 6a — CEF driven from the run loop SwiftUI already owns.
 //
@@ -1578,11 +1595,285 @@ class NormaClient : public CefClient,
   DISALLOW_COPY_AND_ASSIGN(NormaClient);
 };
 
+// ---------------------------------------------------------------------------
+// editor-plumbing Task 2 — the `norma-editor://` scheme handler
+// ---------------------------------------------------------------------------
+
+/// The one directory this scheme serves — the app bundle's `Contents/Resources/EditorAssets`, set
+/// by `NormaCEFRegisterEditorAssetRoot`.
+///
+/// **Written on the main thread, read on the IO thread**, which is why there is a lock rather than
+/// a bare `std::string`: `CefSchemeHandlerFactory`'s own header says "the methods of this class
+/// will always be called on the IO thread", and the registration happens from Swift at app start.
+/// The lock is taken for the length of a string copy, on a path that runs once per asset request.
+///
+/// Empty until registered, and empty means the fence refuses everything — the fail-closed default.
+std::mutex g_editor_root_mutex;
+std::string g_editor_root;
+
+std::string EditorAssetRoot() {
+  std::lock_guard<std::mutex> lock(g_editor_root_mutex);
+  return g_editor_root;
+}
+
+/// The page shell's origin, which is what every asset response allows. Spelled out rather than
+/// composed from `kNormaEditorSchemeName` at runtime because it is a fixed string in a header
+/// value, and a composed one would only be checkable by reading the code that composed it.
+const char kNormaEditorAppOrigin[] = "norma-editor://app";
+
+/// Where a host lands inside the ONE asset root. Two hosts, one tree:
+///
+///   * `assets` IS the root — `norma-editor://assets/vs/loader.js` → `<root>/vs/loader.js`, which
+///     is exactly where the "Embed Monaco editor assets" phase puts the vendored `vs/`.
+///   * `app` is the page shell's own directory — `norma-editor://app/editor.html` →
+///     `<root>/app/editor.html`. Giving the shell its own host (and therefore its own ORIGIN) is
+///     what makes its relative URLs resolve inside it, and what the scheme's CORS treatment is for:
+///     the page fetches Monaco cross-origin from `assets` and the handler answers with an
+///     `Access-Control-Allow-Origin` naming this host.
+///
+/// **Any other host is refused rather than falling back to the root.** An unknown host is a 404;
+/// this is not a place to be generous. The host never widens what is reachable either way — it only
+/// selects a starting point, and the fence still resolves and re-checks the final path.
+bool EditorHostSubdirectory(const std::string &host, std::string &subdirectory) {
+  if (host == "assets") {
+    subdirectory = "";
+    return true;
+  }
+  if (host == "app") {
+    subdirectory = "/app";
+    return true;
+  }
+  return false;
+}
+
+/// Content type by extension, plus whether it is text (and therefore wants a charset).
+///
+/// The default is `application/octet-stream` — a type no renderer will execute or style, so an
+/// asset with an extension nobody listed fails visibly rather than being sniffed into something.
+/// The vendored Monaco tree is 101 `.js`, one `.css` and one `.ttf`; the rest of this table is for
+/// the page shell and for whatever a Monaco bump brings.
+struct EditorMimeEntry {
+  const char *extension;
+  const char *mime;
+  bool text;
+};
+
+const EditorMimeEntry kEditorMimeTypes[] = {
+    {"js", "text/javascript", true},   {"css", "text/css", true},
+    {"html", "text/html", true},       {"json", "application/json", true},
+    {"svg", "image/svg+xml", true},    {"wasm", "application/wasm", false},
+    {"ttf", "font/ttf", false},
+};
+
+const EditorMimeEntry kEditorMimeDefault = {"", "application/octet-stream", false};
+
+const EditorMimeEntry &EditorMimeFor(const std::string &path) {
+  const size_t dot = path.rfind('.');
+  const size_t slash = path.rfind('/');
+  if (dot == std::string::npos || (slash != std::string::npos && dot < slash)) {
+    return kEditorMimeDefault;
+  }
+  const std::string extension = path.substr(dot + 1);
+  for (const EditorMimeEntry &entry : kEditorMimeTypes) {
+    if (extension == entry.extension) {
+      return entry;
+    }
+  }
+  return kEditorMimeDefault;
+}
+
+/// Read a whole regular file. **`S_ISREG` and not just "it opened"**: the fence answers for any
+/// existing node inside the root, a directory included, and `fopen` on a directory SUCCEEDS on
+/// macOS while every read from it fails — so without this check a request for a directory would
+/// become a 200 with an empty body instead of a 404.
+///
+/// The file is buffered whole rather than streamed, deliberately. These are the app's own embedded
+/// assets — Monaco's largest is a few MB and the shell is a few KB — read once per page load from a
+/// path already in the page cache. A streaming reader would add an open file handle per in-flight
+/// request and a partial-read failure mode, to save memory nothing here is short of.
+bool ReadWholeEditorAsset(const char *path, std::string &out) {
+  struct stat info;
+  if (stat(path, &info) != 0 || !S_ISREG(info.st_mode)) {
+    return false;
+  }
+  FILE *file = fopen(path, "rb");
+  if (file == nullptr) {
+    return false;
+  }
+  out.resize(static_cast<size_t>(info.st_size));
+  const size_t read = out.empty() ? 0 : fread(&out[0], 1, out.size(), file);
+  fclose(file);
+  if (read != out.size()) {
+    out.clear();
+    return false;
+  }
+  return true;
+}
+
+/// One request for one asset.
+///
+/// The lifetime contract is CEF's (`cef_resource_handler.h`): a fresh handler per request, its
+/// methods "called in sequence but not from a dedicated thread". Everything here answers
+/// SYNCHRONOUSLY — no callback is ever retained — because the data is a local file read in `Open`,
+/// so the asynchronous arms of that header's contract are simply not used.
+///
+/// A miss is a 404 that this handler still SERVES: `Open` sets `handle_request = true` and returns
+/// true either way. Returning false would cancel the request outright and give the page a network
+/// error rather than a status it can reason about, and leaving it unhandled would fall through to
+/// whatever default the scheme has (none).
+class NormaEditorSchemeHandler : public CefResourceHandler {
+ public:
+  NormaEditorSchemeHandler() = default;
+
+  bool Open(CefRefPtr<CefRequest> request, bool &handle_request, CefRefPtr<CefCallback> callback)
+      override {
+    // "To handle the request immediately set |handle_request| to true and return true."
+    handle_request = true;
+    if (request) {
+      Load(request->GetURL().ToString());
+    }
+    return true;
+  }
+
+  void GetResponseHeaders(CefRefPtr<CefResponse> response, int64_t &response_length,
+                          CefString &redirectUrl) override {
+    if (!response) {
+      return;
+    }
+    if (!found_) {
+      response->SetStatus(404);
+      response->SetStatusText("Not Found");
+      response->SetMimeType("text/plain");
+      response_length = 0;
+      return;
+    }
+    response->SetStatus(200);
+    response->SetStatusText("OK");
+    response->SetMimeType(mime_);
+    if (text_) {
+      // Monaco's sources are UTF-8 and contain non-ASCII bytes. Without a charset the renderer
+      // guesses, which is a decoding bug waiting for the first file that has one.
+      response->SetCharset("utf-8");
+    }
+    // The page shell (`norma-editor://app`) loads Monaco from `norma-editor://assets` — two
+    // origins, so worker and `fetch` loads across them are CORS requests and need this answer. Set
+    // on every hit rather than only on cross-origin ones: it is inert for a same-origin load, and a
+    // conditional would need to know the initiator, which this handler has no reason to inspect.
+    response->SetHeaderByName("Access-Control-Allow-Origin", kNormaEditorAppOrigin, true);
+    response_length = static_cast<int64_t>(data_.size());
+  }
+
+  bool Skip(int64_t bytes_to_skip, int64_t &bytes_skipped,
+            CefRefPtr<CefResourceSkipCallback> callback) override {
+    if (bytes_to_skip < 0 || offset_ >= data_.size()) {
+      bytes_skipped = -2;  // ERR_FAILED, per the header's own example.
+      return false;
+    }
+    const int64_t remaining = static_cast<int64_t>(data_.size() - offset_);
+    bytes_skipped = std::min(bytes_to_skip, remaining);
+    offset_ += static_cast<size_t>(bytes_skipped);
+    return true;
+  }
+
+  bool Read(void *data_out, int bytes_to_read, int &bytes_read,
+            CefRefPtr<CefResourceReadCallback> callback) override {
+    bytes_read = 0;
+    if (data_out == nullptr || bytes_to_read <= 0 || offset_ >= data_.size()) {
+      // "To indicate response completion set |bytes_read| to 0 and return false." A 404 lands here
+      // on its first call, which is what makes it a zero-length body rather than a hang.
+      return false;
+    }
+    const size_t count = std::min(static_cast<size_t>(bytes_to_read), data_.size() - offset_);
+    memcpy(data_out, data_.data() + offset_, count);
+    offset_ += count;
+    bytes_read = static_cast<int>(count);
+    return true;
+  }
+
+  void Cancel() override {}
+
+ private:
+  /// Resolve and read, or leave the handler in its 404 state. Every failure below is the SAME
+  /// outcome — unparseable URL, unknown host, unset root, escape attempt, missing file, directory,
+  /// unreadable file — because telling them apart would tell a page what exists outside the root.
+  void Load(const std::string &url) {
+    CefURLParts parts;
+    if (!CefParseURL(url, parts)) {
+      return;
+    }
+    const std::string host = CefString(&parts.host).ToString();
+    const std::string path = CefString(&parts.path).ToString();
+
+    std::string subdirectory;
+    if (!EditorHostSubdirectory(host, subdirectory)) {
+      return;
+    }
+
+    const std::string root = EditorAssetRoot();
+    if (root.empty()) {
+      return;
+    }
+
+    // THE FENCE. `CefURLParts::path` carries no query and no fragment, and Chromium has already
+    // canonicalised the URL by the time a standard scheme's handler sees it — neither of which is
+    // relied on here. This is the guarantee; the canonicalisation is a coincidence of the path a
+    // request happened to take (`CefSchemeHandlerFactory::Create` documents being reachable from a
+    // `CefURLRequest` with no browser at all).
+    char *resolved = NormaCEFEditorAssetResolve(root.c_str(), (subdirectory + path).c_str());
+    if (resolved == nullptr) {
+      return;
+    }
+    const bool read = ReadWholeEditorAsset(resolved, data_);
+    if (read) {
+      const EditorMimeEntry &entry = EditorMimeFor(resolved);
+      mime_ = entry.mime;
+      text_ = entry.text;
+      found_ = true;
+    }
+    free(resolved);
+  }
+
+  std::string data_;
+  std::string mime_;
+  size_t offset_ = 0;
+  bool text_ = false;
+  bool found_ = false;
+
+  IMPLEMENT_REFCOUNTING(NormaEditorSchemeHandler);
+  DISALLOW_COPY_AND_ASSIGN(NormaEditorSchemeHandler);
+};
+
+/// A handler per request, and no state of its own — the root lives in one place
+/// (`g_editor_root`) so that re-registering it cannot leave a stale copy behind in a factory.
+class NormaEditorSchemeFactory : public CefSchemeHandlerFactory {
+ public:
+  NormaEditorSchemeFactory() = default;
+
+  CefRefPtr<CefResourceHandler> Create(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+                                       const CefString &scheme_name,
+                                       CefRefPtr<CefRequest> request) override {
+    return new NormaEditorSchemeHandler();
+  }
+
+ private:
+  IMPLEMENT_REFCOUNTING(NormaEditorSchemeFactory);
+  DISALLOW_COPY_AND_ASSIGN(NormaEditorSchemeFactory);
+};
+
 class NormaApp : public CefApp, public CefBrowserProcessHandler {
  public:
   NormaApp() = default;
 
   CefRefPtr<CefBrowserProcessHandler> GetBrowserProcessHandler() override { return this; }
+
+  /// editor-plumbing Task 2 — the BROWSER process's half of the scheme registration. The other
+  /// half is `NormaSubprocessApp` in `NormaEditorScheme.h`, which the five helper bundles' shared
+  /// `main` hands to `CefExecuteProcess`: CEF requires the same scheme list in every process, and
+  /// this app class is reachable from exactly one of them. Both call the same function so the
+  /// flags cannot drift — read that header for what each flag buys and what breaks without it.
+  void OnRegisterCustomSchemes(CefRawPtr<CefSchemeRegistrar> registrar) override {
+    NormaCEFRegisterEditorScheme(registrar);
+  }
 
   /// **Works around an upstream CEF/Chromium crash that killed the browser process deterministically
   /// on any single-page-app navigation.** Reproduced by the live gate as "searching on YouTube
@@ -1892,6 +2183,23 @@ BOOL NormaCEFInitialize(int argc,
   Log("CefInitialize ok; context initialized synchronously = %s",
       g_context_initialized ? "yes" : "no");
 
+  // editor-plumbing Task 2 — the `norma-editor://` scheme's FACTORY, which is the browser-process
+  // half of the scheme and the only half that can be registered here. Its other half —
+  // `AddCustomScheme`, in every process including the five helpers — has already run by now:
+  // `CefApp::OnRegisterCustomSchemes` fires from inside `CefInitialize` above.
+  //
+  // AFTER `CefInitialize`, not before: `CefRegisterSchemeHandlerFactory` registers with the global
+  // request context, which does not exist until CEF is up. An EMPTY domain matches every host of a
+  // standard scheme (`cef_scheme.h`) — this scheme has two, `app` and `assets`, and the handler
+  // maps each into the one asset root.
+  //
+  // The result is logged because it is a `bool` nothing else would ever look at: a false here means
+  // the whole editor surface silently serves nothing, with no other symptom until a page fails to
+  // load in Task 5's harness.
+  const bool scheme_ok = CefRegisterSchemeHandlerFactory(kNormaEditorScheme, CefString(),
+                                                         new NormaEditorSchemeFactory());
+  Log("%s scheme handler factory registered = %s", kNormaEditorScheme, scheme_ok ? "yes" : "no");
+
   // The shutdown guarantee lives HERE, with the thing it guards, rather than in a line of
   // AppDelegate that could be deleted without anything failing to compile. It is registered only
   // once CEF is actually up, so a build that never starts CEF never arms it.
@@ -1925,6 +2233,27 @@ BOOL NormaCEFIsInitialized(void) {
 
 const char *NormaCEFLastError(void) {
   return g_last_error.c_str();
+}
+
+// editor-plumbing Task 2. Defined from the C++ constant in `NormaEditorScheme.h` — the scheme name
+// is written ONCE, and the Swift-facing symbol, the browser process's `AddCustomScheme` and the
+// helpers' cannot say different things.
+const char *const kNormaEditorScheme = kNormaEditorSchemeName;
+
+void NormaCEFRegisterEditorAssetRoot(const char *absolutePath) {
+  {
+    std::lock_guard<std::mutex> lock(g_editor_root_mutex);
+    g_editor_root = absolutePath != nullptr ? absolutePath : "";
+  }
+  // No CEF guard on purpose — this is plain process state, safe before `CefInitialize` and safe in
+  // a host where CEF never starts at all (the unit-test host is exactly that). The path itself is
+  // logged in DEBUG only, matching this file's treatment of every other path- or URL-bearing line:
+  // stderr going nowhere under LaunchServices is a default, not a privacy guarantee.
+#if DEBUG
+  Log("editor asset root = %s", absolutePath != nullptr ? absolutePath : "(cleared)");
+#else
+  Log("editor asset root registered");
+#endif
 }
 
 void NormaCEFCreateBrowser(NSView *parent, const char *url) {

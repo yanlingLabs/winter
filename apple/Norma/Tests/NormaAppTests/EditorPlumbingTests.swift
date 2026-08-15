@@ -181,4 +181,98 @@ final class EditorPlumbingTests: XCTestCase {
         XCTAssertNil(resolved("/nonexistent-root-\(UUID().uuidString)", "/vs/loader.js"),
                      "a root that does not exist cannot contain anything")
     }
+
+    // MARK: - The scheme, as far as a CEF-less host can see it
+
+    /// `NormaCEFRegisterEditorAssetRoot` must be safe in a process where CEF never started — which
+    /// is every process this suite runs in, and also a shipped app that never opens a web tab.
+    /// `NormaCEF.h`'s standing contract ("EVERY function here is safe to call when CEF was never
+    /// loaded or initialised") is the thing being pinned; idempotence is the brief's own word.
+    ///
+    /// `kNormaEditorScheme` is checked here rather than in a case of its own because it is the same
+    /// claim: the Swift-facing surface of the scheme resolves, and says what the C++ side says. The
+    /// constant is DEFINED from `NormaEditorScheme.h`'s `kNormaEditorSchemeName` — the one string
+    /// the browser process and the five helpers both register — so this reads the far end of that
+    /// chain from the only language that cannot see it directly.
+    func testRegisteringTheEditorAssetRootIsSafeWithoutCEFAndIsIdempotent() throws {
+        XCTAssertEqual(String(cString: kNormaEditorScheme), "norma-editor",
+                       "the Swift-facing scheme name must be the one the C++ side registers")
+
+        let root = try scratchRootWithFile(at: "vs/loader.js")
+        NormaCEFRegisterEditorAssetRoot(root)
+        NormaCEFRegisterEditorAssetRoot(root)
+        NormaCEFRegisterEditorAssetRoot(nil)
+        XCTAssertFalse(NormaCEFIsInitialized(),
+                       "this suite must not have started CEF — the point of the call above")
+    }
+
+    /// **The pin for this task's one genuine discovery: the helpers do not share the browser
+    /// process's `CefApp`.** `CEFHelperSources/process_helper_mac.cc` passed `nullptr` to
+    /// `CefExecuteProcess` from the day it was written, so `OnRegisterCustomSchemes` ran in exactly
+    /// one process of six. CEF requires the identical scheme list in all of them (`cef_app.h`), and
+    /// a renderer that has not been told `norma-editor://` is STANDARD and SECURE gives the editor
+    /// page no real origin, no secure context, and therefore no workers, no ES modules and no
+    /// `fetch` — Monaco simply does not start.
+    ///
+    /// Nothing else in this repo can catch a regression here. No test boots CEF, so reverting the
+    /// helper's app to `nullptr` compiles, links, leaves the whole suite green, and surfaces only
+    /// as a blank editor in a live run.
+    ///
+    /// The technique is this repo's existing one for exactly that shape of risk (see
+    /// `CEFRuntimeTests.testTheTerminationObserverIsACTUALLYSUBSCRIBED`): the literal lands in
+    /// `__cstring` and survives stripping, so the BUILT PRODUCT can be scanned for it. Debug builds
+    /// put the code in a sibling `.debug.dylib` and Release builds in the executable itself, so
+    /// both are searched and either one counts.
+    ///
+    /// What this pins and what it does not, measured by mutation rather than assumed:
+    ///
+    ///   * Restoring `process_helper_mac.cc` to its pre-task shape — `CefExecuteProcess(main_args,
+    ///     nullptr, nullptr)` with the include gone — fails this test **5 times, once per helper**,
+    ///     with the app binary still passing. That is the realistic regression (a revert, a
+    ///     dropped include, a helper target losing the header search path) and it is caught.
+    ///   * Changing ONLY the third argument, leaving `new NormaSubprocessApp()` constructed above
+    ///     it, still passes: the class is instantiated, so the literal is still emitted. No scan of
+    ///     a built binary can see what was passed to a call, and a host that must never start CEF
+    ///     cannot observe the registration firing — the same limit
+    ///     `testTheTerminationObserverIsACTUALLYSUBSCRIBED` carries, stated here for the same
+    ///     reason. Task 5's live harness is what closes it.
+    func testTheEditorSchemeIsCompiledIntoEveryProcessAndNotOnlyTheBrowser() throws {
+        let app = Bundle.main.bundleURL
+        var binaries: [(String, URL)] = [
+            ("Norma (browser process)", app.appendingPathComponent("Contents/MacOS/Norma"))
+        ]
+        for suffix in ["", " (Alerts)", " (GPU)", " (Plugin)", " (Renderer)"] {
+            let name = "Norma Helper\(suffix)"
+            binaries.append((name, app.appendingPathComponent(
+                "Contents/Frameworks/\(name).app/Contents/MacOS/\(name)")))
+        }
+
+        for (name, executable) in binaries {
+            XCTAssertTrue(
+                Self.binaryCarries("norma-editor", at: executable),
+                "\(name) does not carry the `norma-editor` scheme literal — its process would not "
+                    + "register the scheme, and a renderer without it cannot run the editor page"
+            )
+        }
+    }
+
+    /// Search a built binary — and its `.debug.dylib` sibling, which is where a Debug build's code
+    /// actually lives — for a literal.
+    private static func binaryCarries(_ needle: String, at executable: URL) -> Bool {
+        let candidates = [
+            executable,
+            executable.deletingLastPathComponent()
+                .appendingPathComponent(executable.lastPathComponent + ".debug.dylib")
+        ]
+        let bytes = Data(needle.utf8)
+        for candidate in candidates {
+            guard let data = try? Data(contentsOf: candidate, options: .mappedIfSafe) else {
+                continue
+            }
+            if data.range(of: bytes) != nil {
+                return true
+            }
+        }
+        return false
+    }
 }
