@@ -810,6 +810,47 @@ final class EditorPlumbingTests: XCTestCase {
         }
     }
 
+    // MARK: - Task 4: the host page, as EMBEDDED
+
+    /// **The page reaches the built app, nested, and exactly once.**
+    ///
+    /// The first half is presence: without `EditorAssets/app/editor.html` beside `EditorAssets/vs/`
+    /// there is nothing for `norma-editor://app/editor.html` to serve, and the scheme's fence
+    /// answers 404 to a page that exists perfectly well in the source tree. The embed phase's `app/`
+    /// copy is `[ -d ]`-guarded (it was wired a task before the directory existed), so a source tree
+    /// that stopped being copied would fail nothing on its own.
+    ///
+    /// The second half is the one with teeth. `- path: Resources` in `project.yml` is an xcodegen
+    /// GROUP, so everything under it ALSO goes through Xcode's automatic Copy Bundle Resources —
+    /// and that copy flattens: this project's own build log shows `Resources/MenuBar/mb-dev-idle.png`
+    /// arriving as `Contents/Resources/mb-dev-idle.tiff`, no subdirectory surviving and the bytes
+    /// transformed on the way. Dropping the `excludes: [EditorAssets]` entry does not break a build;
+    /// it silently mints a second, dead copy of the page at the Resources root, on paths the release
+    /// name-scan rules do not describe. Only an absence assertion can see that.
+    func testTheEditorPageIsEmbeddedNestedAndNotFlattened() throws {
+        let resources = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/Resources", isDirectory: true)
+        let editorAssets = resources.appendingPathComponent("EditorAssets", isDirectory: true)
+
+        for relative in ["app/editor.html", "app/editor.js", "app/bridge-protocol.js", "vs/loader.js"] {
+            XCTAssertTrue(
+                FileManager.default.fileExists(
+                    atPath: editorAssets.appendingPathComponent(relative).path),
+                "EditorAssets/\(relative) is missing from the built app — the editor page cannot boot"
+            )
+        }
+
+        for flattened in ["editor.html", "editor.js", "bridge-protocol.js"] {
+            XCTAssertFalse(
+                FileManager.default.fileExists(
+                    atPath: resources.appendingPathComponent(flattened).path),
+                "\(flattened) sits at the Resources ROOT — Copy Bundle Resources took EditorAssets a "
+                    + "second time and flattened it, which means project.yml's `- path: Resources` "
+                    + "lost its `excludes: [EditorAssets]`"
+            )
+        }
+    }
+
     /// Search a built binary — and its `.debug.dylib` sibling, which is where a Debug build's code
     /// actually lives — for a literal.
     private static func binaryCarries(_ needle: String, at executable: URL) -> Bool {

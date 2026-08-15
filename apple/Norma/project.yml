@@ -36,6 +36,17 @@ targets:
       # verified at load (RemoteAccessCoordinator.loadVerifiedRelayConfig) against
       # NormaKit's RelayConfigTrust.productionPublicKey before a single relay URL is trusted.
       - path: Resources
+        # editor-plumbing Task 4: `EditorAssets/` is placed by the "Embed Monaco editor assets"
+        # postCompileScript below, which dittos it NESTED (app/ and vs/ keep their subpaths). It
+        # must NOT also go through Xcode's automatic Copy Bundle Resources, because `- path:
+        # Resources` is an xcodegen GROUP and that copy FLATTENS: this project's own build log shows
+        # `Resources/MenuBar/mb-dev-idle.png` arriving as `Contents/Resources/mb-dev-idle.tiff` —
+        # no subdirectory survives, and COMBINE_HIDPI can transform the bytes on the way. Left
+        # unexcluded, `editor.html`/`editor.js`/`bridge-protocol.js` would ALSO appear bare at the
+        # Resources root: dead copies nothing serves, on a path the name-scan rules do not describe.
+        # `EditorPlumbingTests.testTheEditorPageIsEmbeddedNestedAndNotFlattened` pins both halves.
+        excludes:
+          - EditorAssets
       # sidebar-brand T1: the brand palette (docs/brand.md) — colorsets ONLY, no app-icon set.
       # The `.icns` path still owns the icon via Info.plist's CFBundleIconFile
       # ($(NORMA_APP_ICON)), and ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME stays unset so
