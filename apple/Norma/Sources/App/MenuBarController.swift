@@ -87,6 +87,26 @@ final class MenuBarController {
     let updateItem = NSMenuItem(title: "Update ready — Restart Now", action: #selector(didInstallUpdate), keyEquivalent: "")
     private var panicMounted = false
 
+    #if DEBUG
+    /// editor-plumbing Task 5 — the editor bridge harness's door for a human.
+    ///
+    /// **A settable hook rather than another `init` parameter, and only in Debug.** Every other
+    /// action here is injected at construction because it is part of the shipped menu's contract;
+    /// this one exists only in developer builds and must not widen an initialiser that ten call
+    /// sites and several test files name. Nil-by-default is also the mount condition — the item does
+    /// not exist unless something set this — so a Debug build that never wires it looks exactly like
+    /// a release one.
+    ///
+    /// **Set it before `install()`**: the menu is built once, there.
+    ///
+    /// Norma has no debug MENU — the menu bar's status-item menu is the app's only menu (it is
+    /// `LSUIElement`, so there is no main menu bar to hang one from), which is why this lands beside
+    /// "Dashboard…" rather than under a "Debug" submenu the app does not have.
+    var onOpenEditorHarness: (() -> Void)?
+    let editorHarnessItem = NSMenuItem(title: "Editor Bridge Harness…",
+                                       action: #selector(didOpenEditorHarness), keyEquivalent: "")
+    #endif
+
     // MARK: - Task DD-T5: live activity icon (idle/thinking/working, rotating pulse frames)
 
     private var activity: MenuBarActivity = .idle
@@ -270,6 +290,13 @@ final class MenuBarController {
         menu.addItem(dashboardItem)
         pluginManagerItem.target = self
         menu.addItem(pluginManagerItem)
+        #if DEBUG
+        // Mounted only when something wired the hook — see `onOpenEditorHarness`.
+        if onOpenEditorHarness != nil {
+            editorHarnessItem.target = self
+            menu.addItem(editorHarnessItem)
+        }
+        #endif
         pairDeviceItem.target = self
         menu.addItem(pairDeviceItem)
         pairedDevicesItem.target = self
@@ -438,6 +465,9 @@ final class MenuBarController {
     @objc private func didOpenNormaApp() { openNormaApp() }
     @objc private func didNewChat() { openNewChat() }
     @objc private func didChat() { openChat() }
+    #if DEBUG
+    @objc private func didOpenEditorHarness() { onOpenEditorHarness?() }
+    #endif
     @objc private func didOpenDashboard() { openDashboard() }
     @objc private func didOpenPluginManager() { openPluginManager() }
     @objc private func didOpenPairDevice() { openPairDevice() }

@@ -647,6 +647,47 @@ final class MenuBarEntryPointsTests: XCTestCase {
         menuBar.refresh()
         XCTAssertEqual(item.state, .off, "refresh() reconciles to the now-settled service state")
     }
+
+    // MARK: - editor-plumbing Task 5: the editor bridge harness item (Debug only)
+
+    #if DEBUG
+    /// **The hook being nil is the mount condition, and that is load-bearing rather than tidy.**
+    ///
+    /// Every adjacency assertion in this file is written against the shipped menu, and this item
+    /// sits inside it — so a Debug build that mounted it unconditionally would move "Pair a
+    /// Device…" one place down and fail `testMenuContains…` for a developer-only entry. Nothing
+    /// wires the hook here, so an unwired controller's menu is byte-for-byte the shipped one.
+    func testTheEditorHarnessItemIsNotMountedUnlessSomethingWiresIt() {
+        let controller = makeController()
+        controller.install()
+
+        let titles = controller.statusItem?.menu?.items.map(\.title) ?? []
+        XCTAssertFalse(titles.contains("Editor Bridge Harness…"),
+                       "the harness item must not exist unless onOpenEditorHarness was set")
+    }
+
+    /// Wired before `install()` — which is where the menu is built, once — the item appears beside
+    /// the other developer-facing windows and fires its hook.
+    func testTheEditorHarnessItemMountsAfterManagePluginsAndFiresItsHook() {
+        var fired = 0
+        let controller = makeController()
+        controller.onOpenEditorHarness = { fired += 1 }
+        controller.install()
+
+        let titles = controller.statusItem?.menu?.items.map(\.title) ?? []
+        guard let pluginsIdx = titles.firstIndex(of: "Manage Plugins…"),
+              let harnessIdx = titles.firstIndex(of: "Editor Bridge Harness…") else {
+            return XCTFail("expected the harness item mounted after Manage Plugins…, got \(titles)")
+        }
+        XCTAssertEqual(harnessIdx, pluginsIdx + 1)
+
+        let item = controller.editorHarnessItem
+        XCTAssertNotNil(item.target)
+        XCTAssertNotNil(item.action)
+        NSApp.sendAction(item.action!, to: item.target, from: item)
+        XCTAssertEqual(fired, 1)
+    }
+    #endif
 }
 
 /// A `LoginItemService` that models the REAL `SMLoginItem`'s async/sync mismatch: `enable()`/

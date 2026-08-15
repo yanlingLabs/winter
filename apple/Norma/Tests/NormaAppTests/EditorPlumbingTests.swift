@@ -934,6 +934,298 @@ final class EditorPlumbingTests: XCTestCase {
         }
     }
 
+    // MARK: - Task 5: the harness's page seam
+
+    /// **The page's debug seam exists and stays data-only.**
+    ///
+    /// `normaEditorDebugState()` is how the live harness sees the model table at all: `page` is
+    /// module-scoped, so nothing outside `editor.js` can reach it, and the harness reads this global
+    /// through CDP `Runtime.evaluate` with `returnByValue`. Two failures it guards:
+    ///
+    ///  * the function going missing — every `.local` step in the drill that inspects models would
+    ///    fail as a JavaScript exception, with the harness reporting a page fault for a seam that
+    ///    was simply deleted;
+    ///  * it starting to return live objects. `returnByValue` serialises the answer, and a Monaco
+    ///    model or a disposable cannot be serialised — the evaluate would fail rather than answer,
+    ///    which is why the three members are asserted by name.
+    func testTheEditorPageExposesTheDataOnlyDebugStateSeam() throws {
+        let source = try XCTUnwrap(Self.pageFile(named: "editor.js"),
+                                   "editor.js is in neither the built bundle nor the source tree")
+        let code = Self.strippingJavaScriptComments(try String(contentsOf: source, encoding: .utf8))
+
+        XCTAssertTrue(code.contains("window.normaEditorDebugState"),
+                      "editor.js no longer exposes normaEditorDebugState — Task 5's harness reads "
+                        + "the model table through it and has no other door to `page`")
+        for member in ["paths", "current", "dirtyMap"] {
+            XCTAssertTrue(code.contains("\(member):"),
+                          "normaEditorDebugState must still answer `\(member)` — the harness's "
+                            + "model-table assertions read it by name")
+        }
+        XCTAssertFalse(code.contains("return page;"),
+                       "the debug seam must stay DATA — returning `page` hands back Monaco models "
+                         + "and disposables, which returnByValue cannot serialise at all")
+    }
+
+    // MARK: - Task 5: the harness's drill script, judged without Chromium
+
+    private func step(_ expectation: EditorHarnessExpectation,
+                      id: String = "s", timeout: TimeInterval = 5) -> EditorHarnessStep {
+        return EditorHarnessStep(id: id, drill: 1, title: id, expectation: expectation,
+                                 timeout: timeout)
+    }
+
+    /// **The pin the whole save protocol rests on.** A `contentResponse` carrying a `seq` other than
+    /// the one this step pulled must CONDEMN the step, not be skipped in the hope a better one
+    /// arrives. `markSaved`'s correctness is that an acknowledgement is anchored to the pull it
+    /// acknowledges; a harness that quietly accepted a late answer to a superseded pull would report
+    /// the race drill green whatever the page did.
+    func testAContentResponseForASupersededPullCondemnsTheStep() {
+        var script = EditorHarnessScript(steps: [step(.content(path: "/a.ts", seq: 2, text: "hello"))])
+
+        let verdict = script.advance(event: .bridge(.contentResponse(path: "/a.ts", seq: 1,
+                                                                     text: "hello")))
+
+        guard case .failed(let reason) = verdict else {
+            return XCTFail("a superseded seq must fail the step, got \(verdict)")
+        }
+        XCTAssertTrue(reason.contains("seq 1"), reason)
+        XCTAssertTrue(reason.contains("seq 2"), reason)
+        XCTAssertEqual(script.failedCount, 1)
+    }
+
+    /// The other two ways a `contentResponse` can be wrong, and neither may be treated as "not for
+    /// me": a wrong path would let one model's bytes satisfy another's round trip.
+    func testAContentResponseForTheWrongModelCondemnsTheStep() {
+        var script = EditorHarnessScript(steps: [step(.content(path: "/a.ts", seq: 1, text: "hello"))])
+
+        let verdict = script.advance(event: .bridge(.contentResponse(path: "/b.ts", seq: 1,
+                                                                     text: "hello")))
+
+        guard case .failed(let reason) = verdict else {
+            return XCTFail("a wrong path must fail the step, got \(verdict)")
+        }
+        XCTAssertTrue(reason.contains("/b.ts"), reason)
+    }
+
+    /// **Bytes, not `String`.** Swift's `==` is canonical equivalence, so a precomposed `é` and an
+    /// `e` + U+0301 are the same `String` and different files. The round-trip drills exist to prove
+    /// a byte-identical round trip, so `String ==` is the one comparison that could not see the
+    /// failure they were written for — this is that claim, executed.
+    func testTextIsComparedAsBytesSoCanonicalEquivalenceCannotPassAsIdentity() {
+        let precomposed = "caf\u{00E9}"
+        let decomposed = "cafe\u{0301}"
+        XCTAssertEqual(precomposed, decomposed,
+                       "precondition: Swift's String == calls these equal, which is exactly the trap")
+
+        var script = EditorHarnessScript(steps: [step(.content(path: "/a.ts", seq: 1,
+                                                              text: precomposed))])
+        let verdict = script.advance(event: .bridge(.contentResponse(path: "/a.ts", seq: 1,
+                                                                     text: decomposed)))
+
+        guard case .failed(let reason) = verdict else {
+            return XCTFail("two different byte sequences must fail the round trip, got \(verdict)")
+        }
+        XCTAssertTrue(reason.contains("byte 3"), reason)
+        XCTAssertNil(EditorHarnessScript.firstByteDifference(expected: precomposed,
+                                                             actual: precomposed))
+    }
+
+    /// A timeout is an ORDINARY EVENT, judged by the same function as an arriving message — which is
+    /// what lets `.silence` exist at all, since its pass is a timeout and its failure is a message.
+    func testATimeoutFailsAWaitingStepAndPassesASilenceStep() {
+        var waiting = EditorHarnessScript(steps: [step(.dirty(path: "/a.ts", dirty: true))])
+        guard case .failed(let reason) = waiting.advance(event: .timeout) else {
+            return XCTFail("a timeout must fail a step that was waiting for a message")
+        }
+        XCTAssertTrue(reason.contains("timed out"), reason)
+
+        var silent = EditorHarnessScript(steps: [step(.silence(types: ["modelDirtyChanged"]))])
+        guard case .passed = silent.advance(event: .timeout) else {
+            return XCTFail("a timeout is how a silence step PASSES")
+        }
+        XCTAssertTrue(silent.isFinished)
+    }
+
+    /// **The race drill's whole shape.** A `.silence` step is condemned by the message it forbade —
+    /// this is what "markSaved for a superseded pull must clear NOTHING" is measured with — and
+    /// deliberately unmoved by any other, because the page legitimately interleaves.
+    func testASilenceStepIsCondemnedByTheMessageItForbadeAndIgnoresEveryOther() {
+        var script = EditorHarnessScript(steps: [step(.silence(types: ["modelDirtyChanged"]))])
+
+        XCTAssertEqual(script.advance(event: .bridge(.saveRequested(path: "/a.ts"))), .pending,
+                       "a message of another kind must leave the absence intact")
+        XCTAssertEqual(script.strays.count, 1, "…and be recorded rather than dropped")
+
+        guard case .failed(let reason) = script.advance(
+            event: .bridge(.modelDirtyChanged(path: "/a.ts", dirty: false))) else {
+            return XCTFail("the forbidden message must condemn the step")
+        }
+        XCTAssertTrue(reason.contains("stay silent"), reason)
+    }
+
+    /// A dirty transition with the right shape but the wrong VALUE is a failure, not a stray. The
+    /// race drill's negative half is exactly "a `dirty: false` that must not have happened".
+    func testAWrongDirtyValueCondemnsTheStepRatherThanBeingIgnored() {
+        var script = EditorHarnessScript(steps: [step(.dirty(path: "/a.ts", dirty: true))])
+
+        guard case .failed(let reason) = script.advance(
+            event: .bridge(.modelDirtyChanged(path: "/a.ts", dirty: false))) else {
+            return XCTFail("the wrong dirty value must fail the step")
+        }
+        XCTAssertTrue(reason.contains("required true"), reason)
+    }
+
+    /// Legal interleaving must not be judged. The page emits transitions on its own schedule — an
+    /// external write's dirty transition can land while a pull is in flight — so a message of
+    /// another kind leaves the step waiting and is recorded as a stray.
+    func testAMessageOfAnotherKindLeavesTheStepWaitingAndIsRecorded() {
+        var script = EditorHarnessScript(steps: [step(.content(path: "/a.ts", seq: 1, text: "x"))])
+
+        XCTAssertEqual(script.advance(event: .bridge(.modelDirtyChanged(path: "/a.ts", dirty: true))),
+                       .pending)
+        XCTAssertEqual(script.index, 0, "the step must still be current")
+        XCTAssertEqual(script.strays.count, 1)
+
+        guard case .passed = script.advance(event: .bridge(.contentResponse(path: "/a.ts", seq: 1,
+                                                                            text: "x"))) else {
+            return XCTFail("the answer it was waiting for must still satisfy it")
+        }
+    }
+
+    /// **A failed step does not stop the run.** The question eleven drills exist to answer is which
+    /// of eleven independent claims hold; halting on the first red would leave the other ten
+    /// unmeasured and the transcript silent about them.
+    func testAFailedStepAdvancesTheRunSoTheRemainingDrillsAreStillMeasured() {
+        var script = EditorHarnessScript(steps: [
+            step(.ready, id: "one"),
+            step(.saveRequested(path: "/a.ts"), id: "two")
+        ])
+
+        XCTAssertEqual(script.advance(event: .timeout), .failed("timed out waiting for ready"))
+        XCTAssertEqual(script.current?.id, "two", "the run must move on to the next claim")
+
+        guard case .passed = script.advance(event: .bridge(.saveRequested(path: "/a.ts"))) else {
+            return XCTFail("the second step must be judged on its own merits")
+        }
+        XCTAssertEqual(script.passedCount, 1)
+        XCTAssertEqual(script.failedCount, 1)
+        XCTAssertTrue(script.isFinished)
+    }
+
+    /// A locally judged answer arriving for a step that is waiting on the PAGE is a harness bug, and
+    /// a silent one if it were ignored: the step would sit until its timeout and be reported as a
+    /// page failure it never caused.
+    func testALocalAnswerForAPageStepIsAFailureRatherThanSilence() {
+        var script = EditorHarnessScript(steps: [step(.ready)])
+
+        guard case .failed(let reason) = script.advance(
+            event: .local(ok: true, detail: "wrote the file")) else {
+            return XCTFail("a local answer must not be swallowed by a step waiting on the page")
+        }
+        XCTAssertTrue(reason.contains("wrote the file"), reason)
+    }
+
+    /// Everything arriving after the last step is recorded and nothing is judged — a page that keeps
+    /// talking once the run is over is information, not a verdict.
+    func testMessagesArrivingAfterTheRunEndsAreRecordedAndNotJudged() {
+        var script = EditorHarnessScript(steps: [step(.ready)])
+        _ = script.advance(event: .bridge(.ready))
+        XCTAssertTrue(script.isFinished)
+
+        XCTAssertEqual(script.advance(event: .bridge(.saveRequested(path: "/a.ts"))), .pending)
+        XCTAssertEqual(script.results.count, 1, "no verdict may be recorded for a step that is gone")
+        XCTAssertEqual(script.strays.count, 1)
+    }
+
+    // MARK: - Task 5: what Monaco hands back
+
+    /// **The round-trip drills' expected bytes are COMPUTED, and this is the computation.**
+    ///
+    /// Monaco's buffer builder normalises line endings when it constructs a model, so a file with
+    /// mixed endings does not come back as it went in. Ported from the vendored build
+    /// (`vendor/monaco/vs/editor/editor.main.js`, `PieceTreeTextBufferBuilder._getEOL` / `create`,
+    /// with `normalizeEOL` defaulting to `true` and `defaultEOL` = LF), and pinned here so a wrong
+    /// expectation shows up as a unit failure rather than as an unexplained red in a live run.
+    func testMonacoEOLNormalisationMatchesTheVendoredRule() {
+        // Uniform LF: nothing to rewrite.
+        XCTAssertEqual(MonacoTextBuffer.normalisedEOL("a\nb\nc"), "a\nb\nc")
+        // Uniform CRLF: `p > b/2` picks CRLF, and with no lone terminator nothing is rewritten —
+        // this is the branch fixture B is built to take, so its round trip must be byte-identical.
+        XCTAssertEqual(MonacoTextBuffer.normalisedEOL("a\r\nb\r\nc"), "a\r\nb\r\nc")
+        // Mixed, LF in the majority — fixture A's shape. Every CRLF becomes LF.
+        XCTAssertEqual(MonacoTextBuffer.normalisedEOL("a\nb\nc\r\nd"), "a\nb\nc\nd")
+        // Mixed, CR-bearing terminators in the majority: everything becomes CRLF.
+        XCTAssertEqual(MonacoTextBuffer.normalisedEOL("a\r\nb\r\nc\nd"), "a\r\nb\r\nc\r\nd")
+        // A lone CR is a terminator too, and it is never left alone.
+        XCTAssertEqual(MonacoTextBuffer.normalisedEOL("a\rb\nc"), "a\nb\nc")
+        // No terminator at all: `defaultEOL` decides, and it decides nothing here.
+        XCTAssertEqual(MonacoTextBuffer.normalisedEOL("no newlines"), "no newlines")
+        // A trailing terminator is preserved as one — nothing adds or removes a final newline.
+        XCTAssertEqual(MonacoTextBuffer.normalisedEOL("a\r\n"), "a\r\n")
+        // Non-ASCII passes through the byte scan untouched, including a decomposed sequence.
+        XCTAssertEqual(MonacoTextBuffer.normalisedEOL("caf\u{00E9}\r\ncafe\u{0301}\nx"),
+                       "caf\u{00E9}\ncafe\u{0301}\nx")
+
+        let counts = MonacoTextBuffer.terminatorCounts("a\r\nb\nc\rd")
+        XCTAssertEqual(counts.crlf, 1)
+        XCTAssertEqual(counts.lf, 1)
+        XCTAssertEqual(counts.cr, 1)
+    }
+
+    #if DEBUG
+    /// **The drill list itself** — the harness's own script, built the way the live run builds it.
+    ///
+    /// The plan's seven drills plus the four the earlier tasks' reviews earned are eleven claims,
+    /// and a step quietly dropped from the sequence is invisible in a green live run: nothing fails,
+    /// the transcript simply never mentions it. This asserts every drill is present, in order, and
+    /// that the two round-trip expectations really carry the NORMALISED bytes rather than the raw
+    /// fixtures — which is the one place a wrong expectation would look like a page defect.
+    func testTheStageADrillScriptCarriesEveryDrillInOrder() throws {
+        let scratch = try scratchDir()
+        let fixtures = EditorHarnessFixtures(scratch: scratch)
+        let steps = EditorHarnessFixtures.steps(fixtures)
+
+        let drills = steps.map(\.drill)
+        XCTAssertEqual(Array(Set(drills)).sorted(), Array(0...11),
+                       "every drill from the setup step to the foreign-browser refusal must be present")
+        XCTAssertEqual(drills, drills.sorted(),
+                       "the steps must be in drill order — the transcript is read as eleven claims")
+        XCTAssertEqual(Set(steps.map(\.id)).count, steps.count, "step ids must be unique — the "
+                       + "harness matches its actions on them")
+        for drill in 0...11 {
+            XCTAssertNotNil(EditorHarnessFixtures.drillTitles[drill],
+                            "drill \(drill) has no title for the transcript")
+        }
+
+        // Fixture A carries a CRLF block; its round trip must expect LF throughout, plus the
+        // keystroke drill 3 inserts at the caret.
+        XCTAssertTrue(fixtures.fixtureA.contains("\r\n"), "fixture A must exercise mixed endings")
+        guard case .content(_, let seqA, let expectedA)? = steps.first(where: { $0.id == "4.pull" })?.expectation else {
+            return XCTFail("the round-trip step is missing from the script")
+        }
+        XCTAssertEqual(seqA, 1)
+        XCTAssertFalse(expectedA.contains("\r\n"),
+                       "the expected round trip must be the NORMALISED text — Monaco rewrites a "
+                         + "minority CRLF block to LF, and expecting the raw fixture would fail a "
+                         + "correct page")
+        XCTAssertEqual(expectedA, "x" + MonacoTextBuffer.normalisedEOL(fixtures.fixtureA))
+
+        // Fixture B is uniformly CRLF, so it must come back exactly as written.
+        guard case .content(_, _, let expectedB)? = steps.first(where: { $0.id == "7.pull3" })?.expectation else {
+            return XCTFail("the external-write round-trip step is missing from the script")
+        }
+        XCTAssertEqual(expectedB, fixtures.fixtureB,
+                       "a uniformly-CRLF file has nothing to normalise and must round-trip verbatim")
+
+        // The `.ts`/`.json` extensions are load-bearing: the language workers are the only thing in
+        // the page that exercises the loader's cross-origin fetch path.
+        XCTAssertTrue(fixtures.pathA.hasSuffix(".ts"))
+        XCTAssertTrue(fixtures.pathC.hasSuffix(".json"))
+        XCTAssertFalse(fixtures.fixtureA.hasSuffix("\n"),
+                       "fixture A must end without a trailing newline")
+    }
+    #endif
+
     /// Search a built binary — and its `.debug.dylib` sibling, which is where a Debug build's code
     /// actually lives — for a literal.
     private static func binaryCarries(_ needle: String, at executable: URL) -> Bool {

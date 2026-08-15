@@ -34,6 +34,26 @@ let monaco = null;
 // shows up in a log instead of as a missing-property TypeError inside an injected script.
 window.normaEditor = { dispatch: dispatch };
 
+/**
+ * Task 5's window onto this page's model table — **data only, and not a bridge message.**
+ *
+ * `page` is module-scoped, so nothing outside this file can see it; the harness reads this global
+ * through CDP `Runtime.evaluate` with `returnByValue`, which is why every value below is a plain
+ * string, boolean or array. Returning `page` itself would hand back Monaco models and disposables
+ * that cannot be serialised at all.
+ *
+ * Deliberately NOT an `EditorBridgeInbound` variant: it answers a question the app never asks
+ * (Swift already knows which models it opened), so putting it on the wire would grow the protocol
+ * for a debugger's benefit. `dirtyMap` is the page's own `entry.dirty` — the value the tab dot
+ * follows — rather than a recomputation, so a harness comparing it against the
+ * `modelDirtyChanged` messages it received is comparing two independent witnesses of the same fact.
+ */
+window.normaEditorDebugState = function () {
+    const dirtyMap = {};
+    page.models.forEach(function (entry, path) { dirtyMap[path] = entry.dirty; });
+    return { paths: Array.from(page.models.keys()), current: page.currentPath, dirtyMap: dirtyMap };
+};
+
 // --- Monaco boot -------------------------------------------------------------------------------
 
 // The workers cannot be `new Worker("norma-editor://assets/...")` from this origin, so Monaco's own
