@@ -2749,4 +2749,215 @@ final class ShellSessionHostTests: XCTestCase {
                                    models: #"[{"id":"srv-a","efforts":["none","low","high"]},{"id":"srv-b","efforts":["high","max"]}]"#)
         XCTAssertNil(host.newChatEffort, "once the daemon has said, an effort srv-b refuses cannot stay held")
     }
+
+    // MARK: - editor-product T3: the editor runtime table (pre-warm on reveal, release on departure)
+
+    /// A runtime factory whose every CEF call is recorded — the `makeEditorRuntime` seam's whole
+    /// reason for existing: without it a test that reveals a panel would construct a runtime wired
+    /// to the real C surface, which nothing under XCTest may touch.
+    private struct EditorFactory {
+        let make: (String) -> EditorRuntime
+        let cef: EditorCEFRecorder
+        let slot: EditorSlotRecorder
+        let hub: EditorBridgeHub
+        let scheduler: EditorFakeScheduler
+    }
+
+    /// **Every double a live `EditorRuntime` reaches through an `[unowned self]` closure, held for
+    /// the whole test.**
+    ///
+    /// Not belt-and-braces — measured, as a crash, on the first run. The doubles hand out closure
+    /// structs (`CEFDriver`, `Scheduler`, `Slot`) that capture their recorder unowned, exactly as
+    /// `BrowserRuntimeTests`' do; a recorder a test never mentions AGAIN (the slot recorder, in the
+    /// tests that only assert on the table) is released the moment the local factory value is last
+    /// used, and the runtime's next hub registration reads a dangling reference. Holding them here
+    /// ties their lifetime to the test case rather than to a local's last mention.
+    private var editorDoubles: [AnyObject] = []
+
+    override func tearDown() {
+        editorDoubles.removeAll()
+        super.tearDown()
+    }
+
+    private func editorFactory(files: [String: String] = [:], browserId: Int32 = 41) -> EditorFactory {
+        let cef = EditorCEFRecorder()
+        cef.browserIds = [browserId]
+        let slot = EditorSlotRecorder()
+        let hub = EditorBridgeHub(slot: slot.slot)
+        let scheduler = EditorFakeScheduler()
+        editorDoubles.append(contentsOf: [cef, slot, hub, scheduler] as [AnyObject])
+        return EditorFactory(make: { sessionId in
+            EditorRuntime(sessionId: sessionId, hub: hub, driver: cef.driver,
+                          scheduler: scheduler.scheduler,
+                          readFile: { path in
+                              guard let text = files[path] else {
+                                  throw NSError(domain: NSCocoaErrorDomain, code: NSFileNoSuchFileError)
+                              }
+                              return text
+                          })
+        }, cef: cef, slot: slot, hub: hub, scheduler: scheduler)
+    }
+
+    private func codeRow(_ sessionId: String, dirs: [SessionDirEntry]?) -> SessionSummary {
+        SessionSummary(sessionId: sessionId, title: nil, createdAt: 1, scope: "global",
+                       cwd: dirs?.first?.path, mode: "code", dirs: dirs)
+    }
+
+    /// The two decisions, on their own — the shape of every pure pin in this file.
+    func testTheEditorPreWarmTargetIsASessionWithRealWorkingDirectories() {
+        let rows = [
+            codeRow("S_dirs", dirs: [SessionDirEntry(path: "/repo", locked: false)]),
+            codeRow("S_dirless", dirs: []),
+            SessionSummary(sessionId: "S_chat", title: nil, createdAt: 2, scope: "global",
+                           cwd: nil, mode: "chat")
+        ]
+        XCTAssertEqual(editorPrewarmTarget(sessionId: "S_dirs", rows: rows), "S_dirs")
+        XCTAssertNil(editorPrewarmTarget(sessionId: "S_dirless", rows: rows),
+                     "[] is a real workdir-less session — an editor with no root to reach is a "
+                     + "hidden Chromium nobody can put a file in")
+        XCTAssertNil(editorPrewarmTarget(sessionId: "S_chat", rows: rows),
+                     "nil dirs = no working-directory concept at all")
+        XCTAssertNil(editorPrewarmTarget(sessionId: "S_unlisted", rows: rows),
+                     "a row that has not loaded yet is never guessed at")
+        XCTAssertNil(editorPrewarmTarget(sessionId: nil, rows: rows))
+    }
+
+    func testOnlyACleanEditorIsReleasedWhenTheShellLeavesItsSession() {
+        XCTAssertTrue(editorRuntimeReleasedOnDeparture(dirtyModels: 0))
+        XCTAssertFalse(editorRuntimeReleasedOnDeparture(dirtyModels: 1),
+                       "a detach is not a quit — ⌘W warns about nothing, and T10's gate is what "
+                       + "stands between unsaved work and losing it")
+    }
+
+    func testAPanelRevealPreWarmsExactlyOneEditorForASessionWithDirectories() async {
+        let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+        let (host, factory) = makeHost(rows: rows)
+        defer { host.deselect() }
+        let editor = editorFactory()
+        host.makeEditorRuntime = editor.make
+        // The row has to be LOADED before the reveal can read its `dirs` — an unloaded row is its
+        // own ineligible case (`editorPrewarmTarget` never guesses), the same discipline
+        // `moveToCliOffered`'s own tests follow.
+        await host.directory.refresh()
+        host.setShellVisible(true)
+        host.select("S1")
+        await waitUntilMade(factory, 1)
+        await answerHandshake(factory.made[0], sessionId: "S1")
+
+        host.panelDidReveal()
+        host.panelDidReveal()
+
+        XCTAssertEqual(host.editorRuntimes.count, 1)
+        XCTAssertEqual(editor.cef.createdURLs, [EditorRuntime.pageURL],
+                       "a second reveal finds the runtime already there, and prewarm is idempotent")
+        XCTAssertEqual(host.existingEditorRuntime(for: "S1")?.stateSnapshot.phase, .booting)
+        XCTAssertEqual(editor.hub.registeredBrowserIds, [41],
+                       "registration is keyed on the browser id, learned after the create")
+    }
+
+    func testAPanelRevealCreatesNoEditorForADirlessOrChatSession() async {
+        for row in [codeRow("S1", dirs: []),
+                    SessionSummary(sessionId: "S1", title: nil, createdAt: 1, scope: "global",
+                                   cwd: nil, mode: "chat")] {
+            let (host, factory) = makeHost(rows: [row])
+            let editor = editorFactory()
+            host.makeEditorRuntime = editor.make
+            await host.directory.refresh()
+            host.setShellVisible(true)
+            host.select("S1")
+            await waitUntilMade(factory, 1)
+            await answerHandshake(factory.made[0], sessionId: "S1")
+
+            host.panelDidReveal()
+
+            XCTAssertEqual(host.editorRuntimes.count, 0, "row: \(row.mode ?? "?") dirs=\(String(describing: row.dirs))")
+            XCTAssertEqual(editor.cef.createdURLs, [])
+            host.deselect()
+        }
+    }
+
+    /// The departure policy, driven through the REAL door the shell uses when its window hides.
+    func testHidingTheShellReleasesACleanEditorAndKeepsOneWithUnsavedWork() async {
+        let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+
+        // Clean: released.
+        let (host, factory) = makeHost(rows: rows)
+        let editor = editorFactory()
+        host.makeEditorRuntime = editor.make
+        // The row has to be LOADED before the reveal can read its `dirs` — an unloaded row is its
+        // own ineligible case (`editorPrewarmTarget` never guesses), the same discipline
+        // `moveToCliOffered`'s own tests follow.
+        await host.directory.refresh()
+        host.setShellVisible(true)
+        host.select("S1")
+        await waitUntilMade(factory, 1)
+        await answerHandshake(factory.made[0], sessionId: "S1")
+        host.panelDidReveal()
+        XCTAssertEqual(host.editorRuntimes.count, 1)
+
+        host.setShellVisible(false)
+        XCTAssertEqual(host.editorRuntimes.count, 0, "a clean editor is rebuilt on demand — the "
+                       + "spec's reattach rule re-reads each file on first activation")
+        XCTAssertEqual(editor.cef.closeCount, 1)
+        XCTAssertEqual(editor.hub.registeredBrowserIds, [])
+
+        // Dirty: kept.
+        let (host2, factory2) = makeHost(rows: rows)
+        defer { host2.deselect() }
+        let editor2 = editorFactory(files: ["/repo/a.ts": "const a = 1;\n"])
+        host2.makeEditorRuntime = editor2.make
+        await host2.directory.refresh()
+        host2.setShellVisible(true)
+        host2.select("S1")
+        await waitUntilMade(factory2, 1)
+        await answerHandshake(factory2.made[0], sessionId: "S1")
+        host2.panelDidReveal()
+        guard let runtime = host2.existingEditorRuntime(for: "S1") else {
+            return XCTFail("the reveal built no runtime")
+        }
+        editor2.slot.deliver(browserId: 41, queryId: 1, request: #"{"type":"ready"}"#)
+        await runtime.openFile("/repo/a.ts")
+        editor2.cef.answerNextCDP()
+        editor2.slot.deliver(browserId: 41, queryId: 2,
+                             request: #"{"type":"modelDirtyChanged","path":"/repo/a.ts","dirty":true}"#)
+        XCTAssertEqual(runtime.stateSnapshot.dirtyCount, 1)
+
+        host2.setShellVisible(false)
+        XCTAssertEqual(host2.editorRuntimes.count, 1, "hiding the window must never destroy unsaved edits")
+        XCTAssertEqual(editor2.cef.closeCount, 0)
+        XCTAssertEqual(runtime.stateSnapshot.dirtyCount, 1)
+    }
+
+    /// The explicit door — for a session that is genuinely going away, whatever it is holding.
+    func testTeardownEditorRuntimeReleasesItWhateverItHolds() async {
+        let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+        let (host, factory) = makeHost(rows: rows)
+        defer { host.deselect() }
+        let editor = editorFactory(files: ["/repo/a.ts": "x"])
+        host.makeEditorRuntime = editor.make
+        // The row has to be LOADED before the reveal can read its `dirs` — an unloaded row is its
+        // own ineligible case (`editorPrewarmTarget` never guesses), the same discipline
+        // `moveToCliOffered`'s own tests follow.
+        await host.directory.refresh()
+        host.setShellVisible(true)
+        host.select("S1")
+        await waitUntilMade(factory, 1)
+        await answerHandshake(factory.made[0], sessionId: "S1")
+        host.panelDidReveal()
+        guard let runtime = host.existingEditorRuntime(for: "S1") else {
+            return XCTFail("the reveal built no runtime")
+        }
+        editor.slot.deliver(browserId: 41, queryId: 1, request: #"{"type":"ready"}"#)
+        await runtime.openFile("/repo/a.ts")
+        editor.cef.answerNextCDP()
+        editor.slot.deliver(browserId: 41, queryId: 2,
+                            request: #"{"type":"modelDirtyChanged","path":"/repo/a.ts","dirty":true}"#)
+
+        host.teardownEditorRuntime(for: "S1")
+
+        XCTAssertEqual(host.editorRuntimes.count, 0)
+        XCTAssertEqual(editor.cef.closeCount, 1)
+        XCTAssertEqual(editor.hub.registeredBrowserIds, [])
+        XCTAssertNil(host.existingEditorRuntime(for: "S1"))
+    }
 }

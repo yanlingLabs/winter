@@ -128,6 +128,48 @@ func handoffFailureMessage(_ error: HandoffError) -> String {
     }
 }
 
+// MARK: - editor-product T3: the editor runtime's two decisions (PURE)
+
+/// PURE: which session a panel reveal should have an editor ready for — **only a session with real
+/// working directories**.
+///
+/// Read off the WIRE row's `dirs`, never `cwd`: that field is the daemon's list-time ALIAS of
+/// `dirs[0]?.path`, an echo rather than an independent fact (`SessionSummary.dirs`'s own doc, and
+/// `handoffDirectory`'s). The distinction `dirs` draws is the one that decides this: `nil` means the
+/// daemon populated no set at all (chat/dispatch have no working-directory concept) and `[]` means a
+/// genuinely workdir-less session — **both get no editor**, because the Files tree and every door
+/// that opens a code tab are scoped to those roots, and an editor with no root to reach is a hidden
+/// Chromium nobody can ever put a file in.
+///
+/// A row that is not in `rows` yet (the create-then-navigate race — `attachFresh`'s own one-shot
+/// read carries the same caveat) also gets nothing: pre-warming is an optimisation, and guessing a
+/// session has directories is how you spend 150 MB on a chat.
+func editorPrewarmTarget(sessionId: String?, rows: [SessionSummary]) -> String? {
+    guard let sessionId,
+          let row = rows.first(where: { $0.sessionId == sessionId }),
+          let dirs = row.dirs, !dirs.isEmpty else {
+        return nil
+    }
+    return sessionId
+}
+
+/// PURE: **may the shell release a session's editor when it leaves that session?**
+///
+/// Only when nothing in it is unsaved. This is deliberately NOT the plan's literal "teardown on
+/// detach", and the spec is the authority for the difference: "dirty state does NOT survive an app
+/// restart — unsaved edits are lost **only if the app quits with dirty tabs**, and quit warns if any
+/// exist". A detach is not a quit. It is ⌘W, a click on another app's window, or navigating to the
+/// dashboard — doors with no warning attached to any of them — and tearing the runtime down there
+/// would destroy the user's unsaved buffers silently at every one of them, which is the exact
+/// failure T10's quit gate exists to prevent.
+///
+/// Releasing a CLEAN runtime costs nothing that is not rebuilt on demand: a restored code tab
+/// re-reads its file on first activation (the spec's reattach rule), so what is lost is a browser
+/// that will be re-created, not state that cannot be.
+func editorRuntimeReleasedOnDeparture(dirtyModels: Int) -> Bool {
+    dirtyModels == 0
+}
+
 // MARK: - The live harness behind an open session
 
 /// One live attachment: a pinned `SessionFeed` (its own `NormaClient`/socket — a full harness, the
@@ -477,6 +519,77 @@ final class ShellSessionHost: ObservableObject {
     /// tab, it simply cannot reveal a panel that nothing is drawing.
     var onRevealPanel: (() -> Void)?
 
+    // MARK: - editor-product T3: the editor runtimes
+
+    /// **One editor per session that has one** — the table, owned here for the same reason
+    /// `panelStore` is: this object knows, synchronously and at the exact right moment, which session
+    /// just became current, and it outlives every view that shows one.
+    ///
+    /// Sessions are ADDED by a panel reveal (`panelDidReveal`, dirs-only) and REMOVED by a departure
+    /// that finds nothing unsaved, or by an explicit `teardownEditorRuntime`. Nothing else may touch
+    /// it: an editor that appeared for a session nobody asked about is a hidden Chromium.
+    private(set) var editorRuntimes: [String: EditorRuntime] = [:]
+
+    /// How a runtime is made. The house seam (`makeFeed`, `handoffLaunch`): production builds the
+    /// real thing, and tests substitute one whose CEF calls are recorded — without which every test
+    /// that reveals a panel would construct a runtime wired to the real C surface.
+    var makeEditorRuntime: (String) -> EditorRuntime = { EditorRuntime(sessionId: $0) }
+
+    /// **The pre-warm hook: the panel just became visible.** Called by `ShellRootView` when the
+    /// titlebar toggle reveals it, and by this object's own `revealPanel` for every door that opens
+    /// a tab (`openDiffTab` today, T6's file door next).
+    ///
+    /// Idempotent all the way down — a second reveal finds the runtime already in the table, and
+    /// `EditorRuntime.prewarm()` is itself a no-op past `idle`. Nothing happens at all for a session
+    /// with no working directories (see `editorPrewarmTarget`), which includes every chat session and
+    /// the new-chat page's own.
+    func panelDidReveal() {
+        guard let sessionId = editorPrewarmTarget(sessionId: panelTargetSessionId,
+                                                  rows: directory.rows) else { return }
+        editorRuntime(for: sessionId).prewarm()
+    }
+
+    /// The session's runtime, minted on first use. Reached by the pre-warm above and (from T5) by
+    /// the code tab that needs one — an open is its own pre-warm, so a runtime that was never
+    /// revealed into existence still boots on the first file.
+    @discardableResult
+    func editorRuntime(for sessionId: String) -> EditorRuntime {
+        if let existing = editorRuntimes[sessionId] { return existing }
+        let runtime = makeEditorRuntime(sessionId)
+        editorRuntimes[sessionId] = runtime
+        return runtime
+    }
+
+    /// The session's runtime **if it already has one** — the read every surface should use, since
+    /// asking merely to look would create one.
+    func existingEditorRuntime(for sessionId: String) -> EditorRuntime? { editorRuntimes[sessionId] }
+
+    /// Release a session's editor outright, whatever it is holding. The door for a session that is
+    /// genuinely going away (T10's quit path, an explicit close); the shell's own departures go
+    /// through `releaseEditorRuntimeIfClean` below instead.
+    func teardownEditorRuntime(for sessionId: String) {
+        editorRuntimes.removeValue(forKey: sessionId)?.teardown()
+    }
+
+    /// The shell is leaving `sessionId` (a hop onto another session, a hide, a navigation away).
+    /// Releases its editor only if nothing in it is unsaved — see `editorRuntimeReleasedOnDeparture`
+    /// for why a detach is not a quit.
+    private func releaseEditorRuntimeIfClean(for sessionId: String) {
+        guard let runtime = editorRuntimes[sessionId] else { return }
+        guard editorRuntimeReleasedOnDeparture(dirtyModels: runtime.stateSnapshot.dirtyCount) else {
+            return
+        }
+        editorRuntimes.removeValue(forKey: sessionId)?.teardown()
+    }
+
+    /// **Show the panel** — and take the pre-warm with it. Every door that opens a tab goes through
+    /// here rather than calling `onRevealPanel` directly, so the editor is warming while the daemon
+    /// is still minting the tab.
+    private func revealPanel() {
+        onRevealPanel?()
+        panelDidReveal()
+    }
+
     /// The strip's `+`. Sends no `tabId` — the daemon mints one (`PanelOpenTabResult.tabId`),
     /// which this deliberately discards: nothing here needs it, and seeding it anywhere would be
     /// exactly the second, optimistic code path the design forbids.
@@ -690,7 +803,10 @@ final class ShellSessionHost: ObservableObject {
         case .mint(let title):
             openPanelTab(kind: .diff, title: title, diffId: ref.diffId, sessionId: sessionId)
         }
-        onRevealPanel?()
+        // editor-product T3: the reveal carries the editor pre-warm with it (`revealPanel`) — a user
+        // who has just opened the panel on a session with working directories is a user about to be
+        // one click from a file.
+        revealPanel()
     }
 
     /// panel-shell T15: the new-chat page's OWN "+" — creates (once) and BINDS rather than
@@ -1530,6 +1646,9 @@ final class ShellSessionHost: ObservableObject {
            ) {
             hopAwayPrompt = HopAwayPrompt(sessionId: departing)
         }
+        // editor-product T3: the departing session's editor goes only if it is holding nothing
+        // unsaved (`editorRuntimeReleasedOnDeparture`). A hop is not a quit.
+        if let departing = attachedSessionId { releaseEditorRuntimeIfClean(for: departing) }
         attachedSessionId = sessionId
         refreshOutputFiles(for: sessionId)
         openOutputFile = nil
@@ -1621,6 +1740,9 @@ final class ShellSessionHost: ObservableObject {
            ) {
             hopAwayPrompt = HopAwayPrompt(sessionId: departing)
         }
+        // editor-product T3: same departure policy as the hop above — a hidden shell releases a
+        // CLEAN editor and keeps a dirty one. ⌘W is not a quit, and nothing warns here.
+        if let departing = attachedSessionId { releaseEditorRuntimeIfClean(for: departing) }
         live.feedTask?.cancel()
         live.feedTask = nil
         live.feed.stop()
