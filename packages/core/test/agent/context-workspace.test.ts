@@ -60,7 +60,7 @@ describe("assemble() workspace block (working-directories T6)", () => {
     expect(out).toContain("/tmp/OUTDIR-MARKER");
   });
 
-  test("workdirLess: true adds the extra lines — deliverables to $OUTDIR, scratch to $TMPDIR, don't ask to write elsewhere", () => {
+  test("workdirLess: true — $OUTDIR is the DEFAULT DIRECTORY, scratch to $TMPDIR, don't ask to write elsewhere", () => {
     const { home, trust, skills } = setup();
     const cwd = realDir();
     const a = new ContextAssembler({ normaHome: home, trust, skills });
@@ -68,17 +68,83 @@ describe("assemble() workspace block (working-directories T6)", () => {
     expect(out).toContain("$TMPDIR");
     expect(out).toContain("no project directory");
     expect(out).toMatch(/do not ask to write elsewhere/i);
+    expect(out).toMatch(/is your default directory/i);
   });
 
-  test("workdirLess: false (with-dirs) omits the workdir-less lines — same block minus the extra lines", () => {
+  // THE regression pin for s_bfadc28c2751: a session WITH a working directory built its entire
+  // deliverable inside $OUTDIR because the block's one unconditional line ("anything you're
+  // handing the user goes there") never named the working directory at all. The with-dirs branch
+  // must now name it, prefer it, and demote $OUTDIR to a mailbox.
+  test("workdirLess: false (with-dirs) NAMES the working directory and demotes $OUTDIR to a mailbox", () => {
+    const { home, trust, skills } = setup();
+    const cwd = realDir();
+    const a = new ContextAssembler({ normaHome: home, trust, skills });
+    const withDirs = a.assemble({ cwd, outDir: "/tmp/OUTDIR-MARKER", workdirLess: false });
+    // the working directory is named as a literal absolute path — the thing the old block never did
+    expect(withDirs).toContain(`\`${cwd}\``);
+    expect(withDirs).toMatch(/your working directory for this session is/i);
+    expect(withDirs).toMatch(/Work there by DEFAULT, and strongly prefer it/);
+    // $OUTDIR is still named both ways (a deliverable must still be reachable), but as a mailbox
+    expect(withDirs).toContain("$OUTDIR");
+    expect(withDirs).toContain("/tmp/OUTDIR-MARKER");
+    expect(withDirs).toMatch(/MAILBOX, not a workspace/);
+    expect(withDirs).toMatch(/only when the user asks you to send or deliver/i);
+    // and the retired unconditional line is GONE from this branch — the exact wording that
+    // steered s_bfadc28c2751 into the outbox
+    expect(withDirs).not.toContain("anything you're handing the user goes there");
+    // the workdir-less branch's own lines stay out of it
+    expect(withDirs).not.toContain("no project directory");
+    expect(withDirs).not.toContain("$TMPDIR");
+  });
+
+  test("the two branches are genuinely different text, not one plus extras", () => {
     const { home, trust, skills } = setup();
     const cwd = realDir();
     const a = new ContextAssembler({ normaHome: home, trust, skills });
     const withDirs = a.assemble({ cwd, outDir: "/tmp/OUTDIR-MARKER", workdirLess: false });
     const workdirLess = a.assemble({ cwd, outDir: "/tmp/OUTDIR-MARKER", workdirLess: true });
-    expect(withDirs).not.toContain("no project directory");
-    expect(withDirs).not.toContain("$TMPDIR");
-    expect(workdirLess.length).toBeGreaterThan(withDirs.length);
+    const block = (s: string) => s.split("\n\n").find((p) => p.startsWith("## Workspace"))!;
+    expect(block(withDirs)).not.toBe(block(workdirLess));
+    // the workdir-less branch must NEVER name the cwd it was handed: engine.ts passes the session
+    // TMP dir there (`primary ?? sessionTmpDir(sessionId)`), so naming it would advertise scratch
+    // as the working directory — the exact inversion this branch exists to avoid.
+    expect(workdirLess).not.toContain(cwd);
+  });
+
+  test("cwd null with workdirLess unset still renders the no-directory branch — never an `undefined` path in the prompt", () => {
+    const { home, trust, skills } = setup();
+    const a = new ContextAssembler({ normaHome: home, trust, skills });
+    const out = a.assemble({ cwd: null, outDir: "/tmp/OUTDIR-MARKER" });
+    expect(out).toContain("no project directory");
+    expect(out).not.toContain("undefined");
+  });
+
+  test("extraDirs: listed in the with-dirs branch only when the session actually has more than one", () => {
+    const { home, trust, skills } = setup();
+    const cwd = realDir();
+    const a = new ContextAssembler({ normaHome: home, trust, skills });
+    const none = a.assemble({ cwd, outDir: "/tmp/OUTDIR-MARKER", workdirLess: false });
+    expect(none).not.toMatch(/you may also write in/i);
+    const some = a.assemble({ cwd, outDir: "/tmp/OUTDIR-MARKER", workdirLess: false, extraDirs: ["/tmp/DIR-B", "/tmp/DIR-C"] });
+    expect(some).toMatch(/you may also write in/i);
+    expect(some).toContain("/tmp/DIR-B");
+    expect(some).toContain("/tmp/DIR-C");
+  });
+
+  test("extraDirs absent vs [] is byte-identical — the pre-existing-caller bar", () => {
+    const { home, trust, skills } = setup();
+    const cwd = realDir();
+    const a = new ContextAssembler({ normaHome: home, trust, skills });
+    expect(a.assemble({ cwd, outDir: "/tmp/OUTDIR-MARKER", workdirLess: false }))
+      .toBe(a.assemble({ cwd, outDir: "/tmp/OUTDIR-MARKER", workdirLess: false, extraDirs: [] }));
+  });
+
+  test("extraDirs never leak into the workdir-less branch — no directory to add them to", () => {
+    const { home, trust, skills } = setup();
+    const cwd = realDir();
+    const a = new ContextAssembler({ normaHome: home, trust, skills });
+    const out = a.assemble({ cwd, outDir: "/tmp/OUTDIR-MARKER", workdirLess: true, extraDirs: ["/tmp/DIR-B"] });
+    expect(out).not.toContain("/tmp/DIR-B");
   });
 
   test("basePromptOverride set (dispatch/chat): no block at all, even with outDir present — dispatch/chat swap the base slot entirely", () => {

@@ -2438,6 +2438,11 @@ export class AgentEngine {
       // EngineConfig getter's "off means untouched" precedent.
       outDir: this.cfg.outDirOf?.(sessionId),
       workdirLess: primary === undefined,
+      // OUTDIR-mailbox (2026-08-15): the rest of the `dirs` row, so the workspace block names ALL
+      // of the session's writable project space rather than only the primary. Empty for a
+      // workdir-less session (nothing to add to a branch that names no directory at all) and for
+      // the ordinary single-dir session.
+      extraDirs: primary === undefined ? [] : this.additionalWorkDirs(sessionId, primary),
     });
     // NOTE (correctness-critical): `loaded` MUST be THE ONE LIVE SET for this session — never a
     // snapshot/copy. It's read here to build specs()/deferredIndex() for round 0, and the SAME
@@ -5496,6 +5501,27 @@ export class AgentEngine {
       try { head.push(canonicalizeDirPath(live)); } catch { /* unusable spelling — the row still speaks */ }
     }
     return [...new Set([...head, ...this.sessionDirPaths(sessionId)])];
+  }
+
+  /** OUTDIR-mailbox (2026-08-15): the session's working directories MINUS the primary — what the
+   *  workspace block lists after the sentence that already names the primary as `cwd`.
+   *
+   *  Derived from `classificationDirs` rather than `sessionDirPaths` so this set can never
+   *  disagree with what the fence classifies as "the session's own directories" — one source, two
+   *  readers. Canonicalizes the primary before filtering because the two sides arrive in different
+   *  spellings: `assemble()` receives the RAW `meta.cwd` column while the row's entries come back
+   *  realpathed, so `~/Xcode progects/x` and its symlink-resolved twin are the same directory and
+   *  unequal strings — a raw filter would list the primary twice, once as "your working directory"
+   *  and again under "you may also write in". Both spellings are filtered (canonical AND raw) so
+   *  an uncanonicalizable primary still drops itself.
+   *
+   *  Never throws: `classificationDirs` already swallows an unusable row, and a `canonicalizeDirPath`
+   *  failure degrades to the raw comparison rather than failing the turn — the worst case is one
+   *  redundant path in a prompt sentence, never a lost turn. */
+  private additionalWorkDirs(sessionId: string, primary: string): string[] {
+    let canonPrimary = primary;
+    try { canonPrimary = canonicalizeDirPath(primary); } catch { /* unusable spelling — the raw filter below still speaks */ }
+    return this.classificationDirs(sessionId, undefined).filter((d) => d !== canonPrimary && d !== primary);
   }
 
   private primaryDir(sessionId: string): string | undefined {

@@ -115,26 +115,68 @@ function memoryProtocol(memDir: string): string {
   ].join("\n");
 }
 
-/** working-directories T6 (spec §2): the standing workspace block — ALWAYS present for a code/
- *  cowork turn (never dispatch/chat, which swap the base slot entirely via `basePromptOverride`
- *  and so never reach this call — see `assemble()`'s gate). Names `$OUTDIR` BOTH ways a tool needs
- *  it: the env var bash's own splice exports (`tools/bash.ts`) and the literal absolute path
- *  write/edit need (those tools take real paths, never env-var text — telling the model only the
- *  env var name would leave every non-bash tool unable to use it). Workdir-less sessions get two
- *  more lines, verbatim from spec §2's own wording: deliverables still go to `$OUTDIR`, scratch
- *  goes to `$TMPDIR` (bash already starts there — T5's session-tmp-dir arc), and the model should
- *  not ask to write elsewhere unless the task genuinely needs it — the whole point of the
- *  workdir-less arc is useful work with no permission round trip for every scratch file. */
-function workspaceRules(outDir: string, workdirLess: boolean): string {
+/** The standing workspace block — ALWAYS present for a code/cowork turn (never dispatch/chat,
+ *  which swap the base slot entirely via `basePromptOverride` and so never reach this call — see
+ *  `assemble()`'s gate). TWO GENUINELY DIFFERENT BRANCHES, which is the whole point of it.
+ *
+ *  Introduced by working-directories T6 as ONE unconditional line ("anything you're handing the
+ *  user goes there") plus workdir-less extras. That shape was wrong, and session `s_bfadc28c2751`
+ *  is the proof: a session with a real locked working directory (`~/Xcode progects/testing`) was
+ *  asked to build an app and built the ENTIRE project — package.json, server.js, public/ — inside
+ *  its `$OUTDIR` instead, then told the user to `cd` into `~/.norma-dev/outputs/<sid>` to run it.
+ *  The model was not misbehaving; it was obeying. `$OUTDIR` was the ONLY absolute path the whole
+ *  assembled prompt ever named — `BASE_PROMPT` mentions the working directory purely abstractly
+ *  ("you operate inside a session working directory") and nothing else names the `dirs` row — so
+ *  "anything you're handing the user goes there" plus one concrete path is a complete instruction
+ *  to work in the outbox. (The tell: its first bash call, which runs in the REAL cwd, died on
+ *  `Cannot find module '~/Xcode progects/testing/server.js'`, and it recovered by prefixing
+ *  `cd "$OUTDIR"`.)
+ *
+ *  So the two cases now say different things (user direction, 2026-08-15):
+ *   - WITH a working directory: name it — it is the default place work happens — and demote
+ *     `$OUTDIR` to a MAILBOX, used only when the user asks to be sent something or when Norma is
+ *     handing over a standalone artifact with no home in the project.
+ *   - WITHOUT one (`workdirLess`): `$OUTDIR` IS the default directory, scratch goes to `$TMPDIR`
+ *     (bash already starts there), and don't ask to write elsewhere. Unchanged in substance from
+ *     T6 — this branch was already correct, since there is no project to prefer.
+ *
+ *  `$OUTDIR` is named BOTH ways a tool needs it in either branch: the env var bash's own splice
+ *  exports (`tools/bash.ts`) and the literal absolute path write/edit need (those tools take real
+ *  paths, never env-var text — naming only the env var would leave every non-bash tool unable to
+ *  use it).
+ *
+ *  Joined with "\n" and NOT "\n\n" on purpose: `assemble()` joins its sections with a blank
+ *  line, and `context-workspace.test.ts` recovers the exact section list by splitting on it to
+ *  prove this block is ONE clean insertion. An internal blank line here would read as two
+ *  sections and fail that test. */
+function workspaceRules(input: { outDir: string; cwd: string | null; workdirLess: boolean; extraDirs: string[] }): string {
+  // ONE spelling of "here is $OUTDIR, both ways", shared by the two branches so they can never
+  // drift on the env-var-vs-real-path warning that every non-bash tool depends on.
+  const outNames = `\`$OUTDIR\` in bash — the literal path \`${input.outDir}\` for the write/edit tools (and any other tool that takes a real path, never an env var) —`;
+  // Branch strictly on `workdirLess`, NEVER on "is there a cwd": a workdir-less turn runs with
+  // `cwd` set to the session TMP dir (engine.ts's `primary ?? sessionTmpDir(sessionId)`), so a
+  // cwd-presence test would name scratch as "your working directory" — the exact inversion of
+  // what this branch exists to say. The `cwd === null` half is a belt for a caller that passes no
+  // cwd at all (tests): there is no path to name, so the honest rendering is the no-directory one.
+  if (input.workdirLess || input.cwd === null) {
+    return [
+      "## Workspace",
+      `This session has no project directory, so ${outNames} is your default directory: work there, and anything you're handing the user goes there.`,
+      "Use $TMPDIR for scratch work (bash already starts there). Do not ask to write elsewhere unless the task genuinely needs it.",
+    ].join("\n");
+  }
   const lines = [
     "## Workspace",
-    `Your delivery folder for this session is \`$OUTDIR\` in bash, or the literal path \`${outDir}\` for the write/edit tools (and any other tool that takes a real path, never an env var) — anything you're handing the user goes there.`,
+    `Your working directory for this session is \`${input.cwd}\` — bash starts there and file-tool paths resolve against it. Work there by DEFAULT, and strongly prefer it: projects you build, files you create or edit, and anything the user will open, run, or keep belongs inside it.`,
   ];
-  if (workdirLess) {
-    lines.push(
-      "This session has no project directory. Deliverables still go to $OUTDIR; use $TMPDIR for scratch work (bash already starts there). Do not ask to write elsewhere unless the task genuinely needs it.",
-    );
+  // Only when the session actually has more than one — a single-dir session (the overwhelming
+  // majority) reads one sentence about one directory, with no list to disambiguate.
+  if (input.extraDirs.length) {
+    lines.push(`You may also write in: ${input.extraDirs.map((d) => `\`${d}\``).join(", ")}.`);
   }
+  lines.push(
+    `${outNames} is a MAILBOX, not a workspace: it is how you hand the user something directly. Use it only when the user asks you to send or deliver something, or when you're handing over a standalone artifact that has no natural home in the working directory. Do not build a project there, and do not put work there merely because it is writable.`,
+  );
   return lines.join("\n");
 }
 
@@ -219,6 +261,16 @@ export class ContextAssembler {
     // spelling), just reached with write instructions since a workdir-less CODE session (unlike
     // chat/dispatch) actually has write tools. Absent/false (every pre-T6 caller) is byte-identical.
     workdirLess?: boolean;
+    // OUTDIR-mailbox (2026-08-15): the session's ADDITIONAL working directories — the `dirs` row
+    // minus the primary this block already names as `cwd`. Named in the with-dirs branch so a
+    // multi-dir session is told about all of its writable project space, not just `dirs[0]` (the
+    // old block named NEITHER, which is the bug this whole change exists to fix). The caller owns
+    // the dedup against the primary because the caller owns canonicalization — `cwd` here is the
+    // raw `meta.cwd` spelling while the row's entries are realpathed, so a same-directory pair
+    // can compare unequal as strings; engine.ts's `additionalWorkDirs` canonicalizes both sides.
+    // Absent/empty (every pre-existing caller, and every single-dir session) omits the line
+    // entirely — byte-identical.
+    extraDirs?: string[];
   }): string {
     const cwd = input.cwd;
     const trusted = cwd ? this.trust.isTrusted(cwd) : false;
@@ -249,7 +301,12 @@ export class ContextAssembler {
     // has a real $OUTDIR and working directories, it just doesn't get the user's active style.
     // Skipped when `outDir` is absent (see its own doc comment) — nothing to name.
     if (input.basePromptOverride === undefined && input.outDir) {
-      sections.push(workspaceRules(input.outDir, input.workdirLess === true));
+      sections.push(workspaceRules({
+        outDir: input.outDir,
+        cwd,
+        workdirLess: input.workdirLess === true,
+        extraDirs: input.extraDirs ?? [],
+      }));
     }
     // provider-correctness T5: ADDITIVE, and deliberately NOT part of the base-slot resolution
     // above. A style — even one that REPLACES the base (`keepCodingInstructions:false`) — is about
