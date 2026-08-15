@@ -177,7 +177,11 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
         scroll.borderType = .noBorder
         readout.isEditable = false
         readout.isRichText = false
-        readout.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        // A NAMED ROLE, not a constructed font — `TypographyTests.testNoFontIsConstructedOutsideThe
+        // TokenFiles` sweeps every app source including this one, and it caught the first draft's
+        // `NSFont.monospacedSystemFont(ofSize: 11)`. `syntaxCodeNS` is the app's mono code face,
+        // which is what a ✓/✗ ledger of protocol frames is.
+        readout.font = Typography.syntaxCodeNS
         readout.autoresizingMask = [.width]
         readout.minSize = NSSize(width: 0, height: 0)
         readout.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
