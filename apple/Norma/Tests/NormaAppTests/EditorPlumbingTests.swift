@@ -440,6 +440,47 @@ final class EditorPlumbingTests: XCTestCase {
         }
     }
 
+    // MARK: - Task 3: the C surface of the bridge, as far as a CEF-less host can see it
+
+    /// `NormaCEF.h`'s standing contract — "EVERY function here is safe to call when CEF was never
+    /// loaded or initialised" — applied to the bridge's two new doors, which is every process this
+    /// suite runs in.
+    ///
+    /// The answer path is the one that could plausibly reach the framework (`Callback::Success`
+    /// posts a task through libcef), and the guard against that is structural rather than a check
+    /// for initialisation: with no live query there is no callback, so a `queryId` nobody minted
+    /// returns before anything CEF-shaped is touched. Answering a stale or unknown id is also the
+    /// ordinary case in production — a query cancelled by a navigation between delivery and the
+    /// answer — so "safe" here means "a no-op", not "a refusal".
+    ///
+    /// **What this cannot cover** is the router itself: registering a handler that actually
+    /// receives a query needs a live `CefBrowser`, which this host can never create (the same
+    /// standing constraint that leaves the scheme handler, the CDP observer and the click routing
+    /// unreachable from here). Task 5's live harness is the first execution of any of it.
+    func testTheBridgeDoorsAreSafeWithNoCEFAndAnswerNothingForAQueryNobodyMinted() throws {
+        // The typedef and the function must have the same shape — if either drifts this stops
+        // compiling, which is the only way a C header's two halves can be held together.
+        let respond: NormaCEFBridgeRespond = NormaCEFBridgeRespondCall
+
+        var delivered: [UInt64] = []
+        NormaCEFSetBridgeHandler { _, queryId, _ in delivered.append(queryId) }
+        defer { NormaCEFSetBridgeHandler(nil) }
+
+        // Ids far outside anything a live browser could have minted in this process — and no live
+        // browser can exist here anyway.
+        respond(910_001, true, #"{"ok":true}"#)
+        NormaCEFBridgeRespondCall(910_002, false, #"{"message":"no"}"#)
+        NormaCEFBridgeRespondCall(0, true, nil)
+
+        XCTAssertTrue(delivered.isEmpty,
+                      "answering an unknown query must not call the handler — it is a no-op")
+        XCTAssertFalse(NormaCEFIsInitialized(),
+                       "this suite must not have started CEF — the point of the calls above")
+
+        NormaCEFSetBridgeHandler(nil)
+        NormaCEFBridgeRespondCall(910_001, true, "{}")
+    }
+
     // MARK: - Task 3: the wire vocabulary, and the parity pin Task 4 lights up
 
     /// The two `wireTypes` lists are what the parity test compares against the page's own
@@ -568,6 +609,47 @@ final class EditorPlumbingTests: XCTestCase {
             }
         }
         return quote == nil ? names : nil
+    }
+
+    /// **The pin for the half of the bridge no test can execute: the router is actually LINKED into
+    /// every process, renderers included.**
+    ///
+    /// The browser side and the renderer side of `CefMessageRouterBrowserSide` /
+    /// `CefMessageRouterRendererSide` both live in ONE object file of the static wrapper library
+    /// (`libcef_dll/wrapper/cef_message_router.cc`), and a static library only contributes an object
+    /// file that something actually references. So the router's own string literals — `cefQuery`,
+    /// the name it installs on `window`, among them — are in a binary if and only if that binary
+    /// calls `…::Create`. That makes a string scan a real structural test here rather than a proxy:
+    /// it is reading the linker's answer to "does this process build a router at all?".
+    ///
+    /// Measured by mutation, not assumed. Deleting the single `CefMessageRouterRendererSide::Create`
+    /// call from `NormaSubprocessApp` (leaving the class, the member, the three overrides and every
+    /// other line untouched) drops the literal from **all five helpers while the app keeps it** —
+    /// this test then fails five times, once per renderer-capable process, which is exactly the
+    /// regression it exists for. A renderer with no router installs no `window.cefQuery`, and the
+    /// editor page's every message would fail with the router's own -1, silently, in a live run.
+    ///
+    /// What it does NOT prove is that the two sides agree — the config is shared through one
+    /// function (`NormaEditorBridge.h`) precisely because no scan of a binary could see a mismatch —
+    /// nor that any callback is wired to anything. Task 5's live harness is the first execution.
+    func testTheMessageRouterIsLinkedIntoTheBrowserProcessAndEveryRenderer() throws {
+        let app = Bundle.main.bundleURL
+        var binaries: [(String, URL)] = [
+            ("Norma (browser process)", app.appendingPathComponent("Contents/MacOS/Norma"))
+        ]
+        for suffix in ["", " (Alerts)", " (GPU)", " (Plugin)", " (Renderer)"] {
+            let name = "Norma Helper\(suffix)"
+            binaries.append((name, app.appendingPathComponent(
+                "Contents/Frameworks/\(name).app/Contents/MacOS/\(name)")))
+        }
+
+        for (name, executable) in binaries {
+            XCTAssertTrue(
+                Self.binaryCarries("cefQuery", at: executable),
+                "\(name) does not carry the message router — the wrapper's cef_message_router.o was "
+                    + "not linked in, so this process builds no router and installs no window.cefQuery"
+            )
+        }
     }
 
     /// Search a built binary — and its `.debug.dylib` sibling, which is where a Debug build's code

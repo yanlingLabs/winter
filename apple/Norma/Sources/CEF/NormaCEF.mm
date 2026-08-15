@@ -43,6 +43,11 @@
 // processes' `CefApp` (see that header for why they are a different class and must not be a
 // different scheme list).
 #import "NormaCEFAssetResolve.h"
+// editor-plumbing Task 3 — the `cefQuery` router's configuration, which the RENDERER processes
+// construct from the same function (`NormaEditorScheme.h`'s `NormaSubprocessApp`). Named here
+// rather than taken transitively through that header because this file implements the BROWSER side:
+// `CefMessageRouterBrowserSide::Handler`, below.
+#include "NormaEditorBridge.h"
 #include "NormaEditorScheme.h"
 
 // panel-cef Task 6a — CEF driven from the run loop SwiftUI already owns.
@@ -540,6 +545,159 @@ class NormaCDPObserver : public CefDevToolsMessageObserver {
   IMPLEMENT_REFCOUNTING(NormaCDPObserver);
 };
 
+// ---------------------------------------------------------------------------
+// editor-plumbing Task 3: the editor bridge — `window.cefQuery` → one Swift block
+// ---------------------------------------------------------------------------
+
+/// The ONE handler block, registered by `NormaCEFSetBridgeHandler`. One per process, like the
+/// pre-shutdown hook: the editor is a single feature of a single app, and a per-browser registry
+/// would only move the "which browser is this?" question the handler has to answer anyway (see
+/// that function's header doc for why answering it is a caller obligation and not optional).
+void (^g_bridge_handler)(int browserId, uint64_t queryId, const char *requestJSON) = nil;
+
+/// One query the page is waiting on.
+///
+/// `routerQueryId` is CEF's own id and `handler` is the `Handler` instance that received it: TOGETHER
+/// they identify a query for cancellation, and neither does alone. CEF's id is unique only "for the
+/// life span of the router" (`cef_message_router.h`) and this app creates one router per browser —
+/// its `IdGenerator` restarts at 1 in each — so two tabs legitimately produce the same number.
+/// That is exactly why the id handed OUT is this file's own monotonic one and not CEF's.
+struct NormaCEFBridgeQuery {
+  CefRefPtr<CefMessageRouterBrowserSide::Callback> callback;
+  const void *handler = nullptr;
+  int64_t routerQueryId = 0;
+};
+
+/// The queries in flight, and the counter that names them. **A lock rather than "it is all on the
+/// UI thread anyway"**: `NormaCEFBridgeRespondCall` is an exported C entry point whose callers this
+/// file does not control, and the map is the one place a wrong answer would be a use-after-free
+/// rather than a wrong pixel. The lock is never held across a `Callback` method.
+///
+/// Ids start at 1: `++` before use, so 0 is never a live query and a zero-initialised variable
+/// cannot accidentally name one.
+std::mutex g_bridge_mutex;
+std::map<uint64_t, NormaCEFBridgeQuery> g_bridge_queries;
+uint64_t g_bridge_last_query_id = 0;
+
+/// The error code every refusal carries into the page's `onFailure`. **Deliberately not -1**, which
+/// is the router's own code for "canceled" (`kCanceledErrorCode`, `cef_message_router.cc`) and is
+/// what an UNHANDLED query gets. The page can therefore tell "Norma refused this" from "this query
+/// died with its context".
+const int kNormaCEFBridgeFailureCode = 1;
+
+/// The browser-side query handler — one per client, i.e. one per browser.
+///
+/// `cef_message_router.h`: "All methods will be executed on the browser process UI thread", which
+/// under Norma's external pump is the main thread. The hop to the Swift block is still a
+/// `dispatch_async` rather than a direct call: it takes the handler out of CEF's own callback
+/// frame, so a handler that answers inline, closes the tab or runs JavaScript cannot re-enter the
+/// router from inside `OnQuery`.
+class NormaEditorBridgeHandler : public CefMessageRouterBrowserSide::Handler {
+ public:
+  NormaEditorBridgeHandler() = default;
+
+  /// "Return true to handle the query or false to propagate the query to other registered handlers,
+  /// if any. If no handlers return true from this method then the query will be automatically
+  /// canceled with an error code of -1 delivered to the JavaScript onFailure callback. If this
+  /// method returns true then a Callback method must be executed either in this method or
+  /// asynchronously to complete the query."
+  ///
+  /// Both refusals below therefore differ in kind, on purpose:
+  ///
+  ///   * **no block registered** → `false`. The router cancels the query itself and the page hears
+  ///     -1. Storing a callback nobody will ever answer is the one thing this must not do — until
+  ///     Task 5 registers a handler that is EVERY query, and in the unit-test host it always is.
+  ///   * **a persistent query** → answered `Failure` and `true`. Persistent registrations stay
+  ///     alive until the page cancels them, the context dies, or `Callback::Failure` runs (the
+  ///     header's conditions A-C), and nothing in Norma's protocol is a subscription: every message
+  ///     is one request and one reply. Refusing it out loud beats letting the page accumulate
+  ///     callbacks this file would then have to reap.
+  bool OnQuery(CefRefPtr<CefBrowser> browser,
+               CefRefPtr<CefFrame> frame,
+               int64_t query_id,
+               const CefString &request,
+               bool persistent,
+               CefRefPtr<Callback> callback) override {
+    CEF_REQUIRE_UI_THREAD();
+    if (g_bridge_handler == nil) {
+      return false;
+    }
+    if (!callback) {
+      return false;
+    }
+    if (persistent) {
+      callback->Failure(kNormaCEFBridgeFailureCode,
+                        "the editor bridge answers one reply per query — persistent queries are "
+                        "not supported");
+      return true;
+    }
+
+    const int browserId = browser ? browser->GetIdentifier() : 0;
+    // Copied out of CEF's `CefString` BEFORE the hop — the reference is only valid for this
+    // callback, and the block outlives it by a run-loop turn.
+    const std::string payload = request.ToString();
+
+    uint64_t queryId = 0;
+    {
+      std::lock_guard<std::mutex> lock(g_bridge_mutex);
+      queryId = ++g_bridge_last_query_id;
+      g_bridge_queries[queryId] = NormaCEFBridgeQuery{callback, this, query_id};
+    }
+
+    // **The size and the sender, never the bytes** — not even in DEBUG, which is stricter than this
+    // file's treatment of URLs. A request carries the user's own file contents; a URL is at worst
+    // where they were.
+    Log("bridge-query (browser=%d, id=%llu, %zu byte(s))", browserId,
+        static_cast<unsigned long long>(queryId), payload.size());
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+      if (g_bridge_handler == nil) {
+        // The block was cleared between the store above and this turn. The query is still owed an
+        // answer — an unanswered callback is a runtime error by the router's own contract — so it
+        // is refused rather than dropped.
+        NormaCEFBridgeRespondCall(
+            queryId, false,
+            CDPReasonJSON(@"the editor bridge stopped listening before this query was answered")
+                .UTF8String);
+        return;
+      }
+      g_bridge_handler(browserId, queryId, payload.c_str());
+    });
+    return true;
+  }
+
+  /// "Executed when a query has been canceled either explicitly using the JavaScript cancel function
+  /// or implicitly due to browser destruction, navigation or renderer process termination. It will
+  /// only be called for the single handler that returned true from OnQuery for the same |query_id|.
+  /// **No references to the associated Callback object should be kept after this method is called,
+  /// nor should any Callback methods be executed.**"
+  ///
+  /// So this drops the entry and answers nothing. It is not an edge case: an editor tab that
+  /// navigates, a renderer that dies, and a browser that closes with a save in flight all arrive
+  /// here, and each one would otherwise leave this file holding a callback into a context that no
+  /// longer exists — which a later `NormaCEFBridgeRespondCall` would then try to answer.
+  ///
+  /// The lookup is a scan rather than a second index. The map holds the queries IN FLIGHT — a
+  /// handful at most, since each is one editor round trip — and a reverse index would be a second
+  /// collection to keep honest for no measurable gain.
+  void OnQueryCanceled(CefRefPtr<CefBrowser> browser,
+                       CefRefPtr<CefFrame> frame,
+                       int64_t query_id) override {
+    CEF_REQUIRE_UI_THREAD();
+    std::lock_guard<std::mutex> lock(g_bridge_mutex);
+    for (auto it = g_bridge_queries.begin(); it != g_bridge_queries.end(); ++it) {
+      if (it->second.handler == this && it->second.routerQueryId == query_id) {
+        Log("bridge-query-canceled (id=%llu)", static_cast<unsigned long long>(it->first));
+        g_bridge_queries.erase(it);
+        return;
+      }
+    }
+  }
+
+ private:
+  DISALLOW_COPY_AND_ASSIGN(NormaEditorBridgeHandler);
+};
+
 /// **The second half of every close, and the one that actually finishes it.**
 ///
 /// `DoClose` answers `true`, so CEF stops: `AlloyBrowserHostImpl::CloseContents` computes
@@ -639,8 +797,10 @@ void ForgetOpenBrowser(CefRefPtr<CefBrowser> browser) {
   // app did not initiate — CEF's own shutdown sweep, chiefly.
   //
   // **A RENDERER CRASH IS NOT ONE OF THOSE ROUTES, stated because the obvious reading is wrong.**
-  // Nothing here handles `OnRenderProcessTerminated`, and a renderer death leaves the `CefBrowser`
-  // alive — so this callback does NOT run, and the pending calls are not failed from here. Coverage
+  // A renderer death leaves the `CefBrowser` alive — so this callback does NOT run, and the pending
+  // CDP calls are not failed from here. (The client DOES override `OnRenderProcessTerminated` since
+  // editor-plumbing Task 3, but only to hand it to the editor bridge's message router, which is a
+  // different registry with a different lifetime; it deliberately does not touch this one.) Coverage
   // for that case rests entirely on `OnDevToolsAgentDetached` firing when the agent's renderer dies:
   // plausible (the agent lives in the renderer), NOT stated by `cef_devtools_message_observer.h`,
   // and not verifiable from any test host.
@@ -959,6 +1119,77 @@ class NormaClient : public CefClient,
   // removal of a stock item that does nothing on macOS. See OnBeforeContextMenu.
   CefRefPtr<CefContextMenuHandler> GetContextMenuHandler() override { return this; }
 
+  // ---------------------------------------------------------------------------
+  // editor-plumbing Task 3 — the browser side of the `cefQuery` router
+  //
+  // `cef_message_router.h` is unusually explicit about what an embedder owes it: "The below methods
+  // should be called from other CEF handlers. **They must be called exactly as documented for the
+  // router to function correctly.**" There are four, and all four are wired below —
+  // `OnProcessMessageReceived` (CefClient), `OnBeforeBrowse` and `OnRenderProcessTerminated`
+  // (CefRequestHandler), and `OnBeforeClose` (CefLifeSpanHandler). Missing one is not a partial
+  // feature: the first is the whole delivery channel, and the other three are what keep a callback
+  // from outliving the context that asked for it.
+  // ---------------------------------------------------------------------------
+
+  /// **The delivery channel.** "Call from CefClient::OnProcessMessageReceived. Returns true if the
+  /// message is handled by this router or false otherwise." Every `window.cefQuery` arrives here as
+  /// a process message from the renderer; without this override the router hears nothing at all and
+  /// the page's queries simply never happen.
+  ///
+  /// Nothing else in this client consumes process messages, so the router's answer is the whole
+  /// answer — returned rather than swallowed, which is what leaves room for a second consumer.
+  bool OnProcessMessageReceived(CefRefPtr<CefBrowser> browser,
+                                CefRefPtr<CefFrame> frame,
+                                CefProcessId source_process,
+                                CefRefPtr<CefProcessMessage> message) override {
+    CEF_REQUIRE_UI_THREAD();
+    return bridge_router_ != nullptr &&
+           bridge_router_->OnProcessMessageReceived(browser, frame, source_process, message);
+  }
+
+  /// "Call from CefRequestHandler::OnBeforeBrowse **only if the navigation is allowed to proceed**.
+  /// If |frame| is the main frame then any pending queries associated with |browser| will be
+  /// canceled and Handler::OnQueryCanceled will be called."
+  ///
+  /// The condition is satisfied structurally rather than by a check: this override returns `false`
+  /// — CEF's own default, "allow the navigation" — for every navigation, and it is the ONLY thing
+  /// it does. Norma's navigation policy lives on the Swift side (`PanelURLPolicy`) and its two
+  /// cancel-shaped decisions are elsewhere (`OnBeforePopup`, `OnOpenURLFromTab`), so there is no
+  /// path through this method that refuses a navigation and would therefore have to skip the call.
+  ///
+  /// What it buys: a page that navigates away with a save still in flight has its callback dropped
+  /// here instead of being answered into a context that no longer exists.
+  bool OnBeforeBrowse(CefRefPtr<CefBrowser> browser,
+                      CefRefPtr<CefFrame> frame,
+                      CefRefPtr<CefRequest> request,
+                      bool user_gesture,
+                      bool is_redirect) override {
+    CEF_REQUIRE_UI_THREAD();
+    if (bridge_router_) {
+      bridge_router_->OnBeforeBrowse(browser, frame);
+    }
+    return false;  // the navigation proceeds — which is what makes the call above legal
+  }
+
+  /// "Call from CefRequestHandler::OnRenderProcessTerminated. Any pending queries associated with
+  /// |browser| will be canceled and Handler::OnQueryCanceled will be called. No JavaScript callbacks
+  /// will be executed since this indicates destruction of the context."
+  ///
+  /// **A renderer crash leaves the `CefBrowser` alive**, which is precisely why this needs its own
+  /// override: no close arrives, `OnBeforeClose` never fires, and without this the queries that
+  /// renderer had in flight would sit in `g_bridge_queries` until the tab was eventually closed.
+  void OnRenderProcessTerminated(CefRefPtr<CefBrowser> browser,
+                                 TerminationStatus status,
+                                 int error_code,
+                                 const CefString &error_string) override {
+    CEF_REQUIRE_UI_THREAD();
+    if (bridge_router_) {
+      bridge_router_->OnRenderProcessTerminated(browser);
+    }
+    Log("render-process-terminated (id=%d, status=%d, error=%d)",
+        browser ? browser->GetIdentifier() : 0, static_cast<int>(status), error_code);
+  }
+
   /// **A popup becomes a PANEL TAB — and CEF still never creates a window.** Those are two separate
   /// decisions and only the first of them changed here.
   ///
@@ -1148,6 +1379,11 @@ class NormaClient : public CefClient,
     // belongs to. Recorded BEFORE the abandoned check below, because the abandoned path closes the
     // browser and needs the host view like every other close path does.
     RememberOpenBrowser(browser, bridge_);
+    // editor-plumbing Task 3 — the `cefQuery` router, beside the CDP registration above and for the
+    // same lifetime reason: created with the browser, torn down in `OnBeforeClose`. Created HERE
+    // rather than in the constructor, which is where it obviously belongs and where it would crash
+    // the unit-test host — see `EnsureEditorBridgeRouter` for the whole ruling.
+    EnsureEditorBridgeRouter(browser);
 
     // The creation is over, so CEF is done with the raw parent handle: `CreateHostWindow()` has
     // already run (it is a step of the very call that ends in this callback). Dropping the record
@@ -1308,6 +1544,25 @@ class NormaClient : public CefClient,
     // view outlived it, which the close paths make unreachable; the release is idempotent either
     // way.
     ForgetOpenBrowser(browser);
+    // editor-plumbing Task 3 — the router's own documented obligation, and then the teardown that
+    // makes the handler's lifetime a non-question.
+    //
+    // "Call from CefLifeSpanHandler::OnBeforeClose. Any pending queries associated with |browser|
+    // will be canceled and Handler::OnQueryCanceled will be called. No JavaScript callbacks will be
+    // executed since this indicates destruction of the browser." That cancellation is what empties
+    // this browser's entries out of `g_bridge_queries`.
+    //
+    // Then `RemoveHandler` — "Any pending queries associated with the handler will be canceled" —
+    // and the router is dropped. The header's other rule is that "the Handler object must either
+    // outlive the router or be removed before the router is deleted"; BOTH halves are true here,
+    // and deliberately: the handler is a member declared before the router (so it is destroyed
+    // after it), and it is removed explicitly the moment the browser goes away. Belt and braces on
+    // a destruction order that no test in this repo can execute.
+    if (bridge_router_) {
+      bridge_router_->OnBeforeClose(browser);
+      bridge_router_->RemoveHandler(&bridge_handler_);
+      bridge_router_ = nullptr;
+    }
     bridge_ = nil;
     Log("browser closed (id=%d, live browsers=%zu)", browser->GetIdentifier(), g_browsers.size());
   }
@@ -1576,6 +1831,48 @@ class NormaClient : public CefClient,
   }
 
  private:
+  /// **Create the browser-side router, once, when this client's browser exists.**
+  ///
+  /// The router is per CLIENT, i.e. per browser, which is the shape `cef_message_router.h` names
+  /// second in its own guidance: "It can be useful to have multiple browser-side routers with
+  /// different client-provided Handler instances when implementing different behaviors on a
+  /// per-browser basis." Norma's behaviour is per browser in exactly that sense — a query means
+  /// something only in the tab that sent it — and the per-browser router is what makes
+  /// `OnQueryCanceled` able to say WHICH browser's query died without a lookup.
+  ///
+  /// **Why this is not in the constructor, which is where the brief put it and where it reads
+  /// better.** `CefMessageRouterConfig`'s constructor builds two `CefString`s from string literals,
+  /// and `CefString`'s assignment goes through `cef_string_utf8_to_utf16` — a libcef entry point,
+  /// which in this app is an entry in `libcef_dll_dylib.cc`'s function-pointer table
+  /// (`g_libcef_pointers = {0}` until `CefScopedLibraryLoader` fills it). **The unit-test host
+  /// constructs a real `NormaClient` with CEF never loaded** —
+  /// `NormaCEFClientInstallsTheClickAndMenuHandlers` and
+  /// `NormaCEFTabAfterOneClientCallbackWithNoViewAnywhere` both do, and both are load-bearing pins —
+  /// so a config built in the constructor is a call through a null pointer in every test run of the
+  /// whole app suite. `OnAfterCreated` cannot be reached without a live CEF, and it is the browser
+  /// process UI thread, which is where `AddHandler` is documented to be called from. It is also what
+  /// `cefclient`'s own `ClientHandler` does, for what is presumably the same reason.
+  ///
+  /// A null router is survivable everywhere: every forward site above checks, and a client whose
+  /// creation was abandoned simply never has one.
+  void EnsureEditorBridgeRouter(CefRefPtr<CefBrowser> browser) {
+    CEF_REQUIRE_UI_THREAD();
+    if (bridge_router_) {
+      return;
+    }
+    bridge_router_ = CefMessageRouterBrowserSide::Create(NormaCEFEditorBridgeRouterConfig());
+    if (!bridge_router_) {
+      // `Create` only returns null for a config with an empty function name, which the shared
+      // config cannot produce — logged rather than asserted because a browser with no bridge is a
+      // page that cannot talk to Swift, and that is worth seeing in a live run.
+      Log("editor bridge router NOT created (id=%d)", browser ? browser->GetIdentifier() : 0);
+      return;
+    }
+    bridge_router_->AddHandler(&bridge_handler_, /*first=*/false);
+    Log("editor bridge router created (window.cefQuery, id=%d)",
+        browser ? browser->GetIdentifier() : 0);
+  }
+
   /// The creation this client was built for, until `OnAfterCreated` ends it. **This is what owns
   /// the strong reference to the parent view** (the record holds it; the client holds the record),
   /// which is why the retain cannot outlive CEF's interest in the raw handle: CEF releases the
@@ -1590,6 +1887,18 @@ class NormaClient : public CefClient,
   /// client. Cleared in `OnBeforeClose` so it is released with the browser rather than with the
   /// client, which CEF may hold for longer.
   NormaCEFTabBridge *bridge_ = nil;
+
+  /// editor-plumbing Task 3 — the editor bridge's browser half.
+  ///
+  /// **The declaration ORDER of these two is load-bearing.** Members are destroyed in reverse
+  /// declaration order, so the handler is destroyed AFTER the router — which is one of the two
+  /// things `cef_message_router.h` accepts ("The Handler object must either outlive the router or be
+  /// removed from the router before they're deleted"). `OnBeforeClose` satisfies the other one
+  /// explicitly. A client whose browser never reached `OnAfterCreated` (an abandoned creation, a
+  /// client built by a test seam) holds a null router and an idle handler, and destroys both
+  /// without touching CEF.
+  NormaEditorBridgeHandler bridge_handler_;
+  CefRefPtr<CefMessageRouterBrowserSide> bridge_router_;
 
   IMPLEMENT_REFCOUNTING(NormaClient);
   DISALLOW_COPY_AND_ASSIGN(NormaClient);
@@ -2431,6 +2740,51 @@ void NormaCEFExecuteCDP(NSView *parent,
   // on this line, and the caller's own deadline is what covers it (`PanelCommandConsumer`'s
   // abandonment timer, which exists for the app-is-wedged case anyway).
   RememberPendingCDP(browser->GetIdentifier(), messageId, answer);
+}
+
+// ---------------------------------------------------------------------------
+// editor-plumbing Task 3: the editor bridge's two doors
+// ---------------------------------------------------------------------------
+
+void NormaCEFSetBridgeHandler(void (^handler)(int browserId, uint64_t queryId,
+                                              const char *requestJSON)) {
+  // Copied, like every other block this file stores: a stack block escaping into process-global
+  // state is the classic ARC hazard on this shape (`NormaCEFExecuteCDP` says the same).
+  g_bridge_handler = [handler copy];
+  // No CEF guard, and no reach into the framework — this is plain process state, settable before
+  // `CefInitialize` and in a host where CEF never starts at all. Queries simply do not arrive there.
+  Log("editor bridge handler %s", handler != nil ? "registered" : "cleared");
+}
+
+void NormaCEFBridgeRespondCall(uint64_t queryId, bool success, const char *responseJSON) {
+  CefRefPtr<CefMessageRouterBrowserSide::Callback> callback;
+  {
+    std::lock_guard<std::mutex> lock(g_bridge_mutex);
+    auto it = g_bridge_queries.find(queryId);
+    if (it == g_bridge_queries.end()) {
+      // Unknown, already answered, or cancelled between delivery and now (a navigation, a closed
+      // tab, a dead renderer). All ordinary, none an error — and this is also the line that makes
+      // the whole entry point safe in a process where CEF was never loaded: with no live query
+      // there is no callback, and nothing below runs.
+      return;
+    }
+    // **Erase THEN resolve**, exactly as `SettlePendingCDP` does and for the same reason: the
+    // callback hops to the renderer and the answer may re-enter this file, and an entry still in
+    // the map at that moment is an entry a second answer could fire again.
+    callback = it->second.callback;
+    g_bridge_queries.erase(it);
+  }
+  if (!callback) {
+    return;
+  }
+  const std::string response(responseJSON != nullptr ? responseJSON : "");
+  if (success) {
+    callback->Success(response);
+  } else {
+    callback->Failure(kNormaCEFBridgeFailureCode, response);
+  }
+  Log("bridge-query-answered (id=%llu, ok=%d, %zu byte(s))",
+      static_cast<unsigned long long>(queryId), success ? 1 : 0, response.size());
 }
 
 NSString *NormaCEFPendingCDPTranscriptForOneBrowserWithNoCEFAnywhere(void) {
