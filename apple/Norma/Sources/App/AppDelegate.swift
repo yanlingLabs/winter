@@ -629,6 +629,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             SpikeCloseLeak.start(delegate: self)
             return
         }
+        // editor-plumbing Task 5 — the editor bridge's proof harness, third on the same list and
+        // gated the same way (`NORMA_EDITOR_HARNESS=1`). It runs the whole Stage-A drill unattended
+        // and terminates with a JSON transcript, so it must not have `boot()`'s account-global side
+        // effects underneath it either. The menu item below (`MenuBarController`) is the same
+        // harness inside an ordinary run, for a human to watch.
+        if EditorBridgeHarness.isRequested {
+            EditorBridgeHarness.start(delegate: self)
+            return
+        }
         #endif
         // DD-T4: stamp NORMA_HOME + NORMA_PROFILE into this process's env BEFORE the first
         // `NormaPaths` read (which happens inside `boot()` — `supervisor.start()`'s socket probe,
@@ -1121,6 +1130,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // idempotent guard.
             onInstallUpdate: { [weak self] in self?.updaterCoordinator?.installNow() }
         )
+        #if DEBUG
+        // editor-plumbing Task 5 — wired BEFORE `install()`, which is where the menu is built, and
+        // which is also what mounts the item at all (the hook being nil is the "do not mount"
+        // condition). Debug-only, and it opens the same harness `NORMA_EDITOR_HARNESS=1` runs
+        // unattended: same browser, same drill, same transcript, but the app keeps running and the
+        // window stays up to read.
+        mb.onOpenEditorHarness = { [weak self] in
+            guard let self else { return }
+            EditorBridgeHarness.open(delegate: self)
+        }
+        #endif
         mb.install()
         menuBar = mb
 

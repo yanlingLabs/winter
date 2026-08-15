@@ -125,6 +125,23 @@ export function dmgStagePlan(appPath: string): DmgStageOp[] {
 // scan walker never follows symlinks, so a locale pack is reachable by exactly one path.
 export const NAME_SCAN_EXCLUSIONS: readonly RegExp[] = [
   /^Contents\/Frameworks\/Chromium Embedded Framework\.framework\/Versions\/[^/]+\/Resources\/[^/]+\.lproj$/,
+  // editor-plumbing Task 1 — a DIFFERENT rationale from the rule above, deliberately not
+  // dressed up as the same one. The CEF rule is REACTIVE: a real scan found one genuine
+  // collision (a Swahili word) and was narrowed to exactly that class. This rule is
+  // PROPHYLACTIC: scanning the vendored Monaco tree at implement time (scripts/fetch-monaco.ts,
+  // ~14MB of vs/) with this same guard found ZERO hits — nothing is currently being hidden by
+  // it. It exists anyway because vs/ is minified third-party JS this repo does not author or
+  // review, re-minted wholesale on every version bump — unlike CEF's one-time-found lproj
+  // pattern, a future Monaco bump changing every byte of a 14MB minified blob is exactly the
+  // kind of event that could produce a fresh, meaningless collision with no advance warning,
+  // and there is no practical way to diff-review minified output for that ahead of time.
+  // Directory-anchored (`(\/|$)`) rather than a bare prefix so the scan walker prunes the whole
+  // vs/ subtree as one excluded node — same shape as the lproj rule above — while a name that
+  // merely starts with "vs" (e.g. a hypothetical "vsx" sibling) does not accidentally match.
+  // The in-repo `EditorAssets/app` page shell (Norma's OWN code, landed by Task 4) is
+  // deliberately NOT covered by this pattern and stays fully scanned — only vendored, unreviewed
+  // third-party bytes get this treatment.
+  /^Contents\/Resources\/EditorAssets\/vs(\/|$)/,
 ];
 
 export interface NameScanPlanInputs {

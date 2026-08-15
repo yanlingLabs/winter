@@ -3,6 +3,9 @@
 
 #import <AppKit/AppKit.h>
 
+#include <stdbool.h>
+#include <stdint.h>
+
 /// panel-cef Task 6a — the ENTIRE Swift-facing surface of the CEF embed.
 ///
 /// Plain Objective-C and `extern "C"`, deliberately: the implementation is Objective-C++
@@ -53,6 +56,32 @@ BOOL NormaCEFIsInitialized(void);
 
 /// The last failure reason, for the placeholder the panel shows instead of a page. Never NULL.
 const char *NormaCEFLastError(void);
+
+/// editor-plumbing Task 2 — the `norma-editor://` scheme, spelled once for the Swift side.
+///
+/// `"norma-editor"`. Two hosts map into ONE on-disk root: `norma-editor://assets/...` is the root
+/// itself (Monaco is embedded at `Contents/Resources/EditorAssets/vs`) and
+/// `norma-editor://app/...` is the page shell beside it (`.../EditorAssets/app`). They are separate
+/// ORIGINS on purpose — the shell is Norma's own code, the assets are vendored third-party bytes —
+/// which is why the scheme is registered CORS-enabled and the handler answers with an
+/// `Access-Control-Allow-Origin` naming the shell.
+extern const char *const kNormaEditorScheme;
+
+/// Point the `norma-editor://` scheme at the directory it serves — the app bundle's
+/// `Contents/Resources/EditorAssets`. Idempotent: calling it again replaces the root outright.
+///
+/// **Nothing outside that directory is reachable through this scheme, ever.** The handler resolves
+/// every request through `NormaCEFEditorAssetResolve` (`NormaCEFAssetResolve.h`), which
+/// canonicalises both sides and refuses anything landing outside the root — `..`, percent-encoded
+/// `..`, and symlinks pointing out of the tree included. The editor reads and writes the USER's
+/// files over the JS bridge, under Swift's control; the scheme is for Norma's own shipped assets
+/// and is not a filesystem door.
+///
+/// Safe before CEF is up, and safe when CEF never comes up: the root is plain process state that
+/// the scheme handler consults on the IO thread. Until it is called the root is empty and the
+/// handler answers 404 to everything — the fail-closed default, deliberately not "the working
+/// directory".
+void NormaCEFRegisterEditorAssetRoot(const char *absolutePath);
 
 /// Create a browser as a child of `parent` and navigate it to `url`. If the CEF context is not up
 /// yet the request is QUEUED and replayed from `OnContextInitialized`; `parent` is held weakly, so
@@ -275,6 +304,90 @@ void NormaCEFExecuteCDP(NSView *parent,
                         const char *method,
                         const char *paramsJSON,
                         NormaCEFCDPCompletion completion);
+
+#pragma mark - editor-plumbing Task 3: the editor page's bridge
+
+/// **The shape of an answer to one editor query**, and the type a Swift-side responder is stored
+/// as. `NormaCEFBridgeRespondCall` below has exactly this signature — the typedef is what lets the
+/// Swift side hold the door as a value rather than name the function at every call site, the same
+/// service `NormaCEFCDPCompletion` performs for the CDP door's replies.
+typedef void (*NormaCEFBridgeRespond)(uint64_t queryId, bool success, const char *responseJSON);
+
+/// **Register the ONE block every `window.cefQuery` from every page is delivered to.** Pass `NULL`
+/// to stop listening; there is one bridge per process, like the pre-shutdown hook, and registering
+/// again replaces it outright.
+///
+/// `browserId` is `CefBrowser::GetIdentifier()` — the same number `NormaCEFExecuteCDP`'s registry
+/// keys on. `queryId` is THIS BRIDGE's own monotonic number, not CEF's: CEF's `query_id` is unique
+/// only "for the life span of the router" (`cef_message_router.h`) and Norma creates one router per
+/// browser, so two tabs legitimately produce the same CEF id. `requestJSON` is the page's request
+/// string verbatim, valid only for the duration of the call — copy anything you keep.
+///
+/// **Every delivered query MUST be answered exactly once** with `NormaCEFBridgeRespondCall`, or the
+/// page's promise never settles and the browser side holds a CEF `Callback` for the life of the
+/// browser. That is not merely untidy: the router's own contract calls destroying an unanswered
+/// callback a runtime error. An answer for a query that has already been answered, or one that was
+/// cancelled underneath you (a navigation, a closed tab, a dead renderer), is a safe no-op.
+///
+/// Called on the MAIN thread, one main-queue turn after CEF's own callback — not synchronously
+/// inside it — so a handler is free to re-enter this file (close the tab, run JS, answer inline).
+///
+/// **THE EXPOSURE, STATED RATHER THAN IMPLIED: this puts `window.cefQuery` on EVERY page in EVERY
+/// Norma browser, not only the editor.** The renderer-side router registers it into every V8
+/// context unconditionally (`NormaEditorScheme.h` says why a URL filter there would be worse than
+/// the exposure), so an arbitrary site in a panel web tab can call it and this block will hear it.
+/// Containment is PRODUCER DISCIPLINE, exactly as it is for the CDP door above:
+///
+///   * **the handler MUST discriminate by `browserId`** and answer only queries from the browser it
+///     put the editor page in — a page's request is untrusted input, and the bridge's verbs read
+///     and write the user's files;
+///   * a query from any other browser must be REFUSED (answered `success = false`), not ignored.
+///     Ignoring it strands the callback; refusing it costs the page an error it asked for.
+///
+/// With no block registered — which is every process until the app installs one, and every unit
+/// test — queries are not stored at all: the router cancels them itself and the page's `onFailure`
+/// runs with CEF's own error code of -1.
+void NormaCEFSetBridgeHandler(void (^handler)(int browserId, uint64_t queryId, const char *requestJSON));
+
+/// **Which browser is in this container?** `CefBrowser::GetIdentifier()` for the browser hosted by
+/// `parent`, or **0** when there is none — no browser yet, a browser already closed, CEF never
+/// loaded, or a view that never hosted one. Same number `NormaCEFSetBridgeHandler` delivers as
+/// `browserId` and `NormaCEFExecuteCDP`'s registry keys on.
+///
+/// **This is the missing half of the obligation stated 30 lines above.** That block requires a
+/// bridge handler to discriminate by `browserId` and refuse every query that is not its own — and
+/// until this existed the Swift side had no way to learn what its own is. Everything else in this
+/// header addresses a browser by its CONTAINER VIEW (`NormaCEFExecuteCDP`, the chrome verbs, all
+/// three observers), for the good reason that a container exists before its browser does; the
+/// bridge is the one channel that speaks ids, because a query arrives from a page, not from a view.
+/// This is the translation between the two, and it is the whole of it.
+///
+/// **Resolved live on every call, never cached, and that is the point.** The lookup is two ObjC
+/// pointer comparisons over the open-browser list (`BrowserForParent`, which messages nothing — see
+/// its own note on the zombie hazard that shape exists to avoid), so a handler may call it per query
+/// and always get today's answer: a container whose browser was closed and re-created answers with
+/// the new id, and one whose browser is gone answers 0. A cached id is a stale id, and a stale id in
+/// a discriminator means either refusing your own page or — far worse — accepting someone else's.
+///
+/// **0 is never a browser and must be read as "refuse".** A caller comparing `browserId == 0 == 0`
+/// would accept every query in the process from a container that has no browser at all.
+///
+/// Called on the MAIN thread, like everything else in this header, and safe with CEF never loaded.
+int NormaCEFBrowserIdentifierForParent(NSView *parent);
+
+/// **Answer one query.** `success = true` runs the page's `onSuccess` with `responseJSON`;
+/// `success = false` runs its `onFailure`, carrying `responseJSON` as the error message (by
+/// convention a `{"message": …}` object, matching the CDP door's failure shape).
+///
+/// Resolves and FORGETS in one step, and the erase happens before the callback is touched — the
+/// same ordering `SettlePendingCDP` uses and for the same reason: a second answer, or a cancellation
+/// racing an answer, must find nothing rather than fire twice.
+///
+/// A `queryId` this bridge does not know is a silent no-op, deliberately. It is not an error
+/// condition: the query may have been cancelled by a navigation or a closed tab between delivery and
+/// this call, and both of those are ordinary. Safe with CEF never loaded, like everything else in
+/// this header — with no live query there is nothing to reach the framework for.
+void NormaCEFBridgeRespondCall(uint64_t queryId, bool success, const char *responseJSON);
 
 /// **Test seam.** Drive the pending-CDP registry — the half of the CDP door that decides *which*
 /// completion a reply belongs to — with **no browser, no observer and no CEF anywhere**, and hand

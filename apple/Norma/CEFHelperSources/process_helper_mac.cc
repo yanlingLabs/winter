@@ -34,8 +34,25 @@
 // the whole process tree against it: these bundles now launch and serve real renderer, GPU and
 // utility processes. The branch's headline result IS that they succeed.
 
+// editor-plumbing Task 2 ADDS a FOURTH step, between 2 and 3: a `CefApp`. This main passed
+// `nullptr` from Task 4 until now, which was correct for an embedder with no custom schemes and
+// became wrong the moment `norma-editor://` existed. `cef_app.h`'s own comment on
+// `OnRegisterCustomSchemes` — "called on the main thread for each process and the registered
+// schemes should be the same across all processes" — is a requirement, not advice: a custom scheme
+// registered only in the browser process is not a standard, secure scheme in any RENDERER, so the
+// editor page would have no real origin, no secure context, and therefore no workers, no ES modules
+// and no `fetch`. Nothing in this repo can catch that (no test boots CEF); it would surface as a
+// blank editor in Task 5's live harness.
+//
+// The app class is shared with the browser process's own `NormaApp` through
+// `Sources/CEF/NormaEditorScheme.h` — one `AddCustomScheme` call with one set of flags, reached
+// from here via a HEADER_SEARCH_PATHS entry on the `CEFHelper` target template. See that header for
+// why the two processes have different app CLASSES but must not have different scheme LISTS.
+
 #include "include/cef_app.h"
 #include "include/wrapper/cef_library_loader.h"
+
+#include "NormaEditorScheme.h"
 
 #if defined(CEF_USE_SANDBOX)
 #include "include/cef_sandbox_mac.h"
@@ -54,6 +71,12 @@ int main(int argc, char* argv[]) {
     return 1;
   }
 
+  // Constructed AFTER the loader, not before: `NormaSubprocessApp`'s reference counting is CEF's
+  // (`IMPLEMENT_REFCOUNTING`), and this file never links the framework — it dlopens it above.
+  // One app for every role this executable is dispatched to. It registers the scheme in all of
+  // them and, in a renderer specifically, also carries the editor bridge's renderer-side router —
+  // installing `window.cefQuery` and routing its replies. See `NormaEditorScheme.h` for both.
   CefMainArgs main_args(argc, argv);
-  return CefExecuteProcess(main_args, nullptr, nullptr);
+  CefRefPtr<CefApp> app(new NormaSubprocessApp());
+  return CefExecuteProcess(main_args, app, nullptr);
 }

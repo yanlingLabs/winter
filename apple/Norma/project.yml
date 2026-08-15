@@ -36,6 +36,17 @@ targets:
       # verified at load (RemoteAccessCoordinator.loadVerifiedRelayConfig) against
       # NormaKit's RelayConfigTrust.productionPublicKey before a single relay URL is trusted.
       - path: Resources
+        # editor-plumbing Task 4: `EditorAssets/` is placed by the "Embed Monaco editor assets"
+        # postCompileScript below, which dittos it NESTED (app/ and vs/ keep their subpaths). It
+        # must NOT also go through Xcode's automatic Copy Bundle Resources, because `- path:
+        # Resources` is an xcodegen GROUP and that copy FLATTENS: this project's own build log shows
+        # `Resources/MenuBar/mb-dev-idle.png` arriving as `Contents/Resources/mb-dev-idle.tiff` —
+        # no subdirectory survives, and COMBINE_HIDPI can transform the bytes on the way. Left
+        # unexcluded, `editor.html`/`editor.js`/`bridge-protocol.js` would ALSO appear bare at the
+        # Resources root: dead copies nothing serves, on a path the name-scan rules do not describe.
+        # `EditorPlumbingTests.testTheEditorPageIsEmbeddedNestedAndNotFlattened` pins both halves.
+        excludes:
+          - EditorAssets
       # sidebar-brand T1: the brand palette (docs/brand.md) — colorsets ONLY, no app-icon set.
       # The `.icns` path still owns the icon via Info.plist's CFBundleIconFile
       # ($(NORMA_APP_ICON)), and ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME stays unset so
@@ -106,6 +117,25 @@ targets:
             echo "error: CEF framework not vendored at ${CEF_DIR}." >&2
             echo "error: from the repo root, run: bun run scripts/fetch-cef.ts" >&2
             echo "error: (or: bun run cef:fetch) — then rebuild." >&2
+            exit 1
+          fi
+      - name: Check Monaco vendored
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          # editor-plumbing Task 1: Monaco is vendored the same way CEF is above (fetched,
+          # hash-verified, gitignored — scripts/fetch-monaco.ts) and for the same reason (~14MB
+          # of minified third-party JS has no business being committed). Same three-part check
+          # as the CEF gate above, for the same reason: the loader marker alone would false-pass
+          # a tree left partial by a run that died mid-copy (vs/ copied, LICENSE never reached),
+          # and fetch-monaco.ts only writes .vendored-version after both finish.
+          MONACO_DIR="${SRCROOT}/vendor/monaco"
+          if [ ! -f "${MONACO_DIR}/vs/loader.js" ] || \
+             [ ! -f "${MONACO_DIR}/LICENSE" ] || \
+             [ ! -f "${MONACO_DIR}/.vendored-version" ]; then
+            echo "error: Monaco editor assets not vendored at ${MONACO_DIR}." >&2
+            echo "error: from the repo root, run: bun run scripts/fetch-monaco.ts" >&2
+            echo "error: (or: bun run monaco:fetch) — then rebuild." >&2
             exit 1
           fi
     postCompileScripts:
@@ -286,6 +316,48 @@ targets:
             fi
             ditto "${SRC_DIR}/${SRC_NAME}" "${DEST}/${DEST_NAME}"
           done
+      - name: Embed Monaco editor assets
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          # editor-plumbing Task 1: Monaco is vendored (fetched, hash-verified, gitignored —
+          # scripts/fetch-monaco.ts) the same way CEF is, for the same reason — third-party bytes
+          # this repo doesn't author have no business being committed. This phase places it, plus
+          # the in-repo editor page shell Task 4 lands at Resources/EditorAssets/app, plus the
+          # licence notice, into the built app — mirroring "Embed CEF framework" / "Embed CEF +
+          # Chromium licence notices" above. No signing needed (pure JS/HTML/CSS resources, unlike
+          # CEF's Mach-O framework) and no stamp/skip — a 14MB ditto on every build is cheap,
+          # matching "Embed CEF + Chromium licence notices" above rather than the signing-heavy
+          # "Embed CEF framework" phase's stamp.
+          MONACO_SRC="${SRCROOT}/vendor/monaco"
+          DEST_RESOURCES="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}"
+          DEST_EDITOR="${DEST_RESOURCES}/EditorAssets"
+          mkdir -p "${DEST_EDITOR}"
+          # rm -rf before each ditto (not a bare merge-in) — matches "Embed CEF helpers" below:
+          # ditto merges into an existing destination, so a future Monaco bump that DROPS a file
+          # would otherwise leave it lingering in the built bundle across incremental builds.
+          rm -rf "${DEST_EDITOR}/vs"
+          ditto "${MONACO_SRC}/vs" "${DEST_EDITOR}/vs"
+          # Resources/EditorAssets/app is the in-repo editor page shell (Norma's OWN HTML/CSS/JS,
+          # NOT vendored) — Task 4 creates it. Guarded rather than required: this phase is wired
+          # ahead of Task 4 landing the directory it copies, and an absent not-yet-created source
+          # dir must not fail every build between now and then.
+          if [ -d "${SRCROOT}/Resources/EditorAssets/app" ]; then
+            rm -rf "${DEST_EDITOR}/app"
+            ditto "${SRCROOT}/Resources/EditorAssets/app" "${DEST_EDITOR}/app"
+          fi
+          # Licence notice — same obligation and same precedent as "Embed CEF + Chromium licence
+          # notices" above (Monaco is MIT, not BSD-3-Clause, but the redistribution courtesy is
+          # the same: ship the notice alongside the binary distribution). Fails closed like that
+          # phase, not best-effort: a missing licence file here means fetch-monaco.ts's own
+          # COPY_FILES-equivalent obligation was skipped, which must not ship silently.
+          if [ ! -f "${MONACO_SRC}/LICENSE" ]; then
+            echo "error: required licence notice LICENSE is missing from ${MONACO_SRC}" >&2
+            echo "error: re-vendor Monaco with: bun run monaco:fetch" >&2
+            exit 1
+          fi
+          mkdir -p "${DEST_RESOURCES}/Licenses"
+          ditto "${MONACO_SRC}/LICENSE" "${DEST_RESOURCES}/Licenses/MONACO-LICENSE.txt"
       - name: Embed CEF helpers
         basedOnDependencyAnalysis: false
         script: |
@@ -737,6 +809,17 @@ targetTemplates:
         HEADER_SEARCH_PATHS:
           - $(inherited)
           - $(SRCROOT)/vendor/cef
+          # editor-plumbing Task 2: `Sources/CEF/NormaEditorScheme.h` — the ONE place the
+          # `norma-editor://` scheme's name and option flags are written. These five helper
+          # processes must register the identical scheme the browser process does (`cef_app.h`:
+          # "the registered schemes should be the same across all processes"), and a second copy of
+          # the flags in `process_helper_mac.cc` would drift from `NormaApp`'s the first time
+          # either changed, silently — no test in this repo can boot CEF to notice. One template
+          # entry covers all five targets, which is the whole point of the template.
+          # Array form, like the two entries above it: this checkout's SRCROOT contains a space,
+          # and each array element reaches Xcode as one already-quoted path (see the Norma
+          # target's own HEADER_SEARCH_PATHS comment for the quoting trap this avoids).
+          - $(SRCROOT)/Sources/CEF
         # CEF 151's public headers require C++20 — measured, not assumed (Task 3):
         # cef_scoped_refptr.h:101 uses std::same_as, and a probe compile at gnu++17 fails there
         # with 20 errors. xcodegen's setting preset leaves the project on gnu++14, same failure.

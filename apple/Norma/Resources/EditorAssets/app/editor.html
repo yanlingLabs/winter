@@ -1,0 +1,60 @@
+<!doctype html>
+<!--
+  editor-plumbing Task 4 — the editor shell.
+
+  Loaded as `norma-editor://app/editor.html` (host `app` -> Contents/Resources/EditorAssets/app),
+  with Monaco served from the sibling host `assets` (-> Contents/Resources/EditorAssets). Everything
+  this page references is either RELATIVE (its own two scripts) or under `norma-editor://assets/`,
+  which is the same URL in both layouts — so if Task 5 has to fall back to serving the shell from
+  `norma-editor://assets/app/editor.html` (single origin), not a byte here changes.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!--
+  THE OFFLINE GUARANTEE. `default-src 'none'` plus a per-directive allowlist that names exactly one
+  scheme: nothing http(s), no data: script, no remote font, no telemetry. What each exception buys:
+
+    script-src norma-editor: 'unsafe-eval' — Monaco is an AMD bundle; the loader evaluates module
+                                             sources, and its worker bootstrap evaluates too.
+    style-src  norma-editor: 'unsafe-inline' — Monaco injects its theme and token colours as inline
+                                             <style> elements at runtime; the .css it fetches is a
+                                             norma-editor: URL.
+    font-src   norma-editor:                — codicon.ttf, out of the same bundle.
+    worker-src blob:                        — the language workers are created from a blob:
+                                             bootstrap (see editor.js for why it cannot be a direct
+                                             norma-editor: Worker).
+    img-src    norma-editor: data:          — Monaco inlines a few decorations as data: URIs.
+    connect-src norma-editor:               — the worker's own loader fetches nested vs/ modules.
+-->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src norma-editor: 'unsafe-eval'; style-src norma-editor: 'unsafe-inline'; font-src norma-editor:; worker-src blob:; img-src norma-editor: data:; connect-src norma-editor:">
+<title>Norma Editor</title>
+<style>
+  html, body {
+    height: 100%;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+  }
+  /* The editor owns the whole viewport; the window chrome, tabs and everything else are Swift's. */
+  #editor {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: 0;
+  }
+</style>
+</head>
+<body>
+<div id="editor"></div>
+<!--
+  Monaco's AMD loader, absolute because it lives under the assets host either way. It is a CLASSIC
+  script and editor.js is a module (therefore deferred), so `window.require` is guaranteed to exist
+  by the time editor.js runs — the order is the HTML spec's, not a race.
+-->
+<script src="norma-editor://assets/vs/loader.js"></script>
+<script type="module" src="./editor.js"></script>
+</body>
+</html>

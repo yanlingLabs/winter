@@ -41,3 +41,9 @@ apple/NormaKit/vendor/IrohLib.xcframework/
 # commit; fetched + SHA1-verified via scripts/fetch-cef.ts (index.json-pinned there). The Norma
 # Xcode build fails loudly naming that command if this tree is absent (project.yml preBuildScripts).
 apple/Norma/vendor/cef/
+
+# Monaco editor (the code editor VS Code is built on) prebuilt minified distribution (~14MB
+# uncompressed) — too large to commit; fetched + sha512-verified via scripts/fetch-monaco.ts
+# (npm registry tarball, pinned there). The Norma Xcode build fails loudly naming that command
+# if this tree is absent (project.yml preBuildScripts).
+apple/Norma/vendor/monaco/
