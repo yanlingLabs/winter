@@ -166,7 +166,7 @@ final class SpikeCloseLeakHarness {
         }
         log("CEFREADY")
         guard let container else { return }
-        NormaCEFCreateBrowser(container, page)
+        NormaCEFCreateBrowser(container, page, 0) // no background override — not the editor
     }
 
     private func onNavigation(url: String?, title: String?) {
@@ -353,7 +353,7 @@ final class SpikeCloseLeakHarness {
                 view.frame = parkingHost.bounds
                 parkingHost.addSubview(view)
                 raceContainers.append(view)
-                NormaCEFCreateBrowser(view, page)
+                NormaCEFCreateBrowser(view, page, 0) // no background override — not the editor
             }
             log("RACE-CREATE k=\(k) — quitting in this same turn, with the creations inside CEF's queue")
         }
@@ -544,7 +544,7 @@ final class SpikeCloseLeakHarness {
         window.contentView?.addSubview(view)
         drillContainer = view
         log("DRILL-CREATE")
-        NormaCEFCreateBrowser(view, writePage())
+        NormaCEFCreateBrowser(view, writePage(), 0) // no background override — not the editor
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in self?.runDrill() }
     }
 

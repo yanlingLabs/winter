@@ -2916,8 +2916,11 @@ final class ShellSessionHostTests: XCTestCase {
             return XCTFail("the reveal built no runtime")
         }
         editor2.slot.deliver(browserId: 41, queryId: 1, request: #"{"type":"ready"}"#)
+        // editor-product Task 4: `ready` now ALSO sends `setTheme`, synchronously and ahead of
+        // anything queued — one more pending CDP call to drain before the one that acks `openModel`.
+        editor2.cef.answerNextCDP() // setTheme — no state effect
         await runtime.openFile("/repo/a.ts")
-        editor2.cef.answerNextCDP()
+        editor2.cef.answerNextCDP() // openModel — records the model
         editor2.slot.deliver(browserId: 41, queryId: 2,
                              request: #"{"type":"modelDirtyChanged","path":"/repo/a.ts","dirty":true}"#)
         XCTAssertEqual(runtime.stateSnapshot.dirtyCount, 1)
@@ -2948,8 +2951,11 @@ final class ShellSessionHostTests: XCTestCase {
             return XCTFail("the reveal built no runtime")
         }
         editor.slot.deliver(browserId: 41, queryId: 1, request: #"{"type":"ready"}"#)
+        // editor-product Task 4: drain the ready-triggered `setTheme` first — see the identical note
+        // in `testHidingTheShellReleasesACleanEditorAndKeepsOneWithUnsavedWork`.
+        editor.cef.answerNextCDP() // setTheme — no state effect
         await runtime.openFile("/repo/a.ts")
-        editor.cef.answerNextCDP()
+        editor.cef.answerNextCDP() // openModel — records the model
         editor.slot.deliver(browserId: 41, queryId: 2,
                             request: #"{"type":"modelDirtyChanged","path":"/repo/a.ts","dirty":true}"#)
 

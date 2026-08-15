@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import Foundation
+import SwiftUI
 
 // MARK: - The state (PURE — `EditorRuntimeTests` drives every row of this without CEF)
 
@@ -73,6 +74,10 @@ enum EditorRuntimeEvent: Equatable {
     /// The boot could not proceed — no embedded assets, CEF refused to start, or the page never said
     /// `ready`. Ignored once ready (a late watchdog must not condemn a working editor).
     case bootFailed(reason: String)
+    /// The system appearance changed (`EditorRuntime.systemAppearanceChanged()`, wired to `NSApp`'s
+    /// own `effectiveAppearance`). A no-op unless the page is actually up to repaint —
+    /// editor-product Task 4.
+    case appearanceChanged
     /// Release everything. Legal from EVERY phase, and the only route back to `idle`.
     case teardownRequested
 }
@@ -82,6 +87,11 @@ enum EditorRuntimeEvent: Equatable {
 enum EditorRuntimeEffect: Equatable {
     case createBrowser
     case registerWithHub(browserId: Int32)
+    /// Resolve the current scheme's tokens and send `setTheme` — editor-product Task 4. Carries no
+    /// payload: the reducer only decides WHEN (ready, and every later appearance change), never WHAT
+    /// — that stays the imperative half's job, the same split `openModel` already draws between
+    /// "read the file" (here, at flush time) and "decide to open one" (the reducer).
+    case sendTheme
     /// Read the file from disk and send `openModel`. The read happens HERE, at flush time, rather
     /// than when the open was requested — a queued open must carry today's bytes, not the bytes the
     /// file had when a user clicked while the page was still booting.
@@ -134,7 +144,17 @@ enum EditorRuntimeReducer {
             next.phase = .ready
             let queued = next.pendingOpens
             next.pendingOpens = []
-            return (next, queued.map { .openModel(path: $0) })
+            // **`.sendTheme` first.** The brand belongs on the editor before any file's first paint,
+            // not raced against it — and ordering it ahead of the flushed opens costs nothing, since
+            // `setTheme` and `openModel` land in the page independently of one another.
+            return (next, [.sendTheme] + queued.map { .openModel(path: $0) })
+
+        case .appearanceChanged:
+            // Booting/idle/failed all have somewhere better for this to happen: a runtime still
+            // booting sends the CURRENT scheme's theme the moment `pageReady` fires anyway (read
+            // fresh, not cached), and `failed`/`idle` hold no page to repaint. Only `ready` acts.
+            guard state.phase == .ready else { return (next, []) }
+            return (next, [.sendTheme])
 
         case .openRequested(let path):
             switch state.phase {
@@ -267,7 +287,11 @@ final class EditorRuntime: ObservableObject {
         var registerAssetRoot: (String) -> Void
         var ensureInitialized: @MainActor () -> Bool
         var failureReason: @MainActor () -> String?
-        var createBrowser: (PanelCEFContainerView, String) -> Void
+        /// editor-product Task 4: the third argument is the browser's OWN background at creation,
+        /// `0xAARRGGBB` (`NormaCEF.h`'s `backgroundColorARGB`) — `EditorTheme.cardSurfaceBackgroundARGB`,
+        /// always fully opaque here (unlike `BrowserRuntime`'s ordinary web tabs, which pass `0` —
+        /// "no override" — since an arbitrary site has no brand to anticipate).
+        var createBrowser: (PanelCEFContainerView, String, UInt32) -> Void
         var browserIdentifier: (PanelCEFContainerView) -> Int32
         var closeBrowser: (PanelCEFContainerView) -> Void
         var executeCDP: (PanelCEFContainerView, String, String?, @escaping (Bool, String) -> Void) -> Void
@@ -290,7 +314,7 @@ final class EditorRuntime: ObservableObject {
                 if case .failed(let reason) = NormaCEFRuntime.state { return reason }
                 return nil
             },
-            createBrowser: { NormaCEFCreateBrowser($0, $1) },
+            createBrowser: { NormaCEFCreateBrowser($0, $1, $2) },
             browserIdentifier: { NormaCEFBrowserIdentifierForParent($0) },
             closeBrowser: { NormaCEFCloseBrowser($0) },
             executeCDP: { NormaCEFRuntime.executeCDP(in: $0, method: $1, paramsJSON: $2, completion: $3) })
@@ -340,22 +364,55 @@ final class EditorRuntime: ObservableObject {
     private let driver: CEFDriver
     private let scheduler: Scheduler
     private let readFile: @Sendable (String) throws -> String
+    /// What scheme `EditorTheme.tokensJSON`/`cardSurfaceBackgroundARGB` resolve against. Injected —
+    /// the same reasoning as every other seam here — so a test can pin a payload's shape against a
+    /// KNOWN scheme rather than whatever appearance happens to be active on the machine running the
+    /// suite. Production reads AppKit directly (`currentColorScheme()`); nothing about the resolution
+    /// itself belongs on the reducer's pure side, which only ever decides WHEN to ask for one.
+    /// `@MainActor` (like `BrowserSignals.memoryBytes`/`PanelDiffTab`'s `fetch`): every call site is
+    /// already on the actor, and the default value calls a `@MainActor` static method directly.
+    private let colorScheme: @MainActor () -> ColorScheme
 
     private var container = PanelCEFContainerView()
     private var hiddenWindowStorage: NSWindow?
     private var idPoll: Scheduler.Cancellable?
     private var readyWatchdog: Scheduler.Cancellable?
+    /// The ONE Combine wire this object holds (`ShellSessionHost.cancellables`'s identical shape and
+    /// reasoning) — `NSApp`'s own `effectiveAppearance`, below, so its lifetime is this runtime's own
+    /// and no separate teardown is needed (`AnyCancellable.cancel()` fires on deinit).
+    private var cancellables = Set<AnyCancellable>()
 
     init(sessionId: String,
          hub: EditorBridgeHub = .shared,
          driver: CEFDriver = .production,
          scheduler: Scheduler = .production,
+         colorScheme: @escaping @MainActor () -> ColorScheme = { EditorRuntime.currentColorScheme() },
          readFile: @escaping @Sendable (String) throws -> String = EditorRuntime.readTextFile) {
         self.sessionId = sessionId
         self.hub = hub
         self.driver = driver
         self.scheduler = scheduler
+        self.colorScheme = colorScheme
         self.readFile = readFile
+        // editor-product Task 4 — the app's first reactor to appearance change that is NOT a
+        // SwiftUI view: grepped, nothing else in this codebase observes `effectiveAppearance`,
+        // because every other surface adapts automatically through `Color`/`Image`'s own machinery,
+        // which a Chromium page has none of. Fires once, synchronously, on subscribe (Combine's KVO
+        // publisher replays the current value) — a harmless no-op here, exactly like
+        // `ShellSessionHost.init`'s own `directory.$rows` subscription: this runtime is `.idle` the
+        // moment it is constructed, and the reducer's `.appearanceChanged` case only acts when
+        // `.ready`.
+        NSApp.publisher(for: \.effectiveAppearance)
+            .sink { [weak self] _ in self?.systemAppearanceChanged() }
+            .store(in: &cancellables)
+    }
+
+    /// What `colorScheme`'s production default reads: AppKit's own answer to "is the system in dark
+    /// mode right now", the same `bestMatch(from:)` idiom drawing code uses to resolve a dynamic
+    /// color — there is no SwiftUI `\.colorScheme` environment to read here, since nothing about this
+    /// object is a view.
+    static func currentColorScheme() -> ColorScheme {
+        NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? .dark : .light
     }
 
     // MARK: The doors
@@ -400,6 +457,14 @@ final class EditorRuntime: ObservableObject {
         perform(dispatch(.teardownRequested))
     }
 
+    /// The system's light/dark appearance changed. **The testable seam** (editor-product Task 4):
+    /// wired to `NSApp`'s own KVO in `init`, above, but a test calls this directly rather than
+    /// flipping the real OS appearance — the same posture the whole file already takes toward CEF
+    /// (drive the door, never the framework underneath it).
+    func systemAppearanceChanged() {
+        perform(dispatch(.appearanceChanged))
+    }
+
     // MARK: The reducer, driven
 
     /// Reduce synchronously, publish, and hand the effects back. **Every door goes through here and
@@ -418,6 +483,8 @@ final class EditorRuntime: ObservableObject {
                 startBrowser()
             case .registerWithHub(let browserId):
                 registerWithHub(browserId)
+            case .sendTheme:
+                sendTheme()
             case .openModel(let path):
                 Task { @MainActor [weak self] in await self?.openAndSend(path) }
             case .activateModel(let path):
@@ -458,7 +525,14 @@ final class EditorRuntime: ObservableObject {
             // (`BrowserRuntime.parkingWindow`'s measured note). A pre-warmed editor that is never
             // opened would otherwise boot Monaco against a viewport nobody could ever see.
             self.parkEditorView()
-            self.driver.createBrowser(self.container, Self.pageURL)
+            // editor-product Task 4, white-flash fix (half 1 of 2): the scheme active AT CREATION,
+            // baked into the browser's own background before anything — the asset load, the AMD
+            // bootstrap, Monaco's construction — has painted a single pixel. A LATER appearance
+            // change does not revisit this: by then `editor.html`'s body is transparent (half 2) and
+            // Monaco's own theme (kept live by `.appearanceChanged`, above) is what is actually
+            // showing through it.
+            self.driver.createBrowser(self.container, Self.pageURL,
+                                      EditorTheme.cardSurfaceBackgroundARGB(for: self.colorScheme()))
             self.pollForBrowserId(attempt: 0)
             self.armReadyWatchdog()
         }
@@ -499,6 +573,14 @@ final class EditorRuntime: ObservableObject {
             respond(true, "{}")
             self?.receive(message)
         }
+    }
+
+    /// Resolve the CURRENT scheme's tokens and send `setTheme` — the reducer's `.sendTheme` effect,
+    /// performed. Resolved fresh on every call rather than cached: an appearance change asks again
+    /// through the exact same door (`.appearanceChanged`'s effect is the identical `.sendTheme`), so
+    /// there is nowhere a stale value could be read from even if one existed.
+    private func sendTheme() {
+        send(.setTheme(tokensJSON: EditorTheme.tokensJSON(for: colorScheme())))
     }
 
     private func receive(_ message: EditorBridgeInbound) {

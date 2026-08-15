@@ -1269,8 +1269,9 @@ final class EditorPlumbingTests: XCTestCase {
         let steps = EditorHarnessFixtures.steps(fixtures)
         let ids = steps.map(\.id)
 
-        XCTAssertEqual(steps.count, 43, "two new steps (9.setView, 9.viewState) join the Stage-A "
-                       + "script's 41")
+        XCTAssertEqual(steps.count, 44, "two new steps (9.setView, 9.viewState) joined the Stage-A "
+                       + "script's 41 (Task 1); editor-product Task 4 adds a third, 1.brand, so the "
+                       + "branded theme is live before drill 10's before-screenshot runs")
 
         guard let setViewIndex = ids.firstIndex(of: "9.setView"),
               let openCIndex = ids.firstIndex(of: "9.openC"),

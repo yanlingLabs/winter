@@ -96,7 +96,11 @@ final class BrowserRuntime {
             setNavigationObserver: { NormaCEFSetNavigationObserver($0, $1) },
             setPopupObserver: { NormaCEFSetPopupObserver($0, $1) },
             seedTabState: { NormaCEFSeedTabState($0, $1, $2) },
-            createBrowser: { NormaCEFCreateBrowser($0, $1) },
+            // editor-product Task 4: `0` is "no override" (CEF's own `background_color` contract —
+            // fully transparent alpha) — an ordinary web tab has no brand to anticipate, so this
+            // preserves today's behaviour byte-for-byte rather than growing this closure's own
+            // signature for a value every caller here would pass the same constant for anyway.
+            createBrowser: { NormaCEFCreateBrowser($0, $1, 0) },
             closeBrowser: { NormaCEFCloseBrowser($0) },
             loadURL: { NormaCEFLoadURL($0, $1) },
             goBack: { NormaCEFGoBack($0) },

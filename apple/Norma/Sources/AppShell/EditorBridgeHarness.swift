@@ -622,11 +622,23 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
         // ---- drill 1: offline boot ------------------------------------------------------------
         case "1.boot":
             browserCreatedAt = Date()
-            NormaCEFCreateBrowser(editorContainer, Self.pageURL)
+            // editor-product T4: DEBUG-harness passes the same background the product runtime does
+            // — the scheme active AT CREATION, so this drill exercises the exact call shape a real
+            // session's `EditorRuntime` makes rather than a hardcoded "no override" placeholder.
+            NormaCEFCreateBrowser(editorContainer, Self.pageURL,
+                                 EditorTheme.cardSurfaceBackgroundARGB(for: EditorRuntime.currentColorScheme()))
             // editor-product T3: the hub's key is the browser's id, which does not exist until CEF
             // says so — armed here, immediately after the create, so the registration is in place
             // long before the page can send its `ready` (see `registerWithHub`).
             registerWithHub(attempt: 0)
+
+        // editor-product T4: the SAME theme a real `EditorRuntime` sends the instant `ready`
+        // arrives — see `EditorRuntimeReducer`'s `.pageReady` case. Sent here too so drill 10's
+        // `10.before` screenshot reflects a session that is actually branded by the time it runs,
+        // not Monaco's own unbranded "vs" default (which `editor.create()` applies eagerly, well
+        // before this step, independent of anything the browser's OWN background paints).
+        case "1.brand":
+            performBrandTheme(step.id)
 
         case "1.bound":
             guard let elapsed = readyElapsedMs else {
@@ -1463,16 +1475,52 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
         """) { _ in next() }
     }
 
+    /// `getComputedStyle` of both Monaco's own editor root and its background div, joined — what
+    /// `performTheme` (drill 10) probes to prove a `setTheme` actually repainted something rather
+    /// than merely failing to throw. `performBrandTheme` (drill 1, below) does NOT use this: proving
+    /// a repaint is drill 10's claim, not this step's — see its own doc for why.
+    private static let backgroundProbeScript = """
+    (function () {
+      var editor = document.querySelector(".monaco-editor");
+      var background = document.querySelector(".monaco-editor-background");
+      return (editor ? getComputedStyle(editor).backgroundColor : "?")
+        + " / " + (background ? getComputedStyle(background).backgroundColor : "?");
+    })()
+    """
+
+    /// editor-product Task 4 — the SAME send an `EditorRuntime` makes the instant `ready` arrives
+    /// (`EditorRuntimeReducer`'s `.pageReady` case), performed here because this harness drives its
+    /// own bridge client rather than a product runtime. Its purpose is NOT drill 10's job (proving
+    /// `setTheme` can repaint at all, which needs the page settled enough to answer a DOM query
+    /// meaningfully) — it is making every LATER step in this run, including drill 10's own
+    /// `10.before` screenshot, reflect an editor that is already branded, the way a real session's is
+    /// by the time a user ever sees it. So the claim here is deliberately narrower and does not
+    /// depend on `.monaco-editor`'s DOM query timing at all: the call delivered with no exception,
+    /// and the page logged nothing while handling it.
+    ///
+    /// **Measured, not assumed**: probing `.monaco-editor`/`.monaco-editor-background` THIS early —
+    /// one step after `ready`, on a renderer that has done nothing yet but boot — answered `"?"` for
+    /// both, before AND 300ms after the send, on a run where drill 10's IDENTICAL probe (after nine
+    /// more drills' worth of activity) answered normally. Monaco's `create()` returns before its own
+    /// first layout/paint pass has necessarily run; a claim that depends on querying its DOM this
+    /// early would be measuring the harness's own timing, not the bridge.
+    private func performBrandTheme(_ stepId: String) {
+        let tokens = EditorTheme.tokensJSON(for: EditorRuntime.currentColorScheme())
+        send(.setTheme(tokensJSON: tokens)) { [weak self] error in
+            guard let self else { return }
+            if let error { self.local(stepId, false, error); return }
+            self.readConsole { lines in
+                let errors = lines.filter { $0.hasPrefix("error:") || $0.hasPrefix("csp:") }
+                self.local(stepId, errors.isEmpty,
+                           "sent the branded theme (\(tokens.utf8.count) bytes), no exception"
+                           + (errors.isEmpty ? ", the page logged nothing"
+                              : "; the page logged \(errors.joined(separator: " | "))"))
+            }
+        }
+    }
+
     private func performTheme(_ stepId: String) {
-        let backgroundProbe = """
-        (function () {
-          var editor = document.querySelector(".monaco-editor");
-          var background = document.querySelector(".monaco-editor-background");
-          return (editor ? getComputedStyle(editor).backgroundColor : "?")
-            + " / " + (background ? getComputedStyle(background).backgroundColor : "?");
-        })()
-        """
-        evaluate(editorContainer, backgroundProbe) { [weak self] before in
+        evaluate(editorContainer, Self.backgroundProbeScript) { [weak self] before in
             guard let self else { return }
             let beforeText = before.value.map { "\($0 ?? "")" } ?? "?"
             let tokens = """
@@ -1482,7 +1530,7 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
             self.send(.setTheme(tokensJSON: tokens)) { error in
                 if let error { self.local(stepId, false, error); return }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    self.evaluate(self.editorContainer, backgroundProbe) { after in
+                    self.evaluate(self.editorContainer, Self.backgroundProbeScript) { after in
                         let afterText = after.value.map { "\($0 ?? "")" } ?? "?"
                         self.readConsole { lines in
                             let errors = lines.filter { $0.hasPrefix("error:") || $0.hasPrefix("csp:") }
@@ -1532,7 +1580,7 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
             sidecar.contentView?.addSubview(foreignContainer)
             sidecar.orderFront(nil)
             foreignWindow = sidecar
-            NormaCEFCreateBrowser(foreignContainer, "about:blank")
+            NormaCEFCreateBrowser(foreignContainer, "about:blank", 0) // no override — not the editor
         }
         let id = NormaCEFBrowserIdentifierForParent(foreignContainer)
         let editorId = NormaCEFBrowserIdentifierForParent(editorContainer)
@@ -1753,7 +1801,7 @@ struct EditorHarnessFixtures {
 
     static let drillTitles: [Int: String] = [
         0: "setup — asset root, bridge handler, fixtures, CEF",
-        1: "the page boots offline from norma-editor://",
+        1: "the page boots offline from norma-editor:// and the branded theme lands on ready",
         2: "openModel with a real .ts file, and the language worker behind it",
         3: "a keystroke turns the model dirty",
         4: "pullContent answers byte-identically",
@@ -1788,6 +1836,10 @@ struct EditorHarnessFixtures {
 
             step("1.boot", 1, "create the browser at \(EditorBridgeHarnessRun.pageURL) and wait for ready",
                  .ready, 30),
+            step("1.brand", 1, "send the SAME branded setTheme an EditorRuntime sends on ready, no "
+                 + "exception, nothing logged — so every later step, including drill 10's "
+                 + "before-screenshot, sees an editor that is already branded",
+                 .local, 15),
             step("1.bound", 1, "the page booted inside the drill's 5 s bound", .local, 10),
             step("1.origin", 1, "the page really is on the norma-editor: scheme", .local, 15),
             step("1.offline", 1, "every resource the page fetched is norma-editor: or blob:", .local, 15),

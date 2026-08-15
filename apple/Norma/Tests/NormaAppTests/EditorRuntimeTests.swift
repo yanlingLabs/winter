@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 import XCTest
 @testable import Norma
 
@@ -65,6 +66,9 @@ final class EditorFakeScheduler {
 final class EditorCEFRecorder {
     private(set) var log: [String] = []
     private(set) var createdURLs: [String] = []
+    /// editor-product Task 4 — the `backgroundColorARGB` `NormaCEFCreateBrowser` was called with,
+    /// one per `createBrowser` call, same indices as `createdURLs`.
+    private(set) var createdBackgroundColors: [UInt32] = []
     private(set) var registeredRoots: [String] = []
     private(set) var cdp: [(method: String, params: String?, completion: (Bool, String) -> Void)] = []
     private(set) var closeCount = 0
@@ -105,9 +109,10 @@ final class EditorCEFRecorder {
             },
             ensureInitialized: { [unowned self] in self.initialises },
             failureReason: { [unowned self] in self.failure },
-            createBrowser: { [unowned self] container, url in
+            createBrowser: { [unowned self] container, url, backgroundColorARGB in
                 self.boundsAtCreate = container.bounds
                 self.createdURLs.append(url)
+                self.createdBackgroundColors.append(backgroundColorARGB)
                 self.log.append("create \(url)")
             },
             browserIdentifier: { [unowned self] _ in self.nextBrowserId() },
@@ -215,7 +220,8 @@ final class EditorRuntimeReducerTests: XCTestCase {
         let (flushed, effects) = reduce(queued, [.pageReady])
         XCTAssertEqual(flushed.phase, .ready)
         XCTAssertEqual(flushed.pendingOpens, [])
-        XCTAssertEqual(effects, [.openModel(path: "/a.ts"), .openModel(path: "/b.ts")])
+        XCTAssertEqual(effects, [.sendTheme, .openModel(path: "/a.ts"), .openModel(path: "/b.ts")],
+                       "editor-product Task 4: the theme goes out FIRST, ahead of every flushed open")
     }
 
     func testAnOpenFromIdleIsItsOwnPrewarm() {
@@ -269,7 +275,7 @@ final class EditorRuntimeReducerTests: XCTestCase {
         XCTAssertEqual(cancelled.pendingOpens, ["/b.ts"])
 
         let (flushed, flushEffects) = reduce(cancelled, [.pageReady])
-        XCTAssertEqual(flushEffects, [.openModel(path: "/b.ts")])
+        XCTAssertEqual(flushEffects, [.sendTheme, .openModel(path: "/b.ts")])
         XCTAssertEqual(flushed.pendingOpens, [])
     }
 
@@ -334,6 +340,38 @@ final class EditorRuntimeReducerTests: XCTestCase {
         XCTAssertEqual(again.models.count, 1)
     }
 
+    // MARK: Theme (editor-product Task 4)
+
+    /// `.appearanceChanged` only acts once the page is actually up to repaint — a runtime still
+    /// booting sends the CURRENT scheme's tokens the moment `.pageReady` fires anyway (resolved
+    /// fresh, not cached), so re-sending here would be redundant at best; `idle`/`failed` hold no
+    /// page at all.
+    func testAppearanceChangeOnlyRepaintsARuntimeThatIsActuallyReady() {
+        XCTAssertEqual(reduce(EditorRuntimeState(), [.appearanceChanged]).1, [],
+                       "idle holds no page to repaint")
+
+        let (booting, _) = reduce(EditorRuntimeState(), [.prewarmRequested])
+        XCTAssertEqual(reduce(booting, [.appearanceChanged]).1, [],
+                       "booting — ready's own send will pick up the current scheme")
+
+        let (failed, _) = reduce(EditorRuntimeState(), [.prewarmRequested, .browserIdentified(0)])
+        XCTAssertEqual(reduce(failed, [.appearanceChanged]).1, [], "failed holds no page either")
+
+        let (state, effects) = reduce(ready(), [.appearanceChanged])
+        XCTAssertEqual(effects, [.sendTheme], "ready is the one phase that actually repaints")
+        XCTAssertEqual(state.phase, .ready, "appearance changing is not itself a phase transition")
+    }
+
+    /// The models table, `current` and every other field are untouched by a repaint — `.sendTheme`
+    /// is a side effect on the imperative half, never a state mutation the reducer records.
+    func testAppearanceChangeTouchesNoStateOtherThanEmittingTheEffect() {
+        let (open, _) = reduce(ready(), [.openRequested(path: "/a.ts"), .modelOpened(path: "/a.ts"),
+                                         .dirtyChanged(path: "/a.ts", dirty: true)])
+        let (after, effects) = reduce(open, [.appearanceChanged])
+        XCTAssertEqual(effects, [.sendTheme])
+        XCTAssertEqual(after, open, "nothing about the runtime's own state moves")
+    }
+
     // MARK: Teardown from every phase
 
     func testTeardownIsLegalFromEveryPhaseAndAlwaysReturnsToIdle() {
@@ -371,13 +409,20 @@ final class EditorRuntimeTests: XCTestCase {
         let hub: EditorBridgeHub
     }
 
-    private func makeRuntime(files: [String: String] = [:]) -> Harness {
+    /// `colorScheme` defaults to a FIXED `.light` rather than `EditorRuntime.currentColorScheme()`
+    /// (the production default) — editor-product Task 4: every `boot(_:)` now sends a real
+    /// `EditorTheme.tokensJSON` payload, and a test host's own appearance is not this suite's to
+    /// depend on. Tests that care about the OTHER scheme override it explicitly.
+
+    private func makeRuntime(files: [String: String] = [:],
+                             colorScheme: @escaping @MainActor () -> ColorScheme = { .light }) -> Harness {
         let cef = EditorCEFRecorder()
         let scheduler = EditorFakeScheduler()
         let slot = EditorSlotRecorder()
         let hub = EditorBridgeHub(slot: slot.slot)
         let runtime = EditorRuntime(sessionId: "S1", hub: hub, driver: cef.driver,
                                     scheduler: scheduler.scheduler,
+                                    colorScheme: colorScheme,
                                     readFile: { path in
                                         guard let text = files[path] else {
                                             throw NSError(domain: NSCocoaErrorDomain,
@@ -390,11 +435,21 @@ final class EditorRuntimeTests: XCTestCase {
 
     /// Drives a runtime to `ready`: prewarm, let the id poll find one, then deliver the page's own
     /// `ready` through the hub — the REAL path, since `ready` is a bridge query like any other.
+    ///
+    /// **editor-product Task 4: `ready` now also sends `setTheme`, synchronously, before this
+    /// returns** (`.pageReady`'s `.sendTheme` effect runs on the same call stack as `deliver`, unlike
+    /// a queued `.openModel`, which is Task-scheduled). Answered here, once, so every caller written
+    /// before Task 4 — whose own `answerNextCDP()`/`cdp[0]` assumptions predate the theme send — keeps
+    /// meaning exactly what it said: no test using this helper ever queues an open before booting, so
+    /// `.pageReady` never produces more than this one call, and draining it here is airtight rather
+    /// than merely convenient. A test that wants to inspect the theme send itself does not use this
+    /// helper — see `testPageReadyAlsoSendsTheBrandedThemeBeforeAnyQueuedOpen`.
     @discardableResult
     private func boot(_ harness: Harness, browserId: Int32 = 41) -> Int32 {
         harness.cef.browserIds = [browserId]
         harness.runtime.prewarm()
         harness.slot.deliver(browserId: browserId, queryId: 1, request: #"{"type":"ready"}"#)
+        harness.cef.answerNextCDP()
         return browserId
     }
 
@@ -500,6 +555,73 @@ final class EditorRuntimeTests: XCTestCase {
                        "the editor page never reported ready")
     }
 
+    // MARK: Theme (editor-product Task 4)
+
+    /// The browser's OWN background (`NormaCEF.h`'s `backgroundColorARGB`) is set at the moment
+    /// `prewarm()` creates it, from the INJECTED `colorScheme` — proving the seam that lets a test
+    /// pin this without touching the real system appearance, and that light and dark really do
+    /// resolve to different values (not a hardcoded constant that happens to compile).
+    func testPrewarmCreatesTheBrowserWithTheCurrentSchemesCardSurfaceAsAnOpaqueBackground() {
+        let light = makeRuntime(colorScheme: { .light })
+        light.runtime.prewarm()
+        XCTAssertEqual(light.cef.createdBackgroundColors,
+                       [EditorTheme.cardSurfaceBackgroundARGB(for: .light)])
+
+        let dark = makeRuntime(colorScheme: { .dark })
+        dark.runtime.prewarm()
+        XCTAssertEqual(dark.cef.createdBackgroundColors,
+                       [EditorTheme.cardSurfaceBackgroundARGB(for: .dark)])
+
+        XCTAssertNotEqual(light.cef.createdBackgroundColors, dark.cef.createdBackgroundColors,
+                          "the two schemes must not resolve to the same background")
+        // The alpha byte is CEF's own contract for "this IS an override" (background_color's own
+        // doc: opaque or fully transparent, nothing between) — `0xFF______`.
+        XCTAssertEqual(light.cef.createdBackgroundColors[0] >> 24, 0xFF)
+    }
+
+    /// **`ready` sends the branded theme before this test's `boot()` helper would have drained it** —
+    /// driven manually (not through `boot(_:)`) so the send is still sitting in `cdp` to inspect.
+    /// Pins the wire shape AND that the injected scheme actually reaches the payload: `.dark`'s
+    /// `base` and its `CardSurface` hex both have to show up, not just "some setTheme call".
+    func testReadyAlsoSendsTheBrandedThemeBeforeAnyFlushedOpen() {
+        let harness = makeRuntime(colorScheme: { .dark })
+        harness.cef.browserIds = [41]
+        harness.runtime.prewarm()
+
+        harness.slot.deliver(browserId: 41, queryId: 1, request: #"{"type":"ready"}"#)
+
+        XCTAssertEqual(harness.cef.cdp.count, 1, "ready with nothing queued sends exactly the theme")
+        let expression = expressionOf(harness.cef.cdp[0].params)
+        XCTAssertTrue(expression.hasPrefix("window.normaEditor.dispatch({"),
+                      "one call, one literal entry point, payload as data: \(expression)")
+        XCTAssertTrue(expression.contains(#""type":"setTheme""#), expression)
+        XCTAssertTrue(expression.contains(#""base":"vs-dark""#),
+                      "the INJECTED .dark scheme must reach the payload: \(expression)")
+        // A double-`#` raw string: the value itself contains a `#` (the hex's own leading hash),
+        // which would otherwise read as the single-`#` terminator right after the opening quote.
+        XCTAssertTrue(expression.contains(##""editor.background":"#20201F""##),
+                      "CardSurface's dark hex (docs/brand.md § 1): \(expression)")
+    }
+
+    /// The other half of "on ready and on appearance change": a call before anything exists is a
+    /// no-op (nothing to repaint), and a call once ready sends exactly one more `setTheme` —
+    /// `systemAppearanceChanged()` is the testable seam for what `NSApp`'s own KVO wires in `init`.
+    func testSystemAppearanceChangedSendsAFreshThemeOnlyWhenReady() {
+        let harness = makeRuntime()
+        harness.runtime.systemAppearanceChanged()
+        XCTAssertEqual(harness.cef.cdp.count, 0, "nothing exists yet to repaint")
+
+        boot(harness)
+        XCTAssertEqual(harness.cef.cdp.count, 0, "boot() already drained the ready-triggered send")
+
+        harness.runtime.systemAppearanceChanged()
+        XCTAssertEqual(harness.cef.cdp.count, 1)
+        XCTAssertTrue(expressionOf(harness.cef.cdp[0].params).contains(#""type":"setTheme""#))
+
+        harness.runtime.systemAppearanceChanged()
+        XCTAssertEqual(harness.cef.cdp.count, 2, "every later change repaints again, not just the first")
+    }
+
     // MARK: Opening
 
     func testAnOpenBeforeReadyIsQueuedAndSendsTheFilesCURRENTBytesWhenItFlushes() async {
@@ -512,9 +634,14 @@ final class EditorRuntimeTests: XCTestCase {
         XCTAssertEqual(harness.runtime.stateSnapshot.pendingOpens, ["/tmp/a.ts"])
 
         harness.slot.deliver(browserId: 41, queryId: 1, request: #"{"type":"ready"}"#)
-        await waitForCDP(harness, count: 1)
+        // editor-product Task 4: `ready` now ALSO sends `setTheme` — synchronously, ahead of the
+        // flushed `openModel` (`.pageReady`'s effect order), so two calls land rather than one.
+        await waitForCDP(harness, count: 2)
 
-        let call = harness.cef.cdp[0]
+        XCTAssertTrue(expressionOf(harness.cef.cdp[0].params).contains(#""type":"setTheme""#),
+                      "the ready-triggered theme send lands FIRST, ahead of any flushed open")
+
+        let call = harness.cef.cdp[1]
         XCTAssertEqual(call.method, "Runtime.evaluate",
                        "the bridge is inbound-only — CDP is the ONLY way Swift speaks to the page")
         let expression = expressionOf(call.params)
@@ -525,7 +652,8 @@ final class EditorRuntimeTests: XCTestCase {
 
         // The model is recorded only once the page has actually been told.
         XCTAssertEqual(harness.runtime.stateSnapshot.models, [:])
-        harness.cef.answerNextCDP()
+        harness.cef.answerNextCDP() // setTheme — no state effect
+        harness.cef.answerNextCDP() // openModel — records the model
         XCTAssertEqual(harness.runtime.stateSnapshot.models["/tmp/a.ts"],
                        EditorRuntimeState.ModelEntry(dirty: false))
         XCTAssertEqual(harness.runtime.stateSnapshot.current, "/tmp/a.ts")

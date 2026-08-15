@@ -194,7 +194,7 @@ final class SpikeReparentHarness {
             return
         }
         log("CEFREADY")
-        NormaCEFCreateBrowser(container, pageURL)
+        NormaCEFCreateBrowser(container, pageURL, 0) // no background override — not the editor
         waitForAudio(attempt: 0)
     }
 

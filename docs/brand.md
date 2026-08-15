@@ -218,6 +218,36 @@ Six soft washes, one per `PanelTabKind` (`web`/`document`/`code`/`note`/`diff`/`
 
 **The chip kept the old model on purpose** — it has no selected state, so there was no occlusion complaint to fix; it still wears `ShellSidebarRowStyle` (neutral `RowHover` on hover) over its 2.0× fill, which sits BETWEEN the pill's hover (1.6×) and selected (2.4×) rungs by design. The stronger rest base incidentally FIXED what this section previously recorded as an accepted ~1.00–1.011 light-mode trade-off: the chip's neutral hover delta now measures 1.043–1.212 light / 1.816–2.590 dark (`files` dark, 1.816, is the new lower end — editor-product Task 2, still well clear of the 1.30 floor), and what was a recorded weakness is a pinned floor (`testChipHoverFillStaysDistinguishableFromEveryChipAtRest`, 1.040 light / 1.30 dark). Chip visibility against `CardSurface`: 1.158–1.345 light, 1.556–2.219 dark (`files` dark, 1.556, is the new lower end); `labelColor` on every chip composite ≥ 5.40.
 
+### 3.8 The editor's Monaco theme (editor-product Task 4)
+
+`EditorTheme.tokensJSON(for:)` (`apple/Norma/Sources/AppShell/EditorTheme.swift`) is a Monaco `defineTheme` payload built entirely from tokens this document already names — no new hex is authored for the editor. `base` is Monaco's own builtin `vs` (light) / `vs-dark` (dark), `inherit: true` so everything this payload does NOT name still comes from that builtin. `EditorRuntime` sends it immediately once the page reports `ready`, and again on every system appearance change (`NSApp`'s own `effectiveAppearance`, the app's first non-SwiftUI reactor to it — every other surface adapts through `Color`/`Image`'s automatic machinery, which a Chromium page has none of).
+
+**Chrome — five colors, all reused, none authored fresh:**
+
+| Monaco color | Token | Light | Dark | Why this token |
+| --- | --- | --- | --- | --- |
+| `editor.background` | `CardSurface` | `#F9F9F7` | `#20201F` | The plane every other panel content view sits on (§ 2's plane mapping) — the editor is one more tenant of it. |
+| `editor.foreground` | `labelColor`, composited over `CardSurface` | `#262626` | `#DDDDDD` | `labelColor` is measured NOT fully opaque (84.7% both appearances, `PanelKindTintTests`); composited to one opaque hex by § 3.5's own method rather than sent with its own alpha — the SAME value § 3.6's ink table already publishes as "`labelColor` (the body)" on plain `CardSurface` (14.35 / 11.99, below). |
+| `editor.selectionBackground` | `SelectionPill` | `#E8E6E1` | `#0B0B0B` | The one existing token named for exactly this job ("the selected row's fill"). Dark is darker than its pane by design — § 3.3's ruling carries over unchanged; this is the same asset, not a re-derivation. |
+| `editor.lineHighlightBackground` | `RowHover` | `#EFEDE8` | `#101010` | The closest existing token to "the row under the cursor, gently set apart from its neighbours" — exactly what a list row's hover state already means everywhere else in the app. |
+| `editorCursor.foreground` | `AccentColor` | `#2E9484` | `#2E9484` | Neither wash above reads as a CARET color — both are quiet fills, and a cursor wants to be found at a glance. `accent` is the one token reserved for exactly that job elsewhere (§ 3.2: "tints prominent controls and glyphs", the transcript's own selection chrome and in-progress markers). § 3.4's recorded ceiling ("fine for controls and glyphs, short of the body-text floor") is why this is sanctioned for a caret and would not be for a run of text. |
+
+**Syntax — five Monaco token rules, the SAME `NSColor`s `SyntaxHighlighter` paints the transcript's code blocks with** (`ChatContent/MessageTextFormatting.swift`), so a code block reads identically in the transcript and in the editor:
+
+| Monaco token | `NSColor` | Light | Dark | On `CardSurface`, § 3.5's method |
+| --- | --- | --- | --- | --- |
+| `keyword` | `.systemBlue` | `#0088FF` | `#0091FF` | 3.34:1 / 5.04:1 |
+| `string` | `.systemGreen` | `#34C759` | `#30D158` | **2.11:1** / 8.07:1 |
+| `number` | `.systemPurple` | `#CB30E0` | `#DB34F2` | 3.95:1 / 4.49:1 |
+| `comment` | `.secondaryLabelColor` | `#7D7D7C` | `#9A9A9A` | 3.91:1 / 5.82:1 |
+| `type` | `.systemBlue` (reused) | `#0088FF` | `#0091FF` | 3.34:1 / 5.04:1 |
+
+The five contrast figures are not new measurements — they are § 3.6's own "on `CardSurface`" column ("What lands on the washes", above), which composites these identical five `NSColor`s over this identical ground for the transcript's diff rows. `type` has no role of its own in `SyntaxHighlighter.palette` (four roles, not five — keyword/string/number/comment); it reuses `keyword`'s color rather than introduce a fifth `NSColor` the transcript never paints with — a type name reads closer to a structural/declaration token than to a string, a number or a comment, the only other three roles on offer.
+
+**The light-mode `systemGreen` limitation carries over, unfixed, as § 3.6 already records it.** `2.11:1` is below the 4.5:1 body floor, and it is not a property of the editor or of this payload — it is Apple's `systemGreen` on `CardSurface`, true of every string literal in every code surface this app has, editor included. § 3.6's own ruling stands without amendment: "fixing the syntax palette is a separate change to a shared surface; tracked here, not fixed here."
+
+**The white flash — the OTHER half of this task, not a color-token question.** A Chromium page paints opaque white by default for the whole window between a browser existing and its own first paint — for the editor (asset load, the Monaco AMD bootstrap) on the order of a few hundred milliseconds, well before `setTheme` above could ever reach it. Two changes close that window rather than reduce it: the CEF browser's own `background_color` is set AT CREATION to `EditorTheme.cardSurfaceBackgroundARGB(for:)` — the scheme's `CardSurface`, opaque, packed `0xAARRGGBB` (`NormaCEF.h`'s `backgroundColorARGB` parameter — `0x00000000` is reserved as "no override" for every non-editor caller); `editor.html`'s body becomes `background: transparent`, so that browser-level color shows through instead of Chromium's own white until Monaco's first paint lands. Measured live (editor-product Task 4's harness run): with the branded theme sent immediately on `ready` (drill 1's `1.brand` step), a screenshot taken well into the run shows the editor already painted in `CardSurface`'s own tone, not white.
+
 ---
 
 ## 4. Type
