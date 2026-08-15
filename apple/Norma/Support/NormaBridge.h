@@ -14,6 +14,13 @@
 // every CEF type confined to `Sources/CEF/NormaCEF.mm`.
 #import "NormaCEF.h"
 
+// editor-plumbing Task 2: the `norma-editor://` scheme's path fence. Here for the TESTS' sake and
+// for no other reason — the app's own Swift never calls it (the resource handler does, from C++) —
+// but CEF cannot start under XCTest, so this plain-C seam is the only way the suite can execute the
+// containment property at all. See the header for why the fence is a separate file from the
+// handler that uses it.
+#import "NormaCEFAssetResolve.h"
+
 typedef struct { float x; float y; } MTPoint;
 typedef struct { MTPoint pos; MTPoint vel; } MTReadout;
 
