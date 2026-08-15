@@ -342,21 +342,30 @@ final class EditorPlumbingTests: XCTestCase {
 
     // MARK: - Task 3: the bridge codec, Swift → page
 
-    /// **The exact bytes, pinned.** Quotes, a newline, a non-ASCII dash and an emoji in one payload
-    /// — everything an escaper gets wrong. Key order is deterministic (`.sortedKeys`), slashes are
-    /// not escaped (`.withoutEscapingSlashes`), and non-ASCII stays literal UTF-8, which is valid
-    /// JSON and what every browser's `JSON.parse` reads.
+    /// **The exact bytes, pinned.** One payload carrying every shape an escaper gets wrong: a
+    /// quote, a newline, a TAB, a LITERAL BACKSLASH, a C0 control character, a non-ASCII dash and an
+    /// emoji. Key order is deterministic (`.sortedKeys`), slashes are not escaped
+    /// (`.withoutEscapingSlashes`), and non-ASCII stays literal UTF-8, which is valid JSON and what
+    /// every browser's `JSON.parse` reads.
+    ///
+    /// The backslash and the control character were added by the fix round: the behaviour was
+    /// already right, but without them the pin would not have NOTICED a regression in the two cases
+    /// an escaper most often gets wrong — a lone `\` (which must double, or every following escape
+    /// shifts by one) and a byte with no printable form (which must become `\u00XX`, not vanish).
     func testOpenModelRendersExactlyTheseBytes() throws {
+        // A lone backslash, assembled rather than typed, so this file never contains the escape
+        // sequences it is asserting about — the same reason the U+2028 case below does it.
+        let backslash = #"\"#
         let js = EditorBridgeOutbound.openModel(
             path: "/tmp/a b.swift",
             language: "swift",
-            text: "let s = \"hi\"\nprint(s) — ✅"
+            text: "let s = \"hi\"\n\tprint(s" + backslash + ") — ✅\u{01}"
         ).javascript
 
-        XCTAssertEqual(
-            js,
-            #"window.normaEditor.dispatch({"language":"swift","path":"/tmp/a b.swift","text":"let s = \"hi\"\nprint(s) — ✅","type":"openModel"})"#
-        )
+        let expected = #"window.normaEditor.dispatch({"language":"swift","path":"/tmp/a b.swift","#
+            + #""text":"let s = \"hi\"\n\tprint(s"# + backslash + backslash
+            + #") — ✅"# + backslash + #"u0001","type":"openModel"})"#
+        XCTAssertEqual(js, expected)
     }
 
     /// Every outbound case renders as the ONE entry point with a valid-JSON argument, and the
@@ -575,40 +584,180 @@ final class EditorPlumbingTests: XCTestCase {
                        "the page's OUTBOUND_MESSAGE_TYPES must equal EditorBridgeOutbound.wireTypes")
     }
 
-    /// Pull `NAME = [ "a", "b" ]` out of JavaScript source. Deliberately a small, strict reader
-    /// rather than a JS parser: it takes the first `NAME` followed by `=` and an array literal on
-    /// the same statement, and reads only quoted strings out of it. `nil` when the declaration is
-    /// absent, which fails the comparison above rather than silently matching an empty list.
-    private static func jsStringArray(named name: String, in source: String) -> [String]? {
-        guard let nameRange = source.range(of: name),
-              let open = source.range(of: "[", range: nameRange.upperBound..<source.endIndex),
-              let close = source.range(of: "]", range: open.upperBound..<source.endIndex) else {
-            return nil
-        }
-        // Nothing but whitespace and `=` may sit between the name and the bracket, or this matched
-        // some other statement entirely.
-        let between = source[nameRange.upperBound..<open.lowerBound]
-        guard between.allSatisfy({ $0 == "=" || $0.isWhitespace }) else { return nil }
+    /// **The reader's own regression cases — the two ways it was measured to be wrong**, both
+    /// running un-skipped against scratch JavaScript rather than waiting for Task 4's file.
+    ///
+    /// A parity pin that can be satisfied by a COMMENT is not a parity pin, and one that trips over
+    /// a comment is a pin Task 4 cannot land. Both were real: the first version of this reader took
+    /// the first textual occurrence of the name and never stripped comments.
+    func testTheParityReaderIsNotFooledByCommentsInEitherDirection() throws {
+        // (a) FALSE PASS, as measured: a comment spelling the CORRECT list sits above a declaration
+        // that has drifted. The reader must report the drifted list — the one that ships — so the
+        // pin FAILS. Reading the comment would leave the page and Swift disagreeing, silently, with
+        // a green test.
+        let commentedOverDrift = """
+            // export const INBOUND_MESSAGE_TYPES = ["ready", "modelDirtyChanged", "saveRequested", "contentResponse"];
+            export const INBOUND_MESSAGE_TYPES = ["wrong"];
+            """
+        XCTAssertEqual(Self.jsStringArray(named: "INBOUND_MESSAGE_TYPES", in: commentedOverDrift),
+                       ["wrong"],
+                       "the DECLARATION is the wire, not a comment describing it")
+        XCTAssertNotEqual(Self.jsStringArray(named: "INBOUND_MESSAGE_TYPES", in: commentedOverDrift),
+                          EditorBridgeInbound.wireTypes,
+                          "with the drift read correctly, the parity pin must fail")
 
-        let body = source[open.upperBound..<close.lowerBound]
-        var names: [String] = []
-        var current: String?
-        var quote: Character?
-        for character in body {
-            if let open = quote {
-                if character == open {
-                    names.append(current ?? "")
-                    current = nil
-                    quote = nil
-                } else {
-                    current = (current ?? "") + String(character)
-                }
-            } else if character == "\"" || character == "'" {
-                quote = character
-                current = ""
+        // (b) FALSE FAIL, as measured: a doc comment merely NAMING the constant — which is the
+        // likeliest first encounter, since this test file's own doc comment hands Task 4 a code
+        // block containing the identifier — must not stop the real declaration being found.
+        let documented = """
+            /**
+             * INBOUND_MESSAGE_TYPES is the page -> Swift vocabulary.
+             * Keep it equal to EditorBridgeInbound.wireTypes.
+             */
+            // INBOUND_MESSAGE_TYPES: see EditorBridgeCodec.swift
+            const INBOUND_MESSAGE_TYPES = ["ready", "modelDirtyChanged", "saveRequested", "contentResponse"];
+            """
+        XCTAssertEqual(Self.jsStringArray(named: "INBOUND_MESSAGE_TYPES", in: documented),
+                       EditorBridgeInbound.wireTypes,
+                       "a doc comment naming the constant must not hide the declaration below it")
+
+        // The rest of the reader's contract, so a rewrite cannot quietly loosen it.
+        XCTAssertEqual(Self.jsStringArray(named: "OUTBOUND_MESSAGE_TYPES",
+                                          in: "export const OUTBOUND_MESSAGE_TYPES = ['a', 'b'];"),
+                       ["a", "b"], "single quotes parse too")
+        XCTAssertNil(Self.jsStringArray(named: "INBOUND_MESSAGE_TYPES", in: "const OTHER = [\"a\"];"),
+                     "an absent declaration is nil, never an empty list")
+        XCTAssertNil(Self.jsStringArray(named: "INBOUND_MESSAGE_TYPES",
+                                        in: "// INBOUND_MESSAGE_TYPES = [\"ready\"]\n"),
+                     "a comment alone is not a declaration")
+        XCTAssertNil(Self.jsStringArray(named: "INBOUND_MESSAGE_TYPES",
+                                        in: "send(INBOUND_MESSAGE_TYPES); const x = [\"a\"];"),
+                     "a USE of the name is not its declaration")
+        // A `//` inside a string must not eat the rest of the line — the shape that would otherwise
+        // delete a real declaration sitting after a URL.
+        XCTAssertEqual(Self.jsStringArray(named: "INBOUND_MESSAGE_TYPES",
+                                          in: "const doc = \"https://x/y\"; const INBOUND_MESSAGE_TYPES = [\"ready\"];"),
+                       ["ready"], "a // inside a string literal is not a comment")
+    }
+
+    /// Pull `NAME = [ "a", "b" ]` out of JavaScript source. Deliberately a small, strict reader
+    /// rather than a JS parser: it reads only quoted strings out of the first array literal that a
+    /// declaration of `name` introduces. `nil` when the declaration is absent, which fails the
+    /// comparison above rather than silently matching an empty list.
+    ///
+    /// **Comments are stripped first, and every occurrence is tried.** Both were measured
+    /// failures of the first version: a comment above a drifted declaration satisfied the pin
+    /// (a false PASS — the worst possible outcome for a parity test), and a doc comment merely
+    /// naming the constant made the reader answer `nil` against perfectly correct JavaScript
+    /// (a false FAIL). Stripping fixes the first; trying each occurrence until one parses as a
+    /// declaration fixes the second and also survives Task 4 writing `const` rather than
+    /// `export const`, since nothing here cares which keyword precedes the name.
+    ///
+    /// The residual, stated rather than hidden: a STRING LITERAL containing the whole declaration
+    /// text would be read as one. Nothing else in either direction reaches it, and a file that did
+    /// that would have to spell the exact list to pass anyway.
+    private static func jsStringArray(named name: String, in source: String) -> [String]? {
+        let code = strippingJavaScriptComments(source)
+        var searchFrom = code.startIndex
+        while let nameRange = code.range(of: name, range: searchFrom..<code.endIndex) {
+            searchFrom = nameRange.upperBound
+            guard let open = code.range(of: "[", range: nameRange.upperBound..<code.endIndex),
+                  let close = code.range(of: "]", range: open.upperBound..<code.endIndex) else {
+                return nil
             }
+            // Nothing but whitespace and `=` may sit between the name and the bracket, or this
+            // occurrence is a mention rather than the declaration — try the next one.
+            let between = code[nameRange.upperBound..<open.lowerBound]
+            guard between.allSatisfy({ $0 == "=" || $0.isWhitespace }) else { continue }
+
+            let body = code[open.upperBound..<close.lowerBound]
+            var names: [String] = []
+            var current: String?
+            var quote: Character?
+            for character in body {
+                if let open = quote {
+                    if character == open {
+                        names.append(current ?? "")
+                        current = nil
+                        quote = nil
+                    } else {
+                        current = (current ?? "") + String(character)
+                    }
+                } else if character == "\"" || character == "'" {
+                    quote = character
+                    current = ""
+                }
+            }
+            return quote == nil ? names : nil
         }
-        return quote == nil ? names : nil
+        return nil
+    }
+
+    /// Remove `//` line comments and `/* … */` block comments, leaving string literals alone.
+    ///
+    /// String-awareness is not fussiness: without it a `"https://…"` anywhere in the file would
+    /// swallow the rest of its line, and if a declaration sat there the pin would report a drift
+    /// that does not exist. Quotes, apostrophes and backticks all open a literal, and a backslash
+    /// escapes the next character inside one. (A regular-expression literal would confuse this —
+    /// noted rather than handled: a file of protocol constants has none, and the failure would be a
+    /// loud `nil`, not a false pass.)
+    private static func strippingJavaScriptComments(_ source: String) -> String {
+        var out = ""
+        var index = source.startIndex
+        var quote: Character?
+        var escaped = false
+
+        while index < source.endIndex {
+            let character = source[index]
+            let after = source.index(after: index)
+            let next = after < source.endIndex ? source[after] : nil
+
+            if let open = quote {
+                out.append(character)
+                if escaped {
+                    escaped = false
+                } else if character == "\\" {
+                    escaped = true
+                } else if character == open {
+                    quote = nil
+                }
+                index = after
+                continue
+            }
+
+            if character == "\"" || character == "'" || character == "`" {
+                quote = character
+                out.append(character)
+                index = after
+                continue
+            }
+
+            if character == "/", next == "/" {
+                while index < source.endIndex, source[index] != "\n" {
+                    index = source.index(after: index)
+                }
+                continue   // the newline itself is kept by the next turn
+            }
+
+            if character == "/", next == "*" {
+                index = source.index(index, offsetBy: 2)
+                while index < source.endIndex {
+                    let close = source.index(after: index)
+                    if source[index] == "*", close < source.endIndex, source[close] == "/" {
+                        index = source.index(index, offsetBy: 2)
+                        break
+                    }
+                    index = source.index(after: index)
+                }
+                // A space, so `a/* */b` does not become `ab`.
+                out.append(" ")
+                continue
+            }
+
+            out.append(character)
+            index = after
+        }
+        return out
     }
 
     /// **The pin for the half of the bridge no test can execute: the router is actually LINKED into
@@ -617,10 +766,19 @@ final class EditorPlumbingTests: XCTestCase {
     /// The browser side and the renderer side of `CefMessageRouterBrowserSide` /
     /// `CefMessageRouterRendererSide` both live in ONE object file of the static wrapper library
     /// (`libcef_dll/wrapper/cef_message_router.cc`), and a static library only contributes an object
-    /// file that something actually references. So the router's own string literals — `cefQuery`,
-    /// the name it installs on `window`, among them — are in a binary if and only if that binary
-    /// calls `…::Create`. That makes a string scan a real structural test here rather than a proxy:
-    /// it is reading the linker's answer to "does this process build a router at all?".
+    /// file that something actually references. So the router's own string literals are in a binary
+    /// if and only if that binary calls `…::Create`. That makes a string scan a real structural test
+    /// here rather than a proxy: it is reading the linker's answer to "does this process build a
+    /// router at all?".
+    ///
+    /// **The needle is `cefQueryCancel`, and the obvious `cefQuery` is a TAUTOLOGY** — measured in
+    /// the fix round: `Norma.debug.dylib` carries three matches for it, one of which is this app's
+    /// own log format string `"editor bridge router created (window.cefQuery, id=%d)"`. Deleting
+    /// the browser-side `Create` while leaving that `Log` line in place would have kept the app half
+    /// of this test green, which is precisely the zero-coupling shape `DoClose`'s own pin was
+    /// rewritten to avoid ("a string scan cannot see a return value"). `cefQueryCancel` appears
+    /// exactly once per binary, always from the router's config constructor; Norma names it only in
+    /// comments, and comments do not compile in.
     ///
     /// Measured by mutation, not assumed. Deleting the single `CefMessageRouterRendererSide::Create`
     /// call from `NormaSubprocessApp` (leaving the class, the member, the three overrides and every
@@ -645,7 +803,7 @@ final class EditorPlumbingTests: XCTestCase {
 
         for (name, executable) in binaries {
             XCTAssertTrue(
-                Self.binaryCarries("cefQuery", at: executable),
+                Self.binaryCarries("cefQueryCancel", at: executable),
                 "\(name) does not carry the message router — the wrapper's cef_message_router.o was "
                     + "not linked in, so this process builds no router and installs no window.cefQuery"
             )
