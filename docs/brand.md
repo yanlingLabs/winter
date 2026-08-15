@@ -180,63 +180,40 @@ How visible the washes themselves are, against the plane they tint: added 1.085:
 
 **Mac-only** — the panel strip (`apple/Norma/Sources/AppShell/ShellPanel.swift`) has no iOS surface, so there is nothing on the phone for these to mirror, the same declared-exception class as § 1's four Mac-only tokens.
 
-Five soft washes, one per `PanelTabKind` (`web`/`document`/`code`/`note`/`diff`), on a pill's own fill at rest and a group chip's fill at double opacity — a single colorset per kind (`Theme.panelKindTint(_:)`'s own exhaustive switch, no `default:`), never two. The chip's stronger version is *derived* — `Theme.panelKindChipTint(_:) = panelKindTint(_:).opacity(panelKindChipTintOpacityMultiplier)` — rather than a second colorset per kind, so the switch that names a kind's hue stays the only one. `Color.opacity(_:)` was measured to MULTIPLY an already-translucent colour's stored alpha (0.08 → 0.16 exactly) rather than replace or clamp it, which is what lets a single authored value scale correctly in both appearances.
+Five soft washes, one per `PanelTabKind` (`web`/`document`/`code`/`note`/`diff`) — a single colorset per kind (`Theme.panelKindTint(_:)`'s own exhaustive switch, no `default:`), never two. Every stronger use is *derived* by scaling the one authored alpha: the group chip at `panelKindChipTintOpacityMultiplier` (2.0×), and the pill's hover/selected rungs at `panelKindPillHoverOpacityMultiplier` (1.6×) / `panelKindPillSelectedOpacityMultiplier` (2.4×). `Color.opacity(_:)` was measured to MULTIPLY an already-translucent colour's stored alpha (0.08 → 0.16 exactly) rather than replace or clamp it, which is what lets a single authored value scale correctly in both appearances.
 
-| Kind | Hue | Light α | Dark α |
+**The ladder model (user live-gate ruling, 2026-08-15).** The first shipped version painted the kind tint only at REST: `ShellSidebarRowStyle`'s opaque neutral `RowHover` covered it on hover *and* selection, and that fixed neutral luminance imposed a telescoping-identity ceiling (`hoverΔ × visibility = 1.10988`, fixed) that had forced `web` down to a 4.7% light alpha. The user's gate verdict — *"the selected tab should still show in the same color the tabs of that type do, just a litle stronger; the default accent should be a lil stronger; the browser tabs should have blue accent"* — replaced that model: a pill now paints ONE hue at three strengths (rest → hover 1.6× → selected 2.4×, `Theme.panelKindPillFill`, its own `PanelTabPillStyle`), every state change stays in the kind's colour, and the old ceiling no longer exists for pills. Rest alphas rose accordingly:
+
+| Kind | Hue | Light α (rest) | Dark α (rest) |
 | --- | --- | --- | --- |
-| `PanelKindWebTint` | `#3B82F6` | 4.7% | 14% |
-| `PanelKindDocumentTint` | `#F59E0B` | 8.0% | 14% |
-| `PanelKindCodeTint` | `#8B5CF6` | 4.4% | 14% |
-| `PanelKindNoteTint` | `#EAB308` | 8.0% | 14% |
-| `PanelKindDiffTint` | `#22C55E` | 6.4% | 14% |
+| `PanelKindWebTint` | `#3B82F6` | 12% | 19% |
+| `PanelKindDocumentTint` | `#F59E0B` | 12% | 19% |
+| `PanelKindCodeTint` | `#8B5CF6` | 12% | 19% |
+| `PanelKindNoteTint` | `#EAB308` | 12% | **17%** |
+| `PanelKindDiffTint` | `#22C55E` | 12% | 19% |
 
-**Three of the five light values moved off the brief's uniform 8% provisional — measured, not eyeballed.** The pill's fill sits *underneath* `ShellSidebarRowStyle`'s own hover/selected fill (opaque `RowHover`, painted over the tint the instant a pill is hovered or active — never blended, since `RowHover` is fully opaque), so the same alpha that makes the wash read at rest is also what a user has to see CHANGE on hover. At the flat 8% provisional, `web` and `code` measured a hover-vs-tinted-rest contrast of 1.016:1 and 1.009:1 — barely above 1:1, i.e. hovering those two kinds' tabs would have been nearly imperceptible.
+**The ceiling that sets the dark alphas is label legibility at the SELECTED rung**, not any hover identity: white `labelColor` on the 2.4× composite must hold the 4.5:1 body floor, and the bright ambers lift the selected composite fastest — `note` at 19% measured 4.22:1 (fail) and keeps 17% (4.73:1); `document` at 19% is the tightest pass (4.55:1). Ladder measurements, § 3.5's method, floors in **bold** where a value is the class minimum:
 
-The reason is an exact identity, not a coincidence of these particular hues. In **light**, every one of the five composites lands between `RowHover`'s luminance and `CardSurface`'s, so the two ratios telescope:
+| Kind | scheme | rest visibility (≥1.05) | rest→hover (≥1.040) | hover→selected (≥1.040) | `labelColor` @ selected (≥4.5) |
+| --- | --- | --- | --- | --- | --- |
+| `web` | light | 1.143 | 1.086 | 1.120 | 10.32 |
+| `document` | light | 1.090 | 1.054 | 1.072 | 11.64 |
+| `code` | light | 1.156 | 1.094 | 1.132 | 10.02 |
+| `note` | light | 1.076 | **1.045** | 1.060 | 12.03 |
+| `diff` | light | 1.103 | 1.061 | 1.081 | 11.34 |
+| `web` | dark | 1.273 | 1.187 | 1.274 | 6.23 |
+| `document` | dark | 1.444 | 1.292 | 1.411 | **4.55** |
+| `code` | dark | 1.236 | **1.163** | 1.241 | 6.72 |
+| `note` | dark | 1.425 | 1.278 | 1.391 | 4.73 |
+| `diff` | dark | 1.410 | 1.278 | 1.397 | 4.76 |
 
-```
-contrast(RowHover, tinted) × contrast(tinted, CardSurface) = contrast(RowHover, CardSurface) = 1.10988
-```
+(`PanelKindTintTests.testEveryAdjacentRungOfThePillLadderStaysDistinguishable` floors both rung deltas at 1.040 in both schemes; `testTheLadderIsMonotoneAgainstTheBareSurface` pins the ≥1.05 rest floor and strict rest < hover < selected ordering; `testTintedTextStaysLegibleAcrossTheLadder` pins the 4.5 label floor at the selected rung. A selected pill ignores hover — selection is terminal — pinned in `testPillFillResolvesTheLadderWithSelectedBeatingHover`.)
 
-That product is fixed by two tokens this task does not own, so neither ratio can individually exceed its square root, **√1.10988 ≈ 1.0535** — a hard ceiling no alpha can beat. The best available trade-off is the alpha where the two are equal, which is what `web`/`code`/`diff` are now tuned to (`document`/`note` were already close to that point at the provisional 8% and are unchanged):
+**`TextMuted` (favicon/close-glyph ink), measured at REST** (its real home — unselected pills carry it too), against § 3.5's own quiet-meta register floors (3.5 light / 4.0 dark, baseline 4.14 / 5.99 on the plain surface): light 3.58–3.85 (worst `code`), dark 4.15–4.85 (worst `document`). All clear; the stronger washes cost more than the old rest alphas did, and the figures stay inside `TextMuted`'s established range.
 
-| Kind | Light hover Δ | Light visibility | Dark hover Δ | Dark visibility |
-| --- | --- | --- | --- | --- |
-| `web` | 1.054 | 1.053 | 1.385 | 1.187 |
-| `document` | 1.048 | 1.059 | 1.514 | 1.297 |
-| `code` | 1.053 | 1.054 | 1.357 | 1.163 |
-| `note` | 1.057 | 1.050 | 1.551 | 1.329 |
-| `diff` | 1.053 | 1.054 | 1.487 | 1.274 |
+**The favicon glyph and, on the chip, the count digit are deliberately NOT tinted** — "the tint is the surface, not the icon" (the identical rule Task 9 wrote for the diff favicon). At chip opacity the wash composites to ~1.2–1.35:1 against `CardSurface`; as literal text ink that would be near-invisible.
 
-("Hover Δ" is `contrast(RowHover, tinted)` — the measured requirement itself, the pill's rest fill versus what replaces it the instant it is hovered or active. "Visibility" is `contrast(tinted, CardSurface)` — how visible the wash is against the plain panel, recorded for completeness, never gated the same way: jointly requiring both a hover floor AND a diff-wash-style ≥1.05 visibility floor is unsatisfiable except at the single equal-split point above, so only the hover delta is a pass/fail floor here — `PanelKindTintTests.testHoverFillStaysDistinguishableFromEveryTintedPillAtRest`, floored at 1.040 light / 1.30 dark, both with real margin under every measured value. `testLightHoverDeltaTimesVisibilityEqualsTheFixedRowHoverCardSurfaceContrast` pins the identity itself, so the next tune cannot silently reopen the drowned-hover-delta failure by "fixing" the floor instead of the alpha.)
-
-**Dark needed no retuning at all, for the mirror reason.** In dark, `CardSurface` sits *between* the tinted composite and `RowHover` rather than the composite sitting between the other two — every hue here pushes the dark composite past `CardSurface` toward black, not partway toward `RowHover` — so the ratios *reinforce* instead of trading off: `contrast(RowHover, tinted) = contrast(RowHover, CardSurface) × contrast(tinted, CardSurface)`. Raising alpha in dark only helps the hover delta; there is no ceiling to solve for, which is why the brief's provisional 14% stands unchanged for all five kinds. `PanelKindTintTests.testDarkHoverDeltaEqualsTheFixedBaselineTimesVisibility` pins that direction too.
-
-**Text on the tinted pill**, measured by § 3.5's method (composited over `CardSurface`, then the ink composited over *that* — `NSColor.labelColor` is not opaque, measured at 84.7% alpha both appearances, so the naive uncomposited contrast overstates by roughly 30%; this reproduces § 3.6's own 14.35 / 11.99 figure for `labelColor` on plain `CardSurface` exactly once the ink is composited the same way a wash is):
-
-| | `labelColor` (title) light | dark | `TextMuted` (meta/icon) light | dark |
-| --- | --- | --- | --- | --- |
-| `web` | 13.78 | 10.30 | 3.93 | 5.05 |
-| `document` | 13.72 | 9.50 | 3.91 | 4.62 |
-| `code` | 13.78 | 10.49 | 3.93 | 5.15 |
-| `note` | 13.81 | 9.29 | 3.94 | 4.51 |
-| `diff` | 13.78 | 9.65 | 3.93 | 4.70 |
-
-`labelColor` (the pill's title, `.primary`) stays nowhere near the 4.5:1 body floor on a wash this faint — worst case 9.29:1. `TextMuted` (the favicon and close-glyph ink) is § 3.5's own established "quiet meta" register, never held to the body floor even on the plain surface (4.14 light / 5.99 dark baseline) — the tint costs it a further 0.20–0.25 in light and, asymmetrically, 0.85–1.48 in dark, the same "a wash costs a small further amount, recorded rather than fixed" shape § 3.6 already applies to the syntax palette on the diff washes. Every figure stays well inside `TextMuted`'s own already-established range elsewhere in the app; none of the five is a new low.
-
-**The favicon glyph and, on the chip, the count digit are deliberately NOT tinted** — "the tint is the surface, not the icon" (echoing the identical rule Task 9 already wrote for the diff favicon). This is not merely leaving them alone: at the chip's own double opacity the wash composites to roughly 1.1–1.2:1 against `CardSurface`, which as literal text ink would be close to invisible — the measurement that settles which of the brief's two sanctioned shapes ("stronger version" as ink vs. as surface) was meant.
-
-**The chip, at double opacity** (`Theme.panelKindChipTint`) — recorded, not gated the same way, since the chip's own affordance does not depend on fill alone the way the pill's does:
-
-| Kind | Light composite | Dark composite | Light visibility | Dark visibility |
-| --- | --- | --- | --- | --- |
-| `web` | `#E7EEF7` | `#283B5B` | 1.110 | 1.456 |
-| `document` | `#F8EAD1` | `#5C4319` | 1.123 | 1.767 |
-| `code` | `#EFEBF7` | `#3E315B` | 1.111 | 1.392 |
-| `note` | `#F7EED1` | `#594919` | 1.103 | 1.857 |
-| `diff` | `#DDF2E3` | `#214E31` | 1.110 | 1.710 |
-
-**A live-gate note, not a fixed problem:** doubling each kind's already hover-delta-tuned light alpha pushes the chip's light composite luminance essentially onto `RowHover`'s own — the measured hover delta there is 1.000–1.011, i.e. a chip's fill alone would not read as "hovered" in light mode. Left as-is deliberately: a chip is a lower-stakes accordion toggle (not a primary navigation target), it already carries the usual cursor/help-text/press feedback independent of fill, and shrinking the pill's own alpha further to leave headroom for 2× would spend REST VISIBILITY, not hover delta — the wash would simply read fainter at rest, since hover delta only keeps improving as alpha drops further below the equal-split point tuned above (the failure this section fixed was the flat 8% provisional carrying too MUCH alpha, not too little). Dark carries no such risk — the chip's dark hover delta (1.624–2.167) is stronger than the pill's own.
+**The chip kept the old model on purpose** — it has no selected state, so there was no occlusion complaint to fix; it still wears `ShellSidebarRowStyle` (neutral `RowHover` on hover) over its 2.0× fill, which sits BETWEEN the pill's hover (1.6×) and selected (2.4×) rungs by design. The stronger rest base incidentally FIXED what this section previously recorded as an accepted ~1.00–1.011 light-mode trade-off: the chip's neutral hover delta now measures 1.043–1.212 light / 1.867–2.590 dark, and what was a recorded weakness is a pinned floor (`testChipHoverFillStaysDistinguishableFromEveryChipAtRest`, 1.040 light / 1.30 dark). Chip visibility against `CardSurface`: 1.158–1.345 light, 1.600–2.219 dark; `labelColor` on every chip composite ≥ 5.40.
 
 ---
 

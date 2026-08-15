@@ -597,6 +597,39 @@ struct PanelTabStrip: View {
 /// **Fires two RPCs, applies neither locally.** Both closures only report the tap outward
 /// (`onActivate`/`onClose`); see `ShellSessionHost`'s panel-tab-strip section for why they end at
 /// the wire and never touch `PanelStore` themselves.
+/// The pill's kind-hued state ladder (live-gate ruling 2026-08-15; fill decision =
+/// `Theme.panelKindPillFill`, measured in brand.md § 3.7). Mirrors `ShellSidebarRowStyle.RowBody`'s
+/// structure — internal `@State` hover on a nested `View` (a `ButtonStyle` itself cannot hold
+/// `@State`), pressed folded into hover exactly like `shellSidebarRowFill`'s
+/// `isHovered || isPressed` — so the two row treatments differ ONLY in palette: neutral tokens
+/// there, the kind's own hue at three strengths here.
+private struct PanelTabPillStyle: ButtonStyle {
+    let kind: PanelTabKind
+    let isActive: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        PillBody(configuration: configuration, kind: kind, isActive: isActive)
+    }
+
+    private struct PillBody: View {
+        let configuration: Configuration
+        let kind: PanelTabKind
+        let isActive: Bool
+        @State private var isHovered = false
+
+        var body: some View {
+            configuration.label
+                .background(
+                    RoundedRectangle(cornerRadius: panelTabPillRadius, style: .continuous)
+                        .fill(Theme.panelKindPillFill(
+                            kind, isActive: isActive,
+                            isHovered: isHovered || configuration.isPressed))
+                )
+                .onHover { isHovered = $0 }
+        }
+    }
+}
+
 private struct PanelTabPill: View {
     let tab: PanelTab
     /// live-gate fix E: **resolved by the caller**, never re-derived here. Both call sites pass
@@ -645,43 +678,19 @@ private struct PanelTabPill: View {
             .frame(width: width, height: panelTabPillSize.height, alignment: .leading)
             .contentShape(RoundedRectangle(cornerRadius: panelTabPillRadius, style: .continuous))
         }
-        // diff-tabs Task 12: the soft per-kind tint, layered UNDER `ShellSidebarRowStyle`'s own
-        // hover/selected fill — placed BEFORE `.buttonStyle` below, which is what makes it UNDER
-        // rather than merely "also present". `.buttonStyle` reads the button's original label
-        // through the environment and wraps it in the style's OWN `.background(RoundedRectangle
-        // .fill(...))` (`ShellSidebarRowStyle.RowBody`, `ShellSidebar.swift`); a modifier attached
-        // to the `Button` BEFORE that style application sits BEHIND everything the style itself
-        // draws, at the identical bounds (`.background` sizes to the content it decorates, and
-        // both rounded rects share `panelTabPillRadius`). Concretely: at rest the style's own fill
-        // is `.clear` (`shellSidebarRowFill(.none)`), so this tint shows through untouched; on
-        // hover/selected the style's fill becomes OPAQUE `Theme.rowHover`
-        // (`selectedUsesHoverTone: true` below), which fully occludes this tint — "layers under"
-        // in the plan's own words, not a blend. `RoundedRectangle(...).fill(...)` rather than a
-        // bare `Color`, or the tint would paint the pill's full square frame past its rounded
-        // corners (`Color` has no shape of its own; a plain `.background(Color)` fills the whole
-        // rectangular frame).
-        //
-        // MEASURED, not the brief's flat 8%/14% provisional — `Theme.panelKindTint`'s own doc
-        // comment carries the full reasoning: `RowHover` painting OVER this wash on hover means
-        // the tint's own alpha and the hover cue's legibility trade against each other, and three
-        // of the five kinds needed a lower light alpha than the provisional to keep that hover
-        // delta from drowning. `docs/brand.md` § 3.7 publishes every ratio.
-        .background {
-            RoundedRectangle(cornerRadius: panelTabPillRadius, style: .continuous)
-                .fill(Theme.panelKindTint(tab.kind))
-        }
-        // panel-shell T13: the app's ONE row treatment, not a second hover mechanism beside it —
-        // same pure fill decision (`shellSidebarRowFill`), same `@State isHovered` + `.onHover`,
-        // same `shellSidebarRowCornerRadius` background every sidebar row and titlebar button
-        // renders through. `selectedUsesHoverTone: true` is the sole, named deviation: it swaps
-        // WHICH token `.selected` resolves to (`RowHover` here, not `SelectionPill`), because the
-        // plan's Global Constraints assign panel tabs the `RowHover` token specifically. Passing
-        // `isSelected: isActive` into the style UNCHANGED would have silently repainted the active
-        // tab `SelectionPill` — a recolor this task never asked for — which is why this is a
-        // one-flag generalization of the shared style rather than either that silent recolor or a
-        // hand-rolled fill block living beside it that happens to agree only because both target
-        // the same color today.
-        .buttonStyle(ShellSidebarRowStyle(isSelected: isActive, selectedUsesHoverTone: true))
+        // live-gate ruling 2026-08-15 ("the selected tab should still show in the same color the
+        // tabs of that type do, just a litle stronger"): the pill no longer wears
+        // `ShellSidebarRowStyle` — that shared style's hover/selected fill is OPAQUE neutral
+        // `RowHover`, which occluded the kind tint exactly on the states the user looks at, and
+        // its fixed luminance was the ceiling that had pushed `web`'s light alpha down to 4.7%
+        // ("browser tabs don't read blue"). `PanelTabPillStyle` below paints the ONE fill
+        // `Theme.panelKindPillFill` decides — the kind's own hue at rest/hover/selected strengths
+        // (§ 3.7's measured ladder) — mirroring the shared style's structure (internal `@State`
+        // hover + `.onHover`, pressed folds into hover, same `panelTabPillRadius` rounded rect)
+        // so it stays the same grammar with a kind-hued palette, not a second mechanism. The
+        // group CHIP keeps the shared style: it has no selected state, and the 2.0× base makes
+        // its neutral hover cue measure ≥ 1.043 (§ 3.7) — no occlusion problem to fix there.
+        .buttonStyle(PanelTabPillStyle(kind: tab.kind, isActive: isActive))
         .overlay(alignment: .trailing) {
             Button(action: onClose) {
                 Image(systemName: "xmark")

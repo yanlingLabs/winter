@@ -169,20 +169,24 @@ enum Theme {
     /// below at `panelKindChipTintOpacityMultiplier`× this token's alpha) — never two colorsets
     /// per kind, so `Theme.panelKindTint`'s switch stays the ONE place a kind maps to a hue.
     ///
-    /// **The light alpha is tuned PER KIND, not the brief's uniform 8% provisional — measured,
-    /// not eyeballed.** `ShellSidebarRowStyle`'s hover/selected fill (`Theme.rowHover`, opaque)
-    /// paints OVER this wash whenever it is active, so the wash only shows at rest — which means
-    /// the SAME faint tint that makes the pill legible at rest also competes with the very hover
-    /// cue that has to read as a state change on top of it. At the brief's flat 8%, `web` and
-    /// `code` measured a hover-vs-tinted-rest contrast of 1.016:1 / 1.009:1 — barely above 1:1,
-    /// i.e. hovering a web or code tab would have been nearly imperceptible. `document`/`note`
-    /// were already close to their own ceiling at 8% and are UNCHANGED; `web`/`code`/`diff` move
-    /// down (4.7% / 4.4% / 6.4%) to the alpha where the hover delta and the wash's own visibility
-    /// against `CardSurface` are EQUAL — the mathematically best achievable trade-off, since
-    /// `RowHover` and `CardSurface` are both fixed and (proven in brand.md § 3.7) their own
-    /// contrast caps the product of what any alpha can buy. Dark needed no change at all: dark's
-    /// hover delta and visibility REINFORCE rather than compete (also proven in § 3.7), so every
-    /// kind keeps the provisional 14%.
+    /// **Alphas are MEASURED under the pill's LADDER model (user live-gate ruling, 2026-08-15:
+    /// "the selected tab should still show in the same color the tabs of that type do, just a
+    /// litle stronger; the default accent should be a lil stronger").** The pill no longer wears
+    /// `ShellSidebarRowStyle`'s neutral `RowHover` on hover/selected — that opaque fill occluded
+    /// the kind's hue exactly when the user was looking at it, and its fixed luminance was the
+    /// ceiling that had forced `web` down to a 4.7% light alpha ("browser tabs don't read blue").
+    /// Instead the pill paints ONE hue per kind at three strengths — rest (this token's authored
+    /// alpha), hover (×`panelKindPillHoverOpacityMultiplier`) and selected
+    /// (×`panelKindPillSelectedOpacityMultiplier`) — so every state change stays IN the kind's
+    /// color and the old neutral-crossover trade-off no longer exists. Floors, re-measured per
+    /// kind in both schemes and published in brand.md § 3.7: rest visibility ≥ 1.05 on
+    /// `CardSurface`; rest→hover and hover→selected each ≥ 1.040; `labelColor` ≥ 4.5:1 on the
+    /// STRONGEST (selected) composite. Light rest is a flat 12%; dark rest is 19% except `note`
+    /// at 17% — the bright ambers lift the selected composite enough that the white label falls
+    /// under 4.5:1 at 19%×2.4 (measured 4.22:1); 17% restores 4.73:1. The group CHIP keeps the
+    /// shared row style and its 2.0× fill — the stronger base incidentally lifted its light-mode
+    /// hover delta from the old documented ~1.00–1.011 trade-off to a measured 1.043–1.212, so
+    /// what § 3.7 once recorded as an accepted weakness is now a pinned floor.
     static func panelKindTint(_ kind: PanelTabKind) -> Color {
         switch kind {
         case .web: return Color("PanelKindWebTint")
@@ -208,6 +212,27 @@ enum Theme {
     /// switch stays the single place a kind names its hue, and this only scales what it returns.
     static func panelKindChipTint(_ kind: PanelTabKind) -> Color {
         panelKindTint(kind).opacity(panelKindChipTintOpacityMultiplier)
+    }
+
+    /// The pill's state ladder (live-gate ruling 2026-08-15, doc on `panelKindTint` above): hover
+    /// and selected are the SAME authored hue at fixed, named multiples of the rest alpha — the
+    /// same one-colorset-times-a-constant mechanism as the chip's 2.0×, for the same reason (the
+    /// alpha ladder resolves identically in both appearances because each rung SCALES the
+    /// per-appearance authored value). 1.6/2.4 are measured, not round numbers for their own
+    /// sake: § 3.7's tables show every adjacent-rung delta clearing the 1.040 floor and the
+    /// selected rung holding label legibility in both schemes.
+    static let panelKindPillHoverOpacityMultiplier: Double = 1.6
+    static let panelKindPillSelectedOpacityMultiplier: Double = 2.4
+
+    /// The ONE fill decision for a panel tab pill — pure on its inputs, exhaustively laddered:
+    /// selected beats hover beats rest, mirroring `shellSidebarRowFill`'s precedence so the two
+    /// row treatments stay one grammar even though the pill's PAINT is kind-hued rather than
+    /// neutral. A selected pill ignores hover (selection is a terminal state; the cursor and the
+    /// close box already answer "am I over it").
+    static func panelKindPillFill(_ kind: PanelTabKind, isActive: Bool, isHovered: Bool) -> Color {
+        if isActive { return panelKindTint(kind).opacity(panelKindPillSelectedOpacityMultiplier) }
+        if isHovered { return panelKindTint(kind).opacity(panelKindPillHoverOpacityMultiplier) }
+        return panelKindTint(kind)
     }
 
     // MARK: - Type

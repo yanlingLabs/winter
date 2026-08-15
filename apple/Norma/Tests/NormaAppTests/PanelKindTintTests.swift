@@ -11,13 +11,15 @@ import SwiftUI
 ///    NAMED/dynamic colour (a risk this file deliberately avoids; see § 1's own note). The
 ///    ASSETS' hex/alpha values are pinned where every other colorset's are, in
 ///    `TranscriptBrandTests.documentedPalette` — not duplicated here.
-/// 2. **MEASURED pins** (§ 2) — the brief's explicit "measure, don't eyeball" requirement: the
-///    hover-vs-tinted-rest contrast every tint must clear, and the identity that explains WHY the
-///    floor is what it is rather than an arbitrary number, plus text legibility on every tint.
-/// 3. **Wiring pins** (§ 3) — the pill/chip source really applies the token, UNDER the row
-///    style's own fill, and the favicon/count glyphs stay off it. Read via source, the same
-///    `codeOnly`/`source` convention `TranscriptBrandTests` uses for `ChatContent/` — no view is
-///    mounted anywhere in this file, matching `SidebarBrandTests`' own stated house convention.
+/// 2. **MEASURED pins** (§ 2) — the "measure, don't eyeball" requirement under the LADDER model
+///    (live-gate ruling 2026-08-15): every adjacent rung of the pill's rest→hover→selected ramp
+///    clears its floor, the ladder is strictly monotone, the chip's neutral hover cue clears its
+///    own floor, and text stays legible at the ladder's worst case for each ink.
+/// 3. **Wiring pins** (§ 3) — the pill wears its own ladder style with ONE fill home, the chip
+///    applies its tint UNDER the shared row style, and the favicon/count glyphs stay off both.
+///    Read via source, the same `codeOnly`/`source` convention `TranscriptBrandTests` uses for
+///    `ChatContent/` — no view is mounted anywhere in this file, matching `SidebarBrandTests`'
+///    own stated house convention.
 ///
 /// What NONE of this covers: whether it LOOKS right. `docs/brand.md` § 3.7 records the numbers;
 /// whether a tinted tab reads as "its own kind" at a glance is the live gate, same as every other
@@ -56,6 +58,36 @@ final class PanelKindTintTests: XCTestCase {
         XCTAssertEqual(Theme.panelKindChipTintOpacityMultiplier, 2.0)
     }
 
+    /// The pill ladder's two rungs are likewise NAMED, MEASURED constants (live-gate ruling
+    /// 2026-08-15; § 3.7's tables were computed at exactly these values) — and the ladder must
+    /// stay strictly ordered under the chip's own rung, which sits between hover and selected by
+    /// design (chip 2.0× reads stronger than a hovered pill, quieter than the selected one).
+    func testPillLadderMultipliersAreTheMeasuredValuesInStrictOrder() {
+        XCTAssertEqual(Theme.panelKindPillHoverOpacityMultiplier, 1.6)
+        XCTAssertEqual(Theme.panelKindPillSelectedOpacityMultiplier, 2.4)
+        XCTAssertLessThan(Theme.panelKindPillHoverOpacityMultiplier,
+                          Theme.panelKindChipTintOpacityMultiplier)
+        XCTAssertLessThan(Theme.panelKindChipTintOpacityMultiplier,
+                          Theme.panelKindPillSelectedOpacityMultiplier)
+    }
+
+    /// `panelKindPillFill`'s precedence, pinned at the `Color` level exactly like the chip's
+    /// derivation test: selected beats hover beats rest, and each state resolves to the base
+    /// tint at the named multiplier — never a third mechanism.
+    func testPillFillResolvesTheLadderWithSelectedBeatingHover() {
+        for kind in kinds {
+            XCTAssertEqual(Theme.panelKindPillFill(kind, isActive: false, isHovered: false),
+                           Theme.panelKindTint(kind))
+            XCTAssertEqual(Theme.panelKindPillFill(kind, isActive: false, isHovered: true),
+                           Theme.panelKindTint(kind).opacity(Theme.panelKindPillHoverOpacityMultiplier))
+            XCTAssertEqual(Theme.panelKindPillFill(kind, isActive: true, isHovered: false),
+                           Theme.panelKindTint(kind).opacity(Theme.panelKindPillSelectedOpacityMultiplier))
+            XCTAssertEqual(Theme.panelKindPillFill(kind, isActive: true, isHovered: true),
+                           Theme.panelKindPillFill(kind, isActive: true, isHovered: false),
+                           "\(kind): selection is terminal — hover must not restyle an active pill")
+        }
+    }
+
     /// `panelKindChipTint` is DERIVED — the same switch, scaled — never a second exhaustive
     /// switch that could name a different asset for the same kind. Proven by comparing against an
     /// INDEPENDENTLY-constructed expected value (via the public API, not by reading the
@@ -83,88 +115,84 @@ final class PanelKindTintTests: XCTestCase {
                        "Color.opacity(_:) must multiply stored alpha, not replace or clamp it")
     }
 
-    // MARK: - 2. MEASURED: the hover-vs-tinted-rest floor, its identity, and text legibility
+    // MARK: - 2. MEASURED: the pill's kind-hued ladder, the chip's hover cue, text legibility
 
-    /// **The measured requirement itself** (the brief, verbatim: "selected/hover states must
-    /// remain clearly distinguishable on every tint in both schemes"). `ShellSidebarRowStyle`'s
-    /// own fill is `.clear` at rest and OPAQUE `Theme.rowHover` on hover/selected (`PanelTabPill`
-    /// wires `selectedUsesHoverTone: true`, so the two states share one token) — the row style's
-    /// background paints OVER this task's tint (`ShellPanel.swift`'s own doc comment on the
-    /// `.background` sites walks the z-order), so the two flat colours being compared here are
-    /// exactly what a user sees: the tinted pill at rest, and opaque `RowHover` the instant it
-    /// isn't.
+    /// **The measured requirement, under the ladder model** (live-gate ruling 2026-08-15: the
+    /// selected tab keeps its kind's color, a little stronger — so hover and selected are now the
+    /// SAME hue at `Theme.panelKindPillHoverOpacityMultiplier`/`…SelectedOpacityMultiplier` times
+    /// the rest alpha, and "distinguishable" means each adjacent RUNG of that ladder clears a
+    /// contrast floor against the previous one). The old model's neutral-`RowHover`-over-tint
+    /// crossover — and the telescoping-identity ceiling it imposed, which had forced `web` down
+    /// to a 4.7% light alpha — no longer applies to pills at all.
     ///
-    /// FLOORS, not the published figures (Task 10's own precedent — `docs/brand.md` § 3.6/3.7
-    /// record measurements; floors gate them so a later deliberate retune doesn't red this suite
-    /// for no reason). The floor is NOT an arbitrary WCAG number: `testLightHoverDeltaAnd…`
-    /// below proves `hoverDelta × visibility` is FIXED at `contrast(RowHover, CardSurface)` in
-    /// light — so neither term can individually clear √1.10988 ≈ 1.0535 by construction. 1.040 is
-    /// comfortably under that hard ceiling with room for the worst-measured kind (`document`,
-    /// 1.0477) while staying far above the un-tuned provisional's actual failures (1.009–1.016).
-    /// Dark has no such ceiling (proven in the same test): 1.30 is comfortably under every
-    /// measured dark value (1.357 worst case) with real margin.
-    func testHoverFillStaysDistinguishableFromEveryTintedPillAtRest() {
+    /// FLOORS, not the published figures (Task 10's precedent — `docs/brand.md` § 3.7 records the
+    /// measurements; floors gate them so a deliberate retune doesn't red this suite for no
+    /// reason): every adjacent rung ≥ 1.040 in both schemes. Worst measured: light `note`
+    /// rest→hover 1.045; everything else clears with real margin (dark minima ≥ 1.16).
+    func testEveryAdjacentRungOfThePillLadderStaysDistinguishable() {
+        for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+            let cardSurface = srgb(NSColor(named: "CardSurface")!, appearance)
+            for kind in kinds {
+                let tint = srgb(NSColor(named: assetName(kind))!, appearance)
+                let rest = composite(tint, over: cardSurface)
+                let hover = composite(tint, alphaScale: Theme.panelKindPillHoverOpacityMultiplier,
+                                      over: cardSurface)
+                let selected = composite(tint, alphaScale: Theme.panelKindPillSelectedOpacityMultiplier,
+                                         over: cardSurface)
+                XCTAssertGreaterThanOrEqual(
+                    contrast(rest, hover), 1.040,
+                    "\(kind) in \(appearance.rawValue): hover rung drowns into rest — § 3.7")
+                XCTAssertGreaterThanOrEqual(
+                    contrast(hover, selected), 1.040,
+                    "\(kind) in \(appearance.rawValue): selected rung drowns into hover — § 3.7")
+            }
+        }
+    }
+
+    /// The ladder must actually be a ladder: each rung moves the composite strictly FURTHER from
+    /// the bare surface, in every scheme, for every kind — the property that makes
+    /// rest → hover → selected read as one ramp of the same hue rather than three unrelated
+    /// tints. (This replaces the old model's telescoping/reinforcing identity proofs, which were
+    /// facts about `RowHover` occlusion — a mechanism pills no longer use.)
+    func testTheLadderIsMonotoneAgainstTheBareSurface() {
+        for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+            let cardSurface = srgb(NSColor(named: "CardSurface")!, appearance)
+            for kind in kinds {
+                let tint = srgb(NSColor(named: assetName(kind))!, appearance)
+                let rest = contrast(composite(tint, over: cardSurface), cardSurface)
+                let hover = contrast(composite(tint, alphaScale: Theme.panelKindPillHoverOpacityMultiplier,
+                                               over: cardSurface), cardSurface)
+                let selected = contrast(composite(tint, alphaScale: Theme.panelKindPillSelectedOpacityMultiplier,
+                                                  over: cardSurface), cardSurface)
+                XCTAssertGreaterThanOrEqual(rest, 1.05,
+                                            "\(kind) in \(appearance.rawValue): rest wash invisible against CardSurface")
+                XCTAssertGreaterThan(hover, rest,
+                                     "\(kind) in \(appearance.rawValue): hover must sit above rest")
+                XCTAssertGreaterThan(selected, hover,
+                                     "\(kind) in \(appearance.rawValue): selected must sit above hover")
+            }
+        }
+    }
+
+    /// **The chip kept the OLD model on purpose** (`PanelTabKindChip` still wears
+    /// `ShellSidebarRowStyle`, whose hover fill is opaque neutral `RowHover` over the 2.0× tint —
+    /// it has no selected state, so there was no occlusion complaint to fix). What § 3.7 once
+    /// recorded as an accepted ~1.00–1.011 light-mode trade-off is now a pinned floor: the
+    /// stronger rest base lifted the chip's measured light deltas to 1.043–1.212 as a side
+    /// effect of the ladder retune.
+    func testChipHoverFillStaysDistinguishableFromEveryChipAtRest() {
         for appearance in [NSAppearance.Name.aqua, .darkAqua] {
             let cardSurface = srgb(NSColor(named: "CardSurface")!, appearance)
             let rowHover = srgb(NSColor(named: "RowHover")!, appearance)
             let floor: CGFloat = appearance == .aqua ? 1.040 : 1.30
             for kind in kinds {
                 let tint = srgb(NSColor(named: assetName(kind))!, appearance)
-                let tinted = composite(tint, over: cardSurface)
-                let hoverDelta = contrast(rowHover, tinted)
+                let chip = composite(tint, alphaScale: Theme.panelKindChipTintOpacityMultiplier,
+                                     over: cardSurface)
                 XCTAssertGreaterThanOrEqual(
-                    hoverDelta, floor,
-                    "\(kind) in \(appearance.rawValue): hover fill drowns into the tinted rest "
-                        + "fill (\(hoverDelta):1) — docs/brand.md § 3.7 records the floor's derivation")
+                    contrast(rowHover, chip), floor,
+                    "\(kind) in \(appearance.rawValue): the chip's neutral hover cue drowns — § 3.7")
             }
-        }
-    }
-
-    /// **Why the floor above is what it is — a proof, not a claim.** In LIGHT, the tinted pill's
-    /// luminance always falls BETWEEN `RowHover`'s and `CardSurface`'s (every hue here darkens
-    /// `CardSurface` toward, but not past, `RowHover` at these alphas), so the two ratios
-    /// TELESCOPE exactly: `contrast(RowHover, tinted) × contrast(tinted, CardSurface) ==
-    /// contrast(RowHover, CardSurface)`. That product is FIXED by two tokens this task does not
-    /// own, so the best any alpha can do is split it evenly — neither ratio can exceed its square
-    /// root. This is the fact that turned "pick a floor" into "solve for the alpha that reaches
-    /// the ceiling", per kind (`docs/brand.md` § 3.7's table).
-    func testLightHoverDeltaTimesVisibilityEqualsTheFixedRowHoverCardSurfaceContrast() {
-        let cardSurface = srgb(NSColor(named: "CardSurface")!, .aqua)
-        let rowHover = srgb(NSColor(named: "RowHover")!, .aqua)
-        let baseline = contrast(rowHover, cardSurface)
-        let ceiling = sqrt(baseline)
-        for kind in kinds {
-            let tint = srgb(NSColor(named: assetName(kind))!, .aqua)
-            let tinted = composite(tint, over: cardSurface)
-            let hoverDelta = contrast(rowHover, tinted)
-            let visibility = contrast(tinted, cardSurface)
-            XCTAssertEqual(hoverDelta * visibility, baseline, accuracy: 0.01,
-                           "\(kind): the telescoping identity broke — the floor's derivation no longer holds")
-            XCTAssertLessThanOrEqual(hoverDelta, ceiling + 0.01, "\(kind): hover delta exceeded the proven ceiling")
-            XCTAssertLessThanOrEqual(visibility, ceiling + 0.01, "\(kind): visibility exceeded the proven ceiling")
-        }
-    }
-
-    /// **The mirror fact that explains why DARK needed no retuning at all.** In dark, `CardSurface`
-    /// sits BETWEEN the tinted composite and `RowHover` (every hue here, at these alphas, pushes
-    /// the composite past `CardSurface` toward black rather than stopping short of `RowHover`),
-    /// so the two ratios REINFORCE instead of trading off: `contrast(RowHover, tinted) ==
-    /// contrast(RowHover, CardSurface) × contrast(tinted, CardSurface)`. Raising alpha in dark
-    /// only helps the hover delta — there is no ceiling to solve for, which is why every kind kept
-    /// the brief's provisional 14%.
-    func testDarkHoverDeltaEqualsTheFixedBaselineTimesVisibility() {
-        let cardSurface = srgb(NSColor(named: "CardSurface")!, .darkAqua)
-        let rowHover = srgb(NSColor(named: "RowHover")!, .darkAqua)
-        let baseline = contrast(rowHover, cardSurface)
-        for kind in kinds {
-            let tint = srgb(NSColor(named: assetName(kind))!, .darkAqua)
-            let tinted = composite(tint, over: cardSurface)
-            let hoverDelta = contrast(rowHover, tinted)
-            let visibility = contrast(tinted, cardSurface)
-            XCTAssertEqual(hoverDelta, baseline * visibility, accuracy: 0.01,
-                           "\(kind): the reinforcing identity broke in dark")
-            XCTAssertGreaterThan(hoverDelta, baseline,
-                                 "\(kind): dark tinting must only IMPROVE the hover delta over the untinted baseline")
         }
     }
 
@@ -176,14 +204,15 @@ final class PanelKindTintTests: XCTestCase {
     /// translucent system ink. Verified against `docs/brand.md` § 3.6's own published figure:
     /// `labelColor` on plain `CardSurface` reproduces 14.35 / 11.99 EXACTLY with this method.
     ///
-    /// FLOORS, generous on both inks: `labelColor` never comes close to the 4.5:1 body floor on a
-    /// wash this faint (worst measured: 9.29:1), so 8.0 only guards against a real regression.
-    /// `TextMuted` is § 3.5's OWN established "quiet meta" register — never held to 4.5:1 even on
-    /// the plain surface (4.14 light / 5.99 dark baseline) — so its floor here is relative to
-    /// THAT baseline, not the body floor: the tint may cost some contrast, as any wash does
-    /// (§ 3.6's own precedent: "at most 0.47 of a ratio point" for the diff washes), but not
-    /// collapse it.
-    func testTintedTextStaysLegibleOnEveryPillTint() {
+    /// FLOORS, on the ladder's WORST case for each ink: `labelColor` is checked on the SELECTED
+    /// (strongest, 2.4×) composite and held to the 4.5:1 body floor — this is the ladder's real
+    /// ceiling-setter: dark `note` had to keep a 17% rest alpha (19% measured 4.22:1 at the
+    /// selected rung; 17% restores 4.73:1), and the worst passing value (`document` dark, 4.55)
+    /// is why the floor is the body floor itself rather than something generous. `TextMuted` is
+    /// checked on the REST wash (its actual home — the favicon and meta ink render on unselected
+    /// pills too) against § 3.5's OWN quiet-meta register (4.14 light / 5.99 dark baseline), not
+    /// the body floor: the tint may cost some contrast, as any wash does, but not collapse it.
+    func testTintedTextStaysLegibleAcrossTheLadder() {
         let labelLight = srgb(.labelColor, .aqua)
         let labelDark = srgb(.labelColor, .darkAqua)
         let textMutedLight = srgb(NSColor(named: "TextMuted")!, .aqua)
@@ -192,14 +221,16 @@ final class PanelKindTintTests: XCTestCase {
             for appearance in [NSAppearance.Name.aqua, .darkAqua] {
                 let cardSurface = srgb(NSColor(named: "CardSurface")!, appearance)
                 let tint = srgb(NSColor(named: assetName(kind))!, appearance)
-                let tinted = composite(tint, over: cardSurface)
+                let selected = composite(tint, alphaScale: Theme.panelKindPillSelectedOpacityMultiplier,
+                                         over: cardSurface)
                 let label = appearance == .aqua ? labelLight : labelDark
-                let labelOnTint = composite(label, over: tinted)
-                XCTAssertGreaterThanOrEqual(contrast(labelOnTint, tinted), 8.0,
-                                            "\(kind) in \(appearance.rawValue): title ink (labelColor) weakened badly")
+                let labelOnSelected = composite(label, over: selected)
+                XCTAssertGreaterThanOrEqual(contrast(labelOnSelected, selected), 4.5,
+                                            "\(kind) in \(appearance.rawValue): title ink fell under the body floor on the SELECTED rung")
+                let rest = composite(tint, over: cardSurface)
                 let textMuted = appearance == .aqua ? textMutedLight : textMutedDark
                 let floor: CGFloat = appearance == .aqua ? 3.5 : 4.0
-                XCTAssertGreaterThanOrEqual(contrast(textMuted, tinted), floor,
+                XCTAssertGreaterThanOrEqual(contrast(textMuted, rest), floor,
                                             "\(kind) in \(appearance.rawValue): meta/icon ink (TextMuted) dropped below its own established register")
             }
         }
@@ -207,18 +238,19 @@ final class PanelKindTintTests: XCTestCase {
 
     // MARK: - 3. Wiring: the pill/chip source really applies the tint, and only there
 
-    /// **The z-order the brief specifically asks for** ("layers UNDER the existing
-    /// ShellSidebarRowStyle hover/selected treatment") — proven the same way this codebase already
-    /// proves "this call site declares that role" (`TranscriptBrandTests
-    /// .testEveryAssistantMessageCallSiteDeclaresTheRightRole`): by reading the real source, not by
-    /// mounting a view. In SwiftUI, `.background` attached to a `Button` BEFORE `.buttonStyle` sits
-    /// BEHIND everything the style itself draws (the style wraps the button's ORIGINAL label
-    /// through the environment; a modifier applied earlier in the chain wraps around that whole
-    /// result) — so "before, in file order" and "behind, on screen" are the same fact here.
-    func testPillTintIsWiredBeforeTheRowStyleSoItLandsBehindIt() throws {
-        let lines = try codeLines("Sources/AppShell/ShellPanel.swift")
-        try assertAppliedBeforeItsRowStyle(marker: "Theme.panelKindTint(tab.kind)", lines: lines,
-                                           label: "PanelTabPill")
+    /// **The pill's fill decision has exactly one home** (ladder model, live-gate ruling
+    /// 2026-08-15): `PanelTabPill` wears `PanelTabPillStyle`, and that style's body is the only
+    /// place `Theme.panelKindPillFill` is named in this file — the same read-the-real-source
+    /// proof style as before, retargeted from the old under-the-row-style z-order (a mechanism
+    /// pills no longer use) to the new single-fill-source invariant.
+    func testThePillWearsItsOwnLadderStyleAndTheFillHasOneHome() throws {
+        let code = try loadCodeOnly("Sources/AppShell/ShellPanel.swift")
+        XCTAssertTrue(code.contains("PanelTabPillStyle(kind: tab.kind, isActive: isActive)"),
+                      "PanelTabPill must wear PanelTabPillStyle")
+        XCTAssertEqual(code.components(separatedBy: "Theme.panelKindPillFill(").count - 1, 1,
+                       "panelKindPillFill must be named exactly once — inside PanelTabPillStyle")
+        XCTAssertFalse(code.contains("ShellSidebarRowStyle(isSelected: isActive"),
+                       "the pill must no longer wear the neutral row style — its ladder IS the state paint")
     }
 
     /// The chip's identical wiring, Task 11's slot finally filled — same z-order proof.
@@ -229,18 +261,20 @@ final class PanelKindTintTests: XCTestCase {
     }
 
     /// **The regression this task must not invite**: "finishing the job" by also tinting the
-    /// favicon glyph or the chip's count digit. The brief is explicit ("the tint is the surface,
-    /// not the icon") and `PanelTabKindChip`'s own doc comment names the concrete reason — at 2×
-    /// opacity the wash measures ~1.1–1.2:1 as literal ink, illegible. Proven by an exact COUNT:
-    /// the only two places `Theme.panelKindTint(`/`Theme.panelKindChipTint(` may appear in this
-    /// file's real code are the two `.background` sites the tests above already found — a third
-    /// call site (a glyph, a text run) moves this count to 3.
+    /// favicon glyph or the chip's count digit ("the tint is the surface, not the icon" — at chip
+    /// opacity the wash measures ~1.2:1 as literal ink, illegible). Proven by an exact COUNT of
+    /// every tint accessor this file may name: the chip's one `.background` site
+    /// (`panelKindChipTint`) plus the pill style's one fill site (`panelKindPillFill`), and the
+    /// base `panelKindTint(` never named directly (the ladder and the chip both derive from it in
+    /// `Theme`, not here). A third site — a glyph, a text run — moves a count and reds this.
     func testTheTintIsNamedNowhereElseInThisFile() throws {
         let code = try loadCodeOnly("Sources/AppShell/ShellPanel.swift")
-        let sites = code.components(separatedBy: "Theme.panelKindTint(").count - 1
-            + code.components(separatedBy: "Theme.panelKindChipTint(").count - 1
-        XCTAssertEqual(sites, 2,
-                       "Theme.panelKind(Chip)Tint must be named at exactly the two .background sites")
+        XCTAssertEqual(code.components(separatedBy: "Theme.panelKindChipTint(").count - 1, 1,
+                       "panelKindChipTint must be named at exactly the chip's .background site")
+        XCTAssertEqual(code.components(separatedBy: "Theme.panelKindPillFill(").count - 1, 1,
+                       "panelKindPillFill must be named at exactly the pill style's fill site")
+        XCTAssertEqual(code.components(separatedBy: "Theme.panelKindTint(").count - 1, 0,
+                       "the base tint accessor must not be named directly here — Theme derives every use")
     }
 
     /// Both favicons (pill, chip) explicitly keep `Theme.textMuted` — the pill's rule extended to
@@ -349,7 +383,14 @@ final class PanelKindTintTests: XCTestCase {
     /// `TranscriptBrandTests.composite`; how a wash (or a translucent system ink, § 2 above)
     /// actually reaches the eye.
     private func composite(_ top: NSColor, over bottom: NSColor) -> NSColor {
-        let a = top.alphaComponent
+        composite(top, alphaScale: 1, over: bottom)
+    }
+
+    /// The ladder/chip variant: the SAME hue at `scale ×` its authored alpha — exactly what
+    /// `Color.opacity(multiplier)` produces at render time (§ 1's measured multiply-not-replace
+    /// fact), so § 2's measurements are of the literal painted composites.
+    private func composite(_ top: NSColor, alphaScale scale: Double, over bottom: NSColor) -> NSColor {
+        let a = min(top.alphaComponent * CGFloat(scale), 1)
         return NSColor(srgbRed: top.redComponent * a + bottom.redComponent * (1 - a),
                        green: top.greenComponent * a + bottom.greenComponent * (1 - a),
                        blue: top.blueComponent * a + bottom.blueComponent * (1 - a), alpha: 1)

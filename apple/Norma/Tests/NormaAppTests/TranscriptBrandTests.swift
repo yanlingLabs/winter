@@ -61,11 +61,13 @@ final class TranscriptBrandTests: XCTestCase {
         // to where the hover delta and the wash's own visibility against `CardSurface` are equal,
         // the best either can do given those two tokens are fixed. `docs/brand.md` § 3.7
         // publishes every ratio and the identity behind the floor.
-        "PanelKindWebTint": ("3B82F6", "3B82F6", 0.047, 0.14),
-        "PanelKindDocumentTint": ("F59E0B", "F59E0B", 0.08, 0.14),
-        "PanelKindCodeTint": ("8B5CF6", "8B5CF6", 0.044, 0.14),
-        "PanelKindNoteTint": ("EAB308", "EAB308", 0.08, 0.14),
-        "PanelKindDiffTint": ("22C55E", "22C55E", 0.064, 0.14),
+        // Ladder retune, live-gate ruling 2026-08-15 (brand.md § 3.7): rest alphas — light a flat
+        // 0.12, dark 0.19 except note's 0.17 (the label-legibility ceiling at the selected rung).
+        "PanelKindWebTint": ("3B82F6", "3B82F6", 0.12, 0.19),
+        "PanelKindDocumentTint": ("F59E0B", "F59E0B", 0.12, 0.19),
+        "PanelKindCodeTint": ("8B5CF6", "8B5CF6", 0.12, 0.19),
+        "PanelKindNoteTint": ("EAB308", "EAB308", 0.12, 0.17),
+        "PanelKindDiffTint": ("22C55E", "22C55E", 0.12, 0.19),
     ]
 
     /// The catalog IS the palette brand.md publishes. `SidebarBrandTests` already pins that every
