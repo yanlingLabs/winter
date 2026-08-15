@@ -2746,6 +2746,20 @@ void NormaCEFExecuteCDP(NSView *parent,
 // editor-plumbing Task 3: the editor bridge's two doors
 // ---------------------------------------------------------------------------
 
+int NormaCEFBrowserIdentifierForParent(NSView *parent) {
+  // The header's standing promise, and here it is also what keeps the answer honest: with CEF never
+  // loaded there are no browsers, so the only truthful answer is "none", and `BrowserForParent`
+  // would walk an empty list to reach it anyway.
+  if (!g_initialized) {
+    return 0;
+  }
+  auto browser = BrowserForParent(parent);
+  // Not `browser->GetIdentifier()` behind a bare null check alone: a record is dropped in
+  // `OnBeforeClose`, so a container mid-close resolves to nothing and answers 0 — which the header
+  // requires a discriminator to read as "refuse".
+  return browser ? browser->GetIdentifier() : 0;
+}
+
 void NormaCEFSetBridgeHandler(void (^handler)(int browserId, uint64_t queryId,
                                               const char *requestJSON)) {
   // Copied, like every other block this file stores: a stack block escaping into process-global

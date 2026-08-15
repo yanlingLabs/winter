@@ -349,6 +349,32 @@ typedef void (*NormaCEFBridgeRespond)(uint64_t queryId, bool success, const char
 /// runs with CEF's own error code of -1.
 void NormaCEFSetBridgeHandler(void (^handler)(int browserId, uint64_t queryId, const char *requestJSON));
 
+/// **Which browser is in this container?** `CefBrowser::GetIdentifier()` for the browser hosted by
+/// `parent`, or **0** when there is none — no browser yet, a browser already closed, CEF never
+/// loaded, or a view that never hosted one. Same number `NormaCEFSetBridgeHandler` delivers as
+/// `browserId` and `NormaCEFExecuteCDP`'s registry keys on.
+///
+/// **This is the missing half of the obligation stated 30 lines above.** That block requires a
+/// bridge handler to discriminate by `browserId` and refuse every query that is not its own — and
+/// until this existed the Swift side had no way to learn what its own is. Everything else in this
+/// header addresses a browser by its CONTAINER VIEW (`NormaCEFExecuteCDP`, the chrome verbs, all
+/// three observers), for the good reason that a container exists before its browser does; the
+/// bridge is the one channel that speaks ids, because a query arrives from a page, not from a view.
+/// This is the translation between the two, and it is the whole of it.
+///
+/// **Resolved live on every call, never cached, and that is the point.** The lookup is two ObjC
+/// pointer comparisons over the open-browser list (`BrowserForParent`, which messages nothing — see
+/// its own note on the zombie hazard that shape exists to avoid), so a handler may call it per query
+/// and always get today's answer: a container whose browser was closed and re-created answers with
+/// the new id, and one whose browser is gone answers 0. A cached id is a stale id, and a stale id in
+/// a discriminator means either refusing your own page or — far worse — accepting someone else's.
+///
+/// **0 is never a browser and must be read as "refuse".** A caller comparing `browserId == 0 == 0`
+/// would accept every query in the process from a container that has no browser at all.
+///
+/// Called on the MAIN thread, like everything else in this header, and safe with CEF never loaded.
+int NormaCEFBrowserIdentifierForParent(NSView *parent);
+
 /// **Answer one query.** `success = true` runs the page's `onSuccess` with `responseJSON`;
 /// `success = false` runs its `onFailure`, carrying `responseJSON` as the error message (by
 /// convention a `{"message": …}` object, matching the CDP door's failure shape).
