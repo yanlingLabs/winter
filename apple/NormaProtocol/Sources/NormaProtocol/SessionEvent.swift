@@ -755,7 +755,7 @@ public enum SessionEvent: Codable, Equatable, Sendable {
     /// fallback, and a new kind is exactly the sort of protocol change that already means walking
     /// this file's variant checklist.
     public enum PanelTabKind: String, Codable, Equatable, Sendable {
-        case web, document, code, note, diff
+        case web, document, code, note, diff, files
     }
 
     /// panel-shell T3: the daemon-driven browsing/document panel's tab lifecycle. This event and
