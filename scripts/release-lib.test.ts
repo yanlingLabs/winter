@@ -261,6 +261,26 @@ describe("nameScanPlan (panel-cef Task 5 — §11b's exclusion, expressed in the
     // follows it, so matching it too would be dead policy hiding a walker regression.
     expect(m(`${fw}/Resources/sw.lproj`)).toBe(false);
   });
+
+  test("NAME_SCAN_EXCLUSIONS matches vendored Monaco's vs/ tree only — not the app/ page shell or EditorAssets itself", () => {
+    const m = (p: string) => NAME_SCAN_EXCLUSIONS.some((re) => re.test(p));
+    // The vendored, unreviewed third-party tree — excluded whole, at the directory node and
+    // at any depth beneath it.
+    expect(m("Contents/Resources/EditorAssets/vs")).toBe(true);
+    expect(m("Contents/Resources/EditorAssets/vs/loader.js")).toBe(true);
+    expect(m("Contents/Resources/EditorAssets/vs/base/worker/workerMain.js")).toBe(true);
+    // Task 4's in-repo page shell — Norma's OWN code — stays scanned.
+    expect(m("Contents/Resources/EditorAssets/app")).toBe(false);
+    expect(m("Contents/Resources/EditorAssets/app/index.html")).toBe(false);
+    // The parent dir itself (not the vs/ child) stays scanned.
+    expect(m("Contents/Resources/EditorAssets")).toBe(false);
+    // The licence notice this same embed phase writes stays scanned.
+    expect(m("Contents/Resources/Licenses/MONACO-LICENSE.txt")).toBe(false);
+    // Not a blanket prefix match — a sibling name merely starting with "vs" must not sneak in.
+    expect(m("Contents/Resources/EditorAssets/vsx")).toBe(false);
+    // Unrelated CEF paths are unaffected by this rule.
+    expect(m("Contents/MacOS/Norma")).toBe(false);
+  });
 });
 
 describe("appcastInsertPlan", () => {
