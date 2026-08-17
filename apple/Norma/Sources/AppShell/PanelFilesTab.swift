@@ -76,6 +76,16 @@ final class PanelFilesTabModel: ObservableObject {
     /// Re-point at a host/session. Called from `panelTabContent(for:)` on EVERY render pass
     /// (`PanelEditorTabModel.bind`'s own doc explains why this must be idempotent, cheap, and must
     /// not publish — the identical constraint applies here for the identical reason).
+    ///
+    /// A cached model's `sessionId` changing under it (same `tabId`, different session) is correct
+    /// by construction even though nothing pins it directly: dropping `directorySink` here and
+    /// re-subscribing in `activate()` means `refresh` runs against the NEW session's rows, and
+    /// `FileTreeModel.setRoots` releases every OLD section's watcher before installing new ones
+    /// (see its own doc). In practice this transition cannot occur: `tabId` is a daemon-minted
+    /// `randomUUID()` (`packages/core/src/panel/open-tab.ts`), never reused across sessions, and
+    /// `prunePanelTabModelsOnSessionChange` discards a session's cached models on every session hop
+    /// before this registry could be asked to rebind one to a different session anyway — so this is
+    /// belt-and-suspenders correctness, not a reachable path, which is why it has no dedicated test.
     func bind(host: ShellSessionHost?, sessionId: String?) {
         guard self.host !== host || self.sessionId != sessionId else { return }
         self.host = host

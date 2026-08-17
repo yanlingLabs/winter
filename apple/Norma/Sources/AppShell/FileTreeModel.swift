@@ -53,13 +53,21 @@ protocol FileTreeWatching: AnyObject {
 
 /// How a node gets its watcher. The house seam (`ShellSessionHost.makeEditorRuntime`,
 /// `SessionDirectory`'s `lister`): production wires the real `DispatchSourceDirectoryWatcher` below
-/// (`FileTreeModel.defaultWatcherFactory`); tests substitute a recorder that never touches the
-/// filesystem and can fire `onChange` synchronously on demand — see `FileTreeModelTests`.
+/// via an inline closure literal at `FileTreeModel.init`'s default-argument position (not a named
+/// static property — see that init's own comment for why); tests substitute a recorder that never
+/// touches the filesystem and can fire `onChange` synchronously on demand — see `FileTreeModelTests`.
 ///
 /// Returns `nil` when a watch could not be started (the path vanished between the listing that
 /// found it and this call — the same race every vanish-tolerant reader in this app already
 /// accepts): a node with no watcher simply has no LIVE updates until the next manual refresh, never
 /// a crash and never a wrong answer.
+///
+/// `onChange` is `@escaping`: verified empirically, not assumed — a build attempt without it fails
+/// at the `DispatchSourceDirectoryWatcher` call site with "passing non-escaping parameter 'onChange'
+/// to function expecting an '@escaping' closure". The inner parameter of a function-type typealias
+/// does not inherit non-escaping-by-default the way a plain function parameter does once the
+/// typealias itself is used as an `@escaping` stored-property type; trust the compiler over any
+/// general rule of thumb here.
 typealias FileTreeWatcherFactory = @MainActor (_ path: String, _ onChange: @escaping () -> Void) -> FileTreeWatching?
 
 /// ~300ms (design spec) — the debounce a burst of filesystem events (an agent writing several files
