@@ -776,4 +776,30 @@ final class EditorTabTests: XCTestCase {
         let afterClose = panelTabContent(for: tab) as? PanelEditorTab
         XCTAssertFalse(afterClose?.model === replaced?.model, "closing a tab drops its model")
     }
+
+    // MARK: - editor-product Task 10: the tab-close gate (PURE)
+
+    /// **The dirty×choice matrix, exhaustively** (design notes' own words). `dirty: false` answers
+    /// `.close` for every choice — proving "a clean tab never asks" as a fact about the function,
+    /// not merely about the one call site (`ShellSessionHost.requestCloseTab`) that only ever
+    /// reaches this with `dirty: true` in practice.
+    func testDirtyCloseActionIsTheExhaustiveDirtyByChoiceMatrix() {
+        for choice: DirtyCloseChoice in [.save, .discard, .cancel] {
+            XCTAssertEqual(dirtyCloseAction(dirty: false, choice: choice), .close,
+                           "a clean tab closes silently whatever the (hypothetical) choice — \(choice)")
+        }
+        XCTAssertEqual(dirtyCloseAction(dirty: true, choice: .save), .awaitSave)
+        XCTAssertEqual(dirtyCloseAction(dirty: true, choice: .discard), .close)
+        XCTAssertEqual(dirtyCloseAction(dirty: true, choice: .cancel), .keepOpen)
+    }
+
+    /// The second, smaller decision — what a `.save` becomes once the coordinator actually answers.
+    /// `.failed` is the ONE outcome that does not close: T9's banner already carries the sentence,
+    /// and closing here would take the tab (and the explanation) away together.
+    func testDirtyCloseActionAfterSaveClosesOnSavedAndNoModelButKeepsOpenOnFailed() {
+        XCTAssertEqual(dirtyCloseActionAfterSave(.saved), .close)
+        XCTAssertEqual(dirtyCloseActionAfterSave(.noModel), .close,
+                       "nothing to save is discard-able, not a reason to keep the tab open")
+        XCTAssertEqual(dirtyCloseActionAfterSave(.failed("disk full")), .keepOpen)
+    }
 }

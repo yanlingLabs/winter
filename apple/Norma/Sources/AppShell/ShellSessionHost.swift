@@ -802,6 +802,94 @@ final class ShellSessionHost: ObservableObject {
         }
     }
 
+    // MARK: - editor-product Task 10: the tab-close gate
+
+    /// editor-product Task 10: the ONE door a tab's `×` goes through (`ShellPanel`'s `onCloseTab`) —
+    /// `closePanelTab` below stays the unconditional MECHANISM, reached either straight through (a
+    /// non-code tab, a code tab with no file, or one with no live runtime to ask) or after this gate
+    /// resolves what a dirty `.code` tab means.
+    ///
+    /// **T9's ⚠️, closed**: `dirtyCloseCandidate` below always resolves a code tab's `(path,
+    /// runtime)` pair when one exists, clean or dirty, failed-open or mid-boot — so `runtime
+    /// .close(path)` is reached on EVERY code-tab close from here on, not only the dirty ones. A
+    /// clean tab (including a failed-open one, or one still queued) takes the silent branch: no
+    /// sheet, `dirtyCloseAction(dirty: false, …)`'s own claim (`.close`, whatever `choice` would
+    /// have been). That single call is what stops the leak `PanelEditorTabModels.discard` alone left
+    /// standing — the page's model plus the watcher's two file descriptors, previously released only
+    /// when the whole runtime eventually was.
+    func requestCloseTab(_ tabId: String) {
+        guard let (path, runtime) = dirtyCloseCandidate(tabId: tabId) else {
+            closePanelTab(tabId)
+            return
+        }
+        guard editorTabIsDirty(state: runtime.stateSnapshot, path: path) else {
+            runtime.close(path)
+            closePanelTab(tabId)
+            return
+        }
+        let basename = (path as NSString).lastPathComponent
+        presentDirtyCloseSheet(basename, presentingWindow?()) { [weak self, weak runtime] choice in
+            self?.resolveDirtyTabClose(tabId: tabId, path: path, runtime: runtime, choice: choice)
+        }
+    }
+
+    /// Which `(path, runtime)` the tab-close gate applies to — `nil` for everything it leaves to the
+    /// UNCHANGED `closePanelTab` alone: a non-`.code` tab, a code tab with no file (unreachable
+    /// through any shipped door, same posture `editorSaveMenuTarget` takes toward it), or a session
+    /// with no live runtime (a dirless session never minted one — nothing there to close).
+    private func dirtyCloseCandidate(tabId: String) -> (path: String, runtime: EditorRuntime)? {
+        guard let tab = panelStore.tabs.first(where: { $0.tabId == tabId }),
+              tab.kind == .code, let path = tab.url, !path.isEmpty,
+              let sessionId = panelTargetSessionId,
+              let runtime = existingEditorRuntime(for: sessionId) else {
+            return nil
+        }
+        return (path, runtime)
+    }
+
+    /// The sheet's answer, for a tab already established as dirty. `runtime` is weak-captured at the
+    /// door above (`requestCloseTab`) and handed in already-resolved-or-nil: a sheet can sit on
+    /// screen for as long as the user takes to answer it, and a session that departs (or is torn
+    /// down by T10's own quit gate) while it is up must degrade to "nothing left to close" rather
+    /// than reach into a released runtime.
+    private func resolveDirtyTabClose(tabId: String, path: String, runtime: EditorRuntime?,
+                                      choice: DirtyCloseChoice) {
+        switch dirtyCloseAction(dirty: true, choice: choice) {
+        case .close:
+            runtime?.close(path)
+            closePanelTab(tabId)
+        case .keepOpen:
+            break
+        case .awaitSave:
+            guard let runtime else { return }
+            Task { @MainActor [weak self, weak runtime] in
+                guard let runtime else { return }
+                let outcome = await runtime.save(path)
+                switch dirtyCloseActionAfterSave(outcome) {
+                case .close:
+                    runtime.close(path)
+                    self?.closePanelTab(tabId)
+                case .keepOpen, .awaitSave:
+                    // `.failed`: T9's banner already carries the sentence — the tab simply stays.
+                    break
+                }
+            }
+        }
+    }
+
+    /// The tab-close sheet's own presentation — injected on the same terms as
+    /// `presentHandoffFailure` above, so a test can script the answer without a real `NSAlert`.
+    ///
+    /// **Production falls back to `NSAlert.runModal()` when `presentingWindow` answers `nil`** —
+    /// which is exactly what an un-wired test host's `presentingWindow` always answers. Any test that
+    /// reaches the dirty branch of `requestCloseTab` WITHOUT overriding this first does not fail, it
+    /// HANGS the suite on a headless modal waiting for a click nobody can make.
+    var presentDirtyCloseSheet: (_ basename: String, _ window: NSWindow?,
+                                 _ respond: @escaping (DirtyCloseChoice) -> Void) -> Void = {
+        basename, window, respond in
+        presentDirtyCloseSheetAlert(basename: basename, on: window, respond: respond)
+    }
+
     /// A tab's `×`. panel-shell T15: targets `panelTargetSessionId` (attached, else the new-chat
     /// page's bound session) — see that property's own doc for why this specific widening is what
     /// makes closing a bound session's LAST tab live (the path Task 16's reaper eventually acts on).
@@ -809,6 +897,11 @@ final class ShellSessionHost: ObservableObject {
     /// live pump (`attachFresh`'s `onEvent` hook), but a bound-but-unattached session has no such
     /// pump — without this the strip would show a stale, already-closed tab until the next real
     /// attach.
+    ///
+    /// **The unconditional mechanism, not the gate** (editor-product Task 10) — `requestCloseTab`
+    /// above is the door every real close now goes through; this stays reachable directly for the
+    /// callers that already know closing is safe (the resolved gate itself, and the `#if DEBUG` smoke
+    /// harness in `ShellSidebar.swift`, which never opens a dirty code tab).
     func closePanelTab(_ tabId: String) {
         guard let client = managementClient, let sessionId = panelTargetSessionId else { return }
         // panel-cef Task 6b: the tab's chrome model goes with it. See `PanelWebTabModels.discard`
@@ -820,8 +913,9 @@ final class ShellSessionHost: ObservableObject {
         // the patch string (capped at 1 MiB) and its parsed rows for the life of the process.
         PanelDiffTabModels.discard(tabId: tabId)
         // editor-product Task 5: and the code tab's, which holds the session's editor state mirror,
-        // two Combine subscriptions and T8's save closure. It deliberately does NOT close the
-        // runtime's model — see `PanelEditorTabModels.discard`.
+        // two Combine subscriptions and T8's save closure. editor-product Task 10: the runtime's own
+        // model/watcher are now closed by the GATE in front of this method (`requestCloseTab`), not
+        // by this discard — see that method's own doc for why the two are separate calls.
         PanelEditorTabModels.discard(tabId: tabId)
         // editor-product Task 7: and the files tab's, which releases its tree's watchers and
         // Combine subscription — see `PanelFilesTabModels.discard`/`PanelFilesTabModel.deactivate`.
@@ -2388,6 +2482,39 @@ final class ShellSessionHost: ObservableObject {
     /// The panel's own close button.
     func closeOutputFile() {
         openOutputFile = nil
+    }
+}
+
+// MARK: - editor-product Task 10: the tab-close sheet's AppKit half
+
+/// The dirty-close sheet's real presentation — a FREE function taking the window as a PARAMETER
+/// (`confirmWorkingDir`'s own shape, `WorkingDirPickerSheet.swift`) rather than a `lazy var` closing
+/// over `self`, which is what lets `ShellSessionHost.presentDirtyCloseSheet` default to it directly
+/// without capturing anything.
+///
+/// A sheet when there is a window to hang it on (there always is, in practice — a tab's `×` cannot
+/// be clicked without one), an app-modal fallback otherwise, matching every other alert this file
+/// presents.
+@MainActor
+func presentDirtyCloseSheetAlert(basename: String, on window: NSWindow?,
+                                 respond: @escaping (DirtyCloseChoice) -> Void) {
+    let alert = NSAlert()
+    alert.alertStyle = .warning
+    alert.messageText = "Save changes to \(basename)?"
+    alert.addButton(withTitle: "Save")
+    alert.addButton(withTitle: "Discard")
+    alert.addButton(withTitle: "Cancel") // NSAlert binds Escape to this one automatically.
+    let handle: (NSApplication.ModalResponse) -> Void = { response in
+        switch response {
+        case .alertFirstButtonReturn: respond(.save)
+        case .alertSecondButtonReturn: respond(.discard)
+        default: respond(.cancel)
+        }
+    }
+    if let window {
+        alert.beginSheetModal(for: window, completionHandler: handle)
+    } else {
+        handle(alert.runModal())
     }
 }
 

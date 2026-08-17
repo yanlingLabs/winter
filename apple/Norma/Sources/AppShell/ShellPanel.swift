@@ -217,7 +217,9 @@ struct ShellPanel: View {
                         }
                     },
                     onActivateTab: { tabId in host?.activatePanelTab(tabId) },
-                    onCloseTab: { tabId in host?.closePanelTab(tabId) }
+                    // editor-product Task 10: the gate, not the bare mechanism — a dirty `.code`
+                    // tab's × now asks first (`ShellSessionHost.requestCloseTab`'s own doc).
+                    onCloseTab: { tabId in host?.requestCloseTab(tabId) }
                 )
                 .frame(height: panelTitlebarBandHeight)
 

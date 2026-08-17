@@ -243,6 +243,62 @@ func editorOpenFailureTitle(_ failure: EditorOpenFailure) -> String {
     }
 }
 
+// MARK: - editor-product Task 10: the tab-close gate
+
+/// Which button the user pressed on the dirty-close sheet ("Save changes to \<basename\>?").
+///
+/// Deliberately NOT folded together with `SaveOutcome` into one enum: a choice is the user's
+/// synchronous answer to the sheet, an outcome is what the save actually did once awaited — two
+/// different moments, sometimes minutes apart (T9's own banner takes exactly this posture toward
+/// its two sources). `dirtyCloseActionAfterSave` below is the second, smaller decision that bridges
+/// them once `.save` has actually been awaited.
+enum DirtyCloseChoice: Equatable {
+    case save
+    case discard
+    case cancel
+}
+
+/// PURE: what closing a `.code` tab must DO, decided in one of two places
+/// (`dirtyCloseAction`/`dirtyCloseActionAfterSave`) so an `.awaitSave` can never be handled twice.
+enum DirtyCloseAction: Equatable {
+    /// Close the tab (and the runtime's model) right now — nothing here to lose.
+    case close
+    /// Route the file through the save flow; `dirtyCloseActionAfterSave` decides what happens once
+    /// its outcome is known.
+    case awaitSave
+    /// Leave the tab exactly as it is — no close, no save.
+    case keepOpen
+}
+
+/// **PURE: the tab-close sheet's whole decision table** (design notes: "table-test it
+/// exhaustively" — the dirty×choice matrix).
+///
+/// `dirty` gates whether the sheet is even shown: a CLEAN tab closes silently, whatever `choice`
+/// would have been — which is why this is total over BOTH parameters rather than `choice` being
+/// optional. Production never actually calls this with `dirty: false` (the clean path short-circuits
+/// before asking), but the truth table is the claim either way: "a clean tab never asks" is provable
+/// here, not merely true of one call site.
+func dirtyCloseAction(dirty: Bool, choice: DirtyCloseChoice) -> DirtyCloseAction {
+    guard dirty else { return .close }
+    switch choice {
+    case .save: return .awaitSave
+    case .discard: return .close
+    case .cancel: return .keepOpen
+    }
+}
+
+/// PURE: what a Save choice becomes once the coordinator's outcome is known. `.failed` is the ONE
+/// answer that does not close — T9's banner already carries the failure sentence onto the tab, so
+/// closing here would throw that explanation away along with the tab that was showing it. `.noModel`
+/// closes: "nothing to save" is discard-able by construction (design notes), not a reason to keep a
+/// tab open that asked to leave.
+func dirtyCloseActionAfterSave(_ outcome: SaveOutcome) -> DirtyCloseAction {
+    switch outcome {
+    case .saved, .noModel: return .close
+    case .failed: return .keepOpen
+    }
+}
+
 // MARK: - The per-tab model
 
 /// editor-product Task 5: what a `.code` tab KNOWS. One per tab id, held by `PanelEditorTabModels`
@@ -551,10 +607,13 @@ enum PanelEditorTabModels {
 
     /// Dropped when the user closes the tab (`ShellSessionHost.closePanelTab`).
     ///
-    /// **It does not close the runtime's model, deliberately.** A dirty buffer dropped here would
-    /// lose the user's work with no warning, which is the whole reason T10 owns a close gate; until
-    /// that exists, a closed code tab leaves its model open in the page, where it costs memory and
-    /// nothing else.
+    /// **It does not close the runtime's model itself, deliberately.** A dirty buffer dropped here
+    /// would lose the user's work with no warning — which is why the runtime's own `close(path)` is
+    /// no longer this method's business at all: editor-product Task 10's gate
+    /// (`ShellSessionHost.requestCloseTab`) asks first (a sheet for a dirty file, silent for a clean
+    /// one) and calls `runtime.close(path)` itself, BEFORE ever reaching `closePanelTab` — this
+    /// method's own Swift-side bookkeeping — which is what makes the two calls independent rather
+    /// than one another's business.
     static func discard(tabId: String) {
         // Deactivate FIRST: a view can outlive the registry entry by a beat, and a model that is
         // merely forgotten still holds the subscriptions that act. See `deactivate`.

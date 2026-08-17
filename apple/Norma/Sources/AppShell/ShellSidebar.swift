@@ -148,12 +148,15 @@ struct ShellRootView: View {
                     // Task 6a fix pass: reproduce the LIVE-GATE DEFECT without a click. Closing a
                     // tab (and switching destination with one open — the same dismantle) was making
                     // Norma's whole window disappear, because CEF's default `DoClose` sends
-                    // `performClose:` to the browser's top-level parent window. `closePanelTab` is
-                    // the identical door the pill's × uses, so this exercises the real path.
+                    // `performClose:` to the browser's top-level parent window. `requestCloseTab` is
+                    // the identical door the pill's × uses (editor-product Task 10 — a `.web` tab
+                    // like this one is never dirty, so it passes straight through to the same
+                    // `closePanelTab` this smoke test always exercised), so this reproduces the real
+                    // path.
                     if let after = env["NORMA_PANEL_SMOKE_CLOSE_AFTER"].flatMap(Double.init) {
                         DispatchQueue.main.asyncAfter(deadline: .now() + after) {
                             guard let tabId = panelStore.tabs.first?.tabId else { return }
-                            host?.closePanelTab(tabId)
+                            host?.requestCloseTab(tabId)
                         }
                     }
                     // The user's SECOND reported trigger: clicking Cowork in the sidebar with a tab

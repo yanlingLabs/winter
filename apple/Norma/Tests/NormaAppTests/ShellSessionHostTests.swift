@@ -2779,7 +2779,14 @@ final class ShellSessionHostTests: XCTestCase {
         super.tearDown()
     }
 
-    private func editorFactory(files: [String: String] = [:], browserId: Int32 = 41) -> EditorFactory {
+    /// editor-product Task 10: `makeWatcher`/`saveEditor` are ADDITIVE overrides (both default to
+    /// `nil`, i.e. `EditorRuntime`'s own production defaults) — for the tab-close gate's tests, which
+    /// need to observe a watcher actually stopping (`EditorWatcherRecorder`, borrowed from
+    /// `EditorConflictTests` on the same "doubles, not copies" terms `EditorTabTests` already states)
+    /// or need a save to resolve WITHOUT real CDP/disk plumbing.
+    private func editorFactory(files: [String: String] = [:], browserId: Int32 = 41,
+                               makeWatcher: EditorFileWatcherFactory? = nil,
+                               saveEditor: EditorSaveCoordinator.Editor? = nil) -> EditorFactory {
         let cef = EditorCEFRecorder()
         cef.browserIds = [browserId]
         let slot = EditorSlotRecorder()
@@ -2794,8 +2801,24 @@ final class ShellSessionHostTests: XCTestCase {
                                   throw NSError(domain: NSCocoaErrorDomain, code: NSFileNoSuchFileError)
                               }
                               return EditorFileContents(text: text)
+                          },
+                          saveEditor: saveEditor,
+                          makeWatcher: makeWatcher ?? { path, onChange in
+                              DispatchSourceFileWatcher(path: path, onChange: onChange)
                           })
         }, cef: cef, slot: slot, hub: hub, scheduler: scheduler)
+    }
+
+    /// The bridge messages a runtime has sent and not yet been answered for, by wire type — same
+    /// shape and same reasoning as `EditorTabTests`' own copy (each suite keeps its own; the
+    /// recorders are shared, this reader is not worth sharing across a module boundary of tests).
+    private func cdpTypes(_ cef: EditorCEFRecorder) -> [String] {
+        let known = ["setTheme", "openModel", "activateModel", "closeModel", "pullContent",
+                     "applyExternalContent", "markSaved"]
+        return cef.cdp.compactMap { entry in
+            guard let params = entry.params else { return nil }
+            return known.first { params.contains(#"\"type\":\""# + $0 + #"\""#) }
+        }
     }
 
     private func codeRow(_ sessionId: String, dirs: [SessionDirEntry]?) -> SessionSummary {
@@ -2971,6 +2994,309 @@ final class ShellSessionHostTests: XCTestCase {
         XCTAssertEqual(editor.cef.closeCount, 1)
         XCTAssertEqual(editor.hub.registeredBrowserIds, [])
         XCTAssertNil(host.existingEditorRuntime(for: "S1"))
+    }
+
+    // MARK: - editor-product Task 10: the tab-close gate
+
+    /// A save flow the test controls completely — no real CDP round trip and no real disk, so a
+    /// save's OUTCOME can be scripted deterministically. `coordinator` is filled in AFTER the
+    /// runtime that holds it exists (`EditorRuntime.saveCoordinator` is `private(set) lazy`, so
+    /// reading it forces construction, exactly as calling `save(_:)` for real would).
+    @MainActor
+    private final class ScriptedSaveEditor {
+        weak var coordinator: EditorSaveCoordinator?
+        var writeError: Error?
+        var answerText = "scripted"
+
+        var seam: EditorSaveCoordinator.Editor {
+            EditorSaveCoordinator.Editor(
+                hasModel: { _ in true },
+                pull: { [weak self] path, seq in
+                    self?.coordinator?.deliverContentResponse(path: path, seq: seq, text: self?.answerText ?? "")
+                },
+                markSaved: { _, _ in },
+                noteExpectedWrite: { _ in },
+                withdrawExpectedWrite: { _ in },
+                write: { [weak self] _, _ in
+                    if let error = self?.writeError { throw error }
+                })
+        }
+    }
+
+    /// Drive one session to `.ready` with `path` open and dirty, and register its `.code` tab in the
+    /// panel — the setup every test below shares. Returns the live runtime, or fails the CURRENT
+    /// test cleanly (`XCTUnwrap`, `EditorSaveTests`' own posture for an "async setup that should
+    /// structurally never fail") rather than crashing the whole process.
+    private func makeDirtyCodeTab(host: ShellSessionHost, factory: ShellTransportFactory,
+                                  editor: EditorFactory, sessionId: String, path: String,
+                                  tabId: String) async throws -> EditorRuntime {
+        await host.directory.refresh()
+        host.setShellVisible(true)
+        host.select(sessionId)
+        await waitUntilMade(factory, 1)
+        await answerHandshake(factory.made[0], sessionId: sessionId)
+        host.panelDidReveal()
+        let runtime = try XCTUnwrap(host.existingEditorRuntime(for: sessionId), "the reveal built no runtime")
+        editor.slot.deliver(browserId: 41, queryId: 1, request: #"{"type":"ready"}"#)
+        editor.cef.answerNextCDP() // setTheme — no state effect
+        await runtime.openFile(path)
+        editor.cef.answerNextCDP() // openModel — records the model
+        editor.slot.deliver(browserId: 41, queryId: 2,
+                            request: #"{"type":"modelDirtyChanged","path":"\#(path)","dirty":true}"#)
+        XCTAssertEqual(runtime.stateSnapshot.dirtyCount, 1, "setup must leave the file dirty")
+        host.panelStore.applyFetchedSnapshot(
+            sessionId: sessionId,
+            tabs: [PanelTab(tabId: tabId, kind: .code, url: path, title: (path as NSString).lastPathComponent)],
+            activeTabId: nil)
+        return runtime
+    }
+
+    /// **T9's ⚠️, pinned: a CLEAN code tab's × now closes the runtime's model AND stops its
+    /// watcher.** Before this task `closePanelTab` alone left the page model open and the watcher's
+    /// two file descriptors running — released only when the WHOLE runtime eventually was.
+    func testRequestCloseTabOnACleanCodeTabClosesTheModelAndStopsTheWatcherSilently() async {
+        let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+        let (host, factory, mgmt) = await makeHostWithManagement(rows: rows)
+        defer { host.deselect() }
+        let watchers = EditorWatcherRecorder()
+        let editor = editorFactory(files: ["/repo/a.ts": "x"], makeWatcher: watchers.factory)
+        host.makeEditorRuntime = editor.make
+        await host.directory.refresh()
+        host.setShellVisible(true)
+        host.select("S1")
+        await waitUntilMade(factory, 1)
+        await answerHandshake(factory.made[0], sessionId: "S1")
+        host.panelDidReveal()
+        guard let runtime = host.existingEditorRuntime(for: "S1") else {
+            return XCTFail("the reveal built no runtime")
+        }
+        editor.slot.deliver(browserId: 41, queryId: 1, request: #"{"type":"ready"}"#)
+        editor.cef.answerNextCDP() // setTheme
+        await runtime.openFile("/repo/a.ts")
+        editor.cef.answerNextCDP() // openModel — records the CLEAN model
+        XCTAssertNotNil(runtime.stateSnapshot.models["/repo/a.ts"])
+        XCTAssertEqual(runtime.stateSnapshot.dirtyCount, 0, "this tab stays clean — no dirtyChanged fired")
+        guard let watcher = watchers.watchers["/repo/a.ts"] else {
+            return XCTFail("the open must have armed a watcher")
+        }
+        host.panelStore.applyFetchedSnapshot(
+            sessionId: "S1", tabs: [PanelTab(tabId: "t1", kind: .code, url: "/repo/a.ts", title: "a.ts")],
+            activeTabId: nil)
+        var sheetsPresented = 0
+        host.presentDirtyCloseSheet = { _, _, _ in sheetsPresented += 1 }
+
+        host.requestCloseTab("t1")
+
+        XCTAssertEqual(sheetsPresented, 0, "a clean tab must never show the sheet")
+        XCTAssertNil(runtime.stateSnapshot.models["/repo/a.ts"], "the model must be closed")
+        XCTAssertTrue(watcher.isStopped, "T9's ⚠️ — the watcher's two file descriptors must be released")
+        XCTAssertEqual(cdpTypes(editor.cef), ["closeModel"],
+                       "runtime.close(path) must send closeModel to the page, not just move Swift's "
+                       + "own state — T9's ⚠️")
+        await feedWaitUntil { mgmt.methods.contains("panel.closeTab") }
+        guard let close = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.closeTab" }) else {
+            return XCTFail("requestCloseTab must still fire panel.closeTab for a clean tab: \(mgmt.methods)")
+        }
+        XCTAssertEqual((close["params"] as? [String: Any])?["tabId"] as? String, "t1")
+    }
+
+    /// A non-`.code` tab (or a code tab with no file — unreachable through any shipped door) is the
+    /// gate's own no-op shape: straight through to the unconditional `closePanelTab`, no sheet, and
+    /// no runtime ever touched.
+    func testRequestCloseTabOnANonCodeTabClosesUnconditionallyWithoutTouchingAnyRuntime() async {
+        let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+        let (host, factory, mgmt) = await makeHostWithManagement(rows: rows)
+        defer { host.deselect() }
+        await host.directory.refresh()
+        host.setShellVisible(true)
+        host.select("S1")
+        await waitUntilMade(factory, 1)
+        await answerHandshake(factory.made[0], sessionId: "S1")
+        host.panelStore.applyFetchedSnapshot(
+            sessionId: "S1", tabs: [PanelTab(tabId: "t1", kind: .web, url: "https://a", title: "A")],
+            activeTabId: nil)
+        var sheetsPresented = 0
+        host.presentDirtyCloseSheet = { _, _, _ in sheetsPresented += 1 }
+
+        host.requestCloseTab("t1")
+
+        XCTAssertEqual(sheetsPresented, 0)
+        await feedWaitUntil { mgmt.methods.contains("panel.closeTab") }
+        XCTAssertEqual(host.editorRuntimes.count, 0, "a .web tab's close must never mint or touch an editor")
+    }
+
+    /// The dirty sheet's Cancel: nothing closes, nothing saves, the tab and its model are untouched.
+    func testRequestCloseTabOnADirtyTabCancelChoiceLeavesEverythingOpen() async throws {
+        let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+        let (host, factory, mgmt) = await makeHostWithManagement(rows: rows)
+        defer { host.deselect() }
+        let editor = editorFactory(files: ["/repo/a.ts": "x"])
+        host.makeEditorRuntime = editor.make
+        let runtime = try await makeDirtyCodeTab(host: host, factory: factory, editor: editor,
+                                                sessionId: "S1", path: "/repo/a.ts", tabId: "t1")
+        var presentedBasename: String?
+        host.presentDirtyCloseSheet = { basename, _, respond in
+            presentedBasename = basename
+            respond(.cancel)
+        }
+
+        host.requestCloseTab("t1")
+
+        XCTAssertEqual(presentedBasename, "a.ts")
+        try? await Task.sleep(nanoseconds: 100_000_000) // given a beat, in case a close were racing behind it
+        XCTAssertFalse(mgmt.methods.contains("panel.closeTab"), "Cancel must never fire the RPC")
+        XCTAssertNotNil(runtime.stateSnapshot.models["/repo/a.ts"], "the model must still be open")
+        XCTAssertEqual(runtime.stateSnapshot.dirtyCount, 1, "still dirty — nothing was saved or discarded")
+    }
+
+    /// The dirty sheet's Discard: closes without ever asking the save coordinator for anything.
+    func testRequestCloseTabOnADirtyTabDiscardChoiceClosesWithoutSaving() async throws {
+        let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+        let (host, factory, mgmt) = await makeHostWithManagement(rows: rows)
+        defer { host.deselect() }
+        let editor = editorFactory(files: ["/repo/a.ts": "x"])
+        host.makeEditorRuntime = editor.make
+        let runtime = try await makeDirtyCodeTab(host: host, factory: factory, editor: editor,
+                                                sessionId: "S1", path: "/repo/a.ts", tabId: "t1")
+        host.presentDirtyCloseSheet = { _, _, respond in respond(.discard) }
+
+        host.requestCloseTab("t1")
+
+        await feedWaitUntil { mgmt.methods.contains("panel.closeTab") }
+        XCTAssertNil(runtime.stateSnapshot.models["/repo/a.ts"], "discard still closes the model")
+        XCTAssertFalse(editor.cef.cdp.contains { $0.params?.contains(#"\"type\":\"pullContent\""#) == true },
+                       "Discard must never pull the buffer's content — nothing here is ever saved")
+    }
+
+    /// The dirty sheet's Save, when the save FAILS: the tab stays open (T9's banner already carries
+    /// the sentence — closing here would take the explanation away with it). Cheap and deterministic
+    /// — the pull is simply never answered, and the fake scheduler's own 5 s timer fires it.
+    func testRequestCloseTabOnADirtyTabSaveChoiceThatFailsKeepsTheTabOpen() async throws {
+        let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+        let (host, factory, mgmt) = await makeHostWithManagement(rows: rows)
+        defer { host.deselect() }
+        let editor = editorFactory(files: ["/repo/a.ts": "x"])
+        host.makeEditorRuntime = editor.make
+        let runtime = try await makeDirtyCodeTab(host: host, factory: factory, editor: editor,
+                                                sessionId: "S1", path: "/repo/a.ts", tabId: "t1")
+        host.presentDirtyCloseSheet = { _, _, respond in respond(.save) }
+
+        host.requestCloseTab("t1")
+
+        await feedWaitUntil { self.cdpTypes(editor.cef).contains("pullContent") }
+        XCTAssertTrue(editor.scheduler.fireNextTimer(), "the 5 s pull timeout must be armed")
+        try? await Task.sleep(nanoseconds: 100_000_000) // let the failed save's continuation run
+        XCTAssertFalse(mgmt.methods.contains("panel.closeTab"), "a failed save must not close the tab")
+        XCTAssertNotNil(runtime.stateSnapshot.models["/repo/a.ts"], "the model is untouched by a failed save")
+    }
+
+    /// The dirty sheet's Save, when the save SUCCEEDS: closes only once the outcome is known, and
+    /// AFTER it — scripted so the outcome is deterministic without a real CDP round trip or disk.
+    func testRequestCloseTabOnADirtyTabSaveChoiceThatSucceedsClosesAfterSaving() async throws {
+        let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+        let (host, factory, mgmt) = await makeHostWithManagement(rows: rows)
+        defer { host.deselect() }
+        let scripted = ScriptedSaveEditor()
+        let editor = editorFactory(files: ["/repo/a.ts": "x"], saveEditor: scripted.seam)
+        host.makeEditorRuntime = editor.make
+        let runtime = try await makeDirtyCodeTab(host: host, factory: factory, editor: editor,
+                                                sessionId: "S1", path: "/repo/a.ts", tabId: "t1")
+        scripted.coordinator = runtime.saveCoordinator
+        host.presentDirtyCloseSheet = { _, _, respond in respond(.save) }
+
+        host.requestCloseTab("t1")
+
+        await feedWaitUntil { mgmt.methods.contains("panel.closeTab") }
+        XCTAssertNil(runtime.stateSnapshot.models["/repo/a.ts"], "a successful save must close the model")
+        guard let close = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.closeTab" }) else {
+            return XCTFail("a successful save must still close the tab: \(mgmt.methods)")
+        }
+        XCTAssertEqual((close["params"] as? [String: Any])?["tabId"] as? String, "t1")
+    }
+
+    /// **Obligation 3 (T5 handoff, "T10 decides" — the ruling is CLEAR it): closing a failed-open
+    /// tab drops its `openFailures` entry, so a later reopen mints a fresh read instead of showing
+    /// the stale sentence forever.** A failed-open tab is not dirty (no model at all), so this takes
+    /// the SILENT path — no sheet.
+    func testRequestCloseTabOnAFailedOpenClearsTheOpenFailureForAFreshReopen() async {
+        let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+        let (host, factory, mgmt) = await makeHostWithManagement(rows: rows)
+        defer { host.deselect() }
+        let editor = editorFactory(files: [:]) // "/repo/missing.ts" is nowhere in this dictionary
+        host.makeEditorRuntime = editor.make
+        await host.directory.refresh()
+        host.setShellVisible(true)
+        host.select("S1")
+        await waitUntilMade(factory, 1)
+        await answerHandshake(factory.made[0], sessionId: "S1")
+        host.panelDidReveal()
+        guard let runtime = host.existingEditorRuntime(for: "S1") else {
+            return XCTFail("the reveal built no runtime")
+        }
+        editor.slot.deliver(browserId: 41, queryId: 1, request: #"{"type":"ready"}"#)
+        editor.cef.answerNextCDP() // setTheme
+        await runtime.openFile("/repo/missing.ts")
+        XCTAssertEqual(runtime.stateSnapshot.openFailures["/repo/missing.ts"], .notFound)
+        host.panelStore.applyFetchedSnapshot(
+            sessionId: "S1",
+            tabs: [PanelTab(tabId: "t1", kind: .code, url: "/repo/missing.ts", title: "missing.ts")],
+            activeTabId: nil)
+        host.presentDirtyCloseSheet = { _, _, _ in
+            XCTFail("a failed open holds no model — it is not dirty, and must never ask")
+        }
+
+        host.requestCloseTab("t1")
+
+        XCTAssertNil(runtime.stateSnapshot.openFailures["/repo/missing.ts"],
+                    "closing must clear the failure so a later reopen mints a fresh read")
+        await feedWaitUntil { mgmt.methods.contains("panel.closeTab") }
+    }
+
+    /// **Obligation 4 (T3-carried, progress ledger): a dirty runtime whose session has since
+    /// vanished from the daemon's own list is still retained, and still counted.** Nothing prunes
+    /// `editorRuntimes` in response to a row disappearing — this is what makes the quit gate's own
+    /// gather (`quitDirtyFilePaths`) tolerate a daemon-deleted session BY CONSTRUCTION: it reads
+    /// `EditorRuntimeState` alone, never a session's row.
+    func testTheEditorRuntimeTableRetainsADeadSessionsDirtyRuntimeForTheQuitGateToCount() async {
+        final class MutableRowsBox: @unchecked Sendable { var rows: [SessionSummary] = [] }
+        let box = MutableRowsBox()
+        box.rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+        let directory = SessionDirectory(lister: { box.rows })
+        let factory = ShellTransportFactory()
+        let host = ShellSessionHost(directory: directory, makeFeed: { sessionId in
+            let session = SessionModel()
+            let feed = SessionFeed(makeTransport: { factory.make() }, token: "tok", clientName: "orb",
+                                   mode: .pinned(sessionId: sessionId), session: session)
+            return (feed, session)
+        })
+        defer { host.deselect() }
+        let editor = editorFactory(files: ["/repo/a.ts": "x"])
+        host.makeEditorRuntime = editor.make
+        await directory.refresh()
+        host.setShellVisible(true)
+        host.select("S1")
+        await waitUntilMade(factory, 1)
+        await answerHandshake(factory.made[0], sessionId: "S1")
+        host.panelDidReveal()
+        guard let runtime = host.existingEditorRuntime(for: "S1") else {
+            return XCTFail("the reveal built no runtime")
+        }
+        editor.slot.deliver(browserId: 41, queryId: 1, request: #"{"type":"ready"}"#)
+        editor.cef.answerNextCDP() // setTheme
+        await runtime.openFile("/repo/a.ts")
+        editor.cef.answerNextCDP() // openModel
+        editor.slot.deliver(browserId: 41, queryId: 2,
+                            request: #"{"type":"modelDirtyChanged","path":"/repo/a.ts","dirty":true}"#)
+        XCTAssertEqual(runtime.stateSnapshot.dirtyCount, 1)
+
+        // The daemon-deleted-session shape: the row is simply gone from the next `session.list`.
+        box.rows = []
+        await directory.refresh()
+        XCTAssertNil(directory.rows.first(where: { $0.sessionId == "S1" }), "the row really is gone")
+
+        XCTAssertEqual(host.editorRuntimes.count, 1, "a dead session's dirty runtime is still retained")
+        XCTAssertEqual(quitDirtyFilePaths(runtimeStates: host.editorRuntimes.values.map(\.stateSnapshot)),
+                       ["/repo/a.ts"], "and the quit gate's own gather still counts its dirty file")
     }
 
     // MARK: - editor-product Task 6: the file door
