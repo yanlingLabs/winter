@@ -3027,6 +3027,14 @@ final class ShellSessionHostTests: XCTestCase {
                        "no row at all -> nothing to resolve against, returned untouched")
         XCTAssertEqual(resolvedFilePath("src/a.ts", row: codeRow("S1", dirs: [])), "src/a.ts",
                        "a genuinely workdir-less row -> untouched, same as no row")
+        // editor-product Task 7: the companion case to the predicate reconciliation
+        // (`EditorTabTests.testADegenerateEmptyPathEntryReadsAsDirlessNotPresent`) — this function's
+        // OWN guard already required a real, non-empty primary, unaffected by that fix; pinned here
+        // too so both halves of the reconciliation are on record in the same place a reviewer would
+        // look for either.
+        XCTAssertEqual(
+            resolvedFilePath("src/a.ts", row: codeRow("S1", dirs: [SessionDirEntry(path: "", locked: false)])),
+            "src/a.ts", "a non-empty dirs array whose only entry has no real path -> untouched")
     }
 
     /// **Mint: one `panel.openTab`, kind `code`, carrying the RESOLVED absolute path and the
@@ -3277,5 +3285,124 @@ final class ShellSessionHostTests: XCTestCase {
         try? await Task.sleep(nanoseconds: 150_000_000)
         XCTAssertEqual(editor.cef.cdp.count, 0,
                        "an already-open, non-failed file must not be re-read on activate")
+    }
+
+    // MARK: - editor-product Task 7: the Files tab's door
+
+    /// The DECISION, on its own — mirrors `testTheFileDoorDecisionDedupesByPathOverCodeTabsAndTitlesTheMintWithTheBasename`
+    /// one door up, minus per-item identity: there is at most ONE `.files` tab per session, so the
+    /// KIND ALONE is the whole test, and every edge here is "does the kind filter actually work".
+    func testTheFilesTabActionDedupesByKindAloneAndMintsWhenNoneIsOpen() {
+        XCTAssertEqual(panelFilesTabAction(tabs: []), .mint)
+
+        let open = PanelTab(tabId: "t7", kind: .files, url: nil, title: "Files")
+        XCTAssertEqual(panelFilesTabAction(tabs: [open]), .activate(tabId: "t7"))
+
+        // Every OTHER kind present, but no `.files` tab -> still mint. The kind filter is
+        // load-bearing here, not redundant — a session can freely hold web/code/diff tabs with no
+        // Files tab at all.
+        let others = [
+            PanelTab(tabId: "t1", kind: .web, url: "https://a", title: "A"),
+            PanelTab(tabId: "t2", kind: .code, url: "/repo/a.ts", title: "a.ts"),
+            PanelTab(tabId: "t3", kind: .diff, url: nil, title: "b.ts", diffId: "d_1"),
+        ]
+        XCTAssertEqual(panelFilesTabAction(tabs: others), .mint)
+
+        // The Files tab sitting AMONG other kinds is still found and activated — order-independent.
+        XCTAssertEqual(panelFilesTabAction(tabs: others + [open]), .activate(tabId: "t7"))
+        XCTAssertEqual(panelFilesTabAction(tabs: [open] + others), .activate(tabId: "t7"))
+    }
+
+    /// **The first open: one `panel.openTab`, kind `files`, NO url, titled "Files" — and the panel is
+    /// revealed.** Also the door's own de facto proof that `PanelURLPolicy.mayOpenTab(kind: .files,
+    /// url: nil)` allows it through (`openPanelTab`'s policy guard sits ahead of every branch) — a
+    /// refusal there would show up here as no `panel.openTab` ever reaching the wire.
+    func testAFilesTabOpenWithNoExistingTabMintsWithNoUrlTitledFilesAndRevealsThePanel() async {
+        let (host, factory, mgmt) = await makeHostWithManagement()
+        defer { host.deselect() }
+        host.setShellVisible(true)
+        host.select("S1")
+        await waitUntilMade(factory, 1)
+        await answerHandshake(factory.made[0], sessionId: "S1")
+
+        var revealed = 0
+        host.onRevealPanel = { revealed += 1 }
+
+        host.openFilesTab(sessionId: "S1")
+        await feedWaitUntil { mgmt.methods.contains("panel.openTab") }
+        guard let open = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.openTab" }) else {
+            return XCTFail("a Files-tab open with nothing open must mint a tab: \(mgmt.methods)")
+        }
+        let params = open["params"] as? [String: Any]
+        XCTAssertEqual(params?["sessionId"] as? String, "S1")
+        XCTAssertEqual(params?["kind"] as? String, "files")
+        XCTAssertEqual(params?["title"] as? String, "Files")
+        XCTAssertNil(params?["url"], "a Files tab carries no url")
+        XCTAssertNil(params?["diffId"], "…nor a diffId")
+        XCTAssertNil(params?["tabId"], "the daemon mints tabId — the door must never send one")
+        XCTAssertEqual(mgmt.methods.filter { $0 == "panel.activateTab" }.count, 0,
+                       "nothing was open to activate: \(mgmt.methods)")
+        XCTAssertEqual(revealed, 1, "a tab nobody can see is not an opened tree")
+    }
+
+    /// **The second open: `panel.activateTab` on the tab the first open minted, and NO second
+    /// mint** — one Files tab per session, exactly like the strip's "+" is one tab per click but
+    /// this door is one tab EVER per session.
+    func testASecondFilesTabOpenActivatesInsteadOfMintingASecondTab() async {
+        let (host, factory, mgmt) = await makeHostWithManagement()
+        defer { host.deselect() }
+        host.setShellVisible(true)
+        host.select("S1")
+        await waitUntilMade(factory, 1)
+        await answerHandshake(factory.made[0], sessionId: "S1")
+
+        host.panelStore.applyFetchedSnapshot(
+            sessionId: "S1",
+            tabs: [PanelTab(tabId: "t7", kind: .files, url: nil, title: "Files")],
+            activeTabId: nil)
+
+        var revealed = 0
+        host.onRevealPanel = { revealed += 1 }
+
+        host.openFilesTab(sessionId: "S1")
+        await feedWaitUntil { mgmt.methods.contains("panel.activateTab") }
+        guard let activate = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.activateTab" }) else {
+            return XCTFail("a Files-tab open for an already-open session must activate it: \(mgmt.methods)")
+        }
+        let params = activate["params"] as? [String: Any]
+        XCTAssertEqual(params?["sessionId"] as? String, "S1")
+        XCTAssertEqual(params?["tabId"] as? String, "t7")
+        // The whole point: no duplicate tab. Given a beat, in case a mint were racing behind it.
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertEqual(mgmt.methods.filter { $0 == "panel.openTab" }.count, 0,
+                       "one Files tab per session — a second open must never mint: \(mgmt.methods)")
+        XCTAssertEqual(revealed, 1, "an activate behind a hidden panel is a click that does nothing")
+    }
+
+    /// The door targets the NAMED session, not whatever the shell is attached to — structurally
+    /// guaranteed here (`sessionId:` is required, no attached-session fallback branch exists), but
+    /// pinned end to end anyway for parity with `openFileTab`/`openDiffTab`'s own identical proofs.
+    func testAFilesTabOpenTargetsTheNamedSessionNotTheAttachedOne() async {
+        let (host, factory, mgmt) = await makeHostWithManagement()
+        defer { host.deselect() }
+        host.setShellVisible(true)
+        host.select("S2")
+        await waitUntilMade(factory, 1)
+        await answerHandshake(factory.made[0], sessionId: "S2")
+        XCTAssertEqual(host.attachedSessionId, "S2")
+
+        host.panelStore.applyFetchedSnapshot(
+            sessionId: "S1",
+            tabs: [PanelTab(tabId: "t7", kind: .files, url: nil, title: "Files")],
+            activeTabId: nil)
+
+        host.openFilesTab(sessionId: "S1")
+        await feedWaitUntil { mgmt.methods.contains("panel.activateTab") }
+        guard let activate = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.activateTab" }) else {
+            return XCTFail("the named session's tab must be activated: \(mgmt.methods)")
+        }
+        XCTAssertEqual((activate["params"] as? [String: Any])?["sessionId"] as? String, "S1",
+                       "the activate targets the NAMED session, not the attached one")
+        XCTAssertEqual(mgmt.methods.filter { $0 == "panel.openTab" }.count, 0)
     }
 }

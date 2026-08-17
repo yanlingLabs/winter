@@ -353,12 +353,13 @@ final class ShellSessionHost: ObservableObject {
         directory.$rows
             .sink { [weak self] rows in self?.reconcileIsChatSession(rows: rows) }
             .store(in: &cancellables)
-        // editor-product Task 5 (fix round 1): the panel's own published slice IS the signal for
-        // "which code tabs are on screen" — see `prunePanelEditorTabModels`. Subscribed rather than
-        // called from `switchSession`/`detach`'s six sites, so a future seventh cannot forget it.
-        // Fires once on subscribe with the empty state, which prunes nothing.
+        // editor-product Task 5 (fix round 1) / Task 7: the panel's own published slice IS the
+        // signal for "which code AND files tabs are on screen" — see
+        // `prunePanelTabModelsOnSessionChange`. Subscribed rather than called from
+        // `switchSession`/`detach`'s six sites, so a future seventh cannot forget it. Fires once on
+        // subscribe with the empty state, which prunes nothing.
         panelStore.$tabs
-            .sink { [weak self] tabs in self?.prunePanelEditorTabModels(shownTabs: tabs) }
+            .sink { [weak self] tabs in self?.prunePanelTabModelsOnSessionChange(shownTabs: tabs) }
             .store(in: &cancellables)
     }
 
@@ -571,31 +572,46 @@ final class ShellSessionHost: ObservableObject {
     /// asking merely to look would create one.
     func existingEditorRuntime(for sessionId: String) -> EditorRuntime? { editorRuntimes[sessionId] }
 
-    /// Which session the editor-tab registry was last pruned for. `PanelStore` publishes `tabs` on
-    /// every fold; only a change of SESSION means a whole set of code tabs stopped being on screen.
-    private var lastPanelEditorPruneSessionId: String?
+    /// Which session the editor/files-tab registries were last pruned for. `PanelStore` publishes
+    /// `tabs` on every fold; only a change of SESSION means a whole set of this session's tabs
+    /// stops being on screen.
+    private var lastPanelTabModelPruneSessionId: String?
 
-    /// **editor-product Task 5 (fix round 1): a departed session's code tabs let go of their wires.**
+    /// **editor-product Task 5 (fix round 1) / Task 7: a departed session's code AND files tabs let
+    /// go of their wires.**
     ///
-    /// The bug this closes was measured rather than reasoned about: the tab-model registry kept a
-    /// departed session's model alive (it is discarded only by `closePanelTab`), the model kept a
-    /// live `SessionDirectory.$rows` subscription, and the 5 s `session.list` poll ALONE then minted
-    /// a fresh runtime through `editorRuntimeForCodeTab` and re-read the file — a hidden Chromium for
-    /// a session the user had left, which nothing releases, because a departure releases exactly once
-    /// and it had already happened. The second harm is quieter and worse: the re-read happens ~5 s
-    /// after departure, so a return an hour later shows a buffer that is stale against everything the
-    /// agent wrote since — with T8's save behind it, that is a clobber.
+    /// The bug this closes was measured rather than reasoned about, for the code tab (Task 5's own
+    /// account): the tab-model registry kept a departed session's model alive (it is discarded only
+    /// by `closePanelTab`), the model kept a live `SessionDirectory.$rows` subscription, and the 5 s
+    /// `session.list` poll ALONE then minted a fresh runtime through `editorRuntimeForCodeTab` and
+    /// re-read the file — a hidden Chromium for a session the user had left, which nothing releases,
+    /// because a departure releases exactly once and it had already happened. The second harm is
+    /// quieter and worse: the re-read happens ~5 s after departure, so a return an hour later shows a
+    /// buffer that is stale against everything the agent wrote since — with T8's save behind it, that
+    /// is a clobber.
+    ///
+    /// **Task 7 extends the SAME prune to `PanelFilesTabModel`, for the SAME class of bug.** There is
+    /// no minting cost here (no browser, no CEF) — but its model also holds a live `$rows`
+    /// subscription, and its `FileTreeModel` holds live `DispatchSource` watchers that keep firing
+    /// disk reads for a session nobody is viewing, for as long as its Files tab stays open in a
+    /// session the shell has left. `PanelFilesTabModel.deactivate()` already releases both; this is
+    /// simply the second door that calls it, beside the tab's own explicit close
+    /// (`PanelFilesTabModels.discard`). **Accepted trade, disclosed**: a hop away and back loses
+    /// which folders were expanded — the tree re-reads its roots fresh on return, the same "a
+    /// restored tab re-reads on first activation" rule the design spec states for code tabs.
     ///
     /// **Keyed on the session changing, not on every fold.** Opening or closing a tab within the
     /// current session republishes `tabs` too, and pruning there could drop the model of a tab that
     /// is on screen right now (the panel's `panel.list` seed publishes an empty slice for a beat on
-    /// every attach). A session change is exactly the moment a whole set of code tabs stops being
-    /// visible, and `except:` keeps whatever the new session already has cached, so a switch back is
-    /// not a churn.
-    private func prunePanelEditorTabModels(shownTabs: [PanelTab]) {
-        guard panelStore.currentSessionId != lastPanelEditorPruneSessionId else { return }
-        lastPanelEditorPruneSessionId = panelStore.currentSessionId
-        PanelEditorTabModels.discardAll(except: Set(shownTabs.map(\.tabId)))
+    /// every attach). A session change is exactly the moment a whole set of this session's tabs
+    /// stops being visible, and `except:` keeps whatever the new session already has cached, so a
+    /// switch back is not a churn — for either registry.
+    private func prunePanelTabModelsOnSessionChange(shownTabs: [PanelTab]) {
+        guard panelStore.currentSessionId != lastPanelTabModelPruneSessionId else { return }
+        lastPanelTabModelPruneSessionId = panelStore.currentSessionId
+        let shownTabIds = Set(shownTabs.map(\.tabId))
+        PanelEditorTabModels.discardAll(except: shownTabIds)
+        PanelFilesTabModels.discardAll(except: shownTabIds)
     }
 
     /// **editor-product Task 5: the code tab's door — the one place a TAB may mint a runtime.**
@@ -780,6 +796,9 @@ final class ShellSessionHost: ObservableObject {
         // two Combine subscriptions and T8's save closure. It deliberately does NOT close the
         // runtime's model — see `PanelEditorTabModels.discard`.
         PanelEditorTabModels.discard(tabId: tabId)
+        // editor-product Task 7: and the files tab's, which releases its tree's watchers and
+        // Combine subscription — see `PanelFilesTabModels.discard`/`PanelFilesTabModel.deactivate`.
+        PanelFilesTabModels.discard(tabId: tabId)
         Task { @MainActor [weak self] in
             _ = try? await client.closePanelTab(sessionId: sessionId, tabId: tabId)
             if self?.attachedSessionId == nil { self?.refreshPanelTabs(for: sessionId) }
@@ -911,6 +930,19 @@ final class ShellSessionHost: ObservableObject {
     ///
     /// **The panel is revealed on BOTH branches**, mirroring `openDiffTab` and the strip's "+" — an
     /// activate behind a hidden panel would be a click that visibly does nothing.
+    ///
+    /// **KNOWN, disclosed rather than guarded — two variants, both the diff door's own accepted
+    /// class** (editor-product Task 7, landing the disclosure `openDiffTab`'s doc already carries
+    /// for its own door): (1) the identical double-mint race — two clicks in the beat before the
+    /// first mint's `panel_tab_opened` folds can open two tabs for the same file, because the dedupe
+    /// reads folded state and nothing on the wire dedupes a `panel.openTab` call by path; (2) a
+    /// variant unique to this door's retry — rapid clicks on a tab whose path currently sits in
+    /// `openFailures` can each independently decide `retryOpen: true` (the read is fresh per click,
+    /// and the first retry's own `Task` has not necessarily cleared the failure by the time a second
+    /// click's decision runs), scheduling more than one redundant re-read of the same file. Both are
+    /// bounded and recoverable — wasted work, never a wrong tab or a wrong file — and a guard for
+    /// either is deliberately out of this task's scope, the same ruling `openDiffTab` already made
+    /// for its own.
     func openFileTab(_ path: String, sessionId: String) {
         let row = directory.rows.first { $0.sessionId == sessionId }
         let absolutePath = resolvedFilePath(path, row: row)
@@ -930,6 +962,25 @@ final class ShellSessionHost: ObservableObject {
         }
         // editor-product T3: the reveal carries the editor pre-warm with it — see `openDiffTab`'s
         // identical call, immediately above.
+        revealPanel()
+    }
+
+    /// editor-product Task 7: **the Files tab's door — dedupe by KIND alone, one per session.**
+    /// Mirrors `openFileTab`/`openDiffTab` wherever the two-branch shape allows: dedupe-then-
+    /// activate-or-mint through the SAME two RPCs (`activatePanelTab`/`openPanelTab`), the panel
+    /// revealed on both branches (an activate behind a hidden panel is a click that does nothing).
+    ///
+    /// **No UI control calls this in this task.** It exists for tests today and for whatever later
+    /// surface wants to open the tree (a strip "+"-adjacent affordance is explicitly out of this
+    /// task's scope) — the panel strip's own "+" and the transcript's file doors are unchanged by
+    /// this door's existence.
+    func openFilesTab(sessionId: String) {
+        switch panelFilesTabAction(tabs: panelStore.allSessionTabStates[sessionId]?.tabs ?? []) {
+        case .activate(let tabId):
+            activatePanelTab(tabId, sessionId: sessionId)
+        case .mint:
+            openPanelTab(kind: .files, title: "Files", sessionId: sessionId)
+        }
         revealPanel()
     }
 
@@ -2387,9 +2438,15 @@ func panelDiffTabAction(tabs: [PanelTab], ref: FileDiffRef) -> PanelDiffTabActio
 /// `row.cwd`, which is the daemon's list-time ALIAS of that same field (`SessionSummary.dirs`'s own
 /// doc, echoed by `editorPrewarmTarget`/`editorTabSessionRoots`). A relative path in a session with
 /// no primary to resolve against is returned untouched too — there is nothing sensible to join it
-/// to, and the row that reaches this door has already refused a relative-with-no-cwd click
-/// (`toolDetailIsClickablePath`, `TranscriptMessageViews.swift`), so this is the door's own
-/// defensive floor, not a path a shipped click can produce.
+/// to. **Both of this door's shipped gates now ask the identical question this line does**
+/// (editor-product Task 7 reconciliation): the transcript's `sessionHasWorkingDirectory`
+/// (`toolDetailIsClickablePath`, `TranscriptMessageViews.swift`) and the Files tab's own
+/// `PanelFilesTabModel.roots` are both `editorTabSessionRoots`, which Task 7 tightened to require
+/// `dirs.first?.path` be genuinely non-empty — closing the gap a degenerate `dirs: [{path: ""}]` row
+/// used to leave (Task 6 review, Minor: that row rendered a clickable button whose click reached
+/// here with an empty primary and returned the path untouched, relative, onto the wire). This
+/// remains the door's own defensive floor regardless, for any caller that is neither of those two
+/// gates.
 ///
 /// Not normalized beyond that one join: `"./src/a.ts"` and `"src/a.ts"` resolve to two DIFFERENT
 /// strings and so two different tabs if both are ever clicked for the same file. Known, and left —
@@ -2435,6 +2492,29 @@ func panelFileTabAction(tabs: [PanelTab], path: String, openFailures: Set<String
         return .activate(tabId: open.tabId, retryOpen: openFailures.contains(path))
     }
     return .mint(title: (path as NSString).lastPathComponent)
+}
+
+// MARK: - editor-product Task 7: what a Files-tab open does
+
+/// The two things a Files-tab open can ask for — mirrors `PanelDiffTabAction`/`PanelFileTabAction`
+/// one door up, minus their per-item identity: there is at most ONE `.files` tab per session (design
+/// spec: "one per session, deduped like the New Tab"), so the KIND ALONE is the key — no `diffId`,
+/// no `url`, nothing else to compare.
+enum PanelFilesTabAction: Equatable {
+    /// A `.files` tab is already open for this session: activate it.
+    case activate(tabId: String)
+    /// No `.files` tab yet: mint one — `openFilesTab` titles it "Files" and sends no `url`.
+    case mint
+}
+
+/// PURE: dedupe a Files-tab open against a session's folded tab list. Any existing `.files` tab
+/// matches — there can only ever be one, so unlike `panelFileTabAction`'s path comparison or
+/// `panelDiffTabAction`'s `diffId` comparison, the KIND test alone is the whole decision.
+func panelFilesTabAction(tabs: [PanelTab]) -> PanelFilesTabAction {
+    if let open = tabs.first(where: { $0.kind == .files }) {
+        return .activate(tabId: open.tabId)
+    }
+    return .mint
 }
 
 // MARK: - The hosted surface

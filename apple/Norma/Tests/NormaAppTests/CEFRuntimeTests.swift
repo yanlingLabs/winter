@@ -814,15 +814,14 @@ final class CEFRuntimeTests: XCTestCase {
     }
 
     /// `.web` resolves to the CEF surface, `.diff` to the diff renderer, `.code` to the editor
-    /// viewport, and the three kinds with no surface yet keep Plan A's blank placeholder.
+    /// viewport, `.files` to the file-tree surface, and the two kinds with no surface yet keep Plan
+    /// A's blank placeholder.
     ///
     /// **diff-tabs Task 10 took `.diff` out of the placeholder list — the handoff Task 9 designed.**
     /// Task 9 minted diff tabs (the transcript chip → `ShellSessionHost.openDiffTab`) without
     /// rendering one, and listed `.diff` here TEMPORARILY so this replacement could not be a silent
     /// behaviour change: the loop below failed the moment `PanelDiffTab` landed, and the fix was to
-    /// move the case up into its own assertion rather than to delete a pin. `.files` repeats that
-    /// same TEMPORARILY-a-placeholder posture now (`PanelWebTab.swift`'s own arm comment) — Task 7
-    /// (`PanelFilesTab`) is expected to move it out of this loop the same way.
+    /// move the case up into its own assertion rather than to delete a pin.
     ///
     /// `.diff` must ALSO never render a browser, which the type check states directly (a `.diff` tab
     /// that resolved to `PanelWebTab` would stand Chromium up for a patch file).
@@ -832,6 +831,13 @@ final class CEFRuntimeTests: XCTestCase {
     /// what makes the replacement impossible to land silently. `.code` must never resolve to
     /// `PanelWebTab` either: a code tab is a viewport onto the SESSION's one editor browser, and a
     /// second, per-tab Chromium is exactly the ownership the editor runtime exists to prevent.
+    ///
+    /// **editor-product Task 7 took `.files` out of the placeholder list, the same way** — Task 2 put
+    /// it there as a deliberate TEMPORARY placeholder (no producer opened one yet), and moving it up
+    /// into its own assertion is what makes THIS replacement impossible to land silently too. `.files`
+    /// must never resolve to `PanelWebTab` either: a file tree reads the session's own working
+    /// directory directly off disk (no browser, no CEF, no bridge) — no producer of this tab has ever
+    /// needed one.
     func testWebTabsResolveToTheCEFSurfaceAndOtherKindsDoNot() {
         let web = PanelTab(tabId: "t1", kind: .web, url: nil, title: nil)
         XCTAssertTrue(panelTabContent(for: web) is PanelWebTab)
@@ -848,7 +854,13 @@ final class CEFRuntimeTests: XCTestCase {
         XCTAssertFalse(codeContent is PanelWebTab, "…and never a browser of its own")
         PanelEditorTabModels.removeAllForTesting()
 
-        for kind in [PanelTabKind.document, .note, .files] {
+        let files = PanelTab(tabId: "t5", kind: .files, url: nil, title: nil)
+        let filesContent = panelTabContent(for: files)
+        XCTAssertTrue(filesContent is PanelFilesTab, "a files tab renders the file-tree surface")
+        XCTAssertFalse(filesContent is PanelWebTab, "…and never a browser")
+        PanelFilesTabModels.removeAllForTesting()
+
+        for kind in [PanelTabKind.document, .note] {
             let tab = PanelTab(tabId: "t2", kind: kind, url: nil, title: nil)
             XCTAssertTrue(panelTabContent(for: tab) is PanelPlaceholderTab,
                           "\(kind) must not render a browser")

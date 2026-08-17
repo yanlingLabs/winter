@@ -103,13 +103,16 @@ func panelTabContent(for tab: PanelTab, host: ShellSessionHost? = nil,
     case .diff:
         return PanelDiffTab(tab: tab,
                             model: PanelDiffTabModels.model(for: tab, host: host, sessionId: sessionId))
-    // TEMPORARY — Task 7 (PanelFilesTab) replaces this arm with the real file-browser surface.
-    // editor-product Task 2 only mints the wire value and this factory route — no producer opens a
-    // `.files` tab yet — so a blank placeholder is correct today and pinned as such in
-    // `CEFRuntimeTests` (the same handoff `.diff`'s own TEMPORARY arm used, cf7af62b, before
-    // diff-tabs Task 10 replaced it).
+    // editor-product Task 7: the fourth kind with a real surface — Task 2's TEMPORARY placeholder
+    // arm, replaced (the same handoff `.diff`'s and `.code`'s own TEMPORARY arms used before Tasks
+    // 10 and 5 replaced them). The model is looked up (not built) here for the same reason every
+    // other kind's is: this function runs on every render pass, and a model born here would be
+    // reborn here — for a Files tab that would mean losing every watcher and every expand state on
+    // every visit. Nothing on this line touches disk: `bind` records the host/session and hops off
+    // the current pass; the first read happens once the session's roots resolve.
     case .files:
-        return PanelPlaceholderTab(tab: tab)
+        return PanelFilesTab(tab: tab,
+                             model: PanelFilesTabModels.model(for: tab, host: host, sessionId: sessionId))
     }
 }
 

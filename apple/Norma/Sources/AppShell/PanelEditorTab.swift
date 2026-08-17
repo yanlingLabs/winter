@@ -39,11 +39,22 @@ enum EditorTabSessionRoots: Equatable {
 
 /// PURE: `editorTabSessionRoots`, off the WIRE row's `dirs` — never `cwd`, which is the daemon's
 /// list-time ALIAS of `dirs[0]?.path` (`SessionSummary.dirs`' own doc, and `handoffDirectory`'s).
+///
+/// **editor-product Task 7 (Task 6 review reconciliation): the gate is `dirs.first?.path` being
+/// genuinely non-empty, not merely `dirs` being a non-empty ARRAY.** Before this fix this function
+/// and `resolvedFilePath` (`ShellSessionHost.swift`) asked two DIFFERENT questions of the identical
+/// field — this one said `.present` for a degenerate `dirs: [{path: ""}]` row, while
+/// `resolvedFilePath` already required a real, non-empty primary path to resolve a relative click
+/// against. The gap was real, if narrow: the transcript's row-level gate
+/// (`sessionHasWorkingDirectory`, threaded from this function) would render a clickable file-door
+/// button for that row, and clicking it minted a tab at a RELATIVE url instead of resolving one
+/// (Task 6 review, Minor — graceful but genuine breakage). One predicate now, reused verbatim by
+/// both the transcript's gate and the Files tab (`PanelFilesTabModel.roots`).
 func editorTabSessionRoots(sessionId: String?, rows: [SessionSummary]) -> EditorTabSessionRoots {
     guard let sessionId, let row = rows.first(where: { $0.sessionId == sessionId }) else {
         return .unknown
     }
-    guard let dirs = row.dirs, !dirs.isEmpty else { return .none }
+    guard let dirs = row.dirs, dirs.first?.path.isEmpty == false else { return .none }
     return .present
 }
 
@@ -76,6 +87,13 @@ enum EditorViewportState: Equatable {
 /// `.bootFailed` in the runtime supplies one — and exists so that a future path which forgets to
 /// still says something true rather than an empty line.
 let editorViewportUnknownFailureReason = "the editor stopped before it came up"
+
+/// **The one sentence a dirless session's editor AND its Files tab both show** (design spec:
+/// "empty state for dirless sessions" — one requirement covering both surfaces, and
+/// `EditorViewportState.noWorkingDirectory`'s own doc already names this as "the same fact"). A
+/// shared constant rather than two literals that could drift apart — `PanelFilesTab.swift`
+/// (editor-product Task 7) reuses it verbatim for its own `.none` state.
+let panelDirlessSessionMessage = "This session has no working directory"
 
 /// **PURE: what a code tab's viewport must do for its file, and what it draws while it cannot.**
 ///
@@ -586,7 +604,7 @@ struct EditorViewportStateView: View {
                 // reads as something having gone wrong.
                 ProgressView().controlSize(.small)
             case .noWorkingDirectory:
-                message("This session has no working directory")
+                message(panelDirlessSessionMessage)
             case .noFile:
                 message("This tab has no file")
             case .failed(let reason):

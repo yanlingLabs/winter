@@ -182,6 +182,19 @@ final class EditorTabTests: XCTestCase {
         XCTAssertEqual(editorTabSessionRoots(sessionId: "S_dirs", rows: []), .unknown)
     }
 
+    /// **The predicate reconciliation (editor-product Task 7, Task 6 review's Minor).** Before this
+    /// fix, a degenerate `dirs: [{path: ""}]` row — a non-empty ARRAY whose one entry carries no real
+    /// path — answered `.present` here while `resolvedFilePath` (`ShellSessionHost.swift`) already
+    /// required a genuinely non-empty primary path to resolve anything against. That gap let the
+    /// transcript's row-level gate render a clickable file-door button for such a row, whose click
+    /// then minted a tab at a RELATIVE url instead of resolving one. One predicate now: `dirs.first?
+    /// .path` must be non-empty, not merely `dirs` being a non-empty array.
+    func testADegenerateEmptyPathEntryReadsAsDirlessNotPresent() {
+        let rows = [dirRow("S_empty_path", dirs: [SessionDirEntry(path: "", locked: false)])]
+        XCTAssertEqual(editorTabSessionRoots(sessionId: "S_empty_path", rows: rows), .none,
+                       "a non-empty dirs ARRAY whose only entry has no real path is not a root")
+    }
+
     // MARK: - The plan (PURE)
 
     private func ready(models: [String: Bool] = [:], current: String? = nil,
