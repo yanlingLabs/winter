@@ -257,15 +257,45 @@ final class EditorSaveCoordinator {
     /// The original's POSIX permissions are carried over when there is an original: a save must not
     /// silently turn an executable script into a plain file, and a fresh temporary file is born with
     /// the process's umask rather than the file's own mode.
+    ///
+    /// **`withBOM` puts back the three bytes the READ swallowed** (fix round 1). Foundation's UTF-8
+    /// decoder strips a leading `EF BB BF` and says nothing, so the page never receives one and
+    /// `getValue()` can never return one — without this, a plain ⌘S on an untouched, Visual-Studio-
+    /// authored file would rewrite it three bytes shorter, silently. Which files have one is
+    /// `EditorRuntime.pathsWithBOM`'s memory, recorded at the only place the bytes ever exist.
+    ///
+    /// **What tmp+rename costs, stated rather than left silent:** `rename(2)` REPLACES the
+    /// destination name. A path that is a symlink is replaced by a regular file (the link is consumed,
+    /// not followed), and any hard link to the old inode keeps the OLD contents. That is the standard
+    /// atomic-save trade — every editor that writes this way makes it — and it is the price of a
+    /// destination that can never be caught holding half a file.
+    ///
     /// `nonisolated` because it is the one thing here that must NOT run on the main actor: the
     /// production seam calls it from a detached task so a save never stalls the shell.
-    nonisolated static func writeAtomically(_ text: String, to path: String) throws {
+    nonisolated static func writeAtomically(_ text: String, to path: String,
+                                            withBOM: Bool = false) throws {
         let url = URL(fileURLWithPath: path)
         let directory = url.deletingLastPathComponent()
         let temporary = directory.appendingPathComponent(
             ".\(url.lastPathComponent).norma-save-\(UUID().uuidString)")
+        var data = Data()
+        // Never a SECOND BOM: a buffer that already begins with U+FEFF — a file that carried two, or
+        // a user who typed one — keeps exactly the one it has.
+        if withBOM && text.unicodeScalars.first != "\u{FEFF}" {
+            data.append(contentsOf: EditorFileContents.utf8BOM)
+        }
+        data.append(contentsOf: text.utf8)
         do {
-            try Data(text.utf8).write(to: temporary)
+            try data.write(to: temporary)
+            // **Flushed before the rename.** Without it the rename can reach the disk before the
+            // bytes do, and a power loss leaves the destination NAME pointing at a file whose
+            // contents were never written — the one outcome tmp+rename exists to prevent. Best
+            // effort (`try?`): a file system that cannot fsync must not fail a save that otherwise
+            // succeeded.
+            if let handle = try? FileHandle(forWritingTo: temporary) {
+                try? handle.synchronize()
+                try? handle.close()
+            }
             if let mode = (try? FileManager.default.attributesOfItem(atPath: path))?[.posixPermissions] {
                 try? FileManager.default.setAttributes([.posixPermissions: mode],
                                                        ofItemAtPath: temporary.path)

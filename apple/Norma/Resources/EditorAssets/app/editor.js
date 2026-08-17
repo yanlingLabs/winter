@@ -187,11 +187,19 @@ function dispatch(message) {
  * preserves what the file actually is, and say so in one place.
  *
  * `setEOL` below is that saying-so, and it is honest about being a GUARD rather than a behaviour:
- * on this vendored build it changes nothing, because the buffer has already picked CRLF by the same
- * rule and `TextModel.setEOL` early-returns on a match (`if(this._buffer.getEOL()===$)return;`,
- * vendored). It is here so that the page states the rule it depends on rather than inheriting it
- * silently — if a future Monaco changed `defaultEOL` or that normalisation, a CRLF file would keep
- * its endings anyway instead of being rewritten on its first save.
+ * on this vendored build it changes nothing at all, because the buffer has already picked the same
+ * ending by the same rule and `TextModel.setEOL` early-returns on a match
+ * (`if(this._buffer.getEOL()===$)return;`, vendored). It is here so that the page states the rule it
+ * depends on rather than inheriting it silently — if a future Monaco changed `defaultEOL` or that
+ * normalisation, a file would keep its own dominant ending instead of being rewritten on its first
+ * save.
+ *
+ * **It asserts BOTH branches, not just CRLF** (fix round 1). Insuring only the CRLF half would leave
+ * the other half of the same rule resting on the normalisation this guard exists to stop depending
+ * on: an LF-dominant MIXED file under a future non-normalising Monaco would come back with its
+ * minority CRLFs intact, and `MonacoTextBuffer.savedText(forFileOpenedWith:)` — the Swift-side
+ * expectation every save and every drill is computed through — would be wrong about it. One line
+ * insures the whole rule.
  *
  * **Two placement rules, both load-bearing if the guard ever does fire:**
  *
@@ -215,9 +223,9 @@ function openModel(path, language, text) {
     let model = monaco.editor.getModel(uri);
     if (!model) {
         model = monaco.editor.createModel(text, resolveLanguage(path, language), uri);
-        if (dominantEOLIsCRLF(text)) {
-            model.setEOL(monaco.editor.EndOfLineSequence.CRLF);
-        }
+        model.setEOL(dominantEOLIsCRLF(text)
+                     ? monaco.editor.EndOfLineSequence.CRLF
+                     : monaco.editor.EndOfLineSequence.LF);
     }
     const entry = {
         path: path,

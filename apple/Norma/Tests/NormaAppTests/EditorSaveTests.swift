@@ -651,18 +651,152 @@ final class EditorSaveTests: XCTestCase {
                                    "editor.js is in neither the built bundle nor the source tree")
         let code = try String(contentsOf: source, encoding: .utf8)
 
-        let setEOL = try XCTUnwrap(code.range(of: "model.setEOL(monaco.editor.EndOfLineSequence.CRLF)"),
-                                   "editor.js no longer applies the CRLF EOL rule at open")
+        let setEOL = try XCTUnwrap(code.range(of: "model.setEOL(dominantEOLIsCRLF(text)"),
+                                   "editor.js no longer applies the EOL rule at open")
         let savedVersion = try XCTUnwrap(code.range(of: "savedVersionId: model.getAlternativeVersionId()"),
                                          "editor.js no longer snapshots the saved version at open")
         XCTAssertTrue(setEOL.lowerBound < savedVersion.lowerBound,
                       "setEOL bumps the model's version id when it changes anything — snapshotting "
                       + "the saved point first would open the file DIRTY")
+        // Fix round 1: BOTH branches, so the one line insures the whole normalisation rule rather
+        // than half of it — an LF-dominant MIXED file is as much a claim as a CRLF one.
+        XCTAssertTrue(code.contains("monaco.editor.EndOfLineSequence.CRLF"))
+        XCTAssertTrue(code.contains("monaco.editor.EndOfLineSequence.LF"),
+                      "the LF branch must be asserted too — otherwise savedText's expectation for a "
+                      + "mixed LF-dominant file rests on a normalisation this guard exists to stop "
+                      + "depending on")
 
         XCTAssertTrue(code.contains("carriageBearing * 2 > total"),
                       "the page's dominance rule must stay a STRICT majority (ties to LF), the same "
                       + "comparison the vendored `_getEOL` makes")
         XCTAssertFalse(code.contains("carriageBearing * 2 >= total"))
+    }
+
+    // MARK: - The BOM the decoder eats (fix round 1)
+
+    /// **The fact the whole ruling rests on, measured here rather than remembered:**
+    /// `String(data:encoding: .utf8)` STRIPS a leading `EF BB BF`, so the text handed to the page can
+    /// never carry it back — and `readTextFile` is therefore the only place it can be noticed at all.
+    func testTheReaderRemembersALeadingBOMAndKeepsItOutOfTheText() throws {
+        let directory = try scratchDirectory()
+        let withBOM = directory.appendingPathComponent("bom.ts").path
+        let withoutBOM = directory.appendingPathComponent("plain.ts").path
+        var bytes = Data([0xEF, 0xBB, 0xBF])
+        bytes.append(contentsOf: "let a = 1\n".utf8)
+        try bytes.write(to: URL(fileURLWithPath: withBOM))
+        try Data("let a = 1\n".utf8).write(to: URL(fileURLWithPath: withoutBOM))
+
+        let bommed = try EditorRuntime.readTextFile(withBOM)
+        XCTAssertTrue(bommed.hadBOM)
+        XCTAssertEqual(bommed.text, "let a = 1\n")
+        XCTAssertNotEqual(bommed.text.unicodeScalars.first, "\u{FEFF}",
+                          "the decoder ate it — which is exactly why `hadBOM` has to exist")
+
+        let plain = try EditorRuntime.readTextFile(withoutBOM)
+        XCTAssertFalse(plain.hadBOM)
+        XCTAssertEqual(plain.text, "let a = 1\n")
+    }
+
+    /// The write puts the three bytes back, never invents them, and never doubles one.
+    func testTheAtomicWriteRestoresABOMWithoutInventingOrDoublingOne() throws {
+        let directory = try scratchDirectory()
+        let restored = directory.appendingPathComponent("restored.ts").path
+        let plain = directory.appendingPathComponent("plain.ts").path
+        let already = directory.appendingPathComponent("already.ts").path
+
+        try EditorSaveCoordinator.writeAtomically("let a = 1\n", to: restored, withBOM: true)
+        try EditorSaveCoordinator.writeAtomically("let a = 1\n", to: plain)
+        try EditorSaveCoordinator.writeAtomically("\u{FEFF}let a = 1\n", to: already, withBOM: true)
+
+        var expected = Data([0xEF, 0xBB, 0xBF])
+        expected.append(contentsOf: "let a = 1\n".utf8)
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: restored)), expected)
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: plain)), Data("let a = 1\n".utf8),
+                       "a file with no BOM must never gain one")
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: already)), expected,
+                       "a buffer that already begins with U+FEFF keeps exactly the one it has")
+    }
+
+    /// **The bug, end to end: ⌘S on an UNTOUCHED Visual-Studio-authored file.** `performSave` has no
+    /// dirty gate, so this is one keystroke away at all times — and before the fix it rewrote the
+    /// file three bytes shorter, silently. Real reader, real write, real bytes compared.
+    func testSavingAnUntouchedBOMdFileLeavesItsBytesIdentical() async throws {
+        let directory = try scratchDirectory()
+        let path = directory.appendingPathComponent("windows.ts").path
+        var original = Data([0xEF, 0xBB, 0xBF])
+        original.append(contentsOf: "let a = 1\r\nlet b = 2\r\n".utf8)
+        try original.write(to: URL(fileURLWithPath: path))
+
+        let harness = makeRuntime(realReader: true)
+        boot(harness)
+        // What the page would answer for an untouched buffer: the text the reader produced, put
+        // through the save-round-trip rule (uniform CRLF — unchanged, and the BOM is not in it).
+        let outcome = await saveThroughTheRealPath(
+            harness, path: path,
+            answering: MonacoTextBuffer.savedText(forFileOpenedWith: "let a = 1\r\nlet b = 2\r\n"))
+
+        XCTAssertEqual(outcome, .saved)
+        XCTAssertTrue(harness.runtime.fileHadBOM(path), "the reader's answer is remembered per path")
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path)), original,
+                       "a save of a file nobody edited must not change one byte of it")
+    }
+
+    /// The edited case: the BOM survives, and so does the edit.
+    func testSavingAnEditedBOMdFileKeepsTheBOMAndTakesTheNewContent() async throws {
+        let directory = try scratchDirectory()
+        let path = directory.appendingPathComponent("windows.ts").path
+        var original = Data([0xEF, 0xBB, 0xBF])
+        original.append(contentsOf: "let a = 1\n".utf8)
+        try original.write(to: URL(fileURLWithPath: path))
+
+        let harness = makeRuntime(realReader: true)
+        boot(harness)
+        let outcome = await saveThroughTheRealPath(harness, path: path, answering: "let a = 2\n")
+
+        XCTAssertEqual(outcome, .saved)
+        var expected = Data([0xEF, 0xBB, 0xBF])
+        expected.append(contentsOf: "let a = 2\n".utf8)
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path)), expected)
+    }
+
+    /// …and a file that never had one does not acquire one from the save path.
+    func testSavingAFileWithNoBOMNeverInventsOne() async throws {
+        let directory = try scratchDirectory()
+        let path = directory.appendingPathComponent("plain.ts").path
+        try Data("let a = 1\n".utf8).write(to: URL(fileURLWithPath: path))
+
+        let harness = makeRuntime(realReader: true)
+        boot(harness)
+        let outcome = await saveThroughTheRealPath(harness, path: path, answering: "let a = 2\n")
+
+        XCTAssertEqual(outcome, .saved)
+        XCTAssertFalse(harness.runtime.fileHadBOM(path))
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path)), Data("let a = 2\n".utf8))
+    }
+
+    /// The memory is per path and does not outlive the model: a closed file's answer goes with it,
+    /// so a later save can never put three bytes in front of a file that no longer has any.
+    func testTheBOMMemoryIsForgottenWhenTheModelClosesAndAtTeardown() async throws {
+        let directory = try scratchDirectory()
+        let path = directory.appendingPathComponent("bom.ts").path
+        var bytes = Data([0xEF, 0xBB, 0xBF])
+        bytes.append(contentsOf: "let a = 1\n".utf8)
+        try bytes.write(to: URL(fileURLWithPath: path))
+
+        let harness = makeRuntime(realReader: true)
+        boot(harness)
+        await harness.runtime.openFile(path)
+        drain(harness.cef)
+        XCTAssertTrue(harness.runtime.fileHadBOM(path))
+
+        harness.runtime.close(path)
+        XCTAssertFalse(harness.runtime.fileHadBOM(path))
+
+        await harness.runtime.openFile(path)
+        drain(harness.cef)
+        XCTAssertTrue(harness.runtime.fileHadBOM(path), "a re-open re-answers the question")
+        harness.runtime.teardown()
+        XCTAssertFalse(harness.runtime.fileHadBOM(path))
     }
 
     // MARK: - Helpers borrowed from the runtime suite
@@ -675,20 +809,47 @@ final class EditorSaveTests: XCTestCase {
         let scheduler: EditorFakeScheduler
     }
 
-    private func makeRuntime(saveEditor: EditorSaveCoordinator.Editor? = nil) -> RuntimeHarness {
+    /// `realReader: true` leaves `readFile` at its PRODUCTION default — the only way the BOM drills
+    /// can be honest, since the fact under test is one only the real byte-level read can produce
+    /// (`EditorTabTests` takes the same "use the real reader" posture for the missing-file path).
+    private func makeRuntime(saveEditor: EditorSaveCoordinator.Editor? = nil,
+                             realReader: Bool = false) -> RuntimeHarness {
         let cef = EditorCEFRecorder()
         cef.browserIds = [41]
         let slot = EditorSlotRecorder()
         let hub = EditorBridgeHub(slot: slot.slot)
         let scheduler = EditorFakeScheduler()
         doubles.append(contentsOf: [cef, slot, hub, scheduler] as [AnyObject])
-        let runtime = EditorRuntime(sessionId: "S1", hub: hub, driver: cef.driver,
+        let runtime: EditorRuntime
+        if realReader {
+            runtime = EditorRuntime(sessionId: "S1", hub: hub, driver: cef.driver,
                                     scheduler: scheduler.scheduler,
                                     colorScheme: { .dark },
-                                    readFile: { _ in "let a = 1\n" },
                                     saveEditor: saveEditor)
+        } else {
+            runtime = EditorRuntime(sessionId: "S1", hub: hub, driver: cef.driver,
+                                    scheduler: scheduler.scheduler,
+                                    colorScheme: { .dark },
+                                    readFile: { _ in EditorFileContents(text: "let a = 1\n") },
+                                    saveEditor: saveEditor)
+        }
         runtimes.append(runtime)
         return RuntimeHarness(runtime: runtime, cef: cef, slot: slot, hub: hub, scheduler: scheduler)
+    }
+
+    /// Open `path` through the REAL read path and answer the pull the save then sends with `text`,
+    /// standing in for the page. Returns the save's outcome.
+    private func saveThroughTheRealPath(_ harness: RuntimeHarness, path: String,
+                                        answering text: String) async -> SaveOutcome {
+        await harness.runtime.openFile(path)
+        drain(harness.cef)
+        let save = Task { await harness.runtime.save(path) }
+        await waitUntil("the pull") { self.cdpTypes(harness.cef).contains("pullContent") }
+        // The seq is the coordinator's own, read back rather than assumed.
+        let seq = harness.runtime.saveCoordinator.pendingPullSeqs.first ?? 0
+        drain(harness.cef)
+        harness.runtime.saveCoordinator.deliverContentResponse(path: path, seq: seq, text: text)
+        return await save.value
     }
 
     private func boot(_ harness: RuntimeHarness) {

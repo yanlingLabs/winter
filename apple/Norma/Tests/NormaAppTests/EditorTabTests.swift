@@ -67,7 +67,7 @@ final class EditorTabTests: XCTestCase {
                                             throw NSError(domain: NSCocoaErrorDomain,
                                                           code: NSFileReadNoSuchFileError)
                                         }
-                                        return text
+                                        return EditorFileContents(text: text)
                                     })
         } else {
             runtime = EditorRuntime(sessionId: sessionId, hub: hub, driver: cef.driver,

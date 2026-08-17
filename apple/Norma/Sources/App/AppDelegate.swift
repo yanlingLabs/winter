@@ -417,6 +417,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// resolves to a log + no-op, never a crash or a half-wired window.
     func summonAppWindow(navigatingTo destination: ShellDestination? = nil) {
         if let appWindow {
+            // **Re-asserted on EVERY summon, not only the first** (editor-product T8 fix round 1).
+            // Installing once meant that a main menu SwiftUI rebuilt — or one that simply did not
+            // exist yet at the first summon — took the ⌘S trigger away permanently and silently.
+            // The install is idempotent (it replaces its own item), so re-asserting costs nothing.
+            installEditorSaveMenuItem(host: appWindow.host)
             appWindow.summon(navigatingTo: destination)
             return
         }
@@ -507,22 +512,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// **editor-product Task 8: ⌘S in the main menu.**
     ///
-    /// Installed at the first summon rather than at `boot()`, and the timing is the point: this app
-    /// is `LSUIElement`, so it has no menu bar at all until a window promotes it to `.regular`
-    /// (`syncDockPresence`), and SwiftUI builds its own main menu on a schedule of its own. The first
-    /// summon is the earliest moment there is both a menu to install into and a panel that could
-    /// hold a code tab.
+    /// Installed at summon rather than at `boot()`, and the timing is the point: this app is
+    /// `LSUIElement`, so it has no menu bar at all until a window promotes it to `.regular`
+    /// (`syncDockPresence`), and SwiftUI builds its own main menu on a schedule of its own. A summon
+    /// is the earliest moment there is both a menu to install into and a panel that could hold a
+    /// code tab — and **every** summon runs this (fix round 1), so a menu that appeared or was
+    /// rebuilt later gets the item too.
     ///
-    /// Idempotent by construction (`EditorSaveMenuCommand.install`), so a later re-install — a menu
-    /// SwiftUI rebuilt underneath us — replaces this item rather than adding a second ⌘S.
+    /// Idempotent by construction (`EditorSaveMenuCommand.install`), so re-asserting replaces this
+    /// item rather than adding a second ⌘S.
     ///
     /// Gated `!isRunningUnitTests`, the same posture as `helperClient.register()` and
     /// `loginItem.setEnabled(true)`: the xctest host shares this process's `NSApp`, and a suite that
     /// mutated the real main menu would be changing app-wide state for every later test. The command
     /// object itself is constructed either way — it touches nothing until it is used — and its
     /// decisions are driven directly by `EditorSaveTests`.
-    private func installEditorSaveMenuItem(host: ShellSessionHost) {
-        let command = EditorSaveMenuCommand(
+    private func installEditorSaveMenuItem(host: ShellSessionHost?) {
+        guard let host else { return }
+        // **The SAME command object every time, and that is load-bearing.** `install` removes the
+        // items whose target is ITSELF before adding its own, so a second command object would leave
+        // the first one's item standing — two menu items sharing ⌘S, and the wrong one winning. Safe
+        // to reuse because the app window (and therefore its host) is a process-lifetime singleton.
+        let command = editorSaveMenuCommand ?? EditorSaveMenuCommand(
             activePath: { [weak host] in host?.activeCodeTabPath },
             performSave: { [weak host] _ in
                 // The path is re-resolved by the host at fire time; passing the validated one back
@@ -531,7 +542,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             })
         editorSaveMenuCommand = command
         guard !Self.isRunningUnitTests else { return }
-        command.install(in: NSApp.mainMenu)
+        guard let mainMenu = NSApp.mainMenu else {
+            // Said out loud rather than lost: with no main menu there is no ⌘S trigger, and the
+            // other two doors (the tab's save button, the page's own ⌘S) are all that remain.
+            OrbDebug.log("editor save: no main menu to install ⌘S into — the menu trigger is absent")
+            return
+        }
+        command.install(in: mainMenu)
     }
 
     /// app-shell T9: the floating panel's click-through door — the exact call shape

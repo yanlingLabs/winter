@@ -2793,7 +2793,7 @@ final class ShellSessionHostTests: XCTestCase {
                               guard let text = files[path] else {
                                   throw NSError(domain: NSCocoaErrorDomain, code: NSFileNoSuchFileError)
                               }
-                              return text
+                              return EditorFileContents(text: text)
                           })
         }, cef: cef, slot: slot, hub: hub, scheduler: scheduler)
     }
@@ -3197,7 +3197,7 @@ final class ShellSessionHostTests: XCTestCase {
         return EditorFactory(make: { sessionId in
             EditorRuntime(sessionId: sessionId, hub: hub, driver: cef.driver,
                           scheduler: scheduler.scheduler,
-                          readFile: { path in try disk.read(path) })
+                          readFile: { path in try EditorFileContents(text: disk.read(path)) })
         }, cef: cef, slot: slot, hub: hub, scheduler: scheduler)
     }
 

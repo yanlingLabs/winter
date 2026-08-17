@@ -428,7 +428,7 @@ final class EditorRuntimeTests: XCTestCase {
                                             throw NSError(domain: NSCocoaErrorDomain,
                                                           code: NSFileNoSuchFileError)
                                         }
-                                        return text
+                                        return EditorFileContents(text: text)
                                     })
         return Harness(runtime: runtime, cef: cef, scheduler: scheduler, slot: slot, hub: hub)
     }

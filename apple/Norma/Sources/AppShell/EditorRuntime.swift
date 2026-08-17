@@ -402,7 +402,7 @@ final class EditorRuntime: ObservableObject {
     private let hub: EditorBridgeHub
     private let driver: CEFDriver
     private let scheduler: Scheduler
-    private let readFile: @Sendable (String) throws -> String
+    private let readFile: @Sendable (String) throws -> EditorFileContents
     /// What scheme `EditorTheme.tokensJSON`/`cardSurfaceBackgroundARGB` resolve against. Injected —
     /// the same reasoning as every other seam here — so a test can pin a payload's shape against a
     /// KNOWN scheme rather than whatever appearance happens to be active on the machine running the
@@ -431,7 +431,7 @@ final class EditorRuntime: ObservableObject {
          driver: CEFDriver = .production,
          scheduler: Scheduler = .production,
          colorScheme: @escaping @MainActor () -> ColorScheme = { EditorRuntime.currentColorScheme() },
-         readFile: @escaping @Sendable (String) throws -> String = EditorRuntime.readTextFile,
+         readFile: @escaping @Sendable (String) throws -> EditorFileContents = EditorRuntime.readTextFile,
          saveEditor: EditorSaveCoordinator.Editor? = nil) {
         self.sessionId = sessionId
         self.hub = hub
@@ -527,11 +527,13 @@ final class EditorRuntime: ObservableObject {
             markSaved: { [weak self] path, seq in self?.send(.markSaved(path: path, seq: seq)) },
             noteExpectedWrite: { [weak self] path in self?.noteExpectedWrite(path: path) },
             withdrawExpectedWrite: { [weak self] path in self?.withdrawExpectedWrite(path: path) },
-            write: { path, text in
+            write: { [weak self] path, text in
+                // **The BOM the read swallowed, put back** (fix round 1) — see `pathsWithBOM`.
+                let withBOM = self?.pathsWithBOM.contains(path) ?? false
                 // Off the main actor, like `openAndSend`'s read and for the same reason: a save must
                 // not stall the shell on a slow or network volume.
                 try await Task.detached(priority: .userInitiated) {
-                    try EditorSaveCoordinator.writeAtomically(text, to: path)
+                    try EditorSaveCoordinator.writeAtomically(text, to: path, withBOM: withBOM)
                 }.value
             }),
         scheduler: scheduler)
@@ -561,6 +563,13 @@ final class EditorRuntime: ObservableObject {
     /// T9's to rule on: a rename whose event the watcher misses because the watcher is not installed
     /// yet (a save on a model whose watcher T9 arms lazily). T9 should either arm the watcher before
     /// the first save can happen or bound a note's lifetime; it must not assume the bag drains.
+    ///
+    /// **The SECOND obligation this hands T9 (fix round 1): compare POST-STRIP text.** A BOM'd file's
+    /// model holds the text WITHOUT its three leading bytes (`readTextFile` below), so a clean/dirty
+    /// comparator that diffs raw disk bytes against the model's text finds a difference on every
+    /// BOM'd file from the moment it opens — a phantom "changed on disk" banner over a file nobody
+    /// touched. Strip the BOM from the disk bytes before comparing (`pathsWithBOM` says which files
+    /// have one), exactly as the save path re-adds it after.
     private var pendingExpectedWrites: [String: Int] = [:]
 
     func noteExpectedWrite(path: String) {
@@ -588,6 +597,32 @@ final class EditorRuntime: ObservableObject {
         return pendingExpectedWrites[path] ?? 0
     }
 
+    /// **Which open files began with a UTF-8 BOM** (fix round 1 — the Important).
+    ///
+    /// `String(data:encoding: .utf8)` — the decoder `readTextFile` uses, and the only decoder in this
+    /// path — SILENTLY STRIPS a leading `EF BB BF`. Measured, not assumed: bytes
+    /// `[0xEF, 0xBB, 0xBF, 0x6C]` decode to a `String` whose first scalar is `U+006C`. That makes the
+    /// deletion invisible end to end: the read drops three bytes, so the page never receives them, so
+    /// `getValue()` cannot return them, so the write cannot restore them — and `performSave` has no
+    /// dirty gate, so a plain ⌘S on an UNTOUCHED Visual-Studio-authored file would rewrite it three
+    /// bytes shorter, silently, the first time anybody pressed it.
+    ///
+    /// **The ruling is PRESERVE**, and it is this task's own sentence applied verbatim: a uniformly
+    /// CRLF Windows file is not turned into an LF file by being opened, and neither is a BOM'd file
+    /// turned into a BOM-less one (VS Code preserves it too). So the fact is remembered HERE, at the
+    /// one place that ever sees the bytes, and re-emitted by the write
+    /// (`EditorSaveCoordinator.writeAtomically(_:to:withBOM:)`).
+    ///
+    /// **The page stays BOM-blind, deliberately.** It holds text, not files; a `U+FEFF` handed to
+    /// Monaco would show up as an invisible character in the buffer, in the undo stack and in every
+    /// `getValue()` — which is precisely the kind of thing the editor should never have to know
+    /// about. The BOM is a property of the FILE, and the file is Swift's.
+    private var pathsWithBOM: Set<String> = []
+
+    /// Will a save of `path` re-emit a UTF-8 BOM? Read by the write seam; exposed for the tests that
+    /// pin the memory itself.
+    func fileHadBOM(_ path: String) -> Bool { pathsWithBOM.contains(path) }
+
     // MARK: The reducer, driven
 
     /// Reduce synchronously, publish, and hand the effects back. **Every door goes through here and
@@ -613,6 +648,10 @@ final class EditorRuntime: ObservableObject {
             case .activateModel(let path):
                 send(.activateModel(path: path))
             case .closeModel(let path):
+                // A closed model's BOM answer goes with it: the next open re-reads the file and
+                // re-answers, and a stale `true` would put three bytes in front of a file that no
+                // longer has any (fix round 1).
+                pathsWithBOM.remove(path)
                 send(.closeModel(path: path))
             case .teardown(let browserId):
                 performTeardown(browserId: browserId)
@@ -743,15 +782,21 @@ final class EditorRuntime: ObservableObject {
     /// deliberately short, and the log is where the underlying error survives in full.
     private func openAndSend(_ path: String) async {
         let reader = readFile
-        let text: String
+        let contents: EditorFileContents
         do {
-            text = try await Task.detached(priority: .userInitiated) { try reader(path) }.value
+            contents = try await Task.detached(priority: .userInitiated) { try reader(path) }.value
         } catch {
             NSLog("[EditorRuntime] \(sessionId): could not read \(path): \(error)")
             perform(dispatch(.openFailed(path: path, failure: editorOpenFailure(for: error))))
             return
         }
         guard state.phase == .ready else { return }
+        // **Recorded before the text leaves for the page** (fix round 1): from here on this path's
+        // three leading bytes exist nowhere else — see `pathsWithBOM`. A re-read of a file that lost
+        // (or gained) its BOM re-answers the question rather than trusting the first answer, which is
+        // why this ASSIGNS rather than only inserts.
+        if contents.hadBOM { pathsWithBOM.insert(path) } else { pathsWithBOM.remove(path) }
+        let text = contents.text
         send(.openModel(path: path, language: editorLanguageHint(forPath: path), text: text)) {
             [weak self] ok in
             guard let self, ok else { return }
@@ -830,8 +875,10 @@ final class EditorRuntime: ObservableObject {
 
     private func performTeardown(browserId: Int32) {
         // The page this bag described is going away, and a note that outlived it could only ever
-        // suppress a change made by somebody else (see `pendingExpectedWrites`).
+        // suppress a change made by somebody else (see `pendingExpectedWrites`). The BOM answers go
+        // with it for the same reason: a fresh runtime re-reads every file it opens.
         pendingExpectedWrites.removeAll()
+        pathsWithBOM.removeAll()
         idPoll?.cancel()
         idPoll = nil
         readyWatchdog?.cancel()
@@ -851,12 +898,16 @@ final class EditorRuntime: ObservableObject {
     /// Read a text file, refusing bytes that are not UTF-8 rather than mangling them. A binary file
     /// opened in the editor would round-trip through `String` lossily and be written back CORRUPTED
     /// by the first save — the one failure mode of this whole feature that destroys data.
-    static func readTextFile(_ path: String) throws -> String {
+    ///
+    /// **It answers with the BOM question as well as the text** (fix round 1), because this is the
+    /// only place the bytes exist: `String(data:encoding: .utf8)` strips a leading `EF BB BF` and
+    /// nothing downstream can tell that it did. See `pathsWithBOM`.
+    static func readTextFile(_ path: String) throws -> EditorFileContents {
         let data = try Data(contentsOf: URL(fileURLWithPath: path))
         guard let text = String(data: data, encoding: .utf8) else {
             throw EditorFileReadError.notUTF8(path: path)
         }
-        return text
+        return EditorFileContents(text: text, hadBOM: data.starts(with: EditorFileContents.utf8BOM))
     }
 
     private static func jsonString(_ object: Any) -> String {
@@ -872,6 +923,20 @@ final class EditorRuntime: ObservableObject {
         guard let text, let data = text.data(using: .utf8) else { return nil }
         return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
     }
+}
+
+/// **What a read of a text file yields** (fix round 1): the text the editor gets, and the one fact
+/// about the bytes that the text cannot carry.
+///
+/// A `String` cannot answer "did this file begin with a UTF-8 BOM?" — Foundation's UTF-8 decoder
+/// strips one and says nothing — so the reader answers it here instead. `text` is always BOM-free,
+/// which is what the page must hold; `hadBOM` is what the save path puts back.
+struct EditorFileContents: Equatable {
+    /// `EF BB BF`.
+    static let utf8BOM: [UInt8] = [0xEF, 0xBB, 0xBF]
+
+    var text: String
+    var hadBOM: Bool = false
 }
 
 /// Why a file could not become a model.
