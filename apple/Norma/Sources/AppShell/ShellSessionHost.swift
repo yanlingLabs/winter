@@ -849,9 +849,17 @@ final class ShellSessionHost: ObservableObject {
 
     /// The sheet's answer, for a tab already established as dirty. `runtime` is weak-captured at the
     /// door above (`requestCloseTab`) and handed in already-resolved-or-nil: a sheet can sit on
-    /// screen for as long as the user takes to answer it, and a session that departs (or is torn
-    /// down by T10's own quit gate) while it is up must degrade to "nothing left to close" rather
-    /// than reach into a released runtime.
+    /// screen for as long as the user takes to answer it, and a session torn down (T10's own quit
+    /// sweep is the only realistic way — a DIRTY runtime, the only kind that reaches this function,
+    /// is never released by a clean-only departure) while it is up can arrive here `nil`.
+    ///
+    /// **The branches do not degrade uniformly on `nil` (task-10 review, fix round 1).** `.close`
+    /// still calls `closePanelTab(tabId)` unconditionally — `runtime?.close(path)` merely no-ops —
+    /// so the tab closes either way. `.awaitSave`'s `guard let runtime else { return }` returns
+    /// BEFORE `closePanelTab`, so a nil runtime there instead leaves the tab open, silently. Judged
+    /// effectively unreachable rather than fixed to match: landing in `.awaitSave` with a nil
+    /// runtime needs the quit sweep to tear the runtime down in the exact window between Save being
+    /// chosen and this Task's first hop.
     private func resolveDirtyTabClose(tabId: String, path: String, runtime: EditorRuntime?,
                                       choice: DirtyCloseChoice) {
         switch dirtyCloseAction(dirty: true, choice: choice) {

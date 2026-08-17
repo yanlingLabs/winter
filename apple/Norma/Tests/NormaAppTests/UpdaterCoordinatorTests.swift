@@ -8,14 +8,16 @@ import XCTest
 final class UpdaterCoordinatorTests: XCTestCase {
     static func deps(
         activeTurns: @escaping () async -> Int? = { 0 },
+        dirtyEditors: @escaping () -> Bool = { false },
         readChannel: @escaping () -> String? = { nil },
         feedOverride: @escaping () -> String? = { nil },
         now: @escaping () -> Date = { Date() },
         pollInterval: TimeInterval = 0.01,
         badgeAfter: TimeInterval = 0.05
     ) -> UpdaterCoordinatorDeps {
-        .init(activeTurns: activeTurns, readChannel: readChannel, feedOverride: feedOverride,
-              now: now, pollIntervalSeconds: pollInterval, badgeAfterSeconds: badgeAfter)
+        .init(activeTurns: activeTurns, dirtyEditors: dirtyEditors, readChannel: readChannel,
+              feedOverride: feedOverride, now: now, pollIntervalSeconds: pollInterval,
+              badgeAfterSeconds: badgeAfter)
     }
 
     func testFeedOverrideWinsWhenSet() {
@@ -116,6 +118,48 @@ final class UpdaterCoordinatorTests: XCTestCase {
         clock = clock.addingTimeInterval(1)       // "24h" later (scaled by badgeAfter)
         try? await Task.sleep(for: .seconds(0.05))
         XCTAssertTrue(badges.contains(true))
+    }
+
+    // MARK: - editor-product Task 10 fix round 1: dirty editors defer the poll's idle install
+
+    /// The concrete gap the review walked: idle daemon (no active turns) used to be sufficient for
+    /// the poll to install. It no longer is — a dirty editor buffer holds it back too. Same
+    /// mutable-flag transition shape as `testBusyDaemonPostponesAndIdleInstalls` above, but on the
+    /// new axis: `activeTurns` is idle throughout, only `dirty` moves.
+    func testDirtyEditorPostponesTheIdlePollInstallEvenWhenTheDaemonIsIdle() async {
+        var dirty = true
+        let c = UpdaterCoordinator(deps: Self.deps(activeTurns: { 0 }, dirtyEditors: { dirty }))
+        var installed = 0
+        _ = c.handleRelaunchRequest(version: "0.2.002", untilInvoking: { installed += 1 })
+        try? await Task.sleep(for: .seconds(0.05))
+        XCTAssertEqual(installed, 0)               // idle daemon, but a dirty editor still blocks
+        dirty = false
+        try? await Task.sleep(for: .seconds(0.1))  // next poll sees idle AND clean
+        XCTAssertEqual(installed, 1)
+    }
+
+    /// Control case, the pair's other static half: idle and clean installs exactly as it always
+    /// did — this fix adds a term, it does not change the outcome when that term is false.
+    func testIdleAndCleanStillInstallsOnThePoll() async {
+        let c = UpdaterCoordinator(deps: Self.deps(activeTurns: { 0 }, dirtyEditors: { false }))
+        var installed = 0
+        _ = c.handleRelaunchRequest(version: "0.2.002", untilInvoking: { installed += 1 })
+        try? await Task.sleep(for: .seconds(0.05))
+        XCTAssertEqual(installed, 1)
+    }
+
+    /// The controller's deliberate non-change: "Restart Now" (`AppDelegate.onInstallUpdate`) calls
+    /// `installNow()` directly, never through the poll's predicate, and must keep firing even with
+    /// a dirty editor open — same override shape `testRestartNowOverridesWhileBusy` already pins
+    /// for a busy daemon. No `await` between `handleRelaunchRequest` and `installNow()` below, so
+    /// the poll Task (scheduled, not yet run) cannot race this assertion — same ordering the
+    /// pre-existing busy-override test already relies on.
+    func testRestartNowOverridesEvenWithADirtyEditor() async {
+        let c = UpdaterCoordinator(deps: Self.deps(activeTurns: { 0 }, dirtyEditors: { true }))
+        var installed = 0
+        _ = c.handleRelaunchRequest(version: "0.2.002", untilInvoking: { installed += 1 })
+        c.installNow()
+        XCTAssertEqual(installed, 1)
     }
 
     // MARK: - Sparkle T5: channels

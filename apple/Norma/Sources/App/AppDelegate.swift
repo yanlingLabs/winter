@@ -760,6 +760,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             var deps = updaterDepsOverride ?? .live
             if updaterDepsOverride == nil {
                 deps.activeTurns = { [weak self] in await self?.appModel?.engineActivity() }
+                // task-10 fix round 1: same lazy-evaluated-at-poll-time posture as activeTurns
+                // right above — `appWindow` doesn't exist yet either at this point in boot(), read
+                // fresh at call time like `editorQuitGate.dirtyRuntimeStates` does. Reuses
+                // `quitDirtyFilePaths`, the same pure gather `EditorQuitGate` walks at quit —
+                // `dirtyEditors`'s own doc on `UpdaterCoordinatorDeps` for the full why.
+                deps.dirtyEditors = { [weak self] in
+                    guard let host = self?.appWindow?.host else { return false }
+                    let states = host.editorRuntimes.values.map(\.stateSnapshot)
+                    return !quitDirtyFilePaths(runtimeStates: states).isEmpty
+                }
             }
             let coordinator = UpdaterCoordinator(deps: deps)
             let controller = SPUStandardUpdaterController(
