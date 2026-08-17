@@ -867,6 +867,72 @@ final class ShellSessionHost: ObservableObject {
         revealPanel()
     }
 
+    /// editor-product Task 6: **the file door — the SECOND thing in the transcript that opens a
+    /// panel tab.** Mirrors `openDiffTab` immediately above wherever the two doors are alike.
+    ///
+    /// One tab per file: a second click on the same path — from the transcript again, or later from
+    /// T7's tree — must land on the tab the first click opened, never mint a second, so the
+    /// decision is dedupe-by-PATH (`panelFileTabAction` below), against the session's own folded
+    /// tab list, through the SAME two doors the strip's pills and `openDiffTab` already use
+    /// (`activatePanelTab` / `openPanelTab`). No optimistic local mutation: the tab appears when the
+    /// daemon's `panel_tab_opened` folds, exactly like every other tab.
+    ///
+    /// **The session is NAMED by the caller**, read fresh at click time by the caller
+    /// (`ShellSessionView`) — `openDiffTab`'s own standing rule, unchanged here: the transcript
+    /// row's closure captures no id, so a hop between the click and this call cannot file the tab
+    /// into the wrong session.
+    ///
+    /// **Relative paths resolve against the session's cwd FIRST** (`resolvedFilePath`, below),
+    /// before the dedupe runs — a relative and an absolute spelling of the same file must collide
+    /// on ONE tab, which only holds if both are compared as the same string by the time they reach
+    /// `panelFileTabAction`. `directory.rows` is read fresh here, never through a cached row.
+    ///
+    /// **The retry obligation (Task 5's review, HANDOFFS, binding).** Activating an existing tab
+    /// whose read PREVIOUSLY FAILED must not leave it stuck: `panelFileTabAction` decides WHETHER a
+    /// retry is owed — pure, off the runtime's CURRENT `openFailures` (obligation 3, below) — and
+    /// this door performs it by calling `EditorRuntime.openFile` again. That call is ALL a
+    /// `retryOpenIfFailed` method would ever do: `openFile` dispatches `.openRequested`, whose
+    /// reducer clears the failure entry for that path UNCONDITIONALLY before deciding what happens
+    /// next (`EditorRuntimeReducer`'s own doc) — a fresh read, since an `openFailures` hit always
+    /// means the runtime holds no model for the path. A second, differently-named method would only
+    /// rename this same call, so the choice documented here is: inline through `openFile`, no new
+    /// runtime method.
+    ///
+    /// **NEVER re-points an existing tab's `url`** (Task 5's review, Minor 2): the two branches
+    /// below are `activate` (an unaltered daemon RPC) and `mint` (a brand new tab) — there is no
+    /// third path that touches a tab already on screen.
+    ///
+    /// **The runtime is resolved through the host's table at the moment each read happens, never
+    /// cached** (obligation 3). `existingEditorRuntime(for:)` — the non-minting read, since asking
+    /// merely to look must not stand up a hidden Chromium — is called once to build the pure
+    /// decision's `openFailures` input, and again, fresh, inside the retry's own `Task` (which may
+    /// run on a later turn of the run loop than this call), so neither read can act on a runtime a
+    /// departure-and-return has since replaced with a fresh one.
+    ///
+    /// **The panel is revealed on BOTH branches**, mirroring `openDiffTab` and the strip's "+" — an
+    /// activate behind a hidden panel would be a click that visibly does nothing.
+    func openFileTab(_ path: String, sessionId: String) {
+        let row = directory.rows.first { $0.sessionId == sessionId }
+        let absolutePath = resolvedFilePath(path, row: row)
+        let tabs = panelStore.allSessionTabStates[sessionId]?.tabs ?? []
+        let openFailures = Set((existingEditorRuntime(for: sessionId)?.stateSnapshot.openFailures
+            ?? [:]).keys)
+        switch panelFileTabAction(tabs: tabs, path: absolutePath, openFailures: openFailures) {
+        case .activate(let tabId, let retryOpen):
+            activatePanelTab(tabId, sessionId: sessionId)
+            if retryOpen {
+                Task { @MainActor [weak self] in
+                    await self?.existingEditorRuntime(for: sessionId)?.openFile(absolutePath)
+                }
+            }
+        case .mint(let title):
+            openPanelTab(kind: .code, url: absolutePath, title: title, sessionId: sessionId)
+        }
+        // editor-product T3: the reveal carries the editor pre-warm with it — see `openDiffTab`'s
+        // identical call, immediately above.
+        revealPanel()
+    }
+
     /// panel-shell T15: the new-chat page's OWN "+" — creates (once) and BINDS rather than
     /// navigating (Requirement 1), so `NewChatPage`'s draft survives. `ShellPanel`'s "+" calls this
     /// instead of `openPanelTab` ONLY while `nav.destination == .newChat`; every other landing's "+"
@@ -2310,6 +2376,67 @@ func panelDiffTabAction(tabs: [PanelTab], ref: FileDiffRef) -> PanelDiffTabActio
     return .mint(title: (ref.path as NSString).lastPathComponent)
 }
 
+// MARK: - editor-product Task 6: what a file-door click does
+
+/// PURE: the file door's path resolution — the FIRST step, before the dedupe below ever runs.
+///
+/// An already-absolute path is returned untouched: reads carry no path fence (CLAUDE.md, "Reads
+/// unrestricted"), so a file the agent named outside the session's own roots is still a real file,
+/// and resolving it against anything would be wrong. A RELATIVE one resolves against the session's
+/// PRIMARY working directory — `handoffDirectory`'s own source (`row.dirs?.first?.path`), NEVER
+/// `row.cwd`, which is the daemon's list-time ALIAS of that same field (`SessionSummary.dirs`'s own
+/// doc, echoed by `editorPrewarmTarget`/`editorTabSessionRoots`). A relative path in a session with
+/// no primary to resolve against is returned untouched too — there is nothing sensible to join it
+/// to, and the row that reaches this door has already refused a relative-with-no-cwd click
+/// (`toolDetailIsClickablePath`, `TranscriptMessageViews.swift`), so this is the door's own
+/// defensive floor, not a path a shipped click can produce.
+///
+/// Not normalized beyond that one join: `"./src/a.ts"` and `"src/a.ts"` resolve to two DIFFERENT
+/// strings and so two different tabs if both are ever clicked for the same file. Known, and left —
+/// the diff door accepts an equivalent recoverable duplicate for its own double-click race (its own
+/// doc), and a duplicate tab is the same bounded, recoverable failure here.
+func resolvedFilePath(_ path: String, row: SessionSummary?) -> String {
+    guard !path.hasPrefix("/"), let primary = row?.dirs?.first?.path, !primary.isEmpty else {
+        return path
+    }
+    return (primary as NSString).appendingPathComponent(path)
+}
+
+/// The two things a file-door click can ask for — mirrors `PanelDiffTabAction` one door down.
+enum PanelFileTabAction: Equatable {
+    /// A `.code` tab for this path is already open: activate it. `retryOpen` is Task 5's review
+    /// HANDOFFS obligation, decided HERE rather than left to the door to notice: an existing tab
+    /// whose path currently sits in the runtime's `openFailures` has NO model to show —
+    /// `openFailures` is only ever recorded for a path holding none (`EditorRuntimeState`'s own
+    /// doc) — so activating it alone would re-surface the exact same "File not found" sentence
+    /// forever, including after the agent creates the file a moment later. `true` tells
+    /// `openFileTab` to also ask the runtime to read the file again.
+    case activate(tabId: String, retryOpen: Bool)
+    /// No tab for this path: mint one, titled with the file's own basename.
+    case mint(title: String)
+}
+
+/// PURE: dedupe a file-door click against a session's folded tab list, over `.code` tabs, BY PATH.
+///
+/// `path` is the door's ALREADY-RESOLVED absolute path (`resolvedFilePath`, above) — a relative and
+/// an absolute spelling of the same file must collide on the one open tab, which only holds if both
+/// are compared as the same string by the time they reach here.
+///
+/// **Filtered to `.code`**, unlike `panelDiffTabAction`'s deliberately kind-less match: `url` is a
+/// field every tab kind carries (a `.web` tab's address is never a filesystem path, but nothing
+/// stops the two strings coinciding by chance, where `diffId` structurally cannot), so the kind
+/// check is load-bearing here rather than redundant.
+///
+/// `openFailures` is the session's editor runtime's CURRENT failure set — empty when the session
+/// has no runtime yet — read by the caller immediately before this call, never cached (see
+/// `openFileTab`'s own doc for why that matters).
+func panelFileTabAction(tabs: [PanelTab], path: String, openFailures: Set<String>) -> PanelFileTabAction {
+    if let open = tabs.first(where: { $0.kind == .code && $0.url == path }) {
+        return .activate(tabId: open.tabId, retryOpen: openFailures.contains(path))
+    }
+    return .mint(title: (path as NSString).lastPathComponent)
+}
+
 // MARK: - The hosted surface
 
 /// The shell's session surface: the shared `WindowContentView`, in its right-only configuration.
@@ -2376,7 +2503,22 @@ struct ShellSessionView: View {
                         onOpenDiff: { ref in
                             guard let sessionId = host.attachedSessionId else { return }
                             host.openDiffTab(ref, sessionId: sessionId)
-                        }
+                        },
+                        // editor-product Task 6: the file door, wired identically to `onOpenDiff`
+                        // immediately above — same three-homes opt-in, same read-fresh-at-click-time
+                        // rule (a hop between the click and this call must not file the tab into a
+                        // session the user has left).
+                        onOpenFile: { path in
+                            guard let sessionId = host.attachedSessionId else { return }
+                            host.openFileTab(path, sessionId: sessionId)
+                        },
+                        // editor-product Task 6: the row-level clickability gate's one dynamic
+                        // input — see `WindowContentView.sessionHasWorkingDirectory`'s own doc.
+                        // Reuses T5's `editorTabSessionRoots` rather than growing a third `dirs`
+                        // reader (T5's own review note, honored here as it asked).
+                        sessionHasWorkingDirectory: editorTabSessionRoots(
+                            sessionId: host.attachedSessionId, rows: directory.rows
+                        ) == .present
                     ) {
                         // cli-handoff T3's open-session "Move to CLI", RE-HOSTED (custom-sidebar
                         // rework): the window toolbar it rode died with the native chrome

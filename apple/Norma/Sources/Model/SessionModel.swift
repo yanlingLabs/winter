@@ -1124,7 +1124,14 @@ enum SessionReducer {
     /// since Task 10 to EVERY tool's hint. Urls, CSS selectors, questions and notification bodies
     /// are all long or unbounded on the wire, and the row that renders this is `lineLimit(1)`
     /// (`TranscriptMessageViews`), so an unclipped value buys nothing and costs memory per item.
-    private static let maxToolDetailCharacters = 100
+    ///
+    /// editor-product Task 6: NOT `private` — `clipToolDetail` clips SILENTLY (no marker, unlike
+    /// `toolOutputPreview`'s truncation note), so a detail sitting AT this ceiling might be a cut
+    /// prefix of a real, longer path rather than the whole thing. `TranscriptMessageViews
+    /// .toolDetailIsClickablePath` reads this SAME constant to refuse offering a file-door button
+    /// for one — the `maxToolOutputCharacters` precedent just below (already read cross-file by
+    /// `toolOutputPreview`) for why the second reader is this field, not a hand-copied `100`.
+    static let maxToolDetailCharacters = 100
 
     /// One non-empty string field of a parsed args object, or `nil`. A missing field, a field of
     /// the wrong JSON type, and an empty string are all the same answer — which is what makes

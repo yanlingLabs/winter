@@ -460,6 +460,10 @@ final class ToolRowTests: XCTestCase {
     /// Comments are stripped first, so writing down the reason (this file's own doc comments name the
     /// type repeatedly) is not itself a violation — the `TranscriptBrandTests`/`ComposerChromeTests`
     /// convention.
+    ///
+    /// editor-product Task 6: `"openFileTab"` joins the banned list — the SECOND transcript→panel
+    /// door (`WindowContentView.onOpenFile`) is built on the identical closure discipline, and this
+    /// is the pin that keeps it that way.
     func testChatContentNeverReachesForTheShellHost() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
@@ -472,13 +476,151 @@ final class ToolRowTests: XCTestCase {
                 .split(separator: "\n", omittingEmptySubsequences: false)
                 .map { $0.drop(while: { $0 == " " }).hasPrefix("//") ? "" : String($0) }
                 .joined(separator: "\n")
-            for name in ["ShellSessionHost", "PanelStore", "openPanelTab", "activatePanelTab"] {
+            for name in ["ShellSessionHost", "PanelStore", "openPanelTab", "activatePanelTab",
+                         "openFileTab"] {
                 XCTAssertFalse(code.contains(name),
-                               "\(url.lastPathComponent) reaches for \(name) — the diff door must "
-                               + "stay a closure the window layer injects")
+                               "\(url.lastPathComponent) reaches for \(name) — the diff/file doors "
+                               + "must stay closures the window layer injects")
             }
             scanned += 1
         }
         XCTAssertEqual(scanned, 12, "ChatContent's file count changed — confirm the new file is scanned")
+    }
+
+    // MARK: - editor-product Task 6: the file door's row-level gate
+
+    /// Every tool that could plausibly be confused for a file path, and the four that actually are
+    /// one. `glob`/`grep`/`ls` deliberately share `SessionModel.extractToolDetail`'s switch arm with
+    /// the four file-door tools but are EXCLUDED from `fileDoorToolNames` — this is the pin that
+    /// would catch a future author "helpfully" widening the set to match that other grouping.
+    func testOnlyTheFourFileDoorToolsAreEverConsideredAPath() {
+        for name in ["read", "write", "edit", "notebook_edit"] {
+            XCTAssertTrue(toolDetailIsClickablePath(name: name, detail: "/repo/a.ts",
+                                                    sessionHasWorkingDirectory: false),
+                          "\(name) is one of the four — an absolute detail must be clickable")
+        }
+        for name in ["glob", "grep", "ls", "bash", "browser", "lsp", "web_fetch", "computer"] {
+            XCTAssertFalse(toolDetailIsClickablePath(name: name, detail: "/repo/a.ts",
+                                                     sessionHasWorkingDirectory: true),
+                           "\(name) is not a file-door tool, even with an absolute-looking detail "
+                           + "and a session that has a working directory")
+        }
+    }
+
+    /// The shape gate: absolute is unconditional; relative needs the session's own working
+    /// directory to resolve against, exactly the resolution `ShellSessionHost.resolvedFilePath`
+    /// performs against the SAME fact.
+    func testAnAbsolutePathIsAlwaysClickableAndARelativeOneOnlyWithASessionCwd() {
+        XCTAssertTrue(toolDetailIsClickablePath(name: "read", detail: "/repo/a.ts",
+                                                sessionHasWorkingDirectory: false),
+                      "reads carry no path fence — a dirless session can still open an absolute path")
+        XCTAssertFalse(toolDetailIsClickablePath(name: "edit", detail: "src/a.ts",
+                                                 sessionHasWorkingDirectory: false),
+                       "a relative path with nothing to resolve it against must not invite a click")
+        XCTAssertTrue(toolDetailIsClickablePath(name: "edit", detail: "src/a.ts",
+                                                sessionHasWorkingDirectory: true))
+    }
+
+    func testAnEmptyDetailIsNeverClickable() {
+        XCTAssertFalse(toolDetailIsClickablePath(name: "read", detail: "",
+                                                 sessionHasWorkingDirectory: true))
+    }
+
+    /// **`SessionModel.clipToolDetail` truncates SILENTLY** — no marker, unlike the output preview's
+    /// truncation note — so a detail sitting AT the ceiling might be a cut prefix of a real, longer,
+    /// still-openable path. Refusing it is the safe failure; a path comfortably under the ceiling was
+    /// never touched by the clip and must still be offered.
+    func testADetailAtTheClipCeilingIsRefusedAsPossiblyTruncated() {
+        let atCeiling = "/" + String(repeating: "a", count: SessionReducer.maxToolDetailCharacters - 1)
+        XCTAssertEqual(atCeiling.count, SessionReducer.maxToolDetailCharacters)
+        XCTAssertFalse(toolDetailIsClickablePath(name: "read", detail: atCeiling,
+                                                 sessionHasWorkingDirectory: true),
+                       "a detail this long might be `clipToolDetail`'s silent cut of a longer path")
+
+        let underCeiling = "/" + String(repeating: "a", count: SessionReducer.maxToolDetailCharacters - 2)
+        XCTAssertEqual(underCeiling.count, SessionReducer.maxToolDetailCharacters - 1)
+        XCTAssertTrue(toolDetailIsClickablePath(name: "read", detail: underCeiling,
+                                                sessionHasWorkingDirectory: true),
+                      "comfortably under the ceiling — clipToolDetail never touched this one")
+    }
+
+    // MARK: - editor-product Task 6: the row itself (with-closure → Button, nil → today's plain text)
+
+    /// Depth-first search for a value of type `T` anywhere inside `value`'s reflection tree — the
+    /// `PanelWebChromeTests`/`ComposerChromeTests` technique: no window, no host, nothing mounted,
+    /// only the declarative view VALUE `body` already produced. The depth allowance is generous
+    /// (SwiftUI's own `if`/`HStack` storage adds several unseen levels of its own between a `body`
+    /// and a custom leaf type — measured deeper here than `PanelWebChromeTests`' own two-level
+    /// `AnyView` case, so its `6` is not reused blind).
+    private static func firstDescendant<T>(_ type: T.Type, in value: Any, depth: Int = 0) -> T? {
+        if let hit = value as? T { return hit }
+        guard depth < 12 else { return nil }
+        for child in Mirror(reflecting: value).children {
+            if let hit = firstDescendant(type, in: child.value, depth: depth + 1) { return hit }
+        }
+        return nil
+    }
+
+    private func line(name: String = "read", detail: String? = "/repo/a.ts") -> ToolRunCallLine {
+        ToolRunCallLine(name: name, detail: detail, status: .succeeded, output: nil, fileDiff: nil)
+    }
+
+    /// **The pin: a wired door plus a clickable path becomes a REAL `ToolRowFilePathButton`,
+    /// carrying the exact path and the exact closure the row was handed** — not merely "some button
+    /// appeared", which a stray unrelated `Button` elsewhere in the tree could satisfy vacuously.
+    @MainActor
+    func testAClickablePathRendersAsAButtonWiredToTheExactPathAndClosure() throws {
+        var opened: String?
+        let view = ToolRunCallDetailText(line: line(detail: "/repo/src/a.ts"),
+                                         onOpenFile: { opened = $0 },
+                                         sessionHasWorkingDirectory: false)
+        let button = try XCTUnwrap(
+            Self.firstDescendant(ToolRowFilePathButton.self, in: view.body),
+            "an absolute path on a file-door tool with a wired closure must render a clickable button")
+        XCTAssertEqual(button.path, "/repo/src/a.ts")
+        button.onOpen(button.path)
+        XCTAssertEqual(opened, "/repo/src/a.ts", "the button's action must be the SAME closure the "
+                       + "row was handed, invoked with the SAME path it displays")
+    }
+
+    /// **`onOpenFile == nil` → no button anywhere in the tree.** This is the "byte-identical to
+    /// today" pin's view-layer half: the `else` branch is the untouched pre-Task-6 expression, and
+    /// this proves nothing upstream of it ever reaches a `ToolRowFilePathButton` when the door isn't
+    /// wired — regardless of how clickable the path would otherwise look.
+    @MainActor
+    func testANilDoorNeverRendersAButtonEvenForAnObviouslyClickablePath() {
+        let view = ToolRunCallDetailText(line: line(detail: "/repo/src/a.ts"),
+                                         onOpenFile: nil, sessionHasWorkingDirectory: true)
+        XCTAssertNil(Self.firstDescendant(ToolRowFilePathButton.self, in: view.body),
+                    "no door wired -> today's plain text, unchanged")
+    }
+
+    /// A wired door is necessary but not sufficient — every gate `toolDetailIsClickablePath` enforces
+    /// must actually reach the view, not just the pure function's own unit tests above.
+    @MainActor
+    func testAWiredDoorStillRefusesEveryShapeTheGateRefuses() {
+        let nonFileTool = ToolRunCallDetailText(line: line(name: "bash", detail: "/repo/a.ts"),
+                                                onOpenFile: { _ in }, sessionHasWorkingDirectory: true)
+        XCTAssertNil(Self.firstDescendant(ToolRowFilePathButton.self, in: nonFileTool.body),
+                    "bash's detail is a shell command, never a file-door path")
+
+        let relativeNoCwd = ToolRunCallDetailText(line: line(detail: "src/a.ts"),
+                                                  onOpenFile: { _ in }, sessionHasWorkingDirectory: false)
+        XCTAssertNil(Self.firstDescendant(ToolRowFilePathButton.self, in: relativeNoCwd.body),
+                    "a relative path with nothing to resolve it against must not become a button")
+
+        let noDetail = ToolRunCallDetailText(line: line(detail: nil),
+                                             onOpenFile: { _ in }, sessionHasWorkingDirectory: true)
+        XCTAssertNil(Self.firstDescendant(ToolRowFilePathButton.self, in: noDetail.body),
+                    "no detail at all -> the bare tool-name fallback, never a button")
+    }
+
+    /// A relative path DOES become a button once the session has somewhere to resolve it —
+    /// the positive mirror of the refusal above, so the gate is proven both ways at the view layer.
+    @MainActor
+    func testAWiredDoorOffersARelativePathOnceTheSessionHasAWorkingDirectory() throws {
+        let view = ToolRunCallDetailText(line: line(name: "edit", detail: "src/a.ts"),
+                                         onOpenFile: { _ in }, sessionHasWorkingDirectory: true)
+        _ = try XCTUnwrap(Self.firstDescendant(ToolRowFilePathButton.self, in: view.body))
     }
 }

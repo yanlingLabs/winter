@@ -2966,4 +2966,316 @@ final class ShellSessionHostTests: XCTestCase {
         XCTAssertEqual(editor.hub.registeredBrowserIds, [])
         XCTAssertNil(host.existingEditorRuntime(for: "S1"))
     }
+
+    // MARK: - editor-product Task 6: the file door
+
+    /// The DECISION, on its own — the file door's mirror of
+    /// `testTheDiffChipDecisionDedupesByDiffIdAndTitlesTheMintWithTheBasename`: dedupe by absolute
+    /// PATH over `.code` tabs, else mint titled with the basename.
+    func testTheFileDoorDecisionDedupesByPathOverCodeTabsAndTitlesTheMintWithTheBasename() {
+        XCTAssertEqual(panelFileTabAction(tabs: [], path: "/repo/engine.ts", openFailures: []),
+                       .mint(title: "engine.ts"))
+
+        let open = PanelTab(tabId: "t7", kind: .code, url: "/repo/engine.ts", title: "engine.ts")
+        XCTAssertEqual(panelFileTabAction(tabs: [open], path: "/repo/engine.ts", openFailures: []),
+                       .activate(tabId: "t7", retryOpen: false))
+
+        // A DIFFERENT path is a different tab.
+        XCTAssertEqual(panelFileTabAction(tabs: [open], path: "/repo/other.ts", openFailures: []),
+                       .mint(title: "other.ts"))
+
+        // A `.web` tab sharing the SAME url string never matches — unlike the diff door's `diffId`,
+        // `url` is not unique to `.code`, so the kind filter is load-bearing.
+        let web = PanelTab(tabId: "t1", kind: .web, url: "/repo/engine.ts", title: "A")
+        XCTAssertEqual(panelFileTabAction(tabs: [web], path: "/repo/engine.ts", openFailures: []),
+                       .mint(title: "engine.ts"))
+
+        // A relative path titles from its last component too — the door itself never hands this
+        // function one (resolution happens first), but the pure function makes no such assumption.
+        XCTAssertEqual(panelFileTabAction(tabs: [], path: "src/a.ts", openFailures: []),
+                       .mint(title: "a.ts"))
+    }
+
+    /// The retry branch (Task 5's review HANDOFFS), decided PURELY: an existing tab whose path
+    /// currently sits in `openFailures` asks for a re-read; a DIFFERENT path's failure must never
+    /// leak onto this one's flag, and a MINT never carries the flag at all.
+    func testTheFileDoorDecisionRetriesOnlyAnExistingTabWhosePathIsCurrentlyFailed() {
+        let open = PanelTab(tabId: "t7", kind: .code, url: "/repo/a.ts", title: "a.ts")
+        XCTAssertEqual(
+            panelFileTabAction(tabs: [open], path: "/repo/a.ts", openFailures: ["/repo/a.ts"]),
+            .activate(tabId: "t7", retryOpen: true))
+        XCTAssertEqual(
+            panelFileTabAction(tabs: [open], path: "/repo/a.ts", openFailures: ["/repo/other.ts"]),
+            .activate(tabId: "t7", retryOpen: false), "a different path's failure must not leak")
+        XCTAssertEqual(panelFileTabAction(tabs: [open], path: "/repo/a.ts", openFailures: []),
+                       .activate(tabId: "t7", retryOpen: false))
+        XCTAssertEqual(
+            panelFileTabAction(tabs: [], path: "/repo/a.ts", openFailures: ["/repo/a.ts"]),
+            .mint(title: "a.ts"), "no existing tab -> nothing to retry, regardless of openFailures")
+    }
+
+    /// The resolution step, ahead of the dedupe: absolute untouched, relative joined to the PRIMARY
+    /// directory only (never a second root, never the daemon's `cwd` alias), no base -> untouched.
+    func testResolvedFilePathJoinsARelativePathAgainstThePrimaryDirectoryOnly() {
+        let tworoot = codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false),
+                                           SessionDirEntry(path: "/other", locked: false)])
+        XCTAssertEqual(resolvedFilePath("src/a.ts", row: tworoot), "/repo/src/a.ts",
+                       "the PRIMARY root only — never the second")
+        XCTAssertEqual(resolvedFilePath("/already/absolute.ts", row: tworoot), "/already/absolute.ts",
+                       "an absolute path is returned untouched, never re-rooted")
+        XCTAssertEqual(resolvedFilePath("src/a.ts", row: nil), "src/a.ts",
+                       "no row at all -> nothing to resolve against, returned untouched")
+        XCTAssertEqual(resolvedFilePath("src/a.ts", row: codeRow("S1", dirs: [])), "src/a.ts",
+                       "a genuinely workdir-less row -> untouched, same as no row")
+    }
+
+    /// **Mint: one `panel.openTab`, kind `code`, carrying the RESOLVED absolute path and the
+    /// basename — and the panel is revealed.** Mirrors
+    /// `testAChipClickMintsADiffTabWithItsDiffIdAndBasenameAndRevealsThePanel`.
+    func testAFileDoorClickWithNoExistingTabMintsACodeTabWithAbsolutePathAndBasenameAndRevealsThePanel() async {
+        let (host, factory, mgmt) = await makeHostWithManagement()
+        defer { host.deselect() }
+        host.setShellVisible(true)
+        host.select("S1")
+        await waitUntilMade(factory, 1)
+        await answerHandshake(factory.made[0], sessionId: "S1")
+
+        var revealed = 0
+        host.onRevealPanel = { revealed += 1 }
+
+        host.openFileTab("/repo/src/engine.ts", sessionId: "S1")
+        await feedWaitUntil { mgmt.methods.contains("panel.openTab") }
+        guard let open = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.openTab" }) else {
+            return XCTFail("a file-door click with nothing open must mint a tab: \(mgmt.methods)")
+        }
+        let params = open["params"] as? [String: Any]
+        XCTAssertEqual(params?["sessionId"] as? String, "S1")
+        XCTAssertEqual(params?["kind"] as? String, "code")
+        XCTAssertEqual(params?["url"] as? String, "/repo/src/engine.ts")
+        XCTAssertEqual(params?["title"] as? String, "engine.ts")
+        XCTAssertNil(params?["tabId"], "the daemon mints tabId — the door must never send one")
+        XCTAssertNil(params?["diffId"], "a code tab carries no diffId")
+        XCTAssertEqual(mgmt.methods.filter { $0 == "panel.activateTab" }.count, 0,
+                       "nothing was open to activate: \(mgmt.methods)")
+        XCTAssertEqual(revealed, 1, "a tab nobody can see is not an opened file")
+    }
+
+    /// **The second click: `panel.activateTab` on the tab the first click opened, and NO second
+    /// mint.** Mirrors `testASecondChipClickActivatesTheOpenTabInsteadOfMintingASecond`.
+    func testASecondFileDoorClickOnTheSamePathActivatesInsteadOfMintingASecondTab() async {
+        let (host, factory, mgmt) = await makeHostWithManagement()
+        defer { host.deselect() }
+        host.setShellVisible(true)
+        host.select("S1")
+        await waitUntilMade(factory, 1)
+        await answerHandshake(factory.made[0], sessionId: "S1")
+
+        host.panelStore.applyFetchedSnapshot(
+            sessionId: "S1",
+            tabs: [PanelTab(tabId: "t7", kind: .code, url: "/repo/src/engine.ts", title: "engine.ts")],
+            activeTabId: nil)
+
+        var revealed = 0
+        host.onRevealPanel = { revealed += 1 }
+
+        host.openFileTab("/repo/src/engine.ts", sessionId: "S1")
+        await feedWaitUntil { mgmt.methods.contains("panel.activateTab") }
+        guard let activate = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.activateTab" }) else {
+            return XCTFail("a file door click for an already-open path must activate it: \(mgmt.methods)")
+        }
+        let params = activate["params"] as? [String: Any]
+        XCTAssertEqual(params?["sessionId"] as? String, "S1")
+        XCTAssertEqual(params?["tabId"] as? String, "t7")
+        // The whole point: no duplicate tab. Given a beat, in case a mint were racing behind it.
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertEqual(mgmt.methods.filter { $0 == "panel.openTab" }.count, 0,
+                       "one tab per file — a second click must never mint: \(mgmt.methods)")
+        XCTAssertEqual(revealed, 1, "an activate behind a hidden panel is a click that does nothing")
+    }
+
+    /// The dedupe reads the CALLER'S OWN session, not whatever the shell is attached to — the file
+    /// door's mirror of `testTheDedupeReadsTheChipsOwnSessionNotTheAttachedOne`.
+    func testTheFileDoorDedupeReadsTheCallersOwnSessionNotTheAttachedOne() async {
+        let (host, factory, mgmt) = await makeHostWithManagement()
+        defer { host.deselect() }
+        host.setShellVisible(true)
+        host.select("S2")
+        await waitUntilMade(factory, 1)
+        await answerHandshake(factory.made[0], sessionId: "S2")
+        XCTAssertEqual(host.attachedSessionId, "S2")
+
+        host.panelStore.applyFetchedSnapshot(
+            sessionId: "S1",
+            tabs: [PanelTab(tabId: "t7", kind: .code, url: "/repo/engine.ts", title: "engine.ts")],
+            activeTabId: nil)
+
+        host.openFileTab("/repo/engine.ts", sessionId: "S1")
+        await feedWaitUntil { mgmt.methods.contains("panel.activateTab") }
+        guard let activate = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.activateTab" }) else {
+            return XCTFail("the caller's own session's tab must be activated: \(mgmt.methods)")
+        }
+        XCTAssertEqual((activate["params"] as? [String: Any])?["sessionId"] as? String, "S1",
+                       "the activate targets the caller's session, not the attached one")
+        XCTAssertEqual(mgmt.methods.filter { $0 == "panel.openTab" }.count, 0)
+    }
+
+    /// End to end: a relative click mints with the RESOLVED absolute url on the wire; the SAME file
+    /// clicked again, spelled absolutely, must ACTIVATE that tab rather than mint a second — proof
+    /// that resolution happens BEFORE the dedupe, not merely that the two paths look alike.
+    func testAFileDoorClickResolvesARelativePathBeforeDedupingSoBothSpellingsCollide() async {
+        let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+        let (host, factory, mgmt) = await makeHostWithManagement(rows: rows)
+        defer { host.deselect() }
+        await host.directory.refresh()
+        host.setShellVisible(true)
+        host.select("S1")
+        await waitUntilMade(factory, 1)
+        await answerHandshake(factory.made[0], sessionId: "S1")
+
+        host.openFileTab("src/engine.ts", sessionId: "S1")
+        await feedWaitUntil { mgmt.methods.contains("panel.openTab") }
+        guard let open = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.openTab" }) else {
+            return XCTFail("the relative-path mint never reached the wire: \(mgmt.methods)")
+        }
+        XCTAssertEqual((open["params"] as? [String: Any])?["url"] as? String, "/repo/src/engine.ts",
+                       "the wire only ever sees the RESOLVED absolute path")
+
+        host.panelStore.applyFetchedSnapshot(
+            sessionId: "S1",
+            tabs: [PanelTab(tabId: "t1", kind: .code, url: "/repo/src/engine.ts", title: "engine.ts")],
+            activeTabId: nil)
+        host.openFileTab("/repo/src/engine.ts", sessionId: "S1")
+        await feedWaitUntil { mgmt.methods.contains("panel.activateTab") }
+        XCTAssertEqual(mgmt.methods.filter { $0 == "panel.openTab" }.count, 1,
+                       "the relative and absolute spellings of the same file must collide on ONE tab")
+    }
+
+    /// A mutable stand-in disk — the daemon or the user's own fix (the agent creating a file)
+    /// changes what a SECOND read finds, which a value-typed `files` dictionary (every other runtime
+    /// harness in this file) cannot express. `@unchecked Sendable` + a lock: `readFile` is
+    /// `@Sendable` and runs off the main actor (`EditorRuntime.openAndSend`'s `Task.detached`) —
+    /// `ShellScriptedTransport`'s own precedent, top of this file.
+    private final class MutableDisk: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _files: [String: String]
+        init(_ files: [String: String] = [:]) { _files = files }
+        func set(_ path: String, _ text: String) {
+            lock.lock(); _files[path] = text; lock.unlock()
+        }
+        func read(_ path: String) throws -> String {
+            lock.lock(); defer { lock.unlock() }
+            guard let text = _files[path] else {
+                throw NSError(domain: NSCocoaErrorDomain, code: NSFileNoSuchFileError)
+            }
+            return text
+        }
+    }
+
+    /// `editorFactory(files:)`'s sibling, off a `MutableDisk` rather than a fixed dictionary — see
+    /// that type's own doc for why the retry test below needs it.
+    private func editorFactory(disk: MutableDisk, browserId: Int32 = 41) -> EditorFactory {
+        let cef = EditorCEFRecorder()
+        cef.browserIds = [browserId]
+        let slot = EditorSlotRecorder()
+        let hub = EditorBridgeHub(slot: slot.slot)
+        let scheduler = EditorFakeScheduler()
+        editorDoubles.append(contentsOf: [cef, slot, hub, scheduler] as [AnyObject])
+        return EditorFactory(make: { sessionId in
+            EditorRuntime(sessionId: sessionId, hub: hub, driver: cef.driver,
+                          scheduler: scheduler.scheduler,
+                          readFile: { path in try disk.read(path) })
+        }, cef: cef, slot: slot, hub: hub, scheduler: scheduler)
+    }
+
+    /// **The binding obligation, proven with a REAL runtime: activating a tab whose read PREVIOUSLY
+    /// FAILED does not merely bring it to the front — it asks the runtime to read the file again,
+    /// which is what lets the sentence clear once the agent creates the file (Task 5's review,
+    /// HANDOFFS: "activation alone leaves a stale File not found forever").**
+    func testActivatingATabWhoseReadPreviouslyFailedRetriesTheOpenAndClearsTheFailureOnceItSucceeds() async {
+        let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+        let (host, factory, mgmt) = await makeHostWithManagement(rows: rows)
+        defer { host.deselect() }
+        await host.directory.refresh()
+        host.setShellVisible(true)
+        host.select("S1")
+        await waitUntilMade(factory, 1)
+        await answerHandshake(factory.made[0], sessionId: "S1")
+
+        let disk = MutableDisk()
+        let editor = editorFactory(disk: disk)
+        host.makeEditorRuntime = editor.make
+        host.panelDidReveal()
+        guard let runtime = host.existingEditorRuntime(for: "S1") else {
+            return XCTFail("the reveal built no runtime")
+        }
+        editor.slot.deliver(browserId: 41, queryId: 1, request: #"{"type":"ready"}"#)
+        editor.cef.answerNextCDP() // setTheme
+
+        // First read: the file is not there yet. A failed read records NO model and reaches no CDP
+        // call at all — the read happens BEFORE anything is sent to the page.
+        await runtime.openFile("/repo/a.ts")
+        XCTAssertEqual(runtime.stateSnapshot.openFailures["/repo/a.ts"], .notFound)
+        XCTAssertEqual(editor.cef.cdp.count, 0)
+
+        // The tab already exists — as if the first click's mint had folded.
+        host.panelStore.applyFetchedSnapshot(
+            sessionId: "S1",
+            tabs: [PanelTab(tabId: "t9", kind: .code, url: "/repo/a.ts", title: "a.ts")],
+            activeTabId: nil)
+
+        // The agent has since created the file — a real fix, not a test-only flag.
+        disk.set("/repo/a.ts", "const a = 1;\n")
+
+        host.openFileTab("/repo/a.ts", sessionId: "S1")
+        await feedWaitUntil { mgmt.methods.contains("panel.activateTab") }
+        XCTAssertEqual(mgmt.methods.filter { $0 == "panel.openTab" }.count, 0,
+                       "an existing tab must never be re-minted")
+
+        // The retry: a second read reaches the page, off the SAME runtime.
+        await feedWaitUntil { !editor.cef.cdp.isEmpty }
+        XCTAssertTrue(runtime.stateSnapshot.openFailures.isEmpty,
+                      "the retry clears the stale failure the instant it re-asks")
+        editor.cef.answerNextCDP() // openModel
+        XCTAssertNotNil(runtime.stateSnapshot.models["/repo/a.ts"],
+                        "the retry actually re-read the file the agent had since created")
+    }
+
+    /// **The negative: an already-open, HEALTHY tab is never re-read on activate.** Proven with a
+    /// REAL runtime (not merely the pure decision above), so a door that ignored `retryOpen` and
+    /// called `openFile` unconditionally would surface here as a spurious `activateModel` CDP call.
+    func testActivatingAHealthyExistingTabNeverRetriesAnything() async {
+        let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+        let (host, factory, mgmt) = await makeHostWithManagement(rows: rows)
+        defer { host.deselect() }
+        await host.directory.refresh()
+        host.setShellVisible(true)
+        host.select("S1")
+        await waitUntilMade(factory, 1)
+        await answerHandshake(factory.made[0], sessionId: "S1")
+
+        let disk = MutableDisk(["/repo/a.ts": "const a = 1;\n"])
+        let editor = editorFactory(disk: disk)
+        host.makeEditorRuntime = editor.make
+        host.panelDidReveal()
+        guard let runtime = host.existingEditorRuntime(for: "S1") else {
+            return XCTFail("the reveal built no runtime")
+        }
+        editor.slot.deliver(browserId: 41, queryId: 1, request: #"{"type":"ready"}"#)
+        editor.cef.answerNextCDP() // setTheme
+        await runtime.openFile("/repo/a.ts")
+        editor.cef.answerNextCDP() // openModel — a healthy model, no failure recorded
+        XCTAssertTrue(runtime.stateSnapshot.openFailures.isEmpty)
+
+        host.panelStore.applyFetchedSnapshot(
+            sessionId: "S1",
+            tabs: [PanelTab(tabId: "t9", kind: .code, url: "/repo/a.ts", title: "a.ts")],
+            activeTabId: nil)
+
+        host.openFileTab("/repo/a.ts", sessionId: "S1")
+        await feedWaitUntil { mgmt.methods.contains("panel.activateTab") }
+        // Given a beat, in case a spurious retry were racing behind the activate.
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertEqual(editor.cef.cdp.count, 0,
+                       "an already-open, non-failed file must not be re-read on activate")
+    }
 }

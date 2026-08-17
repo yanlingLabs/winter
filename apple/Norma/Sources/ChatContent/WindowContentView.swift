@@ -52,6 +52,33 @@ struct WindowContentView<Accessory: View>: View {
     /// Declared BEFORE `headerAccessory` so the memberwise init keeps the `@ViewBuilder` accessory
     /// last — the same ordering constraint `sidebars`' own doc records.
     var onOpenDiff: ((FileDiffRef) -> Void)? = nil
+    /// editor-product Task 6: **the SECOND transcript→panel door, crossing this boundary exactly
+    /// like `onOpenDiff` immediately above.**
+    ///
+    /// A clickable path on a read/edit/write/notebook_edit row calls it with the path exactly as
+    /// the row would draw it; the SHELL decides what that means
+    /// (`ShellSessionHost.openFileTab` — dedupe by absolute path, else mint a `.code` tab, reveal
+    /// the panel either way). Nothing in `ChatContent/` imports, names or knows about
+    /// `ShellSessionHost`, `PanelStore` or the panel — the SAME source-scan pin `onOpenDiff` is
+    /// covered by (`ToolRowTests.testChatContentNeverReachesForTheShellHost`) is extended to name
+    /// this door's own producer too.
+    ///
+    /// Same opt-in as `onOpenDiff`, for the same reason: `nil` on the orb's morph window and every
+    /// detached window, where a clickable path would be a click that does nothing.
+    var onOpenFile: ((String) -> Void)? = nil
+    /// editor-product Task 6: **the row-level clickability gate's one dynamic input** — whether the
+    /// ATTACHED session currently carries a working directory to resolve a RELATIVE path against
+    /// (`ToolRunCallDetailText`/`toolDetailIsClickablePath`). An ABSOLUTE path is clickable
+    /// regardless of this flag (reads carry no path fence), so this only ever WIDENS what a
+    /// relative path may do, never narrows an absolute one.
+    ///
+    /// A plain value, not a closure — like `composerCardMode` above and unlike `onOpenDiff`/
+    /// `onOpenFile`: this answers a DISPLAY-time question ("what should this render as right now"),
+    /// not a click-time one, so it needs no read-fresh-at-call-time discipline. The one call site
+    /// that sets it true (`ShellSessionView`) recomputes it on every render from the live
+    /// `directory.rows`, the same "read fresh from the directory" convention `composerCardMode`
+    /// itself already follows.
+    var sessionHasWorkingDirectory: Bool = false
     @ViewBuilder let headerAccessory: () -> Accessory
 
     /// Task 4 (2d-iii): the ⋯ menu's popover presentation state — local to this view (not the
@@ -201,7 +228,8 @@ struct WindowContentView<Accessory: View>: View {
                 onApproval: adapter.onApprovalRespond,
                 onQuestion: adapter.onQuestionRespond,
                 onPlan: adapter.onPlanRespond
-            ), onOpenDiff: onOpenDiff)
+            ), onOpenDiff: onOpenDiff, onOpenFile: onOpenFile,
+            sessionHasWorkingDirectory: sessionHasWorkingDirectory)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             // The composer FLOATS over the transcript (user call, 2026-08-12: "the composer should
             // float over the transcript and not have that hard background"). It used to be the next
