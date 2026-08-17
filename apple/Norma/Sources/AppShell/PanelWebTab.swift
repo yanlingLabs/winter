@@ -82,8 +82,18 @@ func panelTabContent(for tab: PanelTab, host: ShellSessionHost? = nil,
         return PanelWebTab(tab: tab,
                            model: PanelWebTabModels.model(for: tab, host: host, sessionId: sessionId),
                            runtime: .shared)
-    case .document, .code, .note:
+    case .document, .note:
         return PanelPlaceholderTab(tab: tab)
+    // editor-product Task 5: the third kind with a real surface — Stage A's placeholder arm,
+    // replaced. The model is looked up (not built) here for the reason `.web`'s and `.diff`'s are:
+    // this function runs on every render pass, and a model born here would be reborn here — for a
+    // code tab that would mean re-reading the file from disk on every visit. Nothing on this line
+    // touches CEF: `bind` records the host/session and hops off the current pass, and even the
+    // runtime it eventually resolves is only a browser once something opens a file in it.
+    case .code:
+        return PanelEditorTab(tab: tab,
+                              model: PanelEditorTabModels.model(for: tab, host: host,
+                                                                sessionId: sessionId))
     // diff-tabs Task 10: the second kind with a real surface — Task 9's TEMPORARY placeholder arm,
     // replaced. The model is looked up (not built) here for the same reason `.web`'s is: this
     // function runs on every render pass, and a model born here would be reborn here, re-fetching

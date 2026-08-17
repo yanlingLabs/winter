@@ -564,6 +564,26 @@ final class ShellSessionHost: ObservableObject {
     /// asking merely to look would create one.
     func existingEditorRuntime(for sessionId: String) -> EditorRuntime? { editorRuntimes[sessionId] }
 
+    /// **editor-product Task 5: the code tab's door — the one place a TAB may mint a runtime.**
+    ///
+    /// `nil` for a session with no working directories, which is the whole point of routing every
+    /// code tab through here rather than through `editorRuntime(for:)` directly: "a dirless session
+    /// never stands a hidden Chromium up" is then one rule in one place, enforceable by one test,
+    /// instead of a check each of the tab's two slots is trusted to remember. The tab renders that
+    /// `nil` as "This session has no working directory" (`EditorViewportState`).
+    ///
+    /// The gate is `editorTabSessionRoots`, NOT `editorPrewarmTarget`, for the reason that function's
+    /// own doc gives: a row that has not arrived yet is `.unknown`, and the tab must wait rather than
+    /// claim. `.unknown` mints nothing — an open is its own pre-warm, so the beat costs nothing but a
+    /// spinner.
+    func editorRuntimeForCodeTab(sessionId: String?) -> EditorRuntime? {
+        guard let sessionId,
+              editorTabSessionRoots(sessionId: sessionId, rows: directory.rows) == .present else {
+            return nil
+        }
+        return editorRuntime(for: sessionId)
+    }
+
     /// Release a session's editor outright, whatever it is holding. The door for a session that is
     /// genuinely going away (T10's quit path, an explicit close); the shell's own departures go
     /// through `releaseEditorRuntimeIfClean` below instead.
@@ -722,6 +742,10 @@ final class ShellSessionHost: ObservableObject {
         // Heavier than the web case, which is why it is not merely tidy: a loaded diff model holds
         // the patch string (capped at 1 MiB) and its parsed rows for the life of the process.
         PanelDiffTabModels.discard(tabId: tabId)
+        // editor-product Task 5: and the code tab's, which holds the session's editor state mirror,
+        // two Combine subscriptions and T8's save closure. It deliberately does NOT close the
+        // runtime's model — see `PanelEditorTabModels.discard`.
+        PanelEditorTabModels.discard(tabId: tabId)
         Task { @MainActor [weak self] in
             _ = try? await client.closePanelTab(sessionId: sessionId, tabId: tabId)
             if self?.attachedSessionId == nil { self?.refreshPanelTabs(for: sessionId) }

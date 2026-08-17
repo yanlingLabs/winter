@@ -46,6 +46,17 @@ struct EditorRuntimeState: Equatable {
     var pendingOpens: [String] = []
     /// Why `phase == .failed`, in words, for whatever renders it (T5's calm error state).
     var failureReason: String?
+    /// **editor-product Task 5: why a path has no model — the EXPLICIT signal, and the only honest
+    /// one.** `models[path] == nil` is NOT "the file is missing": a queued open, a read still in
+    /// flight and a read that failed are all "no model", and only the last of them is something to
+    /// tell the user about. A tab that inferred a missing file from an absent model would show
+    /// "File not found" for the whole 30 s a slow boot takes.
+    ///
+    /// Recorded by `openRequested` failing its read (`EditorRuntime.openAndSend`'s catch) and
+    /// CLEARED by anything that supersedes it — a fresh `openRequested` for the same path (a retry
+    /// must show a spinner, not the stale sentence), the model actually opening, a close, or
+    /// teardown. Never set for a path this runtime already holds.
+    var openFailures: [String: EditorOpenFailure] = [:]
 
     /// How many open models have unsaved edits. The input to "may this runtime be released when the
     /// shell leaves its session" — see `ShellSessionHost.editorRuntimeReleasedOnDeparture`.
@@ -67,6 +78,10 @@ enum EditorRuntimeEvent: Equatable {
     case openRequested(path: String)
     /// An `openModel` reached the page.
     case modelOpened(path: String)
+    /// editor-product Task 5: the file could not be turned into a model — the read threw. Carries
+    /// WHY, classified once (`editorOpenFailure(for:)`), because "File not found" is a lie for a
+    /// file that exists and is a directory, is unreadable, or is not text.
+    case openFailed(path: String, failure: EditorOpenFailure)
     case activateRequested(path: String)
     case closeRequested(path: String)
     /// The page's `modelDirtyChanged`.
@@ -157,6 +172,13 @@ enum EditorRuntimeReducer {
             return (next, [.sendTheme])
 
         case .openRequested(let path):
+            // editor-product Task 5: a new ask SUPERSEDES the last failure for that path, before any
+            // phase decides anything. The door that retries is real — T6's tree click on a file the
+            // agent has just created, or a user who fixed the permissions — and a tab that kept
+            // rendering "File not found" over an in-flight re-read would be lying for the whole
+            // duration of the fix. The `.failed` arm below deliberately returns the UNTOUCHED state:
+            // nothing acts there, so nothing may change either.
+            next.openFailures.removeValue(forKey: path)
             switch state.phase {
             case .idle:
                 // **An open is its own pre-warm.** The reveal hook is not the only way a runtime can
@@ -179,13 +201,16 @@ enum EditorRuntimeReducer {
                 }
                 return (next, [.openModel(path: path)])
             case .failed:
-                // Absorbed: a failed runtime holds no page to open anything in.
-                return (next, [])
+                // Absorbed: a failed runtime holds no page to open anything in. `state`, not `next`
+                // — an absorbed event must not even clear a failure entry (see the note above).
+                return (state, [])
             }
 
         case .modelOpened(let path):
             guard state.phase == .ready else { return (next, []) }
             if next.models[path] == nil { next.models[path] = EditorRuntimeState.ModelEntry() }
+            // A model that opened cannot also be a file that could not be opened.
+            next.openFailures.removeValue(forKey: path)
             // `openModel` ends in the page's own `activateModel` (`editor.js`), so the model it just
             // created IS what the editor shows.
             next.current = path
@@ -199,8 +224,21 @@ enum EditorRuntimeReducer {
             next.current = path
             return (next, [.activateModel(path: path)])
 
+        case .openFailed(let path, let failure):
+            // **Gated on `.ready`, like every other arm that records what the page did.** The read
+            // runs off the actor and can land after a teardown; recording a failure into the fresh
+            // state a teardown just produced would make an idle runtime claim a missing file, and
+            // nothing would ever clear it. A path this runtime already holds is likewise ignored:
+            // that is a stale read racing a live model, and the model is the newer truth.
+            guard state.phase == .ready, next.models[path] == nil else { return (next, []) }
+            next.openFailures[path] = failure
+            return (next, [])
+
         case .closeRequested(let path):
             next.pendingOpens.removeAll { $0 == path }
+            // Whether or not there is a model to drop, a closed tab's failure goes with it — the
+            // path is no longer anybody's to render.
+            next.openFailures.removeValue(forKey: path)
             guard state.models[path] != nil else { return (next, []) }
             next.models.removeValue(forKey: path)
             // The page DETACHES before it disposes and leaves the editor showing nothing; activating
@@ -604,10 +642,14 @@ final class EditorRuntime: ObservableObject {
 
     /// Read the file off the main actor, then hand it to the page.
     ///
-    /// A read failure records NO model and logs — the visible "File not found" state belongs to the
-    /// tab (T5), which knows whether anything is showing this path at all. Recording a phantom model
-    /// here would make the page and Swift disagree about what is open, which is the one disagreement
-    /// the whole seq-anchored protocol exists to prevent.
+    /// A read failure records NO model — the visible "File not found" state belongs to the tab (T5),
+    /// which knows whether anything is showing this path at all. Recording a phantom model here
+    /// would make the page and Swift disagree about what is open, which is the one disagreement the
+    /// whole seq-anchored protocol exists to prevent.
+    ///
+    /// editor-product Task 5: it does record the FAILURE, though (`.openFailed` → `openFailures`),
+    /// because the tab cannot infer one. Still logged as well — the reason string a user sees is
+    /// deliberately short, and the log is where the underlying error survives in full.
     private func openAndSend(_ path: String) async {
         let reader = readFile
         let text: String
@@ -615,6 +657,7 @@ final class EditorRuntime: ObservableObject {
             text = try await Task.detached(priority: .userInitiated) { try reader(path) }.value
         } catch {
             NSLog("[EditorRuntime] \(sessionId): could not read \(path): \(error)")
+            perform(dispatch(.openFailed(path: path, failure: editorOpenFailure(for: error))))
             return
         }
         guard state.phase == .ready else { return }
@@ -740,6 +783,44 @@ final class EditorRuntime: ObservableObject {
 /// Why a file could not become a model.
 enum EditorFileReadError: Error, Equatable {
     case notUTF8(path: String)
+}
+
+/// **editor-product Task 5: the two answers a tab can honestly give for a file it cannot show.**
+///
+/// Two rather than one because the copy differs and the difference matters: "File not found" for a
+/// file that exists but is a directory, is unreadable, or holds bytes that are not text would send
+/// the user looking for something that is right where they left it.
+///
+/// It is a value on the runtime's state (`EditorRuntimeState.openFailures`) rather than an `Error`
+/// because it has to survive the read that produced it — the tab renders it minutes later, on a
+/// render pass that has no relationship to the `catch` block it came from.
+enum EditorOpenFailure: Equatable {
+    /// Nothing at that path.
+    case notFound
+    /// It is there and could not be read as text. The reason is shown VERBATIM under the title, so
+    /// it must be a sentence a person can act on, not a symbol name.
+    case unreadable(reason: String)
+}
+
+/// PURE: which of the two a thrown read is (`EditorRuntime.openAndSend`'s catch, and `T5`'s tests
+/// drive it directly with constructed errors).
+///
+/// `Data(contentsOf:)` reports a missing file as `NSCocoaErrorDomain` 260
+/// (`NSFileReadNoSuchFileError`); 4 (`NSFileNoSuchFileError`) is the same fact from the older
+/// file-manager paths, and both are matched rather than one, because which of them arrives is
+/// Foundation's business and not a promise anybody made. Everything else — a directory (258/259), a
+/// permission refusal (257), a device error, and this runtime's own `notUTF8` — is honestly
+/// "unreadable", with the system's own sentence carried through.
+func editorOpenFailure(for error: Error) -> EditorOpenFailure {
+    if case EditorFileReadError.notUTF8 = error {
+        return .unreadable(reason: "This file isn't UTF-8 text.")
+    }
+    let cocoa = error as NSError
+    if cocoa.domain == NSCocoaErrorDomain,
+       cocoa.code == NSFileReadNoSuchFileError || cocoa.code == NSFileNoSuchFileError {
+        return .notFound
+    }
+    return .unreadable(reason: cocoa.localizedDescription)
 }
 
 /// **What language Swift claims for a path — deliberately nothing.**

@@ -813,9 +813,8 @@ final class CEFRuntimeTests: XCTestCase {
         }
     }
 
-    /// `.web` resolves to the CEF surface, `.diff` to the diff renderer, and the four kinds with no
-    /// surface yet (editor-product Task 2 added `.files` to that group) keep Plan A's blank
-    /// placeholder.
+    /// `.web` resolves to the CEF surface, `.diff` to the diff renderer, `.code` to the editor
+    /// viewport, and the three kinds with no surface yet keep Plan A's blank placeholder.
     ///
     /// **diff-tabs Task 10 took `.diff` out of the placeholder list — the handoff Task 9 designed.**
     /// Task 9 minted diff tabs (the transcript chip → `ShellSessionHost.openDiffTab`) without
@@ -827,6 +826,12 @@ final class CEFRuntimeTests: XCTestCase {
     ///
     /// `.diff` must ALSO never render a browser, which the type check states directly (a `.diff` tab
     /// that resolved to `PanelWebTab` would stand Chromium up for a patch file).
+    ///
+    /// **editor-product Task 5 took `.code` out of the placeholder list, the same way** — it had sat
+    /// there since Plan A, and moving it up into its own assertion (rather than deleting a pin) is
+    /// what makes the replacement impossible to land silently. `.code` must never resolve to
+    /// `PanelWebTab` either: a code tab is a viewport onto the SESSION's one editor browser, and a
+    /// second, per-tab Chromium is exactly the ownership the editor runtime exists to prevent.
     func testWebTabsResolveToTheCEFSurfaceAndOtherKindsDoNot() {
         let web = PanelTab(tabId: "t1", kind: .web, url: nil, title: nil)
         XCTAssertTrue(panelTabContent(for: web) is PanelWebTab)
@@ -837,7 +842,13 @@ final class CEFRuntimeTests: XCTestCase {
         XCTAssertFalse(diffContent is PanelWebTab, "…and never a browser")
         PanelDiffTabModels.removeAllForTesting()
 
-        for kind in [PanelTabKind.document, .code, .note, .files] {
+        let code = PanelTab(tabId: "t4", kind: .code, url: "/tmp/engine.ts", title: "engine.ts")
+        let codeContent = panelTabContent(for: code)
+        XCTAssertTrue(codeContent is PanelEditorTab, "a code tab renders the editor viewport")
+        XCTAssertFalse(codeContent is PanelWebTab, "…and never a browser of its own")
+        PanelEditorTabModels.removeAllForTesting()
+
+        for kind in [PanelTabKind.document, .note, .files] {
             let tab = PanelTab(tabId: "t2", kind: kind, url: nil, title: nil)
             XCTAssertTrue(panelTabContent(for: tab) is PanelPlaceholderTab,
                           "\(kind) must not render a browser")
