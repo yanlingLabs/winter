@@ -58,6 +58,21 @@ struct EditorRuntimeState: Equatable {
     /// teardown. Never set for a path this runtime already holds.
     var openFailures: [String: EditorOpenFailure] = [:]
 
+    /// **editor-product Task 9: what each open file's tab is SAYING, above the editor.**
+    ///
+    /// Per PATH rather than per tab, because the two things that raise a banner — a watcher event
+    /// and a save outcome — are both facts about a file, and because the runtime is the only place
+    /// that sees all three save triggers (the page's own ⌘S never passes through a tab at all). The
+    /// tab renders it through the mirror it already keeps (`PanelEditorTabModel.runtimeState`), so
+    /// no new wire was needed for it to arrive.
+    ///
+    /// **Absent means `.none`** — `banner(for:)` below is the only reader, and the reducer removes
+    /// an entry rather than storing `.none`, so two states that say the same thing are never
+    /// unequal.
+    var banners: [String: EditorTabBanner] = [:]
+
+    func banner(for path: String) -> EditorTabBanner { banners[path] ?? .none }
+
     /// How many open models have unsaved edits. The input to "may this runtime be released when the
     /// shell leaves its session" — see `ShellSessionHost.editorRuntimeReleasedOnDeparture`.
     var dirtyCount: Int { models.values.filter(\.dirty).count }
@@ -93,6 +108,30 @@ enum EditorRuntimeEvent: Equatable {
     /// own `effectiveAppearance`). A no-op unless the page is actually up to repaint —
     /// editor-product Task 4.
     case appearanceChanged
+
+    // MARK: editor-product Task 9 — the world changing underneath an open model
+
+    /// **The file's bytes moved and it was not us** — the watcher's verdict, already classified
+    /// (`editorDiskChange`) and carrying the text the read produced. The reducer decides what that
+    /// MEANS: a clean model is reloaded silently, a dirty one gets a banner. The text travels on the
+    /// event rather than being re-read by an effect (as `.openModel` does) because the read has
+    /// already happened — it is HOW this event came to exist.
+    case externalChanged(path: String, text: String)
+    /// The file is gone.
+    case externalDeleted(path: String)
+    /// The banner's Reload, with the bytes a FRESH read produced — never the text the banner was
+    /// raised with, which may be minutes old by the time the user answers.
+    case reloadApplied(path: String, text: String)
+    /// The banner's Keep mine.
+    case keepMineChosen(path: String)
+    /// The banner's ×.
+    case bannerDismissed(path: String)
+    /// A transient error's own timer expired (`editorTransientErrorDuration`).
+    case transientErrorExpired(path: String)
+    /// A save finished, however it finished. `.failed`'s sentence is what the banner shows; `.saved`
+    /// RESOLVES a conflict (the file now holds this buffer); `.noModel` says nothing.
+    case saveFinished(path: String, outcome: SaveOutcome)
+
     /// Release everything. Legal from EVERY phase, and the only route back to `idle`.
     case teardownRequested
 }
@@ -113,6 +152,17 @@ enum EditorRuntimeEffect: Equatable {
     case openModel(path: String)
     case activateModel(path: String)
     case closeModel(path: String)
+    /// editor-product Task 9: put these bytes in the model, preserving its undo history
+    /// (`editor.js`'s `applyExternalContent`, upgraded from `setValue` to a full-range
+    /// `pushEditOperations` edit in this task).
+    case applyExternalContent(path: String, text: String)
+    /// **Start watching this file** — emitted by `modelOpened`, i.e. at the first moment the page
+    /// holds the model, which is also the first moment a save of it is possible
+    /// (`EditorSaveCoordinator`'s `hasModel` gate reads the very table this event fills). That
+    /// ordering is the answer to T8's "arm the watcher before the first save can happen": there is
+    /// no window in which a write of this path could produce an event nobody is listening for.
+    case watchFile(path: String)
+    case unwatchFile(path: String)
     /// Unregister from the hub (if a browser was ever identified) and destroy the browser.
     case teardown(browserId: Int32)
 }
@@ -211,10 +261,14 @@ enum EditorRuntimeReducer {
             if next.models[path] == nil { next.models[path] = EditorRuntimeState.ModelEntry() }
             // A model that opened cannot also be a file that could not be opened.
             next.openFailures.removeValue(forKey: path)
+            // Nor can it still be saying anything about a PREVIOUS life of this path: a re-open
+            // re-read the file, so whatever conflict or failure the last one ended on is answered.
+            next.banners.removeValue(forKey: path)
             // `openModel` ends in the page's own `activateModel` (`editor.js`), so the model it just
             // created IS what the editor shows.
             next.current = path
-            return (next, [])
+            // editor-product Task 9 — the watch starts here, and only here (see `.watchFile`).
+            return (next, [.watchFile(path: path)])
 
         case .activateRequested(let path):
             // An activate for a path this runtime does not hold is NOT turned into an open here: the
@@ -236,19 +290,80 @@ enum EditorRuntimeReducer {
 
         case .closeRequested(let path):
             next.pendingOpens.removeAll { $0 == path }
-            // Whether or not there is a model to drop, a closed tab's failure goes with it — the
-            // path is no longer anybody's to render.
+            // Whether or not there is a model to drop, a closed tab's failure — and anything its
+            // banner was saying — goes with it: the path is no longer anybody's to render.
             next.openFailures.removeValue(forKey: path)
+            next.banners.removeValue(forKey: path)
             guard state.models[path] != nil else { return (next, []) }
             next.models.removeValue(forKey: path)
             // The page DETACHES before it disposes and leaves the editor showing nothing; activating
             // a survivor is the caller's obligation, exercised by drill 9.
             if next.current == path { next.current = nil }
-            return (next, [.closeModel(path: path)])
+            // The watch goes with the model, so "a watcher exists exactly while a model does" is an
+            // invariant of the reducer rather than a discipline the imperative half has to keep.
+            return (next, [.closeModel(path: path), .unwatchFile(path: path)])
 
         case .dirtyChanged(let path, let dirty):
             guard next.models[path] != nil else { return (next, []) }
             next.models[path]?.dirty = dirty
+            return (next, [])
+
+        // MARK: editor-product Task 9
+
+        case .externalChanged(let path, let text):
+            // **Gated on the MODEL, like every other arm that describes the page's contents.** The
+            // read runs off the actor and can land after a close or a teardown; reloading a model
+            // that is not there would send the page a message it answers with a console error, and
+            // bannering one would leave a sentence nothing can dismiss.
+            guard let entry = next.models[path] else { return (next, []) }
+            setBanner(&next, path, .externalChange(dirty: entry.dirty))
+            // **Clean → silent reload; dirty → the banner and NOTHING else.** Never both: an
+            // auto-reload of a dirty model is the data loss this whole task exists to prevent.
+            return (next, entry.dirty ? [] : [.applyExternalContent(path: path, text: text)])
+
+        case .externalDeleted(let path):
+            guard next.models[path] != nil else { return (next, []) }
+            setBanner(&next, path, .externalDeleted)
+            return (next, [])
+
+        case .reloadApplied(let path, let text):
+            // The user chose Reload, so the apply happens whatever the dirty flag says — that is
+            // precisely what "discard mine" means, and it is the ONE path that overwrites a dirty
+            // buffer from disk.
+            guard next.models[path] != nil else { return (next, []) }
+            setBanner(&next, path, .reloadChosen)
+            return (next, [.applyExternalContent(path: path, text: text)])
+
+        case .keepMineChosen(let path):
+            guard next.models[path] != nil else { return (next, []) }
+            setBanner(&next, path, .keepChosen)
+            return (next, [])
+
+        case .bannerDismissed(let path):
+            guard next.models[path] != nil else { return (next, []) }
+            setBanner(&next, path, .dismissed)
+            return (next, [])
+
+        case .transientErrorExpired(let path):
+            guard next.models[path] != nil else { return (next, []) }
+            setBanner(&next, path, .transientErrorExpired)
+            return (next, [])
+
+        case .saveFinished(let path, let outcome):
+            // A save awaits a pull and a write, so this arrives long after it was asked for: the
+            // model may have closed and the runtime may have been torn down and rebuilt underneath
+            // it. A path with no model has no banner to carry the news.
+            guard next.models[path] != nil else { return (next, []) }
+            switch outcome {
+            case .saved:
+                setBanner(&next, path, .saveSucceeded)
+            case .failed(let message):
+                setBanner(&next, path, .saveFailed(message))
+            case .noModel:
+                // Not a failure and never a banner (`SaveOutcome.noModel`'s own doc) — nothing
+                // happened, and a red row for nothing is a lie.
+                break
+            }
             return (next, [])
 
         case .bootFailed(let reason):
@@ -264,6 +379,20 @@ enum EditorRuntimeReducer {
             // imperative half has one path to run (it is idempotent), and so "teardown from anywhere
             // releases the slot" is a claim the tests can make about the reducer alone.
             return (EditorRuntimeState(), [.teardown(browserId: state.browserId)])
+        }
+    }
+
+    /// One path's banner, moved by the pure conflict reducer (`EditorConflictReducer`) and stored
+    /// NORMALISED: `.none` removes the entry rather than writing it, so two states that say the same
+    /// thing compare equal — this whole value is `Equatable` and the tests compare it whole.
+    private static func setBanner(_ state: inout EditorRuntimeState,
+                                  _ path: String,
+                                  _ event: EditorBannerEvent) {
+        let next = EditorConflictReducer.reduce(state.banner(for: path), event)
+        if next == .none {
+            state.banners.removeValue(forKey: path)
+        } else {
+            state.banners[path] = next
         }
     }
 }
@@ -411,6 +540,11 @@ final class EditorRuntime: ObservableObject {
     /// `@MainActor` (like `BrowserSignals.memoryBytes`/`PanelDiffTab`'s `fetch`): every call site is
     /// already on the actor, and the default value calls a `@MainActor` static method directly.
     private let colorScheme: @MainActor () -> ColorScheme
+    /// editor-product Task 9: how an open model gets its watch. Injected on the same terms as every
+    /// other seam here — the real one holds two kernel event sources and a debounce timer, none of
+    /// which a unit test may own — and the double a test substitutes fires `onChange` on demand,
+    /// which is what makes the whole conflict flow drivable without a filesystem.
+    private let makeWatcher: EditorFileWatcherFactory
 
     /// What the save flow does to the world, or `nil` to build the real thing from this runtime on
     /// first use. Injected only by tests — the same seam-shaped reason every other member of this
@@ -421,6 +555,24 @@ final class EditorRuntime: ObservableObject {
     private var hiddenWindowStorage: NSWindow?
     private var idPoll: Scheduler.Cancellable?
     private var readyWatchdog: Scheduler.Cancellable?
+
+    // MARK: editor-product Task 9 — the watch tables
+
+    /// One live watch per open model. Kept in step with `state.models` by the reducer's own
+    /// `.watchFile`/`.unwatchFile` effects rather than by discipline here.
+    private var watchers: [String: FileTreeWatching] = [:]
+    /// **The generation of the read in flight for each path — the stale-read guard.**
+    ///
+    /// The handler reads off the main actor, so two debounced fires for one path can overlap and the
+    /// OLDER read can resume last, comparing bytes that are already superseded against a baseline
+    /// the newer read has moved. That is a false "changed on disk" out of thin air. Every read takes
+    /// a number before it starts and drops itself on resume if a later one has begun; the later read
+    /// describes the same file, so nothing is lost by dropping the earlier one.
+    private var watchGenerations: [String: Int] = [:]
+    /// The transient error's own 5 s timer, per path (`editorTransientErrorDuration`). Armed and
+    /// cancelled by `syncBannerTimer(path:)`, which is called after every banner-moving dispatch —
+    /// so a conflict raised over a transient error takes its timer down with it.
+    private var bannerTimers: [String: Scheduler.Cancellable] = [:]
     /// The ONE Combine wire this object holds (`ShellSessionHost.cancellables`'s identical shape and
     /// reasoning) — `NSApp`'s own `effectiveAppearance`, below, so its lifetime is this runtime's own
     /// and no separate teardown is needed (`AnyCancellable.cancel()` fires on deinit).
@@ -432,7 +584,14 @@ final class EditorRuntime: ObservableObject {
          scheduler: Scheduler = .production,
          colorScheme: @escaping @MainActor () -> ColorScheme = { EditorRuntime.currentColorScheme() },
          readFile: @escaping @Sendable (String) throws -> EditorFileContents = EditorRuntime.readTextFile,
-         saveEditor: EditorSaveCoordinator.Editor? = nil) {
+         saveEditor: EditorSaveCoordinator.Editor? = nil,
+         // An inline closure LITERAL rather than a reference to a named static, for the reason
+         // `FileTreeModel.init` documents empirically: a default-argument expression is not
+         // evaluated in a context Swift treats as already on the main actor, and a literal runs
+         // nothing at creation time so the question never arises.
+         makeWatcher: @escaping EditorFileWatcherFactory = { path, onChange in
+             DispatchSourceFileWatcher(path: path, onChange: onChange)
+         }) {
         self.sessionId = sessionId
         self.hub = hub
         self.driver = driver
@@ -440,6 +599,7 @@ final class EditorRuntime: ObservableObject {
         self.colorScheme = colorScheme
         self.readFile = readFile
         self.saveEditorOverride = saveEditor
+        self.makeWatcher = makeWatcher
         // editor-product Task 4 — the app's first reactor to appearance change that is NOT a
         // SwiftUI view: grepped, nothing else in this codebase observes `effectiveAppearance`,
         // because every other surface adapts automatically through `Color`/`Image`'s own machinery,
@@ -535,6 +695,10 @@ final class EditorRuntime: ObservableObject {
                 try await Task.detached(priority: .userInitiated) {
                     try EditorSaveCoordinator.writeAtomically(text, to: path, withBOM: withBOM)
                 }.value
+                // editor-product Task 9: the write LANDED, so Swift now knows exactly what the file
+                // holds — see `noteWriteLanded`. Only on success; a throw propagates from the line
+                // above and the coordinator withdraws its own note.
+                self?.noteWriteLanded(path: path, text: text)
             }),
         scheduler: scheduler)
 
@@ -542,7 +706,14 @@ final class EditorRuntime: ObservableObject {
     /// code tab's save button and the page's own ⌘S (`saveRequested`, routed in `receive` below).
     @discardableResult
     func save(_ path: String) async -> SaveOutcome {
-        return await saveCoordinator.save(path: path)
+        let outcome = await saveCoordinator.save(path: path)
+        // **editor-product Task 9: every save's outcome lands in the tab's banner from HERE**, which
+        // is the only place all three triggers meet — the page's own ⌘S never passes through a tab
+        // at all, so a banner fed from the tab's save button would stay silent for it. Coalesced
+        // callers both arrive with the SAME outcome, and re-reducing it is idempotent.
+        perform(dispatch(.saveFinished(path: path, outcome: outcome)))
+        syncBannerTimer(path: path)
+        return outcome
     }
 
     /// **The watcher-suppression seam T9 consumes.**
@@ -597,6 +768,50 @@ final class EditorRuntime: ObservableObject {
         return pendingExpectedWrites[path] ?? 0
     }
 
+    /// **editor-product Task 9's answer to the obligation above: a note's lifetime ends when its
+    /// WRITE does, not when an event happens to arrive.**
+    ///
+    /// The hazard T8 handed over is that a note is consumed by an EVENT, and events can fail to
+    /// arrive (a debounce coalescing two renames into one fire; the measured re-arm race in
+    /// `DispatchSourceFileWatcher`'s own doc) — after which the bag's leftovers silently swallow the
+    /// next GENUINE external change. That is closed here rather than by a timer, and the bound is
+    /// provable rather than generous:
+    ///
+    ///   * `EditorSaveCoordinator` coalesces saves **per path**, so at most one write per path is
+    ///     ever in flight (`save(path:)`'s `inFlight` table, entered and left with no suspension
+    ///     point in between);
+    ///   * therefore, at the instant one write lands, every note standing for that path belongs to a
+    ///     write that has already landed — including its own;
+    ///   * so the bag for that path can be emptied outright, and the file's known contents set to
+    ///     exactly what was written.
+    ///
+    /// The consequence that makes it worth doing: an external change arriving immediately AFTER one
+    /// of our saves is correctly external, because the note that would have swallowed it no longer
+    /// exists. The counted bag survives as the belt for the one window this cannot cover — the
+    /// rename has landed and this continuation has not run yet, where the watcher's read sees bytes
+    /// the baseline has not caught up with, and `editorDiskChange` answers `.ours`.
+    private func noteWriteLanded(path: String, text: String) {
+        diskBaseline[path] = text
+        pendingExpectedWrites.removeValue(forKey: path)
+    }
+
+    /// **What Swift last knew the file at each open path to contain**, BOM already stripped — the
+    /// primary suppressor, and the comparator T8's seam doc demands (post-strip text, never raw
+    /// bytes: a BOM'd file's model holds the text without its three leading bytes, so a raw compare
+    /// would report a phantom change on every one of them from the moment of open).
+    ///
+    /// Set in exactly three places, all of which are "somebody observed the file": the read at open
+    /// (`openAndSend`), a write that landed (`noteWriteLanded`), and every watcher read that decided
+    /// anything (`fileChangedOnDisk`). **Its lifecycle is `pathsWithBOM`'s, deliberately** — both are
+    /// facts about the BYTES of one open file, both are re-answered by every read, and both are
+    /// dropped by the same close and the same teardown. They are declared next to each other so that
+    /// stays true.
+    private var diskBaseline: [String: String] = [:]
+
+    /// Test seam: what this runtime believes is on disk for `path`. Read by the tests that pin the
+    /// suppression, and by nothing else.
+    func knownDiskText(for path: String) -> String? { diskBaseline[path] }
+
     /// **Which open files began with a UTF-8 BOM** (fix round 1 — the Important).
     ///
     /// `String(data:encoding: .utf8)` — the decoder `readTextFile` uses, and the only decoder in this
@@ -650,9 +865,17 @@ final class EditorRuntime: ObservableObject {
             case .closeModel(let path):
                 // A closed model's BOM answer goes with it: the next open re-reads the file and
                 // re-answers, and a stale `true` would put three bytes in front of a file that no
-                // longer has any (fix round 1).
+                // longer has any (fix round 1). Its known contents go with it for the same reason
+                // and at the same moment — see `diskBaseline`.
                 pathsWithBOM.remove(path)
+                diskBaseline.removeValue(forKey: path)
                 send(.closeModel(path: path))
+            case .applyExternalContent(let path, let text):
+                send(.applyExternalContent(path: path, text: text))
+            case .watchFile(let path):
+                startWatching(path)
+            case .unwatchFile(let path):
+                stopWatching(path)
             case .teardown(let browserId):
                 performTeardown(browserId: browserId)
             }
@@ -796,11 +1019,179 @@ final class EditorRuntime: ObservableObject {
         // (or gained) its BOM re-answers the question rather than trusting the first answer, which is
         // why this ASSIGNS rather than only inserts.
         if contents.hadBOM { pathsWithBOM.insert(path) } else { pathsWithBOM.remove(path) }
+        // editor-product Task 9: and this is the FIRST thing Swift knows about the file's contents —
+        // the baseline every later watcher event is measured against (see `diskBaseline`).
+        diskBaseline[path] = contents.text
         let text = contents.text
         send(.openModel(path: path, language: editorLanguageHint(forPath: path), text: text)) {
             [weak self] ok in
             guard let self, ok else { return }
             self.perform(self.dispatch(.modelOpened(path: path)))
+        }
+    }
+
+    // MARK: - editor-product Task 9: the world changing underneath an open model
+
+    /// Start watching `path`. Called by the reducer's `.watchFile` effect, which `modelOpened`
+    /// emits — so the watch is live from the first instant the page holds the model, which is also
+    /// the first instant a save of it is possible.
+    ///
+    /// A factory that answers `nil` (the directory could not be opened) leaves the model unwatched:
+    /// it shows what it was opened with, and it is never wrong about anything. Logged, because a
+    /// file quietly not tracking disk is worth one line.
+    private func startWatching(_ path: String) {
+        guard watchers[path] == nil else { return }
+        guard let watcher = makeWatcher(path, { [weak self] in
+            // The watcher's own debounce has already coalesced the burst; this hop is what carries
+            // the read off the main actor and back. Weak throughout: a fire racing a teardown must
+            // find nothing rather than resurrect a runtime.
+            Task { @MainActor [weak self] in await self?.fileChangedOnDisk(path) }
+        }) else {
+            NSLog("[EditorRuntime] \(sessionId): could not watch \(path) — the file will not "
+                  + "reload if it changes on disk")
+            return
+        }
+        watchers[path] = watcher
+    }
+
+    /// Stop watching, and forget everything that only made sense while we were.
+    private func stopWatching(_ path: String) {
+        watchers.removeValue(forKey: path)?.stop()
+        // A read in flight for this path resumes into a runtime that no longer holds the model; the
+        // generation bump makes it drop itself rather than rely on that check alone.
+        watchGenerations[path] = (watchGenerations[path] ?? 0) + 1
+        bannerTimers.removeValue(forKey: path)?.cancel()
+    }
+
+    /// **The watcher's handler — one debounced fire, one read, one decision.** `async` and
+    /// internal-by-default deliberately: it is the door the conflict tests drive, so that the whole
+    /// flow (suppression, clean reload, dirty banner, deletion) is reachable with a fake watcher and
+    /// a real temp file, with nothing to wait for and no run loop to spin.
+    func fileChangedOnDisk(_ path: String) async {
+        guard state.models[path] != nil else { return }
+        let generation = (watchGenerations[path] ?? 0) + 1
+        watchGenerations[path] = generation
+
+        let reader = readFile
+        var contents: EditorFileContents?
+        var readFailure: Error?
+        do {
+            contents = try await Task.detached(priority: .utility) { try reader(path) }.value
+        } catch {
+            readFailure = error
+        }
+
+        // **Both guards, and both matter.** The generation is the stale-read guard (see
+        // `watchGenerations`); the model check is the same "the page may have moved on" rule every
+        // other post-await site here keeps.
+        guard watchGenerations[path] == generation, state.models[path] != nil else { return }
+
+        if let readFailure {
+            // **Only a MISSING file is a deletion.** A permissions flap, a device error or a file
+            // that has stopped being UTF-8 are all "we could not look right now" — keeping the
+            // baseline and saying nothing is the honest answer, and a banner claiming the file was
+            // deleted because a network volume hiccuped would be a lie the user acts on.
+            guard case .notFound = editorOpenFailure(for: readFailure) else {
+                NSLog("[EditorRuntime] \(sessionId): could not re-read \(path) after a change: "
+                      + "\(readFailure) — the editor keeps what it has")
+                return
+            }
+            // Swift knows nothing about the contents of a file that is not there. Clearing this is
+            // what makes the file COMING BACK a change again, even if it comes back byte-identical
+            // (a `git checkout` of a deleted file must clear the banner it raised).
+            diskBaseline.removeValue(forKey: path)
+        } else if let contents {
+            // Re-answered on every read, exactly as `openAndSend` does: a file that lost or gained a
+            // BOM externally re-decides, and the next save re-emits whatever it has NOW.
+            if contents.hadBOM { pathsWithBOM.insert(path) } else { pathsWithBOM.remove(path) }
+        }
+
+        switch editorDiskChange(diskText: contents?.text,
+                                baseline: diskBaseline[path],
+                                expectedWrites: expectedWriteCount(for: path)) {
+        case .unchanged:
+            // The common answer, and it says nothing: our own completed save, a sibling's change
+            // reaching the directory source, a `touch`.
+            return
+
+        case .ours:
+            // The narrow window `noteWriteLanded`'s doc names: the rename has landed and the write's
+            // own continuation has not run yet. Consume ONE note (T8's contract, verbatim) and treat
+            // the bytes as known.
+            _ = consumeExpectedWrite(path: path)
+            diskBaseline[path] = contents?.text ?? diskBaseline[path]
+
+        case .external(let text):
+            // Recorded BEFORE the dispatch: whatever the reducer decides — silent reload or banner —
+            // this is what the file now holds, and the next event must be measured against it.
+            diskBaseline[path] = text
+            perform(dispatch(.externalChanged(path: path, text: text)))
+            syncBannerTimer(path: path)
+
+        case .deleted:
+            perform(dispatch(.externalDeleted(path: path)))
+            syncBannerTimer(path: path)
+        }
+    }
+
+    /// **The banner's Reload — discard mine, take what is on disk.**
+    ///
+    /// It re-READS rather than applying the text the banner was raised with: a banner can sit on
+    /// screen for as long as the user takes to answer it, and applying minute-old bytes would
+    /// discard the user's edits in favour of a version of the file that no longer exists either.
+    func reloadFromDisk(_ path: String) async {
+        guard state.models[path] != nil else { return }
+        let reader = readFile
+        let contents: EditorFileContents
+        do {
+            contents = try await Task.detached(priority: .userInitiated) { try reader(path) }.value
+        } catch {
+            NSLog("[EditorRuntime] \(sessionId): reload of \(path) could not read it: \(error)")
+            // The file went away between the banner and the answer. Say THAT rather than leaving a
+            // Reload button that does nothing.
+            if case .notFound = editorOpenFailure(for: error) {
+                diskBaseline.removeValue(forKey: path)
+                perform(dispatch(.externalDeleted(path: path)))
+                syncBannerTimer(path: path)
+            }
+            return
+        }
+        guard state.models[path] != nil else { return }
+        if contents.hadBOM { pathsWithBOM.insert(path) } else { pathsWithBOM.remove(path) }
+        diskBaseline[path] = contents.text
+        perform(dispatch(.reloadApplied(path: path, text: contents.text)))
+        syncBannerTimer(path: path)
+    }
+
+    /// **The banner's Keep mine.** The banner goes; nothing else moves. The baseline stays at what
+    /// the watcher last saw, which is what makes the next ⌘S an ordinary overwrite (its own event
+    /// resolves against the text it wrote) and a FURTHER external change a fresh conflict.
+    func keepMine(_ path: String) {
+        perform(dispatch(.keepMineChosen(path: path)))
+        syncBannerTimer(path: path)
+    }
+
+    /// The banner's ×.
+    func dismissBanner(_ path: String) {
+        perform(dispatch(.bannerDismissed(path: path)))
+        syncBannerTimer(path: path)
+    }
+
+    /// Arm, re-arm or cancel one path's transient-error timer to match the banner it now has.
+    ///
+    /// Called after every banner-moving dispatch rather than only after a failure, which is what
+    /// makes the two rules structural: a transient error always leaves after
+    /// `editorTransientErrorDuration`, and a conflict raised over one takes that timer down with it
+    /// (a fire that arrived later could only clear the conflict, which is exactly what must not
+    /// happen — the reducer refuses it too, and this is the belt).
+    private func syncBannerTimer(path: String) {
+        bannerTimers.removeValue(forKey: path)?.cancel()
+        guard case .transientError = state.banner(for: path) else { return }
+        let deadline = scheduler.now().addingTimeInterval(editorTransientErrorDuration)
+        bannerTimers[path] = scheduler.timer(deadline) { [weak self] in
+            guard let self else { return }
+            self.bannerTimers.removeValue(forKey: path)
+            self.perform(self.dispatch(.transientErrorExpired(path: path)))
         }
     }
 
@@ -874,11 +1265,24 @@ final class EditorRuntime: ObservableObject {
     // MARK: Teardown
 
     private func performTeardown(browserId: Int32) {
-        // The page this bag described is going away, and a note that outlived it could only ever
-        // suppress a change made by somebody else (see `pendingExpectedWrites`). The BOM answers go
-        // with it for the same reason: a fresh runtime re-reads every file it opens.
+        // **The watchers die FIRST, and that ordering is what makes the line below safe** (T8's
+        // teardown note, stated at the site it depends on). Clearing the bag mid-save would
+        // otherwise be a real hazard: a save's rename can land after this runs, and a note that had
+        // been dropped would leave that rename looking like somebody else's edit. It is harmless
+        // only because nothing is left to notice it — every watch this runtime owned is stopped
+        // here, and a fresh runtime re-reads every file it opens, so the first thing the next one
+        // knows about any of these files is today's bytes.
+        for (_, watcher) in watchers { watcher.stop() }
+        watchers.removeAll()
+        watchGenerations.removeAll()
+        for (_, timer) in bannerTimers { timer.cancel() }
+        bannerTimers.removeAll()
+        // The page these described is going away, and a note that outlived it could only ever
+        // suppress a change made by somebody else (see `pendingExpectedWrites`). The BOM answers and
+        // the known contents go with it for the same reason.
         pendingExpectedWrites.removeAll()
         pathsWithBOM.removeAll()
+        diskBaseline.removeAll()
         idPoll?.cancel()
         idPoll = nil
         readyWatchdog?.cancel()

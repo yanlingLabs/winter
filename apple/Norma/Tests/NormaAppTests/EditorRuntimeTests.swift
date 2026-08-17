@@ -259,9 +259,15 @@ final class EditorRuntimeReducerTests: XCTestCase {
     }
 
     func testClosingTheActiveModelLeavesTheEditorShowingNothing() {
-        let (open, _) = reduce(ready(), [.openRequested(path: "/a.ts"), .modelOpened(path: "/a.ts")])
+        let (open, openEffects) = reduce(ready(), [.openRequested(path: "/a.ts"),
+                                                   .modelOpened(path: "/a.ts")])
+        // editor-product Task 9: the watch is part of a model's own lifecycle now — armed when the
+        // page reports the model open (which is also the first moment a save of it is possible) and
+        // stopped with it, so "a watcher exists exactly while a model does" is the reducer's claim
+        // rather than the imperative half's discipline.
+        XCTAssertEqual(openEffects, [.openModel(path: "/a.ts"), .watchFile(path: "/a.ts")])
         let (closed, effects) = reduce(open, [.closeRequested(path: "/a.ts")])
-        XCTAssertEqual(effects, [.closeModel(path: "/a.ts")])
+        XCTAssertEqual(effects, [.closeModel(path: "/a.ts"), .unwatchFile(path: "/a.ts")])
         XCTAssertEqual(closed.models, [:])
         XCTAssertNil(closed.current, "activating a survivor is the caller's obligation (drill 9)")
     }

@@ -170,8 +170,12 @@ enum EditorBridgeOutbound {
     /// `alternativeVersionId != savedVersionId`, and `savedVersionId` otherwise moves only when a
     /// model is opened or externally replaced — so a saved file would keep its modified dot forever.
     /// The tempting shortcut, acking a save with `applyExternalContent(text: whatWasWritten)`, is a
-    /// trap: it routes through Monaco's `setValue`, whose `_setValueFromTextBuffer` clears the
-    /// model's command manager, and would silently throw away the user's undo history on every save.
+    /// trap: it REPLACES the buffer, so anything the user typed between the pull and this
+    /// acknowledgement would be overwritten by the bytes that went to disk — the same data loss the
+    /// `seq` anchor below exists to prevent, arriving through the other door. (editor-product Task 9
+    /// upgraded that message from `setValue` to a full-range `pushEditOperations` edit, so the older
+    /// form of this warning — "it clears the model's command manager and destroys the undo history"
+    /// — no longer holds; the replacement itself is what makes it wrong here, and always was.)
     /// This message touches no content, no undo stack and no view state.
     ///
     /// **`seq` is not bookkeeping — it is the whole correctness of the acknowledgement.** Between

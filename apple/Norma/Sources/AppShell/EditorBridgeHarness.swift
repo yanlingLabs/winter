@@ -727,9 +727,13 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
             }
 
         case "5.undone":
-            // The proof `markSaved` touched no undo history: the pre-save edit really came back out,
-            // which the `applyExternalContent`-as-acknowledgement shortcut could not have allowed
-            // (its `setValue` clears the model's command manager).
+            // The proof `markSaved` touched no undo history: the pre-save edit really came back out.
+            // (editor-product Task 9 note: this step's claim is about `markSaved` alone. It used to
+            // read as a contrast with `applyExternalContent`, whose `setValue` cleared the command
+            // manager — that is no longer true of it, since T9 made it a full-range
+            // `pushEditOperations` edit precisely so an agent's reload stays undoable. What still
+            // makes `applyExternalContent` wrong as an acknowledgement is that it replaces the
+            // buffer at all.)
             currentValue { [weak self] result in
                 guard let self else { return }
                 switch result {

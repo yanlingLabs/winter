@@ -15,6 +15,17 @@ let panelEditorChromeGap: CGFloat = 6
 /// it is a statement, not a button, and the save button beside it is the thing to click.
 let panelEditorDirtyDotSize: CGFloat = 6
 
+/// editor-product Task 9 — the banner's own vertical breathing room. Small: this row sits between
+/// the chrome and the code, and a tall one would read as a dialog rather than as a note about the
+/// file. The horizontal inset is `panelTabPillInset`, shared with the chrome row above it so the
+/// two lines of text start at the same x.
+let panelEditorBannerVerticalPadding: CGFloat = 5
+
+/// The gap between the banner's sentence and its buttons, and between the buttons themselves — the
+/// chrome row's own `panelEditorChromeGap`, reused rather than re-chosen: they are stacked
+/// immediately above one another and any second figure would read as a mistake.
+let panelEditorBannerGap: CGFloat = panelEditorChromeGap
+
 // MARK: - Pure decisions
 
 /// PURE: what a code tab can know about its session's working directories.
@@ -439,15 +450,50 @@ final class PanelEditorTabModel: ObservableObject {
     /// fresh hidden Chromium up to save a file it does not hold. `runtimeRef` is the fallback for the
     /// ordinary case where the host is gone but this pass already resolved one.
     func requestSave() {
-        guard !isRetired, let path, !path.isEmpty else { return }
-        let resolved = sessionId.flatMap { host?.existingEditorRuntime(for: $0) } ?? runtimeRef
-        guard let runtime = resolved else { return }
+        // editor-product Task 9: the resolution itself moved to `resolvedRuntime()` — unchanged in
+        // behaviour, shared with the three banner doors so all four cannot drift apart.
+        guard let runtime = resolvedRuntime(), let path else { return }
         Task { @MainActor [weak runtime] in _ = await runtime?.save(path) }
     }
 
     /// What the chrome asks. A model with no runtime, or a runtime with no model for this path, is
     /// not dirty.
     var isDirty: Bool { editorTabIsDirty(state: runtimeState, path: path) }
+
+    // MARK: - editor-product Task 9: the banner
+
+    /// What this tab is saying above the editor. Read from the mirrored runtime state — the same
+    /// single source the dirty dot and the viewport read, so the banner can never describe a
+    /// different editor than the one on screen.
+    var banner: EditorTabBanner {
+        guard let path, let runtimeState, runtimeRef != nil else { return .none }
+        return runtimeState.banner(for: path)
+    }
+
+    /// **The three banner doors**, resolved exactly like `requestSave()` — through the host at fire
+    /// time, never through a remembered runtime — so a button pressed on a tab whose session has
+    /// departed reaches nothing rather than a torn-down page.
+    func reloadFromDisk() {
+        guard let runtime = resolvedRuntime(), let path else { return }
+        Task { @MainActor [weak runtime] in await runtime?.reloadFromDisk(path) }
+    }
+
+    func keepMine() {
+        guard let runtime = resolvedRuntime(), let path else { return }
+        runtime.keepMine(path)
+    }
+
+    func dismissBanner() {
+        guard let runtime = resolvedRuntime(), let path else { return }
+        runtime.dismissBanner(path)
+    }
+
+    /// The runtime this tab may speak to right now — `requestSave`'s own resolution, extracted so
+    /// the four doors that need it cannot drift apart.
+    private func resolvedRuntime() -> EditorRuntime? {
+        guard !isRetired, let path, !path.isEmpty else { return nil }
+        return sessionId.flatMap { host?.existingEditorRuntime(for: $0) } ?? runtimeRef
+    }
 
     /// What the content asks, with `isViewportHost` at its safe default — see `editorViewportPlan`.
     ///
@@ -614,6 +660,24 @@ struct PanelEditorContent: View {
     @ObservedObject var model: PanelEditorTabModel
 
     var body: some View {
+        VStack(spacing: 0) {
+            // **editor-product Task 9 — above everything, including the calm states.** A file that
+            // was deleted while its tab was showing "File not found" (a failed re-open racing the
+            // deletion) still has something to say, and a banner that only rendered over the editor
+            // would be invisible exactly when the news is worst.
+            if model.banner != .none {
+                EditorBannerView(banner: model.banner,
+                                 onReload: { model.reloadFromDisk() },
+                                 onKeepMine: { model.keepMine() },
+                                 onDismiss: { model.dismissBanner() })
+            }
+            viewport
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onAppear { model.activate() }
+    }
+
+    private var viewport: some View {
         Group {
             switch model.plan {
             case .adoptAndActivate(let path), .activateOnly(let path), .upToDate(let path):
@@ -640,7 +704,107 @@ struct PanelEditorContent: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onAppear { model.activate() }
+    }
+}
+
+// MARK: - editor-product Task 9: the banner
+
+/// **One row above the editor, two sources, one treatment.**
+///
+/// The look is the shell's own inline-notice vocabulary rather than an invention: the row sits on
+/// `Theme.elevatedSurface` with a `Theme.hairline` rule under it (`PanelDiffTab`'s own footer is the
+/// in-repo shape), the sentence is `.primary` and any detail is `Theme.textMuted`, and the buttons
+/// wear `ShellSidebarRowStyle` like every other control in the panel chrome.
+///
+/// **No danger tone, deliberately** — and that is the house rule, not a shortcut: `Theme`'s own
+/// documentation records that the palette has no danger or success colour, that the transcript's
+/// failure lines are therefore set in `.primary`, and that the two diff roles are the ONE place
+/// where colour carries meaning. A red banner here would either invent an unmeasured token or
+/// borrow the diff's, and borrowing it would make "removed lines" and "the save failed" the same
+/// idea in the user's eye.
+struct EditorBannerView: View {
+    let banner: EditorTabBanner
+    let onReload: () -> Void
+    let onKeepMine: () -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: panelEditorBannerGap) {
+            Text(sentence)
+                .font(Typography.caption(.medium))
+                .foregroundStyle(.primary)
+                .lineLimit(2)
+                .truncationMode(.middle)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if let detail {
+                Text(detail)
+                    .font(Typography.caption())
+                    .foregroundStyle(Theme.textMuted)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: panelEditorBannerGap)
+
+            switch banner {
+            case .conflict(.changed):
+                // Reload first, Keep mine second: the destructive one is the one that discards the
+                // user's edits, and it reads first because it is the answer to the question the
+                // sentence asks ("it changed — do you want it?"). Neither is a default and neither
+                // is pre-selected; nothing here happens without a click.
+                action(editorConflictReloadTitle, onReload)
+                action(editorConflictKeepTitle, onKeepMine)
+            case .conflict(.deleted):
+                // No Reload — there is nothing to reload TO (`editorConflictDeletedMessage`).
+                dismissButton
+            case .transientError, .none:
+                dismissButton
+            }
+        }
+        .padding(.horizontal, panelTabPillInset)
+        .padding(.vertical, panelEditorBannerVerticalPadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.elevatedSurface)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Theme.hairline).frame(height: 1)
+        }
+    }
+
+    private var sentence: String {
+        switch banner {
+        case .conflict(.changed): return editorConflictChangedMessage
+        case .conflict(.deleted): return editorConflictDeletedMessage
+        case .transientError(let message): return message
+        case .none: return ""
+        }
+    }
+
+    private var detail: String? {
+        if case .conflict(.deleted) = banner { return editorConflictDeletedDetail }
+        return nil
+    }
+
+    private var dismissButton: some View {
+        ShellTitlebarButton(systemImage: "xmark",
+                            label: editorBannerDismissLabel,
+                            size: panelChromeButtonSize,
+                            action: onDismiss)
+    }
+
+    /// A text button in the panel's ONE button treatment — the same hover, highlight and hit box
+    /// every sidebar row and chrome button wears (`ShellSidebarRowStyle`), with the row's own inset
+    /// so the label is not flush against the fill.
+    private func action(_ title: String, _ perform: @escaping () -> Void) -> some View {
+        Button(action: perform) {
+            Text(title)
+                .font(Typography.caption(.medium))
+                .foregroundStyle(Theme.textMuted)
+                .padding(.horizontal, panelEditorBannerGap)
+                .frame(height: panelChromeButtonSize)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(ShellSidebarRowStyle(isSelected: false))
+        .accessibilityLabel(title)
     }
 }
 

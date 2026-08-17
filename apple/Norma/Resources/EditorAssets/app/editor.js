@@ -322,19 +322,74 @@ function pullContent(path, seq) {
     sendToSwift("contentResponse", { path: path, seq: seq, text: text });
 }
 
+/**
+ * **The file changed outside the editor — take the new text, KEEP the undo history.**
+ * (editor-product Task 9; the spec's Stage-B input names this obligation by name.)
+ *
+ * ## Why this is a full-range edit and not `setValue`
+ *
+ * `setValue` goes through `_setValueFromTextBuffer`, which **clears the model's command manager** —
+ * every undo step the user had, gone. That was tolerable while the only caller was a debug harness;
+ * it is not tolerable now that this message is what an agent's edit lands as. An agent rewriting a
+ * file the user is reading must be undoable, exactly as it is in VS Code.
+ *
+ * A full-range `pushEditOperations` is the same replacement expressed as an EDIT: one undo element
+ * on top of the existing stack, so ⌘Z restores what the user had, and the scroll position and
+ * decorations survive instead of being reset to the top of the file.
+ *
+ * ## The EOL step, and why skipping it would silently rewrite files
+ *
+ * **Monaco rewrites the text an edit inserts to the MODEL's current ending** — vendored, verbatim,
+ * from `PieceTreeTextBuffer.applyEdits`:
+ *
+ * ```js
+ * let P; [T,M,A,P] = countEOL(S.text); const N = this.getEOL();
+ * P === 0 || P === (N === "\r\n" ? 2 : 1) ? D = S.text : D = S.text.replace(/\r\n|\r|\n/g, N)
+ * ```
+ *
+ * (`countEOL`'s fourth value is a bitmask: 0 = no terminators, 1 = all LF, 2 = all CRLF, 3 = mixed.)
+ * So an edit only survives untouched when the incoming text has no line endings at all, or endings
+ * that uniformly match the model's. `setValue` never had this problem — it REBUILDS the buffer, and
+ * the builder picks the ending by majority from the new text.
+ *
+ * Without the `setEOL` below, an external rewrite of an LF file into a CRLF one would be silently
+ * flattened back to LF in the buffer, and the next ⌘S would write the flattened version to disk —
+ * the exact class of silent data-shape damage Task 8's EOL ruling exists to prevent. With it, this
+ * message applies the same rule `openModel` does: **the file's own dominant ending governs**, since
+ * an external change is simply the file as it is now. It also keeps
+ * `MonacoTextBuffer.savedText(forFileOpenedWith:)` — the Swift-side expectation every drill and
+ * every save is computed through — true for a model that has been externally replaced.
+ *
+ * ## What is unchanged, and must stay unchanged
+ *
+ * `applyingExternal` still brackets the mutation. It is not belt-and-braces: the edit fires the
+ * content listener, which would compute dirty against the OLD saved id and emit `dirty: true` an
+ * instant before the new id makes it false again — one external write, two spurious transitions, a
+ * tab dot that blinks. (Safe either way if Monaco ever fired that event asynchronously: by then the
+ * saved id is already the new one, so the recompute answers "clean" on its own.)
+ *
+ * The saved point still moves to the version this edit produced, and the dirty flag is still
+ * recomputed through `refreshDirty` — so a model that was dirty reports exactly one transition, to
+ * clean, which is what the live harness's drill 7 asserts.
+ */
 function applyExternalContent(path, text) {
     const entry = page.models.get(path);
     if (!entry) {
         console.error("normaEditor: applyExternalContent for a path that is not open:", path);
         return;
     }
-    // The suppression flag is not belt-and-braces: `setValue` fires the content listener, which
-    // would compute dirty against the OLD saved id and emit `dirty: true` an instant before the new
-    // id makes it false again. One external write, two spurious transitions, and a tab dot that
-    // blinks. (Safe either way if Monaco ever fired that event asynchronously: by then the saved id
-    // is already the new one, so the recompute answers "clean" on its own.)
     entry.applyingExternal = true;
-    entry.model.setValue(text);
+    // BEFORE the edit — see the EOL note above. On a model whose ending already matches, this is
+    // Monaco's own early return (`if(this._buffer.getEOL()===$)return;`) and costs nothing.
+    entry.model.setEOL(dominantEOLIsCRLF(text)
+                       ? monaco.editor.EndOfLineSequence.CRLF
+                       : monaco.editor.EndOfLineSequence.LF);
+    // `[]` for the cursor state before, and a computer that returns null: this replacement is not
+    // the user's edit and must not move their selection — Monaco keeps the cursor where it can.
+    entry.model.pushEditOperations([], [{
+        range: entry.model.getFullModelRange(),
+        text: text
+    }], function () { return null; });
     entry.savedVersionId = entry.model.getAlternativeVersionId();
     entry.applyingExternal = false;
     // Any pull still awaiting acknowledgement described text that no longer exists in this buffer,
@@ -368,8 +423,12 @@ function applyExternalContent(path, text) {
  *
  * It touches nothing else — not the buffer, not the undo stack, not the view state, not the content
  * listener. That is the other reason this message exists rather than Swift acking a save with
- * `applyExternalContent`: that route goes through `setValue`, whose `_setValueFromTextBuffer` clears
- * the model's command manager, so every save would silently destroy the user's undo history.
+ * `applyExternalContent(text: whatWasWritten)`: that route REPLACES THE BUFFER, so any keystroke
+ * made between the pull and the acknowledgement would be overwritten by the text that was written
+ * to disk — the data loss the seq anchor below exists to prevent, arriving by a different door.
+ * (Task 9 upgraded `applyExternalContent` from `setValue` to a full-range `pushEditOperations`, so
+ * the OLD form of this warning — "it would destroy the undo history" — no longer holds. The
+ * replacement itself is what makes it wrong as an acknowledgement, and always was.)
  */
 function markSaved(path, seq) {
     // Both branches below log with console.warn, not console.error: a markSaved for a path that
