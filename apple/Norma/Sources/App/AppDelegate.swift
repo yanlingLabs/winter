@@ -1165,9 +1165,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             loginItemController: loginItem,
             panic: { [weak peripheral] in peripheral?.panic() },
             // live-gate fix H: not a bare `NSApp.terminate` — see `quitReleasingBrowserViews`.
+            // editor-product Task 10: routed through `editorQuitGate` first — the dirty-editor
+            // protection ahead of the browser sweep (`EditorQuitGate`'s own doc).
             quit: { [weak self] in
                 guard let self else { return NSApp.terminate(nil) }
-                self.quitReleasingBrowserViews()
+                self.editorQuitGate.run()
             },
             // Lifecycle T4: the ONE true-quit gate — arms `reallyQuitting` so
             // `applicationShouldTerminate` (T3) lets THIS quit through instead of treating it like
@@ -1255,6 +1257,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
+    // MARK: - editor-product Task 10: the quit path's dirty-editor gate
+
+    /// **The real wiring for `EditorQuitGate`** — `lazy`, on the same terms as `ShellSessionHost
+    /// .presentHandoffFailure`, so its closures can capture `self` weakly. Constructed once; every
+    /// closure re-reads `appWindow?.host` FRESH at call time rather than capturing it, since the
+    /// first summon can happen at any point after this property is first touched.
+    ///
+    /// **Obligation 1 (T3 review, routed here): `teardownAllRuntimes` tears down EVERY live runtime,
+    /// clean ones too** — a pre-warmed but never-dirtied editor is exactly as capable of surviving
+    /// ⌘Q view-still-parented as a dirty one; the browser sweep this method's sibling
+    /// (`quitReleasingBrowserViews`) already runs has never known these containers exist at all.
+    ///
+    /// **Obligation 5: no attempt to wait out an in-flight save.** `teardownAllRuntimes` calls
+    /// `ShellSessionHost.teardownEditorRuntime(for:)` synchronously and returns; a save whose write
+    /// already passed `EditorSaveCoordinator`'s pull completes its rename AFTER this runs
+    /// (`EditorRuntime.performTeardown`'s own doc — harmless, and documented there, not re-litigated
+    /// here).
+    lazy var editorQuitGate = EditorQuitGate(
+        dirtyRuntimeStates: { [weak self] in
+            guard let host = self?.appWindow?.host else { return [] }
+            return host.editorRuntimes.values.map(\.stateSnapshot)
+        },
+        teardownAllRuntimes: { [weak self] in
+            guard let host = self?.appWindow?.host else { return 0 }
+            let sessionIds = Array(host.editorRuntimes.keys)
+            for sessionId in sessionIds { host.teardownEditorRuntime(for: sessionId) }
+            return sessionIds.count
+        },
+        presentAlert: { dirtyPaths in presentQuitDirtyAlert(dirtyPaths: dirtyPaths) },
+        // What used to run unconditionally: the browser sweep, the settle beat, the terminate.
+        // `forceSettle` widens `quitReleasingBrowserViews`'s own no-browsers guard — see that
+        // method's own doc for why a browser-less, editor-only quit needs it just as much.
+        proceedWithQuit: { [weak self] tornDownCount in
+            self?.quitReleasingBrowserViews(forceSettle: tornDownCount > 0)
+        },
+        // Obligation (unstated in the brief, necessary for correctness): undo the menu-bar Quit's
+        // own `reallyQuitting = true` arm (`onReallyQuit`, wired above — it runs BEFORE this gate,
+        // per `MenuBarController.didQuit`'s own ordering doc). This gate is the FIRST cancellable
+        // point the true-quit path has ever had; leaving the flag set would corrupt every LATER
+        // plain ⌘Q into a silent full quit — exactly the corruption class `updaterQuitting`'s own
+        // doc comment (near `reallyQuitting`'s declaration, above) already names for a stale `true`
+        // on that flag ("if the quit somehow failed, a stale `reallyQuitting = true` would corrupt
+        // later ⌘Q semantics").
+        cancelQuit: { [weak self] in self?.reallyQuitting = false })
+
     /// **The quit door — live-gate fix H, and the one place the browser views get unparented while
     /// the app is still ALIVE.**
     ///
@@ -1293,9 +1340,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// latches `BrowserRuntime` inert first, so the release below is the last thing that happens to
     /// the browsers. Latched BEFORE the no-browsers guard on purpose: the door has opened either
     /// way, and a runtime that cannot be reached is the same statement in both branches.
-    func quitReleasingBrowserViews() {
+    ///
+    /// **`forceSettle` (editor-product Task 10): the same beat, for a reason this guard cannot see
+    /// on its own.** `hasLiveBrowsers` reads `BrowserRuntime.shared.containers` ALONE — the editor's
+    /// hidden Chromium is deliberately outside that table (`EditorRuntime`'s own doc: outside
+    /// `BrowserSignals`/`BrowserLifecycleEngine` on purpose). A session with a pre-warmed or open
+    /// editor and no web tab at all would otherwise hit this guard, skip the settle beat entirely and
+    /// terminate through the EXACT unclean-close shape the table above measured — zero drain turns —
+    /// even after `EditorQuitGate` has just torn its browser down. `editorQuitGate` passes `true`
+    /// whenever it tore down at least one live runtime; every other caller keeps today's behaviour
+    /// via the default.
+    func quitReleasingBrowserViews(forceSettle: Bool = false) {
         BrowserRuntime.shared.quiesce()
-        guard BrowserRuntime.shared.hasLiveBrowsers else { return NSApp.terminate(nil) }
+        guard BrowserRuntime.shared.hasLiveBrowsers || forceSettle else { return NSApp.terminate(nil) }
         BrowserRuntime.shared.releaseViewsForShutdown()
         // **A `Timer` in COMMON modes, not `DispatchQueue.main.asyncAfter`** — the same lesson
         // `BrowserRuntime.Scheduler.production.timer` carries, and it was re-learned here the hard
@@ -1403,4 +1460,135 @@ func isSystemInitiatedQuitEvent() -> Bool {
         || reason == OSType(kAEReallyLogOut)
         || reason == OSType(kAEShowRestartDialog)
         || reason == OSType(kAEShowShutdownDialog)
+}
+
+// MARK: - editor-product Task 10: the quit path's dirty-editor gate
+
+/// PURE: every dirty model's path, across every runtime the quit gate must ask about. Reads ONLY
+/// `EditorRuntimeState` — never a session's row, never a title — which is what makes obligation 4
+/// (tolerate a daemon-deleted session) true by construction rather than by a guard: there is no
+/// session lookup here for a dead session to break. A path dirty in two different runtimes at once
+/// (the same file open in two code sessions — legal, if rare) appears twice; disclosed, not fixed —
+/// see `EditorQuitGate`'s own doc.
+func quitDirtyFilePaths(runtimeStates: [EditorRuntimeState]) -> [String] {
+    runtimeStates.flatMap { state in state.models.filter { $0.value.dirty }.map(\.key) }
+}
+
+/// PURE: does the quit path need to ask? **This is the level obligation 6's pin lives at** — "zero
+/// dirty ⇒ terminate untouched" is a claim about this function answering `.proceedUntouched`, and
+/// about `EditorQuitGate.run()` never calling `presentAlert` for that answer. It is NOT a claim
+/// about `teardownAllRuntimes`, which `run()` calls on EITHER branch (obligation 1: every live
+/// runtime, clean ones too) — the pin is at the decision/alert level, not "nothing happens".
+enum QuitDirtyGateDecision: Equatable {
+    case proceedUntouched
+    case confirm(dirtyPaths: [String])
+}
+
+func quitDirtyGateDecision(dirtyPaths: [String]) -> QuitDirtyGateDecision {
+    dirtyPaths.isEmpty ? .proceedUntouched : .confirm(dirtyPaths: dirtyPaths)
+}
+
+/// The quit alert's two buttons. No "Cancel" — `.review` already means "don't quit", the same
+/// meaning `applicationShouldTerminate`'s own `.terminateCancel` carries for a plain ⌘Q.
+enum QuitAlertChoice: Equatable { case review, quitAnyway }
+
+enum QuitGateAction: Equatable { case cancelQuit, proceedWithTeardown }
+
+/// PURE: `.review` cancels (design notes — "Review hands control back so the user saves via the
+/// tabs"; no save-all here), `.quitAnyway` proceeds.
+func quitGateAction(choice: QuitAlertChoice) -> QuitGateAction {
+    choice == .review ? .cancelQuit : .proceedWithTeardown
+}
+
+/// PURE: "N unsaved files" — singular-aware, since "1 unsaved files" is the kind of copy bug a user
+/// notices before anything else about the dialog.
+func quitDirtyAlertTitle(count: Int) -> String {
+    count == 1 ? "1 unsaved file" : "\(count) unsaved files"
+}
+
+/// How many basenames the quit alert lists before switching to "…and N more" — design notes' "cap
+/// the list visually if long"; no exact figure was specified, this is the controller's own choice.
+let quitDirtyAlertListCap = 5
+
+/// PURE: the alert's basenames line, sorted for a STABLE presentation (`quitDirtyFilePaths`'
+/// own order is whatever `Dictionary` iteration happened to give this run, per-runtime). Basenames
+/// only, from the paths themselves — obligation 4, same reasoning as `quitDirtyFilePaths`'s doc:
+/// no session lookup exists here to fail on a dead one.
+func quitDirtyAlertFileList(dirtyPaths: [String]) -> String {
+    let basenames = dirtyPaths.sorted().map { ($0 as NSString).lastPathComponent }
+    guard basenames.count > quitDirtyAlertListCap else { return basenames.joined(separator: "\n") }
+    let shown = basenames.prefix(quitDirtyAlertListCap).joined(separator: "\n")
+    return shown + "\n…and \(basenames.count - quitDirtyAlertListCap) more"
+}
+
+/// **editor-product Task 10: the quit path's dirty-editor gate**, as one small imperative shell
+/// around four pure decisions (`quitDirtyFilePaths`/`quitDirtyGateDecision`/`quitGateAction`) —
+/// every side effect is a SEAM, so the ORDERING obligation (T3 review, routed here: teardown for
+/// every live runtime BEFORE the settle beat) is provable with spies rather than a real
+/// `BrowserRuntime`/CEF/`NSApp.terminate` stack, none of which a unit test may touch safely (a real
+/// `reallyQuitting == true` run reaching `NSApp.terminate` would tear down the xctest host itself).
+///
+/// **Disclosed, not fixed, here:** a code tab closed WHILE its file is still opening (an in-flight
+/// read racing this gate) can have its model re-added by the late `modelOpened` landing after —
+/// `EditorRuntime`'s own carried note on why that read is not cancellable; irrelevant to the gate
+/// itself, which only ever asks what IS dirty at the instant it runs. A system logout bypasses this
+/// gate entirely (`applicationShouldTerminate`'s `systemInitiated` axis answers `.terminateNow`
+/// straight from AppKit's own quit event, never through the menu-bar `quit:` closure this wires
+/// into) — an editor browser gets exactly the same residual-unclean-close exposure on logout that a
+/// web browser already has (`quitReleasingBrowserViews`'s own doc, "the belt for a `NormaCEFShutdown`
+/// reached without passing through here"; spec §10 gate 10), unchanged by this task.
+@MainActor
+struct EditorQuitGate {
+    var dirtyRuntimeStates: () -> [EditorRuntimeState]
+    /// Obligation 1: every live runtime, clean ones too. Returns how many it tore down — threaded to
+    /// `proceedWithQuit` so production can decide whether the browser-sweep settle beat is owed
+    /// (`quitReleasingBrowserViews`'s own `forceSettle` doc: `hasLiveBrowsers` never sees an editor's
+    /// container).
+    var teardownAllRuntimes: () -> Int
+    /// Synchronous — production's `NSAlert.runModal()` already blocks until answered, so there is no
+    /// completion-handler seam to fake here.
+    var presentAlert: (_ dirtyPaths: [String]) -> QuitAlertChoice
+    /// What used to run unconditionally: `AppDelegate.quitReleasingBrowserViews` (browser sweep,
+    /// settle beat, terminate) — now told how many editor runtimes it just released.
+    var proceedWithQuit: (_ tornDownCount: Int) -> Void
+    /// Undo the menu-bar Quit's own `reallyQuitting = true` arm. Required, not optional — see this
+    /// type's own doc and `AppDelegate.editorQuitGate`'s wiring for why leaving it set would corrupt
+    /// a LATER plain ⌘Q.
+    var cancelQuit: () -> Void
+
+    func run() {
+        let dirtyPaths = quitDirtyFilePaths(runtimeStates: dirtyRuntimeStates())
+        switch quitDirtyGateDecision(dirtyPaths: dirtyPaths) {
+        case .proceedUntouched:
+            proceedWithQuit(teardownAllRuntimes())
+        case .confirm(let paths):
+            switch quitGateAction(choice: presentAlert(paths)) {
+            case .cancelQuit:
+                cancelQuit()
+            case .proceedWithTeardown:
+                proceedWithQuit(teardownAllRuntimes())
+            }
+        }
+    }
+}
+
+/// The quit alert's real presentation — app-modal (`NSAlert.runModal()`), never a sheet: a dirty
+/// editor legally outlives a HIDDEN shell window (`ShellSessionHostTests
+/// .testHidingTheShellReleasesACleanEditorAndKeepsOneWithUnsavedWork` — only a CLEAN one is released
+/// on departure), so a sheet hung on that window could be presented onto nothing visible. `activate`
+/// first: this fires from a status-item action, which does not itself activate the app
+/// (`AppDelegate.showDockIcon`'s own identical call, for the identical reason).
+///
+/// Review first (the default button — Return triggers it; NSAlert makes the FIRST added button the
+/// default), Quit Anyway second: the destructive choice is never the one a stray Return key fires.
+@MainActor
+func presentQuitDirtyAlert(dirtyPaths: [String]) -> QuitAlertChoice {
+    NSApp.activate(ignoringOtherApps: true)
+    let alert = NSAlert()
+    alert.alertStyle = .warning
+    alert.messageText = quitDirtyAlertTitle(count: dirtyPaths.count)
+    alert.informativeText = quitDirtyAlertFileList(dirtyPaths: dirtyPaths)
+    alert.addButton(withTitle: "Review")
+    alert.addButton(withTitle: "Quit Anyway")
+    return alert.runModal() == .alertFirstButtonReturn ? .review : .quitAnyway
 }

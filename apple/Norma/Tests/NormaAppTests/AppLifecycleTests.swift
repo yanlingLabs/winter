@@ -292,4 +292,143 @@ final class AppLifecycleTests: XCTestCase {
         XCTAssertFalse(handled, "no main window existed — this call must have attempted to open one itself, leaving nothing for AppKit's default handling")
         XCTAssertTrue(delegate.detachedWindows.isEmpty, "no appModel to open against — the attempt no-ops safely (same guard as summonAppWindow's other callers)")
     }
+
+    // MARK: - editor-product Task 10: the quit path's dirty-editor gate (PURE)
+
+    private func dirtyState(_ path: String, dirty: Bool = true) -> EditorRuntimeState {
+        var state = EditorRuntimeState()
+        state.models[path] = EditorRuntimeState.ModelEntry(dirty: dirty)
+        return state
+    }
+
+    func testQuitDirtyFilePathsGathersEveryDirtyModelAcrossEveryRuntimeAndIgnoresCleanOnes() {
+        let clean = dirtyState("/repo/clean.ts", dirty: false)
+        var mixed = dirtyState("/repo/a.ts", dirty: true)
+        mixed.models["/repo/clean2.ts"] = EditorRuntimeState.ModelEntry(dirty: false)
+        let secondRuntime = dirtyState("/other/b.ts", dirty: true)
+
+        XCTAssertEqual(quitDirtyFilePaths(runtimeStates: []), [])
+        XCTAssertEqual(quitDirtyFilePaths(runtimeStates: [clean]), [], "nothing dirty, nothing gathered")
+        // Two runtimes: `Dictionary` iteration order is not guaranteed, so this is a Set, never a
+        // positional array comparison.
+        XCTAssertEqual(Set(quitDirtyFilePaths(runtimeStates: [mixed, secondRuntime])),
+                       Set(["/repo/a.ts", "/other/b.ts"]))
+    }
+
+    /// **Obligation 6's pin, at exactly the level it belongs**: this decision, not "did teardown
+    /// run" (that is unconditional — see `EditorQuitGate`'s own tests below).
+    func testQuitDirtyGateDecisionIsProceedUntouchedOnlyWhenNothingIsDirty() {
+        XCTAssertEqual(quitDirtyGateDecision(dirtyPaths: []), .proceedUntouched)
+        XCTAssertEqual(quitDirtyGateDecision(dirtyPaths: ["/repo/a.ts"]),
+                       .confirm(dirtyPaths: ["/repo/a.ts"]))
+    }
+
+    func testQuitGateActionMapsReviewToCancelAndQuitAnywayToProceed() {
+        XCTAssertEqual(quitGateAction(choice: .review), .cancelQuit)
+        XCTAssertEqual(quitGateAction(choice: .quitAnyway), .proceedWithTeardown)
+    }
+
+    func testQuitDirtyAlertTitleIsSingularAware() {
+        XCTAssertEqual(quitDirtyAlertTitle(count: 1), "1 unsaved file")
+        XCTAssertEqual(quitDirtyAlertTitle(count: 2), "2 unsaved files")
+        XCTAssertEqual(quitDirtyAlertTitle(count: 0), "0 unsaved files")
+    }
+
+    /// Sorted (a stable list — `quitDirtyFilePaths`' own order is whatever one run's `Dictionary`
+    /// iteration gives it) and capped at `quitDirtyAlertListCap` with a "…and N more" tail.
+    func testQuitDirtyAlertFileListSortsAndCapsWithAnAndNMoreTail() {
+        XCTAssertEqual(quitDirtyAlertFileList(dirtyPaths: ["/repo/b.ts", "/repo/a.ts"]), "a.ts\nb.ts")
+        XCTAssertEqual(quitDirtyAlertListCap, 5, "the cap this test's fixture below is built against")
+        let many = (1...7).map { "/repo/f\($0).ts" }
+        XCTAssertEqual(quitDirtyAlertFileList(dirtyPaths: many),
+                       "f1.ts\nf2.ts\nf3.ts\nf4.ts\nf5.ts\n…and 2 more")
+    }
+
+    // MARK: - EditorQuitGate: the orchestration, driven with spies
+    //
+    // Never a real BrowserRuntime/CEF/NSApp.terminate stack — and never `run()`/`proceedWithQuit` on
+    // a REAL AppDelegate with `reallyQuitting == true`: that would reach `NSApp.terminate`, which
+    // `applicationShouldTerminate` would answer `.terminateNow` for, tearing down the xctest host
+    // itself mid-suite. `EditorQuitGate`'s injected seams are exactly what make the ORDERING
+    // obligation (T3 review: teardown for every live runtime BEFORE the settle beat) provable
+    // without touching any of that.
+
+    func testEditorQuitGateProceedsUntouchedTearsDownEveryRuntimeAndNeverPresentsAnAlertWhenNothingIsDirty() {
+        var order: [String] = []
+        var presented = 0
+        var cancelled = 0
+        let gate = EditorQuitGate(
+            dirtyRuntimeStates: { [] },
+            teardownAllRuntimes: { order.append("teardown"); return 2 },
+            presentAlert: { _ in presented += 1; return .review },
+            proceedWithQuit: { count in order.append("proceed(\(count))") },
+            cancelQuit: { cancelled += 1 })
+
+        gate.run()
+
+        XCTAssertEqual(order, ["teardown", "proceed(2)"],
+                       "obligation 1: teardown runs even with nothing dirty (clean runtimes too), "
+                       + "strictly before proceed")
+        XCTAssertEqual(presented, 0, "obligation 6's pin: zero dirty ⇒ no alert, ever constructed")
+        XCTAssertEqual(cancelled, 0)
+    }
+
+    func testEditorQuitGateReviewCancelsWithoutTearingDownOrProceeding() {
+        var teardownCalls = 0
+        var proceedCalls = 0
+        var cancelled = 0
+        let gate = EditorQuitGate(
+            dirtyRuntimeStates: { [self.dirtyState("/repo/a.ts")] },
+            teardownAllRuntimes: { teardownCalls += 1; return 1 },
+            presentAlert: { _ in .review },
+            proceedWithQuit: { _ in proceedCalls += 1 },
+            cancelQuit: { cancelled += 1 })
+
+        gate.run()
+
+        XCTAssertEqual(cancelled, 1)
+        XCTAssertEqual(teardownCalls, 0, "Review must never tear anything down")
+        XCTAssertEqual(proceedCalls, 0, "Review must never proceed to the browser sweep")
+    }
+
+    /// **The order pin.** A second, CLEAN runtime is in the mix deliberately — obligation 1 says
+    /// EVERY live runtime, not only the dirty one the alert asked about.
+    func testEditorQuitGateQuitAnywayTearsDownEveryRuntimeBeforeProceedingWithTheCount() {
+        var order: [String] = []
+        var presentedPaths: [String]?
+        let gate = EditorQuitGate(
+            dirtyRuntimeStates: { [self.dirtyState("/repo/a.ts", dirty: true),
+                                  self.dirtyState("/repo/b.ts", dirty: false)] },
+            teardownAllRuntimes: { order.append("teardown"); return 2 },
+            presentAlert: { paths in presentedPaths = paths; return .quitAnyway },
+            proceedWithQuit: { count in order.append("proceed(\(count))") },
+            cancelQuit: { XCTFail("Quit Anyway must never cancel") })
+
+        gate.run()
+
+        XCTAssertEqual(presentedPaths, ["/repo/a.ts"], "only the dirty model is asked about")
+        XCTAssertEqual(order, ["teardown", "proceed(2)"],
+                       "obligation 1: EVERY live runtime is torn down — the clean second one too — "
+                       + "strictly before proceedWithQuit, which owns the settle beat")
+    }
+
+    // MARK: - reallyQuitting reset on Review (necessary for correctness; not named in the brief)
+
+    /// **This gate is the FIRST cancellable point the true-quit path has ever had.**
+    /// `reallyQuitting` is armed by the menu's `onReallyQuit()` BEFORE this gate ever runs
+    /// (`MenuBarController.didQuit`'s own ordering doc) and nothing else in this file ever resets
+    /// it — so a Review that left it `true` would corrupt every LATER plain ⌘Q into a silent full
+    /// quit (the exact corruption class `updaterQuitting`'s own doc comment already names for a
+    /// stale `reallyQuitting = true`). Driven by calling `cancelQuit` DIRECTLY — never `run()` or
+    /// `proceedWithQuit` on a real delegate with `reallyQuitting == true` (see this section's own
+    /// header comment for why that is unsafe here).
+    func testEditorQuitGateCancelQuitResetsReallyQuittingSoALaterPlainQuitDoesNotSilentlyFullyQuit() {
+        let delegate = AppDelegate()
+        delegate.reallyQuitting = true // simulates the menu-bar Quit's own onReallyQuit() firing
+
+        delegate.editorQuitGate.cancelQuit()
+
+        XCTAssertFalse(delegate.reallyQuitting,
+                       "Review must undo the arm, or a later plain ⌘Q silently full-quits")
+    }
 }
