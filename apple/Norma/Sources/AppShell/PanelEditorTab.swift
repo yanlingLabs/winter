@@ -198,6 +198,22 @@ func editorTabDisplayPath(path: String?, fallbackTitle: String) -> String {
     return fileDiffChipDisplayPath(path)
 }
 
+/// **PURE: what the app's ⌘S saves — the ACTIVE tab, and only if it is a file.**
+///
+/// editor-product Task 8. Deliberately not "the frontmost code tab": the active tab is the one the
+/// user is looking at, and a ⌘S that reached past a web tab to save a code tab three positions back
+/// in the strip would write a file the user is not thinking about. A panel showing anything else
+/// answers `nil`, which is what leaves the menu item disabled.
+///
+/// `url` carries the absolute path on a `.code` tab (the wire fact since Stage A), so a code tab
+/// without one — unreachable through every shipped door, and rendered as "This tab has no file" —
+/// is likewise nothing to save.
+func editorSaveMenuTarget(tabs: [PanelTab], activeTabId: String?) -> PanelTab? {
+    guard let activeTabId, let tab = tabs.first(where: { $0.tabId == activeTabId }) else { return nil }
+    guard tab.kind == .code, let url = tab.url, !url.isEmpty else { return nil }
+    return tab
+}
+
 /// PURE: does the chrome show the unsaved dot? Read from the runtime's state — which is the PAGE's
 /// own answer (`modelDirtyChanged`, computed as `alternativeVersionId != savedVersionId`), relayed
 /// and never inferred here. A path with no model is not dirty; neither is a session with no editor.
@@ -243,11 +259,18 @@ final class PanelEditorTabModel: ObservableObject {
     /// browser that was torn down — silently, and for as long as the tab lives.
     private weak var host: ShellSessionHost?
 
-    /// **T8's slot.** The save flow (pull → atomic write → `markSaved`) is `EditorSaveCoordinator`'s,
-    /// which does not exist yet; when it does, it fills this in. Until then the chrome's save button
-    /// renders as a placeholder (`ShellTitlebarButton.isPlaceholder`) — it hovers, it clicks, and it
-    /// honestly does nothing, which is the treatment this app already uses for a control that is not
-    /// wired rather than pretending to be disabled.
+    /// **T8's slot, filled.** The chrome's save button calls this; the save flow behind it is
+    /// `EditorSaveCoordinator`'s, reached through `requestSave()` below.
+    ///
+    /// **Set at CREATION** (`PanelEditorTabModels.model(for:host:sessionId:)`), not later: the chrome
+    /// reads it as a plain `var` to decide `ShellTitlebarButton.isPlaceholder`, and a plain var is
+    /// not observable — a slot filled after the first render would leave the button drawn one step
+    /// quiet until something else happened to publish. Set before the model is ever handed out, the
+    /// question never arises, and the alternative (making it `@Published` to drive one re-render)
+    /// would publish on every bind for a value that never changes.
+    ///
+    /// It stays a settable var rather than becoming a method so that a test can observe the door
+    /// without a shell, which is exactly how the routing pins drive it.
     var onSaveRequested: (() -> Void)?
 
     @Published private(set) var roots: EditorTabSessionRoots = .unknown
@@ -405,6 +428,23 @@ final class PanelEditorTabModel: ObservableObject {
         Task { @MainActor [weak runtime] in await runtime?.openFile(path) }
     }
 
+    /// **editor-product Task 8: the save button's own half of the one save path.**
+    ///
+    /// Refuses once retired, like every other door on this object — but the retirement guard is the
+    /// SECOND line of defence, not the first: the registry is what resolves this object at all
+    /// (`PanelEditorTabModels.save(tabId:)`), and a retired model is no longer in it.
+    ///
+    /// The runtime is asked for at fire time and never remembered — `existingEditorRuntime`, so a
+    /// save on a session whose editor was released by a departure does nothing rather than standing a
+    /// fresh hidden Chromium up to save a file it does not hold. `runtimeRef` is the fallback for the
+    /// ordinary case where the host is gone but this pass already resolved one.
+    func requestSave() {
+        guard !isRetired, let path, !path.isEmpty else { return }
+        let resolved = sessionId.flatMap { host?.existingEditorRuntime(for: $0) } ?? runtimeRef
+        guard let runtime = resolved else { return }
+        Task { @MainActor [weak runtime] in _ = await runtime?.save(path) }
+    }
+
     /// What the chrome asks. A model with no runtime, or a runtime with no model for this path, is
     /// not dirty.
     var isDirty: Bool { editorTabIsDirty(state: runtimeState, path: path) }
@@ -445,9 +485,22 @@ enum PanelEditorTabModels {
             return cached
         }
         let fresh = PanelEditorTabModel(tabId: tab.tabId, path: tab.url)
+        // **T8's slot, filled here and only here** — before the model is handed to either slot, so
+        // the chrome's `isPlaceholder` read is right on the very first render (see the property's
+        // own doc). The closure captures the tab id ALONE, never the model: a view can hold a
+        // retired model for a beat, and a closure that closed over `self` would still fire a save
+        // through it. Resolving through the registry means a retired model — which is no longer in
+        // the registry — cannot be reached at all.
+        fresh.onSaveRequested = { [tabId = tab.tabId] in PanelEditorTabModels.save(tabId: tabId) }
         models[tab.tabId] = fresh
         fresh.bind(host: host, sessionId: sessionId)
         return fresh
+    }
+
+    /// Save the file of the tab the registry currently holds under `tabId`. See the closure above
+    /// for why this indirection exists.
+    static func save(tabId: String) {
+        models[tabId]?.requestSave()
     }
 
     /// Dropped when the user closes the tab (`ShellSessionHost.closePanelTab`).

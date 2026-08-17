@@ -636,6 +636,31 @@ final class ShellSessionHost: ObservableObject {
         return editorRuntime(for: sessionId)
     }
 
+    /// **editor-product Task 8: what the app's ⌘S menu item is looking at.**
+    ///
+    /// The panel's ACTIVE tab, if it is a code tab with a file (`editorSaveMenuTarget`). Read twice
+    /// per use — once to decide whether the menu item is enabled, once when it fires — because both
+    /// answers must describe the panel as it is at that instant, not as it was when a menu was built.
+    var activeCodeTabPath: String? {
+        return editorSaveMenuTarget(tabs: panelStore.tabs, activeTabId: panelStore.activeTabId)?.url
+    }
+
+    /// Save the active code tab. **Trigger 1 of 3**, and the only one that starts outside the panel:
+    /// the menu item fires wherever the keyboard focus happens to be.
+    ///
+    /// `existingEditorRuntime`, never `editorRuntimeForCodeTab` — a save must not MINT an editor. A
+    /// session with no runtime holds no unsaved buffer by construction, so there is nothing a fresh
+    /// one could write.
+    @discardableResult
+    func saveActiveCodeTab() async -> SaveOutcome {
+        guard let path = activeCodeTabPath,
+              let sessionId = panelStore.currentSessionId,
+              let runtime = existingEditorRuntime(for: sessionId) else {
+            return .noModel
+        }
+        return await runtime.save(path)
+    }
+
     /// Release a session's editor outright, whatever it is holding. The door for a session that is
     /// genuinely going away (T10's quit path, an explicit close); the shell's own departures go
     /// through `releaseEditorRuntimeIfClean` below instead.

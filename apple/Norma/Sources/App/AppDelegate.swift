@@ -79,6 +79,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// host's `onPanelCommand` hook holds weakly. `nil` until the shell is first summoned, exactly
     /// like the coordinator above — with no shell there is no harness, so no command can arrive.
     private(set) var panelCommands: PanelCommandConsumer?
+    /// editor-product T8: the main menu's ⌘S — the third save trigger, and the only one reachable
+    /// with the keyboard focus outside the editor. Held for the app's life because an `NSMenuItem`
+    /// does NOT retain its target: nothing else owns this object, and a deallocated target is a menu
+    /// item that silently stops working. `nil` until the first `summonAppWindow` (before that there
+    /// is no panel, so no code tab to save).
+    private(set) var editorSaveMenuCommand: EditorSaveMenuCommand?
     /// SP2b T5: owns this Mac's `RemoteHost` (lazily constructed — nothing starts until either a
     /// pairing window is requested or, autostart follow-up below, this Mac already has ≥1 paired
     /// device). Constructed unconditionally in `boot()` (cheap — it does no I/O of its own; only
@@ -495,7 +501,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.browserSignals?.setRenderingActive(active)
         }
         appWindow = controller
+        installEditorSaveMenuItem(host: host)
         controller.summon(navigatingTo: destination)
+    }
+
+    /// **editor-product Task 8: ⌘S in the main menu.**
+    ///
+    /// Installed at the first summon rather than at `boot()`, and the timing is the point: this app
+    /// is `LSUIElement`, so it has no menu bar at all until a window promotes it to `.regular`
+    /// (`syncDockPresence`), and SwiftUI builds its own main menu on a schedule of its own. The first
+    /// summon is the earliest moment there is both a menu to install into and a panel that could
+    /// hold a code tab.
+    ///
+    /// Idempotent by construction (`EditorSaveMenuCommand.install`), so a later re-install — a menu
+    /// SwiftUI rebuilt underneath us — replaces this item rather than adding a second ⌘S.
+    ///
+    /// Gated `!isRunningUnitTests`, the same posture as `helperClient.register()` and
+    /// `loginItem.setEnabled(true)`: the xctest host shares this process's `NSApp`, and a suite that
+    /// mutated the real main menu would be changing app-wide state for every later test. The command
+    /// object itself is constructed either way — it touches nothing until it is used — and its
+    /// decisions are driven directly by `EditorSaveTests`.
+    private func installEditorSaveMenuItem(host: ShellSessionHost) {
+        let command = EditorSaveMenuCommand(
+            activePath: { [weak host] in host?.activeCodeTabPath },
+            performSave: { [weak host] _ in
+                // The path is re-resolved by the host at fire time; passing the validated one back
+                // in would be a second, staler answer to the same question.
+                Task { @MainActor in _ = await host?.saveActiveCodeTab() }
+            })
+        editorSaveMenuCommand = command
+        guard !Self.isRunningUnitTests else { return }
+        command.install(in: NSApp.mainMenu)
     }
 
     /// app-shell T9: the floating panel's click-through door — the exact call shape

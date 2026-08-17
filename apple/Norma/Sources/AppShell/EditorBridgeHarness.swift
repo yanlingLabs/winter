@@ -736,7 +736,7 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
                 case .bad(let reason):
                     self.local(step.id, false, reason)
                 case .ok(let text):
-                    let expected = MonacoTextBuffer.normalisedEOL(self.fixtures.fixtureA)
+                    let expected = MonacoTextBuffer.savedText(forFileOpenedWith: self.fixtures.fixtureA)
                     if let difference = EditorHarnessScript.firstByteDifference(expected: expected,
                                                                                actual: text) {
                         self.local(step.id, false, "the undo did not restore the pre-edit text: \(difference)")
@@ -817,7 +817,7 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
                 case .bad(let reason):
                     self.local(step.id, false, reason)
                 case .ok(let text):
-                    let expected = "yx" + MonacoTextBuffer.normalisedEOL(self.fixtures.fixtureA)
+                    let expected = "yx" + MonacoTextBuffer.savedText(forFileOpenedWith: self.fixtures.fixtureA)
                     if let difference = EditorHarnessScript.firstByteDifference(expected: expected,
                                                                                actual: text) {
                         self.local(step.id, false,
@@ -1820,9 +1820,9 @@ struct EditorHarnessFixtures {
         let pathA = fixtures.pathA
         let pathC = fixtures.pathC
         // What Monaco will hand back for each fixture — see `MonacoTextBuffer`.
-        let a = MonacoTextBuffer.normalisedEOL(fixtures.fixtureA)
-        let b = MonacoTextBuffer.normalisedEOL(fixtures.fixtureB)
-        let c = MonacoTextBuffer.normalisedEOL(fixtures.fixtureC)
+        let a = MonacoTextBuffer.savedText(forFileOpenedWith: fixtures.fixtureA)
+        let b = MonacoTextBuffer.savedText(forFileOpenedWith: fixtures.fixtureB)
+        let c = MonacoTextBuffer.savedText(forFileOpenedWith: fixtures.fixtureC)
 
         func step(_ id: String, _ drill: Int, _ title: String,
                   _ expectation: EditorHarnessExpectation, _ timeout: TimeInterval) -> EditorHarnessStep {

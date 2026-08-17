@@ -167,6 +167,41 @@ function dispatch(message) {
     }
 }
 
+/**
+ * Open a file as a model.
+ *
+ * ## The EOL contract (editor-product Task 8 — the spec's "CRLF ruling needed")
+ *
+ * **The file's own dominant line ending is what the editor keeps, and a mixed file unifies to it.**
+ * That is Monaco's own rule, not a policy this page invents: `PieceTreeTextBufferBuilder` normalises
+ * line endings while it BUILDS the buffer, by strict majority, with a tie going to LF —
+ *
+ * ```js
+ * _getEOL(_){const b=this._cr+this._lf+this._crlf,p=this._cr+this._crlf;
+ *            return b===0?_===1?"\n":"\r\n":p>b/2?"\r\n":"\n"}                 // vendored, verbatim
+ * ```
+ *
+ * — and rewrites every terminator to that answer whenever the text disagrees with it. So a
+ * uniformly-CRLF file round-trips byte for byte, a CRLF-majority file comes back all-CRLF, and an
+ * LF-majority file comes back all-LF. The ruling is: **accept that normalisation**, because it
+ * preserves what the file actually is, and say so in one place.
+ *
+ * `setEOL` below is that saying-so, and it is honest about being a GUARD rather than a behaviour:
+ * on this vendored build it changes nothing, because the buffer has already picked CRLF by the same
+ * rule and `TextModel.setEOL` early-returns on a match (`if(this._buffer.getEOL()===$)return;`,
+ * vendored). It is here so that the page states the rule it depends on rather than inheriting it
+ * silently — if a future Monaco changed `defaultEOL` or that normalisation, a CRLF file would keep
+ * its endings anyway instead of being rewritten on its first save.
+ *
+ * **Two placement rules, both load-bearing if the guard ever does fire:**
+ *
+ *   1. BEFORE `savedVersionId` is read. A `setEOL` that changes anything bumps the model's version
+ *      id and emits a content-changed event — snapshotting the saved point first would make a
+ *      freshly-opened file report itself dirty, with nothing the user could do to make it clean.
+ *   2. ONLY on a model this call created. The `getModel(uri)` branch hands back a model whose text
+ *      is NOT `text` (the argument is dropped there), so deciding its EOL from bytes it does not
+ *      hold would rewrite somebody else's buffer on a hunch.
+ */
 function openModel(path, language, text) {
     if (page.models.has(path)) {
         // Not an error worth refusing, but never a re-create: `createModel` THROWS on a URI that is
@@ -177,7 +212,13 @@ function openModel(path, language, text) {
         return;
     }
     const uri = monaco.Uri.file(path);
-    const model = monaco.editor.getModel(uri) || monaco.editor.createModel(text, resolveLanguage(path, language), uri);
+    let model = monaco.editor.getModel(uri);
+    if (!model) {
+        model = monaco.editor.createModel(text, resolveLanguage(path, language), uri);
+        if (dominantEOLIsCRLF(text)) {
+            model.setEOL(monaco.editor.EndOfLineSequence.CRLF);
+        }
+    }
     const entry = {
         path: path,
         model: model,
@@ -378,6 +419,39 @@ function refreshDirty(entry) {
     }
     entry.dirty = dirty;
     sendToSwift("modelDirtyChanged", { path: entry.path, dirty: dirty });
+}
+
+// --- Line endings ------------------------------------------------------------------------------
+
+/**
+ * Is CRLF this text's dominant line ending? **The vendored builder's rule, mirrored exactly**
+ * (`_getEOL`, quoted in `openModel` above), and mirrored a third time on the Swift side
+ * (`MonacoTextBuffer.terminatorCounts` / `opensWithCRLF`) so the save flow's expectation is computed
+ * from the same arithmetic the page runs on.
+ *
+ * Counting is by TERMINATOR, not by character: a CRLF is one terminator, not a CR plus an LF, which
+ * is what makes a uniformly-CRLF file count as 100% CR-bearing rather than 50%.
+ *
+ * `> total / 2`, never `>=`: **a tie goes to LF**, because the vendored rule is `p > b / 2`. One
+ * CRLF against one LF is not a CRLF file.
+ */
+function dominantEOLIsCRLF(text) {
+    let carriageBearing = 0;
+    let total = 0;
+    for (let index = 0; index < text.length; index++) {
+        const code = text.charCodeAt(index);
+        if (code === 13) {
+            // CR, or the CR of a CRLF — one terminator either way, and both are CR-bearing.
+            if (index + 1 < text.length && text.charCodeAt(index + 1) === 10) {
+                index++;
+            }
+            carriageBearing++;
+            total++;
+        } else if (code === 10) {
+            total++;
+        }
+    }
+    return total > 0 && carriageBearing * 2 > total;
 }
 
 // --- Language ----------------------------------------------------------------------------------

@@ -383,10 +383,11 @@ final class EditorRuntime: ObservableObject {
     @Published private(set) var state = EditorRuntimeState()
     var stateSnapshot: EditorRuntimeState { state }
 
-    /// **T8's two messages, relayed rather than dropped.** The save flow does not exist yet; when it
-    /// does, it hangs here rather than inside this object (`EditorSaveCoordinator`). Until then a
-    /// `saveRequested` (the page's own ⌘S) and a `contentResponse` have nowhere to go, and silently
-    /// swallowing them inside a `switch` with no arm is how a whole flow goes missing unnoticed.
+    /// **T8's two messages, now ROUTED as well as relayed.** Both go to `saveCoordinator` — the
+    /// page's own ⌘S (`saveRequested`) starts a save, and a `contentResponse` answers the pull one is
+    /// waiting on. These hooks remain beside that routing as pure observation, which is what T3's
+    /// relay pin drives: a message swallowed by a `switch` arm that does nothing is how a whole flow
+    /// goes missing unnoticed, and the pin is what keeps saying so.
     var onSaveRequested: ((String) -> Void)?
     var onContentResponse: ((_ path: String, _ seq: UInt64, _ text: String) -> Void)?
 
@@ -411,6 +412,11 @@ final class EditorRuntime: ObservableObject {
     /// already on the actor, and the default value calls a `@MainActor` static method directly.
     private let colorScheme: @MainActor () -> ColorScheme
 
+    /// What the save flow does to the world, or `nil` to build the real thing from this runtime on
+    /// first use. Injected only by tests — the same seam-shaped reason every other member of this
+    /// section is injected: the whole flow speaks to a Chromium page and writes to disk.
+    private let saveEditorOverride: EditorSaveCoordinator.Editor?
+
     private var container = PanelCEFContainerView()
     private var hiddenWindowStorage: NSWindow?
     private var idPoll: Scheduler.Cancellable?
@@ -425,13 +431,15 @@ final class EditorRuntime: ObservableObject {
          driver: CEFDriver = .production,
          scheduler: Scheduler = .production,
          colorScheme: @escaping @MainActor () -> ColorScheme = { EditorRuntime.currentColorScheme() },
-         readFile: @escaping @Sendable (String) throws -> String = EditorRuntime.readTextFile) {
+         readFile: @escaping @Sendable (String) throws -> String = EditorRuntime.readTextFile,
+         saveEditor: EditorSaveCoordinator.Editor? = nil) {
         self.sessionId = sessionId
         self.hub = hub
         self.driver = driver
         self.scheduler = scheduler
         self.colorScheme = colorScheme
         self.readFile = readFile
+        self.saveEditorOverride = saveEditor
         // editor-product Task 4 — the app's first reactor to appearance change that is NOT a
         // SwiftUI view: grepped, nothing else in this codebase observes `effectiveAppearance`,
         // because every other surface adapts automatically through `Color`/`Image`'s own machinery,
@@ -501,6 +509,83 @@ final class EditorRuntime: ObservableObject {
     /// (drive the door, never the framework underneath it).
     func systemAppearanceChanged() {
         perform(dispatch(.appearanceChanged))
+    }
+
+    // MARK: - editor-product Task 8: saving
+
+    /// **The save flow, owned here** (`EditorSaveCoordinator`) — one per runtime, because the seq
+    /// counter, the outstanding pull and the coalescing table are all facts about ONE page.
+    ///
+    /// `lazy` rather than built in `init` so its seam can close over a fully-initialised `self`
+    /// without the dance a stored property would need; weak in every closure, since this object owns
+    /// the coordinator and the coordinator would otherwise own it back.
+    private(set) lazy var saveCoordinator = EditorSaveCoordinator(
+        sessionId: sessionId,
+        editor: saveEditorOverride ?? EditorSaveCoordinator.Editor(
+            hasModel: { [weak self] path in self?.state.models[path] != nil },
+            pull: { [weak self] path, seq in self?.send(.pullContent(path: path, seq: seq)) },
+            markSaved: { [weak self] path, seq in self?.send(.markSaved(path: path, seq: seq)) },
+            noteExpectedWrite: { [weak self] path in self?.noteExpectedWrite(path: path) },
+            withdrawExpectedWrite: { [weak self] path in self?.withdrawExpectedWrite(path: path) },
+            write: { path, text in
+                // Off the main actor, like `openAndSend`'s read and for the same reason: a save must
+                // not stall the shell on a slow or network volume.
+                try await Task.detached(priority: .userInitiated) {
+                    try EditorSaveCoordinator.writeAtomically(text, to: path)
+                }.value
+            }),
+        scheduler: scheduler)
+
+    /// Save one open file. **The one path all three triggers land in** — the app's ⌘S menu item, the
+    /// code tab's save button and the page's own ⌘S (`saveRequested`, routed in `receive` below).
+    @discardableResult
+    func save(_ path: String) async -> SaveOutcome {
+        return await saveCoordinator.save(path: path)
+    }
+
+    /// **The watcher-suppression seam T9 consumes.**
+    ///
+    /// A save writes the file the editor is watching, so the watcher T9 installs per open model will
+    /// see an event for a change it already knows about. `EditorSaveCoordinator` files a note here
+    /// immediately BEFORE its rename; T9's watcher calls `consumeExpectedWrite(path:)` when an event
+    /// arrives and treats a `true` answer as "this was us" — silently, with no reload and no banner.
+    ///
+    /// **A counted bag, not a set** — the brief's word was "set", and one save per file is the
+    /// ordinary case, but "one event per note" is multiset arithmetic: two saves of the same file in
+    /// quick succession are two renames and two events, and a set would suppress only the first.
+    ///
+    /// **The obligation this hands T9**: a note is consumed by an EVENT, so a note that never gets
+    /// one lingers, and the next genuine external change to that file would be swallowed by it. The
+    /// two ways that happens are already closed here — a write that throws withdraws its own note
+    /// (`EditorSaveCoordinator.performSave`), and teardown drops the whole bag — but the third is
+    /// T9's to rule on: a rename whose event the watcher misses because the watcher is not installed
+    /// yet (a save on a model whose watcher T9 arms lazily). T9 should either arm the watcher before
+    /// the first save can happen or bound a note's lifetime; it must not assume the bag drains.
+    private var pendingExpectedWrites: [String: Int] = [:]
+
+    func noteExpectedWrite(path: String) {
+        pendingExpectedWrites[path, default: 0] += 1
+    }
+
+    func withdrawExpectedWrite(path: String) {
+        guard let count = pendingExpectedWrites[path] else { return }
+        if count <= 1 {
+            pendingExpectedWrites.removeValue(forKey: path)
+        } else {
+            pendingExpectedWrites[path] = count - 1
+        }
+    }
+
+    /// T9's door: was the change at `path` one of ours? Consumes ONE note per call.
+    func consumeExpectedWrite(path: String) -> Bool {
+        guard pendingExpectedWrites[path] != nil else { return false }
+        withdrawExpectedWrite(path: path)
+        return true
+    }
+
+    /// How many of this runtime's own writes at `path` are still unaccounted for.
+    func expectedWriteCount(for path: String) -> Int {
+        return pendingExpectedWrites[path] ?? 0
     }
 
     // MARK: The reducer, driven
@@ -632,8 +717,14 @@ final class EditorRuntime: ObservableObject {
         case .modelDirtyChanged(let path, let dirty):
             perform(dispatch(.dirtyChanged(path: path, dirty: dirty)))
         case .saveRequested(let path):
+            // **Trigger 3 of 3** (editor-product Task 8): Monaco's own ⌘S, landing in the same
+            // coordinator the menu item and the tab's save button use. Not awaited — the page asked
+            // for a save, it is not waiting for an answer, and the outcome reaches the user through
+            // the dirty dot the page itself recomputes.
+            Task { @MainActor [weak self] in _ = await self?.save(path) }
             onSaveRequested?(path)
         case .contentResponse(let path, let seq, let text):
+            saveCoordinator.deliverContentResponse(path: path, seq: seq, text: text)
             onContentResponse?(path, seq, text)
         }
     }
@@ -738,6 +829,9 @@ final class EditorRuntime: ObservableObject {
     // MARK: Teardown
 
     private func performTeardown(browserId: Int32) {
+        // The page this bag described is going away, and a note that outlived it could only ever
+        // suppress a change made by somebody else (see `pendingExpectedWrites`).
+        pendingExpectedWrites.removeAll()
         idPoll?.cancel()
         idPoll = nil
         readyWatchdog?.cancel()

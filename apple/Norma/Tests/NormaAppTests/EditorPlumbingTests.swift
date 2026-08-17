@@ -1231,14 +1231,25 @@ final class EditorPlumbingTests: XCTestCase {
                        "the expected round trip must be the NORMALISED text — Monaco rewrites a "
                          + "minority CRLF block to LF, and expecting the raw fixture would fail a "
                          + "correct page")
-        XCTAssertEqual(expectedA, "x" + MonacoTextBuffer.normalisedEOL(fixtures.fixtureA))
+        // editor-product Task 8: computed through the PRODUCT-facing name for the same rule
+        // (`savedText(forFileOpenedWith:)` — what a save writes back), which is what the page's own
+        // EOL step at `openModel` re-asserts. Same function, same bytes; the name is what says which
+        // question the drill is asking.
+        XCTAssertEqual(expectedA, "x" + MonacoTextBuffer.savedText(forFileOpenedWith: fixtures.fixtureA))
 
-        // Fixture B is uniformly CRLF, so it must come back exactly as written.
+        // Fixture B is uniformly CRLF, so it must come back exactly as written — and it still must
+        // after Task 8's `setEOL` step, which picks CRLF for exactly this text and therefore asks
+        // Monaco for the ending it had already chosen (`TextModel.setEOL` early-returns on a match).
         guard case .content(_, _, let expectedB)? = steps.first(where: { $0.id == "7.pull3" })?.expectation else {
             return XCTFail("the external-write round-trip step is missing from the script")
         }
         XCTAssertEqual(expectedB, fixtures.fixtureB,
                        "a uniformly-CRLF file has nothing to normalise and must round-trip verbatim")
+        XCTAssertTrue(MonacoTextBuffer.opensWithCRLF(fixtures.fixtureB),
+                      "fixture B is the CRLF-dominant branch — the one the page's EOL step acts on")
+        XCTAssertFalse(MonacoTextBuffer.opensWithCRLF(fixtures.fixtureA),
+                       "fixture A is LF-dominant: the page's EOL step must NOT fire for it, or its "
+                       + "minority CRLF block would come back as CRLF and drill 4 would fail")
 
         // The `.ts`/`.json` extensions are load-bearing: the language workers are the only thing in
         // the page that exercises the loader's cross-origin fetch path.
