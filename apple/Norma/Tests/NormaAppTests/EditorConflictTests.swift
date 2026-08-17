@@ -693,11 +693,18 @@ final class EditorWatcherTests: XCTestCase {
 
     // MARK: The page's own half
 
-    /// **The source pin for the undo-preserving upgrade.** No test in this bundle can run the page,
-    /// so the claim is pinned where it lives: the body applies a full-range `pushEditOperations`
-    /// edit, sets the EOL BEFORE it (the vendored `applyEdits` rewrites inserted text to the
-    /// model's own ending otherwise), and snapshots the saved version AFTER — and `setValue`, whose
-    /// `_setValueFromTextBuffer` clears the command manager, is gone from it.
+    /// **The source pin for the undo-preserving upgrade**, extended by editor-product Task 11 for
+    /// the EOL step and the undo-isolation boundary around it. No test in this bundle can run the
+    /// page, so the claim is pinned where it lives: the body applies a full-range
+    /// `pushEditOperations` edit, pushes the EOL BEFORE it (the vendored `applyEdits` rewrites
+    /// inserted text to the model's own ending otherwise), and snapshots the saved version AFTER —
+    /// `setValue`, whose `_setValueFromTextBuffer` clears the command manager, is gone from it, and
+    /// so — since Task 11 — is `setEOL`, whose own vendored body never reaches `_commandManager`
+    /// either (an agent's EOL flip used to survive ⌘Z; Task 9's review named the gap). The whole
+    /// change is bracketed by two `pushStackElement()` calls so it lands as its OWN undo unit:
+    /// without the first, a user's still-open keystroke would absorb the agent's change into it
+    /// (Monaco's `canAppend` has no time or edit-kind test — only an explicit boundary closes an
+    /// element); without the second, the user's NEXT keystroke would merge into the agent's.
     func testTheEditorPageAppliesExternalContentAsAnUndoPreservingEdit() throws {
         let source = try XCTUnwrap(Self.pageFile(named: "editor.js"),
                                    "editor.js is in neither the built bundle nor the source tree")
@@ -708,19 +715,42 @@ final class EditorWatcherTests: XCTestCase {
         XCTAssertFalse(body.contains("setValue("),
                        "setValue clears the model's command manager — an agent's edit must stay "
                        + "undoable")
-        let setEOL = try XCTUnwrap(body.range(of: "setEOL("),
-                                   "without setEOL the edit is rewritten to the model's OWN ending: "
-                                   + "an external LF→CRLF change would be silently flattened, and "
-                                   + "drill 7's byte-identity would fail")
+        // editor-product Task 11: `setEOL` is gone from this function entirely.
+        // `TextModel.setEOL`'s own vendored body never reaches `_commandManager` — which is why an
+        // agent's EOL flip used to survive ⌘Z, and the next ⌘S would write a whole-file EOL diff
+        // nobody asked for. `pushEOL` is the undoable twin (same buffer mutation, recorded).
+        XCTAssertFalse(body.contains("setEOL("),
+                       "setEOL is invisible to undo — an agent's EOL flip would survive ⌘Z")
+        let pushEOL = try XCTUnwrap(body.range(of: "pushEOL("),
+                                    "without pushEOL the edit is rewritten to the model's OWN ending "
+                                    + "(the same hazard setEOL used to guard against), and an agent's "
+                                    + "EOL flip would be invisible to undo")
         let edit = try XCTUnwrap(body.range(of: "pushEditOperations("))
         let fullRange = try XCTUnwrap(body.range(of: "getFullModelRange()"),
                                       "the edit must replace the WHOLE model, not a guess at a range")
         let saved = try XCTUnwrap(body.range(of: "entry.savedVersionId = "))
-        XCTAssertTrue(setEOL.lowerBound < edit.lowerBound)
+        XCTAssertTrue(pushEOL.lowerBound < edit.lowerBound)
         XCTAssertTrue(edit.lowerBound < fullRange.upperBound)
         XCTAssertTrue(edit.lowerBound < saved.lowerBound,
                       "the saved point is snapshotted AFTER the edit, or the model would report "
                       + "itself dirty over text that is exactly what is on disk")
+
+        // editor-product Task 11: the undo-isolation boundary — load-bearing, not hygiene. A future
+        // cleanup that drops either call silently reintroduces the merge this task closed.
+        let firstBoundary = try XCTUnwrap(body.range(of: "pushStackElement()"),
+                                          "the agent's change must seal off whatever the user had "
+                                          + "open, or one \u{2318}Z would erase the user's edit and "
+                                          + "the agent's change together")
+        XCTAssertTrue(firstBoundary.lowerBound < pushEOL.lowerBound,
+                      "the boundary must be sealed BEFORE the EOL/edit pair, not after")
+        let secondBoundary = try XCTUnwrap(
+            body.range(of: "pushStackElement()", range: edit.upperBound..<body.endIndex),
+            "the agent's change must ALSO seal itself off afterwards, or the user's next keystroke "
+            + "would merge into it")
+        XCTAssertTrue(edit.lowerBound < secondBoundary.lowerBound)
+        XCTAssertTrue(secondBoundary.lowerBound < saved.lowerBound,
+                      "the boundary closes the agent's own undo unit before anything else runs")
+
         XCTAssertTrue(body.contains("entry.applyingExternal = true"),
                       "the transition suppression is still what stops the tab dot blinking")
         XCTAssertTrue(body.contains("entry.lastPull = null"),

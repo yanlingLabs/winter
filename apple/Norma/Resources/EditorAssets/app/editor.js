@@ -352,13 +352,61 @@ function pullContent(path, seq) {
  * that uniformly match the model's. `setValue` never had this problem — it REBUILDS the buffer, and
  * the builder picks the ending by majority from the new text.
  *
- * Without the `setEOL` below, an external rewrite of an LF file into a CRLF one would be silently
+ * Without the EOL step below, an external rewrite of an LF file into a CRLF one would be silently
  * flattened back to LF in the buffer, and the next ⌘S would write the flattened version to disk —
  * the exact class of silent data-shape damage Task 8's EOL ruling exists to prevent. With it, this
  * message applies the same rule `openModel` does: **the file's own dominant ending governs**, since
  * an external change is simply the file as it is now. It also keeps
  * `MonacoTextBuffer.savedText(forFileOpenedWith:)` — the Swift-side expectation every drill and
  * every save is computed through — true for a model that has been externally replaced.
+ *
+ * ## `pushEOL`, not `setEOL` — the undo hole Task 9 left open (editor-product Task 11, Minor 1)
+ *
+ * `TextModel.setEOL` — what this used to call — never touches `_commandManager` (vendored,
+ * verbatim): `setEOL(B){…if(this._buffer.getEOL()===$)return;…this._buffer.setEOL($),
+ * this._increaseVersionId(),…this._emitContentChangedEvent(…)}`. It mutates the buffer, bumps the
+ * version id and fires a content-changed event — but nothing in it reaches `_undoRedoService`, so it
+ * is INVISIBLE to undo. An agent edit that also flipped a file's line endings used to survive ⌘Z:
+ * undo put back the pre-agent TEXT but left the FLIPPED ending in place, and the next ⌘S wrote a
+ * whole-file EOL diff nobody asked for.
+ *
+ * `TextModel.pushEOL` is the undoable twin (vendored, verbatim): `pushEOL(B){if((this.getEOL()===
+ * "\n"?0:1)!==B)try{…this._commandManager.pushEOL(B)}finally{…}}`, and the command manager's own
+ * `pushEOL` calls the SAME raw `setEOL` and then records the change into an edit-stack element,
+ * which is what makes it undoable. **It is already a no-op when the ending is unchanged** — the
+ * `getEndOfLineSequence() !== wanted` guard below is the identical comparison, performed one level
+ * up; kept explicit anyway so this function states its own intent rather than resting on an
+ * unstated guarantee of a vendored dependency that could change under a future Monaco bump.
+ *
+ * ## The stack-element boundary — why the agent's whole change must be its OWN undo unit
+ *
+ * `pushEOL` and `pushEditOperations` both resolve their edit-stack element the same way
+ * (`EditStack._getOrCreateEditStackElement`, vendored): reuse whatever `_undoRedoService
+ * .getLastElement` answers, if it `canAppend` — and `canAppend` is `this.model===c &&
+ * this._data instanceof p`, nothing about WHEN the element was opened or WHAT KIND of change it has
+ * already seen. An element stays open, and silently absorbs anything pushed into it, until something
+ * calls `pushStackElement()`. Left unguarded, a user's still-open keystroke (nothing closes an
+ * element after an ordinary edit — that is also why `EditorBridgeHarness.insertText` calls
+ * `editor.pushUndoStop()` before every synthesised keystroke, the same seam from the harness side)
+ * would ABSORB this whole external change into ITS OWN undo unit, and a single ⌘Z would erase the
+ * user's edit and the agent's change together — landing past the agent's change in one step, never
+ * stopping to show the state right before it. That is worse than the hole this task closes, and
+ * pinning it in the live exit gate would certify the defect class as behaviour.
+ *
+ * So this function seals the boundary on BOTH sides. `pushStackElement()` BEFORE the EOL/edit pair
+ * closes off whatever the user had open, so the agent's change starts its own fresh element. The EOL
+ * push and the content edit then share THAT element — nothing separates the two of them, and nothing
+ * should: they are one semantic action ("the file changed under you"), and splitting them would only
+ * add a resting point nobody wants — a buffer whose TEXT is right and whose LINE ENDING is still
+ * wrong is not a state ⌘Z should ever leave on screen. A second `pushStackElement()` AFTER closes
+ * that element again, so the user's NEXT keystroke cannot merge into it either. The result: ⌘Z once
+ * restores the pre-agent state byte for byte — text AND line ending together, since
+ * `SingleModelEditStackElement.undo()` calls `_applyUndoRedoEdits`, which reverses the recorded text
+ * changes AND resets the element's `beforeEOL` in the SAME call — and a second ⌘Z reaches the user's
+ * own earlier edit. (The original plan for this fix described a three-stop sequence — EOL and
+ * content undone separately. That reasoning under-read `canAppend`: nothing in the two calls forces
+ * a boundary BETWEEN them, only a leading one to keep the user's edit out. The two-stop shape here is
+ * deliberate, not a shortfall — see the undo drill and the task report for the live proof.)
  *
  * ## What is unchanged, and must stay unchanged
  *
@@ -379,17 +427,27 @@ function applyExternalContent(path, text) {
         return;
     }
     entry.applyingExternal = true;
-    // BEFORE the edit — see the EOL note above. On a model whose ending already matches, this is
-    // Monaco's own early return (`if(this._buffer.getEOL()===$)return;`) and costs nothing.
-    entry.model.setEOL(dominantEOLIsCRLF(text)
-                       ? monaco.editor.EndOfLineSequence.CRLF
-                       : monaco.editor.EndOfLineSequence.LF);
+    // Seal whatever undo element the user's own typing left open — see the boundary note above.
+    // Harmless on a model with no history yet: `pushStackElement()` on an empty undo/redo stack is
+    // `_undoRedoService.getLastElement` answering null, which this is a guarded no-op against.
+    entry.model.pushStackElement();
+    // BEFORE the edit — see the EOL note above. `getEndOfLineSequence()` is the model's own current
+    // ending as the SAME enum `pushEOL` takes, so the guard is one comparison, not a string build.
+    const wantedEOL = dominantEOLIsCRLF(text)
+        ? monaco.editor.EndOfLineSequence.CRLF
+        : monaco.editor.EndOfLineSequence.LF;
+    if (entry.model.getEndOfLineSequence() !== wantedEOL) {
+        entry.model.pushEOL(wantedEOL);
+    }
     // `[]` for the cursor state before, and a computer that returns null: this replacement is not
     // the user's edit and must not move their selection — Monaco keeps the cursor where it can.
     entry.model.pushEditOperations([], [{
         range: entry.model.getFullModelRange(),
         text: text
     }], function () { return null; });
+    // Seal THIS element too — the user's next keystroke must start its own, not merge into the
+    // agent's change (see the boundary note above).
+    entry.model.pushStackElement();
     entry.savedVersionId = entry.model.getAlternativeVersionId();
     entry.applyingExternal = false;
     // Any pull still awaiting acknowledgement described text that no longer exists in this buffer,
