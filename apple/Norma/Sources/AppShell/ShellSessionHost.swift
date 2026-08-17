@@ -136,10 +136,12 @@ func handoffFailureMessage(_ error: HandoffError) -> String {
 /// Read off the WIRE row's `dirs`, never `cwd`: that field is the daemon's list-time ALIAS of
 /// `dirs[0]?.path`, an echo rather than an independent fact (`SessionSummary.dirs`'s own doc, and
 /// `handoffDirectory`'s). The distinction `dirs` draws is the one that decides this: `nil` means the
-/// daemon populated no set at all (chat/dispatch have no working-directory concept) and `[]` means a
-/// genuinely workdir-less session — **both get no editor**, because the Files tree and every door
-/// that opens a code tab are scoped to those roots, and an editor with no root to reach is a hidden
-/// Chromium nobody can ever put a file in.
+/// daemon populated no set at all (chat/dispatch have no working-directory concept), `[]` means a
+/// genuinely workdir-less session, and a degenerate `[{path: ""}]` (the same case
+/// `editorTabSessionRoots` reads as `.none`, fix-round-1-caught: this predicate had drifted back to
+/// `!dirs.isEmpty` alone) means a row whose one entry carries no real path — **all three get no
+/// editor**, because the Files tree and every door that opens a code tab are scoped to those roots,
+/// and an editor with no root to reach is a hidden Chromium nobody can ever put a file in.
 ///
 /// A row that is not in `rows` yet (the create-then-navigate race — `attachFresh`'s own one-shot
 /// read carries the same caveat) also gets nothing: pre-warming is an optimisation, and guessing a
@@ -147,7 +149,7 @@ func handoffFailureMessage(_ error: HandoffError) -> String {
 func editorPrewarmTarget(sessionId: String?, rows: [SessionSummary]) -> String? {
     guard let sessionId,
           let row = rows.first(where: { $0.sessionId == sessionId }),
-          let dirs = row.dirs, !dirs.isEmpty else {
+          let dirs = row.dirs, dirs.first?.path.isEmpty == false else {
         return nil
     }
     return sessionId

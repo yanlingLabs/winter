@@ -141,7 +141,13 @@ final class PanelFilesTabModel: ObservableObject {
         switch resolved {
         case .present:
             let row = rows.first { $0.sessionId == sessionId }
-            tree.setRoots(row?.dirs?.map(\.path) ?? [])
+            // Filter, not just map: `editorTabSessionRoots` only gates the FIRST entry (`dirs.first?
+            // .path.isEmpty == false`), so a second, degenerate entry — `dirs: [{path: "/real"},
+            // {path: ""}]` — still reaches here unfiltered. `URL(fileURLWithPath: "")` resolves to
+            // the PROCESS's cwd (verified empirically, not assumed), and `listTreeEntries` reads it
+            // like any other root — an empty path is not "no root," it is a REAL, populated, wrongly
+            // labeled one. Fix-round-1-caught.
+            tree.setRoots((row?.dirs?.map(\.path) ?? []).filter { !$0.isEmpty })
         case .none, .unknown:
             tree.setRoots([])
         }
@@ -315,15 +321,17 @@ struct PanelFilesContent: View {
 // MARK: - The tree rows
 
 /// **A `List` with a hand-rolled recursive disclosure row, not SwiftUI's `OutlineGroup(_:children:)`
-/// directly.** That view's own triangle is opaque UI state with no expand/collapse callback, and
-/// this model's whole "lazy children, expand-on-demand" contract (`FileTreeModel.expand`/`collapse`)
-/// needs an EXPLICIT signal to test without mounting a view — the house posture throughout this app
-/// (`PanelDiffTab`/`PanelEditorTab`'s own doc comments make the identical argument for their own
-/// surfaces). `List` still supplies the native scroll container; `FileTreeRowView` supplies the
-/// recursion, driven by `node.isExpanded`/`node.children`, which `FileTreeModel.toggle` — not
-/// SwiftUI — decides. This satisfies the design spec's "native SwiftUI outline" and the plan's own
-/// "List/OutlineGroup" wording as a tree rendered inside a `List`, not as a literal use of the
-/// `OutlineGroup` type.
+/// directly.** Two reasons, both self-contained (an earlier version of this doc cited a cross-file
+/// precedent for this choice that turned out not to exist — fix round 1, `PanelFilesTab.swift:323`
+/// review note — so this now stands on nothing but itself):
+/// 1. `OutlineGroup`'s own triangle is opaque UI state with no expand/collapse callback.
+/// 2. This model's whole "lazy children, expand-on-demand" contract (`FileTreeModel.expand`/
+///    `collapse`) needs an EXPLICIT signal to stay testable without mounting a view.
+///
+/// `List` still supplies the native scroll container; `FileTreeRowView` supplies the recursion,
+/// driven by `node.isExpanded`/`node.children`, which `FileTreeModel.toggle` — not SwiftUI — decides.
+/// This satisfies the design spec's "native SwiftUI outline" and the plan's own "List/OutlineGroup"
+/// wording as a tree rendered inside a `List`, not as a literal use of the `OutlineGroup` type.
 private struct FileTreeChildrenView: View {
     @ObservedObject var node: FileTreeNode
     let model: FileTreeModel

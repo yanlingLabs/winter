@@ -151,6 +151,29 @@ final class PanelFilesTabTests: XCTestCase {
         XCTAssertTrue(model.tree.sections.isEmpty)
     }
 
+    /// Fix round 1: `editorTabSessionRoots` only gates the FIRST entry, so a SECOND, degenerate
+    /// entry — `dirs: [{path: realRoot}, {path: ""}]` — used to reach `setRoots` unfiltered and mint
+    /// a phantom section. Unfixed, this was not a no-op: `URL(fileURLWithPath: "")` resolves to the
+    /// PROCESS's own cwd (verified empirically with a throwaway probe, not assumed), and
+    /// `listTreeEntries` lists it like any other root — a real, populated, blank-headed section
+    /// showing wherever the daemon happens to be running from. Exact equality below pins both halves:
+    /// the real root present, and nothing else alongside it.
+    func testAMultiRootRowWithOneEmptyEntrySkipsOnlyThatEntry() async {
+        let root = makeTempRoot()
+        defer { removeIfPresent(root) }
+        let box = RowsBox()
+        box.rows = [dirRow("S1", dirs: [SessionDirEntry(path: root, locked: false),
+                                        SessionDirEntry(path: "", locked: false)])]
+        let host = await makeHost(box)
+        let model = PanelFilesTabModel(tabId: "t1", tree: FileTreeModel())
+        model.bind(host: host, sessionId: "S1")
+        model.activate()
+
+        XCTAssertEqual(model.roots, .present)
+        XCTAssertEqual(model.tree.sections.map(\.rootPath), [root],
+                       "the empty second entry must never become its own section")
+    }
+
     // MARK: - The tree row's door (routes through ShellSessionHost.openFileTab, never a parallel path)
 
     func testOpenFileRoutesThroughTheHostsFileDoorForTheSessionThisModelIsBoundTo() async {

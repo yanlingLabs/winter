@@ -2808,6 +2808,7 @@ final class ShellSessionHostTests: XCTestCase {
         let rows = [
             codeRow("S_dirs", dirs: [SessionDirEntry(path: "/repo", locked: false)]),
             codeRow("S_dirless", dirs: []),
+            codeRow("S_degenerate", dirs: [SessionDirEntry(path: "", locked: false)]),
             SessionSummary(sessionId: "S_chat", title: nil, createdAt: 2, scope: "global",
                            cwd: nil, mode: "chat")
         ]
@@ -2815,6 +2816,11 @@ final class ShellSessionHostTests: XCTestCase {
         XCTAssertNil(editorPrewarmTarget(sessionId: "S_dirless", rows: rows),
                      "[] is a real workdir-less session — an editor with no root to reach is a "
                      + "hidden Chromium nobody can put a file in")
+        XCTAssertNil(editorPrewarmTarget(sessionId: "S_degenerate", rows: rows),
+                     "fix round 1: a [{path: \"\"}] row used to pass !dirs.isEmpty and prewarm a "
+                     + "REAL hidden EditorRuntime/Chromium for a session editorTabSessionRoots (the "
+                     + "authoritative gate the Files tab/code-tab door/transcript all use) already "
+                     + "classifies as dirless — same predicate, now mirrored here too")
         XCTAssertNil(editorPrewarmTarget(sessionId: "S_chat", rows: rows),
                      "nil dirs = no working-directory concept at all")
         XCTAssertNil(editorPrewarmTarget(sessionId: "S_unlisted", rows: rows),
