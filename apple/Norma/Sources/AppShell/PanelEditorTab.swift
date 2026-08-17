@@ -245,6 +245,9 @@ final class PanelEditorTabModel: ObservableObject {
     private var runtimeSink: AnyCancellable?
     private var directorySink: AnyCancellable?
     private var activateScheduled = false
+    /// Set once, by `deactivate()` — this tab is gone from the panel and this object must never act
+    /// again. Read by the two doors that could otherwise wake it (`activate`, `refresh`).
+    private var isRetired = false
 
     /// **The lazy-open guard, keyed on the RUNTIME as well as the path.** A `Set<String>` alone
     /// would suppress the re-read a fresh runtime needs — the spec's reattach rule is that a
@@ -297,6 +300,7 @@ final class PanelEditorTabModel: ObservableObject {
     /// (the create-then-navigate race), and nothing else would ever re-ask. Combine replays the
     /// current value on subscribe, so this doubles as the first refresh.
     func activate() {
+        guard !isRetired else { return }
         guard directorySink == nil, let directory = host?.directory else {
             refresh()
             return
@@ -304,7 +308,36 @@ final class PanelEditorTabModel: ObservableObject {
         directorySink = directory.$rows.sink { [weak self] rows in self?.refresh(rows: rows) }
     }
 
+    /// **Drop every live wire — this tab is no longer anywhere the user can see it** (fix round 1).
+    ///
+    /// Without this a model outlives its tab with a live `SessionDirectory.$rows` subscription, and
+    /// the visible-gated 5 s `session.list` poll alone is enough to RESURRECT a departed session's
+    /// editor: `refresh` mints through `editorRuntimeForCodeTab`, the open guard resets because the
+    /// runtime is new, and a hidden Chromium plus a disk re-read appear for a session the user left —
+    /// which nothing then releases, since the shell only ever releases the DEPARTING session, once.
+    /// (Measured, not theorised: one `directory.refresh()` after a departure produced a created
+    /// browser and a second mint.)
+    ///
+    /// It drops the wires rather than merely leaving the registry, because a view can still hold this
+    /// object for a beat after the registry has let go — the wires, not the dictionary entry, are
+    /// what act.
+    ///
+    /// **One-way**, and that is the point: this model is retired, not paused. `activate()` and
+    /// `refresh()` both refuse afterwards, so no lingering `onAppear` from a view being torn down can
+    /// re-subscribe it. Nothing is lost — a genuine return to the session gets a FRESH model from the
+    /// registry (the retired one is no longer in it), which mints and re-reads exactly as a first
+    /// visit does.
+    func deactivate() {
+        isRetired = true
+        directorySink = nil
+        runtimeSink = nil
+        runtimeRef = nil
+    }
+
     private func refresh(rows: [SessionSummary]? = nil) {
+        // **The one choke point that mints, so the one place retirement has to hold.** Every other
+        // door into this object (the rows sink, `activate`, the test seam) arrives here.
+        guard !isRetired else { return }
         let rows = rows ?? host?.directory.rows ?? []
         let resolvedRoots = editorTabSessionRoots(sessionId: sessionId, rows: rows)
         if roots != resolvedRoots { roots = resolvedRoots }
@@ -406,7 +439,26 @@ enum PanelEditorTabModels {
     /// that exists, a closed code tab leaves its model open in the page, where it costs memory and
     /// nothing else.
     static func discard(tabId: String) {
-        models.removeValue(forKey: tabId)
+        // Deactivate FIRST: a view can outlive the registry entry by a beat, and a model that is
+        // merely forgotten still holds the subscriptions that act. See `deactivate`.
+        models.removeValue(forKey: tabId)?.deactivate()
+    }
+
+    /// **Every model whose tab is no longer on screen, deactivated and dropped** (fix round 1).
+    ///
+    /// Driven by the panel's own session change (`ShellSessionHost.init`'s `panelStore.$tabs` sink),
+    /// which is the moment — and the only moment — a whole session's worth of code tabs stops being
+    /// anywhere the user can see. `discard(tabId:)` covers the other door (one tab, closed
+    /// deliberately); between them the registry is bounded by what the panel is actually showing
+    /// rather than by everything it has ever shown.
+    ///
+    /// `except` is the tab set the panel now publishes, so a switch BACK to a session whose tabs are
+    /// still cached keeps their models rather than churning them.
+    static func discardAll(except tabIds: Set<String>) {
+        for (tabId, model) in models where !tabIds.contains(tabId) {
+            model.deactivate()
+            models.removeValue(forKey: tabId)
+        }
     }
 
     /// Test seam only — `models` is process-global state.

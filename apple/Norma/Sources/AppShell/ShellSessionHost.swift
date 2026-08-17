@@ -353,6 +353,13 @@ final class ShellSessionHost: ObservableObject {
         directory.$rows
             .sink { [weak self] rows in self?.reconcileIsChatSession(rows: rows) }
             .store(in: &cancellables)
+        // editor-product Task 5 (fix round 1): the panel's own published slice IS the signal for
+        // "which code tabs are on screen" — see `prunePanelEditorTabModels`. Subscribed rather than
+        // called from `switchSession`/`detach`'s six sites, so a future seventh cannot forget it.
+        // Fires once on subscribe with the empty state, which prunes nothing.
+        panelStore.$tabs
+            .sink { [weak self] tabs in self?.prunePanelEditorTabModels(shownTabs: tabs) }
+            .store(in: &cancellables)
     }
 
     // MARK: - T4: the landing's roster verbs (bare RPCs — see `managementClient`'s doc for why these
@@ -563,6 +570,33 @@ final class ShellSessionHost: ObservableObject {
     /// The session's runtime **if it already has one** — the read every surface should use, since
     /// asking merely to look would create one.
     func existingEditorRuntime(for sessionId: String) -> EditorRuntime? { editorRuntimes[sessionId] }
+
+    /// Which session the editor-tab registry was last pruned for. `PanelStore` publishes `tabs` on
+    /// every fold; only a change of SESSION means a whole set of code tabs stopped being on screen.
+    private var lastPanelEditorPruneSessionId: String?
+
+    /// **editor-product Task 5 (fix round 1): a departed session's code tabs let go of their wires.**
+    ///
+    /// The bug this closes was measured rather than reasoned about: the tab-model registry kept a
+    /// departed session's model alive (it is discarded only by `closePanelTab`), the model kept a
+    /// live `SessionDirectory.$rows` subscription, and the 5 s `session.list` poll ALONE then minted
+    /// a fresh runtime through `editorRuntimeForCodeTab` and re-read the file — a hidden Chromium for
+    /// a session the user had left, which nothing releases, because a departure releases exactly once
+    /// and it had already happened. The second harm is quieter and worse: the re-read happens ~5 s
+    /// after departure, so a return an hour later shows a buffer that is stale against everything the
+    /// agent wrote since — with T8's save behind it, that is a clobber.
+    ///
+    /// **Keyed on the session changing, not on every fold.** Opening or closing a tab within the
+    /// current session republishes `tabs` too, and pruning there could drop the model of a tab that
+    /// is on screen right now (the panel's `panel.list` seed publishes an empty slice for a beat on
+    /// every attach). A session change is exactly the moment a whole set of code tabs stops being
+    /// visible, and `except:` keeps whatever the new session already has cached, so a switch back is
+    /// not a churn.
+    private func prunePanelEditorTabModels(shownTabs: [PanelTab]) {
+        guard panelStore.currentSessionId != lastPanelEditorPruneSessionId else { return }
+        lastPanelEditorPruneSessionId = panelStore.currentSessionId
+        PanelEditorTabModels.discardAll(except: Set(shownTabs.map(\.tabId)))
+    }
 
     /// **editor-product Task 5: the code tab's door — the one place a TAB may mint a runtime.**
     ///

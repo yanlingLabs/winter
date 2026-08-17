@@ -616,6 +616,74 @@ final class EditorTabTests: XCTestCase {
         XCTAssertFalse(first.runtime === second.runtime)
     }
 
+    /// **fix round 1 — the resurrection pin.** Adapted from the review's own probe, which measured
+    /// this: after a departure, ONE `session.list` poll tick was enough to mint a second runtime,
+    /// create a hidden Chromium and re-read the file for a session the user had left — and nothing
+    /// would ever release it, because a departure releases exactly once and it had already happened.
+    /// The quieter half is worse: that re-read lands ~5 s after departure, so a return an hour later
+    /// shows a buffer stale against everything the agent wrote since.
+    ///
+    /// Departure is driven through the REAL door the product uses — the panel leaving the session
+    /// (`PanelStore.switchSession`, which every hop/attach goes through) plus the release the shell
+    /// performs — rather than the probe's shortcut, and the model is taken from the REGISTRY, since
+    /// the registry outliving the tab is the mechanism under test.
+    func testTheSessionListPollAloneNeverResurrectsADepartedSessionsEditor() async {
+        let box = RowsBox()
+        let dirs = [SessionDirEntry(path: "/repo", locked: false)]
+        box.rows = [dirRow("S1", dirs: dirs), dirRow("S2", dirs: dirs)]
+        let host = await makeHost(box)
+        let first = makeRuntime(files: [Self.file: "let a = 1\n"])
+        let second = makeRuntime(sessionId: "S1", files: [Self.file: "let a = 1\n"], browserId: 42)
+        var mints = 0
+        host.makeEditorRuntime = { _ in
+            mints += 1
+            return mints == 1 ? first.runtime : second.runtime
+        }
+        boot(first)
+
+        // The panel is showing S1's code tab: the model comes from the registry, subscribes, reads.
+        host.panelStore.switchSession(to: "S1")
+        let tab = PanelTab(tabId: "t1", kind: .code, url: Self.file, title: "engine.ts")
+        let model = PanelEditorTabModels.model(for: tab, host: host, sessionId: "S1")
+        model.activate()
+        await waitUntil("the first read") { self.cdpTypes(first.cef).contains("openModel") }
+        XCTAssertEqual(host.editorRuntimes.count, 1)
+
+        // The hop: the panel leaves S1, and the shell releases its clean editor.
+        host.panelStore.switchSession(to: "S2")
+        host.teardownEditorRuntime(for: "S1")
+        XCTAssertEqual(host.editorRuntimes.count, 0, "released on departure")
+
+        // Five seconds later the poll ticks. That is ALL that happens — and then some: even a view
+        // being torn down calling `activate`/`refresh` on the retired model must change nothing.
+        await host.directory.refresh()
+        model.activate()
+        model.refreshForTesting()
+        try? await Task.sleep(nanoseconds: 150_000_000)
+
+        XCTAssertEqual(host.editorRuntimes.count, 0, "a departed session's editor stays released")
+        XCTAssertEqual(second.cef.createdURLs, [],
+                       "no hidden Chromium for a session the user has left")
+        XCTAssertEqual(mints, 1, "the poll mints nothing")
+        XCTAssertEqual(second.runtime.stateSnapshot.pendingOpens, [],
+                       "…and re-reads nothing: a silently stale buffer is the half that survives to "
+                       + "T8's save")
+
+        // **The genuine return still mints and still re-reads** (the spec's reattach rule): a fresh
+        // model, because the retired one left the registry with the session it belonged to.
+        host.panelStore.switchSession(to: "S1")
+        let returned = PanelEditorTabModels.model(for: tab, host: host, sessionId: "S1")
+        XCTAssertFalse(returned === model, "the registry mints a fresh model for the return")
+        returned.activate()
+
+        await waitUntil("the return's own read") {
+            second.runtime.stateSnapshot.pendingOpens.contains(Self.file)
+        }
+        XCTAssertEqual(mints, 2)
+        XCTAssertEqual(second.cef.createdURLs, [EditorRuntime.pageURL],
+                       "an open is its own pre-warm — the return boots the fresh runtime")
+    }
+
     /// **A dirless session never stands a hidden Chromium up** — and says so calmly.
     func testADirlessSessionMintsNoEditorAndSaysSo() async {
         let box = RowsBox()
