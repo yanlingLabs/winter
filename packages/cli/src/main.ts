@@ -1,7 +1,7 @@
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { existsSync, readFileSync } from "node:fs";
-import { resolveNormaHome, KeychainSecretStore, startDaemon, TOKEN_NAMES, loadSettings, CORE_VERSION, runWorkflowSubprocess, resolveNormaProfile } from "@norma/core";
+import { resolveNormaHome, KeychainSecretStore, startDaemon, TOKEN_NAMES, loadSettings, CORE_VERSION, runWorkflowSubprocess, runFunctionsExecSubprocess, isFunctionsExecWorkerInvocation, resolveNormaProfile } from "@norma/core";
 import type { Settings } from "@norma/core";
 import { METHODS, type ApprovalPolicy, type Task } from "@norma/protocol";
 import { POLICY_ORDER } from "./tui/policy-order";
@@ -1099,9 +1099,13 @@ if (import.meta.main) {
   // already wrapped in sandbox-exec; THIS process is the sandboxed worker. Route straight to the entry
   // and never fall through to daemon-connect / TUI. (In dev/test the runtime spawns the entry .ts
   // directly, so this branch is only exercised by the compiled binary.)
-  if (process.argv.includes("__workflow-worker")) {
+  if (process.argv.slice(2).length === 1 && process.argv.slice(2)[0] === "__workflow-worker") {
     runWorkflowSubprocess();
     await new Promise(() => {});   // entry drives itself to process.exit(); block everything below
+  }
+  if (isFunctionsExecWorkerInvocation(process.argv.slice(2))) {
+    runFunctionsExecSubprocess();
+    await new Promise(() => {}); // entry drives itself to process.exit(); block everything below
   }
 
   const argv = process.argv.slice(2);

@@ -10,6 +10,8 @@ export {
   type Settings,
 } from "./settings";
 export { runWorkflowSubprocess } from "./workflows/subprocess-entry";
+export { runFunctionsExecSubprocess, isFunctionsExecWorkerInvocation } from "./functions-exec/subprocess-entry";
+export { FunctionsExecRuntime, defaultFunctionsExecWorkerCommand, type FunctionsExecRuntimeDeps, type FunctionsExecRuntimeInput, type FunctionsExecRuntimeResult } from "./functions-exec/runtime";
 export { WorkflowRuntime, type WorkflowRuntimeDeps, type WorkflowRuntimeEvent, type WorkflowLaunch } from "./workflows/runtime";
 export { WorkflowStore, type ResolvedWorkflow } from "./workflows/store";
 export {

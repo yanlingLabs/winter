@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CORE_VERSION } from "@norma/core";
@@ -158,6 +158,39 @@ describe("norma --version — printed line and exit code (handoff Task 2)", () =
     expect(stdout.startsWith(`norma ${CORE_VERSION} — commands:`)).toBe(true);
     expect(stdout).not.toContain("Phase 1b-ii-d");
   }, 30_000);
+});
+
+describe("functions.exec compiled worker route", () => {
+  test("the compiled CLI enters the exact private worker route and exits after its terminal frame", async () => {
+    const cliDir = join(import.meta.dir, "..");
+    const outputDir = mkdtempSync(join(tmpdir(), "norma-functions-worker-"));
+    const binary = join(outputDir, "norma-core");
+    try {
+      const build = Bun.spawn(["bun", "build", "--compile", "src/main.ts", "--outfile", binary], {
+        cwd: cliDir,
+        stdout: "ignore",
+        stderr: "pipe",
+      });
+      expect(await build.exited).toBe(0);
+
+      const worker = Bun.spawn([binary, "__functions-exec-worker"], {
+        stdin: "pipe",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      worker.stdin.write(`${JSON.stringify({ type: "execute", cellId: "cell-1", source: 'tools.text("route-ok")' })}\n`);
+      worker.stdin.end();
+      const output = await new Response(worker.stdout).text();
+      expect(await worker.exited).toBe(0);
+      expect(output.split("\n").filter(Boolean).map((line) => JSON.parse(line))).toEqual([
+        { type: "ready" },
+        { type: "cell", cellId: "cell-1", frame: { type: "text", text: "route-ok" } },
+        { type: "completed", cellId: "cell-1" },
+      ]);
+    } finally {
+      rmSync(outputDir, { recursive: true, force: true });
+    }
+  }, 60_000);
 });
 
 describe("formatResumeHint (Phase 3c Task 5 — the dim post-exit resume hint)", () => {
