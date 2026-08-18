@@ -4,6 +4,12 @@ import { dirname } from "node:path";
 import { resolveWithinAny } from "../paths";
 import type { ToolRegistry } from "./registry";
 import { withFileDiff } from "./diff-report";
+import { applyCodexPatch } from "../../functions-exec/apply-patch";
+
+const editArgs = z.union([
+  z.object({ path: z.string().min(1), old_string: z.string().min(1), new_string: z.string(), replace_all: z.boolean().optional() }),
+  z.object({ patch: z.string().min(1) }).strict(),
+]);
 
 export function registerWriteTools(r: ToolRegistry): void {
   r.register({
@@ -34,10 +40,12 @@ export function registerWriteTools(r: ToolRegistry): void {
 
   r.register({
     name: "edit",
-    description: "Replace an exact string in a file. old_string must match exactly (including whitespace) and, unless replace_all is true, be UNIQUE in the file — the edit fails otherwise. replace_all: true replaces every occurrence.",
-    args: z.object({ path: z.string().min(1), old_string: z.string().min(1), new_string: z.string(), replace_all: z.boolean().optional() }),
+    description: "Edit files either by replacing an exact string (old_string must match exactly and be unique unless replace_all is true) or by supplying a raw Codex apply_patch patch string in patch.",
+    args: editArgs,
     // Out-of-root targets: same grant-before-dispatch story as `write` above.
-    async run({ path, old_string, new_string, replace_all }, { roots, diffSink }) {
+    async run(args: z.infer<typeof editArgs>, { roots, diffSink }) {
+      if ("patch" in args) return applyCodexPatch(args.patch, roots);
+      const { path, old_string, new_string, replace_all } = args;
       const target = resolveWithinAny(roots, path);
       const text = readFileSync(target, "utf8");
       const count = text.split(old_string).length - 1;

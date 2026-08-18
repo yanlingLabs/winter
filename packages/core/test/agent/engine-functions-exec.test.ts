@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { z } from "zod";
 import { ToolRegistry } from "../../src/agent/tools/registry";
 import { registerToolSearchTool } from "../../src/agent/tools/toolsearch";
@@ -103,6 +105,29 @@ describe("engine functions.exec integration", () => {
 
     expect(fetches).toBe(0);
     expect(events.some((event) => event.type === "tool_result" && event.output.includes("web_fetch denied"))).toBe(true);
+    expect(events.some((event) => event.type === "approval_requested")).toBe(false);
+  });
+
+  test("runs a nested raw patch through edit without an approval card in accept-edits mode", async () => {
+    const registry = new ToolRegistry();
+    registerToolSearchTool(registry);
+    registerFunctionsExecTools(registry, true);
+    const patch = "*** Begin Patch\n*** Add File: nested.txt\n+created through tools.edit\n*** End Patch";
+    const provider = new FakeProvider([
+      [{ type: "tool_call", callId: "load", name: "ToolSearch", argsJson: JSON.stringify({ query: "select:functions.exec" }) }, done("tool_calls")],
+      [{ type: "tool_call", callId: "run", name: "functions.exec", argsJson: JSON.stringify({ source: "ignored" }) }, done("tool_calls")],
+      [{ type: "text_delta", delta: "done" }, done("end_turn")],
+    ]);
+    const { engine, events, sessionId, cwd } = setupEngine(provider, {
+      registry,
+      policy: "accept-edits",
+      toolSearch: {},
+      functionsExecRuntimeFactory: runtimeForNestedCall({ name: "edit", args: { patch } }),
+    });
+
+    await engine.runTurn(sessionId);
+
+    expect(readFileSync(join(cwd, "nested.txt"), "utf8")).toBe("created through tools.edit\n");
     expect(events.some((event) => event.type === "approval_requested")).toBe(false);
   });
 

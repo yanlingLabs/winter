@@ -23,7 +23,7 @@ export function registerFunctionsExecTools(registry: ToolRegistry, supported = f
   if (!supported) return;
   registry.register({
     name: FUNCTIONS_EXEC_TOOL,
-    description: "Run bounded JavaScript in an isolated worker. Load this deferred tool with ToolSearch first. JavaScript has no direct filesystem, process, or network access; use tools.bash, tools.read, tools.web_fetch, or tools.web_search, which each use Norma's normal permission path. Use tools.text(), tools.image(), tools.audio(), tools.notify(), and await tools.yield().",
+    description: "Run bounded JavaScript in an isolated worker. Load this deferred tool with ToolSearch first. JavaScript has no direct filesystem, process, or network access; use tools.bash, tools.edit, tools.read, tools.web_fetch, or tools.web_search, which each use Norma's normal permission path. Use tools.text(), tools.image(), tools.audio(), tools.notify(), and await tools.yield().",
     args: functionsExecArgs,
     modes: ["code"],
     deferred: true,
