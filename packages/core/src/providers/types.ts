@@ -48,7 +48,10 @@ export type TurnInputItem =
   // in-turn by the engine's image drain (never a persisted session event — see engine.ts's
   // pendingImages), so `eventToInput` has no case for it and cross-turn history never reconstructs
   // a past image.
-  | { type: "image"; imageUrl: string; alt?: string };
+  | { type: "image"; imageUrl: string; alt?: string; detail?: "auto" | "low" | "high" | "original" }
+  // Transient functions.exec audio. Like images, it exists only in the in-memory continuation for
+  // the next provider request and is never reconstructed from session history.
+  | { type: "audio"; dataUrl: string };
 
 export interface ToolSpec {
   name: string;

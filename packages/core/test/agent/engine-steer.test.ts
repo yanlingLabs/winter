@@ -23,6 +23,7 @@ import { Compactor } from "../../src/agent/compactor";
 import type { McpManager } from "../../src/agent/mcp/manager";
 import type { BashReviewer } from "../../src/agent/reviewer";
 import type { PermissionRules } from "../../src/agent/permission-rules";
+import type { FunctionsExecRuntimeBridge, FunctionsExecRuntimeDeps } from "../../src/functions-exec/runtime";
 import { writeDiff, type DiffHeader } from "../../src/diffs/store";
 
 // Mirrors packages/core/test/agent/engine.test.ts's setup(). Exported so other engine test
@@ -40,7 +41,7 @@ export function setupEngine(provider: Provider, opts?: {
   // fileDiff tests register an arbitrary fake tool name — gate.ts's evaluate() fails an
   // unclassified name closed to "ask" under every OTHER policy, and "bypass" is the one verdict
   // that resolves "allow" with no card, so those tests can reach registry.execute() directly).
-  reviewer?: BashReviewer; reviewerEnabled?: boolean | (() => boolean | undefined); reviewerAllow?: string[]; policy?: "ask" | "auto" | "plan" | "dont-ask" | "bypass";
+  reviewer?: BashReviewer; reviewerEnabled?: boolean | (() => boolean | undefined); reviewerAllow?: string[]; policy?: "ask" | "auto" | "plan" | "dont-ask" | "accept-edits" | "bypass";
   // phase 5e T3: per-class review on/off — undefined (every pre-5e-T3 test) leaves every class
   // enabled, unchanged. See EngineConfig.reviewerClasses's own doc comment. Also accepts a getter
   // directly (hot-settings T2's engine-hot-config.test.ts passes `() => live.reviewer?.classes`
@@ -85,6 +86,7 @@ export function setupEngine(provider: Provider, opts?: {
   // write/edit/notebook_edit resolve through this harness exactly as before this opt existed —
   // only a test that explicitly opts in (tools-file-diff.test.ts's engine-level test) sees it.
   diffHome?: string;
+  functionsExecRuntimeFactory?: (deps: Pick<FunctionsExecRuntimeDeps, "callTool" | "onFrame">) => FunctionsExecRuntimeBridge;
 }) {
   const home = mkdtempSync(join(tmpdir(), "norma-engine-steer-"));
   const cwd = opts?.cwd ?? realpathSync(mkdtempSync(join(tmpdir(), "norma-engine-steer-cwd-")));
@@ -131,6 +133,7 @@ export function setupEngine(provider: Provider, opts?: {
     store, hub, registry, broker,
     gate: new PermissionGate(),
     provider: { provider, model: "gated-1", live: opts?.live },
+    functionsExecRuntimeFactory: opts?.functionsExecRuntimeFactory,
     dirs,
     approvalTimeoutMs: 500,
     assembler,

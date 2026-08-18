@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { CodexAuthStore, CodexOAuthProvider } from "../../src/providers/codex-oauth";
 import { CODEX_MODELS, DEFAULT_CODEX_MODEL } from "../../src/providers/codex-config";
+import { wireToolName } from "../../src/providers/openai-compatible";
 
 let server: ReturnType<typeof Bun.serve> | null = null;
 afterEach(() => { server?.stop(true); server = null; });
@@ -97,6 +98,33 @@ describe("CodexOAuthProvider", () => {
     const events = [];
     for await (const e of p.streamTurn({ model: "m", input: [] })) events.push(e);
     expect(events).toEqual([{ type: "error", code: "auth", message: expect.stringContaining("norma login") }]);
+  });
+
+  test("uses valid Responses names on the wire and restores dotted internal tool names", async () => {
+    const internalName = "functions.exec";
+    const wireName = wireToolName(internalName);
+    let body: any;
+    server = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        body = await req.json();
+        return new Response(
+          `data: ${JSON.stringify({ type: "response.output_item.done", item: { type: "function_call", call_id: "call-1", name: wireName, arguments: "{}" } })}\n\n`
+          + `data: ${JSON.stringify({ type: "response.completed", response: {} })}\n\n`,
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      },
+    });
+    const p = new CodexOAuthProvider({ authStore: await seeded(), backendUrl: `http://localhost:${server.port}` });
+    const events = [];
+    for await (const event of p.streamTurn({
+      model: "gpt-5.6-sol",
+      input: [{ type: "message", role: "user", content: "hi" }],
+      tools: [{ name: internalName, description: "run a cell", parameters: { type: "object" } }],
+    })) events.push(event);
+
+    expect(body.tools[0].name).toBe(wireName);
+    expect(events).toContainEqual({ type: "tool_call", callId: "call-1", name: internalName, argsJson: "{}" });
   });
 });
 

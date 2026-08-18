@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { ModelInfo, Provider, ProviderEvent, TurnInputItem, TurnRequest, ToolSpec } from "./types";
 import { ResponsesSseParser } from "./responses-sse";
 import { parseProviderErrorCode } from "./errors";
@@ -25,7 +26,28 @@ export interface OpenAICompatibleConfig {
  * Responses API ResponseItem shape (not yet live-verified against the codex backend;
  * the parity doc only covers message/function_call_output — Task 12's live gate confirms).
  */
-export function mapInput(items: TurnInputItem[]): unknown[] {
+const RESPONSES_FUNCTION_NAME = /^[A-Za-z0-9_-]{1,64}$/;
+
+/** Encode namespaced internal tools into the restricted Responses API function-name grammar. */
+export function wireToolName(name: string): string {
+  if (RESPONSES_FUNCTION_NAME.test(name)) return name;
+  const encoded = `norma_${Buffer.from(name, "utf8").toString("base64url")}`;
+  if (RESPONSES_FUNCTION_NAME.test(encoded)) return encoded;
+  return `norma_${createHash("sha256").update(name).digest("hex").slice(0, 58)}`;
+}
+
+/** Maps the constrained Responses wire names back to their internal tool names for one request. */
+export function wireToolNames(tools: ToolSpec[] | undefined): Map<string, string> {
+  const names = new Map<string, string>();
+  for (const tool of tools ?? []) {
+    const wire = wireToolName(tool.name);
+    if (names.has(wire)) throw new Error(`tool names collide after Responses transport encoding: ${tool.name}`);
+    names.set(wire, tool.name);
+  }
+  return names;
+}
+
+export function mapInput(items: TurnInputItem[], toWireName: (name: string) => string = wireToolName): unknown[] {
   return items.map((i) => {
     if (i.type === "message") {
       // Map role to the appropriate content item type per the Responses API schema.
@@ -34,7 +56,7 @@ export function mapInput(items: TurnInputItem[]): unknown[] {
       return { type: "message", role: i.role, content: [{ type: contentType, text: i.content }] };
     }
     if (i.type === "function_call") {
-      return { type: "function_call", call_id: i.callId, name: i.name, arguments: i.argsJson };
+      return { type: "function_call", call_id: i.callId, name: toWireName(i.name), arguments: i.argsJson };
     }
     if (i.type === "reasoning") return JSON.parse(i.itemJson); // opaque passthrough — never inspected
     // Computer-use image (Phase 5 CU): a user message carrying an input_image. This is the ONLY
@@ -44,15 +66,24 @@ export function mapInput(items: TurnInputItem[]): unknown[] {
     if (i.type === "image") {
       const content: unknown[] = [];
       if (i.alt) content.push({ type: "input_text", text: i.alt });
-      content.push({ type: "input_image", image_url: i.imageUrl });
+      content.push({ type: "input_image", image_url: i.imageUrl, ...(i.detail === undefined ? {} : { detail: i.detail }) });
       return { type: "message", role: "user", content };
+    }
+    if (i.type === "audio") {
+      const match = /^data:audio\/(wav|mpeg);base64,([a-z0-9+/=]+)$/iu.exec(i.dataUrl);
+      if (!match) throw new Error("audio input requires a base64 audio/mpeg or audio/wav data URL");
+      return {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_audio", input_audio: { data: match[2], format: match[1]!.toLowerCase() === "mpeg" ? "mp3" : "wav" } }],
+      };
     }
     return { type: "function_call_output", call_id: i.callId, output: i.output };
   });
 }
 
 export function mapTools(tools: ToolSpec[] | undefined): unknown[] {
-  return (tools ?? []).map((t) => ({ type: "function", name: t.name, description: t.description, parameters: t.parameters, strict: false }));
+  return (tools ?? []).map((t) => ({ type: "function", name: wireToolName(t.name), description: t.description, parameters: t.parameters, strict: false }));
 }
 
 /**
@@ -135,7 +166,8 @@ export class OpenAICompatibleProvider implements Provider {
     }
     if (!res.ok) { yield await mapHttpError(res.status, res.headers.get("retry-after"), res.text()); return; }
 
-    const parser = new ResponsesSseParser();
+    const names = wireToolNames(req.tools);
+    const parser = new ResponsesSseParser((name) => names.get(name) ?? name);
     const reader = res.body!.getReader();
     try {
       while (true) {

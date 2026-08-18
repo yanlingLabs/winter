@@ -7,6 +7,7 @@ import { startDaemon, type RunningDaemon } from "../../src/daemon";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { FakeProvider } from "../../src/agent/fake-provider";
 import { PermissionGate, isGateClassified } from "../../src/agent/gate";
+import { functionsExecSandboxAvailable } from "../../src/functions-exec/sandbox";
 
 /**
  * R-T3 whole-branch review, Important 1 (FIX 1). mode-toolset-equivalence.test.ts pins the EXACT
@@ -94,7 +95,7 @@ describe("daemon tool census (R-T3 whole-branch review FIX 1): real registration
   // chat's schema carrying only the read verbs — is invisible to `namesForMode` (which reports
   // ELIGIBILITY, exactly as the dispatch block below records for deferral) and is pinned separately
   // in test/agent/tools/browser.test.ts.
-  test("code mode is offered EXACTLY the full daemon tool surface (36 tools)", async () => {
+  test("code mode is offered EXACTLY the full daemon tool surface for this host's sandbox capability", async () => {
     const d = await boot();
     expect(d.registry).not.toBeNull();
     const offered = [...d.registry!.namesForMode("code", { builtinDeferral: true })];
@@ -122,6 +123,7 @@ describe("daemon tool census (R-T3 whole-branch review FIX 1): real registration
         "list_mcp_resources", "read_mcp_resource",
         "Workflow",
         "browser",
+        ...(functionsExecSandboxAvailable() ? ["functions.exec", "functions.wait"] : []),
       ].sort(),
     );
   });

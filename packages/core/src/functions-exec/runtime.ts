@@ -41,6 +41,12 @@ export interface FunctionsExecRuntimeDeps {
   hasSeatbelt?: boolean;
 }
 
+/** The engine-facing worker contract, kept narrow so alternate process hosts can preserve the same bridge. */
+export interface FunctionsExecRuntimeBridge {
+  cancel(sessionId: string, cellId: string): boolean;
+  execute(input: FunctionsExecRuntimeInput): Promise<FunctionsExecRuntimeResult>;
+}
+
 const DEFAULT_TIMEOUT_MS = 10_000;
 const MAX_TIMEOUT_MS = 60_000;
 
@@ -61,7 +67,7 @@ function activeKey(sessionId: string, cellId: string): string {
   return sessionId + "\u0000" + cellId;
 }
 
-export class FunctionsExecRuntime {
+export class FunctionsExecRuntime implements FunctionsExecRuntimeBridge {
   private readonly active = new Map<string, () => void>();
 
   constructor(private readonly deps: FunctionsExecRuntimeDeps = {}) {}

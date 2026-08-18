@@ -9,6 +9,8 @@ export class ResponsesSseParser {
   private decoder = new TextDecoder();
   private sawToolCall = false;
 
+  constructor(private readonly fromWireToolName: (name: string) => string = (name) => name) {}
+
   push(chunk: Uint8Array): ProviderEvent[] {
     // Normalize after appending so \r\n split across two push() calls is handled correctly.
     this.buf = (this.buf + this.decoder.decode(chunk, { stream: true })).replace(/\r\n/g, "\n");
@@ -61,7 +63,7 @@ export class ResponsesSseParser {
           return [{
             type: "tool_call",
             callId: String(data.item.call_id),
-            name: String(data.item.name),
+            name: this.fromWireToolName(String(data.item.name)),
             argsJson: String(data.item.arguments ?? ""),
           }];
         }

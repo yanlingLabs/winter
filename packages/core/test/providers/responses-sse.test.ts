@@ -31,6 +31,14 @@ describe("ResponsesSseParser", () => {
     ]);
   });
 
+  test("restores an encoded Responses tool name", () => {
+    const parser = new ResponsesSseParser((name) => name === "norma_ZnVuY3Rpb25zLmV4ZWM" ? "functions.exec" : name);
+    const chunk = new TextEncoder().encode(
+      'data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_fx","name":"norma_ZnVuY3Rpb25zLmV4ZWM","arguments":"{}"}}\n\n',
+    );
+    expect(parser.push(chunk)).toEqual([{ type: "tool_call", callId: "call_fx", name: "functions.exec", argsJson: "{}" }]);
+  });
+
   test("unknown event types are ignored (forward compat)", () => {
     const p = new ResponsesSseParser();
     const chunk = new TextEncoder().encode('event: response.shiny.new\ndata: {"type":"response.shiny.new"}\n\n');

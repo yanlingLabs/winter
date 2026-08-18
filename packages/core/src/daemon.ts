@@ -26,6 +26,7 @@ import { registerBashTool } from "./agent/tools/bash";
 import { registerBackgroundTools } from "./agent/tools/background";
 import { registerSkillTools } from "./agent/tools/skill";
 import { registerToolSearchTool } from "./agent/tools/toolsearch";
+import { registerFunctionsExecTools } from "./agent/tools/functions-exec";
 import { registerAskUserTool } from "./agent/tools/ask-user";
 import { registerAskQuestionTool } from "./agent/tools/ask-question";
 import { registerTaskTools } from "./agent/tools/tasks";
@@ -670,6 +671,7 @@ export async function startDaemon(opts: {
     registerBackgroundTools(registry, { bgRegistry }, { deferred: true });
     registerSkillTools(registry, { skills: skillStore });
     registerToolSearchTool(registry);
+    registerFunctionsExecTools(registry);
     questions = new QuestionBroker();
     taskStore = new TaskStore();
     registerAskUserTool(registry);

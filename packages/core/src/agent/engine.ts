@@ -41,6 +41,20 @@ import { guardAgentName, type AgentStatus, type BackgroundAgentRegistry, type Re
 import type { HookResult } from "../plugins/hook-runner";
 import type { ComputerUseService } from "./computer-use";
 import { SubagentTranscripts } from "./subagent-transcript";
+import { FunctionsExecCells } from "../functions-exec/cells";
+import {
+  FunctionsExecRuntime,
+  type FunctionsExecNestedCall,
+  type FunctionsExecRuntimeBridge,
+  type FunctionsExecRuntimeDeps,
+} from "../functions-exec/runtime";
+import { type CellFrame, type JsonValue } from "../functions-exec/protocol";
+import {
+  FUNCTIONS_EXEC_TOOL,
+  FUNCTIONS_WAIT_TOOL,
+  functionsExecArgs,
+  functionsWaitArgs,
+} from "./tools/functions-exec";
 import { resolveModelAlias } from "./model-aliases";
 import type { LspManager } from "./lsp/manager";
 import { autoDiagnosticsSuffix, AUTO_DIAG_TOOL_NAMES } from "./lsp/auto-diagnostics";
@@ -61,6 +75,21 @@ import { clientEffortEligible, isClientEffort, wireEffort } from "../settings";
  *  never touches). A real BackgroundTaskRegistry instance satisfies this structurally. */
 export interface BgTaskLister {
   list(sessionId: string): Array<{ status: string }>;
+}
+
+interface FunctionsExecNestedDispatchContext {
+  sessionId: string;
+  threadId: string;
+  outerCallId: string;
+  cwd: string;
+  signal: AbortSignal;
+  loaded: Set<string>;
+  pins: Set<string>;
+  rootsOverride?: string[];
+  visionCapable?: boolean;
+  excludeTools?: Set<string>;
+  allowTools?: Set<string>;
+  input: TurnInputItem[];
 }
 
 const MAIN_THREAD = "main";
@@ -828,6 +857,9 @@ export interface EngineConfig {
   // resolves from when unset, and as what `contextWindow`'s default-Infinity ModelInfo lookup
   // falls back to matching when `live` is absent.
   provider: { provider: Provider; model: string; live?: () => { model: string; reasoningEffort?: string } };
+  // The production factory constructs the Seatbelt runtime. Keeping the engine-facing contract
+  // narrow also permits a remote executor to preserve the same parent-owned tool bridge.
+  functionsExecRuntimeFactory?: (deps: Pick<FunctionsExecRuntimeDeps, "callTool" | "onFrame">) => FunctionsExecRuntimeBridge;
   assembler: ContextAssembler;
   compactor: Compactor;
   mcp?: McpManager;
@@ -1166,6 +1198,10 @@ export class AgentEngine {
   // concurrent session's dangerous-domain block, which is the identical cross-session bleed that
   // map already had to defend against, on a far worse payload.
   private readonly browserApprovedCallIds = new Set<string>();
+  private readonly functionsExecCells = new FunctionsExecCells();
+  private readonly functionsExecNested = new Map<string, (call: FunctionsExecNestedCall) => Promise<JsonValue>>();
+  private readonly functionsExecRuntime: FunctionsExecRuntimeBridge;
+  private readonly pendingFunctionsExecMedia = new Map<string, Array<Extract<TurnInputItem, { type: "image" | "audio" }>>>();
   // CC-parity subagent transcript writer (subagent-transcript.ts) — constructed in the constructor
   // BODY (not a field initializer) so it can close over `this.cfg`, which parameter-property
   // assignment guarantees is already set by the time the body runs.
@@ -1175,6 +1211,15 @@ export class AgentEngine {
   // bridge (below) and task-stop.ts's plain tool can share it; nothing engine-local is needed here.
   constructor(private readonly cfg: EngineConfig) {
     this.subagentTranscripts = new SubagentTranscripts((sessionId) => this.cfg.tmpDirOf?.(sessionId));
+    const functionsExecRuntimeDeps: Pick<FunctionsExecRuntimeDeps, "callTool" | "onFrame"> = {
+      callTool: async (call) => {
+        const dispatch = this.functionsExecNested.get(call.cellId);
+        if (!dispatch) throw new Error("functions.exec cell is unavailable");
+        return dispatch(call);
+      },
+      onFrame: (sessionId, cellId, frame) => this.functionsExecCells.recordFrame(sessionId, cellId, frame),
+    };
+    this.functionsExecRuntime = this.cfg.functionsExecRuntimeFactory?.(functionsExecRuntimeDeps) ?? new FunctionsExecRuntime(functionsExecRuntimeDeps);
   }
 
   /** session-activity-hygiene T5: a top-level turn for this session has SETTLED — every terminal
@@ -1372,6 +1417,8 @@ export class AgentEngine {
   /** Abort the in-flight turn for a session, if any. Idempotent — safe to call when idle. */
   interrupt(sessionId: string): { wasRunning: boolean } {
     const ac = this.aborters.get(sessionId);
+    this.functionsExecCells.cancelSession(sessionId);
+    this.clearFunctionsExecMedia(sessionId);
     if (!ac) return { wasRunning: false };
     ac.abort();
     return { wasRunning: true };
@@ -1587,6 +1634,7 @@ export class AgentEngine {
     // this session — running OR terminal (unlike task_stop's running-only pin above), since a
     // FINISHED agent must stay collectable via agent_output without a ToolSearch load.
     if (this.cfg.bgAgents?.list(sessionId).length) { pins.add("agent_list"); pins.add("agent_output"); }
+    if (this.functionsExecCells.hasWaitable(sessionId)) pins.add(FUNCTIONS_WAIT_TOOL);
     // Task B4: /ultracode pins the deferred Workflow tool for the turn — mirrors exit_plan_mode's
     // own pin just above (a state-required deferred built-in forced visible without touching the
     // sticky loadedTools set). `ultracodeActive` is computed ONCE per turn by turn() itself (its own
@@ -2849,8 +2897,9 @@ export class AgentEngine {
       // requestApproval invocation triggered by THIS round's calls, further down. `opts
       // .ultracodeActive` (Task B4) is NOT recomputed per round like the rest of this Set — it's
       // the one fixed-for-the-whole-turn value turn() already decided, just applied at this seam too.
-      const pins = tsEnabled ? this.pinnedTools(sessionId, meta, cwd, opts.ultracodeActive) : new Set<string>();
-      const effectiveLoaded = pins.size ? new Set([...loaded, ...pins]) : loaded;
+        const pins = tsEnabled ? this.pinnedTools(sessionId, meta, cwd, opts.ultracodeActive) : new Set<string>();
+        const effectiveLoaded = pins.size ? new Set([...loaded, ...pins]) : loaded;
+        this.drainFunctionsExecMedia(sessionId, threadId, input);
 
       for await (const ev of this.cfg.provider.provider.streamTurn({
         model: opts.model,
@@ -3944,8 +3993,14 @@ export class AgentEngine {
       }
 
       for (const call of calls) {
-        this.emit(sessionId, { type: "tool_call", sessionId, threadId, callId: call.callId, name: call.name, argsJson: call.argsJson });
-        input.push({ type: "function_call", callId: call.callId, name: call.name, argsJson: call.argsJson });
+        const persistedArgsJson = call.name === FUNCTIONS_EXEC_TOOL
+          ? JSON.stringify({ source: "[functions.exec source omitted]" })
+          : call.argsJson;
+        this.emit(sessionId, { type: "tool_call", sessionId, threadId, callId: call.callId, name: call.name, argsJson: persistedArgsJson });
+        // Never replay executable source into the model context. Besides keeping later history
+        // stable, this prevents a source literal from smuggling a media data URL around the
+        // transient media channel. The worker still receives `call.argsJson` below.
+        input.push({ type: "function_call", callId: call.callId, name: call.name, argsJson: persistedArgsJson });
 
         // diff-tabs Task 5: `ToolOutcome` (registry.ts) is the single source of truth for the
         // {output, isError, fileDiff?} shape — reused here rather than hand-copied so a future
@@ -4061,6 +4116,21 @@ export class AgentEngine {
         // call that never ran.
         if (!offered(call.name)) {
           outcome = { output: `tool ${call.name} is not available in this session`, isError: true };
+          this.emit(sessionId, { type: "tool_result", sessionId, threadId, callId: call.callId, output: outcome.output, isError: outcome.isError });
+          input.push({ type: "tool_result", callId: call.callId, output: outcome.output, isError: outcome.isError });
+          continue;
+        }
+        if (call.name === FUNCTIONS_EXEC_TOOL) {
+          outcome = await this.runFunctionsExec(call, {
+            sessionId, threadId, outerCallId: call.callId, cwd, signal, loaded, pins, rootsOverride, visionCapable,
+            excludeTools, allowTools, input,
+          });
+          this.emit(sessionId, { type: "tool_result", sessionId, threadId, callId: call.callId, output: outcome.output, isError: outcome.isError });
+          input.push({ type: "tool_result", callId: call.callId, output: outcome.output, isError: outcome.isError });
+          continue;
+        }
+        if (call.name === FUNCTIONS_WAIT_TOOL) {
+          outcome = await this.runFunctionsWait(call, sessionId, signal);
           this.emit(sessionId, { type: "tool_result", sessionId, threadId, callId: call.callId, output: outcome.output, isError: outcome.isError });
           input.push({ type: "tool_result", callId: call.callId, output: outcome.output, isError: outcome.isError });
           continue;
@@ -4821,6 +4891,7 @@ export class AgentEngine {
       // — the model sees them on the NEXT round's provider call. Placed here (round end, not per
       // call) so an image never splits a function_call/tool_result pair. No-op when nothing staged.
       this.drainRoundImages(sessionId, threadId, calls, input);
+      this.drainFunctionsExecMedia(sessionId, threadId, input);
     }
 
     // CHILD-ONLY terminal. The main thread's `effectiveMaxIterations` is Infinity, so its loop above
@@ -6102,6 +6173,162 @@ export class AgentEngine {
       this.pendingImages.delete(key);
       for (const url of imgs) input.push({ type: "image", imageUrl: url });
     }
+  }
+
+  private functionsExecMediaKey(sessionId: string, threadId: string): string {
+    return `${sessionId}\u0000${threadId}`;
+  }
+
+  private stageFunctionsExecFrame(
+    sessionId: string,
+    threadId: string,
+    cellId: string,
+    frame: CellFrame,
+  ): void {
+    if (frame.type === "notification") {
+      const content = `<task-notification>\n<task-id>${cellId}</task-id>\n<status>progress</status>\n<summary>${this.sanitizeForReminder(frame.text)}</summary>\n</task-notification>`;
+      this.emit(sessionId, { type: "notification_requested", sessionId, threadId, title: "Norma", message: frame.text });
+      this.cfg.hub.append(sessionId, { type: "task_notification", sessionId, threadId, content });
+      if (this.isRunning(sessionId)) this.retriggerPending.add(sessionId);
+      else void this.runTurn(sessionId).catch((error) => console.error("functions.exec notification turn failed:", error));
+      return;
+    }
+    if (frame.type !== "image" && frame.type !== "audio") return;
+    if (frame.type === "audio" && !/^data:audio\/(?:mpeg|wav);base64,/iu.test(frame.dataUrl)) return;
+    const key = this.functionsExecMediaKey(sessionId, threadId);
+    const pending = this.pendingFunctionsExecMedia.get(key) ?? [];
+    pending.push(frame.type === "image"
+      ? { type: "image", imageUrl: frame.dataUrl, detail: frame.detail }
+      : { type: "audio", dataUrl: frame.dataUrl });
+    this.pendingFunctionsExecMedia.set(key, pending);
+  }
+
+  private drainFunctionsExecMedia(sessionId: string, threadId: string, input: TurnInputItem[]): void {
+    const key = this.functionsExecMediaKey(sessionId, threadId);
+    const pending = this.pendingFunctionsExecMedia.get(key);
+    if (!pending) return;
+    this.pendingFunctionsExecMedia.delete(key);
+    input.push(...pending);
+  }
+
+  private clearFunctionsExecMedia(sessionId: string): void {
+    for (const key of this.pendingFunctionsExecMedia.keys()) {
+      if (key.startsWith(`${sessionId}\u0000`)) this.pendingFunctionsExecMedia.delete(key);
+    }
+  }
+
+  private async runFunctionsExec(
+    call: { callId: string; argsJson: string },
+    context: FunctionsExecNestedDispatchContext,
+  ): Promise<ToolOutcome> {
+    let raw: unknown;
+    try { raw = JSON.parse(call.argsJson || "{}"); }
+    catch { return { output: "tool arguments were not valid JSON", isError: true }; }
+    const parsed = functionsExecArgs.safeParse(raw);
+    if (!parsed.success) return { output: "invalid arguments for functions.exec", isError: true };
+    const roots = this.writableRoots(context.sessionId, context.cwd ? repoRootFor(context.cwd) : null, context.rootsOverride);
+    let cellId = "";
+    try {
+      cellId = this.functionsExecCells.start({
+        sessionId: context.sessionId,
+        run: (id) => this.functionsExecRuntime.execute({
+          sessionId: context.sessionId,
+          cellId: id,
+          source: parsed.data.source,
+          protectedRoots: roots,
+          ...(parsed.data.timeoutMs === undefined ? {} : { timeoutMs: parsed.data.timeoutMs }),
+        }),
+        cancel: (id) => { this.functionsExecRuntime.cancel(context.sessionId, id); },
+        onFrame: (sessionId, id, frame) => this.stageFunctionsExecFrame(sessionId, context.threadId, id, frame),
+        onRemoved: (_sessionId, id) => { this.functionsExecNested.delete(id); },
+      });
+      this.functionsExecNested.set(cellId, (nested) => this.dispatchFunctionsExecNested(nested, cellId, context));
+      const checkpoint = await this.functionsExecCells.next(context.sessionId, cellId, context.signal);
+      return { output: JSON.stringify({ cellId, ...checkpoint }), isError: checkpoint.status === "failed" };
+    } catch (error) {
+      if (cellId) this.functionsExecCells.cancel(context.sessionId, cellId);
+      return { output: error instanceof Error ? error.message : String(error), isError: true };
+    }
+  }
+
+  private async runFunctionsWait(
+    call: { argsJson: string },
+    sessionId: string,
+    signal: AbortSignal,
+  ): Promise<ToolOutcome> {
+    let raw: unknown;
+    try { raw = JSON.parse(call.argsJson || "{}"); }
+    catch { return { output: "tool arguments were not valid JSON", isError: true }; }
+    const parsed = functionsWaitArgs.safeParse(raw);
+    if (!parsed.success) return { output: "invalid arguments for functions.wait", isError: true };
+    if (!this.functionsExecCells.canWait(sessionId, parsed.data.cellId)) {
+      return { output: `functions.exec cell ${parsed.data.cellId} has not yielded`, isError: true };
+    }
+    try {
+      const checkpoint = await this.functionsExecCells.next(sessionId, parsed.data.cellId, signal);
+      return { output: JSON.stringify({ cellId: parsed.data.cellId, ...checkpoint }), isError: checkpoint.status === "failed" };
+    } catch (error) {
+      return { output: error instanceof Error ? error.message : String(error), isError: true };
+    }
+  }
+
+  private async dispatchFunctionsExecNested(
+    nested: FunctionsExecNestedCall,
+    cellId: string,
+    context: FunctionsExecNestedDispatchContext,
+  ): Promise<JsonValue> {
+    const call = {
+      callId: `${context.outerCallId}:fx:${cellId}:${nested.callId}`,
+      name: nested.name,
+      argsJson: JSON.stringify(nested.args),
+    };
+    this.emit(context.sessionId, { type: "tool_call", sessionId: context.sessionId, threadId: context.threadId, ...call });
+    context.input.push({ type: "function_call", ...call });
+    let outcome: ToolOutcome & { deniedByHuman?: boolean };
+    if (context.excludeTools?.has(call.name) || (context.allowTools && !context.allowTools.has(call.name))) {
+      outcome = { output: `tool ${call.name} is not available in this session`, isError: true };
+    } else {
+      const meta = this.cfg.store.meta(context.sessionId);
+      const decision = this.cfg.gate.evaluate(call.name, meta.approvalPolicy);
+      const webFetchCard = call.name === "web_fetch" ? this.webFetchGate(call, context.cwd) : null;
+      if (decision === "deny") {
+        outcome = { output: `Denied automatically — ${call.name} is not permitted in the current approval mode`, isError: true };
+      } else if (webFetchCard && meta.approvalPolicy !== "bypass") {
+        outcome = meta.approvalPolicy === "dont-ask"
+          ? { output: "web_fetch denied — dont-ask mode declines a fetch to a dangerous domain with no standing WebFetch rule.", isError: true }
+          : await this.requestApproval(call, context.cwd, context.sessionId, context.threadId, context.signal, {
+            timeoutMs: this.approvalTimeoutFor(meta),
+            summary: webFetchCard.summary,
+            options: webFetchCard.options,
+          }, context.loaded, undefined, context.pins, context.rootsOverride, context.visionCapable, context.excludeTools, context.allowTools);
+      } else if (decision === "ask" || (call.name === "bash" && (nested.args as { dangerouslyDisableSandbox?: unknown }).dangerouslyDisableSandbox === true && this.cfg.store.meta(context.sessionId).approvalPolicy !== "bypass")) {
+        outcome = await this.requestApproval(call, context.cwd, context.sessionId, context.threadId, context.signal, {
+          timeoutMs: this.approvalTimeoutFor(meta),
+          summary: approvalCardSummary(call),
+        }, context.loaded, undefined, context.pins, context.rootsOverride, context.visionCapable, context.excludeTools, context.allowTools);
+      } else {
+        outcome = await this.executeCall(
+          call,
+          context.cwd,
+          context.sessionId,
+          context.threadId,
+          context.signal,
+          new Set([...context.loaded, call.name]),
+          context.pins,
+          context.rootsOverride,
+          context.visionCapable,
+          context.excludeTools,
+          context.allowTools,
+        );
+      }
+    }
+    this.emit(context.sessionId, { type: "tool_result", sessionId: context.sessionId, threadId: context.threadId, callId: call.callId, output: outcome.output, isError: outcome.isError });
+    context.input.push({ type: "tool_result", callId: call.callId, output: outcome.output, isError: outcome.isError });
+    if (outcome.deniedByHuman) {
+      this.functionsExecCells.cancel(context.sessionId, cellId);
+      throw new Error(outcome.output);
+    }
+    return outcome.output;
   }
 
   private async executeCall(

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { OpenAICompatibleProvider, buildRequestBody, mapInput } from "../../src/providers/openai-compatible";
+import { OpenAICompatibleProvider, buildRequestBody, mapInput, wireToolName } from "../../src/providers/openai-compatible";
 
 let server: ReturnType<typeof Bun.serve> | null = null;
 afterEach(() => { server?.stop(true); server = null; });
@@ -89,6 +89,28 @@ describe("OpenAICompatibleProvider", () => {
     }));
     expect(body.input[1]).toEqual({ type: "function_call", call_id: "call_1", name: "glob", arguments: '{"pattern":"*"}' });
     expect(body.input[2]).toEqual({ type: "function_call_output", call_id: "call_1", output: "a.txt" });
+  });
+
+  test("encodes dotted tools on the Responses wire and restores them on the inbound stream", async () => {
+    let body: any;
+    server = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        body = await req.json();
+        const wire = wireToolName("functions.exec");
+        const sse = `data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_fx","name":"${wire}","arguments":"{\\"source\\":\\"tools.text('x')\\"}"}}\n\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}\n\n`;
+        return new Response(sse, { headers: { "content-type": "text/event-stream" } });
+      },
+    });
+    const p = new OpenAICompatibleProvider({ baseUrl: `http://localhost:${server.port}`, apiKey: "sk" });
+    const events = await collect(p.streamTurn({
+      model: "m",
+      input: [{ type: "function_call", callId: "old", name: "functions.exec", argsJson: "{}" }],
+      tools: [{ name: "functions.exec", description: "run", parameters: { type: "object" } }],
+    }));
+    expect(body.tools[0].name).toBe(wireToolName("functions.exec"));
+    expect(body.input[0].name).toBe(wireToolName("functions.exec"));
+    expect(events[0]).toEqual({ type: "tool_call", callId: "call_fx", name: "functions.exec", argsJson: '{"source":"tools.text(\'x\')"}' });
   });
 
   test("consumer break mid-stream cancels the reader (no connection leak)", async () => {
@@ -258,5 +280,13 @@ describe("mapInput image (Phase 5 CU)", () => {
     const out = mapInput([{ type: "image", imageUrl: dataUrl }]) as any[];
     expect(out[0].content[0].image_url).toBe(dataUrl);
     expect(typeof out[0].content[0].image_url).toBe("string");
+  });
+});
+
+describe("mapInput audio", () => {
+  test("maps transient WAV audio into the Responses input_audio part", () => {
+    expect(mapInput([{ type: "audio", dataUrl: "data:audio/wav;base64,AAAA" }])).toEqual([
+      { type: "message", role: "user", content: [{ type: "input_audio", input_audio: { data: "AAAA", format: "wav" } }] },
+    ]);
   });
 });
