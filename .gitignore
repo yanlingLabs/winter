@@ -47,3 +47,11 @@ apple/Norma/vendor/cef/
 # (npm registry tarball, pinned there). The Norma Xcode build fails loudly naming that command
 # if this tree is absent (project.yml preBuildScripts).
 apple/Norma/vendor/monaco/
+
+# LibreOffice (LibreOfficeKit) official mac arm64 build, harvested+trimmed (~585MB) — too large
+# to commit; fetched + sha256-verified via scripts/fetch-libreoffice.ts (dmg .sha256 sidecar,
+# pinned there). NOT wired into any Xcode build gate (unlike vendor/cef and vendor/monaco above):
+# the Office Stage A embed gate came back NO-GO — see
+# docs/superpowers/research/2026-08-18-lok-embed-gate.md. This tree is not usable in-process;
+# do not point app code at it.
+apple/Norma/vendor/libreoffice/
