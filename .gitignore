@@ -48,10 +48,12 @@ apple/Norma/vendor/cef/
 # if this tree is absent (project.yml preBuildScripts).
 apple/Norma/vendor/monaco/
 
-# LibreOffice (LibreOfficeKit) official mac arm64 build, harvested+trimmed (~585MB) — too large
-# to commit; fetched + sha256-verified via scripts/fetch-libreoffice.ts (dmg .sha256 sidecar,
-# pinned there). NOT wired into any Xcode build gate (unlike vendor/cef and vendor/monaco above):
-# the Office Stage A embed gate came back NO-GO — see
-# docs/superpowers/research/2026-08-18-lok-embed-gate.md. This tree is not usable in-process;
-# do not point app code at it.
+# LibreOffice (LibreOfficeKit) headless macOS arm64 product-set, from-source build
+# (--enable-headless, svp VCL backend, zero source patches) — ~488MB unpacked, ~154MiB
+# compressed; too large to commit. Fetched + sha256-verified via scripts/fetch-libreoffice.ts
+# from a dedicated GitHub release asset (vendor-libreoffice-20260818, pinned there). GO — proves
+# tdf#145127 does not block a native macOS headless embed; see
+# .superpowers/sdd/2026-08-18-office-plumbing/{svp-probe-report.md,trim-gate-report.md}. NOT yet
+# wired into any Xcode build gate (unlike vendor/cef and vendor/monaco above) — that is
+# downstream work (the helper target that embeds product-set/).
 apple/Norma/vendor/libreoffice/
