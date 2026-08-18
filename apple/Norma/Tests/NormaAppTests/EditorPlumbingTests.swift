@@ -1360,7 +1360,7 @@ final class EditorPlumbingTests: XCTestCase {
         // undo() or redo() on E_agent permanently serializes it (bundle-verified:
         // `SingleModelEditStackElement.undo`/`.redo` both open with
         // `this._data instanceof p&&(this._data=this._data.serialize())`), which would make
-        // `canAppend` false regardless of whether `editor.js:450`'s trailing boundary ever ran —
+        // `canAppend` false regardless of whether `applyExternalContent`'s trailing boundary ever ran —
         // silently turning the discriminator back into the non-discriminating step the fix round
         // replaced. The generic "sorted by drill" check above cannot catch an intra-drill
         // reorder; this exact sequence can.
@@ -1369,7 +1369,7 @@ final class EditorPlumbingTests: XCTestCase {
             "15.open", "15.userEdit", "15.saveClean", "15.agentLands", "15.discriminant",
             "15.undo1", "15.undo2", "15.redoToAgent", "15.postRedoKeystroke"
         ], "15.discriminant's slot right after 15.agentLands (and strictly before any undo/redo "
-           + "touches E_agent) is the entire reason it can discriminate editor.js:450 at all")
+           + "touches E_agent) is the entire reason it can discriminate the trailing boundary at all")
 
         // The EOL-sensitive fixtures the undo drill and the CRLF round trip depend on.
         XCTAssertTrue(MonacoTextBuffer.opensWithCRLF(fixtures.fixtureCRLF),

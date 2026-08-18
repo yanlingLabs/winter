@@ -2209,8 +2209,8 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
     /// **The actual discriminator — and the SECOND design of this step.** The first design (fix
     /// round 1's own initial attempt) typed with a CDP `Input.insertText` call carrying no
     /// `pushUndoStop`, on the theory that a "raw" keystroke's own open/merge decision comes
-    /// straight from `EditStack.canAppend`. A mutation run (line 450 commented out, rebuilt, run
-    /// live) proved that theory wrong: the step reported PASS in BOTH the real and the mutated
+    /// straight from `EditStack.canAppend`. A mutation run (the trailing `pushStackElement()` in
+    /// `applyExternalContent` commented out, rebuilt, run live) proved that theory wrong: the step reported PASS in BOTH the real and the mutated
     /// build — 71/71 either way. The reason is a THIRD confound, at a layer neither the review nor
     /// this file's earlier reasoning had reached: every keystroke, however delivered, is routed
     /// through Monaco's command layer (`SimpleCharacterTypeOperation.getEdits`, bundle @1956328)
@@ -2221,18 +2221,18 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
     /// `pushEditOperations` call is not a "typing" op, so the tracked previous type is `Other=0`
     /// afterward, and `A(0,4)` = `N(0)=false → P(0)=0 !== P(4)=4` = **true, unconditionally** —
     /// the command layer forces a boundary before ANY keystroke that follows ANY external edit,
-    /// whether or not `editor.js:450` ran. (The SAME arithmetic explains the file's older, already
+    /// whether or not `applyExternalContent`'s trailing `pushStackElement()` ran. (The SAME arithmetic explains the file's older, already
     /// -proven finding the opposite direction: two consecutive typed characters both compute
     /// `Y=4`, so `A(4,4) = P(4)!==P(4) = false` — they coalesce, which is exactly why
     /// `insertText`'s own doc comment says `pushUndoStop` was required for drill 6's two-keystroke
     /// race to behave.) **Consequence: no keystroke-shaped action, CDP or otherwise, can ever
-    /// discriminate line 450** — the command layer's own boundary is unconditional right here,
+    /// discriminate that trailing boundary** — the command layer's own boundary is unconditional right here,
     /// and would mask the trailing `pushStackElement()` in both directions forever.
     ///
     /// So this step no longer types. It calls `model.pushEditOperations(...)` DIRECTLY, in the
     /// SAME shape `applyExternalContent` itself uses, which reaches `EditStack` straight —
     /// `_getOrCreateEditStackElement` → `canAppend` — with no command layer in between. That is
-    /// the only layer at which `E_agent`'s open/closed state (CLOSED if line 450 ran, still OPEN
+    /// the only layer at which `E_agent`'s open/closed state (CLOSED if the trailing boundary ran, still OPEN
     /// if it did not — `canAppend(c){return this.model===c&&this._data instanceof p}`, bundle
     /// @~1559677) is observable at all. The model is addressed by URI via `monaco.editor.getModels
     /// ()`, not `getEditors()[0].getModel()` — drills 13/14 left other models registered on this
@@ -2242,29 +2242,29 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
     /// `15.undo1` — a single `.undo()`/`.redo()` unconditionally serializes whatever element it
     /// touches (`undo(){this._data instanceof p&&(this._data=this._data.serialize());...}`, the
     /// first line of both, bundle @~1559677), which would make `canAppend` false regardless of
-    /// line 450 from that point on — exactly what makes `performStageBPostRedoKeystroke` (below)
+    /// the trailing boundary from that point on — exactly what makes `performStageBPostRedoKeystroke` (below)
     /// unable to discriminate anything (confound (b), from the review, still stands for THAT step).
     ///
     /// One direct "T", one ⌘Z, and the buffer must be back to EXACTLY the agent's landed state. If
-    /// line 450 ran: "T" opened its own element (`canAppend` false against the closed `E_agent`),
-    /// so the ⌘Z removes only "T". If line 450 were deleted: "T" would REUSE `E_agent` (`canAppend`
+    /// the trailing boundary ran: "T" opened its own element (`canAppend` false against the closed `E_agent`),
+    /// so the ⌘Z removes only "T". If it were deleted: "T" would REUSE `E_agent` (`canAppend`
     /// true against the still-open element), and the SAME single ⌘Z would remove "T" *and* the
     /// agent's whole EOL+content change together, landing on the pre-agent, LF, user-edited text
     /// instead — a large, easy-to-see divergence, not a rounding error. That asymmetry, mutation
-    /// -proven (line 450 commented out: this step alone reports FAIL with the pre-agent/LF
+    /// -proven (that call commented out: this step alone reports FAIL with the pre-agent/LF
     /// signature; restored: PASS), not a passing assertion alone, is the proof.
     ///
-    /// **What line 450 protects, honestly stated** (wave-8 item 5, corrected after re-review
+    /// **What the trailing boundary protects, honestly stated** (wave-8 item 5, corrected after re-review
     /// disproved the original claim): a future DIRECT model edit that lands below Monaco's command
     /// layer with no leading seal of its own — NOT the user's own keystrokes, which that layer's
     /// `shouldPushStackElementBefore` heuristic already isolates regardless (see above), and NOT
     /// another `applyExternalContent` call either: a second one seals its OWN leading boundary
-    /// independently (editor.js:433, BEFORE its EOL/edit pair), whether or not THIS call's trailing
+    /// independently (its own LEADING `pushStackElement()`, BEFORE its EOL/edit pair), whether or not THIS call's trailing
     /// one ran. No currently-reachable production writer is the case actually being guarded against
     /// — every user-reachable path (typing, paste, actions, bulk edits, snippets, find-replace)
     /// already self-seals one way or the other, which is exactly why this is defense-in-depth rather
     /// than a live dependency. `15.postRedoKeystroke`'s "no corruption" claim about keystrokes stands
-    /// independently of line 450 for exactly that reason; it was never the boundary's claim to make.
+    /// independently of the trailing boundary for exactly that reason; it was never the boundary's claim to make.
     private func performStageBDiscriminant(_ stepId: String) {
         guard let runtime = stageBRuntime, let container = stageBRuntimeContainer else {
             local(stepId, false, "no Stage B runtime/container")
@@ -2331,13 +2331,13 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
                                        + "(past the command layer, which a keystroke cannot avoid) "
                                        + "then undid once — "
                                        + (ok ? "back to EXACTLY the agent's landed state: the edit "
-                                          + "opened its OWN element, proving editor.js:450's "
+                                          + "opened its OWN element, proving applyExternalContent's "
                                           + "trailing boundary held"
                                           : "WRONG: \(difference ?? "eol mismatch") — the undo "
                                           + "reached PAST the agent's change to the pre-agent, "
                                           + "user-edited text, meaning the edit merged into the "
-                                          + "agent's still-open element (editor.js:450's boundary "
-                                          + "is NOT holding)"))
+                                          + "agent's still-open element (applyExternalContent's trailing "
+                                          + "boundary is NOT holding)"))
                         }
                     }
                 }
@@ -2428,9 +2428,9 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
     /// runs, `15.undo1`, `15.undo2` and `15.redoToAgent` have already called `.undo()`/`.redo()`
     /// on `E_agent` twice each way, and BOTH unconditionally serialize it as their first action
     /// (`this._data instanceof p&&(this._data=this._data.serialize())` — bundle @~1559677) — so
-    /// `canAppend` is permanently false here regardless of whether `editor.js:450` ever ran. A
-    /// keystroke typed at this point will ALWAYS open a new element; deleting line 450 leaves this
-    /// step green. (The 5e5bc578 commit message called this step "trailing-boundary keystroke
+    /// `canAppend` is permanently false here regardless of whether the trailing boundary ever ran. A
+    /// keystroke typed at this point will ALWAYS open a new element; deleting `applyExternalContent`'s
+    /// trailing `pushStackElement()` leaves this step green. (The 5e5bc578 commit message called this step "trailing-boundary keystroke
     /// isolation" — that claim was wrong; corrected in the Task 11 fix-round report.)
     ///
     /// What this step still legitimately proves: the pipeline does not corrupt state through a
@@ -2471,7 +2471,7 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
                                        + (ok ? "back to EXACTLY the agent's landed state: no "
                                           + "corruption through the redo-then-type-then-undo "
                                           + "sequence (this step does NOT discriminate "
-                                          + "editor.js:450 — both undo/redo elements were already "
+                                          + "the trailing boundary — both undo/redo elements were already "
                                           + "serialized before this step ran; 15.discriminant is "
                                           + "the one that does)"
                                           : "WRONG: \(difference ?? "eol mismatch") — the pipeline "
@@ -3115,7 +3115,7 @@ struct EditorHarnessFixtures {
             step("15.discriminant", 15, "THE discriminator: pushEditOperations DIRECTLY on the "
                  + "model (past Monaco's command layer, which forces its own boundary on any "
                  + "keystroke and cannot be used here — mutation-proven), undone once — proves "
-                 + "editor.js:450's trailing boundary live, not by construction; MUST run before "
+                 + "applyExternalContent's trailing boundary live, not by construction; MUST run before "
                  + "any undo/redo touches E_agent or the proof is destroyed", .local, 15),
             step("15.undo1", 15, "⌘Z once — the merged EOL+content undo unit restores the "
                  + "pre-agent state byte for byte, text AND line ending together", .local, 15),
