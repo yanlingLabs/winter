@@ -1275,6 +1275,13 @@ export async function startDaemon(opts: {
     });
     dispatchChildren.start();
 
+    // PR 2 (background MCP tasks): same later-assigned-closure shape as `dispatchChildren` just
+    // above and `engine?.transcriptPathFor` earlier — McpManager is constructed well before the
+    // engine exists, but a settled task has to reach the engine's notification path. Assigning
+    // here (rather than passing it at construction) is the only ordering that works, and the
+    // closure is only ever INVOKED when a real task settles, long after boot.
+    if (mcp) mcp.onTaskSettled = (sid, key) => engine!.notifyMcpTaskCompletion(sid, key);
+
     // Dreaming (Phase 7b): background memory synthesis for the dispatch session. Hardcoded
     // model/cadence per spec; memory.enabled (hot) is the only switch. Constructed here, AFTER
     // `engine` is assigned above, since `activeTurnCount` closes over it (an idle read at tick
