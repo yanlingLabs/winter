@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<office:document xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+    xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0"
+    xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"
+    xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0"
+    xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0"
+    office:version="1.3"
+    office:mimetype="application/vnd.oasis.opendocument.spreadsheet">
+  <office:automatic-styles>
+    <style:style style:name="GateFill" style:family="table-cell">
+      <style:table-cell-properties fo:background-color="#ff6600"/>
+      <style:text-properties fo:color="#ffffff" fo:font-weight="bold"/>
+    </style:style>
+  </office:automatic-styles>
+  <office:body>
+    <office:spreadsheet>
+      <table:table table:name="Sheet1">
+        <table:table-column table:number-columns-repeated="4"/>
+        <table:table-row>
+          <table:table-cell table:style-name="GateFill" office:value-type="string">
+            <text:p>NORMA GATE</text:p>
+          </table:table-cell>
+          <table:table-cell office:value-type="float" office:value="42">
+            <text:p>42</text:p>
+          </table:table-cell>
+        </table:table-row>
+        <table:table-row>
+          <table:table-cell office:value-type="string">
+            <text:p>office stage A embed probe</text:p>
+          </table:table-cell>
+        </table:table-row>
+      </table:table>
+    </office:spreadsheet>
+  </office:body>
+</office:document>

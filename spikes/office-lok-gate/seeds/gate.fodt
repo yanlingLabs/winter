@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<office:document xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+    xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0"
+    xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"
+    xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0"
+    office:version="1.3"
+    office:mimetype="application/vnd.oasis.opendocument.text">
+  <office:automatic-styles>
+    <style:style style:name="GateText" style:family="paragraph">
+      <style:text-properties fo:color="#ff6600" fo:font-weight="bold" fo:font-size="24pt"/>
+    </style:style>
+  </office:automatic-styles>
+  <office:body>
+    <office:text>
+      <text:p text:style-name="GateText">NORMA GATE</text:p>
+      <text:p>office stage A embed probe</text:p>
+    </office:text>
+  </office:body>
+</office:document>
