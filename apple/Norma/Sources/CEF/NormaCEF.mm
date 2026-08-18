@@ -78,8 +78,53 @@
 //   2. THE 33 ms CEILING IS CEF's OWN `1000 / 30`, not a tuned value. Task 1 swept it: the pump
 //      rate tracks the ceiling linearly (61.1 / 30.3 / 10.4 per second at 16 / 33 / 100 ms) but
 //      CPU does NOT move monotonically (2.6% / 1.3% / 3.4% of one core across all six processes),
-//      so between-run noise dominates and the interval is not what decides cost. 33 ms bounds
-//      worst-case input-to-paint latency at one 30fps frame. Do not "optimise" it.
+//      so between-run noise dominates and the interval is not what decides cost. Task 1's own
+//      sentence here used to read "33 ms bounds worst-case input-to-paint latency at one 30fps
+//      frame" — a live-gate report of app-wide "clunky/laggy, low refresh, scroll worst" (a
+//      perf-probe task, 2026-08-18, instrumented copy + CDP, no code shipped from the probe) went
+//      looking for that frame specifically and DISPROVED it:
+//
+//        - Every CEF page in Norma — the editor AND a blank web tab alike — renders
+//          `requestAnimationFrame` at a hard, page-content-independent **30.0 Hz** on this
+//          120 Hz-capable display, whether `kMaxTimerDelay` is 33 ms OR 16 ms. The 16 ms run
+//          verified the override actually took effect first (idle `DoWork` rate measured 60/s,
+//          exactly double 33 ms's 30/s, matching Task 1's own linear tracking) — so the pump was
+//          provably ticking twice as often and `requestAnimationFrame` did not move by one hertz.
+//        - Active scrolling (a CDP wheel-event burst) already drives `OnScheduleWork`'s
+//          `delay_ms <= 0` path hard — 45-52 total `DoWork`/s, ABOVE the idle ceiling, with the
+//          TIMER path (this section) going nearly silent — and frame pacing still held at 30.0 Hz.
+//          The pump is not starved during scroll; something downstream ignores the extra ticks.
+//        - Occlusion, resize churn and Monaco-specific cost were checked and are not it either
+//          (`document.visibilityState` reads `"visible"` throughout; a container resize-churn
+//          counter fired once in a 71-step drill; a blank page matches the editor exactly).
+//        - `--disable-frame-rate-limit --disable-gpu-vsync` (real Chromium switches, passed as
+//          argv exactly like `--remote-debugging-port` — no code change) raised idle
+//          `requestAnimationFrame` to ~57 Hz. That is the actual lever in the SHIPPED config:
+//          Chromium's OWN frame-rate limiter / assumed-vsync-interval, not this pump. It was not
+//          chased further — an uncapped/vsync-disabled compositor is not something to ship on a
+//          hunch (pegged GPU and tearing on real animated content), and finding or wiring a real
+//          vsync source into CEF's windowed compositor under this external-pump architecture is a
+//          change to THAT plumbing, not to this constant. **UNDISCHARGED CAVEAT, read before
+//          touching either:** this ~57 Hz run still had `kMaxTimerDelay` overridden to 16 ms (60
+//          `DoWork`/s) — 57 ≈ 60, so the number is equally explained by "the limiter is gone and
+//          THIS ceiling is now the gate" as by "the limiter caps near 60 regardless". The
+//          discriminating run (switches + the STOCK 33 ms ceiling: ~30 Hz still means
+//          pump-bound, ~57-60 Hz means Chromium's own default and this constant stays irrelevant)
+//          was not performed. Whoever next touches the vsync/limiter side must run it BEFORE
+//          assuming this constant is inert once that fix lands — it may become the next thing to
+//          raise.
+//
+//      **So: in TODAY's shipped configuration this constant is not a rendering-smoothness lever.
+//      Do not "optimise" it expecting a frame-rate or scroll-smoothness change here — measured,
+//      twice (33 ms and 16 ms), to do nothing for either, because Chromium's own limiter gates
+//      first.** That may stop being true the day the limiter/vsync side is fixed — see the
+//      undischarged caveat above before relying on this constant staying inert. Until then it
+//      still bounds worst-case latency for genuinely aperiodic idle-path work (a debounce timer, a
+//      delayed IPC reply) that is NOT frame production, which is the one thing Task 1's CPU-noise
+//      conclusion still stands on. One confound the probe could not clear: the whole session ran
+//      on battery (never AC) — if that turns out to matter, it would soften "30.0 Hz" as an
+//      unconditional number, but not the A/B finding itself (33 ms and 16 ms were measured under
+//      the identical condition).
 //
 //   3. THE RE-ENTRANCY REPOST. `CefDoMessageLoopWork()` re-enters this pump through paint and IPC
 //      callbacks; a discarded call must be REPOSTED, never dropped (`PerformMessageLoopWork`).
