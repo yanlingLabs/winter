@@ -11,6 +11,7 @@
     "test": "bun test"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
     "@norma/protocol": "workspace:*",
     "unpdf": "^1.6.2",
     "zod": "^4.0.0"
