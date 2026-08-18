@@ -1022,6 +1022,9 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
         case "15.agentLands":
             performStageBAgentLands(step.id)
 
+        case "15.discriminant":
+            performStageBDiscriminant(step.id)
+
         case "15.undo1":
             performStageBUndoStep(step.id, expectedText: "U" + fixtures.fixtureUndoOriginal,
                                   expectedEOL: "\n", expectDirty: true,
@@ -1037,8 +1040,8 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
         case "15.redoToAgent":
             performStageBRedoToAgent(step.id)
 
-        case "15.trailingBoundary":
-            performStageBTrailingBoundary(step.id)
+        case "15.postRedoKeystroke":
+            performStageBPostRedoKeystroke(step.id)
 
         // ---- drill 16: dirty + external write reaches the banner; Keep mine; save overwrites ---
         case "16.setupDirty":
@@ -2203,6 +2206,139 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
         Darwin.close(fd)
     }
 
+    /// **The actual discriminator — and the SECOND design of this step.** The first design (fix
+    /// round 1's own initial attempt) typed with a CDP `Input.insertText` call carrying no
+    /// `pushUndoStop`, on the theory that a "raw" keystroke's own open/merge decision comes
+    /// straight from `EditStack.canAppend`. A mutation run (line 450 commented out, rebuilt, run
+    /// live) proved that theory wrong: the step reported PASS in BOTH the real and the mutated
+    /// build — 71/71 either way. The reason is a THIRD confound, at a layer neither the review nor
+    /// this file's earlier reasoning had reached: every keystroke, however delivered, is routed
+    /// through Monaco's command layer (`SimpleCharacterTypeOperation.getEdits`, bundle @~1960451)
+    /// BEFORE it ever reaches `EditStack`. That layer decides `shouldPushStackElementBefore` with
+    /// its OWN heuristic (`A`/`M`/`N`/`P`, bundle @~1964344-1964450) keyed on the EditOperationType
+    /// of the PREVIOUS edit versus this one — `A(H,Y) = N(H)&&!N(Y) ? true : H===5 ? false :
+    /// P(H)!==P(Y)`, where typing "T" always computes `Y=4`. `applyExternalContent`'s own
+    /// `pushEditOperations` call is not a "typing" op, so the tracked previous type is `Other=0`
+    /// afterward, and `A(0,4)` = `N(0)=false → P(0)=0 !== P(4)=4` = **true, unconditionally** —
+    /// the command layer forces a boundary before ANY keystroke that follows ANY external edit,
+    /// whether or not `editor.js:450` ran. (The SAME arithmetic explains the file's older, already
+    /// -proven finding the opposite direction: two consecutive typed characters both compute
+    /// `Y=4`, so `A(4,4) = P(4)!==P(4) = false` — they coalesce, which is exactly why
+    /// `insertText`'s own doc comment says `pushUndoStop` was required for drill 6's two-keystroke
+    /// race to behave.) **Consequence: no keystroke-shaped action, CDP or otherwise, can ever
+    /// discriminate line 450** — the command layer's own boundary is unconditional right here,
+    /// and would mask the trailing `pushStackElement()` in both directions forever.
+    ///
+    /// So this step no longer types. It calls `model.pushEditOperations(...)` DIRECTLY, in the
+    /// SAME shape `applyExternalContent` itself uses, which reaches `EditStack` straight —
+    /// `_getOrCreateEditStackElement` → `canAppend` — with no command layer in between. That is
+    /// the only layer at which `E_agent`'s open/closed state (CLOSED if line 450 ran, still OPEN
+    /// if it did not — `canAppend(c){return this.model===c&&this._data instanceof p}`, bundle
+    /// @~1559677) is observable at all. The model is addressed by URI via `monaco.editor.getModels
+    /// ()`, not `getEditors()[0].getModel()` — drills 13/14 left other models registered on this
+    /// same page, and the active editor's current model is not a safe assumption to lean on here.
+    ///
+    /// This step MUST still run HERE, immediately after `15.agentLands` and strictly before
+    /// `15.undo1` — a single `.undo()`/`.redo()` unconditionally serializes whatever element it
+    /// touches (`undo(){this._data instanceof p&&(this._data=this._data.serialize());...}`, the
+    /// first line of both, bundle @~1559677), which would make `canAppend` false regardless of
+    /// line 450 from that point on — exactly what makes `performStageBPostRedoKeystroke` (below)
+    /// unable to discriminate anything (confound (b), from the review, still stands for THAT step).
+    ///
+    /// One direct "T", one ⌘Z, and the buffer must be back to EXACTLY the agent's landed state. If
+    /// line 450 ran: "T" opened its own element (`canAppend` false against the closed `E_agent`),
+    /// so the ⌘Z removes only "T". If line 450 were deleted: "T" would REUSE `E_agent` (`canAppend`
+    /// true against the still-open element), and the SAME single ⌘Z would remove "T" *and* the
+    /// agent's whole EOL+content change together, landing on the pre-agent, LF, user-edited text
+    /// instead — a large, easy-to-see divergence, not a rounding error. That asymmetry, mutation
+    /// -proven (line 450 commented out: this step alone reports FAIL with the pre-agent/LF
+    /// signature; restored: PASS), not a passing assertion alone, is the proof.
+    ///
+    /// **What line 450 protects, honestly stated**: the NEXT direct model edit — another agent
+    /// write, any future page-script mutation — not the user's own keystrokes, which the command
+    /// layer's `shouldPushStackElementBefore` heuristic already isolates on its own (see above).
+    /// `15.postRedoKeystroke`'s "no corruption" claim about keystrokes stands independently of
+    /// line 450 for exactly that reason; it was never the boundary's claim to make.
+    private func performStageBDiscriminant(_ stepId: String) {
+        guard let runtime = stageBRuntime, let container = stageBRuntimeContainer else {
+            local(stepId, false, "no Stage B runtime/container")
+            return
+        }
+        let path = fixtures.pathUndo
+        guard let pathData = try? JSONSerialization.data(withJSONObject: [path]),
+              let pathJSON = String(data: pathData, encoding: .utf8) else {
+            local(stepId, false, "could not encode \(path) for injection")
+            return
+        }
+        // JSON-encoded, never raw-interpolated — the same discipline `EditorBridgeCodec.javascript`
+        // documents: nothing here lets a path's own bytes become JavaScript syntax.
+        let script = """
+        (function () {
+          var path = (\(pathJSON))[0];
+          var uri = monaco.Uri.file(path).toString();
+          var models = monaco.editor.getModels();
+          var target = null;
+          for (var i = 0; i < models.length; i++) {
+            if (models[i].uri.toString() === uri) { target = models[i]; break; }
+          }
+          if (!target) { return "NOTFOUND"; }
+          target.pushEditOperations([], [{
+            range: new monaco.Range(1, 1, 1, 1),
+            text: "T"
+          }], function () { return null; });
+          return "ok";
+        })()
+        """
+        evaluate(container, script) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .bad(let reason):
+                self.local(stepId, false, "the direct model edit: \(reason)")
+                return
+            case .ok(let value):
+                if (value as? String) == "NOTFOUND" {
+                    self.local(stepId, false, "no model on the page has uri \(path) — is 15.agentLands "
+                               + "running against the right path?")
+                    return
+                }
+            }
+            self.waitForDirty(runtime: runtime, path: path, want: true) { [weak self] dirtyOk, dirtyDetail in
+                guard let self else { return }
+                guard dirtyOk else {
+                    self.local(stepId, false, "the direct model edit never dirtied the model: \(dirtyDetail)")
+                    return
+                }
+                self.trigger("undo", on: container) { [weak self] error in
+                    guard let self else { return }
+                    if let error { self.local(stepId, false, "the discriminating undo: \(error)"); return }
+                    self.currentValueAndEOL(on: container) { [weak self] result in
+                        guard let self else { return }
+                        switch result {
+                        case .bad(let reason):
+                            self.local(stepId, false, reason)
+                        case .ok(let observed):
+                            let expected = MonacoTextBuffer.savedText(forFileOpenedWith: self.fixtures.fixtureAgentWrite)
+                            let difference = EditorHarnessScript.firstByteDifference(expected: expected,
+                                                                                     actual: observed.text)
+                            let ok = difference == nil && observed.eol == "\r\n"
+                            self.local(stepId, ok, "pushEditOperations \"T\" DIRECTLY on the model "
+                                       + "(past the command layer, which a keystroke cannot avoid) "
+                                       + "then undid once — "
+                                       + (ok ? "back to EXACTLY the agent's landed state: the edit "
+                                          + "opened its OWN element, proving editor.js:450's "
+                                          + "trailing boundary held"
+                                          : "WRONG: \(difference ?? "eol mismatch") — the undo "
+                                          + "reached PAST the agent's change to the pre-agent, "
+                                          + "user-edited text, meaning the edit merged into the "
+                                          + "agent's still-open element (editor.js:450's boundary "
+                                          + "is NOT holding)"))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// One ⌘Z on the runtime's own page, judged against a computed expectation — the SAME
     /// "compare by UTF-8 bytes" discipline the round-trip drills use (`EditorHarnessScript`'s own
     /// header): the whole point here is proving byte identity, and `String ==` cannot see the
@@ -2282,11 +2418,20 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
         }
     }
 
-    /// **The symmetric hole.** The leading `pushStackElement()` seals the user's edit OUT of the
-    /// agent's change; this proves the TRAILING one seals the agent's change OUT of whatever the
-    /// user types next. One keystroke, one undo, and what is left must be EXACTLY the agent's own
-    /// change — not the keystroke and the agent's change together.
-    private func performStageBTrailingBoundary(_ stepId: String) {
+    /// **Not a discriminator — `performStageBDiscriminant` (above) is.** By the time this step
+    /// runs, `15.undo1`, `15.undo2` and `15.redoToAgent` have already called `.undo()`/`.redo()`
+    /// on `E_agent` twice each way, and BOTH unconditionally serialize it as their first action
+    /// (`this._data instanceof p&&(this._data=this._data.serialize())` — bundle @~1559677) — so
+    /// `canAppend` is permanently false here regardless of whether `editor.js:450` ever ran. A
+    /// keystroke typed at this point will ALWAYS open a new element; deleting line 450 leaves this
+    /// step green. (The 5e5bc578 commit message called this step "trailing-boundary keystroke
+    /// isolation" — that claim was wrong; corrected in the Task 11 fix-round report.)
+    ///
+    /// What this step still legitimately proves: the pipeline does not corrupt state through a
+    /// realistic redo-then-type-then-undo sequence — a self-sealing keystroke (`insertText`, which
+    /// calls `pushUndoStop` itself) lands cleanly after two undos and two redos, and one ⌘Z
+    /// removes exactly that keystroke, no more, no less.
+    private func performStageBPostRedoKeystroke(_ stepId: String) {
         guard let runtime = stageBRuntime, let container = stageBRuntimeContainer else {
             local(stepId, false, "no Stage B runtime/container")
             return
@@ -2294,17 +2439,17 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
         let path = fixtures.pathUndo
         insertText("T", on: container) { [weak self] error in
             guard let self else { return }
-            if let error { self.local(stepId, false, "the trailing keystroke: \(error)"); return }
+            if let error { self.local(stepId, false, "the post-redo keystroke: \(error)"); return }
             self.waitForDirty(runtime: runtime, path: path, want: true) { [weak self] dirtyOk, dirtyDetail in
                 guard let self else { return }
                 guard dirtyOk else {
-                    self.local(stepId, false, "the trailing keystroke never dirtied the model: "
+                    self.local(stepId, false, "the post-redo keystroke never dirtied the model: "
                                + "\(dirtyDetail)")
                     return
                 }
                 self.trigger("undo", on: container) { [weak self] error in
                     guard let self else { return }
-                    if let error { self.local(stepId, false, "the trailing undo: \(error)"); return }
+                    if let error { self.local(stepId, false, "the post-redo undo: \(error)"); return }
                     self.currentValueAndEOL(on: container) { [weak self] result in
                         guard let self else { return }
                         switch result {
@@ -2315,12 +2460,17 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
                             let difference = EditorHarnessScript.firstByteDifference(expected: expected,
                                                                                      actual: observed.text)
                             let ok = difference == nil && observed.eol == "\r\n"
-                            self.local(stepId, ok, "typed \"T\" then undid once — the buffer is "
-                                       + (ok ? "back to EXACTLY the agent's landed state"
-                                          : "WRONG: \(difference ?? "eol mismatch")")
-                                       + " — the trailing boundary "
-                                       + (ok ? "held" : "did NOT hold (the undo reached past the "
-                                          + "agent's own change)"))
+                            self.local(stepId, ok, "typed \"T\" (self-sealing insertText) then "
+                                       + "undid once, after two undos + two redos — the buffer is "
+                                       + (ok ? "back to EXACTLY the agent's landed state: no "
+                                          + "corruption through the redo-then-type-then-undo "
+                                          + "sequence (this step does NOT discriminate "
+                                          + "editor.js:450 — both undo/redo elements were already "
+                                          + "serialized before this step ran; 15.discriminant is "
+                                          + "the one that does)"
+                                          : "WRONG: \(difference ?? "eol mismatch") — the pipeline "
+                                          + "corrupted state through the redo-then-type-then-undo "
+                                          + "sequence"))
                         }
                     }
                 }
@@ -2956,15 +3106,21 @@ struct EditorHarnessFixtures {
             step("15.agentLands", 15, "simulate the agent: an in-place O_TRUNC rewrite with "
                  + "CRLF-flipped, content-changed text — the clean model reloads SILENTLY "
                  + "(content updated, EOL flipped, no dirty blink)", .local, 10),
+            step("15.discriminant", 15, "THE discriminator: pushEditOperations DIRECTLY on the "
+                 + "model (past Monaco's command layer, which forces its own boundary on any "
+                 + "keystroke and cannot be used here — mutation-proven), undone once — proves "
+                 + "editor.js:450's trailing boundary live, not by construction; MUST run before "
+                 + "any undo/redo touches E_agent or the proof is destroyed", .local, 15),
             step("15.undo1", 15, "⌘Z once — the merged EOL+content undo unit restores the "
                  + "pre-agent state byte for byte, text AND line ending together", .local, 15),
             step("15.undo2", 15, "⌘Z again — the user's own edit unwinds, back to the pristine "
                  + "original", .local, 15),
             step("15.redoToAgent", 15, "redo twice — back at the agent's landed state, clean again",
                  .local, 15),
-            step("15.trailingBoundary", 15, "a keystroke AFTER the agent's change, undone once, "
-                 + "removes ONLY that keystroke — the trailing pushStackElement() boundary holds",
-                 .local, 15),
+            step("15.postRedoKeystroke", 15, "a self-sealing keystroke AFTER two undos + two "
+                 + "redos, undone once, removes ONLY that keystroke — proves no corruption, but "
+                 + "NOT a boundary discriminator (undo/redo already forced E_agent's element "
+                 + "closed by the time this runs)", .local, 15),
 
             step("16.setupDirty", 16, "open a file and dirty it with a real keystroke", .local, 15),
             step("16.externalWrite", 16, "an external write while dirty — the conflict banner "

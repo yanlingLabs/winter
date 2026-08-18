@@ -1337,8 +1337,9 @@ final class EditorPlumbingTests: XCTestCase {
         let scratch = try scratchDir()
         let fixtures = EditorHarnessFixtures(scratch: scratch)
         let steps = EditorHarnessFixtures.steps(fixtures)
-        XCTAssertEqual(steps.count, 70, "Stage A's own 44 steps (Task 1 + editor-product Task 4's "
-                       + "1.brand) plus Stage B's 26 (editor-product Task 11)")
+        XCTAssertEqual(steps.count, 71, "Stage A's own 44 steps (Task 1 + editor-product Task 4's "
+                       + "1.brand) plus Stage B's 27 (editor-product Task 11 + its fix round's "
+                       + "15.discriminant)")
 
         let stageB = steps.filter { $0.drill >= 12 }
         XCTAssertEqual(Set(stageB.map(\.drill)), Set(12...18),
@@ -1353,6 +1354,22 @@ final class EditorPlumbingTests: XCTestCase {
             XCTAssertNotNil(EditorHarnessFixtures.drillTitles[drill],
                             "drill \(drill) has no title for the transcript")
         }
+
+        // Drill 15's INTERNAL order is load-bearing, not incidental: `15.discriminant` must run
+        // immediately after `15.agentLands` and strictly before `15.undo1`, because a single
+        // undo() or redo() on E_agent permanently serializes it (bundle-verified:
+        // `SingleModelEditStackElement.undo`/`.redo` both open with
+        // `this._data instanceof p&&(this._data=this._data.serialize())`), which would make
+        // `canAppend` false regardless of whether `editor.js:450`'s trailing boundary ever ran —
+        // silently turning the discriminator back into the non-discriminating step the fix round
+        // replaced. The generic "sorted by drill" check above cannot catch an intra-drill
+        // reorder; this exact sequence can.
+        let drill15Ids = steps.filter { $0.drill == 15 }.map(\.id)
+        XCTAssertEqual(drill15Ids, [
+            "15.open", "15.userEdit", "15.saveClean", "15.agentLands", "15.discriminant",
+            "15.undo1", "15.undo2", "15.redoToAgent", "15.postRedoKeystroke"
+        ], "15.discriminant's slot right after 15.agentLands (and strictly before any undo/redo "
+           + "touches E_agent) is the entire reason it can discriminate editor.js:450 at all")
 
         // The EOL-sensitive fixtures the undo drill and the CRLF round trip depend on.
         XCTAssertTrue(MonacoTextBuffer.opensWithCRLF(fixtures.fixtureCRLF),
