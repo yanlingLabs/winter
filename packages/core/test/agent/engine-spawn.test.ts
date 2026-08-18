@@ -32,6 +32,7 @@ import { sessionTmpDir } from "../../src/agent/session-tmp";
 import type { LspManager } from "../../src/agent/lsp/manager";
 import type { ModelInfo, Provider, ProviderEvent, TurnRequest } from "../../src/providers/types";
 import { stubRegistry } from "./engine-reviewer.test"; // SP-policies Task 7: stub `bash` tool for the escalation tests' discriminating observable
+import type { McpManager } from "../../src/agent/mcp/manager";
 
 export function setup(
   script: ProviderEvent[][],
@@ -42,6 +43,9 @@ export function setup(
     // a test isolate "run_in_background requested but the registry was never wired" from the
     // unrelated "subagent bridge entirely absent" case above).
     withBgAgents?: boolean;
+    // PR 2: wires EngineConfig.mcp so a test can exercise notifyMcpTaskCompletion. Default
+    // undefined → cfg.mcp omitted, exactly as before this option existed.
+    mcp?: McpManager;
     subagentsOpts?: { maxConcurrent?: number; timeoutMs?: number | null; stallTimeoutMs?: number | null; acquireTimeoutMs?: number };
     provider?: Provider; // override — script ignored when set (e.g. a hanging provider for timeout tests)
     // undefined (default) → EngineConfig.provider.live absent, matching every pre-existing test
@@ -151,6 +155,7 @@ export function setup(
     agents,
     subagents,
     bgAgents: withBgAgents ? bgAgents : undefined,
+    ...(opts.mcp ? { mcp: opts.mcp } : {}),
     // hot-settings T2: both are now getters — opts stays the plain-value shape every existing
     // call site here uses, wrapped at this ONE boundary (mirrors daemon.ts's own getters).
     subagentMaxDepth: () => opts.maxDepth,
@@ -169,7 +174,7 @@ export function setup(
   const sessionId = store.createSession("global", { cwd, approvalPolicy: opts.approvalPolicy ?? "auto" });
   const events: SessionEvent[] = [];
   hub.attach({ clientName: "test-observer", deliver: (e) => { events.push(e); return true; } }, sessionId, 0);
-  return { engine, store, hub, broker, sessionId, cwd, provider, dirs, events, registry, bgAgents, subagents };
+  return { engine, store, hub, broker, sessionId, cwd, provider, dirs, events, registry, bgAgents, subagents, mcp: opts.mcp };
 }
 
 const done = (reason: "end_turn" | "tool_calls" | "aborted"): ProviderEvent => ({ type: "done", stopReason: reason });

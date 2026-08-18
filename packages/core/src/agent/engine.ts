@@ -2074,6 +2074,9 @@ export class AgentEngine {
     // builders and deliberately untouched): entity-escape a literal closing task-notification tag
     // (any casing/inner whitespace) so a hostile result can't close THIS block early — the real
     // closing tag below must stay the only one.
+    // Escape BOTH ends of the tag, not just the closing one: escaping only `</task-notification>`
+    // still lets a hostile result emit a bare `<task-notification>` that reads as a nested block.
+    // Neither can be produced literally by a server result any more.
     const clean = (s: string) => this.sanitizeForReminder(s).replace(/<\/\s*task-notification\s*>/gi, "&lt;/task-notification&gt;");
     const label = clean(e.name ?? e.agentId);
     const summary = e.status === "completed" ? `Agent "${label}" completed`
@@ -2096,6 +2099,39 @@ export class AgentEngine {
     if (this.isRunning(sessionId)) { this.retriggerPending.add(sessionId); return; }
     // steer()'s idle idiom: the event is already in history; a fresh turn replays it.
     void this.runTurn(sessionId).catch((err) => console.error("bg-notification turn failed:", err));
+  }
+
+  /** MCP sibling of notifyBgCompletion. Persists a settled background MCP task as a
+   *  task_notification and wakes the session the same way. Exactly-once via the registry's
+   *  takeForNotification claim, which matters here because BOTH the abort path and the stream's
+   *  settle path call onTaskSettled for the same key.
+   *
+   *  SANITISATION IS NOT OPTIONAL HERE. `result` is authored by a third-party MCP SERVER — less
+   *  trusted than the subagent output notifyBgCompletion already sanitises — and this event is
+   *  durable, replayed user-role into every later turn. Same two passes: sanitizeForReminder,
+   *  then entity-escape any closing task-notification tag so a hostile result cannot end the
+   *  block early and inject structure after it. */
+  notifyMcpTaskCompletion(sessionId: string, key: string): void {
+    const e = this.cfg.mcp?.tasks.takeForNotification(key);
+    if (!e) return;
+    // Escape BOTH ends of the tag. Escaping only the closing one still lets a hostile result emit
+    // a bare `<task-notification>` that reads as a nested block; neither can now be produced
+    // literally by server output. (notifyBgCompletion escapes only the closing tag — the same
+    // hardening would suit it, but changing that path is out of scope here.)
+    const clean = (s: string) => this.sanitizeForReminder(s)
+      .replace(/<\/\s*task-notification\s*>/gi, "&lt;/task-notification&gt;")
+      .replace(/<\s*task-notification\s*>/gi, "&lt;task-notification&gt;");
+    const label = clean(`${e.tool} on ${e.server}`);
+    const summary = e.status === "completed" ? `MCP task "${label}" completed`
+      : e.status === "failed" ? `MCP task "${label}" failed`
+      : `MCP task "${label}" was cancelled`;
+    const result = e.result ? `\n<result>${clean(e.result)}</result>` : "";
+    const content = `<task-notification>\n<task-id>${clean(e.key)}</task-id>\n<status>${e.status}</status>\n<summary>${summary}</summary>${result}\n</task-notification>`;
+    this.cfg.hub.append(sessionId, { type: "task_notification", sessionId, threadId: MAIN_THREAD, content });
+    // Same wake discipline as notifyBgCompletion: defer while a turn is in flight (runTurn's
+    // finally drains it), otherwise the session is idle and a fresh turn replays the event.
+    if (this.isRunning(sessionId)) { this.retriggerPending.add(sessionId); return; }
+    void this.runTurn(sessionId).catch((err) => console.error("mcp-task-notification turn failed:", err));
   }
 
   /** Task B2: persists a completed/failed WORKFLOW run as a task_notification history event —
