@@ -124,7 +124,8 @@
 //
 //      **THE MODE, settled by reading the create call, not by measuring further:** every browser
 //      this file creates — editor and web tab alike, there is exactly one production
-//      `CreateBrowser` call site (`CreateBrowserNow`, below) — is WINDOWED, not off-screen. It
+//      `CreateBrowser` call site as of 2026-08-18 (`CreateBrowserNow`, below) — is WINDOWED, not
+//      off-screen. It
 //      calls `window_info.SetAsChild(...)` and sets `window_info.runtime_style =
 //      CEF_RUNTIME_STYLE_ALLOY` immediately after (both in `CreateBrowserNow`);
 //      `CefSettings.windowless_rendering_enabled` is never set in `NormaCEFInitialize` (defaults
@@ -181,14 +182,17 @@
 //      delayed IPC reply) that is NOT frame production, which is the one thing Task 1's CPU-noise
 //      conclusion still stands on. **Power confound, both sessions:** the original 30.0 Hz finding
 //      and this same-morning rerun were both measured on a MacBook discharging on battery, and
-//      this session additionally saw `pmset -g` report `powermode 1` (Low Power Mode, most likely
-//      auto-engaged at 6% battery) — on a ProMotion display, Low Power Mode itself caps the
-//      system-wide refresh ceiling at 60 Hz, so neither session can claim "120 Hz was reachable
-//      today." What both sessions CAN claim: the STOCK config reproducibly locks to a clean
-//      30.000 Hz regardless of that confound (Low Power Mode would cap the ceiling ABOVE 30, not
-//      force exactly 30), and removing the limiter removes pacing rather than revealing a clean
-//      alternate rate. An AC-powered, Low-Power-Mode-off rerun is owed before quoting any number
-//      here as "the achievable ceiling".
+//      this session additionally saw `pmset -g` report `powermode 1` — INFERRED as Low Power Mode
+//      (an undocumented key; a `defaults read` cross-check against the documented plist key
+//      returned nothing, so this is not independently confirmed), most likely auto-engaged at 6%
+//      battery. Apple documents Low Power Mode as capping ProMotion at 60 Hz on supported
+//      MacBooks, but this session did not independently measure the LIVE refresh rate — so "the
+//      ceiling was 60, not 120, today" is an inference stacked on an inference, not a measurement,
+//      and neither session can claim "120 Hz was reachable today." What both sessions CAN claim
+//      without that inference: the STOCK config reproducibly locks to a clean 30.000 Hz regardless
+//      (a 60 Hz LPM ceiling would cap ABOVE 30, not force exactly 30), and removing the limiter
+//      removes pacing rather than revealing a clean alternate rate. An AC-powered, verified-
+//      Low-Power-Mode-off rerun is owed before quoting any number here as "the achievable ceiling".
 //
 //   3. THE RE-ENTRANCY REPOST. `CefDoMessageLoopWork()` re-enters this pump through paint and IPC
 //      callbacks; a discarded call must be REPOSTED, never dropped (`PerformMessageLoopWork`).
