@@ -1209,10 +1209,15 @@ final class EditorPlumbingTests: XCTestCase {
         let steps = EditorHarnessFixtures.steps(fixtures)
 
         let drills = steps.map(\.drill)
-        XCTAssertEqual(Array(Set(drills)).sorted(), Array(0...11),
+        // editor-product Task 11: `steps` now ALSO carries Stage B's own drills (12-18, appended
+        // after Stage A's) — `subtracting` rather than an exact-equality asks the ORIGINAL
+        // question ("is every Stage-A drill present") without becoming false the moment a later
+        // task appends more of them after it.
+        XCTAssertEqual(Set(0...11).subtracting(Set(drills)), [],
                        "every drill from the setup step to the foreign-browser refusal must be present")
         XCTAssertEqual(drills, drills.sorted(),
-                       "the steps must be in drill order — the transcript is read as eleven claims")
+                       "the steps must be in drill order — the transcript is read as eleven claims, "
+                       + "then (editor-product Task 11) Stage B's own seven more, never interleaved")
         XCTAssertEqual(Set(steps.map(\.id)).count, steps.count, "step ids must be unique — the "
                        + "harness matches its actions on them")
         for drill in 0...11 {
@@ -1280,9 +1285,14 @@ final class EditorPlumbingTests: XCTestCase {
         let steps = EditorHarnessFixtures.steps(fixtures)
         let ids = steps.map(\.id)
 
-        XCTAssertEqual(steps.count, 44, "two new steps (9.setView, 9.viewState) joined the Stage-A "
-                       + "script's 41 (Task 1); editor-product Task 4 adds a third, 1.brand, so the "
-                       + "branded theme is live before drill 10's before-screenshot runs")
+        // editor-product Task 11 appended Stage B (26 more steps, drills 12-18) AFTER Stage A's
+        // own — scoped to `drill <= 11` so this stays the Stage-A-specific count it always was;
+        // `testTheStageBDrillScriptCarriesEveryDrillInOrder`, below, pins the combined total.
+        let stageASteps = steps.filter { $0.drill <= 11 }
+        XCTAssertEqual(stageASteps.count, 44, "two new steps (9.setView, 9.viewState) joined the "
+                       + "Stage-A script's 41 (Task 1); editor-product Task 4 adds a third, "
+                       + "1.brand, so the branded theme is live before drill 10's before-screenshot "
+                       + "runs")
 
         guard let setViewIndex = ids.firstIndex(of: "9.setView"),
               let openCIndex = ids.firstIndex(of: "9.openC"),
@@ -1316,6 +1326,66 @@ final class EditorPlumbingTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(lines.count, 60, "fixture B must be tall enough that "
                                     + "scrollTop(\(EditorHarnessFixtures.viewStateScrollTop)) is not "
                                     + "clamped near 0 in the harness's ~600px-tall viewport")
+    }
+
+    /// **editor-product Task 11 — Stage B's own drill-list pin**, the same rigor
+    /// `testTheStageADrillScriptCarriesEveryDrillInOrder` applies to Stage A: every drill 12-18
+    /// present, ids unique, steps in drill order, and the fixtures whose EOL rule the undo/CRLF
+    /// drills depend on actually carry the bytes those drills need — a wrong fixture here would
+    /// look like a runtime defect, not a harness one.
+    func testTheStageBDrillScriptCarriesEveryDrillInOrder() throws {
+        let scratch = try scratchDir()
+        let fixtures = EditorHarnessFixtures(scratch: scratch)
+        let steps = EditorHarnessFixtures.steps(fixtures)
+        XCTAssertEqual(steps.count, 70, "Stage A's own 44 steps (Task 1 + editor-product Task 4's "
+                       + "1.brand) plus Stage B's 26 (editor-product Task 11)")
+
+        let stageB = steps.filter { $0.drill >= 12 }
+        XCTAssertEqual(Set(stageB.map(\.drill)), Set(12...18),
+                       "every drill from the runtime's own boot to the files-tree smoke must be "
+                       + "present")
+        XCTAssertEqual(stageB.map(\.drill), stageB.map(\.drill).sorted(),
+                       "Stage B's steps must be in drill order too")
+        XCTAssertEqual(Set(steps.map(\.id)).count, steps.count,
+                       "step ids must be unique across BOTH stages — the harness matches its "
+                       + "actions on them")
+        for drill in 12...18 {
+            XCTAssertNotNil(EditorHarnessFixtures.drillTitles[drill],
+                            "drill \(drill) has no title for the transcript")
+        }
+
+        // The EOL-sensitive fixtures the undo drill and the CRLF round trip depend on.
+        XCTAssertTrue(MonacoTextBuffer.opensWithCRLF(fixtures.fixtureCRLF),
+                      "drill 14's file must be the CRLF-dominant branch, or the round trip proves "
+                      + "nothing about the normalisation rule")
+        XCTAssertEqual(fixtures.fixtureCRLF, fixtures.fixtureB,
+                       "drill 14 deliberately reuses fixture B's own content — its saved-text byte "
+                       + "count is already independently pinned by drill 7's own live pull, so the "
+                       + "two are cross-checks of the SAME number rather than two hand-counted ones")
+        XCTAssertFalse(MonacoTextBuffer.opensWithCRLF(fixtures.fixtureUndoOriginal),
+                       "drill 15's ORIGINAL file must be LF-dominant — the undo drill's whole claim "
+                       + "is about the FLIP the simulated agent write causes")
+        XCTAssertTrue(MonacoTextBuffer.opensWithCRLF(fixtures.fixtureAgentWrite),
+                      "drill 15's simulated agent write must be CRLF-dominant — the flip pushEOL "
+                      + "(editor-product Task 11, Part 0) exists to make undoable")
+        XCTAssertNotEqual(
+            MonacoTextBuffer.savedText(forFileOpenedWith: "U" + fixtures.fixtureUndoOriginal),
+            MonacoTextBuffer.savedText(forFileOpenedWith: fixtures.fixtureAgentWrite),
+            "the pre-agent (user-edited) text and the agent's write must be genuinely DIFFERENT "
+            + "content, or \"content updated\" is unprovable")
+        XCTAssertNotEqual(fixtures.fixtureBanner, fixtures.fixtureBannerExternal,
+                          "the banner drill's external write must be genuinely different content, "
+                          + "or the conflict it raises proves nothing")
+
+        // 13.timeout's whole premise is a path the page never opened — never written, even after
+        // the SAME writeToDisk() the live run calls at 0.setup.
+        try fixtures.writeToDisk()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixtures.pathNeverOpened),
+                       "pathNeverOpened must not exist on disk even after writeToDisk()")
+        // 18's tree starts empty — the debounce-window claim needs a file that arrives AFTER the
+        // watcher is already armed, not one the tree already knew about.
+        let treeEntries = try FileManager.default.contentsOfDirectory(atPath: fixtures.filesTreeDir)
+        XCTAssertEqual(treeEntries, [], "the files-tree smoke needs an EMPTY directory to start from")
     }
     #endif
 
