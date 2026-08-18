@@ -28,6 +28,17 @@ function handle(msg: any) {
   else if (msg.method === "notifications/initialized") { /* notification, no reply */ }
   else if (msg.method === "tools/list") {
     const echoTool = { name: "echo", description: "Echo the msg back", inputSchema: { type: "object", properties: { msg: { type: "string" } }, required: ["msg"] } };
+    // NORMA_FAKE_PAGES=1 splits the listing across two pages so the client's nextCursor loop is
+    // exercised. Off by default — every pre-existing test sees a single unpaginated page.
+    if (process.env.NORMA_FAKE_PAGES === "1") {
+      if (msg.params?.cursor === undefined) {
+        send({ jsonrpc: "2.0", id: msg.id, result: { tools: [echoTool], nextCursor: "p2" } });
+      } else {
+        const page2 = { name: "page2tool", description: "Second page", inputSchema: { type: "object" } };
+        send({ jsonrpc: "2.0", id: msg.id, result: { tools: [page2] } });
+      }
+      return;
+    }
     const tools = process.env.NORMA_FAKE_DUP === "1" ? [echoTool, echoTool] : [echoTool];
     send({ jsonrpc: "2.0", id: msg.id, result: { tools } });
   }

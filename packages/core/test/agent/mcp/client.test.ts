@@ -60,4 +60,11 @@ describe.if(isMac)("McpStdioClient", () => {
     await expect(c.readResource("fake://nope")).rejects.toThrow();
     c.stop();
   });
+
+  test("tools/list pagination: every page is collected, not just the first", async () => {
+    const c = new McpStdioClient({ command: "bun", args: ["run", FIXTURE], env: { NORMA_FAKE_PAGES: "1" } });
+    await c.start();
+    expect(c.tools().map((t) => t.name)).toEqual(["echo", "page2tool"]);
+    c.stop();
+  });
 });
