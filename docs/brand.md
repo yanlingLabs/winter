@@ -193,21 +193,23 @@ Six soft washes, one per `PanelTabKind` (`web`/`document`/`code`/`note`/`diff`/`
 | `PanelKindDiffTint` | `#22C55E` | 12% | 19% |
 | `PanelKindFilesTint` | `#64748B` | 12% | 19% |
 
-**The ceiling that sets the dark alphas is label legibility at the SELECTED rung**, not any hover identity: white `labelColor` on the 2.4× composite must hold the 4.5:1 body floor, and the bright ambers lift the selected composite fastest — `note` at 19% measured 4.22:1 (fail) and keeps 17% (4.73:1); `document` at 19% is the tightest pass (4.55:1). `files` (editor-product Task 2, added under this same ladder model — it never saw the old RowHover-occlusion model at all) needed no such exception at a flat 19%. Ladder measurements, § 3.5's method, floors in **bold** where a value is the class minimum:
+**The ceiling that sets the dark alphas is label legibility at the SELECTED rung**, not any hover identity: white `labelColor` on the 2.4× composite must hold the 4.5:1 body floor, and the bright ambers lift the selected composite fastest — `note` keeps 17% (5.16:1); `document` at 19% is the tightest pass (4.97:1). `files` (editor-product Task 2, added under this same ladder model — it never saw the old RowHover-occlusion model at all) needed no such exception at a flat 19%. Ladder measurements, § 3.5's method, floors in **bold** where a value is the class minimum:
+
+**Stale-ink correction (wave-8 item 8):** every `labelColor @ selected` figure in this section — the table below, and the two numbers in the sentence just above — was originally measured against a stale composite (the ink composited once over `CardSurface`, then reused for every subsequent tint instead of compositing fresh per background) and has since been re-measured; the table's other three columns and every other section's figures are unaffected. One consequence worth stating on its own: `note`-dark AT 19% (not the 17% it actually keeps) now measures 4.65:1 under the corrected method — a PASS against the 4.5:1 floor, where the original stale measurement had recorded a 4.22 FAIL. That 4.22 fail was the entire reason this section gave for the 17% exception, so the reason is now obsolete — but the alpha itself still stays at 17%; reverting it to 19% is a real, separate design option this correction deliberately leaves OUT of scope.
 
 | Kind | scheme | rest visibility (≥1.05) | rest→hover (≥1.040) | hover→selected (≥1.040) | `labelColor` @ selected (≥4.5) |
 | --- | --- | --- | --- | --- | --- |
-| `web` | light | 1.143 | 1.086 | 1.120 | 10.32 |
-| `document` | light | 1.090 | 1.054 | 1.072 | 11.64 |
-| `code` | light | 1.156 | 1.094 | 1.132 | 10.02 |
-| `note` | light | 1.076 | **1.045** | 1.060 | 12.03 |
-| `diff` | light | 1.103 | 1.061 | 1.081 | 11.34 |
+| `web` | light | 1.143 | 1.086 | 1.120 | 11.04 |
+| `document` | light | 1.090 | 1.054 | 1.072 | 12.18 |
+| `code` | light | 1.156 | 1.094 | 1.132 | 10.78 |
+| `note` | light | 1.076 | **1.045** | 1.060 | 12.50 |
+| `diff` | light | 1.103 | 1.061 | 1.081 | 11.92 |
 | `files` | light | 1.155 | 1.094 | 1.133 | 10.77 |
-| `web` | dark | 1.273 | 1.187 | 1.274 | 6.23 |
-| `document` | dark | 1.444 | 1.292 | 1.411 | **4.55** |
-| `code` | dark | 1.236 | 1.163 | 1.241 | 6.72 |
-| `note` | dark | 1.425 | 1.278 | 1.391 | 4.73 |
-| `diff` | dark | 1.410 | 1.278 | 1.397 | 4.76 |
+| `web` | dark | 1.273 | 1.187 | 1.274 | 6.62 |
+| `document` | dark | 1.444 | 1.292 | 1.411 | **4.97** |
+| `code` | dark | 1.236 | 1.163 | 1.241 | 7.09 |
+| `note` | dark | 1.425 | 1.278 | 1.391 | 5.16 |
+| `diff` | dark | 1.410 | 1.278 | 1.397 | 5.17 |
 | `files` | dark | 1.228 | **1.150** | 1.216 | 7.37 |
 
 (`PanelKindTintTests.testEveryAdjacentRungOfThePillLadderStaysDistinguishable` floors both rung deltas at 1.040 in both schemes; `testTheLadderIsMonotoneAgainstTheBareSurface` pins the ≥1.05 rest floor and strict rest < hover < selected ordering; `testTintedTextStaysLegibleAcrossTheLadder` pins the 4.5 label floor at the selected rung. A selected pill ignores hover — selection is terminal — pinned in `testPillFillResolvesTheLadderWithSelectedBeatingHover`. `files`'s dark rest→hover (1.150) is now the class minimum for that cell — bold moved off `code`'s 1.163, which stays the same measured value, just no longer the tightest.)

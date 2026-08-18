@@ -182,8 +182,12 @@ enum Theme {
     /// kind in both schemes and published in brand.md § 3.7: rest visibility ≥ 1.05 on
     /// `CardSurface`; rest→hover and hover→selected each ≥ 1.040; `labelColor` ≥ 4.5:1 on the
     /// STRONGEST (selected) composite. Light rest is a flat 12%; dark rest is 19% except `note`
-    /// at 17% — the bright ambers lift the selected composite enough that the white label falls
-    /// under 4.5:1 at 19%×2.4 (measured 4.22:1); 17% restores 4.73:1. The group CHIP keeps the
+    /// at 17% — the bright ambers lift the selected composite enough that, under the ORIGINAL
+    /// (stale-ink) measurement, the white label fell under 4.5:1 at 19%×2.4 (recorded 4.22:1);
+    /// 17% restored 4.73:1. Re-measured since (`docs/brand.md` § 3.7's stale-ink footnote): 19%
+    /// actually holds 4.65:1, a PASS, which makes that original reason for the exception obsolete
+    /// — the alpha stays at 17% regardless; a revert to 19% is a separate, unmade design call, not
+    /// a consequence of the correction. The group CHIP keeps the
     /// shared row style and its 2.0× fill — the stronger base incidentally lifted its light-mode
     /// hover delta from the old documented ~1.00–1.011 trade-off to a measured 1.043–1.212, so
     /// what § 3.7 once recorded as an accepted weakness is now a pinned floor.

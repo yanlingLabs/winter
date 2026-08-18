@@ -209,8 +209,10 @@ final class PanelKindTintTests: XCTestCase {
     ///
     /// FLOORS, on the ladder's WORST case for each ink: `labelColor` is checked on the SELECTED
     /// (strongest, 2.4×) composite and held to the 4.5:1 body floor — this is the ladder's real
-    /// ceiling-setter: dark `note` had to keep a 17% rest alpha (19% measured 4.22:1 at the
-    /// selected rung; 17% restores 4.73:1), and the worst passing value (`document` dark, 4.55)
+    /// ceiling-setter: dark `note` had to keep a 17% rest alpha (19% measured 4.65:1 at the
+    /// selected rung — see `docs/brand.md` § 3.7's stale-ink footnote: originally recorded as a
+    /// 4.22 fail, which was the reason for the exception, now obsolete though the alpha itself is
+    /// unchanged; 17% restores 5.16:1), and the worst passing value (`document` dark, 4.97)
     /// is why the floor is the body floor itself rather than something generous. `TextMuted` is
     /// checked on the REST wash (its actual home — the favicon and meta ink render on unselected
     /// pills too) against § 3.5's OWN quiet-meta register (4.14 light / 5.99 dark baseline), not
