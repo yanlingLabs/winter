@@ -194,6 +194,92 @@
 //      removes pacing rather than revealing a clean alternate rate. An AC-powered, verified-
 //      Low-Power-Mode-off rerun is owed before quoting any number here as "the achievable ceiling".
 //
+//      **Same-day follow-up (a later 2026-08-18 session, same machine, same CEF build): the owed
+//      rerun, taken — and it falsifies a DIFFERENT, more specific hypothesis than the one it set
+//      out to test, while also closing the "60 vs 120" question above.**
+//
+//      Conditions, checked immediately before every measurement (`pmset -g batt`; `pmset -g | grep
+//      powermode`): AC power, charging, `powermode 0` — Low Power Mode confirmed OFF, not inferred.
+//      Display: the built-in 120 Hz ProMotion panel, confirmed live from inside the measuring
+//      process itself (`NSScreen.maximumFramesPerSecond`, read on every probe window at every
+//      lifecycle event) rather than assumed from `system_profiler`.
+//
+//      **The experiment.** The leading hypothesis into this rerun: a browser's vsync registration
+//      is fixed at whatever its hosting `NSWindow`'s on-screen state was at `CreateBrowser` time,
+//      and adoption into a visible window later cannot fix it. A temporary, `#if DEBUG`-and-env-
+//      gated harness (`SpikeVsyncProbe.swift`, modeled on `SpikeReparent`, deleted after this
+//      measurement — no trace in any shipped commit) called `CreateBrowserNow` directly, exactly as
+//      production does, to build: a browser whose hosting window was already ordered onto the
+//      screen BEFORE `CreateBrowser` ran ("visible-birth"); a browser parked in a never-ordered-in
+//      borderless window byte-for-byte matching `BrowserRuntime.parkingWindow`'s shape, with
+//      `CreateBrowser` called there and reparented only later into a second visible window via the
+//      exact sequence `BrowserRuntime.mountViewport` uses — one `addSubview`, frame set to the
+//      host's bounds after the move, then the autoresizing mask ("parked-then-adopted", i.e. the
+//      panel's real tab-open shape); and, in a separate run, ONLY the parked-then-adopted browser
+//      with no visible-birth sibling ever created in that process — specifically to rule out "a
+//      visible-birth browser silently heals some process-global vsync state" as a confound a
+//      combined run cannot resolve on its own.
+//
+//      **Every condition read a clean ~120 Hz, meanDelta ~8.34 ms — none locked to 30:**
+//      visible-birth idle 120.00 Hz / scroll-burst 119.72 Hz; parked-then-adopted idle 119.81 Hz /
+//      scroll-burst 119.74 Hz (combined run); and, decisively, the solo run's browser — no sibling
+//      ever born visible in its process — read 119.85 Hz while STILL PARKED, before its own
+//      adoption ever ran, and 119.92 Hz after. **A parked browser with nothing else in its process
+//      to have healed it already runs at 120 Hz.** There is no unhealed per-browser or per-process
+//      state left for the visible-birth-vs-parked-birth hypothesis to appeal to: it is FALSIFIED,
+//      under these conditions, as cleanly as a measurement gets. `BrowserRuntime.parkingWindow`/
+//      `mountViewport` and `EditorRuntime.hiddenWindow` (an identical shape, not independently
+//      re-measured because the mechanism it would have shared is the one just falsified) are
+//      exonerated. No fix was shipped from this task; there was nothing left standing to fix.
+//
+//      **A bigger finding fell out of chasing this down: the historical 30.000 Hz measurements were
+//      taken with the display asleep.** `pmset -g log` timestamps the machine's own display
+//      notifications — not an inference — and it places BOTH of this same morning's decisive
+//      numbers inside one continuous "Display is turned off" span: off at 05:38:02, no "Display is
+//      turned on" logged before either ran, `Using Batt(Charge: 6)` bracketing both.
+//      (`baseline-raf.txt`, the 30.000 Hz number quoted above as "RESOLVED same-morning": measured
+//      05:54:51-05:54:57. `novsync-raf.txt`, the pacing-removed free-run quoted alongside it:
+//      measured 05:55:30-05:55:36.) This session's own first attempt at the rerun walked into the
+//      live version of the same trap: a probe window taken through `orderFront`/
+//      `makeKeyAndOrderFront`/`NSApp.activate` still read `occlusionState` as occluded a full 5
+//      seconds later, because the display had gone to sleep 5 minutes earlier (`pmset -g log`: off
+//      09:09:18) and none of those ordinary AppKit calls woke it or counted as user activity.
+//      `caffeinate -u` (which explicitly documents "if the display is off, this option will awake
+//      the display") fixed it, timestamped to the second against the same log ("Display is turned
+//      on" at 09:15:07). **Lesson for the next person measuring rAF unattended: check `ioreg -c
+//      IOHIDSystem | grep HIDIdleTime` and `pmset -g log | grep -i display` before trusting a
+//      number, or hold `caffeinate -u` for the whole session — an asleep display is a confound
+//      ordinary window-visibility calls do not clear and CDP cannot see.**
+//
+//      That correlation alone does not prove display-sleep CAUSES the lock, so it was tested
+//      directly rather than left as a coincidence: with the same parked browser still live, AC
+//      power and `powermode 0` unchanged, `pmset displaysleepnow` forced the display off (confirmed
+//      via the same log mechanism: off at 09:24:48) and a fresh idle-rAF read was taken through the
+//      DevTools socket, which needs no screen. Result: 119.95 Hz. **Display-sleep ALONE, with Low
+//      Power Mode off and AC connected, does not reproduce the lock either.** That leaves Low Power
+//      Mode itself and/or running on battery power (as opposed to AC) as the only candidates left
+//      standing consistent with every measurement across both sessions — neither was exercised
+//      here: toggling `lowpowermode` needs `sudo pmset`, not run without explicit authorization for
+//      a system-wide preference change, and the battery-power axis needs the machine physically
+//      unplugged, which an unattended session cannot do to itself.
+//
+//      **This does not mean the user's original live-gate complaint ("clunky/laggy, low refresh,
+//      scroll worst") was imaginary** — that report came from a human at the machine, display
+//      necessarily awake, most plausibly scrolling with a real trackpad rather than the
+//      CDP-synthetic `Input.dispatchMouseEvent` bursts every measurement in this file has used. If
+//      it reopens: measure live, display awake, user actually present and scrolling, on AC with Low
+//      Power Mode off first (to match today's exoneration and see whether it holds under genuine
+//      input); then, if it still reproduces, the same drill on battery with Low Power Mode on (a
+//      plausible real path: a long live-gate session drains the battery, macOS auto-engages LPM at
+//      low charge, exactly as `pmset -g` caught mid-session once already) — capturing `pmset -g
+//      batt` / `powermode` / `pmset -g log`'s display state beside every number, every time, which
+//      is the discipline both this session and the one before it violated at least once before
+//      catching it. If the lock reproduces under a genuinely clean, display-awake, user-present
+//      condition, the next escalation is exactly what the original investigation named before this
+//      rerun intervened: a `Throttle*` trace or GPU-process tracing to find which Chromium
+//      visibility heuristic a `SetAsChild` browser trips, or a CVDisplayLink-driven pump. Neither is
+//      warranted on today's evidence.
+//
 //   3. THE RE-ENTRANCY REPOST. `CefDoMessageLoopWork()` re-enters this pump through paint and IPC
 //      callbacks; a discarded call must be REPOSTED, never dropped (`PerformMessageLoopWork`).
 //
