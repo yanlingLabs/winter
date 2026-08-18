@@ -82,8 +82,18 @@ func panelTabContent(for tab: PanelTab, host: ShellSessionHost? = nil,
         return PanelWebTab(tab: tab,
                            model: PanelWebTabModels.model(for: tab, host: host, sessionId: sessionId),
                            runtime: .shared)
-    case .document, .code, .note:
+    case .document, .note:
         return PanelPlaceholderTab(tab: tab)
+    // editor-product Task 5: the third kind with a real surface — Stage A's placeholder arm,
+    // replaced. The model is looked up (not built) here for the reason `.web`'s and `.diff`'s are:
+    // this function runs on every render pass, and a model born here would be reborn here — for a
+    // code tab that would mean re-reading the file from disk on every visit. Nothing on this line
+    // touches CEF: `bind` records the host/session and hops off the current pass, and even the
+    // runtime it eventually resolves is only a browser once something opens a file in it.
+    case .code:
+        return PanelEditorTab(tab: tab,
+                              model: PanelEditorTabModels.model(for: tab, host: host,
+                                                                sessionId: sessionId))
     // diff-tabs Task 10: the second kind with a real surface — Task 9's TEMPORARY placeholder arm,
     // replaced. The model is looked up (not built) here for the same reason `.web`'s is: this
     // function runs on every render pass, and a model born here would be reborn here, re-fetching
@@ -93,6 +103,16 @@ func panelTabContent(for tab: PanelTab, host: ShellSessionHost? = nil,
     case .diff:
         return PanelDiffTab(tab: tab,
                             model: PanelDiffTabModels.model(for: tab, host: host, sessionId: sessionId))
+    // editor-product Task 7: the fourth kind with a real surface — Task 2's TEMPORARY placeholder
+    // arm, replaced (the same handoff `.diff`'s and `.code`'s own TEMPORARY arms used before Tasks
+    // 10 and 5 replaced them). The model is looked up (not built) here for the same reason every
+    // other kind's is: this function runs on every render pass, and a model born here would be
+    // reborn here — for a Files tab that would mean losing every watcher and every expand state on
+    // every visit. Nothing on this line touches disk: `bind` records the host/session and hops off
+    // the current pass; the first read happens once the session's roots resolve.
+    case .files:
+        return PanelFilesTab(tab: tab,
+                             model: PanelFilesTabModels.model(for: tab, host: host, sessionId: sessionId))
     }
 }
 

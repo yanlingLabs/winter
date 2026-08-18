@@ -36,6 +36,12 @@
     margin: 0;
     padding: 0;
     overflow: hidden;
+    /* editor-product Task 4 — the white-flash fix's other half. Chromium's own default page
+       background is opaque white; a transparent body lets the CEF BROWSER's own creation-time
+       background (NormaCEF.h's backgroundColorARGB — the scheme's CardSurface, set before this page
+       has fetched or executed a byte) show through instead, for the window between the browser
+       existing and Monaco's own first paint. */
+    background: transparent;
   }
   /* The editor owns the whole viewport; the window chrome, tabs and everything else are Swift's. */
   #editor {

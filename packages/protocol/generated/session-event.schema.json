@@ -2439,7 +2439,8 @@
             "document",
             "code",
             "note",
-            "diff"
+            "diff",
+            "files"
           ]
         },
         "url": {

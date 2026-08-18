@@ -128,6 +128,54 @@ func handoffFailureMessage(_ error: HandoffError) -> String {
     }
 }
 
+// MARK: - editor-product T3: the editor runtime's two decisions (PURE)
+
+/// PURE: which session a panel reveal should have an editor ready for — **only a session with real
+/// working directories**.
+///
+/// **wave-8 item 2 (predicate unify): DERIVES from `editorTabSessionRoots` (`PanelEditorTab.swift`)
+/// rather than re-reading `dirs` itself.** The two used to be a byte-identical hand-copy of the same
+/// three-way read off the WIRE row's `dirs` (never `cwd` — that field is the daemon's list-time ALIAS
+/// of `dirs[0]?.path`, an echo rather than an independent fact, `SessionSummary.dirs`'s own doc and
+/// `handoffDirectory`'s): `nil` means the daemon populated no set at all (chat/dispatch have no
+/// working-directory concept), `[]` means a genuinely workdir-less session, and a degenerate
+/// `[{path: ""}]` means a row whose one entry carries no real path. That duplication is exactly the
+/// shape that drifted once already — fix-round-1 caught THIS predicate regressed to `!dirs.isEmpty`
+/// alone while `editorTabSessionRoots` stayed correct — so one spelling remains now; see that
+/// function's own doc for the full reasoning behind each case. **All three non-`.present` answers
+/// still get no editor**, because the Files tree and every door that opens a code tab are scoped to
+/// those roots, and an editor with no root to reach is a hidden Chromium nobody can ever put a file
+/// in.
+///
+/// A row that is not in `rows` yet (the create-then-navigate race — `attachFresh`'s own one-shot
+/// read carries the same caveat) also gets nothing: pre-warming is an optimisation, and guessing a
+/// session has directories is how you spend 150 MB on a chat. `editorTabSessionRoots` answers
+/// `.unknown` for exactly that row, which is not `.present` either, so the guard below still refuses
+/// it.
+func editorPrewarmTarget(sessionId: String?, rows: [SessionSummary]) -> String? {
+    guard let sessionId, editorTabSessionRoots(sessionId: sessionId, rows: rows) == .present else {
+        return nil
+    }
+    return sessionId
+}
+
+/// PURE: **may the shell release a session's editor when it leaves that session?**
+///
+/// Only when nothing in it is unsaved. This is deliberately NOT the plan's literal "teardown on
+/// detach", and the spec is the authority for the difference: "dirty state does NOT survive an app
+/// restart — unsaved edits are lost **only if the app quits with dirty tabs**, and quit warns if any
+/// exist". A detach is not a quit. It is ⌘W, a click on another app's window, or navigating to the
+/// dashboard — doors with no warning attached to any of them — and tearing the runtime down there
+/// would destroy the user's unsaved buffers silently at every one of them, which is the exact
+/// failure T10's quit gate exists to prevent.
+///
+/// Releasing a CLEAN runtime costs nothing that is not rebuilt on demand: a restored code tab
+/// re-reads its file on first activation (the spec's reattach rule), so what is lost is a browser
+/// that will be re-created, not state that cannot be.
+func editorRuntimeReleasedOnDeparture(dirtyModels: Int) -> Bool {
+    dirtyModels == 0
+}
+
 // MARK: - The live harness behind an open session
 
 /// One live attachment: a pinned `SessionFeed` (its own `NormaClient`/socket — a full harness, the
@@ -311,6 +359,14 @@ final class ShellSessionHost: ObservableObject {
         directory.$rows
             .sink { [weak self] rows in self?.reconcileIsChatSession(rows: rows) }
             .store(in: &cancellables)
+        // editor-product Task 5 (fix round 1) / Task 7: the panel's own published slice IS the
+        // signal for "which code AND files tabs are on screen" — see
+        // `prunePanelTabModelsOnSessionChange`. Subscribed rather than called from
+        // `switchSession`/`detach`'s six sites, so a future seventh cannot forget it. Fires once on
+        // subscribe with the empty state, which prunes nothing.
+        panelStore.$tabs
+            .sink { [weak self] tabs in self?.prunePanelTabModelsOnSessionChange(shownTabs: tabs) }
+            .store(in: &cancellables)
     }
 
     // MARK: - T4: the landing's roster verbs (bare RPCs — see `managementClient`'s doc for why these
@@ -477,6 +533,164 @@ final class ShellSessionHost: ObservableObject {
     /// tab, it simply cannot reveal a panel that nothing is drawing.
     var onRevealPanel: (() -> Void)?
 
+    // MARK: - editor-product T3: the editor runtimes
+
+    /// **One editor per session that has one** — the table, owned here for the same reason
+    /// `panelStore` is: this object knows, synchronously and at the exact right moment, which session
+    /// just became current, and it outlives every view that shows one.
+    ///
+    /// Sessions are ADDED by a panel reveal (`panelDidReveal`, dirs-only) and REMOVED by a departure
+    /// that finds nothing unsaved, or by an explicit `teardownEditorRuntime`. Nothing else may touch
+    /// it: an editor that appeared for a session nobody asked about is a hidden Chromium.
+    private(set) var editorRuntimes: [String: EditorRuntime] = [:]
+
+    /// How a runtime is made. The house seam (`makeFeed`, `handoffLaunch`): production builds the
+    /// real thing, and tests substitute one whose CEF calls are recorded — without which every test
+    /// that reveals a panel would construct a runtime wired to the real C surface.
+    var makeEditorRuntime: (String) -> EditorRuntime = { EditorRuntime(sessionId: $0) }
+
+    /// **The pre-warm hook: the panel just became visible.** Called by `ShellRootView` when the
+    /// titlebar toggle reveals it, and by this object's own `revealPanel` for every door that opens
+    /// a tab (`openDiffTab` today, T6's file door next).
+    ///
+    /// Idempotent all the way down — a second reveal finds the runtime already in the table, and
+    /// `EditorRuntime.prewarm()` is itself a no-op past `idle`. Nothing happens at all for a session
+    /// with no working directories (see `editorPrewarmTarget`), which includes every chat session and
+    /// the new-chat page's own.
+    func panelDidReveal() {
+        guard let sessionId = editorPrewarmTarget(sessionId: panelTargetSessionId,
+                                                  rows: directory.rows) else { return }
+        editorRuntime(for: sessionId).prewarm()
+    }
+
+    /// The session's runtime, minted on first use. Reached by the pre-warm above and (from T5) by
+    /// the code tab that needs one — an open is its own pre-warm, so a runtime that was never
+    /// revealed into existence still boots on the first file.
+    @discardableResult
+    func editorRuntime(for sessionId: String) -> EditorRuntime {
+        if let existing = editorRuntimes[sessionId] { return existing }
+        let runtime = makeEditorRuntime(sessionId)
+        editorRuntimes[sessionId] = runtime
+        return runtime
+    }
+
+    /// The session's runtime **if it already has one** — the read every surface should use, since
+    /// asking merely to look would create one.
+    func existingEditorRuntime(for sessionId: String) -> EditorRuntime? { editorRuntimes[sessionId] }
+
+    /// Which session the editor/files-tab registries were last pruned for. `PanelStore` publishes
+    /// `tabs` on every fold; only a change of SESSION means a whole set of this session's tabs
+    /// stops being on screen.
+    private var lastPanelTabModelPruneSessionId: String?
+
+    /// **editor-product Task 5 (fix round 1) / Task 7: a departed session's code AND files tabs let
+    /// go of their wires.**
+    ///
+    /// The bug this closes was measured rather than reasoned about, for the code tab (Task 5's own
+    /// account): the tab-model registry kept a departed session's model alive (it is discarded only
+    /// by `closePanelTab`), the model kept a live `SessionDirectory.$rows` subscription, and the 5 s
+    /// `session.list` poll ALONE then minted a fresh runtime through `editorRuntimeForCodeTab` and
+    /// re-read the file — a hidden Chromium for a session the user had left, which nothing releases,
+    /// because a departure releases exactly once and it had already happened. The second harm is
+    /// quieter and worse: the re-read happens ~5 s after departure, so a return an hour later shows a
+    /// buffer that is stale against everything the agent wrote since — with T8's save behind it, that
+    /// is a clobber.
+    ///
+    /// **Task 7 extends the SAME prune to `PanelFilesTabModel`, for the SAME class of bug.** There is
+    /// no minting cost here (no browser, no CEF) — but its model also holds a live `$rows`
+    /// subscription, and its `FileTreeModel` holds live `DispatchSource` watchers that keep firing
+    /// disk reads for a session nobody is viewing, for as long as its Files tab stays open in a
+    /// session the shell has left. `PanelFilesTabModel.deactivate()` already releases both; this is
+    /// simply the second door that calls it, beside the tab's own explicit close
+    /// (`PanelFilesTabModels.discard`). **Accepted trade, disclosed**: a hop away and back loses
+    /// which folders were expanded — the tree re-reads its roots fresh on return, the same "a
+    /// restored tab re-reads on first activation" rule the design spec states for code tabs.
+    ///
+    /// **Keyed on the session changing, not on every fold.** Opening or closing a tab within the
+    /// current session republishes `tabs` too, and pruning there could drop the model of a tab that
+    /// is on screen right now (the panel's `panel.list` seed publishes an empty slice for a beat on
+    /// every attach). A session change is exactly the moment a whole set of this session's tabs
+    /// stops being visible, and `except:` keeps whatever the new session already has cached, so a
+    /// switch back is not a churn — for either registry.
+    private func prunePanelTabModelsOnSessionChange(shownTabs: [PanelTab]) {
+        guard panelStore.currentSessionId != lastPanelTabModelPruneSessionId else { return }
+        lastPanelTabModelPruneSessionId = panelStore.currentSessionId
+        let shownTabIds = Set(shownTabs.map(\.tabId))
+        PanelEditorTabModels.discardAll(except: shownTabIds)
+        PanelFilesTabModels.discardAll(except: shownTabIds)
+    }
+
+    /// **editor-product Task 5: the code tab's door — the one place a TAB may mint a runtime.**
+    ///
+    /// `nil` for a session with no working directories, which is the whole point of routing every
+    /// code tab through here rather than through `editorRuntime(for:)` directly: "a dirless session
+    /// never stands a hidden Chromium up" is then one rule in one place, enforceable by one test,
+    /// instead of a check each of the tab's two slots is trusted to remember. The tab renders that
+    /// `nil` as "This session has no working directory" (`EditorViewportState`).
+    ///
+    /// The gate is `editorTabSessionRoots`, NOT `editorPrewarmTarget`, for the reason that function's
+    /// own doc gives: a row that has not arrived yet is `.unknown`, and the tab must wait rather than
+    /// claim. `.unknown` mints nothing — an open is its own pre-warm, so the beat costs nothing but a
+    /// spinner.
+    func editorRuntimeForCodeTab(sessionId: String?) -> EditorRuntime? {
+        guard let sessionId,
+              editorTabSessionRoots(sessionId: sessionId, rows: directory.rows) == .present else {
+            return nil
+        }
+        return editorRuntime(for: sessionId)
+    }
+
+    /// **editor-product Task 8: what the app's ⌘S menu item is looking at.**
+    ///
+    /// The panel's ACTIVE tab, if it is a code tab with a file (`editorSaveMenuTarget`). Read twice
+    /// per use — once to decide whether the menu item is enabled, once when it fires — because both
+    /// answers must describe the panel as it is at that instant, not as it was when a menu was built.
+    var activeCodeTabPath: String? {
+        return editorSaveMenuTarget(tabs: panelStore.tabs, activeTabId: panelStore.activeTabId)?.url
+    }
+
+    /// Save the active code tab. **Trigger 1 of 3**, and the only one that starts outside the panel:
+    /// the menu item fires wherever the keyboard focus happens to be.
+    ///
+    /// `existingEditorRuntime`, never `editorRuntimeForCodeTab` — a save must not MINT an editor. A
+    /// session with no runtime holds no unsaved buffer by construction, so there is nothing a fresh
+    /// one could write.
+    @discardableResult
+    func saveActiveCodeTab() async -> SaveOutcome {
+        guard let path = activeCodeTabPath,
+              let sessionId = panelStore.currentSessionId,
+              let runtime = existingEditorRuntime(for: sessionId) else {
+            return .noModel
+        }
+        return await runtime.save(path)
+    }
+
+    /// Release a session's editor outright, whatever it is holding. The door for a session that is
+    /// genuinely going away (T10's quit path, an explicit close); the shell's own departures go
+    /// through `releaseEditorRuntimeIfClean` below instead.
+    func teardownEditorRuntime(for sessionId: String) {
+        editorRuntimes.removeValue(forKey: sessionId)?.teardown()
+    }
+
+    /// The shell is leaving `sessionId` (a hop onto another session, a hide, a navigation away).
+    /// Releases its editor only if nothing in it is unsaved — see `editorRuntimeReleasedOnDeparture`
+    /// for why a detach is not a quit.
+    private func releaseEditorRuntimeIfClean(for sessionId: String) {
+        guard let runtime = editorRuntimes[sessionId] else { return }
+        guard editorRuntimeReleasedOnDeparture(dirtyModels: runtime.stateSnapshot.dirtyCount) else {
+            return
+        }
+        editorRuntimes.removeValue(forKey: sessionId)?.teardown()
+    }
+
+    /// **Show the panel** — and take the pre-warm with it. Every door that opens a tab goes through
+    /// here rather than calling `onRevealPanel` directly, so the editor is warming while the daemon
+    /// is still minting the tab.
+    private func revealPanel() {
+        onRevealPanel?()
+        panelDidReveal()
+    }
+
     /// The strip's `+`. Sends no `tabId` — the daemon mints one (`PanelOpenTabResult.tabId`),
     /// which this deliberately discards: nothing here needs it, and seeding it anywhere would be
     /// exactly the second, optimistic code path the design forbids.
@@ -592,6 +806,102 @@ final class ShellSessionHost: ObservableObject {
         }
     }
 
+    // MARK: - editor-product Task 10: the tab-close gate
+
+    /// editor-product Task 10: the ONE door a tab's `×` goes through (`ShellPanel`'s `onCloseTab`) —
+    /// `closePanelTab` below stays the unconditional MECHANISM, reached either straight through (a
+    /// non-code tab, a code tab with no file, or one with no live runtime to ask) or after this gate
+    /// resolves what a dirty `.code` tab means.
+    ///
+    /// **T9's ⚠️, closed**: `dirtyCloseCandidate` below always resolves a code tab's `(path,
+    /// runtime)` pair when one exists, clean or dirty, failed-open or mid-boot — so `runtime
+    /// .close(path)` is reached on EVERY code-tab close from here on, not only the dirty ones. A
+    /// clean tab (including a failed-open one, or one still queued) takes the silent branch: no
+    /// sheet, `dirtyCloseAction(dirty: false, …)`'s own claim (`.close`, whatever `choice` would
+    /// have been). That single call is what stops the leak `PanelEditorTabModels.discard` alone left
+    /// standing — the page's model plus the watcher's two file descriptors, previously released only
+    /// when the whole runtime eventually was.
+    func requestCloseTab(_ tabId: String) {
+        guard let (path, runtime) = dirtyCloseCandidate(tabId: tabId) else {
+            closePanelTab(tabId)
+            return
+        }
+        guard editorTabIsDirty(state: runtime.stateSnapshot, path: path) else {
+            runtime.close(path)
+            closePanelTab(tabId)
+            return
+        }
+        let basename = (path as NSString).lastPathComponent
+        presentDirtyCloseSheet(basename, presentingWindow?()) { [weak self, weak runtime] choice in
+            self?.resolveDirtyTabClose(tabId: tabId, path: path, runtime: runtime, choice: choice)
+        }
+    }
+
+    /// Which `(path, runtime)` the tab-close gate applies to — `nil` for everything it leaves to the
+    /// UNCHANGED `closePanelTab` alone: a non-`.code` tab, a code tab with no file (unreachable
+    /// through any shipped door, same posture `editorSaveMenuTarget` takes toward it), or a session
+    /// with no live runtime (a dirless session never minted one — nothing there to close).
+    private func dirtyCloseCandidate(tabId: String) -> (path: String, runtime: EditorRuntime)? {
+        guard let tab = panelStore.tabs.first(where: { $0.tabId == tabId }),
+              tab.kind == .code, let path = tab.url, !path.isEmpty,
+              let sessionId = panelTargetSessionId,
+              let runtime = existingEditorRuntime(for: sessionId) else {
+            return nil
+        }
+        return (path, runtime)
+    }
+
+    /// The sheet's answer, for a tab already established as dirty. `runtime` is weak-captured at the
+    /// door above (`requestCloseTab`) and handed in already-resolved-or-nil: a sheet can sit on
+    /// screen for as long as the user takes to answer it, and a session torn down (T10's own quit
+    /// sweep is the only realistic way — a DIRTY runtime, the only kind that reaches this function,
+    /// is never released by a clean-only departure) while it is up can arrive here `nil`.
+    ///
+    /// **The branches do not degrade uniformly on `nil` (task-10 review, fix round 1).** `.close`
+    /// still calls `closePanelTab(tabId)` unconditionally — `runtime?.close(path)` merely no-ops —
+    /// so the tab closes either way. `.awaitSave`'s `guard let runtime else { return }` returns
+    /// BEFORE `closePanelTab`, so a nil runtime there instead leaves the tab open, silently. Judged
+    /// effectively unreachable rather than fixed to match: landing in `.awaitSave` with a nil
+    /// runtime needs the quit sweep to tear the runtime down in the exact window between Save being
+    /// chosen and this Task's first hop.
+    private func resolveDirtyTabClose(tabId: String, path: String, runtime: EditorRuntime?,
+                                      choice: DirtyCloseChoice) {
+        switch dirtyCloseAction(dirty: true, choice: choice) {
+        case .close:
+            runtime?.close(path)
+            closePanelTab(tabId)
+        case .keepOpen:
+            break
+        case .awaitSave:
+            guard let runtime else { return }
+            Task { @MainActor [weak self, weak runtime] in
+                guard let runtime else { return }
+                let outcome = await runtime.save(path)
+                switch dirtyCloseActionAfterSave(outcome) {
+                case .close:
+                    runtime.close(path)
+                    self?.closePanelTab(tabId)
+                case .keepOpen, .awaitSave:
+                    // `.failed`: T9's banner already carries the sentence — the tab simply stays.
+                    break
+                }
+            }
+        }
+    }
+
+    /// The tab-close sheet's own presentation — injected on the same terms as
+    /// `presentHandoffFailure` above, so a test can script the answer without a real `NSAlert`.
+    ///
+    /// **Production falls back to `NSAlert.runModal()` when `presentingWindow` answers `nil`** —
+    /// which is exactly what an un-wired test host's `presentingWindow` always answers. Any test that
+    /// reaches the dirty branch of `requestCloseTab` WITHOUT overriding this first does not fail, it
+    /// HANGS the suite on a headless modal waiting for a click nobody can make.
+    var presentDirtyCloseSheet: (_ basename: String, _ window: NSWindow?,
+                                 _ respond: @escaping (DirtyCloseChoice) -> Void) -> Void = {
+        basename, window, respond in
+        presentDirtyCloseSheetAlert(basename: basename, on: window, respond: respond)
+    }
+
     /// A tab's `×`. panel-shell T15: targets `panelTargetSessionId` (attached, else the new-chat
     /// page's bound session) — see that property's own doc for why this specific widening is what
     /// makes closing a bound session's LAST tab live (the path Task 16's reaper eventually acts on).
@@ -599,6 +909,11 @@ final class ShellSessionHost: ObservableObject {
     /// live pump (`attachFresh`'s `onEvent` hook), but a bound-but-unattached session has no such
     /// pump — without this the strip would show a stale, already-closed tab until the next real
     /// attach.
+    ///
+    /// **The unconditional mechanism, not the gate** (editor-product Task 10) — `requestCloseTab`
+    /// above is the door every real close now goes through; this stays reachable directly for the
+    /// callers that already know closing is safe (the resolved gate itself, and the `#if DEBUG` smoke
+    /// harness in `ShellSidebar.swift`, which never opens a dirty code tab).
     func closePanelTab(_ tabId: String) {
         guard let client = managementClient, let sessionId = panelTargetSessionId else { return }
         // panel-cef Task 6b: the tab's chrome model goes with it. See `PanelWebTabModels.discard`
@@ -609,6 +924,14 @@ final class ShellSessionHost: ObservableObject {
         // Heavier than the web case, which is why it is not merely tidy: a loaded diff model holds
         // the patch string (capped at 1 MiB) and its parsed rows for the life of the process.
         PanelDiffTabModels.discard(tabId: tabId)
+        // editor-product Task 5: and the code tab's, which holds the session's editor state mirror,
+        // two Combine subscriptions and T8's save closure. editor-product Task 10: the runtime's own
+        // model/watcher are now closed by the GATE in front of this method (`requestCloseTab`), not
+        // by this discard — see that method's own doc for why the two are separate calls.
+        PanelEditorTabModels.discard(tabId: tabId)
+        // editor-product Task 7: and the files tab's, which releases its tree's watchers and
+        // Combine subscription — see `PanelFilesTabModels.discard`/`PanelFilesTabModel.deactivate`.
+        PanelFilesTabModels.discard(tabId: tabId)
         Task { @MainActor [weak self] in
             _ = try? await client.closePanelTab(sessionId: sessionId, tabId: tabId)
             if self?.attachedSessionId == nil { self?.refreshPanelTabs(for: sessionId) }
@@ -690,7 +1013,108 @@ final class ShellSessionHost: ObservableObject {
         case .mint(let title):
             openPanelTab(kind: .diff, title: title, diffId: ref.diffId, sessionId: sessionId)
         }
-        onRevealPanel?()
+        // editor-product T3: the reveal carries the editor pre-warm with it (`revealPanel`) — a user
+        // who has just opened the panel on a session with working directories is a user about to be
+        // one click from a file.
+        revealPanel()
+    }
+
+    /// editor-product Task 6: **the file door — the SECOND thing in the transcript that opens a
+    /// panel tab.** Mirrors `openDiffTab` immediately above wherever the two doors are alike.
+    ///
+    /// One tab per file: a second click on the same path — from the transcript again, or later from
+    /// T7's tree — must land on the tab the first click opened, never mint a second, so the
+    /// decision is dedupe-by-PATH (`panelFileTabAction` below), against the session's own folded
+    /// tab list, through the SAME two doors the strip's pills and `openDiffTab` already use
+    /// (`activatePanelTab` / `openPanelTab`). No optimistic local mutation: the tab appears when the
+    /// daemon's `panel_tab_opened` folds, exactly like every other tab.
+    ///
+    /// **The session is NAMED by the caller**, read fresh at click time by the caller
+    /// (`ShellSessionView`) — `openDiffTab`'s own standing rule, unchanged here: the transcript
+    /// row's closure captures no id, so a hop between the click and this call cannot file the tab
+    /// into the wrong session.
+    ///
+    /// **Relative paths resolve against the session's cwd FIRST** (`resolvedFilePath`, below),
+    /// before the dedupe runs — a relative and an absolute spelling of the same file must collide
+    /// on ONE tab, which only holds if both are compared as the same string by the time they reach
+    /// `panelFileTabAction`. `directory.rows` is read fresh here, never through a cached row.
+    ///
+    /// **The retry obligation (Task 5's review, HANDOFFS, binding).** Activating an existing tab
+    /// whose read PREVIOUSLY FAILED must not leave it stuck: `panelFileTabAction` decides WHETHER a
+    /// retry is owed — pure, off the runtime's CURRENT `openFailures` (obligation 3, below) — and
+    /// this door performs it by calling `EditorRuntime.openFile` again. That call is ALL a
+    /// `retryOpenIfFailed` method would ever do: `openFile` dispatches `.openRequested`, whose
+    /// reducer clears the failure entry for that path UNCONDITIONALLY before deciding what happens
+    /// next (`EditorRuntimeReducer`'s own doc) — a fresh read, since an `openFailures` hit always
+    /// means the runtime holds no model for the path. A second, differently-named method would only
+    /// rename this same call, so the choice documented here is: inline through `openFile`, no new
+    /// runtime method.
+    ///
+    /// **NEVER re-points an existing tab's `url`** (Task 5's review, Minor 2): the two branches
+    /// below are `activate` (an unaltered daemon RPC) and `mint` (a brand new tab) — there is no
+    /// third path that touches a tab already on screen.
+    ///
+    /// **The runtime is resolved through the host's table at the moment each read happens, never
+    /// cached** (obligation 3). `existingEditorRuntime(for:)` — the non-minting read, since asking
+    /// merely to look must not stand up a hidden Chromium — is called once to build the pure
+    /// decision's `openFailures` input, and again, fresh, inside the retry's own `Task` (which may
+    /// run on a later turn of the run loop than this call), so neither read can act on a runtime a
+    /// departure-and-return has since replaced with a fresh one.
+    ///
+    /// **The panel is revealed on BOTH branches**, mirroring `openDiffTab` and the strip's "+" — an
+    /// activate behind a hidden panel would be a click that visibly does nothing.
+    ///
+    /// **KNOWN, disclosed rather than guarded — two variants, both the diff door's own accepted
+    /// class** (editor-product Task 7, landing the disclosure `openDiffTab`'s doc already carries
+    /// for its own door): (1) the identical double-mint race — two clicks in the beat before the
+    /// first mint's `panel_tab_opened` folds can open two tabs for the same file, because the dedupe
+    /// reads folded state and nothing on the wire dedupes a `panel.openTab` call by path; (2) a
+    /// variant unique to this door's retry — rapid clicks on a tab whose path currently sits in
+    /// `openFailures` can each independently decide `retryOpen: true` (the read is fresh per click,
+    /// and the first retry's own `Task` has not necessarily cleared the failure by the time a second
+    /// click's decision runs), scheduling more than one redundant re-read of the same file. Both are
+    /// bounded and recoverable — wasted work, never a wrong tab or a wrong file — and a guard for
+    /// either is deliberately out of this task's scope, the same ruling `openDiffTab` already made
+    /// for its own.
+    func openFileTab(_ path: String, sessionId: String) {
+        let row = directory.rows.first { $0.sessionId == sessionId }
+        let absolutePath = resolvedFilePath(path, row: row)
+        let tabs = panelStore.allSessionTabStates[sessionId]?.tabs ?? []
+        let openFailures = Set((existingEditorRuntime(for: sessionId)?.stateSnapshot.openFailures
+            ?? [:]).keys)
+        switch panelFileTabAction(tabs: tabs, path: absolutePath, openFailures: openFailures) {
+        case .activate(let tabId, let retryOpen):
+            activatePanelTab(tabId, sessionId: sessionId)
+            if retryOpen {
+                Task { @MainActor [weak self] in
+                    await self?.existingEditorRuntime(for: sessionId)?.openFile(absolutePath)
+                }
+            }
+        case .mint(let title):
+            openPanelTab(kind: .code, url: absolutePath, title: title, sessionId: sessionId)
+        }
+        // editor-product T3: the reveal carries the editor pre-warm with it — see `openDiffTab`'s
+        // identical call, immediately above.
+        revealPanel()
+    }
+
+    /// editor-product Task 7: **the Files tab's door — dedupe by KIND alone, one per session.**
+    /// Mirrors `openFileTab`/`openDiffTab` wherever the two-branch shape allows: dedupe-then-
+    /// activate-or-mint through the SAME two RPCs (`activatePanelTab`/`openPanelTab`), the panel
+    /// revealed on both branches (an activate behind a hidden panel is a click that does nothing).
+    ///
+    /// **No UI control calls this in this task.** It exists for tests today and for whatever later
+    /// surface wants to open the tree (a strip "+"-adjacent affordance is explicitly out of this
+    /// task's scope) — the panel strip's own "+" and the transcript's file doors are unchanged by
+    /// this door's existence.
+    func openFilesTab(sessionId: String) {
+        switch panelFilesTabAction(tabs: panelStore.allSessionTabStates[sessionId]?.tabs ?? []) {
+        case .activate(let tabId):
+            activatePanelTab(tabId, sessionId: sessionId)
+        case .mint:
+            openPanelTab(kind: .files, title: "Files", sessionId: sessionId)
+        }
+        revealPanel()
     }
 
     /// panel-shell T15: the new-chat page's OWN "+" — creates (once) and BINDS rather than
@@ -1530,6 +1954,9 @@ final class ShellSessionHost: ObservableObject {
            ) {
             hopAwayPrompt = HopAwayPrompt(sessionId: departing)
         }
+        // editor-product T3: the departing session's editor goes only if it is holding nothing
+        // unsaved (`editorRuntimeReleasedOnDeparture`). A hop is not a quit.
+        if let departing = attachedSessionId { releaseEditorRuntimeIfClean(for: departing) }
         attachedSessionId = sessionId
         refreshOutputFiles(for: sessionId)
         openOutputFile = nil
@@ -1621,6 +2048,9 @@ final class ShellSessionHost: ObservableObject {
            ) {
             hopAwayPrompt = HopAwayPrompt(sessionId: departing)
         }
+        // editor-product T3: same departure policy as the hop above — a hidden shell releases a
+        // CLEAN editor and keeps a dirty one. ⌘W is not a quit, and nothing warns here.
+        if let departing = attachedSessionId { releaseEditorRuntimeIfClean(for: departing) }
         live.feedTask?.cancel()
         live.feedTask = nil
         live.feed.stop()
@@ -2067,6 +2497,39 @@ final class ShellSessionHost: ObservableObject {
     }
 }
 
+// MARK: - editor-product Task 10: the tab-close sheet's AppKit half
+
+/// The dirty-close sheet's real presentation — a FREE function taking the window as a PARAMETER
+/// (`confirmWorkingDir`'s own shape, `WorkingDirPickerSheet.swift`) rather than a `lazy var` closing
+/// over `self`, which is what lets `ShellSessionHost.presentDirtyCloseSheet` default to it directly
+/// without capturing anything.
+///
+/// A sheet when there is a window to hang it on (there always is, in practice — a tab's `×` cannot
+/// be clicked without one), an app-modal fallback otherwise, matching every other alert this file
+/// presents.
+@MainActor
+func presentDirtyCloseSheetAlert(basename: String, on window: NSWindow?,
+                                 respond: @escaping (DirtyCloseChoice) -> Void) {
+    let alert = NSAlert()
+    alert.alertStyle = .warning
+    alert.messageText = "Save changes to \(basename)?"
+    alert.addButton(withTitle: "Save")
+    alert.addButton(withTitle: "Discard")
+    alert.addButton(withTitle: "Cancel") // NSAlert binds Escape to this one automatically.
+    let handle: (NSApplication.ModalResponse) -> Void = { response in
+        switch response {
+        case .alertFirstButtonReturn: respond(.save)
+        case .alertSecondButtonReturn: respond(.discard)
+        default: respond(.cancel)
+        }
+    }
+    if let window {
+        alert.beginSheetModal(for: window, completionHandler: handle)
+    } else {
+        handle(alert.runModal())
+    }
+}
+
 // MARK: - The `panel.list` snapshot fold (the app's SECOND fold path)
 
 /// PURE: `panel.list`'s wire rows → the app's own `PanelTab`s. The snapshot half of the pair
@@ -2128,6 +2591,96 @@ func panelDiffTabAction(tabs: [PanelTab], ref: FileDiffRef) -> PanelDiffTabActio
         return .activate(tabId: open.tabId)
     }
     return .mint(title: (ref.path as NSString).lastPathComponent)
+}
+
+// MARK: - editor-product Task 6: what a file-door click does
+
+/// PURE: the file door's path resolution — the FIRST step, before the dedupe below ever runs.
+///
+/// An already-absolute path is returned untouched: reads carry no path fence (CLAUDE.md, "Reads
+/// unrestricted"), so a file the agent named outside the session's own roots is still a real file,
+/// and resolving it against anything would be wrong. A RELATIVE one resolves against the session's
+/// PRIMARY working directory — `handoffDirectory`'s own source (`row.dirs?.first?.path`), NEVER
+/// `row.cwd`, which is the daemon's list-time ALIAS of that same field (`SessionSummary.dirs`'s own
+/// doc, echoed by `editorPrewarmTarget`/`editorTabSessionRoots`). A relative path in a session with
+/// no primary to resolve against is returned untouched too — there is nothing sensible to join it
+/// to. **Both of this door's shipped gates now ask the identical question this line does**
+/// (editor-product Task 7 reconciliation): the transcript's `sessionHasWorkingDirectory`
+/// (`toolDetailIsClickablePath`, `TranscriptMessageViews.swift`) and the Files tab's own
+/// `PanelFilesTabModel.roots` are both `editorTabSessionRoots`, which Task 7 tightened to require
+/// `dirs.first?.path` be genuinely non-empty — closing the gap a degenerate `dirs: [{path: ""}]` row
+/// used to leave (Task 6 review, Minor: that row rendered a clickable button whose click reached
+/// here with an empty primary and returned the path untouched, relative, onto the wire). This
+/// remains the door's own defensive floor regardless, for any caller that is neither of those two
+/// gates.
+///
+/// Not normalized beyond that one join: `"./src/a.ts"` and `"src/a.ts"` resolve to two DIFFERENT
+/// strings and so two different tabs if both are ever clicked for the same file. Known, and left —
+/// the diff door accepts an equivalent recoverable duplicate for its own double-click race (its own
+/// doc), and a duplicate tab is the same bounded, recoverable failure here.
+func resolvedFilePath(_ path: String, row: SessionSummary?) -> String {
+    guard !path.hasPrefix("/"), let primary = row?.dirs?.first?.path, !primary.isEmpty else {
+        return path
+    }
+    return (primary as NSString).appendingPathComponent(path)
+}
+
+/// The two things a file-door click can ask for — mirrors `PanelDiffTabAction` one door down.
+enum PanelFileTabAction: Equatable {
+    /// A `.code` tab for this path is already open: activate it. `retryOpen` is Task 5's review
+    /// HANDOFFS obligation, decided HERE rather than left to the door to notice: an existing tab
+    /// whose path currently sits in the runtime's `openFailures` has NO model to show —
+    /// `openFailures` is only ever recorded for a path holding none (`EditorRuntimeState`'s own
+    /// doc) — so activating it alone would re-surface the exact same "File not found" sentence
+    /// forever, including after the agent creates the file a moment later. `true` tells
+    /// `openFileTab` to also ask the runtime to read the file again.
+    case activate(tabId: String, retryOpen: Bool)
+    /// No tab for this path: mint one, titled with the file's own basename.
+    case mint(title: String)
+}
+
+/// PURE: dedupe a file-door click against a session's folded tab list, over `.code` tabs, BY PATH.
+///
+/// `path` is the door's ALREADY-RESOLVED absolute path (`resolvedFilePath`, above) — a relative and
+/// an absolute spelling of the same file must collide on the one open tab, which only holds if both
+/// are compared as the same string by the time they reach here.
+///
+/// **Filtered to `.code`**, unlike `panelDiffTabAction`'s deliberately kind-less match: `url` is a
+/// field every tab kind carries (a `.web` tab's address is never a filesystem path, but nothing
+/// stops the two strings coinciding by chance, where `diffId` structurally cannot), so the kind
+/// check is load-bearing here rather than redundant.
+///
+/// `openFailures` is the session's editor runtime's CURRENT failure set — empty when the session
+/// has no runtime yet — read by the caller immediately before this call, never cached (see
+/// `openFileTab`'s own doc for why that matters).
+func panelFileTabAction(tabs: [PanelTab], path: String, openFailures: Set<String>) -> PanelFileTabAction {
+    if let open = tabs.first(where: { $0.kind == .code && $0.url == path }) {
+        return .activate(tabId: open.tabId, retryOpen: openFailures.contains(path))
+    }
+    return .mint(title: (path as NSString).lastPathComponent)
+}
+
+// MARK: - editor-product Task 7: what a Files-tab open does
+
+/// The two things a Files-tab open can ask for — mirrors `PanelDiffTabAction`/`PanelFileTabAction`
+/// one door up, minus their per-item identity: there is at most ONE `.files` tab per session (design
+/// spec: "one per session, deduped like the New Tab"), so the KIND ALONE is the key — no `diffId`,
+/// no `url`, nothing else to compare.
+enum PanelFilesTabAction: Equatable {
+    /// A `.files` tab is already open for this session: activate it.
+    case activate(tabId: String)
+    /// No `.files` tab yet: mint one — `openFilesTab` titles it "Files" and sends no `url`.
+    case mint
+}
+
+/// PURE: dedupe a Files-tab open against a session's folded tab list. Any existing `.files` tab
+/// matches — there can only ever be one, so unlike `panelFileTabAction`'s path comparison or
+/// `panelDiffTabAction`'s `diffId` comparison, the KIND test alone is the whole decision.
+func panelFilesTabAction(tabs: [PanelTab]) -> PanelFilesTabAction {
+    if let open = tabs.first(where: { $0.kind == .files }) {
+        return .activate(tabId: open.tabId)
+    }
+    return .mint
 }
 
 // MARK: - The hosted surface
@@ -2196,7 +2749,22 @@ struct ShellSessionView: View {
                         onOpenDiff: { ref in
                             guard let sessionId = host.attachedSessionId else { return }
                             host.openDiffTab(ref, sessionId: sessionId)
-                        }
+                        },
+                        // editor-product Task 6: the file door, wired identically to `onOpenDiff`
+                        // immediately above — same three-homes opt-in, same read-fresh-at-click-time
+                        // rule (a hop between the click and this call must not file the tab into a
+                        // session the user has left).
+                        onOpenFile: { path in
+                            guard let sessionId = host.attachedSessionId else { return }
+                            host.openFileTab(path, sessionId: sessionId)
+                        },
+                        // editor-product Task 6: the row-level clickability gate's one dynamic
+                        // input — see `WindowContentView.sessionHasWorkingDirectory`'s own doc.
+                        // Reuses T5's `editorTabSessionRoots` rather than growing a third `dirs`
+                        // reader (T5's own review note, honored here as it asked).
+                        sessionHasWorkingDirectory: editorTabSessionRoots(
+                            sessionId: host.attachedSessionId, rows: directory.rows
+                        ) == .present
                     ) {
                         // cli-handoff T3's open-session "Move to CLI", RE-HOSTED (custom-sidebar
                         // rework): the window toolbar it rode died with the native chrome

@@ -26,7 +26,7 @@ import SwiftUI
 /// visual claim in this task family (Task 9/10/11's own reports name the identical limitation).
 @MainActor
 final class PanelKindTintTests: XCTestCase {
-    private let kinds: [PanelTabKind] = [.web, .document, .code, .note, .diff]
+    private let kinds: [PanelTabKind] = [.web, .document, .code, .note, .diff, .files]
 
     // MARK: - 1. Theme.panelKindTint / panelKindChipTint at value level
 
@@ -44,6 +44,7 @@ final class PanelKindTintTests: XCTestCase {
         let expected: [PanelTabKind: String] = [
             .web: "PanelKindWebTint", .document: "PanelKindDocumentTint",
             .code: "PanelKindCodeTint", .note: "PanelKindNoteTint", .diff: "PanelKindDiffTint",
+            .files: "PanelKindFilesTint",
         ]
         for (kind, assetName) in expected {
             XCTAssertEqual(Theme.panelKindTint(kind), Color(assetName),
@@ -128,7 +129,9 @@ final class PanelKindTintTests: XCTestCase {
     /// FLOORS, not the published figures (Task 10's precedent — `docs/brand.md` § 3.7 records the
     /// measurements; floors gate them so a deliberate retune doesn't red this suite for no
     /// reason): every adjacent rung ≥ 1.040 in both schemes. Worst measured: light `note`
-    /// rest→hover 1.045; everything else clears with real margin (dark minima ≥ 1.16).
+    /// rest→hover 1.045; dark `files` rest→hover 1.150 (editor-product Task 2 — slightly under
+    /// the old dark worst, `code`'s 1.163, still comfortably clear of the floor); everything else
+    /// clears with more margin still.
     func testEveryAdjacentRungOfThePillLadderStaysDistinguishable() {
         for appearance in [NSAppearance.Name.aqua, .darkAqua] {
             let cardSurface = srgb(NSColor(named: "CardSurface")!, appearance)
@@ -206,8 +209,10 @@ final class PanelKindTintTests: XCTestCase {
     ///
     /// FLOORS, on the ladder's WORST case for each ink: `labelColor` is checked on the SELECTED
     /// (strongest, 2.4×) composite and held to the 4.5:1 body floor — this is the ladder's real
-    /// ceiling-setter: dark `note` had to keep a 17% rest alpha (19% measured 4.22:1 at the
-    /// selected rung; 17% restores 4.73:1), and the worst passing value (`document` dark, 4.55)
+    /// ceiling-setter: dark `note` had to keep a 17% rest alpha (19% measured 4.65:1 at the
+    /// selected rung — see `docs/brand.md` § 3.7's stale-ink footnote: originally recorded as a
+    /// 4.22 fail, which was the reason for the exception, now obsolete though the alpha itself is
+    /// unchanged; 17% restores 5.16:1), and the worst passing value (`document` dark, 4.97)
     /// is why the floor is the body floor itself rather than something generous. `TextMuted` is
     /// checked on the REST wash (its actual home — the favicon and meta ink render on unselected
     /// pills too) against § 3.5's OWN quiet-meta register (4.14 light / 5.99 dark baseline), not
@@ -307,6 +312,7 @@ final class PanelKindTintTests: XCTestCase {
         case .code: return "PanelKindCodeTint"
         case .note: return "PanelKindNoteTint"
         case .diff: return "PanelKindDiffTint"
+        case .files: return "PanelKindFilesTint"
         }
     }
 

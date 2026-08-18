@@ -1096,6 +1096,121 @@ struct TranscriptDiffChip: View {
     }
 }
 
+// MARK: - editor-product Task 6: the file door's row-level gate
+
+/// Which tools' detail IS a path, and nothing else — `SessionModel.extractToolDetail` rule 1: for
+/// exactly these four, the detail is the tool's own path argument, verbatim. `glob`/`grep` share
+/// `extractToolDetail`'s switch arm but are excluded here on purpose — a search pattern is not a
+/// path just because it often looks like one — and so is `ls`: its argument is a DIRECTORY, which
+/// is T7's tree's business, not a `.code` tab's.
+let fileDoorToolNames: Set<String> = ["read", "write", "edit", "notebook_edit"]
+
+/// PURE: whether a call's detail is a path this session's file door can actually act on, so the row
+/// may offer it as a `Button` at all (`ToolRunCallDetailText`).
+///
+/// Three gates, all of them load-bearing:
+///  1. **The tool.** See `fileDoorToolNames` above.
+///  2. **The length.** `SessionModel.clipToolDetail` truncates SILENTLY — no marker, unlike
+///     `toolOutputPreview`'s truncation note — so a detail sitting AT `maxToolDetailCharacters`
+///     might be a cut PREFIX of a real, longer, still-openable path rather than the whole thing.
+///     Offering a button built from a truncated string would open (or fail to find) the WRONG
+///     file, silently — worse than the diff chip's own floor ("a click that does nothing"), so a
+///     detail at the ceiling is refused rather than risked. A path shorter than the ceiling was
+///     never clipped (`clipToolDetail` only ever SHORTENS, never pads), so this cannot refuse a
+///     real short path.
+///  3. **The shape.** An ABSOLUTE path is always offered: reads carry no path fence (CLAUDE.md,
+///     "Reads unrestricted"), so a file outside the session's own working directories is still a
+///     real, openable one — the design spec's own rule ("door opens any existing absolute path").
+///     A RELATIVE one needs somewhere to resolve against, which only a session that carries a
+///     working directory has (`sessionHasWorkingDirectory` — see `WindowContentView`'s own doc for
+///     where that bit comes from, and `ShellSessionHost.resolvedFilePath` for the resolution
+///     itself, against the SAME field, never the daemon's `cwd` alias). Offering a button for a
+///     relative path with no base would silently open a tab for a path resolved against nothing
+///     sensible.
+func toolDetailIsClickablePath(name: String, detail: String, sessionHasWorkingDirectory: Bool) -> Bool {
+    guard fileDoorToolNames.contains(name), !detail.isEmpty,
+          detail.count < SessionReducer.maxToolDetailCharacters else {
+        return false
+    }
+    return detail.hasPrefix("/") || sessionHasWorkingDirectory
+}
+
+/// editor-product Task 6: the clickable half of a read/edit/write/notebook_edit row's detail — see
+/// `ToolRunCallDetailText` for the gate that decides whether this view or plain text draws.
+///
+/// **Underline-on-hover, not the diff chip's fill-lift.** `TranscriptDiffChip` is a whole capsule,
+/// set apart from the sentence around it; this path sits INLINE in a line of prose (`toolName
+/// path`), where a capsule would read as a badge stapled mid-sentence. An underline is the
+/// house-agnostic "this is a link" cue and needs no new colour — `Theme.textMuted` carries through
+/// from the row's own `.foregroundStyle` (set explicitly below too, so nothing here depends on
+/// environment propagation through the `Button` boundary), exactly as `docs/brand.md` § 3.1 asks.
+///
+/// A dedicated top-level type (not inline in `ToolRunCallDetailText`) for the same reason
+/// `TranscriptDiffChip` is one: `@State` needs a distinct view identity to hold hover state, which
+/// an `if` branch inside another view's `body` is not.
+struct ToolRowFilePathButton: View {
+    let path: String
+    let onOpen: (String) -> Void
+
+    @State private var isHovering = false
+
+    var body: some View {
+        Button {
+            onOpen(path)
+        } label: {
+            Text(path)
+                .foregroundStyle(Theme.textMuted)
+                .underline(isHovering)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+        .animation(.easeOut(duration: 0.14), value: isHovering)
+        .help("Open this file in the panel")
+        .accessibilityLabel("Open \(path) in the panel")
+    }
+}
+
+/// editor-product Task 6: one expanded call's detail line — `"<name> <detail>"`, exactly as it has
+/// always drawn, UNLESS the file door is wired (`onOpenFile` non-nil) and this call's detail is a
+/// path the door can act on (`toolDetailIsClickablePath`), in which case the detail half becomes
+/// `ToolRowFilePathButton` while the tool name stays plain text beside it.
+///
+/// **`onOpenFile == nil` renders BYTE-IDENTICAL to before this task** — the `else` branch is the
+/// exact, untouched expression `TranscriptToolGroupRow.expandedCalls` used to hold inline; every
+/// existing caller (every non-file tool, every file tool with no door wired, every path shape the
+/// door refuses) still draws precisely that.
+///
+/// A dedicated top-level type (not inline in `TranscriptToolGroupRow.expandedCalls`) so it is
+/// constructible — and its produced view graph reflectable — by a test with no `ForEach`, window or
+/// host in the way, the same reason `TranscriptDiffChip` is its own type rather than a chip drawn
+/// inline.
+struct ToolRunCallDetailText: View {
+    let line: ToolRunCallLine
+    /// editor-product Task 6: the file door — see `WindowContentView.onOpenFile`'s own doc for the
+    /// full threading story. `nil` (the default) is every pre-Task-6 caller.
+    var onOpenFile: ((String) -> Void)? = nil
+    /// editor-product Task 6 — see `WindowContentView.sessionHasWorkingDirectory`'s own doc.
+    var sessionHasWorkingDirectory: Bool = false
+
+    var body: some View {
+        if let detail = line.detail, let onOpenFile,
+           toolDetailIsClickablePath(name: line.name, detail: detail,
+                                     sessionHasWorkingDirectory: sessionHasWorkingDirectory) {
+            HStack(spacing: 0) {
+                Text("\(line.name) ")
+                    .lineLimit(1)
+                ToolRowFilePathButton(path: detail, onOpen: onOpenFile)
+            }
+        } else {
+            Text(line.detail.map { "\(line.name) \($0)" } ?? line.name)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+    }
+}
+
 struct TranscriptToolGroupRow: View {
     let entries: [ToolRunEntry]
     /// Whether this run's turn is STILL RUNNING. Only a live turn may draw a running glyph:
@@ -1111,6 +1226,11 @@ struct TranscriptToolGroupRow: View {
     /// `nil` (the default, kept so every existing construction site is untouched) draws the chips as
     /// plain text on a surface that has no panel.
     var onOpenDiff: ((FileDiffRef) -> Void)? = nil
+    /// editor-product Task 6: the file door — see `ToolRunCallDetailText`/`WindowContentView
+    /// .onOpenFile`'s own doc. Threaded through to every expanded call's detail line unchanged.
+    var onOpenFile: ((String) -> Void)? = nil
+    /// editor-product Task 6 — see `WindowContentView.sessionHasWorkingDirectory`'s own doc.
+    var sessionHasWorkingDirectory: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -1188,9 +1308,11 @@ struct TranscriptToolGroupRow: View {
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
                         statusGlyph(line.status)
-                        Text(line.detail.map { "\(line.name) \($0)" } ?? line.name)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
+                        // editor-product Task 6: was a bare `Text(...)` inline here — now
+                        // `ToolRunCallDetailText`, which draws that SAME text unless the file door
+                        // is wired and this line's detail is a path it can open (its own doc).
+                        ToolRunCallDetailText(line: line, onOpenFile: onOpenFile,
+                                              sessionHasWorkingDirectory: sessionHasWorkingDirectory)
                     }
                     .font(Typography.captionMono())
                     .foregroundStyle(Theme.textMuted)

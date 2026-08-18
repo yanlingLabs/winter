@@ -158,6 +158,10 @@ std::vector<CefRefPtr<CefBrowser>> g_browsers;
 @interface NormaCEFPendingBrowser : NSObject
 @property(nonatomic, weak) NSView *parent;
 @property(nonatomic, copy) NSString *url;
+/// editor-product Task 4 — carried through the queue so a browser replayed from
+/// `OnContextInitialized` still gets the caller's requested background rather than silently falling
+/// back to "no override" the moment a creation happened to race the context coming up.
+@property(nonatomic) uint32_t backgroundColorARGB;
 @end
 
 @implementation NormaCEFPendingBrowser
@@ -1008,7 +1012,7 @@ bool ExternalPump::PerformMessageLoopWork() {
 // CefApp / CefBrowserProcessHandler / CefClient
 // ---------------------------------------------------------------------------
 
-void CreateBrowserNow(NSView *parent, const std::string &url);
+void CreateBrowserNow(NSView *parent, const std::string &url, uint32_t backgroundColorARGB);
 void ReplayPendingBrowsers();
 void CloseAbandonedBrowser(CefRefPtr<CefBrowser> browser, NormaCEFBrowserCreation *creation);
 
@@ -2255,7 +2259,7 @@ class NormaApp : public CefApp, public CefBrowserProcessHandler {
 
 CefRefPtr<NormaApp> g_app;
 
-void CreateBrowserNow(NSView *parent, const std::string &url) {
+void CreateBrowserNow(NSView *parent, const std::string &url, uint32_t backgroundColorARGB) {
   CefWindowInfo window_info;
   const NSRect b = [parent bounds];
   window_info.SetAsChild(CAST_NSVIEW_TO_CEF_WINDOW_HANDLE(parent),
@@ -2290,6 +2294,11 @@ void CreateBrowserNow(NSView *parent, const std::string &url) {
   // to message the view behind CEF's window handle — the zombie crash `NormaClient::Tab()`
   // describes.
   CefBrowserSettings browser_settings;
+  // editor-product Task 4 — the white-flash fix's first half. `backgroundColorARGB` is ALREADY the
+  // `cef_color_t` bit layout (`NormaCEF.h`'s own contract: `0x00000000` is "no override", an
+  // `0xFFrrggbb` paints the browser that color before its first real paint), so this is a direct
+  // assignment rather than a conversion.
+  browser_settings.background_color = backgroundColorARGB;
   CefRefPtr<NormaClient> client = new NormaClient(creation, bridge);
   if (!CefBrowserHost::CreateBrowser(window_info, client, CefString(url), browser_settings, nullptr,
                                      nullptr)) {
@@ -2336,7 +2345,7 @@ void ReplayPendingBrowsers() {
       Log("dropping queued browser — its panel tab went away before the context came up");
       continue;
     }
-    CreateBrowserNow(parent, std::string([request.url UTF8String]));
+    CreateBrowserNow(parent, std::string([request.url UTF8String]), request.backgroundColorARGB);
   }
 }
 
@@ -2565,13 +2574,13 @@ void NormaCEFRegisterEditorAssetRoot(const char *absolutePath) {
 #endif
 }
 
-void NormaCEFCreateBrowser(NSView *parent, const char *url) {
+void NormaCEFCreateBrowser(NSView *parent, const char *url, uint32_t backgroundColorARGB) {
   if (!g_initialized || g_shutting_down || parent == nil) {
     return;
   }
   const std::string target(url != nullptr ? url : "");
   if (g_context_initialized) {
-    CreateBrowserNow(parent, target);
+    CreateBrowserNow(parent, target, backgroundColorARGB);
     return;
   }
   // Task 1 measured OnContextInitialized firing SYNCHRONOUSLY inside CefInitialize on every run —
@@ -2584,6 +2593,7 @@ void NormaCEFCreateBrowser(NSView *parent, const char *url) {
   NormaCEFPendingBrowser *request = [[NormaCEFPendingBrowser alloc] init];
   request.parent = parent;
   request.url = [NSString stringWithUTF8String:target.c_str()];
+  request.backgroundColorARGB = backgroundColorARGB;
   [g_pending addObject:request];
 #if DEBUG
   Log("queued browser for %s (context not up yet)", target.c_str());

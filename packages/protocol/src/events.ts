@@ -520,7 +520,7 @@ export const SessionActivityEvent = Base.extend({
   activity: SessionActivity,
 });
 
-export const PanelTabKind = z.enum(["web", "document", "code", "note", "diff"]);
+export const PanelTabKind = z.enum(["web", "document", "code", "note", "diff", "files"]);
 
 /** panel-cef Task 6b: the field-size caps on every panel `url`/`title`, carried from Plan A (which
  *  surfaced them and owned none) and made LIVE by this task — Task 6b builds the first producer of

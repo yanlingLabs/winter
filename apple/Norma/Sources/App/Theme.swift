@@ -158,13 +158,13 @@ enum Theme {
     /// `diffAddedWash`.
     static let diffRemovedWash = Color("DiffRemovedWash")
 
-    // MARK: - Color: the five panel-kind tints (diff-tabs Task 12) — Mac-only
+    // MARK: - Color: the six panel-kind tints (diff-tabs Task 12; sixth added editor-product Task 2) — Mac-only
 
     /// **Mac-only**, like `rowHover`/`hairline`/`hairlineElevated`/`paletteSurface` (§ 1): the
     /// panel strip itself has no iOS surface, so there is nothing on the phone for these to
     /// mirror. `docs/brand.md` § 3.7 publishes every measurement below.
     ///
-    /// Five soft washes, one per `PanelTabKind`, on the SAME hue at two strengths: a faint pill
+    /// Six soft washes, one per `PanelTabKind`, on the SAME hue at two strengths: a faint pill
     /// fill (`panelKindTint`, this token) and a stronger chip fill (`panelKindChipTint`, derived
     /// below at `panelKindChipTintOpacityMultiplier`× this token's alpha) — never two colorsets
     /// per kind, so `Theme.panelKindTint`'s switch stays the ONE place a kind maps to a hue.
@@ -182,8 +182,12 @@ enum Theme {
     /// kind in both schemes and published in brand.md § 3.7: rest visibility ≥ 1.05 on
     /// `CardSurface`; rest→hover and hover→selected each ≥ 1.040; `labelColor` ≥ 4.5:1 on the
     /// STRONGEST (selected) composite. Light rest is a flat 12%; dark rest is 19% except `note`
-    /// at 17% — the bright ambers lift the selected composite enough that the white label falls
-    /// under 4.5:1 at 19%×2.4 (measured 4.22:1); 17% restores 4.73:1. The group CHIP keeps the
+    /// at 17% — the bright ambers lift the selected composite enough that, under the ORIGINAL
+    /// (stale-ink) measurement, the white label fell under 4.5:1 at 19%×2.4 (recorded 4.22:1);
+    /// 17% restored 4.73:1. Re-measured since (`docs/brand.md` § 3.7's stale-ink footnote): 19%
+    /// actually holds 4.65:1, a PASS, which makes that original reason for the exception obsolete
+    /// — the alpha stays at 17% regardless; a revert to 19% is a separate, unmade design call, not
+    /// a consequence of the correction. The group CHIP keeps the
     /// shared row style and its 2.0× fill — the stronger base incidentally lifted its light-mode
     /// hover delta from the old documented ~1.00–1.011 trade-off to a measured 1.043–1.212, so
     /// what § 3.7 once recorded as an accepted weakness is now a pinned floor.
@@ -194,6 +198,10 @@ enum Theme {
         case .code: return Color("PanelKindCodeTint")
         case .note: return Color("PanelKindNoteTint")
         case .diff: return Color("PanelKindDiffTint")
+        // editor-product Task 2: the sixth kind, same ladder-model alphas as web/document/code/diff
+        // (flat 12% light / 19% dark — no label-legibility ceiling forced a note-style exception
+        // here; measured, `docs/brand.md` § 3.7).
+        case .files: return Color("PanelKindFilesTint")
         }
     }
 
@@ -304,8 +312,9 @@ enum Theme {
         // (Task 10); `docs/brand.md` § 3.6 publishes every ratio.
         "DiffRemoved", "DiffAdded", "DiffAddedWash", "DiffRemovedWash",
         // diff-tabs Task 12 — the five panel-kind tints (Mac-only, `panelKindTint`'s switch).
-        // FINAL and measured; `docs/brand.md` § 3.7 publishes every ratio.
+        // FINAL and measured; `docs/brand.md` § 3.7 publishes every ratio. Sixth added
+        // editor-product Task 2 (`PanelKindFilesTint`), same measured discipline.
         "PanelKindWebTint", "PanelKindDocumentTint", "PanelKindCodeTint", "PanelKindNoteTint",
-        "PanelKindDiffTint",
+        "PanelKindDiffTint", "PanelKindFilesTint",
     ]
 }

@@ -8,6 +8,22 @@ struct UpdaterCoordinatorDeps {
     /// Current number of executing agent turns; nil when the daemon is unreachable
     /// (treated as idle — nothing to interrupt).
     var activeTurns: () async -> Int?
+    /// True while any editor runtime has a dirty (unsaved) buffer. **Consulted on the POLL path
+    /// only** (`startPolling()`'s idle check) — task-10 fix round 1, closing the concrete gap a
+    /// review walked: idle machine, no active daemon turns, user walks away, poll fires, Sparkle
+    /// terminates the host, `applicationShouldTerminate` answers `.terminateNow` without ever
+    /// entering the menu-bar `quit:` closure (so `EditorQuitGate` never runs) — buffer gone on
+    /// relaunch, no user action anywhere in the chain. Deliberately NOT consulted by `installNow()`
+    /// itself, so the "Restart Now" menu click (`AppDelegate`'s `onInstallUpdate`) keeps today's
+    /// behavior unchanged — that alert-less install is existing updater UX, and gating a click the
+    /// user just made is a different product question this fix does not decide.
+    /// **Consequence accepted, not fixed:** a forever-dirty editor defers auto-install
+    /// indefinitely — same shape as a never-idle agent turn already deferred it before this fix,
+    /// self-heals on the next launch, and the quit gate (`EditorQuitGate`) now warns on the way out
+    /// regardless. Fail-open default `{ false }` (`.live` below); `AppDelegate.boot()` replaces it
+    /// with the live walk over every session's `EditorRuntime` (`quitDirtyFilePaths`, the same pure
+    /// function `EditorQuitGate` uses) whenever no test override is installed.
+    var dirtyEditors: () -> Bool
     /// updates.channel from ~/.norma/settings.json; nil/absent → stable.
     var readChannel: () -> String?
     /// NORMA_UPDATE_FEED env override for local test feeds; nil → Info.plist SUFeedURL.
@@ -21,11 +37,14 @@ extension UpdaterCoordinatorDeps {
     /// Production wiring. activeTurns here is only the fail-open default (nil = idle):
     /// `AppDelegate.boot()` replaces it with the live daemon bridge
     /// (`AppModel.engineActivity()`, the T2 engine.activity RPC) whenever no test override is
-    /// installed (T4). readChannel reads live from settings.json (T5). Both fail-open:
-    /// nil activity = idle, nil channel = stable.
+    /// installed (T4). dirtyEditors is likewise only the fail-open default (false = clean):
+    /// `AppDelegate.boot()` replaces it with the live editor walk the same way, right alongside
+    /// activeTurns (task-10 fix round 1). readChannel reads live from settings.json (T5). All
+    /// three fail open: nil activity = idle, false dirty = clean, nil channel = stable.
     @MainActor static var live: UpdaterCoordinatorDeps {
         .init(
             activeTurns: { nil },
+            dirtyEditors: { false },
             readChannel: { UpdaterCoordinator.readChannelFromSettings() },
             feedOverride: { ProcessInfo.processInfo.environment["NORMA_UPDATE_FEED"] },
             now: { Date() },
@@ -77,12 +96,16 @@ final class UpdaterCoordinator: NSObject {
     }
 
     /// Poll: first check immediately (idle-at-stage installs with no 30s lag), then every
-    /// pollIntervalSeconds. nil activeTurns (daemon unreachable) counts as idle.
+    /// pollIntervalSeconds. nil activeTurns (daemon unreachable) counts as idle. task-10 fix
+    /// round 1: idle alone is no longer sufficient — a dirty editor buffer holds the poll back
+    /// too (`dirtyEditors`'s own doc for the full why/consequences). `installNow()` itself stays
+    /// unguarded: this is the ONLY caller this predicate applies to — "Restart Now" calls
+    /// `installNow()` directly and must keep firing regardless.
     private func startPolling() {
         pollTask?.cancel()
         pollTask = Task { [weak self] in
             while let self, !Task.isCancelled {
-                if (await self.deps.activeTurns() ?? 0) == 0 {
+                if (await self.deps.activeTurns() ?? 0) == 0, !self.deps.dirtyEditors() {
                     self.installNow()
                     return
                 }
@@ -92,7 +115,9 @@ final class UpdaterCoordinator: NSObject {
         }
     }
 
-    /// The poll's idle trigger AND the user's "Restart Now" override. Idempotent.
+    /// The poll's idle trigger AND the user's "Restart Now" override. Idempotent. Takes no dirty-
+    /// editor opinion itself — `startPolling()`'s predicate is what withholds the poll's own call;
+    /// reached via `onInstallUpdate`, this always proceeds (task-10 fix round 1's deliberate line).
     func installNow() {
         guard let install = pendingInstall else { return }
         pendingInstall = nil

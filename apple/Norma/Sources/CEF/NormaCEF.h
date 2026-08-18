@@ -92,7 +92,22 @@ void NormaCEFRegisterEditorAssetRoot(const char *absolutePath);
 /// every run, contrary to expectation — but that is timing, and creation is queued behind it
 /// anyway. (A `NormaCEFIsContextInitialized` predicate was exported for that finding and never
 /// called by anything; removed by whole-branch review F9, the state itself is read here.)
-void NormaCEFCreateBrowser(NSView *parent, const char *url);
+///
+/// **editor-product Task 4 — `backgroundColorARGB` is the browser's OWN background from the instant
+/// it exists**, packed `0xAARRGGBB`: the same bit layout CEF's `cef_color_t`/`CefColorSetARGB` use
+/// inside the framework, spelled as `uint32_t` rather than `cef_color_t` because this header stays
+/// framework-free (no CEF type may cross into the bridging header — the file's own opening note).
+/// Threaded into `CefBrowserSettings.background_color` (`NormaCEF.mm`'s create path), which documents
+/// its own contract: the alpha byte must be either fully opaque or fully transparent.
+///
+///   * `0x00000000` — **no override.** CEF falls back to its own `CefSettings.background_color`
+///     default, i.e. today's behaviour, unchanged. Every caller with nothing branded to anticipate
+///     (`BrowserRuntime`'s ordinary web tabs, the CEF spikes) passes this.
+///   * `0xFFrrggbb` — paints the browser that color before any page has loaded anything at all. The
+///     fix for the measured white flash: a Chromium page paints a flat white background by default
+///     for the whole window between browser creation and its OWN first paint, which for the editor
+///     (asset load + the Monaco AMD bootstrap) is on the order of a few hundred milliseconds.
+void NormaCEFCreateBrowser(NSView *parent, const char *url, uint32_t backgroundColorARGB);
 
 #pragma mark - Task 6b: the browser chrome's two channels
 

@@ -163,6 +163,13 @@ const fixtures: Record<string, unknown> = {
   // field); no url — matches the shape the app's diff-tab door actually mints (title is the path's
   // basename). Shares its diffId with tool_result_with_file_diff above: same underlying diff.
   "panel_tab_opened_diff": { ...base, type: "panel_tab_opened", tabId: "tab_2", kind: "diff", diffId: "d1f2e3", title: "fixture.swift" },
+  // editor-product Task 2: "files" is a second NEW PanelTabKind value on the SAME existing
+  // panel_tab_opened shape, the identical new-value pattern the diff fixture just above uses.
+  // Unlike diff it carries no companion field (no diffId-equivalent) and no title — a files tab
+  // has no per-instance data on the wire, only the static "Files" display-title fallback
+  // (panelTabDisplayTitle, ShellPanel.swift) — so this fixture is deliberately the bare minimum:
+  // just the discriminator, tabId, and kind.
+  "panel_tab_opened_files": { ...base, type: "panel_tab_opened", tabId: "tab_3", kind: "files" },
   "panel_tab_closed": { ...base, type: "panel_tab_closed", tabId: "tab_1" },
   "panel_tab_activated": { ...base, type: "panel_tab_activated", tabId: "tab_1" },
   "panel_tab_navigated": { ...base, type: "panel_tab_navigated", tabId: "tab_1", url: "https://example.com/pricing", title: "Pricing" },

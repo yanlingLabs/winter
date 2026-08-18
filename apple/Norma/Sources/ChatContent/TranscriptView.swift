@@ -22,6 +22,11 @@ struct TranscriptView: View {
     /// `nil` — the default, which every existing call site takes — draws the chips as plain text on
     /// a surface with no panel to open a tab in (the orb's morph window, every detached window).
     var onOpenDiff: ((FileDiffRef) -> Void)? = nil
+    /// editor-product Task 6: the SECOND transcript→panel door — see `WindowContentView.onOpenFile`'s
+    /// own doc for the full story. Threaded through unchanged, same opt-in default as `onOpenDiff`.
+    var onOpenFile: ((String) -> Void)? = nil
+    /// editor-product Task 6 — see `WindowContentView.sessionHasWorkingDirectory`'s own doc.
+    var sessionHasWorkingDirectory: Bool = false
     @State private var nearBottom = true
     @State private var showLatestPill = false
 
@@ -35,6 +40,8 @@ struct TranscriptView: View {
                             exchange: exchange,
                             cardWiring: cardWiring,
                             onOpenDiff: onOpenDiff,
+                            onOpenFile: onOpenFile,
+                            sessionHasWorkingDirectory: sessionHasWorkingDirectory,
                             streamingText: isLast ? adapter.liveStreamingText : nil,
                             // Live only for the newest exchange (mac-chat-parity Task 2). That is
                             // not quite the same as "every in-flight call lives here": a main-thread
@@ -153,6 +160,10 @@ private struct TranscriptExchangeRow: View {
     /// diff-tabs Task 9 — see `TranscriptView.onOpenDiff`. Carried, never captured: this view is a
     /// pure function of its inputs and the closure is one of them.
     var onOpenDiff: ((FileDiffRef) -> Void)? = nil
+    /// editor-product Task 6 — see `TranscriptView.onOpenFile`. Same carried-not-captured reasoning.
+    var onOpenFile: ((String) -> Void)? = nil
+    /// editor-product Task 6 — see `WindowContentView.sessionHasWorkingDirectory`'s own doc.
+    var sessionHasWorkingDirectory: Bool = false
     /// Non-nil only for the LAST exchange while a reply is actively streaming (v1's synthetic
     /// trailing-stream mechanism) — `TranscriptView.body` computes this per-index so this view
     /// stays a pure function of its own inputs.
@@ -179,7 +190,9 @@ private struct TranscriptExchangeRow: View {
                         turnIsLive: turnIsLive,
                         isExpanded: expandedRuns.contains(key),
                         toggle: { toggle(key) },
-                        onOpenDiff: onOpenDiff
+                        onOpenDiff: onOpenDiff,
+                        onOpenFile: onOpenFile,
+                        sessionHasWorkingDirectory: sessionHasWorkingDirectory
                     )
                 case .single(let item):
                     // mac-chat-parity Task 3: an approval/question/plan draws its CARD here, in the

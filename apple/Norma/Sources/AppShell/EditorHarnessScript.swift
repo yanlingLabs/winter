@@ -355,6 +355,37 @@ enum MonacoTextBuffer {
         return String(bytes: out, encoding: .utf8) ?? text
     }
 
+    /// **PURE: does the page's `openModel` EOL step fire for this text?** — the Swift mirror of
+    /// `editor.js`'s `dominantEOLIsCRLF`, which is itself the vendored `_getEOL` rule.
+    ///
+    /// Strict majority of CR-BEARING terminators (a CRLF counts once, as one CR-bearing terminator),
+    /// and **a tie goes to LF**: the vendored comparison is `p > b/2`, so one CRLF against one LF is
+    /// an LF text. A text with no terminator at all has no dominant ending and answers `false`.
+    static func opensWithCRLF(_ text: String) -> Bool {
+        let counts = terminatorCounts(text)
+        let total = counts.cr + counts.lf + counts.crlf
+        guard total > 0 else { return false }
+        return (counts.cr + counts.crlf) * 2 > total
+    }
+
+    /// **editor-product Task 8 — what a SAVE writes back for a file opened with `text`.** The
+    /// product-facing name for the round trip, and the one function every expectation about it is
+    /// computed through (the live harness's drills included).
+    ///
+    /// It delegates to `normalisedEOL` rather than re-deriving anything, deliberately: the page's
+    /// `openModel` EOL step (`setEOL(CRLF)` when `opensWithCRLF`) asserts **exactly** the ending the
+    /// buffer builder has already chosen by the same majority rule, so the text a save pulls back is
+    /// the normalised text and nothing else. Two implementations of one rule is how a vocabulary
+    /// drifts; this is one implementation with two names, and the second name is what tells a reader
+    /// which question it is answering.
+    ///
+    /// The consequence worth stating, because it is the ruling: **a file's dominant line ending
+    /// survives a save byte for byte, and a mixed file is unified to its dominant ending on the first
+    /// one.** A uniformly-CRLF Windows file is not turned into an LF file by being opened.
+    static func savedText(forFileOpenedWith text: String) -> String {
+        return normalisedEOL(text)
+    }
+
     /// Lone CRs, lone LFs and CRLF pairs, counted the way `acceptChunk` counts them.
     static func terminatorCounts(_ text: String) -> (cr: Int, lf: Int, crlf: Int) {
         var cr = 0, lf = 0, crlf = 0

@@ -813,8 +813,9 @@ final class CEFRuntimeTests: XCTestCase {
         }
     }
 
-    /// `.web` resolves to the CEF surface, `.diff` to the diff renderer, and the three kinds with no
-    /// surface yet keep Plan A's blank placeholder.
+    /// `.web` resolves to the CEF surface, `.diff` to the diff renderer, `.code` to the editor
+    /// viewport, `.files` to the file-tree surface, and the two kinds with no surface yet keep Plan
+    /// A's blank placeholder.
     ///
     /// **diff-tabs Task 10 took `.diff` out of the placeholder list — the handoff Task 9 designed.**
     /// Task 9 minted diff tabs (the transcript chip → `ShellSessionHost.openDiffTab`) without
@@ -824,6 +825,19 @@ final class CEFRuntimeTests: XCTestCase {
     ///
     /// `.diff` must ALSO never render a browser, which the type check states directly (a `.diff` tab
     /// that resolved to `PanelWebTab` would stand Chromium up for a patch file).
+    ///
+    /// **editor-product Task 5 took `.code` out of the placeholder list, the same way** — it had sat
+    /// there since Plan A, and moving it up into its own assertion (rather than deleting a pin) is
+    /// what makes the replacement impossible to land silently. `.code` must never resolve to
+    /// `PanelWebTab` either: a code tab is a viewport onto the SESSION's one editor browser, and a
+    /// second, per-tab Chromium is exactly the ownership the editor runtime exists to prevent.
+    ///
+    /// **editor-product Task 7 took `.files` out of the placeholder list, the same way** — Task 2 put
+    /// it there as a deliberate TEMPORARY placeholder (no producer opened one yet), and moving it up
+    /// into its own assertion is what makes THIS replacement impossible to land silently too. `.files`
+    /// must never resolve to `PanelWebTab` either: a file tree reads the session's own working
+    /// directory directly off disk (no browser, no CEF, no bridge) — no producer of this tab has ever
+    /// needed one.
     func testWebTabsResolveToTheCEFSurfaceAndOtherKindsDoNot() {
         let web = PanelTab(tabId: "t1", kind: .web, url: nil, title: nil)
         XCTAssertTrue(panelTabContent(for: web) is PanelWebTab)
@@ -834,7 +848,19 @@ final class CEFRuntimeTests: XCTestCase {
         XCTAssertFalse(diffContent is PanelWebTab, "…and never a browser")
         PanelDiffTabModels.removeAllForTesting()
 
-        for kind in [PanelTabKind.document, .code, .note] {
+        let code = PanelTab(tabId: "t4", kind: .code, url: "/tmp/engine.ts", title: "engine.ts")
+        let codeContent = panelTabContent(for: code)
+        XCTAssertTrue(codeContent is PanelEditorTab, "a code tab renders the editor viewport")
+        XCTAssertFalse(codeContent is PanelWebTab, "…and never a browser of its own")
+        PanelEditorTabModels.removeAllForTesting()
+
+        let files = PanelTab(tabId: "t5", kind: .files, url: nil, title: nil)
+        let filesContent = panelTabContent(for: files)
+        XCTAssertTrue(filesContent is PanelFilesTab, "a files tab renders the file-tree surface")
+        XCTAssertFalse(filesContent is PanelWebTab, "…and never a browser")
+        PanelFilesTabModels.removeAllForTesting()
+
+        for kind in [PanelTabKind.document, .note] {
             let tab = PanelTab(tabId: "t2", kind: kind, url: nil, title: nil)
             XCTAssertTrue(panelTabContent(for: tab) is PanelPlaceholderTab,
                           "\(kind) must not render a browser")
@@ -845,7 +871,7 @@ final class CEFRuntimeTests: XCTestCase {
     /// `plus.forwardslash.minus`) — a favicon name that resolves to nothing draws an empty pill, and
     /// nothing else in the suite would notice.
     func testEveryPanelTabKindHasARealFaviconGlyph() {
-        for kind in [PanelTabKind.web, .document, .code, .note, .diff] {
+        for kind in [PanelTabKind.web, .document, .code, .note, .diff, .files] {
             let name = panelTabFaviconSystemImage(kind)
             XCTAssertNotNil(NSImage(systemSymbolName: name, accessibilityDescription: nil),
                             "\(kind)'s favicon `\(name)` is not a real SF Symbol")
