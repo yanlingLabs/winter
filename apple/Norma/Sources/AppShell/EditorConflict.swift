@@ -25,7 +25,10 @@ enum EditorConflictKind: Equatable {
 ///     vanished under their unsaved edits); it persists until they answer it;
 ///   * a **transient error** is the outcome of something the user just did (a save that failed —
 ///     `SaveOutcome.failed`'s own sentence, produced by T8 and surfaced nowhere until now); it says
-///     its piece and leaves after `editorTransientErrorDuration`.
+///     its piece and leaves `editorTransientErrorDuration` after it was raised (or last changed to a
+///     new sentence) — a banner-moving dispatch that leaves the SAME sentence standing must not push
+///     that deadline out (`EditorRuntime.syncBannerTimer`'s own doc has the reasoning and the bug
+///     this corrected).
 ///
 /// **The precedence rule, stated once: a conflict WINS and a save failure yields.** A conflict is
 /// actionable — there are two buttons and one of them is the fix — while a failed save is a report

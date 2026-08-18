@@ -2213,7 +2213,7 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
     /// live) proved that theory wrong: the step reported PASS in BOTH the real and the mutated
     /// build — 71/71 either way. The reason is a THIRD confound, at a layer neither the review nor
     /// this file's earlier reasoning had reached: every keystroke, however delivered, is routed
-    /// through Monaco's command layer (`SimpleCharacterTypeOperation.getEdits`, bundle @~1960451)
+    /// through Monaco's command layer (`SimpleCharacterTypeOperation.getEdits`, bundle @1956328)
     /// BEFORE it ever reaches `EditStack`. That layer decides `shouldPushStackElementBefore` with
     /// its OWN heuristic (`A`/`M`/`N`/`P`, bundle @~1964344-1964450) keyed on the EditOperationType
     /// of the PREVIOUS edit versus this one — `A(H,Y) = N(H)&&!N(Y) ? true : H===5 ? false :
@@ -2254,11 +2254,17 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
     /// -proven (line 450 commented out: this step alone reports FAIL with the pre-agent/LF
     /// signature; restored: PASS), not a passing assertion alone, is the proof.
     ///
-    /// **What line 450 protects, honestly stated**: the NEXT direct model edit — another agent
-    /// write, any future page-script mutation — not the user's own keystrokes, which the command
-    /// layer's `shouldPushStackElementBefore` heuristic already isolates on its own (see above).
-    /// `15.postRedoKeystroke`'s "no corruption" claim about keystrokes stands independently of
-    /// line 450 for exactly that reason; it was never the boundary's claim to make.
+    /// **What line 450 protects, honestly stated** (wave-8 item 5, corrected after re-review
+    /// disproved the original claim): a future DIRECT model edit that lands below Monaco's command
+    /// layer with no leading seal of its own — NOT the user's own keystrokes, which that layer's
+    /// `shouldPushStackElementBefore` heuristic already isolates regardless (see above), and NOT
+    /// another `applyExternalContent` call either: a second one seals its OWN leading boundary
+    /// independently (editor.js:433, BEFORE its EOL/edit pair), whether or not THIS call's trailing
+    /// one ran. No currently-reachable production writer is the case actually being guarded against
+    /// — every user-reachable path (typing, paste, actions, bulk edits, snippets, find-replace)
+    /// already self-seals one way or the other, which is exactly why this is defense-in-depth rather
+    /// than a live dependency. `15.postRedoKeystroke`'s "no corruption" claim about keystrokes stands
+    /// independently of line 450 for exactly that reason; it was never the boundary's claim to make.
     private func performStageBDiscriminant(_ stepId: String) {
         guard let runtime = stageBRuntime, let container = stageBRuntimeContainer else {
             local(stepId, false, "no Stage B runtime/container")

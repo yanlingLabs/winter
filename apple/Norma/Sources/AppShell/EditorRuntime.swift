@@ -569,10 +569,13 @@ final class EditorRuntime: ObservableObject {
     /// a number before it starts and drops itself on resume if a later one has begun; the later read
     /// describes the same file, so nothing is lost by dropping the earlier one.
     private var watchGenerations: [String: Int] = [:]
-    /// The transient error's own 5 s timer, per path (`editorTransientErrorDuration`). Armed and
-    /// cancelled by `syncBannerTimer(path:)`, which is called after every banner-moving dispatch —
-    /// so a conflict raised over a transient error takes its timer down with it.
-    private var bannerTimers: [String: Scheduler.Cancellable] = [:]
+    /// The transient error's own 5 s timer, per path (`editorTransientErrorDuration`), paired with
+    /// the banner value it is standing FOR. Armed and cancelled by `syncBannerTimer(path:)`, which
+    /// is called after every banner-moving dispatch — a conflict raised over a transient error takes
+    /// its timer down with it, and (wave-8 item 3) a dispatch that leaves the SAME `.transientError`
+    /// standing leaves this timer's deadline alone rather than re-arming a fresh window under it —
+    /// see that method's own doc. The paired banner is what makes "the same" checkable at all.
+    private var bannerTimers: [String: (banner: EditorTabBanner, timer: Scheduler.Cancellable)] = [:]
     /// The ONE Combine wire this object holds (`ShellSessionHost.cancellables`'s identical shape and
     /// reasoning) — `NSApp`'s own `effectiveAppearance`, below, so its lifetime is this runtime's own
     /// and no separate teardown is needed (`AnyCancellable.cancel()` fires on deinit).
@@ -634,6 +637,14 @@ final class EditorRuntime: ObservableObject {
     /// `async` all the way to the read, which happens off the main actor — the one genuinely
     /// blocking thing in this object. An open requested before the page is ready is QUEUED and this
     /// returns immediately; the read then happens at flush time, against the file as it is then.
+    ///
+    /// **wave-8 item 6: fire-and-forget past the read.** The `.openModel` message's own completion
+    /// (`openAndSend`'s `send(...)` callback, which is what actually dispatches `.modelOpened` and
+    /// makes `state.models[path]` exist) is never awaited here — this function's `await` spans only
+    /// the disk read, so it can and does return before the page has acknowledged the open at all. A
+    /// caller doing `await runtime.openFile(path)` and then reading `stateSnapshot.models[path]`
+    /// immediately after may find nothing there yet. Never sequence off this await — observe
+    /// published state (`state`/`stateSnapshot`) instead, the way every real caller already does.
     func openFile(_ absolutePath: String) async {
         for effect in dispatch(.openRequested(path: absolutePath)) {
             if case .openModel(let path) = effect {
@@ -791,8 +802,20 @@ final class EditorRuntime: ObservableObject {
     /// rename has landed and this continuation has not run yet, where the watcher's read sees bytes
     /// the baseline has not caught up with, and `editorDiskChange` answers `.ours`.
     private func noteWriteLanded(path: String, text: String) {
-        diskBaseline[path] = text
+        // wave-8 item 7d HAZARD, closed: clear the bag UNCONDITIONALLY. A naive
+        // `guard state.models[path] != nil else { return }` at the top of this function would ALSO
+        // skip this line for a path closed mid-save — `EditorSaveCoordinator.performSave` checks
+        // `hasModel` only ONCE, before the pull, and never again before the write, so a close that
+        // lands after the pull answers does not stop the write, and this function still runs.
+        // `.closeRequested`'s own effect (`.closeModel`) already clears `diskBaseline`/`pathsWithBOM`
+        // for the path, but it does NOT touch this bag — so a skipped clear here would leave a
+        // lingering expected-write note that silently swallows the FIRST genuine external change on
+        // a later re-open of the same path, misread as "ours" when it never was. Only the baseline
+        // re-insert below is gated on the model still existing: a path closed mid-save has nothing
+        // left that should remember new bytes for it, but its accounting must still settle either way.
         pendingExpectedWrites.removeValue(forKey: path)
+        guard state.models[path] != nil else { return }
+        diskBaseline[path] = text
     }
 
     /// **What Swift last knew the file at each open path to contain**, BOM already stripped — the
@@ -1023,6 +1046,10 @@ final class EditorRuntime: ObservableObject {
         // the baseline every later watcher event is measured against (see `diskBaseline`).
         diskBaseline[path] = contents.text
         let text = contents.text
+        // wave-8 item 6: this callback — not `openAndSend`'s own `async` return — is what actually
+        // makes the model exist (`.modelOpened` is what flips `state.models[path]` in). It runs on
+        // its own later turn, decoupled from `openFile`'s `await`, which already returned once this
+        // `send` call was MADE. Never sequence off that await; observe published state instead.
         send(.openModel(path: path, language: editorLanguageHint(forPath: path), text: text)) {
             [weak self] ok in
             guard let self, ok else { return }
@@ -1059,8 +1086,22 @@ final class EditorRuntime: ObservableObject {
         watchers.removeValue(forKey: path)?.stop()
         // A read in flight for this path resumes into a runtime that no longer holds the model; the
         // generation bump makes it drop itself rather than rely on that check alone.
+        //
+        // **wave-8 item 7c: BUMP, never REMOVE the entry — pruning it here is UNSAFE, not merely
+        // untidy.** If close deleted `watchGenerations[path]` outright, a later re-open of the SAME
+        // path would start counting from `(nil ?? 0) + 1 == 1` again — the identical sequence a
+        // FRESH runtime starts from. A stale in-flight read from the PREVIOUS lifetime that resumes
+        // after the re-open would then carry a generation number that can collide with the new
+        // lifetime's own count at the exact same value, passing both the generation guard AND the
+        // model-exists guard (`fileChangedOnDisk`'s `watchGenerations[path] == generation,
+        // state.models[path] != nil`) and dispatching bytes from a read nobody asked for into the
+        // reopened model. Monotonically incrementing instead — never resetting — means a stale read
+        // from any earlier lifetime always carries a generation strictly behind the current one, so
+        // it can never pass the guard by coincidence. The table is not unbounded: every path's entry
+        // is finite in number (bumped, not grown) and the whole table is dropped at `teardown()`
+        // (`watchGenerations.removeAll()`), which is this runtime's true, bounded lifetime.
         watchGenerations[path] = (watchGenerations[path] ?? 0) + 1
-        bannerTimers.removeValue(forKey: path)?.cancel()
+        bannerTimers.removeValue(forKey: path)?.timer.cancel()
     }
 
     /// **The watcher's handler — one debounced fire, one read, one decision.** `async` and
@@ -1180,19 +1221,41 @@ final class EditorRuntime: ObservableObject {
     /// Arm, re-arm or cancel one path's transient-error timer to match the banner it now has.
     ///
     /// Called after every banner-moving dispatch rather than only after a failure, which is what
-    /// makes the two rules structural: a transient error always leaves after
-    /// `editorTransientErrorDuration`, and a conflict raised over one takes that timer down with it
-    /// (a fire that arrived later could only clear the conflict, which is exactly what must not
-    /// happen — the reducer refuses it too, and this is the belt).
+    /// makes two rules structural: a conflict raised over a transient error takes that timer down
+    /// with it (a fire that arrived later could only clear the conflict, which is exactly what must
+    /// not happen — the reducer refuses it too, and this is the belt); and (wave-8 item 3) a
+    /// dispatch that leaves the SAME `.transientError` standing — byte-identical to what was already
+    /// showing — leaves this timer's deadline exactly where it was, rather than cancelling and
+    /// re-arming a fresh `editorTransientErrorDuration` window under it.
+    ///
+    /// **The bug this closes**: every call here used to unconditionally cancel-then-rearm whenever
+    /// the RESULTING banner was any `.transientError`, whether or not the dispatch actually changed
+    /// what was on screen. A clean external touch on a path already showing a save failure — the
+    /// shape a background agent's own edit traffic makes, and it can repeat indefinitely — reduces to
+    /// `clearingConflict`, which leaves a standing `.transientError` untouched
+    /// (`EditorConflictReducer`); but this method could not tell "untouched" from "freshly raised"
+    /// and rearmed either way, so the same sentence's countdown kept getting pushed out and the
+    /// banner could be pinned open forever. A genuinely NEW or DIFFERENT failure (a fresh
+    /// `.saveFailed` message) still gets a fresh window below — the comparison is on the banner
+    /// VALUE, which is what "the same" or "different" actually means here, not on which event
+    /// produced it.
     private func syncBannerTimer(path: String) {
-        bannerTimers.removeValue(forKey: path)?.cancel()
-        guard case .transientError = state.banner(for: path) else { return }
+        let banner = state.banner(for: path)
+        guard case .transientError = banner else {
+            bannerTimers.removeValue(forKey: path)?.timer.cancel()
+            return
+        }
+        // A live timer already owns this EXACT standing banner — nothing moved, so its deadline
+        // doesn't either.
+        if let existing = bannerTimers[path], existing.banner == banner { return }
+        bannerTimers.removeValue(forKey: path)?.timer.cancel()
         let deadline = scheduler.now().addingTimeInterval(editorTransientErrorDuration)
-        bannerTimers[path] = scheduler.timer(deadline) { [weak self] in
+        let armed = scheduler.timer(deadline) { [weak self] in
             guard let self else { return }
             self.bannerTimers.removeValue(forKey: path)
             self.perform(self.dispatch(.transientErrorExpired(path: path)))
         }
+        bannerTimers[path] = (banner: banner, timer: armed)
     }
 
     // MARK: Speaking to the page
@@ -1275,7 +1338,7 @@ final class EditorRuntime: ObservableObject {
         for (_, watcher) in watchers { watcher.stop() }
         watchers.removeAll()
         watchGenerations.removeAll()
-        for (_, timer) in bannerTimers { timer.cancel() }
+        for (_, entry) in bannerTimers { entry.timer.cancel() }
         bannerTimers.removeAll()
         // The page these described is going away, and a note that outlived it could only ever
         // suppress a change made by somebody else (see `pendingExpectedWrites`). The BOM answers and

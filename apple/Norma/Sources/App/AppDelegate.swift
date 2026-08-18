@@ -765,11 +765,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // fresh at call time like `editorQuitGate.dirtyRuntimeStates` does. Reuses
                 // `quitDirtyFilePaths`, the same pure gather `EditorQuitGate` walks at quit —
                 // `dirtyEditors`'s own doc on `UpdaterCoordinatorDeps` for the full why.
-                deps.dirtyEditors = { [weak self] in
-                    guard let host = self?.appWindow?.host else { return false }
-                    let states = host.editorRuntimes.values.map(\.stateSnapshot)
-                    return !quitDirtyFilePaths(runtimeStates: states).isEmpty
-                }
+                //
+                // wave-8 item 4: the body itself is hoisted into `liveDirtyEditors()` below, an
+                // always-compiled method — see that method's own doc for why.
+                deps.dirtyEditors = { [weak self] in self?.liveDirtyEditors() ?? false }
             }
             let coordinator = UpdaterCoordinator(deps: deps)
             let controller = SPUStandardUpdaterController(
@@ -1268,6 +1267,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // MARK: - editor-product Task 10: the quit path's dirty-editor gate
+
+    /// **wave-8 item 4: hoisted out of `boot()`'s `#if !DEBUG` Sparkle block** so a Debug build
+    /// actually TYPE-CHECKS this expression instead of never compiling it at all.
+    ///
+    /// The body is unchanged — `appWindow?.host` walk → `quitDirtyFilePaths` — this is purely a
+    /// composition fix, not a behaviour one: Sparkle itself stays dist-only (DD-T4's own ruling), so
+    /// this method is still never CALLED under Debug. What changes is that it is now always
+    /// COMPILED, which is what closes the one CI-unchecked residue the whole-branch review found —
+    /// a `#if !DEBUG`-only closure body is invisible to Xcode's compiler under the Debug config CI
+    /// actually builds, so a change here that broke under Debug (a renamed property, a changed
+    /// signature) would only ever be caught by a Release build, which this repo's dev workflow does
+    /// not routinely run (`CLAUDE.md`'s own dev/dist rule: dev work never builds/launches Release).
+    private func liveDirtyEditors() -> Bool {
+        guard let host = appWindow?.host else { return false }
+        let states = host.editorRuntimes.values.map(\.stateSnapshot)
+        return !quitDirtyFilePaths(runtimeStates: states).isEmpty
+    }
 
     /// **The real wiring for `EditorQuitGate`** — `lazy`, on the same terms as `ShellSessionHost
     /// .presentHandoffFailure`, so its closures can capture `self` weakly. Constructed once; every

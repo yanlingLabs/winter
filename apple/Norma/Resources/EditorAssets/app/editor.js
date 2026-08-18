@@ -399,7 +399,18 @@ function pullContent(path, seq) {
  * should: they are one semantic action ("the file changed under you"), and splitting them would only
  * add a resting point nobody wants — a buffer whose TEXT is right and whose LINE ENDING is still
  * wrong is not a state ⌘Z should ever leave on screen. A second `pushStackElement()` AFTER closes
- * that element again, so the user's NEXT keystroke cannot merge into it either. The result: ⌘Z once
+ * that element too. **This second call is defense-in-depth, not what protects typing that follows
+ * it** (wave-8 item 5, corrected after re-review disproved the original claim): every keystroke,
+ * however delivered, is routed through Monaco's own command layer BEFORE it ever reaches
+ * `EditStack`, and that layer's `shouldPushStackElementBefore` heuristic already forces its own
+ * boundary after any non-typing op — which `pushEditOperations` here is — so the next keystroke
+ * cannot reach this element regardless of whether this trailing call ran (mechanism and live proof:
+ * `EditorBridgeHarness.performStageBDiscriminant`, harness step 15.discriminant). What this second
+ * call actually guards against is a future DIRECT model edit landing below that command layer with
+ * no leading seal of its own — no currently-reachable production writer is that today: every
+ * user-reachable path (typing, paste, actions, bulk edits, snippets, find-replace) is routed through
+ * the command layer, and another agent write seals its own leading boundary independently
+ * (`pushStackElement()` at the top of this function, above). The result: ⌘Z once
  * restores the pre-agent state byte for byte — text AND line ending together, since
  * `SingleModelEditStackElement.undo()` calls `_applyUndoRedoEdits`, which reverses the recorded text
  * changes AND resets the element's `beforeEOL` in the SAME call — and a second ⌘Z reaches the user's
@@ -445,8 +456,9 @@ function applyExternalContent(path, text) {
         range: entry.model.getFullModelRange(),
         text: text
     }], function () { return null; });
-    // Seal THIS element too — the user's next keystroke must start its own, not merge into the
-    // agent's change (see the boundary note above).
+    // Seal THIS element too — defense-in-depth for a future direct model edit below Monaco's
+    // command layer, not for what the user types next: typing that follows is already isolated from
+    // this element regardless of this call (see the boundary note above).
     entry.model.pushStackElement();
     entry.savedVersionId = entry.model.getAlternativeVersionId();
     entry.applyingExternal = false;

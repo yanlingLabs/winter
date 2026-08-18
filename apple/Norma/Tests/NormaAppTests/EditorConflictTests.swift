@@ -13,7 +13,7 @@ final class EditorConflictReducerTests: XCTestCase {
         .none, .conflict(.changed), .conflict(.deleted), .transientError("Couldn't save")
     ]
 
-    /// **The whole matrix, written out.** Four states × eight events, as literal expectations rather
+    /// **The whole matrix, written out.** Four states × nine events, as literal expectations rather
     /// than as rules re-derived in the test — a table is the only form in which "exhaustive" is
     /// visible, and the only one where a future change to the reducer has to be RE-DECIDED here
     /// rather than silently agreed with.
@@ -518,6 +518,72 @@ final class EditorWatcherTests: XCTestCase {
         XCTAssertEqual(harness.runtime.stateSnapshot.banner(for: path), .none)
     }
 
+    /// **wave-8 item 3 — the bug**: every banner-moving dispatch used to cancel-and-rearm the 5 s
+    /// timer whenever the RESULTING banner was any `.transientError`, even one byte-identical to what
+    /// was already showing. Agent edit traffic can produce exactly that shape indefinitely (a clean
+    /// external touch on a path already showing a save failure reduces to `clearingConflict`, which
+    /// leaves a standing `.transientError` untouched) — so the same sentence's countdown kept getting
+    /// pushed out and the banner could be pinned open forever.
+    ///
+    /// The discriminating check is the timer's OWN identity, not merely its firing: a re-arm cancels
+    /// the old one and mints a NEW one regardless of what `scheduler.current` happens to read, so
+    /// asserting `liveTimers[0].id` is unchanged is what a naive fix (which still fires eventually,
+    /// just later) cannot pass by accident.
+    func testACleanExternalChangeDoesNotExtendAStandingTransientErrorsDeadline() async throws {
+        let (harness, path) = try await openedFile(contents: "one\n")
+
+        let outcome = await failingSave(harness, path: path)
+        XCTAssertEqual(outcome, .failed(EditorSaveCoordinator.pullTimeoutMessage))
+        let standing = EditorTabBanner.transientError(EditorSaveCoordinator.pullTimeoutMessage)
+        XCTAssertEqual(harness.runtime.stateSnapshot.banner(for: path), standing)
+        XCTAssertEqual(harness.scheduler.liveTimers.count, 1, "one timer armed for the failure")
+        let armedId = harness.scheduler.liveTimers[0].id
+
+        // Advance partway — nowhere near the deadline — then a clean external touch lands: the
+        // model is not dirty, so this reloads silently and, before the fix, ALSO cancelled and
+        // re-armed a fresh 5 s window even though the banner it leaves standing is byte-identical to
+        // the one already showing.
+        harness.scheduler.current = harness.scheduler.current.addingTimeInterval(1)
+        try "two\n".write(toFile: path, atomically: true, encoding: .utf8)
+        await harness.runtime.fileChangedOnDisk(path)
+
+        XCTAssertEqual(harness.runtime.stateSnapshot.banner(for: path), standing,
+                       "still the identical standing banner — nothing here should have moved it")
+        XCTAssertEqual(harness.scheduler.liveTimers.count, 1,
+                       "no second timer — the SAME one still owns this banner")
+        XCTAssertEqual(harness.scheduler.liveTimers[0].id, armedId,
+                       "the ORIGINAL timer, not a cancel-and-replace")
+        XCTAssertFalse(harness.scheduler.cancelled.contains(armedId),
+                       "the original timer was never even cancelled, let alone replaced")
+
+        // Prove the deadline itself did not move: firing at the ORIGINAL 5 s mark (4 s from here,
+        // since 1 s already elapsed above) still clears the banner exactly on schedule.
+        harness.scheduler.current = harness.scheduler.current
+            .addingTimeInterval(editorTransientErrorDuration - 1)
+        XCTAssertTrue(harness.scheduler.fireNextTimer(), "the original timer was still live and due")
+        XCTAssertEqual(harness.runtime.stateSnapshot.banner(for: path), .none)
+    }
+
+    /// The other half of the fix, unchanged behaviour: a conflict arriving over a standing transient
+    /// error still cancels its timer outright — the reducer's own precedence rule needs this belt (a
+    /// timer that fired later could only clear the CONFLICT, which must never happen).
+    func testADirtyExternalChangeOverAStandingTransientErrorStillCancelsItsTimer() async throws {
+        let (harness, path) = try await openedFile(contents: "one\n")
+        let outcome = await failingSave(harness, path: path)
+        XCTAssertEqual(outcome, .failed(EditorSaveCoordinator.pullTimeoutMessage))
+        XCTAssertEqual(harness.scheduler.liveTimers.count, 1, "one timer armed for the failure")
+        let armedId = harness.scheduler.liveTimers[0].id
+
+        markDirty(harness, path: path)
+        try "theirs\n".write(toFile: path, atomically: true, encoding: .utf8)
+        await harness.runtime.fileChangedOnDisk(path)
+
+        XCTAssertEqual(harness.runtime.stateSnapshot.banner(for: path), .conflict(.changed))
+        XCTAssertTrue(harness.scheduler.liveTimers.isEmpty,
+                      "the error's timer is cancelled outright, not left running under the conflict")
+        XCTAssertTrue(harness.scheduler.cancelled.contains(armedId))
+    }
+
     /// The precedence rule where it is actually enforced: a save that fails while a conflict is up
     /// changes nothing on screen, and a save that SUCCEEDS resolves the conflict.
     func testAConflictOutranksASaveFailureAndASuccessfulSaveResolvesIt() async throws {
@@ -552,6 +618,43 @@ final class EditorWatcherTests: XCTestCase {
 
         XCTAssertEqual(outcome, .failed(EditorSaveCoordinator.pullTimeoutMessage))
         XCTAssertEqual(harness.runtime.stateSnapshot.banners, [:])
+    }
+
+    /// **wave-8 item 7d — the hazard a naive fix would have introduced, closed.**
+    /// `EditorSaveCoordinator.performSave` checks `hasModel` exactly ONCE, before the pull, and never
+    /// again before the write — so a model closed AFTER its pull answers still gets its own write,
+    /// and `noteWriteLanded` still runs for it, with the model already gone. The bag must still
+    /// empty (a naive `guard state.models[path] != nil` at the top would ALSO skip that, leaving a
+    /// stray note that silently swallows the next re-open's first genuine external change); the
+    /// baseline must NOT resurrect (`closeRequested`'s own effect already cleared it, and a path with
+    /// no model has nothing left that should remember new bytes for it).
+    ///
+    /// Deterministic, not racy: `deliverContentResponse` only RESUMES `performSave`'s suspended
+    /// continuation — Swift's cooperative scheduling does not run the rest of that suspended task
+    /// until this synchronous call stack yields, so the `close(path)` immediately below is
+    /// guaranteed to complete (and to have already cleared `diskBaseline`/`pathsWithBOM`) before the
+    /// write that follows the pull ever runs.
+    func testANoteWriteLandedForAModelClosedMidSaveClearsTheBagWithoutResurrectingTheBaseline() async throws {
+        let (harness, path) = try await openedFile(contents: "one\n")
+
+        let save = Task { await harness.runtime.save(path) }
+        await waitUntil("the pull") { self.cdpTypes(harness.cef).contains("pullContent") }
+        let seq = harness.runtime.saveCoordinator.pendingPullSeqs.first ?? 0
+        drain(harness.cef)
+
+        harness.runtime.saveCoordinator.deliverContentResponse(path: path, seq: seq, text: "mine\n")
+        harness.runtime.close(path)
+
+        let outcome = await save.value
+        XCTAssertEqual(outcome, .saved, "the write itself still lands — hasModel is not re-checked")
+        XCTAssertEqual(try String(contentsOfFile: path, encoding: .utf8), "mine\n",
+                       "the bytes really are on disk — this is not a case where the write failed")
+        XCTAssertEqual(harness.runtime.expectedWriteCount(for: path), 0,
+                       "the bag must empty even though the model is gone, or a lingering note "
+                       + "swallows the next re-open's first genuine external change")
+        XCTAssertNil(harness.runtime.knownDiskText(for: path),
+                     "closeRequested already cleared the baseline; a model that no longer exists "
+                     + "must not have it resurrected")
     }
 
     // MARK: The stale-read guard
@@ -704,7 +807,11 @@ final class EditorWatcherTests: XCTestCase {
     /// change is bracketed by two `pushStackElement()` calls so it lands as its OWN undo unit:
     /// without the first, a user's still-open keystroke would absorb the agent's change into it
     /// (Monaco's `canAppend` has no time or edit-kind test — only an explicit boundary closes an
-    /// element); without the second, the user's NEXT keystroke would merge into the agent's.
+    /// element); the second is defense-in-depth for a future direct model edit below Monaco's
+    /// command layer, not for the user's own next keystroke — that already cannot reach this
+    /// element regardless, isolated by the command layer's own `shouldPushStackElementBefore`
+    /// heuristic (`EditorBridgeHarness.performStageBDiscriminant`'s own doc has the mechanism and
+    /// the live proof, harness step 15.discriminant).
     func testTheEditorPageAppliesExternalContentAsAnUndoPreservingEdit() throws {
         let source = try XCTUnwrap(Self.pageFile(named: "editor.js"),
                                    "editor.js is in neither the built bundle nor the source tree")
@@ -745,8 +852,9 @@ final class EditorWatcherTests: XCTestCase {
                       "the boundary must be sealed BEFORE the EOL/edit pair, not after")
         let secondBoundary = try XCTUnwrap(
             body.range(of: "pushStackElement()", range: edit.upperBound..<body.endIndex),
-            "the agent's change must ALSO seal itself off afterwards, or the user's next keystroke "
-            + "would merge into it")
+            "the agent's change must ALSO seal itself off afterwards — defense-in-depth for a "
+            + "future direct model edit below the command layer, which is what the user's own next "
+            + "keystroke is already isolated from without this call")
         XCTAssertTrue(edit.lowerBound < secondBoundary.lowerBound)
         XCTAssertTrue(secondBoundary.lowerBound < saved.lowerBound,
                       "the boundary closes the agent's own undo unit before anything else runs")
