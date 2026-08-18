@@ -37,6 +37,36 @@ describe("functions-exec worker routing", () => {
     ]);
   });
 
+  test("bridges only bounded aliases and waits for unawaited nested calls before completing", async () => {
+    const calls: unknown[] = [];
+    const frames: WorkerToParentFrame[] = [];
+    await executeFunctionsExecWorkerCell({
+      type: "execute",
+      cellId: "cell-1",
+      source: 'tools.bash({command: "pwd"}); const page = await tools.read({path: "README.md"}); tools.text(page);',
+    }, (frame) => frames.push(frame), async (name, args) => {
+      calls.push({ name, args });
+      return name === "read" ? "read-result" : "bash-result";
+    });
+
+    expect(calls).toEqual([
+      { name: "bash", args: { command: "pwd" } },
+      { name: "read", args: { path: "README.md" } },
+    ]);
+    expect(frames).toEqual([
+      { type: "cell", cellId: "cell-1", frame: { type: "text", text: "read-result" } },
+      { type: "completed", cellId: "cell-1" },
+    ]);
+  });
+
+  test("fails the cell when unawaited nested calls exceed the fixed bridge limit", async () => {
+    await expect(executeFunctionsExecWorkerCell({
+      type: "execute",
+      cellId: "cell-1",
+      source: 'tools.bash({command:"1"});tools.bash({command:"2"});tools.bash({command:"3"});tools.bash({command:"4"});tools.bash({command:"5"});',
+    }, () => {}, async () => "ok")).rejects.toThrow(/nested tool-call limit/i);
+  });
+
   test("fails closed without macOS Seatbelt before spawning a worker", async () => {
     const runtime = new FunctionsExecRuntime({ platform: "linux", hasSeatbelt: true });
     await expect(runtime.execute({

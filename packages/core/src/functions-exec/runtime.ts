@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { dispatchFunctionsExecAlias } from "./aliases";
 import { NdjsonDecoder, encodeNdjsonFrame } from "./ndjson";
-import { assertWorkerToParentFrame, type CellFrame } from "./protocol";
+import { assertWorkerToParentFrame, type CellFrame, type JsonValue, type NestedToolName } from "./protocol";
 import { buildFunctionsExecSeatbeltProfile, functionsExecSandboxAvailable } from "./sandbox";
 import { FUNCTIONS_EXEC_WORKER_ARGUMENT } from "./subprocess-entry";
 
@@ -20,6 +21,14 @@ export interface FunctionsExecRuntimeInput {
   timeoutMs?: number;
 }
 
+export interface FunctionsExecNestedCall {
+  sessionId: string;
+  cellId: string;
+  callId: string;
+  name: NestedToolName;
+  args: JsonValue;
+}
+
 export type FunctionsExecRuntimeResult =
   | { status: "completed"; cellId: string; frames: CellFrame[] }
   | { status: "failed"; cellId: string; frames: CellFrame[]; error: string };
@@ -27,6 +36,7 @@ export type FunctionsExecRuntimeResult =
 export interface FunctionsExecRuntimeDeps {
   workerCommand?: () => FunctionsExecWorkerCommand;
   onFrame?: (sessionId: string, cellId: string, frame: CellFrame) => void;
+  callTool?: (call: FunctionsExecNestedCall) => Promise<JsonValue>;
   platform?: NodeJS.Platform;
   hasSeatbelt?: boolean;
 }
@@ -48,7 +58,7 @@ function errorMessage(error: unknown): string {
 }
 
 function activeKey(sessionId: string, cellId: string): string {
-  return `${sessionId}\u0000${cellId}`;
+  return sessionId + "\u0000" + cellId;
 }
 
 export class FunctionsExecRuntime {
@@ -67,7 +77,7 @@ export class FunctionsExecRuntime {
     const frames: CellFrame[] = [];
     const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > MAX_TIMEOUT_MS) {
-      return Promise.resolve({ status: "failed", cellId: input.cellId, frames, error: `timeout must be an integer between 1 and ${MAX_TIMEOUT_MS} ms` });
+      return Promise.resolve({ status: "failed", cellId: input.cellId, frames, error: "timeout must be an integer between 1 and " + MAX_TIMEOUT_MS + " ms" });
     }
     if (!functionsExecSandboxAvailable(this.deps.platform, this.deps.hasSeatbelt)) {
       return Promise.resolve({ status: "failed", cellId: input.cellId, frames, error: "functions.exec is unavailable on this platform" });
@@ -97,8 +107,12 @@ export class FunctionsExecRuntime {
       });
       const decoder = new NdjsonDecoder(assertWorkerToParentFrame);
       const key = activeKey(input.sessionId, input.cellId);
+      const pendingCalls = new Set<string>();
+      const seenCallIds = new Set<string>();
+      let workerCompleted = false;
       let settled = false;
       let stderr = "";
+      let timer: ReturnType<typeof setTimeout> | undefined;
       const stop = (): void => {
         try {
           if (child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
@@ -110,51 +124,107 @@ export class FunctionsExecRuntime {
       const finish = (result: FunctionsExecRuntimeResult): void => {
         if (settled) return;
         settled = true;
-        clearTimeout(timer);
+        if (timer !== undefined) clearTimeout(timer);
         this.active.delete(key);
         stop();
         resolve(result);
       };
-      const fail = (error: string): void => finish({ status: "failed", cellId: input.cellId, frames, error: error.slice(0, 256) });
-      const timer = setTimeout(() => fail(`functions.exec timed out after ${timeoutMs} ms`), timeoutMs);
+      const fail = (error: string): void => {
+        finish({ status: "failed", cellId: input.cellId, frames, error: error.slice(0, 256) });
+      };
+      const write = (frame: Parameters<typeof encodeNdjsonFrame>[0]): boolean => {
+        if (settled) return false;
+        try {
+          child.stdin.write(encodeNdjsonFrame(frame));
+          return true;
+        } catch (error) {
+          fail("functions.exec worker stdin failed: " + errorMessage(error));
+          return false;
+        }
+      };
+      const maybeComplete = (): void => {
+        if (workerCompleted && pendingCalls.size === 0) {
+          finish({ status: "completed", cellId: input.cellId, frames });
+        }
+      };
+      const serviceCall = (call: Extract<ReturnType<typeof assertWorkerToParentFrame>, { type: "call" }>): void => {
+        if (call.cellId !== input.cellId || seenCallIds.has(call.callId)) {
+          fail("functions.exec worker sent an invalid nested tool call");
+          return;
+        }
+        seenCallIds.add(call.callId);
+        pendingCalls.add(call.callId);
+        const dispatch = this.deps.callTool;
+        if (!dispatch) {
+          write({ type: "tool_result", cellId: input.cellId, callId: call.callId, result: "nested tools are unavailable", isError: true });
+          pendingCalls.delete(call.callId);
+          maybeComplete();
+          return;
+        }
+        void dispatchFunctionsExecAlias(call.name, call.args, (name, args) => dispatch({
+          sessionId: input.sessionId,
+          cellId: input.cellId,
+          callId: call.callId,
+          name,
+          args,
+        })).then(
+          (result) => { write({ type: "tool_result", cellId: input.cellId, callId: call.callId, result, isError: false }); },
+          (error) => { write({ type: "tool_result", cellId: input.cellId, callId: call.callId, result: errorMessage(error).slice(0, 128), isError: true }); },
+        ).finally(() => {
+          pendingCalls.delete(call.callId);
+          maybeComplete();
+        });
+      };
+
+      timer = setTimeout(() => fail("functions.exec timed out after " + timeoutMs + " ms"), timeoutMs);
       this.active.set(key, () => fail("functions.exec cancelled"));
-      child.on("error", (error) => fail(`functions.exec worker failed to spawn: ${error.message}`));
-      child.stdin.on("error", (error) => fail(`functions.exec worker stdin failed: ${error.message}`));
+      child.on("error", (error) => fail("functions.exec worker failed to spawn: " + error.message));
+      child.stdin.on("error", (error) => fail("functions.exec worker stdin failed: " + error.message));
       child.stderr.on("data", (chunk: Buffer) => {
         if (stderr.length < 256) stderr += chunk.toString("utf8").slice(0, 256 - stderr.length);
       });
       child.stdout.on("data", (chunk: Buffer) => {
+        if (settled) return;
         const result = decoder.push(new Uint8Array(chunk));
         if (!result.ok) {
-          fail(`functions.exec worker protocol failure: ${result.fatal.code}`);
+          fail("functions.exec worker protocol failure: " + result.fatal.code);
           return;
         }
         for (const frame of result.frames) {
           if (frame.type === "fatal") {
-            fail(`functions.exec worker failed: ${frame.message}`);
+            fail("functions.exec worker failed: " + frame.message);
             return;
+          }
+          if (frame.type === "call") {
+            serviceCall(frame);
+            continue;
           }
           if (frame.type === "cell") {
+            if (frame.cellId !== input.cellId) {
+              fail("functions.exec worker sent a frame for another cell");
+              return;
+            }
             frames.push(frame.frame);
             this.deps.onFrame?.(input.sessionId, input.cellId, frame.frame);
+            continue;
           }
           if (frame.type === "completed") {
-            finish({ status: "completed", cellId: input.cellId, frames });
-            return;
+            if (frame.cellId !== input.cellId) {
+              fail("functions.exec worker completed another cell");
+              return;
+            }
+            workerCompleted = true;
+            maybeComplete();
           }
         }
       });
       child.on("close", (code) => {
         if (settled) return;
         const result = decoder.finish();
-        if (!result.ok) fail(`functions.exec worker protocol failure: ${result.fatal.code}`);
-        else fail(`functions.exec worker exited (${code ?? "signal"})${stderr.trim() ? `: ${stderr.trim()}` : ""}`);
+        if (!result.ok) fail("functions.exec worker protocol failure: " + result.fatal.code);
+        else fail("functions.exec worker exited (" + (code ?? "signal") + ")" + (stderr.trim() ? ": " + stderr.trim() : ""));
       });
-      try {
-        child.stdin.end(encodeNdjsonFrame({ type: "execute", cellId: input.cellId, source: input.source }));
-      } catch (error) {
-        fail(`functions.exec worker stdin failed: ${errorMessage(error)}`);
-      }
+      write({ type: "execute", cellId: input.cellId, source: input.source });
     });
   }
 }
