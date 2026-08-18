@@ -42,10 +42,25 @@ function handle(msg: any) {
       }
       return;
     }
+    // NORMA_FAKE_IMAGE=1 exposes a tool whose result carries a non-text content block, so the
+    // manager's attach path can be asserted. Off by default.
+    if (process.env.NORMA_FAKE_IMAGE === "1") {
+      send({ jsonrpc: "2.0", id: msg.id, result: { tools: [{ name: "shot", description: "Returns a PNG", inputSchema: { type: "object" } }] } });
+      return;
+    }
     const tools = process.env.NORMA_FAKE_DUP === "1" ? [echoTool, echoTool] : [echoTool];
     send({ jsonrpc: "2.0", id: msg.id, result: { tools } });
   }
-  else if (msg.method === "tools/call") send({ jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text: `echo: ${msg.params?.arguments?.msg ?? ""}` }] } });
+  else if (msg.method === "tools/call") {
+    if (msg.params?.name === "shot") {
+      send({ jsonrpc: "2.0", id: msg.id, result: { content: [
+        { type: "text", text: "here is the shot" },
+        { type: "image", data: TINY_PNG_B64, mimeType: "image/png" },
+      ] } });
+      return;
+    }
+    send({ jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text: `echo: ${msg.params?.arguments?.msg ?? ""}` }] } });
+  }
   else if (msg.method === "resources/list" && process.env.NORMA_FAKE_RESOURCES === "1") {
     send({ jsonrpc: "2.0", id: msg.id, result: { resources: [
       { uri: TEXT_URI, name: "greeting", description: "A greeting text resource", mimeType: "text/plain" },

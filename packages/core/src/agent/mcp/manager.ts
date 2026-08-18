@@ -2,6 +2,7 @@ import { z } from "zod";
 import { readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { McpStdioClient } from "./client";
+import { attachImageGuarded } from "../tools/attach-image";
 import type { ToolRegistry } from "../tools/registry";
 import type { TrustStore } from "../trust";
 
@@ -44,6 +45,32 @@ export class McpManager {
    *    (this fail-fast semantics is pinned by an existing test: a server whose OWN tool list has
    *    an internal duplicate name is entirely marked failed, not partially registered).
    */
+  /** The `run` closure every registered MCP tool shares. Uses `callToolContent` rather than
+   *  `callTool` so a non-text block can be ATTACHED instead of flattened: an image goes through
+   *  `attachImageGuarded` — the same path `read_mcp_resource` uses, so the size guard and the
+   *  "[image omitted: …]" fallback behave identically — and only its failure text joins the
+   *  string result. `ToolRunResult` is unchanged (still a string); images travel out-of-band on
+   *  `ctx.attachImage`, which is why this needed no registry-contract change. */
+  private toolRunner(client: McpStdioClient, toolName: string) {
+    return async (a: unknown, ctx: { signal?: AbortSignal; attachImage?: (dataUrl: string) => void }): Promise<string> => {
+      const { blocks, isError } = await client.callToolContent(toolName, a, ctx.signal);
+      const parts: string[] = [];
+      for (const b of blocks) {
+        if (b.type === "text") { parts.push(b.text); continue; }
+        if (b.type === "image") {
+          const omitted = attachImageGuarded(ctx, { mime: b.mimeType, base64: b.data });
+          if (omitted) parts.push(omitted);
+          continue;
+        }
+        if (b.type === "resource_link") { parts.push(`[resource: ${b.uri}${b.mimeType ? ` (${b.mimeType})` : ""}]`); continue; }
+        if (b.type === "audio") { parts.push(`[audio omitted: ${b.mimeType}]`); continue; }
+        parts.push("[non-text content omitted]");
+      }
+      const text = parts.join("");
+      return text || (isError ? "[mcp tool error]" : "");
+    };
+  }
+
   private async startOne(
     serverKey: string,
     cfg: McpServerConfig,
@@ -68,7 +95,7 @@ export class McpManager {
               args: z.object({}).passthrough(),
               rawParameters: t.inputSchema,
               scope: opts?.scope,
-              run: (a, ctx) => client.callTool(t.name, a, ctx.signal),
+              run: this.toolRunner(client, t.name),
             });
           } catch (e) {
             this.deps.log?.(`mcp: register '${full}' failed: ${(e as Error).message}`);
@@ -81,7 +108,7 @@ export class McpManager {
             args: z.object({}).passthrough(),
             rawParameters: t.inputSchema,
             scope: opts?.scope,
-            run: (a, ctx) => client.callTool(t.name, a, ctx.signal),
+            run: this.toolRunner(client, t.name),
           });
         }
         toolNames.push(t.name);

@@ -253,3 +253,22 @@ describe.if(isMac)("McpManager.startPlugins", () => {
     mgr.stopAll();
   });
 });
+
+// Non-text tool content: image blocks route through the same attachImageGuarded path
+// read_mcp_resource uses, rather than being flattened to "[non-text content omitted]".
+describe.if(isMac)("McpManager tool content", () => {
+  test("an image content block is attached, not dropped as '[non-text content omitted]'", async () => {
+    const attached: string[] = [];
+    const registry = new ToolRegistry();
+    const mgr = new McpManager({ registry, trust: new TrustStore(join(realDir(), "trust.json")) });
+    await mgr.startAll({ pix: { command: "bun", args: ["run", FIXTURE], env: { NORMA_FAKE_IMAGE: "1" } } });
+    expect(registry.has("mcp__pix__shot")).toBe(true);
+    const out = await registry.execute("mcp__pix__shot", {}, { ...ctx(), attachImage: (d: string) => { attached.push(d); } });
+    expect(out.isError).toBe(false);
+    expect(attached.length).toBe(1);
+    expect(attached[0]!.startsWith("data:image/png;base64,")).toBe(true);
+    expect(out.output).toContain("here is the shot");
+    expect(out.output).not.toContain("[non-text content omitted]");
+    mgr.stopAll();
+  });
+});

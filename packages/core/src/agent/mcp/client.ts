@@ -7,6 +7,15 @@ export interface McpToolInfo { name: string; description: string; inputSchema: R
 export interface McpResourceInfo { uri: string; name?: string; description?: string; mimeType?: string }
 export interface McpResourceContent { uri: string; mimeType?: string; text?: string; blob?: string }
 
+/** A tool result's content blocks, surfaced structurally so callers can ATTACH images rather than
+ *  flatten everything to text. `callTool()` (string) is kept unchanged for existing callers. */
+export type McpContentBlock =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string }
+  | { type: "audio"; data: string; mimeType: string }
+  | { type: "resource_link"; uri: string; name?: string; mimeType?: string }
+  | { type: "other"; raw: unknown };
+
 /** Per-call ceiling. The SDK's own default is 60s (DEFAULT_REQUEST_TIMEOUT_MSEC), which would be a
  *  REGRESSION here: the hand-rolled client this replaces had no per-request timeout at all, so a
  *  tool legally running longer than a minute works today. 10 minutes preserves every realistic
@@ -107,6 +116,25 @@ export class McpStdioClient {
     const content: any[] = res?.content ?? [];
     const text = content.map((c) => (c?.type === "text" ? String(c.text ?? "") : "[non-text content omitted]")).join("");
     return text || (res?.isError ? "[mcp tool error]" : "");
+  }
+
+  /** Structured sibling of `callTool`. Same request, but the content blocks are returned intact so
+   *  a caller holding a ToolContext can attach images instead of dropping them. */
+  async callToolContent(name: string, args: unknown, signal?: AbortSignal): Promise<{ blocks: McpContentBlock[]; isError: boolean }> {
+    if (this._dead) throw new Error("mcp server is not running");
+    const res: any = await this.client!.callTool(
+      { name, arguments: (args ?? {}) as Record<string, unknown> },
+      undefined,
+      { signal, timeout: callTimeoutMs(), resetTimeoutOnProgress: true },
+    );
+    const blocks: McpContentBlock[] = (res?.content ?? []).map((c: any): McpContentBlock => {
+      if (c?.type === "text") return { type: "text", text: String(c.text ?? "") };
+      if (c?.type === "image") return { type: "image", data: String(c.data ?? ""), mimeType: String(c.mimeType ?? "image/png") };
+      if (c?.type === "audio") return { type: "audio", data: String(c.data ?? ""), mimeType: String(c.mimeType ?? "audio/wav") };
+      if (c?.type === "resource_link") return { type: "resource_link", uri: String(c.uri ?? ""), name: c.name !== undefined ? String(c.name) : undefined, mimeType: c.mimeType !== undefined ? String(c.mimeType) : undefined };
+      return { type: "other", raw: c };
+    });
+    return { blocks, isError: !!res?.isError };
   }
 
   async listResources(signal?: AbortSignal): Promise<McpResourceInfo[]> {
