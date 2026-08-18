@@ -20,7 +20,8 @@ function bytes(value: JsonValue): number {
 export function retainTail<T>(items: readonly T[], next: T, maxItems: number): T[] {
   positiveOrZero(maxItems, "maxItems");
   if (maxItems === 0) return [];
-  return [...items.slice(-(maxItems - 1)), next];
+  const retainedExisting = maxItems - 1;
+  return [...items.slice(items.length - retainedExisting), next];
 }
 
 /**
@@ -35,8 +36,14 @@ export class CellQuota {
   private notifications = 0;
 
   constructor(options?: { maxBytes?: number; maxNotifications?: number }) {
-    this.maxBytes = positiveOrZero(options?.maxBytes ?? MAX_CONTEXT_ENVELOPE_BYTES, "maxBytes");
-    this.maxNotifications = positiveOrZero(options?.maxNotifications ?? MAX_PENDING_NOTIFICATIONS, "maxNotifications");
+    this.maxBytes = Math.min(
+      positiveOrZero(options?.maxBytes ?? MAX_CONTEXT_ENVELOPE_BYTES, "maxBytes"),
+      MAX_CONTEXT_ENVELOPE_BYTES,
+    );
+    this.maxNotifications = Math.min(
+      positiveOrZero(options?.maxNotifications ?? MAX_PENDING_NOTIFICATIONS, "maxNotifications"),
+      MAX_PENDING_NOTIFICATIONS,
+    );
   }
 
   get remainingBytes(): number {

@@ -1,6 +1,8 @@
 import {
   MAX_CONTEXT_ENVELOPE_BYTES,
+  MAX_EXECUTE_ENVELOPE_BYTES,
   assertParentToWorkerFrame,
+  assertWorkerToParentFrame,
   assertWireFrame,
   type FunctionsExecFatalCode,
   type ParentToWorkerFrame,
@@ -9,8 +11,11 @@ import {
 
 export type { ParentToWorkerFrame, WorkerToParentFrame } from "./protocol";
 
+// Worker output is model-visible, while a single parent execute frame is private source transport.
 export const MAX_NDJSON_LINE_BYTES = MAX_CONTEXT_ENVELOPE_BYTES;
 export const MAX_NDJSON_TOTAL_BYTES = MAX_NDJSON_LINE_BYTES * 8;
+export const MAX_PARENT_NDJSON_LINE_BYTES = MAX_EXECUTE_ENVELOPE_BYTES;
+export const MAX_PARENT_NDJSON_TOTAL_BYTES = MAX_PARENT_NDJSON_LINE_BYTES + MAX_NDJSON_LINE_BYTES * 4;
 
 export interface NdjsonLimits {
   maxLineBytes?: number;
@@ -46,7 +51,8 @@ function positiveLimit(value: number | undefined, fallback: number, maximum: num
 export function encodeNdjsonFrame(frame: ParentToWorkerFrame | WorkerToParentFrame): Uint8Array {
   const validated = assertWireFrame(frame);
   const line = encoder.encode(`${JSON.stringify(validated)}\n`);
-  if (line.byteLength - 1 > MAX_NDJSON_LINE_BYTES) throw new RangeError("NDJSON frame exceeds the line limit");
+  const maxLineBytes = isParentFrame(validated) ? MAX_PARENT_NDJSON_LINE_BYTES : MAX_NDJSON_LINE_BYTES;
+  if (line.byteLength - 1 > maxLineBytes) throw new RangeError("NDJSON frame exceeds the line limit");
   return line;
 }
 
@@ -59,6 +65,8 @@ export class NdjsonDecoder<T = ParentToWorkerFrame> {
   private readonly maxTotalBytes: number;
   private pending = new Uint8Array();
   private totalBytes = 0;
+  private completed = false;
+  private readonly requiresCompletion: boolean;
   private terminal: NdjsonFatalError | "finished" | undefined;
 
   constructor(options?: NdjsonLimits);
@@ -67,12 +75,17 @@ export class NdjsonDecoder<T = ParentToWorkerFrame> {
     const isValidator = typeof input === "function";
     this.validate = (isValidator ? input : assertParentToWorkerFrame) as FrameValidator<T>;
     const limits = (isValidator ? options : input) as NdjsonLimits | undefined;
-    this.maxLineBytes = positiveLimit(limits?.maxLineBytes, MAX_NDJSON_LINE_BYTES, MAX_NDJSON_LINE_BYTES, "maxLineBytes");
-    this.maxTotalBytes = positiveLimit(limits?.maxTotalBytes, MAX_NDJSON_TOTAL_BYTES, MAX_NDJSON_TOTAL_BYTES, "maxTotalBytes");
+    const parentFrames = !isValidator || input === assertParentToWorkerFrame;
+    const defaultLineBytes = parentFrames ? MAX_PARENT_NDJSON_LINE_BYTES : MAX_NDJSON_LINE_BYTES;
+    const defaultTotalBytes = parentFrames ? MAX_PARENT_NDJSON_TOTAL_BYTES : MAX_NDJSON_TOTAL_BYTES;
+    this.maxLineBytes = positiveLimit(limits?.maxLineBytes, defaultLineBytes, defaultLineBytes, "maxLineBytes");
+    this.maxTotalBytes = positiveLimit(limits?.maxTotalBytes, defaultTotalBytes, defaultTotalBytes, "maxTotalBytes");
+    this.requiresCompletion = input === assertWorkerToParentFrame;
   }
 
   push(chunk: Uint8Array): NdjsonDecodeResult<T> {
     if (this.terminal) return this.terminal === "finished" ? error("stream_closed", "NDJSON stream is already closed") : { ok: false, fatal: this.terminal };
+    if (this.completed) return this.fail("stream_closed", "NDJSON stream is already completed");
     this.totalBytes += chunk.byteLength;
     if (this.totalBytes > this.maxTotalBytes) return this.fail("output_limit_exceeded", "NDJSON output exceeded its total byte limit");
 
@@ -85,9 +98,11 @@ export class NdjsonDecoder<T = ParentToWorkerFrame> {
       const line = this.takeLine();
       start = index + 1;
       if (line.byteLength === 0) continue;
+      if (this.completed) return this.fail("stream_closed", "NDJSON stream is already completed");
       const parsed = this.parseLine(line);
       if (!parsed.ok) return parsed;
       frames.push(parsed.frame);
+      if (isCompletedFrame(parsed.frame)) this.completed = true;
     }
     const appended = this.append(chunk.subarray(start));
     if (appended) return appended;
@@ -96,15 +111,23 @@ export class NdjsonDecoder<T = ParentToWorkerFrame> {
 
   finish(reason: "eof" | "epipe" = "eof"): NdjsonDecodeResult<T> {
     if (this.terminal) return this.terminal === "finished" ? { ok: true, frames: [] } : { ok: false, fatal: this.terminal };
-    if (reason === "epipe") return this.fail("broken_pipe", "NDJSON pipe closed before completion");
+    if (reason === "epipe" && (!this.requiresCompletion || !this.completed)) {
+      return this.fail("broken_pipe", "NDJSON pipe closed before completion");
+    }
     if (this.pending.byteLength !== 0) return this.fail("truncated_line", "NDJSON stream ended with a partial line");
+    if (this.requiresCompletion && !this.completed) return this.fail("broken_pipe", "NDJSON stream ended before completion");
     this.terminal = "finished";
     return { ok: true, frames: [] };
   }
 
   private append(bytes: Uint8Array): NdjsonDecodeResult<never> | undefined {
     if (bytes.byteLength === 0) return undefined;
-    if (this.pending.byteLength + bytes.byteLength > this.maxLineBytes) {
+    const nextLength = this.pending.byteLength + bytes.byteLength;
+    const trailingCarriageReturn = bytes.byteLength > 0
+      ? bytes[bytes.byteLength - 1] === 0x0d
+      : this.pending.byteLength > 0 && this.pending[this.pending.byteLength - 1] === 0x0d;
+    const payloadLength = nextLength - (trailingCarriageReturn ? 1 : 0);
+    if (payloadLength > this.maxLineBytes) {
       return this.fail("line_too_large", "NDJSON line exceeded its byte limit");
     }
     const next = new Uint8Array(this.pending.byteLength + bytes.byteLength);
@@ -146,4 +169,12 @@ export class NdjsonDecoder<T = ParentToWorkerFrame> {
     this.pending = new Uint8Array();
     return { ok: false, fatal: this.terminal };
   }
+}
+
+function isCompletedFrame(value: unknown): boolean {
+  return typeof value === "object" && value !== null && (value as { type?: unknown }).type === "completed";
+}
+
+function isParentFrame(frame: ParentToWorkerFrame | WorkerToParentFrame): frame is ParentToWorkerFrame {
+  return frame.type === "execute" || frame.type === "tool_result" || frame.type === "abort" || frame.type === "shutdown";
 }

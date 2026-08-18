@@ -7,9 +7,17 @@
 export const MAX_CONTEXT_ENVELOPE_BYTES = 512;
 export const MAX_UNTRUSTED_STRING_CHARS = 256;
 export const MAX_UNTRUSTED_STRING_BYTES = 384;
+// Source is transport-only: the engine replaces it with an opaque marker before provider input or
+// durable history. It still needs a meaningful but fixed budget for raw Codex patches.
+export const MAX_FUNCTIONS_EXEC_SOURCE_CHARS = 8 * 1024;
+export const MAX_FUNCTIONS_EXEC_SOURCE_BYTES = 8 * 1024;
+// JSON can double a source made only of quotes or backslashes. This caps the execute transport
+// envelope without weakening the 512-byte cap for any model-visible worker result.
+export const MAX_EXECUTE_ENVELOPE_BYTES = MAX_FUNCTIONS_EXEC_SOURCE_BYTES * 2 + 256;
 export const MAX_JSON_DEPTH = 4;
 export const MAX_JSON_CONTAINER_ENTRIES = 16;
 export const MAX_CELL_ID_CHARS = 64;
+export const MAX_MEDIA_DATA_URL_BYTES = 256;
 
 export type JsonPrimitive = null | boolean | number | string;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
@@ -55,6 +63,10 @@ export type WorkerToParentFrame =
   | { type: "fatal"; code: FunctionsExecFatalCode; message: string };
 
 const textEncoder = new TextEncoder();
+const imageMimes = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+const audioMimes = new Set(["audio/mpeg", "audio/wav", "audio/ogg", "audio/mp4"]);
+const base64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+const mediaDataUrl = /^data:(image\/[a-z0-9.+-]+|audio\/[a-z0-9.+-]+);base64,([A-Za-z0-9+/=]+)$/i;
 const nestedToolNames = new Set<NestedToolName>(["bash", "edit", "read", "web_fetch", "web_search"]);
 const fatalCodes = new Set<FunctionsExecFatalCode>([
   "invalid_utf8",
@@ -87,6 +99,30 @@ export function assertUntrustedString(value: unknown, label = "string"): asserts
   if (value.length > MAX_UNTRUSTED_STRING_CHARS || textEncoder.encode(value).byteLength > MAX_UNTRUSTED_STRING_BYTES) {
     fail(`${label} string exceeds its hard bound`);
   }
+}
+
+export function assertFunctionsExecSource(value: unknown): asserts value is string {
+  if (typeof value !== "string") fail("source must be a string");
+  if (value.length > MAX_FUNCTIONS_EXEC_SOURCE_CHARS || textEncoder.encode(value).byteLength > MAX_FUNCTIONS_EXEC_SOURCE_BYTES) {
+    fail("source exceeds its hard bound");
+  }
+}
+
+export function assertMediaDataUrl(value: unknown, kind: "image" | "audio"): string {
+  assertUntrustedString(value, `${kind} data URL`);
+  if (textEncoder.encode(value).byteLength > MAX_MEDIA_DATA_URL_BYTES) {
+    fail(`${kind} data URL exceeds its hard bound`);
+  }
+  const match = mediaDataUrl.exec(value);
+  const allowedMimes = kind === "image" ? imageMimes : audioMimes;
+  if (!match || !match[1] || !match[2] || !allowedMimes.has(match[1].toLowerCase()) || !base64.test(match[2])) {
+    fail(`${kind} data URL or base64 payload is invalid`);
+  }
+  return value;
+}
+
+export function assertImageDetail(value: unknown): asserts value is ImageDetail {
+  if (!Object.values(ImageDetail).includes(value as ImageDetail)) fail("image detail is invalid");
 }
 
 function assertIdentifier(value: unknown, label: string): asserts value is string {
@@ -137,6 +173,14 @@ export function assertContextEnvelope<T>(value: T): T {
   return value;
 }
 
+function assertExecuteEnvelope<T extends Record<string, unknown>>(value: T): T {
+  const encoded = JSON.stringify(value);
+  if (encoded === undefined || textEncoder.encode(encoded).byteLength > MAX_EXECUTE_ENVELOPE_BYTES) {
+    fail("execute envelope exceeds its hard bound");
+  }
+  return value;
+}
+
 export function assertCellFrame(value: unknown): CellFrame {
   if (!isPlainRecord(value) || typeof value.type !== "string") fail("cell frame must be an object");
   switch (value.type) {
@@ -148,13 +192,13 @@ export function assertCellFrame(value: unknown): CellFrame {
     }
     case "image": {
       assertExactKeys(value, ["type", "dataUrl", "detail"]);
-      assertUntrustedString(value.dataUrl, "image data URL");
-      if (!Object.values(ImageDetail).includes(value.detail as ImageDetail)) fail("image detail is invalid");
+      assertMediaDataUrl(value.dataUrl, "image");
+      assertImageDetail(value.detail);
       return assertContextEnvelope(value as CellFrame);
     }
     case "audio": {
       assertExactKeys(value, ["type", "dataUrl"]);
-      assertUntrustedString(value.dataUrl, "audio data URL");
+      assertMediaDataUrl(value.dataUrl, "audio");
       return assertContextEnvelope(value as CellFrame);
     }
     case "yield":
@@ -177,8 +221,8 @@ export function assertParentToWorkerFrame(value: unknown): ParentToWorkerFrame {
     case "execute":
       assertExactKeys(value, ["type", "cellId", "source"]);
       assertIdentifier(value.cellId, "cellId");
-      assertUntrustedString(value.source, "source");
-      return assertContextEnvelope(value as ParentToWorkerFrame);
+      assertFunctionsExecSource(value.source);
+      return assertExecuteEnvelope(value) as ParentToWorkerFrame;
     case "tool_result":
       assertExactKeys(value, ["type", "cellId", "callId", "result", "isError"]);
       assertIdentifier(value.cellId, "cellId");

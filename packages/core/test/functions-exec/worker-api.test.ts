@@ -29,7 +29,51 @@ describe("functions-exec worker helper API", () => {
     expect(() => helpers.image("data:text/plain;base64,eA==")).toThrow(/image/i);
     expect(() => helpers.audio("data:audio/mpeg;base64,%%%%")).toThrow(/base64/i);
     expect(() => helpers.store("saved", { attachment: "data:image/png;base64,aGVsbG8=" })).toThrow(/media/i);
+    expect(() => helpers.store("saved", { attachment: "data%3Aimage%2Fpng%3Bbase64%2CaGVsbG8%3D" })).toThrow(/media/i);
+    expect(() => helpers.store("saved", { attachment: "d\\\\u0061ta:image/png;base64,aGVsbG8=" })).toThrow(/media/i);
+    expect(() => helpers.store("saved", { note: "attachment=data:image/png;base64,aGVsbG8=" })).toThrow(/media/i);
+    expect(() => helpers.store("data:image/png;base64,aGVsbG8=", "ok")).toThrow(/media/i);
     expect(() => helpers.store("x".repeat(65), "ok")).toThrow(/key/i);
+  });
+
+  test("takes a canonical snapshot without invoking hostile getters, toJSON, or prototype hooks", () => {
+    const helpers = createWorkerHelpers({ emit: () => {} });
+    let getterCalls = 0;
+    let toJsonCalls = 0;
+    let prototypeCalls = 0;
+    const accessor = {};
+    Object.defineProperty(accessor, "attachment", {
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        return "data:image/png;base64,aGVsbG8=";
+      },
+    });
+    const toJson = {
+      toJSON() {
+        toJsonCalls += 1;
+        return "data:image/png;base64,aGVsbG8=";
+      },
+    };
+    const proxied = new Proxy({ answer: "42" }, {
+      get() {
+        getterCalls += 1;
+        throw new Error("must not read through a proxy getter");
+      },
+      getPrototypeOf() {
+        prototypeCalls += 1;
+        throw new Error("must not read a prototype");
+      },
+    });
+
+    expect(() => helpers.store("accessor", accessor as never)).toThrow();
+    expect(() => helpers.store("to-json", toJson as never)).toThrow(/JSON/i);
+    helpers.store("proxied", proxied as never);
+
+    expect(getterCalls).toBe(0);
+    expect(toJsonCalls).toBe(0);
+    expect(prototypeCalls).toBe(0);
+    expect(helpers.load("proxied")).toEqual({ answer: "42" });
   });
 
   test("stores only bounded JSON values and returns an immutable copy", () => {
