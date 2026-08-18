@@ -69,6 +69,23 @@ func editorTabSessionRoots(sessionId: String?, rows: [SessionSummary]) -> Editor
     return .present
 }
 
+/// editor-product wave-8 item 1: the Files-tab strip door's gate — read by `ShellPanel.swift`'s
+/// `PanelTabStrip` (the control sits beside `trailingButtonCluster`, not inside it — see that
+/// view's own `filesTabAvailable` doc) as a value, rather than re-derived there.
+///
+/// **Wire safety, not UX.** Calling `ShellSessionHost.openFilesTab(sessionId:)` mints a
+/// `panel_tab_opened kind:"files"` event into the session's OWN log, and that log replicates
+/// BYTE-VERBATIM to a phone (no re-encode) — including to a phone whose currently-pinned
+/// `NormaProtocol` carries a CLOSED `PanelTabKind` enum that has never seen `"files"` and fails to
+/// decode it. The whole branch's no-Swift-kit-tag ruling rests on that string never reaching a
+/// session a phone might replay, which is why the control this gates must render as genuinely
+/// ABSENT — not merely disabled — on any session `editorTabSessionRoots` does not resolve to
+/// `.present` (a row not yet arrived, a chat/dispatch row, or a workdir-less/degenerate one all read
+/// the same here as they do to every other door built on this predicate).
+func panelFilesDoorShown(sessionId: String?, rows: [SessionSummary]) -> Bool {
+    editorTabSessionRoots(sessionId: sessionId, rows: rows) == .present
+}
+
 /// What a code tab draws when it is NOT drawing the editor. Every case is a calm, centred sentence
 /// (or a spinner); none of them is an error the user can act on by pressing something, which is why
 /// there is no retry anywhere here — the doors that retry are the file tree and the transcript, and
@@ -816,6 +833,9 @@ struct EditorBannerView: View {
             case .conflict(.deleted):
                 // No Reload — there is nothing to reload TO (`editorConflictDeletedMessage`).
                 dismissButton
+            // `.none` is unreachable here in practice — the parent only constructs this view behind
+            // `model.banner != .none` (`PanelEditorContent.body`) — kept in the switch rather than
+            // `default:` so a future banner case still forces a decision here at compile time.
             case .transientError, .none:
                 dismissButton
             }

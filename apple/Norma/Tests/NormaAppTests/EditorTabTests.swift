@@ -195,6 +195,64 @@ final class EditorTabTests: XCTestCase {
                        "a non-empty dirs ARRAY whose only entry has no real path is not a root")
     }
 
+    // MARK: - editor-product wave-8 item 1: the Files-tab strip door's gate (PURE)
+
+    /// `panelFilesDoorShown` is a thin wrapper over `editorTabSessionRoots`, but it is the gate the
+    /// panel strip's control lives or dies by — this pins it against every shape that function's own
+    /// tests already carry, on the SAME `rows` fixture, so the two can never quietly drift apart.
+    func testPanelFilesDoorShownMirrorsTheRootsPredicateExactly() {
+        let rows = [
+            dirRow("S_dirs", dirs: [SessionDirEntry(path: "/repo", locked: false)]),
+            dirRow("S_dirless", dirs: []),
+            dirRow("S_empty_path", dirs: [SessionDirEntry(path: "", locked: false)]),
+            SessionSummary(sessionId: "S_chat", title: nil, createdAt: 2, scope: "global",
+                           cwd: nil, mode: "chat")
+        ]
+        XCTAssertTrue(panelFilesDoorShown(sessionId: "S_dirs", rows: rows),
+                      "a real primary directory is the one case the door shows for")
+        XCTAssertFalse(panelFilesDoorShown(sessionId: "S_dirless", rows: rows),
+                       "[] is a genuine workdir-less session — no door")
+        XCTAssertFalse(panelFilesDoorShown(sessionId: "S_empty_path", rows: rows),
+                       "a degenerate dirs:[{path:\"\"}] row is not a root, same as editorTabSessionRoots")
+        XCTAssertFalse(panelFilesDoorShown(sessionId: "S_chat", rows: rows),
+                       "chat has no working-directory concept at all")
+        XCTAssertFalse(panelFilesDoorShown(sessionId: "S_unlisted", rows: rows),
+                       "not-yet-arrived (.unknown) must render as ABSENT — never a guessed door")
+        XCTAssertFalse(panelFilesDoorShown(sessionId: nil, rows: rows))
+        XCTAssertFalse(panelFilesDoorShown(sessionId: "S_dirs", rows: []))
+    }
+
+    /// **Wire safety, at the one call site that can actually fire it.** Nothing in `ShellPanel.swift`
+    /// is reachable from XCTest (this suite's own established posture — see its header doc), so this
+    /// is a source pin: the door must be an absent `if`, never a `.disabled(...)` control a stray
+    /// click could still fire, and it must call through to the host's real door rather than a hand
+    /// re-derivation of the RPC.
+    func testShellPanelGatesTheFilesDoorAndWiresItToTheHostsRealDoor() throws {
+        let code = try shellPanelCodeOnly()
+        XCTAssertTrue(code.contains("if filesTabAvailable {"),
+                      "the control must be genuinely ABSENT when ineligible, not merely disabled")
+        XCTAssertTrue(code.contains("host?.openFilesTab(sessionId: sessionId)"),
+                      "firing the door must call through to ShellSessionHost.openFilesTab(sessionId:)")
+        XCTAssertTrue(code.contains("panelFilesDoorShown(sessionId: host?.panelSessionId"),
+                      "the gate must be the one shared predicate, not a second hand-copy of it")
+    }
+
+    /// Loads `ShellPanel.swift` and strips comment-only lines — the same discipline
+    /// `PanelKindTintTests.codeOnly` keeps, for the identical reason: a prose comment mentioning one
+    /// of these fragments (this task's own doc comments come close) must never be able to satisfy a
+    /// pin that is supposed to be reading the real call site.
+    private func shellPanelCodeOnly() throws -> String {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // NormaAppTests
+            .deletingLastPathComponent()   // Tests
+            .deletingLastPathComponent()   // Norma
+            .appendingPathComponent("Sources/AppShell/ShellPanel.swift")
+        let source = try String(contentsOf: url, encoding: .utf8)
+        return source.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.drop(while: { $0 == " " }).hasPrefix("//") ? "" : String($0) }
+            .joined(separator: "\n")
+    }
+
     // MARK: - The plan (PURE)
 
     private func ready(models: [String: Bool] = [:], current: String? = nil,

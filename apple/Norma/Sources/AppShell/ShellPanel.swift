@@ -184,6 +184,22 @@ struct ShellPanel: View {
         shownTab.map { panelTabContent(for: $0, host: host, sessionId: host?.panelSessionId) }
     }
 
+    /// editor-product wave-8 item 1: the strip's Files-tab door — `panelFilesDoorShown` on the SAME
+    /// session `panelSessionId` already names for every other strip action (`activeTabContent`
+    /// just above), so a bound-but-unattached new-chat page's browse-only session is gated
+    /// identically rather than by a second notion of "the current session".
+    ///
+    /// **Read at render time, not observed** — `host` is a plain `var` here (this view's own
+    /// established posture, `ShellSidebar.swift`'s identical `host` property), so a row that arrives
+    /// AFTER this body last ran shows the door on the next fold this view already takes for some
+    /// other reason (`store` IS `@ObservedObject`, and a session hop/tab change republishes it),
+    /// never instantly. Cosmetically late only, never a wire-safety gap: the predicate is re-read
+    /// fresh every time this body runs, and a session's `dirs` cannot arrive between two folds and
+    /// then vanish again — the window is "not yet shown", never "shown when it should not be".
+    private var filesTabAvailable: Bool {
+        panelFilesDoorShown(sessionId: host?.panelSessionId, rows: host?.directory.rows ?? [])
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             // The chrome band: one continuous surface, no internal divider. Two vertical slices —
@@ -202,6 +218,7 @@ struct ShellPanel: View {
                     // one" cannot happen, because there is only one answer to which tab that is.
                     shownTabId: shownTab?.tabId,
                     presentation: $presentation,
+                    filesTabAvailable: filesTabAvailable,
                     onOpenTab: {
                         // panel-shell T15: the new-chat page's own "+" BINDS rather than navigating
                         // (user ruling — the page's draft must survive). Every OTHER "+", including
@@ -219,7 +236,15 @@ struct ShellPanel: View {
                     onActivateTab: { tabId in host?.activatePanelTab(tabId) },
                     // editor-product Task 10: the gate, not the bare mechanism — a dirty `.code`
                     // tab's × now asks first (`ShellSessionHost.requestCloseTab`'s own doc).
-                    onCloseTab: { tabId in host?.requestCloseTab(tabId) }
+                    onCloseTab: { tabId in host?.requestCloseTab(tabId) },
+                    // editor-product wave-8 item 1: the door's target is `panelSessionId`, the SAME
+                    // session every other strip action already names — see `filesTabAvailable`'s
+                    // own doc just above for why that particular session, not `attachedSessionId`
+                    // alone.
+                    onOpenFilesTab: {
+                        guard let sessionId = host?.panelSessionId else { return }
+                        host?.openFilesTab(sessionId: sessionId)
+                    }
                 )
                 .frame(height: panelTitlebarBandHeight)
 
@@ -341,9 +366,18 @@ struct PanelTabStrip: View {
     /// choice (a strip that reports no taps); omitting the shown tab is not.
     let shownTabId: String?
     @Binding var presentation: PanelPresentation
+    /// editor-product wave-8 item 1: whether the strip's Files-tab door renders at all this frame.
+    /// `ShellPanel` reads `panelFilesDoorShown` for the CURRENT session and hands down the value —
+    /// this view never re-derives the decision, only renders it, the same division of labour every
+    /// closure below already keeps between "what to do" and "whether it is allowed".
+    var filesTabAvailable: Bool = false
     var onOpenTab: () -> Void = {}
     var onActivateTab: (String) -> Void = { _ in }
     var onCloseTab: (String) -> Void = { _ in }
+    /// editor-product wave-8 item 1: fires `ShellSessionHost.openFilesTab(sessionId:)`. A no-op
+    /// default like every other closure here — this view only ever calls it from behind the
+    /// `filesTabAvailable` gate below, never unconditionally.
+    var onOpenFilesTab: () -> Void = {}
 
     /// diff-tabs Task 11: the tab-strip kind-grouping accordion's mode — per-window view state,
     /// never persisted and never daemon-visible (the brief's own words: this is presentation, not
@@ -356,7 +390,19 @@ struct PanelTabStrip: View {
 
     var body: some View {
         GeometryReader { geo in
-            let pillWidth = panelTabPillWidth(tabCount: store.tabs.count, availableWidth: geo.size.width)
+            // editor-product wave-8 item 1: the Files-tab door is a CONDITIONAL layout participant
+            // of the outer HStack below — one more `panelExpandButtonSize` plus the one more
+            // `panelNewTabButtonGap` its own extra adjacency costs, reserved HERE so the ScrollView's
+            // frame subtraction and `panelTabPillWidth`'s `availableWidth` never see a wider strip
+            // than what the button actually leaves for pills when it shows. `panelTrailingClusterWidth`
+            // and the pure width formulas (`panelTabStripOverhead`/`panelTabPillWidth`) themselves
+            // stay UNCHANGED — the reservation lives entirely at this one call site, which is what
+            // keeps every existing pinned metric (`PanelMetricsTests`) exactly as measured whether or
+            // not the current session has one.
+            let filesButtonReserve: CGFloat = filesTabAvailable
+                ? panelExpandButtonSize + panelNewTabButtonGap : 0
+            let stripWidth = geo.size.width - filesButtonReserve
+            let pillWidth = panelTabPillWidth(tabCount: store.tabs.count, availableWidth: stripWidth)
 
             HStack(spacing: panelNewTabButtonGap) {
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -406,8 +452,19 @@ struct PanelTabStrip: View {
                 // is already exactly `panelTabPillSize.height` tall via its own three
                 // `panelExpandButtonSize` buttons), so leaving it to size itself risked the two
                 // trailing elements centring a few points apart rather than sharing one line.
-                .frame(width: max(0, geo.size.width - panelNewTabButtonGap - panelTrailingClusterWidth),
+                .frame(width: max(0, stripWidth - panelNewTabButtonGap - panelTrailingClusterWidth),
                        height: panelTabPillSize.height, alignment: .leading)
+
+                // editor-product wave-8 item 1: present ONLY when `filesTabAvailable` — see that
+                // property's own doc and `panelFilesDoorShown`'s (wire safety, not UX). `if`, not
+                // `.disabled(...)`: an ungated-but-dimmed control here would still be a control a
+                // stray click could fire on a chat session, minting a `panel_tab_opened kind:"files"`
+                // a pinned phone build cannot decode — so this must be genuinely ABSENT, not merely
+                // inert.
+                if filesTabAvailable {
+                    ShellTitlebarButton(systemImage: panelTabFaviconSystemImage(.files), label: "Files",
+                                        size: panelExpandButtonSize, action: onOpenFilesTab)
+                }
 
                 trailingButtonCluster
             }
@@ -422,7 +479,7 @@ struct PanelTabStrip: View {
             // report. `panelShownTab` supplies the fallback kind for a FRESH entry into grouped
             // mode — the exact same "active, else first" rule the strip already highlights by,
             // not a second one invented for this task.
-            .onChange(of: PanelStripModeInputs(tabCount: store.tabs.count, availableWidth: geo.size.width),
+            .onChange(of: PanelStripModeInputs(tabCount: store.tabs.count, availableWidth: stripWidth),
                      initial: true) { _, inputs in
                 let fallbackKind = panelShownTab(tabs: store.tabs, activeTabId: shownTabId)?.kind
                 mode = panelStripNextMode(current: mode, tabCount: inputs.tabCount,
