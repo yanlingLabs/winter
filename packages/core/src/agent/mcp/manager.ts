@@ -49,7 +49,7 @@ export class McpManager {
     cfg: McpServerConfig,
     opts?: { scope?: string; onCollision?: "skip" | "throw"; label?: string; context?: string },
   ): Promise<StartOneResult> {
-    const client = new McpStdioClient(cfg);
+    const client = new McpStdioClient(cfg, this.deps.log);
     const label = opts?.label ?? "server";
     try {
       await client.start();

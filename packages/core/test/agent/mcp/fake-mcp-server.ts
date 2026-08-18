@@ -19,6 +19,9 @@ const IMAGE_URI = "fake://pixel";
 const TINY_PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 function handle(msg: any) {
+  // NORMA_FAKE_STDERR=1 makes the fake server chatty on stderr so the client's stderr->log
+  // routing can be asserted. Off by default — pre-existing tests see a silent server.
+  if (process.env.NORMA_FAKE_STDERR === "1") process.stderr.write("fake server noise\n");
   if (msg.method === "initialize") {
     if (process.env.NORMA_FAKE_NULL === "1") process.stdout.write("null\n");
     const capabilities: Record<string, unknown> = { tools: {} };

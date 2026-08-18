@@ -67,4 +67,17 @@ describe.if(isMac)("McpStdioClient", () => {
     expect(c.tools().map((t) => t.name)).toEqual(["echo", "page2tool"]);
     c.stop();
   });
+
+  test("server stderr reaches the log callback", async () => {
+    const lines: string[] = [];
+    const c = new McpStdioClient(
+      { command: "bun", args: ["run", FIXTURE], env: { NORMA_FAKE_STDERR: "1" } },
+      (m) => lines.push(m),
+    );
+    await c.start();
+    // stderr is asynchronous relative to the handshake; give the pipe a tick to drain.
+    await new Promise((r) => setTimeout(r, 100));
+    expect(lines.some((l) => l.includes("fake server noise"))).toBe(true);
+    c.stop();
+  });
 });
