@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { McpStdioClient } from "../../../src/agent/mcp/client";
 
 const FIXTURE = join(import.meta.dir, "fake-mcp-server.ts");
+const TASK_FIXTURE = join(import.meta.dir, "fake-task-server.ts");
 const isMac = process.platform === "darwin";
 
 describe.if(isMac)("McpStdioClient", () => {
@@ -78,6 +79,44 @@ describe.if(isMac)("McpStdioClient", () => {
     // stderr is asynchronous relative to the handshake; give the pipe a tick to drain.
     await new Promise((r) => setTimeout(r, 100));
     expect(lines.some((l) => l.includes("fake server noise"))).toBe(true);
+    c.stop();
+  });
+
+  test("callToolTask: a NON-task server still returns synchronously", async () => {
+    const c = new McpStdioClient({ command: "bun", args: ["run", FIXTURE] });
+    await c.start();
+    const out = await c.callToolTask("echo", { msg: "hi" });
+    expect(out.kind).toBe("sync");
+    if (out.kind !== "sync") throw new Error("unreachable");
+    expect(out.blocks).toEqual([{ type: "text", text: "echo: hi" }]);
+    expect(out.isError).toBe(false);
+    c.stop();
+  });
+
+  test("callToolTask: a task-capable server reports taskCreated, then settles", async () => {
+    const c = new McpStdioClient({ command: "bun", args: ["run", TASK_FIXTURE] });
+    await c.start();
+    let created: string | undefined;
+    const out = await c.callToolTask("slow", {}, undefined, (id) => { created = id; });
+    expect(out.kind).toBe("task");
+    if (out.kind !== "task") throw new Error("unreachable");
+    expect(created).toBeTruthy();
+    expect(out.handle.taskId).toBe(created!);
+    const settled = await out.handle.settled;
+    expect(settled.ok).toBe(true);
+    expect(settled.blocks).toEqual([{ type: "text", text: "slow work finished" }]);
+    c.stop();
+  });
+
+  test("callToolTask: a failing task settles ok:false (the stream's `error` arm, not a throw)", async () => {
+    const c = new McpStdioClient({ command: "bun", args: ["run", TASK_FIXTURE], env: { NORMA_FAKE_TASK_FAIL: "1" } });
+    await c.start();
+    const out = await c.callToolTask("slow", {});
+    expect(out.kind).toBe("task");
+    if (out.kind !== "task") throw new Error("unreachable");
+    const settled = await out.handle.settled;
+    expect(settled.ok).toBe(false);
+    expect(settled.blocks.some((b) => b.type === "text" && /fail/i.test(b.text))).toBe(true);
     c.stop();
   });
 });

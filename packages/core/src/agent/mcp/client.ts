@@ -16,6 +16,21 @@ export type McpContentBlock =
   | { type: "resource_link"; uri: string; name?: string; mimeType?: string }
   | { type: "other"; raw: unknown };
 
+/** A task in flight: its server-assigned id, plus a promise that settles when the stream reaches
+ *  its terminal message. `settled` never rejects — a failed task resolves with `ok: false`. */
+export type McpTaskHandle = { taskId: string; settled: Promise<{ ok: boolean; blocks: McpContentBlock[] }> };
+
+/** Shared content-block mapper: one implementation for callToolContent and callToolTask. */
+function toBlocks(content: unknown): McpContentBlock[] {
+  return ((content as any[]) ?? []).map((c: any): McpContentBlock => {
+    if (c?.type === "text") return { type: "text", text: String(c.text ?? "") };
+    if (c?.type === "image") return { type: "image", data: String(c.data ?? ""), mimeType: String(c.mimeType ?? "image/png") };
+    if (c?.type === "audio") return { type: "audio", data: String(c.data ?? ""), mimeType: String(c.mimeType ?? "audio/wav") };
+    if (c?.type === "resource_link") return { type: "resource_link", uri: String(c.uri ?? ""), name: c.name !== undefined ? String(c.name) : undefined, mimeType: c.mimeType !== undefined ? String(c.mimeType) : undefined };
+    return { type: "other", raw: c };
+  });
+}
+
 /** Per-call ceiling. The SDK's own default is 60s (DEFAULT_REQUEST_TIMEOUT_MSEC), which would be a
  *  REGRESSION here: the hand-rolled client this replaces had no per-request timeout at all, so a
  *  tool legally running longer than a minute works today. 10 minutes preserves every realistic
@@ -120,6 +135,8 @@ export class McpStdioClient {
 
   /** Structured sibling of `callTool`. Same request, but the content blocks are returned intact so
    *  a caller holding a ToolContext can attach images instead of dropping them. */
+  /** Structured sibling of `callTool`. Same request, but the content blocks are returned intact so
+   *  a caller holding a ToolContext can attach images instead of dropping them. */
   async callToolContent(name: string, args: unknown, signal?: AbortSignal): Promise<{ blocks: McpContentBlock[]; isError: boolean }> {
     if (this._dead) throw new Error("mcp server is not running");
     const res: any = await this.client!.callTool(
@@ -127,14 +144,62 @@ export class McpStdioClient {
       undefined,
       { signal, timeout: callTimeoutMs(), resetTimeoutOnProgress: true },
     );
-    const blocks: McpContentBlock[] = (res?.content ?? []).map((c: any): McpContentBlock => {
-      if (c?.type === "text") return { type: "text", text: String(c.text ?? "") };
-      if (c?.type === "image") return { type: "image", data: String(c.data ?? ""), mimeType: String(c.mimeType ?? "image/png") };
-      if (c?.type === "audio") return { type: "audio", data: String(c.data ?? ""), mimeType: String(c.mimeType ?? "audio/wav") };
-      if (c?.type === "resource_link") return { type: "resource_link", uri: String(c.uri ?? ""), name: c.name !== undefined ? String(c.name) : undefined, mimeType: c.mimeType !== undefined ? String(c.mimeType) : undefined };
-      return { type: "other", raw: c };
-    });
-    return { blocks, isError: !!res?.isError };
+    return { blocks: toBlocks(res?.content), isError: !!res?.isError };
+  }
+
+  /** Task-aware call. `client.experimental.tasks.callToolStream` decides FOR US whether this
+   *  becomes a task: it augments the request only when the tool declares `execution.taskSupport`
+   *  AND the server advertised a `tasks.requests.tools.call` capability (client's private
+   *  isToolTask). Otherwise it sends a plain request. So a non-task server takes the "sync" arm
+   *  below and behaves exactly as it did before tasks existed — Norma adds no branching of its
+   *  own and never modifies a server-authored schema.
+   *
+   *  The generator is guaranteed to end in `result` or `error`. On the task arm we return as soon
+   *  as `taskCreated` arrives, so the turn is NOT held open, and keep draining in the background
+   *  to settle the handle. Verified live sequence:
+   *    taskCreated -> taskStatus(working) -> taskStatus(completed) -> result
+   *  A FAILING task arrives as the stream's `error` message (not a `result` with isError), which
+   *  is why the error arm settles rather than throws once a task exists. */
+  async callToolTask(
+    name: string,
+    args: unknown,
+    signal?: AbortSignal,
+    onCreated?: (taskId: string) => void,
+  ): Promise<{ kind: "sync"; blocks: McpContentBlock[]; isError: boolean } | { kind: "task"; handle: McpTaskHandle }> {
+    if (this._dead) throw new Error("mcp server is not running");
+    const stream = this.client!.experimental.tasks.callToolStream(
+      { name, arguments: (args ?? {}) as Record<string, unknown> },
+      undefined,
+      { signal, timeout: callTimeoutMs(), resetTimeoutOnProgress: true },
+    );
+    const iter = stream[Symbol.asyncIterator]();
+
+    for (;;) {
+      const { value, done } = await iter.next();
+      if (done) return { kind: "sync", blocks: [], isError: true };
+      const msg: any = value;
+      if (msg.type === "taskCreated") {
+        const taskId = String(msg.task?.taskId ?? "");
+        onCreated?.(taskId);
+        const settled = (async (): Promise<{ ok: boolean; blocks: McpContentBlock[] }> => {
+          for (;;) {
+            const n = await iter.next();
+            if (n.done) return { ok: false, blocks: [{ type: "text", text: "[mcp task ended without a result]" }] };
+            const m: any = n.value;
+            if (m.type === "result") return { ok: !m.result?.isError, blocks: toBlocks(m.result?.content) };
+            if (m.type === "error") return { ok: false, blocks: [{ type: "text", text: String(m.error?.message ?? "mcp task failed") }] };
+            // 'taskStatus' — progress only; keep draining.
+          }
+        })().catch((e): { ok: boolean; blocks: McpContentBlock[] } => (
+          { ok: false, blocks: [{ type: "text", text: String((e as Error)?.message ?? "mcp task failed") }] }
+        ));
+        return { kind: "task", handle: { taskId, settled } };
+      }
+      if (msg.type === "result") return { kind: "sync", blocks: toBlocks(msg.result?.content), isError: !!msg.result?.isError };
+      // No task was created, so there is nothing to settle later — a hard failure of the call
+      // itself, which the caller expects as a throw (matching callTool/callToolContent).
+      if (msg.type === "error") throw new Error(String(msg.error?.message ?? "mcp tool error"));
+    }
   }
 
   async listResources(signal?: AbortSignal): Promise<McpResourceInfo[]> {
