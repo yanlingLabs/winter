@@ -227,6 +227,15 @@ final class EditorTabTests: XCTestCase {
     /// is a source pin: the door must be an absent `if`, never a `.disabled(...)` control a stray
     /// click could still fire, and it must call through to the host's real door rather than a hand
     /// re-derivation of the RPC.
+    ///
+    /// **Two gates, not one — render time AND fire time.** `filesTabAvailable` decides whether the
+    /// control exists as of the last render; a hop landing between that render and a click already
+    /// in flight would otherwise fire `openFilesTab` against whatever session `panelSessionId` names
+    /// FRESH at click time, which can differ from the session the control was shown for. The onClick
+    /// closure re-checks `panelFilesDoorShown` against the CURRENT session before firing, so this
+    /// pin checks for BOTH occurrences of the shared predicate — one keyed to `host?.panelSessionId`
+    /// (the render-time gate, `filesTabAvailable`) and one keyed to the guard-bound `sessionId` local
+    /// (the fire-time re-check) — so a future edit cannot silently drop either belt.
     func testShellPanelGatesTheFilesDoorAndWiresItToTheHostsRealDoor() throws {
         let code = try shellPanelCodeOnly()
         XCTAssertTrue(code.contains("if filesTabAvailable {"),
@@ -234,7 +243,10 @@ final class EditorTabTests: XCTestCase {
         XCTAssertTrue(code.contains("host?.openFilesTab(sessionId: sessionId)"),
                       "firing the door must call through to ShellSessionHost.openFilesTab(sessionId:)")
         XCTAssertTrue(code.contains("panelFilesDoorShown(sessionId: host?.panelSessionId"),
-                      "the gate must be the one shared predicate, not a second hand-copy of it")
+                      "the RENDER-time gate must be the one shared predicate, not a hand-copy of it")
+        XCTAssertTrue(code.contains("panelFilesDoorShown(sessionId: sessionId, rows: host?.directory.rows"),
+                      "the FIRE-time re-check must also use the shared predicate — the belt for a "
+                      + "hop landing between render and an in-flight click")
     }
 
     /// Loads `ShellPanel.swift` and strips comment-only lines — the same discipline

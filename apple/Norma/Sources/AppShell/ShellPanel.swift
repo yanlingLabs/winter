@@ -241,8 +241,22 @@ struct ShellPanel: View {
                     // session every other strip action already names — see `filesTabAvailable`'s
                     // own doc just above for why that particular session, not `attachedSessionId`
                     // alone.
+                    //
+                    // **The fire-time re-check is the belt, not redundant with the render-time
+                    // gate.** `filesTabAvailable` decides whether the control exists WHEN THIS BODY
+                    // LAST RAN; a hop that lands between that render and a click already in flight
+                    // (one run-loop tick of a stale strip) would otherwise fire against whatever
+                    // session `panelSessionId` names FRESH at click time — which is exactly the
+                    // wire-unsafe direction, since this is the one strip action whose fresh-read
+                    // could name a session the control was never shown for. Re-reading the SAME
+                    // `panelFilesDoorShown` gate here, against the CURRENT `panelSessionId`, is what
+                    // makes "absent, not merely disabled" hold at the moment it fires, not only at
+                    // the moment it rendered.
                     onOpenFilesTab: {
-                        guard let sessionId = host?.panelSessionId else { return }
+                        guard let sessionId = host?.panelSessionId,
+                              panelFilesDoorShown(sessionId: sessionId, rows: host?.directory.rows ?? []) else {
+                            return
+                        }
                         host?.openFilesTab(sessionId: sessionId)
                     }
                 )
