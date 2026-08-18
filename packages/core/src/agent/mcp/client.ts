@@ -233,6 +233,13 @@ export class McpStdioClient {
     }));
   }
 
+  /** Upstream cancellation for a task in flight. Best-effort: a dead client is a no-op, since the
+   *  server is already gone. */
+  async cancelTask(taskId: string): Promise<void> {
+    if (this._dead) return;
+    await this.client!.experimental.tasks.cancelTask(taskId);
+  }
+
   stop(): void {
     try { void this.client?.close(); } catch { /* ignore */ }
     try { void this.transport?.close(); } catch { /* ignore */ }

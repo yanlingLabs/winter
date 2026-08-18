@@ -8,6 +8,7 @@ import { ToolRegistry, type ToolContext } from "../../../src/agent/tools/registr
 import { TrustStore } from "../../../src/agent/trust";
 
 const FIXTURE = join(import.meta.dir, "fake-mcp-server.ts");
+const TASK_FIXTURE = join(import.meta.dir, "fake-task-server.ts");
 const ctx = (): ToolContext => ({ cwd: "/tmp", roots: ["/tmp"], sessionId: "s1" });
 const isMac = process.platform === "darwin";
 function realDir(): string { return realpathSync(mkdtempSync(join(tmpdir(), "mcp-mgr-"))); }
@@ -269,6 +270,70 @@ describe.if(isMac)("McpManager tool content", () => {
     expect(attached[0]!.startsWith("data:image/png;base64,")).toBe(true);
     expect(out.output).toContain("here is the shot");
     expect(out.output).not.toContain("[non-text content omitted]");
+    mgr.stopAll();
+  });
+});
+
+// PR 2: a task-capable tool must hand the turn back immediately and settle later through
+// onTaskSettled, rather than blocking the turn until the server finishes.
+describe.if(isMac)("McpManager background tasks", () => {
+  test("a task-capable tool returns a started-notice and settles through onTaskSettled", async () => {
+    const settled: Array<{ sessionId: string; key: string }> = [];
+    const registry = new ToolRegistry();
+    const mgr = new McpManager({
+      registry,
+      trust: new TrustStore(join(realDir(), "trust.json")),
+      onTaskSettled: (sessionId, key) => { settled.push({ sessionId, key }); },
+    });
+    await mgr.startAll({ slow: { command: "bun", args: ["run", TASK_FIXTURE] } });
+    expect(registry.has("mcp__slow__slow")).toBe(true);
+
+    const out = await registry.execute("mcp__slow__slow", {}, ctx());
+    expect(out.isError).toBe(false);
+    expect(out.output).toContain("Task started");
+    // the turn was NOT held open: nothing has settled at the moment the tool returned
+    expect(settled.length).toBe(0);
+
+    for (let i = 0; i < 200 && settled.length === 0; i++) await Bun.sleep(5);
+    expect(settled.length).toBe(1);
+    expect(settled[0]!.sessionId).toBe("s1");
+    const entry = mgr.tasks.takeForNotification(settled[0]!.key);
+    expect(entry?.status).toBe("completed");
+    expect(entry?.result).toContain("slow work finished");
+    // exactly-once: the claim is spent
+    expect(mgr.tasks.takeForNotification(settled[0]!.key)).toBeUndefined();
+    mgr.stopAll();
+  });
+
+  test("a failing task settles as failed, still exactly one notification", async () => {
+    const settled: string[] = [];
+    const registry = new ToolRegistry();
+    const mgr = new McpManager({
+      registry,
+      trust: new TrustStore(join(realDir(), "trust.json")),
+      onTaskSettled: (_s, key) => { settled.push(key); },
+    });
+    await mgr.startAll({ slow: { command: "bun", args: ["run", TASK_FIXTURE], env: { NORMA_FAKE_TASK_FAIL: "1" } } });
+    await registry.execute("mcp__slow__slow", {}, ctx());
+    for (let i = 0; i < 200 && settled.length === 0; i++) await Bun.sleep(5);
+    expect(settled.length).toBe(1);
+    expect(mgr.tasks.takeForNotification(settled[0]!)?.status).toBe("failed");
+    mgr.stopAll();
+  });
+
+  test("a NON-task server is unaffected: still synchronous, no task registered", async () => {
+    const settled: string[] = [];
+    const registry = new ToolRegistry();
+    const mgr = new McpManager({
+      registry,
+      trust: new TrustStore(join(realDir(), "trust.json")),
+      onTaskSettled: (_s, key) => { settled.push(key); },
+    });
+    await mgr.startAll({ fake: { command: "bun", args: ["run", FIXTURE] } });
+    const out = await registry.execute("mcp__fake__echo", { msg: "hi" }, ctx());
+    expect(out.output).toBe("echo: hi");
+    expect(settled).toEqual([]);
+    expect(mgr.tasks.list("s1")).toEqual([]);
     mgr.stopAll();
   });
 });

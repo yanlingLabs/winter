@@ -3,6 +3,8 @@ import { readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { McpStdioClient } from "./client";
 import { attachImageGuarded } from "../tools/attach-image";
+import { McpTaskRegistry, taskKey } from "./task-registry";
+import type { McpContentBlock } from "./client";
 import type { ToolRegistry } from "../tools/registry";
 import type { TrustStore } from "../trust";
 
@@ -26,7 +28,22 @@ export class McpManager {
   private inFlight = new Map<string, Promise<void>>();
   private pluginState: Array<{ display: string; status: McpServerStatus["status"]; toolNames: string[]; client?: McpStdioClient }> = [];
   private pluginToolNames: string[] = []; // full `mcp__<plugin>_<server>__<tool>` names, for stopAll teardown
-  constructor(private readonly deps: { registry: ToolRegistry; trust: TrustStore; log?: (m: string) => void }) {}
+  /** Public so the engine can claim settled entries via takeForNotification. */
+  readonly tasks = new McpTaskRegistry();
+
+  /** Fired once per task reaching a terminal state. MUTABLE on purpose: the daemon constructs
+   *  McpManager before the engine exists, so it assigns this afterwards (daemon.ts's existing
+   *  later-assigned-closure pattern). Also accepted as a constructor dep for tests. */
+  onTaskSettled?: (sessionId: string, key: string) => void;
+
+  constructor(private readonly deps: {
+    registry: ToolRegistry;
+    trust: TrustStore;
+    log?: (m: string) => void;
+    onTaskSettled?: (sessionId: string, key: string) => void;
+  }) {
+    this.onTaskSettled = deps.onTaskSettled;
+  }
 
   /**
    * Shared per-server bring-up used by startAll/doEnsureProject/startPlugins: spawn the client,
@@ -45,30 +62,60 @@ export class McpManager {
    *    (this fail-fast semantics is pinned by an existing test: a server whose OWN tool list has
    *    an internal duplicate name is entirely marked failed, not partially registered).
    */
-  /** The `run` closure every registered MCP tool shares. Uses `callToolContent` rather than
-   *  `callTool` so a non-text block can be ATTACHED instead of flattened: an image goes through
-   *  `attachImageGuarded` — the same path `read_mcp_resource` uses, so the size guard and the
-   *  "[image omitted: …]" fallback behave identically — and only its failure text joins the
-   *  string result. `ToolRunResult` is unchanged (still a string); images travel out-of-band on
-   *  `ctx.attachImage`, which is why this needed no registry-contract change. */
-  private toolRunner(client: McpStdioClient, toolName: string) {
-    return async (a: unknown, ctx: { signal?: AbortSignal; attachImage?: (dataUrl: string) => void }): Promise<string> => {
-      const { blocks, isError } = await client.callToolContent(toolName, a, ctx.signal);
-      const parts: string[] = [];
-      for (const b of blocks) {
-        if (b.type === "text") { parts.push(b.text); continue; }
-        if (b.type === "image") {
-          const omitted = attachImageGuarded(ctx, { mime: b.mimeType, base64: b.data });
-          if (omitted) parts.push(omitted);
-          continue;
-        }
-        if (b.type === "resource_link") { parts.push(`[resource: ${b.uri}${b.mimeType ? ` (${b.mimeType})` : ""}]`); continue; }
-        if (b.type === "audio") { parts.push(`[audio omitted: ${b.mimeType}]`); continue; }
-        parts.push("[non-text content omitted]");
-      }
-      const text = parts.join("");
-      return text || (isError ? "[mcp tool error]" : "");
+  /** The `run` closure every registered MCP tool shares.
+   *
+   *  Routes through `callToolTask`, which lets the SDK decide per call whether this becomes a
+   *  task (only when the tool declares execution.taskSupport AND the server advertised the
+   *  capability). A non-task server therefore takes the `sync` arm and behaves exactly as before
+   *  tasks existed — this is why every pre-existing MCP test still passes untouched. */
+  private toolRunner(client: McpStdioClient, serverKey: string, toolName: string) {
+    return async (a: unknown, ctx: { signal?: AbortSignal; attachImage?: (dataUrl: string) => void; sessionId?: string }): Promise<string> => {
+      const out = await client.callToolTask(toolName, a, ctx.signal);
+      if (out.kind === "sync") return this.renderBlocks(out.blocks, out.isError, ctx);
+
+      const { taskId, settled } = out.handle;
+      const key = taskKey(serverKey, taskId);
+      const sessionId = ctx.sessionId ?? "";
+      this.tasks.register({ sessionId, server: serverKey, tool: toolName, taskId });
+
+      // ctx.signal aborts the CLIENT-side wait; tell the SERVER too so it stops working. The
+      // registry's first-terminal-state-wins rule settles the race between this and `settled`.
+      ctx.signal?.addEventListener("abort", () => {
+        void client.cancelTask(taskId).catch(() => {});
+        this.tasks.complete(key, { ok: false, result: "", status: "cancelled" });
+        this.onTaskSettled?.(sessionId, key);
+      }, { once: true });
+
+      void settled.then((s) => {
+        // renderBlocks WITHOUT ctx: the turn that owned ctx.attachImage has already ended, so an
+        // image cannot be attached and degrades to a labelled placeholder instead of vanishing.
+        this.tasks.complete(key, { ok: s.ok, result: this.renderBlocks(s.blocks, !s.ok) });
+        this.onTaskSettled?.(sessionId, key);
+      });
+
+      return `Task started: ${toolName} on ${serverKey} (task ${taskId}). It runs in the background; you will be notified when it finishes.`;
     };
+  }
+
+  /** Shared block→string rendering. With a ctx, images attach out-of-band via the same
+   *  attachImageGuarded path read_mcp_resource uses; without one (a task settling after its turn
+   *  ended) they degrade to a labelled placeholder. */
+  private renderBlocks(blocks: McpContentBlock[], isError: boolean, ctx?: { attachImage?: (dataUrl: string) => void }): string {
+    const parts: string[] = [];
+    for (const b of blocks) {
+      if (b.type === "text") { parts.push(b.text); continue; }
+      if (b.type === "image") {
+        if (!ctx) { parts.push(`[image omitted: ${b.mimeType} — task completed after its turn]`); continue; }
+        const omitted = attachImageGuarded(ctx, { mime: b.mimeType, base64: b.data });
+        if (omitted) parts.push(omitted);
+        continue;
+      }
+      if (b.type === "resource_link") { parts.push(`[resource: ${b.uri}${b.mimeType ? ` (${b.mimeType})` : ""}]`); continue; }
+      if (b.type === "audio") { parts.push(`[audio omitted: ${b.mimeType}]`); continue; }
+      parts.push("[non-text content omitted]");
+    }
+    const text = parts.join("");
+    return text || (isError ? "[mcp tool error]" : "");
   }
 
   private async startOne(
@@ -95,7 +142,7 @@ export class McpManager {
               args: z.object({}).passthrough(),
               rawParameters: t.inputSchema,
               scope: opts?.scope,
-              run: this.toolRunner(client, t.name),
+              run: this.toolRunner(client, serverKey, t.name),
             });
           } catch (e) {
             this.deps.log?.(`mcp: register '${full}' failed: ${(e as Error).message}`);
@@ -108,7 +155,7 @@ export class McpManager {
             args: z.object({}).passthrough(),
             rawParameters: t.inputSchema,
             scope: opts?.scope,
-            run: this.toolRunner(client, t.name),
+            run: this.toolRunner(client, serverKey, t.name),
           });
         }
         toolNames.push(t.name);
