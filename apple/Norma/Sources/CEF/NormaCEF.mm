@@ -99,32 +99,96 @@
 //          counter fired once in a 71-step drill; a blank page matches the editor exactly).
 //        - `--disable-frame-rate-limit --disable-gpu-vsync` (real Chromium switches, passed as
 //          argv exactly like `--remote-debugging-port` — no code change) raised idle
-//          `requestAnimationFrame` to ~57 Hz. That is the actual lever in the SHIPPED config:
-//          Chromium's OWN frame-rate limiter / assumed-vsync-interval, not this pump. It was not
-//          chased further — an uncapped/vsync-disabled compositor is not something to ship on a
-//          hunch (pegged GPU and tearing on real animated content), and finding or wiring a real
-//          vsync source into CEF's windowed compositor under this external-pump architecture is a
-//          change to THAT plumbing, not to this constant. **UNDISCHARGED CAVEAT, read before
-//          touching either:** this ~57 Hz run still had `kMaxTimerDelay` overridden to 16 ms (60
-//          `DoWork`/s) — 57 ≈ 60, so the number is equally explained by "the limiter is gone and
-//          THIS ceiling is now the gate" as by "the limiter caps near 60 regardless". The
-//          discriminating run (switches + the STOCK 33 ms ceiling: ~30 Hz still means
-//          pump-bound, ~57-60 Hz means Chromium's own default and this constant stays irrelevant)
-//          was not performed. Whoever next touches the vsync/limiter side must run it BEFORE
-//          assuming this constant is inert once that fix lands — it may become the next thing to
-//          raise.
+//          `requestAnimationFrame` to ~57 Hz in that run, but `kMaxTimerDelay` was ALSO overridden
+//          to 16 ms in it — an UNDISCHARGED CAVEAT at the time: 57 ≈ 60, so the number was equally
+//          explained by "the limiter is gone and THIS ceiling is now the gate" as by "the limiter
+//          caps near 60 regardless".
 //
-//      **So: in TODAY's shipped configuration this constant is not a rendering-smoothness lever.
-//      Do not "optimise" it expecting a frame-rate or scroll-smoothness change here — measured,
-//      twice (33 ms and 16 ms), to do nothing for either, because Chromium's own limiter gates
-//      first.** That may stop being true the day the limiter/vsync side is fixed — see the
-//      undischarged caveat above before relying on this constant staying inert. Until then it
+//      **RESOLVED same-morning (2026-08-18, a follow-up perf-fix task, same instrumented-copy
+//      method): the discriminating rerun does NOT reproduce ~57-60 Hz.** Both switches, STOCK
+//      33 ms ceiling, no override — measured immediately after a same-session STOCK-config
+//      rerun that reproduced the lock exactly (182 `requestAnimationFrame` callbacks in 6.03 s,
+//      30.000 Hz, meanDelta 33.333 ms, p50-p99 33.3-34.6 ms — as clean a 30 Hz clock as a
+//      measurement gets). With both switches added and the ceiling untouched: 3207 callbacks in
+//      6.02 s, nominal ~533 Hz, but NOT a clean plateau — meanDelta 1.877 ms with a bimodal
+//      distribution (p50 0.1 ms, p90 3.4 ms, p95/p99/max 18.6/18.8/18.9 ms), i.e. bursts of
+//      back-to-back callbacks separated by ~19 ms gaps. A GPU-helper `%CPU` sample taken across
+//      the same window spiked to 84.9% in its last second, against a 0.0-3.0% range at the STOCK
+//      30 Hz lock. So the caveat is discharged, but not the way either side of it predicted: the
+//      two switches do not unmask a clean second ~60 Hz gate — they remove pacing ENTIRELY, and
+//      what's left free-runs at whatever the surrounding scheduling noise allows, at real GPU
+//      cost. That matches both the CEF community's and Adobe CEP's own reports that these
+//      switches make embedded-Chromium panels "choppy/inconsistent" rather than smoothly faster
+//      (magpcss.org/ceforum t=12029; github.com/Adobe-CEP/CEP-Resources issue 467) — confirming,
+//      not just asserting, that they are diagnostic levers and never a shippable configuration.
+//
+//      **THE MODE, settled by reading the create call, not by measuring further:** every browser
+//      this file creates — editor and web tab alike, there is exactly one production
+//      `CreateBrowser` call site (`CreateBrowserNow`, below) — is WINDOWED, not off-screen. It
+//      calls `window_info.SetAsChild(...)` and sets `window_info.runtime_style =
+//      CEF_RUNTIME_STYLE_ALLOY` immediately after (both in `CreateBrowserNow`);
+//      `CefSettings.windowless_rendering_enabled` is never set in `NormaCEFInitialize` (defaults
+//      false); `SetAsWindowless` appears nowhere in this codebase; and `NormaClient` never
+//      overrides `CefClient::GetRenderHandler()`, so there is no OSR paint handler installed even
+//      in principle. `CefBrowserSettings.windowless_frame_rate` — the field a leading hypothesis
+//      going into the follow-up task suspected, since it defaults to 30 — governs (per this repo's
+//      own vendored `vendor/cef/include/internal/cef_types.h:584-590`) "the maximum rate... that
+//      `CefRenderHandler::OnPaint` will be called for a windowless browser". It is structurally
+//      inert here: no windowless browser, no `OnPaint` callback, nothing for that field to pace.
+//
+//      **Where the vsync/begin-frame machinery actually lives**, per the same task's `strings -a`
+//      pass over the vendored `vendor/cef/Release/Chromium Embedded Framework.framework` binary
+//      (CEF 151.3.16 / Chromium 151.0.7922.109; grepped, not disassembled): real display-vsync
+//      machinery IS compiled in — `ExternalBeginFrameSourceMac::{SetVSyncDisplayID,
+//      SetPreferredInterval,OnDisplayLinkCallback}`, `CVDisplayLinkMac` and `CADisplayLinkMac`
+//      (`{GetForDisplay,RegisterCallback,UnregisterCallback}`, both the legacy and the modern
+//      macOS display-link path), `DelayBasedBeginFrameSource::OnTimerTick`, and metrics literally
+//      named `Viz.DisplayLink.Create.GPU.CVDisplayLink` / `Viz.BeginFrameSource.VrrFrameCount`
+//      (VRR = ProMotion's variable refresh rate) — so "CEF's windowed compositor has no real vsync
+//      source to wire up" is NOT the right framing; the machinery an ordinary windowed Chromium
+//      tab uses for real 120 Hz pacing already exists in this exact build. Equally present is an
+//      extensive visibility-driven frame-BUDGET subsystem — `LocalFrameView::
+//      RenderThrottlingStatusChanged`, `RemoteFrameView::VisibilityForThrottlingChanged`,
+//      `RenderWidgetHostImpl::WasShown`, `WebContentsImpl::{WasShown,WasOccluded}`,
+//      `ThrottleMainFrameTo60Hz`, `ThrottleRepeatedNoDamageFrames` — any one of which is a
+//      plausible reason a browser embedded as a **child NSView of a foreign (non-Chromium)
+//      NSWindow** could read as less-than-fully-visible to Chromium's own heuristics and land in
+//      a reduced budget tier. Strings alone cannot say WHICH throttle path fires for a
+//      `SetAsChild` browser under this external-pump architecture; that needs live GPU-process
+//      tracing or Chromium source-level debugging, neither performed here. Every CEF-forum "30
+//      fps" thread found is about WINDOWLESS/OSR mode instead (a different, better-documented
+//      bug); the one direct parallel for a WINDOWED embedded panel — Adobe CEP, cited above — has
+//      an open, years-old, upstream-unresolved report of this exact shape, capped well below the
+//      display's real refresh rate independent of what that refresh rate actually is ("This is
+//      also not a 120hz vs 60hz issue. If I limit my mac's display to 60hz, the maximum fps is
+//      still noticeably lower") — corroboration that the symptom is a known, hard, upstream-
+//      flavored category, not proof of the mechanism.
+//
+//      **A real 120 Hz path is therefore a Chromium/CEF-facing architecture change, not a tunable
+//      constant:** most likely driving this file's external pump from a genuine `CVDisplayLink`/
+//      `CADisplayLink` callback keyed to the live display's actual rate (`NSScreen.
+//      maximumFramesPerSecond`) instead of — or in addition to — the fixed-interval NSTimer above,
+//      combined with tracing which Throttle* path treats a `SetAsChild` browser as backgrounded.
+//      Neither was attempted here; both are out of scope for a measurement/comment pass and belong
+//      to whoever next owns this file. No code shipped from this probe.
+//
+//      **So: in TODAY's shipped configuration this constant is not a rendering-smoothness lever.**
+//      Do not "optimise" it expecting a frame-rate or scroll-smoothness change here — measured
+//      three times now (33 ms, 16 ms, and 33 ms-with-limiter-disabled) to do nothing for the
+//      LOCKED-30-Hz case and to matter only once the limiter itself is gone, at which point it
+//      stops being a pacing constant and becomes one input into an otherwise-unpaced free-run. It
 //      still bounds worst-case latency for genuinely aperiodic idle-path work (a debounce timer, a
 //      delayed IPC reply) that is NOT frame production, which is the one thing Task 1's CPU-noise
-//      conclusion still stands on. One confound the probe could not clear: the whole session ran
-//      on battery (never AC) — if that turns out to matter, it would soften "30.0 Hz" as an
-//      unconditional number, but not the A/B finding itself (33 ms and 16 ms were measured under
-//      the identical condition).
+//      conclusion still stands on. **Power confound, both sessions:** the original 30.0 Hz finding
+//      and this same-morning rerun were both measured on a MacBook discharging on battery, and
+//      this session additionally saw `pmset -g` report `powermode 1` (Low Power Mode, most likely
+//      auto-engaged at 6% battery) — on a ProMotion display, Low Power Mode itself caps the
+//      system-wide refresh ceiling at 60 Hz, so neither session can claim "120 Hz was reachable
+//      today." What both sessions CAN claim: the STOCK config reproducibly locks to a clean
+//      30.000 Hz regardless of that confound (Low Power Mode would cap the ceiling ABOVE 30, not
+//      force exactly 30), and removing the limiter removes pacing rather than revealing a clean
+//      alternate rate. An AC-powered, Low-Power-Mode-off rerun is owed before quoting any number
+//      here as "the achievable ceiling".
 //
 //   3. THE RE-ENTRANCY REPOST. `CefDoMessageLoopWork()` re-enters this pump through paint and IPC
 //      callbacks; a discarded call must be REPOSTED, never dropped (`PerformMessageLoopWork`).
