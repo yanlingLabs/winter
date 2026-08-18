@@ -105,7 +105,8 @@ breaks real users if inherited by accident:
 |---|---|---|---|
 | Request timeout | `DEFAULT_REQUEST_TIMEOUT_MSEC = 60000` | unbounded | New `NORMA_MCP_CALL_TIMEOUT_MS`, default **600000 (10 min)**, passed explicitly with `resetTimeoutOnProgress: true`. See rationale below. |
 | Stdio env | `getDefaultEnvironment()` -> 6 keys (`HOME LOGNAME PATH SHELL TERM USER`) | all 38 of `process.env` | Explicitly pass `{...process.env, ...cfg.env}`. Servers relying on inherited API keys must not break. |
-| Malformed line | SDK may throw on a bare `null` line | tolerant skip (client.ts:110) | `NORMA_FAKE_NULL=1` fixture emits `null\n`. Fix the *fixture* to stay spec-valid; assertions unchanged. |
+| Malformed line | **No delta — verified.** The SDK surfaces a bare `null` line as a non-fatal zod error via `onerror`; the connection survives and `tools/list` still succeeds | tolerant skip (client.ts:110) | Fixture and test BOTH unchanged. Requirement: install an `onerror` handler that logs rather than propagates. |
+| Server stderr | SDK default is `"inherit"` — server stderr leaks into the daemon's own stderr | piped, then discarded | Set `stderr: "pipe"` explicitly and route to the daemon log. |
 
 **Timeout rationale (decided, not deferred).** Three options were on the table: inherit the SDK's
 60s (breaks any tool legally running longer today), keep it unbounded (preserves behaviour but
@@ -120,12 +121,16 @@ gaining* a 60s one is a regression. The bound is chosen deliberately, not inheri
 
 ### Commit 2: non-text content + stderr
 
-- `callTool` stops returning a bare `string`. Images/audio/`resource_link` route through the
-  existing `attach-image.ts` path instead of `[non-text content omitted]`.
+- New `callToolContent()` returns structured `McpContentBlock[]` alongside the existing
+  `callTool()` string method. Images route through the existing `attach-image.ts` path instead of
+  becoming `[non-text content omitted]`.
 - stderr -> daemon log, closing the `/* could log to daemon log */` TODO at client.ts:41.
 
-This commit **does** touch `manager.ts` and the registry contract. That is why it sits on top of
-a green commit 1 rather than being mixed into it — the regression proof stays intact.
+**The registry contract does NOT change** (corrected from the original design). `ToolRunResult` is
+`string | { output, fileDiff? }`, and images attach through the side channel `ctx.attachImage` via
+`attachImageGuarded`, not through the return value. So `callTool()` keeps its exact signature for
+every existing caller, `callToolContent()` is purely additive, and the only `manager.ts` change is
+its `run` closure. Materially smaller blast radius than first assumed.
 
 ## PR 2 — background tasks
 
