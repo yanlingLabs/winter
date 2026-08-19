@@ -141,13 +141,23 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     ///
     /// Scroll and zoom are exercised as genuinely different viewports/zoom levels — both produce
     /// tile keys `TileMath` itself computes (the same authority the canvas uses), so this test can
-    /// never assert a key TileMath and the production code would disagree about. **Part switching is
-    /// NOT exercised against real LOK data**: every `gate.*` fixture in this repo has exactly one
-    /// part (`OfficeHelperLiveTests`'s own `Expectation` table — no multi-sheet/multi-slide fixture
-    /// exists), so `subscribeTiles(part: 0, ...)` is called a second time as the closest honest proxy
-    /// (proves the wire call survives a repeat ask) rather than a real cross-part switch. The
-    /// PLUMBING for a part switch (`OfficeTileCanvasView.setActivePart` resubscribing) is proven live
-    /// at the recorder level in `OfficeTileCanvasViewTests` instead — disclosed, not silently skipped.
+    /// never assert a key TileMath and the production code would disagree about.
+    ///
+    /// **office-plumbing Task 9 — the parts==1 tripwire, flipped.** This test used to stop at
+    /// `gate.xlsx` (exactly one part — `OfficeHelperLiveTests`'s own `Expectation` table) and repeat
+    /// `subscribeTiles(part: 0, ...)` a second time as the closest honest proxy for a cross-part
+    /// switch, with a comment naming the condition under which it should be extended: "if this ever
+    /// changes, extend this test to a real second-part ask." T9 is what changes it — a SECOND
+    /// document, `officeHarnessMultiSheetFodsContent()` (`OfficeHarnessScript.swift`, shared with the
+    /// Office Harness itself), templated fresh at test time with two `<table:table>` sheets in two
+    /// different fill colors. Opened alongside `gate.xlsx` on the SAME runtime (one runtime holds
+    /// several open documents — `OfficeRuntimeState.documents` is keyed by path), this proves
+    /// `doc.parts == 2` against real LOK and that `subscribeTiles(part: 1, ...)` paints tile (0,0)
+    /// pixel-DISTINCT from `subscribeTiles(part: 0, ...)` at the identical `TileKey` coordinates —
+    /// the genuine cross-part switch the old comment deferred. The PLUMBING for a part switch
+    /// (`OfficeTileCanvasView.setActivePart` resubscribing) stays proven live at the recorder level in
+    /// `OfficeTileCanvasViewTests`, unchanged by this — that class fakes the driver; this one is
+    /// about whether real LOK actually paints a second part differently, which no recorder can answer.
     func testSubscribingAndRequestingTilesThroughTheRealHelperDeliversRealPixelsIntoTheTileStore() async throws {
         let helperURL = Bundle.main.bundleURL.deletingLastPathComponent()
             .appendingPathComponent("NormaOfficeHelper")
@@ -236,12 +246,59 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         }
         XCTAssertTrue(zoomedFilled, "the 200%-zoom tiles never arrived: \(expectedZoomedKeys)")
 
-        // --- Part: gate.xlsx has exactly one sheet (parts == 1) — see this test's own header for
-        // why a genuine cross-part switch cannot be exercised against real data here. Proves the
-        // repeat call at least survives, not a part boundary. ---
-        XCTAssertEqual(doc.parts, 1, "if this ever changes, extend this test to a real second-part ask")
+        // --- Part sanity: gate.xlsx itself still has exactly one sheet — unrelated to the real
+        // cross-part proof below, which uses a SECOND document precisely because this one cannot
+        // supply it. ---
+        XCTAssertEqual(doc.parts, 1, "gate.xlsx is a fixed single-sheet fixture — see OfficeHelperLiveTests' own table")
         runtime.subscribeTiles(path: gatePath, part: 0, zoomPPT: zoomPPT1000, viewportTwips: coldViewport)
         try? await Task.sleep(nanoseconds: 200_000_000) // let it settle; nothing new is expected
+
+        // --- office-plumbing Task 9: the real second-part ask, against a genuinely multi-part
+        // document — see this test's own header for why gate.xlsx itself could never supply this. ---
+        let multiPath = makeScratchDirectory().appendingPathComponent("t9-multisheet.fods").path
+        try officeHarnessMultiSheetFodsContent().write(toFile: multiPath, atomically: true, encoding: .utf8)
+        runtime.open(multiPath)
+        let multiSettled = await waitUntil(timeout: 40) {
+            runtime.stateSnapshot.documents[multiPath] != nil || runtime.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(multiSettled, "the templated two-sheet fixture never settled — phase: \(runtime.stateSnapshot.phase)")
+        guard let multiDoc = runtime.stateSnapshot.documents[multiPath] else {
+            return XCTFail("the templated fixture did not open: "
+                           + "\(runtime.stateSnapshot.openFailures[multiPath] ?? "no reason recorded")")
+        }
+        let multiDocId = multiDoc.docId
+        XCTAssertEqual(multiDoc.type, .spreadsheet)
+        XCTAssertEqual(multiDoc.parts, 2, "the templated fixture carries two <table:table> sheets — "
+                       + "real LOK must report two parts for it, or nothing below proves a real switch")
+
+        // **`TileKey` carries `part` as part of its own identity** (`TileMath.swift`'s own struct) —
+        // so part 0's and part 1's paints of "the same" tile (0,0) live under two DIFFERENT keys in
+        // the store, never one key overwritten twice. Comparing against a single shared key would
+        // silently compare an entry to itself and never actually observe part 1's paint at all.
+        let part0Key = TileKey(part: 0, zoomPPT: zoomPPT1000, tileX: 0, tileY: 0)
+        let part1Key = TileKey(part: 1, zoomPPT: zoomPPT1000, tileX: 0, tileY: 0)
+        let partViewport = officeViewportTwips(scrollOrigin: .zero, visibleSize: CGSize(width: 256, height: 256),
+                                               zoomPPT: zoomPPT1000)
+        runtime.subscribeTiles(path: multiPath, part: 0, zoomPPT: zoomPPT1000, viewportTwips: partViewport)
+        let part0Filled = await waitUntil(timeout: 20) { runtime.tileStore.tile(docId: multiDocId, key: part0Key) != nil }
+        XCTAssertTrue(part0Filled, "part 0's tile (0,0) never arrived")
+        let part0Pixels = try XCTUnwrap(runtime.tileStore.tile(docId: multiDocId, key: part0Key)).pixels
+
+        // `subscribeRequested` is what actually asks LOK to switch which part paints
+        // (`TileRenderer`'s own doc: `nPart` is passed DIRECTLY to `paintPartTile`) — real LOK must
+        // paint DIFFERENT pixels for part 1 at the identical tile COORDINATE, or this is not a real
+        // cross-part switch.
+        runtime.subscribeTiles(path: multiPath, part: 1, zoomPPT: zoomPPT1000, viewportTwips: partViewport)
+        let part1Filled = await waitUntil(timeout: 20) { runtime.tileStore.tile(docId: multiDocId, key: part1Key) != nil }
+        XCTAssertTrue(part1Filled, "part 1's tile (0,0) never arrived — either the part switch did not "
+                       + "reach LOK, or the store never recorded it under its own (part: 1) key")
+        let part1Pixels = try XCTUnwrap(runtime.tileStore.tile(docId: multiDocId, key: part1Key)).pixels
+        XCTAssertNotEqual(part0Pixels, part1Pixels, "part 1 must paint pixel-DISTINCT content from "
+                          + "part 0 at the identical tile coordinates — the whole claim of a real "
+                          + "cross-part switch")
+        XCTAssertEqual(part1Pixels.count, TileMath.bytesPerTile)
+        XCTAssertEqual(runtime.stateSnapshot.documents[multiPath]?.activePart, 1,
+                       "subscribeRequested(part: 1, ...) must have updated activePart — the part strip's own read")
 
         _ = host.teardownAllOfficeRuntimesAndStopHelper()
     }
