@@ -447,17 +447,21 @@ final class OfficeRuntime: ObservableObject {
                     guard let self else { return }
                     let needed = self.tileStore.keysNeedingRequest(docId: docId, candidates: keys)
                     guard !needed.isEmpty else { return }
-                    // T6 review F2: mark in-flight only AFTER the send succeeds (the store's own
-                    // `markRequested` doc already says so) — `markRequested` before the `await`, with
-                    // the throw swallowed by `try?`, left a thrown send's keys stuck in-flight
-                    // forever: `keysNeedingRequest` would filter them out of every future subscribe
-                    // with nothing ever going back to request them. Every throw path today happens to
-                    // coincide with a store eviction EXCEPT `.timedOut`, which is one back-pressure
-                    // config change from reachable — so `catch` explicitly frees the keys rather than
-                    // relying on that coincidence.
+                    // T6 review F2, re-reviewed: mark in-flight SYNCHRONOUSLY, in the same
+                    // uninterrupted stretch of MainActor code that decides to send — there is no
+                    // `await` between `needed` being computed and this call, so nothing else on
+                    // MainActor (an overlapping `subscribeTiles` from continuous scroll, most
+                    // obviously) can interleave and see these keys as still unrequested. The first
+                    // cut marked only after `driver.requestTiles` returned, which reopened exactly
+                    // that window — the reviewer measured it empirically (a gated send + two
+                    // overlapping subscribes produced two `requestTiles` calls for the same keys) and
+                    // it collides with `keysNeedingRequest`'s own "big-batch amplifier" warning, one
+                    // call and its retries compounding the shared queue's backlog. `catch` still frees
+                    // the keys the moment a send actually fails — see `markRequested`'s own doc for
+                    // why both halves are required.
+                    self.tileStore.markRequested(docId: docId, keys: needed)
                     do {
                         try await driver.requestTiles(docId, needed)
-                        self.tileStore.markRequested(docId: docId, keys: needed)
                     } catch {
                         for key in needed { self.tileStore.markFailed(docId: docId, key: key) }
                     }

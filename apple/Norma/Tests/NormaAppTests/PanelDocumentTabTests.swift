@@ -167,17 +167,32 @@ final class PanelDocumentTabTests: XCTestCase {
     // .OfficeDriverRecorder` is private to that file)
 
     private final class DocumentOfficeDriverRecorder: @unchecked Sendable {
-        // T6 review F3: `open` runs off the main actor when driven concurrently (a nested type does
-        // NOT inherit its enclosing `@MainActor` test class's isolation) — same lock-backed shape as
+        // T6 review F3 + re-review Minor: `open` runs off the main actor when driven concurrently (a
+        // nested type does NOT inherit its enclosing `@MainActor` test class's isolation), and every
+        // field a closure reads is also set directly by test code from MainActor — so every shared
+        // mutable field is guarded, not just the call log. Same lock-backed shape as
         // `ShellSessionHostTests.OfficeDriverRecorder` and this codebase's wider precedent
         // (`ShellScriptedTransport`/`ShellTransportFactory`/`MutableDisk`).
         private let lock = NSLock()
         private var _openCalls: [(docId: String, path: String)] = []
         var openCalls: [(docId: String, path: String)] { lock.lock(); defer { lock.unlock() }; return _openCalls }
-        var openMetadata: [String: OfficeDocumentMetadata] = [:]
-        var defaultMetadata = OfficeDocumentMetadata(
+
+        private var _openMetadata: [String: OfficeDocumentMetadata] = [:]
+        var openMetadata: [String: OfficeDocumentMetadata] {
+            get { lock.lock(); defer { lock.unlock() }; return _openMetadata }
+            set { lock.lock(); _openMetadata = newValue; lock.unlock() }
+        }
+        private var _defaultMetadata = OfficeDocumentMetadata(
             type: .text, parts: 1, sizeTwips: OfficeDocumentSize(widthTwips: 100, heightTwips: 100))
-        var state: OfficeHelperSupervisor.State = .ready
+        var defaultMetadata: OfficeDocumentMetadata {
+            get { lock.lock(); defer { lock.unlock() }; return _defaultMetadata }
+            set { lock.lock(); _defaultMetadata = newValue; lock.unlock() }
+        }
+        private var _state: OfficeHelperSupervisor.State = .ready
+        var state: OfficeHelperSupervisor.State {
+            get { lock.lock(); defer { lock.unlock() }; return _state }
+            set { lock.lock(); _state = newValue; lock.unlock() }
+        }
 
         var driver: OfficeRuntime.Driver {
             OfficeRuntime.Driver(

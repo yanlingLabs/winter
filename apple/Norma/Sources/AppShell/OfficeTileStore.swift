@@ -95,8 +95,22 @@ final class OfficeTileStore {
 
     // MARK: - Writes
 
-    /// Record that `keys` were just handed to `requestTiles` — call this AFTER the wire send
-    /// succeeds (a failed send has nothing in flight to track; see `OfficeRuntime.perform`).
+    /// Record that `keys` are ABOUT to be handed to `requestTiles` — call this SYNCHRONOUSLY, in the
+    /// same uninterrupted stretch of actor-isolated code that decides to send, BEFORE the `await`
+    /// that actually performs the wire call (see `OfficeRuntime.perform`'s `.subscribe` case). This
+    /// was originally written the other way round ("call this after the send succeeds"), which reads
+    /// naturally but is wrong: it leaves a window, for the full length of the wire round trip, where
+    /// `keysNeedingRequest` cannot see these keys as in flight — an ordinary overlapping subscribe
+    /// during continuous scroll (the throttle tick, or the shared queue's own latency, outrunning a
+    /// single round trip) then sees them as still unrequested and issues a duplicate `requestTiles`
+    /// call, each duplicate lengthening the queue's own backlog. Marking before the `await` closes
+    /// that window structurally — nothing else can run on the same actor between the decision to
+    /// send and this call, since there is no suspension point in between.
+    ///
+    /// The other half of this contract is the caller's: if the send throws, the caller MUST call
+    /// `markFailed` for every key passed here. This call has no way to tell "sent, awaiting a reply"
+    /// apart from "never sent" on its own — a throw that skips `markFailed` stands the keys in flight
+    /// forever, exactly as a genuinely successful, still-outstanding request would.
     func markRequested(docId: String, keys: [TileKey]) {
         for key in keys { inFlight.insert(Key(docId: docId, tileKey: key)) }
     }

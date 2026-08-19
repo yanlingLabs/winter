@@ -3753,13 +3753,17 @@ final class ShellSessionHostTests: XCTestCase {
     /// per factory, shared across every session it mints — the real architecture's own shape (one
     /// app-wide client), not a test convenience shortcut.
     private final class OfficeDriverRecorder: @unchecked Sendable {
-        // T6 review F3: `performTeardown` fans a `close` per document out onto concurrent detached
-        // `Task`s, and these closures run off the main actor — a NESTED type does NOT inherit its
-        // enclosing `@MainActor` test class's isolation, so unsynchronized concurrent appends here
-        // raced and silently lost entries (~25% of `testTeardownOfficeRuntimeRemovesItFromTheTable`
-        // runs). Same lock-backed shape as `ShellScriptedTransport`/`ShellTransportFactory`/
-        // `MutableDisk`, this file's own established precedent for a double touched off-actor.
+        // T6 review F3 + re-review Minor: every field a driver closure can touch runs off the main
+        // actor when called concurrently (a nested type does NOT inherit its enclosing `@MainActor`
+        // test class's isolation), and test code sets these same fields from MainActor — so EVERY
+        // shared mutable field is guarded, not just the call-log arrays F3 first closed (~25% of
+        // `testTeardownOfficeRuntimeRemovesItFromTheTable` failed before that fix). Same lock-backed
+        // shape as `ShellScriptedTransport`/`ShellTransportFactory`/`MutableDisk`, this file's own
+        // established precedent. The lock is NEVER held across an `await` — see `open`'s and
+        // `requestTiles`'s suspend/resume dances, which release it before suspending and re-take it
+        // only for the plain synchronous reads/writes on either side.
         private let lock = NSLock()
+
         private var _openCalls: [(docId: String, path: String)] = []
         private var _closeCalls: [String] = []
         private var _subscribeCalls: [String] = []
@@ -3784,19 +3788,43 @@ final class ShellSessionHostTests: XCTestCase {
             lock.lock(); defer { lock.unlock() }; return _requestFailureCalls
         }
 
-        var state: OfficeHelperSupervisor.State = .ready
-        var openFailures: [String: String] = [:] // path -> reason
-        var openMetadata: [String: OfficeDocumentMetadata] = [:] // path -> override
-        var defaultMetadata = OfficeDocumentMetadata(
+        private var _state: OfficeHelperSupervisor.State = .ready
+        var state: OfficeHelperSupervisor.State {
+            get { lock.lock(); defer { lock.unlock() }; return _state }
+            set { lock.lock(); _state = newValue; lock.unlock() }
+        }
+        private var _openFailures: [String: String] = [:] // path -> reason
+        var openFailures: [String: String] {
+            get { lock.lock(); defer { lock.unlock() }; return _openFailures }
+            set { lock.lock(); _openFailures = newValue; lock.unlock() }
+        }
+        private var _openMetadata: [String: OfficeDocumentMetadata] = [:] // path -> override
+        var openMetadata: [String: OfficeDocumentMetadata] {
+            get { lock.lock(); defer { lock.unlock() }; return _openMetadata }
+            set { lock.lock(); _openMetadata = newValue; lock.unlock() }
+        }
+        private var _defaultMetadata = OfficeDocumentMetadata(
             type: .spreadsheet, parts: 1, sizeTwips: OfficeDocumentSize(widthTwips: 100, heightTwips: 100))
+        var defaultMetadata: OfficeDocumentMetadata {
+            get { lock.lock(); defer { lock.unlock() }; return _defaultMetadata }
+            set { lock.lock(); _defaultMetadata = newValue; lock.unlock() }
+        }
         /// office-plumbing Task 6 — what `subscribeTiles` reports as the current viewport's key set,
         /// per docId. Empty (the pre-Task-6 default) unless a test opts in — most existing office
         /// tests never look at tiles at all, and an empty reply means `perform`'s `.subscribe` case
         /// has nothing to request, so `requestCalls` simply stays empty for them too.
-        var subscribeReplies: [String: [TileKey]] = [:] // docId -> keys
+        private var _subscribeReplies: [String: [TileKey]] = [:] // docId -> keys
+        var subscribeReplies: [String: [TileKey]] {
+            get { lock.lock(); defer { lock.unlock() }; return _subscribeReplies }
+            set { lock.lock(); _subscribeReplies = newValue; lock.unlock() }
+        }
         /// T6 review F2's own drill: when set, `requestTiles` throws instead of recording a success —
         /// proves a thrown send leaves its keys requestable again rather than stuck in-flight forever.
-        var requestTilesShouldFail = false
+        private var _requestTilesShouldFail = false
+        var requestTilesShouldFail: Bool {
+            get { lock.lock(); defer { lock.unlock() }; return _requestTilesShouldFail }
+            set { lock.lock(); _requestTilesShouldFail = newValue; lock.unlock() }
+        }
 
         /// Carry 6's own drill: an `open` for a suspended path does not return until
         /// `resumeOpen(forPath:)` is called — the seam that lets a test park an open MID-FLIGHT,
@@ -3804,9 +3832,34 @@ final class ShellSessionHostTests: XCTestCase {
         private var suspendedOpens: Set<String> = []
         private var pendingOpenContinuations: [String: CheckedContinuation<Void, Never>] = [:]
 
-        func suspendOpen(forPath path: String) { suspendedOpens.insert(path) }
+        func suspendOpen(forPath path: String) {
+            lock.lock(); suspendedOpens.insert(path); lock.unlock()
+        }
         func resumeOpen(forPath path: String) {
-            pendingOpenContinuations.removeValue(forKey: path)?.resume()
+            lock.lock()
+            let continuation = pendingOpenContinuations.removeValue(forKey: path)
+            lock.unlock()
+            continuation?.resume() // resumed OUTSIDE the lock — never resume a continuation while holding it
+        }
+
+        /// T6 re-review's own scratch proof, made permanent: gates `requestTiles` so a test can hold
+        /// ONE call outstanding while firing a second, overlapping `subscribeTiles` — proving the
+        /// second sees the first's keys as already in flight rather than issuing a duplicate. A
+        /// single gate, not per-key/per-doc like `suspendOpen`'s `Set<String>`, since every test that
+        /// needs this only ever holds back one call at a time.
+        private var requestTilesSuspended = false
+        private var pendingRequestTilesContinuations: [CheckedContinuation<Void, Never>] = []
+
+        func suspendRequestTiles() {
+            lock.lock(); requestTilesSuspended = true; lock.unlock()
+        }
+        func resumeRequestTiles() {
+            lock.lock()
+            requestTilesSuspended = false
+            let continuations = pendingRequestTilesContinuations
+            pendingRequestTilesContinuations = []
+            lock.unlock()
+            for continuation in continuations { continuation.resume() } // outside the lock, same reason as above
         }
 
         var driver: OfficeRuntime.Driver {
@@ -3817,9 +3870,14 @@ final class ShellSessionHostTests: XCTestCase {
                 },
                 open: { [unowned self] docId, path in
                     self.lock.lock(); self._openCalls.append((docId, path)); self.lock.unlock()
-                    if self.suspendedOpens.remove(path) != nil {
+                    self.lock.lock()
+                    let wasSuspended = self.suspendedOpens.remove(path) != nil
+                    self.lock.unlock()
+                    if wasSuspended {
                         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                            self.lock.lock()
                             self.pendingOpenContinuations[path] = continuation
+                            self.lock.unlock()
                         }
                     }
                     if let reason = self.openFailures[path] {
@@ -3838,6 +3896,16 @@ final class ShellSessionHostTests: XCTestCase {
                     self.lock.lock(); self._unsubscribeCalls.append(docId); self.lock.unlock()
                 },
                 requestTiles: { [unowned self] docId, keys in
+                    self.lock.lock()
+                    let wasSuspended = self.requestTilesSuspended
+                    self.lock.unlock()
+                    if wasSuspended {
+                        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                            self.lock.lock()
+                            self.pendingRequestTilesContinuations.append(continuation)
+                            self.lock.unlock()
+                        }
+                    }
                     if self.requestTilesShouldFail {
                         self.lock.lock(); self._requestFailureCalls.append((docId, keys)); self.lock.unlock()
                         throw OfficeHelperClientError.timedOut
@@ -4105,11 +4173,11 @@ final class ShellSessionHostTests: XCTestCase {
 
         runtime.subscribeTiles(path: "/a.xlsx", part: 0, zoomPPT: 1000, viewportTwips: sampleViewport)
 
-        // T6 review F2: anchor on the store's in-flight count — the LAST step of the effect's Task
-        // now that `markRequested` trails the send — rather than the recorder's append, which
-        // happens off-actor a beat earlier; anchoring on the append alone left a window where this
-        // job's own assertions could run before `markRequested` actually landed.
-        await officeWaitUntil(timeout: 2) { runtime.tileStore.inFlightCountForTesting == 3 }
+        // T6 re-review F2: anchor on the recorder's append. `markRequested` now runs SYNCHRONOUSLY,
+        // in program order, before `driver.requestTiles` is even called (see that call's own
+        // comment) — so observing the append already implies the mark landed first; no separate wait
+        // on the store is needed.
+        await officeWaitUntil(timeout: 2) { !office.recorder.requestCalls.isEmpty }
         XCTAssertEqual(office.recorder.requestCalls.count, 1)
         XCTAssertEqual(office.recorder.requestCalls[0].docId, docId)
         XCTAssertEqual(Set(office.recorder.requestCalls[0].keys), Set(keys))
@@ -4134,10 +4202,11 @@ final class ShellSessionHostTests: XCTestCase {
         office.recorder.subscribeReplies[docId] = [k0, k1]
 
         runtime.subscribeTiles(path: "/a.xlsx", part: 0, zoomPPT: 1000, viewportTwips: sampleViewport)
-        // T6 review F2: anchor on the store's in-flight count (the LAST step of the effect's Task,
-        // now that `markRequested` trails the send) rather than the recorder's append — the ingest
-        // below needs `markRequested` to have already run, or k1 could read as "not in flight."
-        await officeWaitUntil(timeout: 2) { runtime.tileStore.inFlightCountForTesting == 2 }
+        // T6 re-review F2: anchor on the recorder's append — `markRequested` now runs synchronously
+        // before `driver.requestTiles` is called, so the append implies the mark, AND (unlike a
+        // store-only anchor) this specific condition also guarantees call #1's own append precedes
+        // call #2's, which `requestCalls[1]` below depends on.
+        await officeWaitUntil(timeout: 2) { office.recorder.requestCalls.count == 1 }
 
         // k0 "arrives" (a stand-in for the real push); k1 stays in flight, untouched.
         runtime.tileStore.ingest(docId: docId, key: k0, generation: 0, pixels: Data(repeating: 1, count: 4))
@@ -4152,12 +4221,13 @@ final class ShellSessionHostTests: XCTestCase {
                        "only the genuinely-missing key is requested a second time")
     }
 
-    /// T6 review F2: `markRequested` used to fire BEFORE the send, with the throw swallowed by
-    /// `try?` — a thrown `requestTiles` left its keys marked in-flight forever, so
-    /// `keysNeedingRequest` would never offer them again (a permanent placeholder at those
-    /// coordinates). The fix marks in-flight only after a successful send and explicitly frees the
-    /// keys in a catch. `.timedOut` stands in for the one throw path that does not already coincide
-    /// with a store eviction (the review's own finding).
+    /// T6 review F2, re-reviewed: a thrown `requestTiles` must not strand its keys in flight forever.
+    /// `markRequested` runs synchronously, BEFORE the send (closing the round-2 duplicate-request
+    /// window — see `OfficeTileStore.markRequested`'s own doc) — so a throw genuinely DOES mark the
+    /// keys in flight first, then the `catch` must explicitly free them via `markFailed`, or they
+    /// strand exactly as a real, still-outstanding request would. `.timedOut` stands in for the one
+    /// throw path that does not already coincide with a store eviction (the original review's own
+    /// finding).
     func testAThrowingRequestTilesLeavesItsKeysRequestableAgainRatherThanStuckInFlightForever() async {
         let (host, _) = makeHost()
         let office = officeFactory()
@@ -4176,14 +4246,61 @@ final class ShellSessionHostTests: XCTestCase {
         // store's in-flight count, which would read as trivially "zero" even before the Task starts.
         await officeWaitUntil(timeout: 2) { !office.recorder.requestFailureCalls.isEmpty }
         XCTAssertTrue(office.recorder.requestCalls.isEmpty, "a thrown send is never recorded as a successful request")
-        XCTAssertEqual(runtime.tileStore.inFlightCountForTesting, 0, "a thrown send marks nothing in flight")
+        // The failure record lands off-actor, INSIDE the driver closure, before the throw — the
+        // catch's `markFailed` calls only run afterward, back on MainActor, so a separate poll is
+        // needed here (unlike the assertion above, which reads the same recorder the failure record
+        // itself lives on): without it, this can observe the SYNCHRONOUS `markRequested` mark before
+        // the catch has had a chance to clear it.
+        await officeWaitUntil(timeout: 2) { runtime.tileStore.inFlightCountForTesting == 0 }
         XCTAssertEqual(runtime.tileStore.keysNeedingRequest(docId: docId, candidates: keys), keys,
-                       "the failed keys are requestable again, not stuck in flight forever")
+                       "the failed keys are requestable again once the catch clears them, not stuck in flight forever")
 
         // A subsequent subscribe, now with a healthy driver, must actually re-request them.
         office.recorder.requestTilesShouldFail = false
         runtime.subscribeTiles(path: "/a.xlsx", part: 0, zoomPPT: 1000, viewportTwips: sampleViewport)
         await officeWaitUntil(timeout: 2) { !office.recorder.requestCalls.isEmpty }
+        XCTAssertEqual(Set(office.recorder.requestCalls[0].keys), Set(keys))
+    }
+
+    /// T6 re-review's own empirical proof, made permanent: gate the first `requestTiles` mid-flight,
+    /// fire a second, overlapping `subscribeTiles` for the identical viewport before the first's
+    /// round trip resolves, and confirm only ONE `requestTiles` call ever fires for the shared keys.
+    /// Under the shape this replaces (mark in-flight only after a successful send), the second
+    /// subscribe's own `keysNeedingRequest` would still see these keys as unrequested while the first
+    /// sits gated, and issue a genuine duplicate — this is exactly what the reviewer measured to
+    /// prove the round-1 fix reopened obligation 3's "big-batch amplifier."
+    func testOverlappingSubscribesRacingOneGatedSendIssueExactlyOneRequestForTheSharedKeys() async {
+        let (host, _) = makeHost()
+        let office = officeFactory()
+        host.makeOfficeRuntime = office.make
+        let runtime = host.officeRuntime(for: "S1")
+        runtime.open("/a.xlsx")
+        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.documents["/a.xlsx"] != nil }
+        let docId = runtime.stateSnapshot.documents["/a.xlsx"]!.docId
+        let keys = [tileKey(0, 0), tileKey(1, 0)]
+        office.recorder.subscribeReplies[docId] = keys
+        office.recorder.suspendRequestTiles()
+
+        runtime.subscribeTiles(path: "/a.xlsx", part: 0, zoomPPT: 1000, viewportTwips: sampleViewport)
+        // The gate holds `requestTiles` itself, not `markRequested` — which runs synchronously
+        // BEFORE the gated call is even reached (program order, no `await` in between; see
+        // `OfficeTileStore.markRequested`'s own doc). Waiting on the store here, rather than on the
+        // recorder, is deliberate: it is the only observable signal available while the send sits
+        // gated, and it is exactly the signal the second subscribe below depends on.
+        await officeWaitUntil(timeout: 2) { runtime.tileStore.inFlightCountForTesting == 2 }
+
+        runtime.subscribeTiles(path: "/a.xlsx", part: 0, zoomPPT: 1000, viewportTwips: sampleViewport)
+        // The second subscribe's own `subscribeTiles` round trip is NOT gated — only `requestTiles`
+        // is — so it completes quickly regardless of the first call sitting parked, and with these
+        // keys already marked in flight, its `needed` set is empty: no second `requestTiles` call is
+        // even attempted, gated or otherwise.
+        await officeWaitUntil(timeout: 2) { office.recorder.subscribeCalls.count == 2 }
+
+        office.recorder.resumeRequestTiles()
+        await officeWaitUntil(timeout: 2) { !office.recorder.requestCalls.isEmpty }
+        XCTAssertEqual(office.recorder.requestCalls.count, 1,
+                       "the second, overlapping subscribe must not issue a duplicate request for keys "
+                       + "the first has already marked in flight")
         XCTAssertEqual(Set(office.recorder.requestCalls[0].keys), Set(keys))
     }
 
