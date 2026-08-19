@@ -50,16 +50,16 @@ final class OfficeHelperClient {
     /// Task 4 — the tile-pipeline counterparts to `onDocumentEvent` above, same settable-closure
     /// shape (not an `AsyncStream`, same carry-driven restraint) proxied straight through to the
     /// underlying `OfficeWireConnection`'s own dedicated push callbacks.
-    var onTile: ((String, TileKey, Int, Int, Int, String) -> Void)? {
-        didSet { connection.onTile = { [onTile] docId, key, generation, width, height, pixelsBase64 in
-            onTile?(docId, key, generation, width, height, pixelsBase64)
+    var onTile: ((UInt64, String, TileKey, Int, Int, Int, String) -> Void)? {
+        didSet { connection.onTile = { [onTile] seq, docId, key, generation, width, height, pixelsBase64 in
+            onTile?(seq, docId, key, generation, width, height, pixelsBase64)
         } }
     }
-    var onTileFailed: ((String, TileKey, String) -> Void)? {
-        didSet { connection.onTileFailed = { [onTileFailed] docId, key, reason in onTileFailed?(docId, key, reason) } }
+    var onTileFailed: ((UInt64, String, TileKey, String) -> Void)? {
+        didSet { connection.onTileFailed = { [onTileFailed] seq, docId, key, reason in onTileFailed?(seq, docId, key, reason) } }
     }
-    var onInvalidated: ((String, [TileKey]) -> Void)? {
-        didSet { connection.onInvalidated = { [onInvalidated] docId, keys in onInvalidated?(docId, keys) } }
+    var onInvalidated: ((UInt64, String, [TileKey]) -> Void)? {
+        didSet { connection.onInvalidated = { [onInvalidated] seq, docId, keys in onInvalidated?(seq, docId, keys) } }
     }
 
     init(connection: OfficeWireConnection, seqAllocator: OfficeWireSeqAllocator, requestTimeout: TimeInterval) {

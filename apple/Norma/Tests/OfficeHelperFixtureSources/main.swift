@@ -21,6 +21,17 @@ import Foundation
 //                  -> .helperUnavailable path.
 //   dieAfterHello — replies helloOk normally, then calls _exit(0) immediately after. Drives the
 //                  supervisor's post-ready death-detection -> .helperDied path.
+//   multicastInvalidate — behaves like "ok" for everything, PLUS: after every `tileRequestAccepted`
+//                  reply, synthesizes a real invalidation (EMPTY, via
+//                  FakeOfficeDocumentBridge.simulateInvalidation) for that request's docId. Task 4's
+//                  own test seam for a scenario nothing else can provoke deterministically: whether
+//                  real LOK ever fires a LIVE invalidate-tiles callback for a view-only document is
+//                  an open, empirically-answered question (see task-4-report.md's debt-1 finding),
+//                  so multicast fan-out (OfficeHelperServer's DocEntry.subscribers) is proven here
+//                  against a bridge that invalidates on command instead — a `tileRequest` with an
+//                  EMPTY keys array (already its own explicitly-tested, legal-if-pointless shape in
+//                  OfficeWireCodecTests) is this mode's trigger, chosen over a timer/race or a new,
+//                  test-only wire verb.
 
 let args = OfficeWireArgs.parse(Array(CommandLine.arguments.dropFirst()))
 
@@ -35,6 +46,15 @@ guard let token = args["token"], !token.isEmpty else { fail("missing required --
 var idleExitSeconds = 120.0
 if let raw = args["idle-exit-seconds"], let parsed = Double(raw), parsed > 0 { idleExitSeconds = parsed }
 
+// Task 3: OfficeHelperServer now requires a documentBridge. The fixture never links LOKBridge
+// (no bridging header, no LOK C symbols — see project.yml's excludes on this target) — its whole
+// point is exercising OfficeHelperServer's CONNECTION-level failure paths (handshake timeout,
+// death-after-hello, token mismatch), none of which are document-shaped (OfficeSupervisorTests
+// never calls open/close). FakeOfficeDocumentBridge is Task 2's own old bookkeeping-only behavior,
+// now given a name. Named here (not inline) so the "multicastInvalidate" mode's hook can capture
+// it directly (Task 4).
+let bridge = FakeOfficeDocumentBridge()
+
 let mode = args["mode"] ?? "ok"
 var hooks = OfficeHelperServer.Hooks()
 switch mode {
@@ -44,19 +64,15 @@ case "silent":
     hooks.suppressReplies = true
 case "dieAfterHello":
     hooks.afterHelloOkWritten = { _exit(0) }
+case "multicastInvalidate":
+    hooks.afterTileRequestAccepted = { docId in bridge.simulateInvalidation(docId: docId) }
 default:
-    fail("unknown --mode \(mode) (expected ok | silent | dieAfterHello)")
+    fail("unknown --mode \(mode) (expected ok | silent | dieAfterHello | multicastInvalidate)")
 }
 
-// Task 3: OfficeHelperServer now requires a documentBridge. The fixture never links LOKBridge
-// (no bridging header, no LOK C symbols — see project.yml's excludes on this target) — its whole
-// point is exercising OfficeHelperServer's CONNECTION-level failure paths (handshake timeout,
-// death-after-hello, token mismatch), none of which are document-shaped (OfficeSupervisorTests
-// never calls open/close). FakeOfficeDocumentBridge is Task 2's own old bookkeeping-only behavior,
-// now given a name.
 let server = OfficeHelperServer(
     socketPath: socketPath, statePath: statePath, expectedToken: token,
-    idleExitSeconds: idleExitSeconds, hooks: hooks, documentBridge: FakeOfficeDocumentBridge())
+    idleExitSeconds: idleExitSeconds, hooks: hooks, documentBridge: bridge)
 
 do {
     try server.start()

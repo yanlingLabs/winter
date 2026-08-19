@@ -95,9 +95,13 @@ final class OfficeWireConnection: @unchecked Sendable {
     /// `nextFrame`/`expectReply` path in `OfficeHelperClient`, exactly like `opened`/`closed`) and
     /// are deliberately NOT listed here — only frames the helper sends WITHOUT a matching
     /// outstanding request need this treatment.
-    var onTile: (@Sendable (String, TileKey, Int, Int, Int, String) -> Void)?      // docId, key, generation, width, height, pixelsBase64
-    var onTileFailed: (@Sendable (String, TileKey, String) -> Void)?               // docId, key, reason
-    var onInvalidated: (@Sendable (String, [TileKey]) -> Void)?                    // docId, keys
+    // `seq` (helper-minted, per-CONNECTION — F8) leads every one of these three: unlike
+    // `onDocumentEvent`'s payload, it is genuinely useful here for a caller/test wanting to reason
+    // about per-connection push ordering (e.g. detecting out-of-order delivery), and costs nothing
+    // to thread through since `ingest()` already has it off the decoded frame.
+    var onTile: (@Sendable (UInt64, String, TileKey, Int, Int, Int, String) -> Void)?  // seq, docId, key, generation, width, height, pixelsBase64
+    var onTileFailed: (@Sendable (UInt64, String, TileKey, String) -> Void)?           // seq, docId, key, reason
+    var onInvalidated: (@Sendable (UInt64, String, [TileKey]) -> Void)?                // seq, docId, keys
 
     init(socketPath: String) {
         transport = UnixSocketTransport(path: socketPath)
@@ -205,9 +209,9 @@ final class OfficeWireConnection: @unchecked Sendable {
         var pushesToDeliver: [(String, OfficeDocumentEvent)] = []
         // Task 4 — the three new async-push shapes, collected the same way `pushesToDeliver`
         // already is (under `lock`, delivered to callbacks after `lock.unlock()` below).
-        var tilesToDeliver: [(String, TileKey, Int, Int, Int, String)] = []
-        var tileFailuresToDeliver: [(String, TileKey, String)] = []
-        var invalidationsToDeliver: [(String, [TileKey])] = []
+        var tilesToDeliver: [(UInt64, String, TileKey, Int, Int, Int, String)] = []
+        var tileFailuresToDeliver: [(UInt64, String, TileKey, String)] = []
+        var invalidationsToDeliver: [(UInt64, String, [TileKey])] = []
         lock.lock()
         buffer.append(data)
         while true {
@@ -238,12 +242,12 @@ final class OfficeWireConnection: @unchecked Sendable {
                     switch frame {
                     case .documentEvent(_, let docId, let event):
                         pushesToDeliver.append((docId, event))
-                    case .tile(_, let docId, let key, let generation, let width, let height, let pixelsBase64):
-                        tilesToDeliver.append((docId, key, generation, width, height, pixelsBase64))
-                    case .tileFailed(_, let docId, let key, let reason):
-                        tileFailuresToDeliver.append((docId, key, reason))
-                    case .invalidated(_, let docId, let keys):
-                        invalidationsToDeliver.append((docId, keys))
+                    case .tile(let seq, let docId, let key, let generation, let width, let height, let pixelsBase64):
+                        tilesToDeliver.append((seq, docId, key, generation, width, height, pixelsBase64))
+                    case .tileFailed(let seq, let docId, let key, let reason):
+                        tileFailuresToDeliver.append((seq, docId, key, reason))
+                    case .invalidated(let seq, let docId, let keys):
+                        invalidationsToDeliver.append((seq, docId, keys))
                     default:
                         frameQueue.append(frame)
                     }
@@ -263,14 +267,14 @@ final class OfficeWireConnection: @unchecked Sendable {
         for (docId, event) in pushesToDeliver {
             onDocumentEvent?(docId, event)
         }
-        for (docId, key, generation, width, height, pixelsBase64) in tilesToDeliver {
-            onTile?(docId, key, generation, width, height, pixelsBase64)
+        for (seq, docId, key, generation, width, height, pixelsBase64) in tilesToDeliver {
+            onTile?(seq, docId, key, generation, width, height, pixelsBase64)
         }
-        for (docId, key, reason) in tileFailuresToDeliver {
-            onTileFailed?(docId, key, reason)
+        for (seq, docId, key, reason) in tileFailuresToDeliver {
+            onTileFailed?(seq, docId, key, reason)
         }
-        for (docId, keys) in invalidationsToDeliver {
-            onInvalidated?(docId, keys)
+        for (seq, docId, keys) in invalidationsToDeliver {
+            onInvalidated?(seq, docId, keys)
         }
         if let pending, let toDeliver, pending.once.trip() {
             pending.continuation.resume(returning: toDeliver)

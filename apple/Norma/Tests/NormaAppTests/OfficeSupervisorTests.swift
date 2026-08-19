@@ -74,6 +74,12 @@ final class OfficeSupervisorTests: XCTestCase {
     func testHandshakeSucceedsAgainstTheFixtureInOkMode() async throws {
         let supervisor = OfficeHelperSupervisor(configuration: configuration(mode: "ok"))
         await supervisor.start()
+        // Task 4 debt (pre-existing, flagged in task-3-report.md): every sibling test in this file
+        // that spawns a fixture process explicitly tears it down via `addTeardownBlock`; this one,
+        // spawned INDIRECTLY through the supervisor's own `start()`, never did — the fixture's
+        // default `--idle-exit-seconds` is 120 (no override passed here), so a leaked process from
+        // this test would sit alive for up to two real minutes after the test itself finished.
+        addTeardownBlock { if let process = supervisor.process, process.isRunning { process.terminate() } }
 
         XCTAssertEqual(supervisor.state, .ready)
         XCTAssertNotNil(supervisor.client)
@@ -401,5 +407,136 @@ final class OfficeSupervisorTests: XCTestCase {
             return
         }
         XCTAssertEqual(pongReply, .pong(seq: 2))
+    }
+
+    // MARK: - Task 4: multicast (two connections, one doc owner: pushes to both; close by
+    // non-owner refused) — also proves F8 (per-connection push-seq) as a side effect: two
+    // connections receiving the SAME logical invalidation get DIFFERENT seq numbers, each dense
+    // within its OWN stream, not a shared server-wide counter.
+
+    /// A tiny, lock-protected async-push collector — the same shape
+    /// `OfficeHelperLiveTests.testDocumentEventPushDoesNotStarveAConcurrentPingReply` already
+    /// established for `onDocumentEvent`, reused here for `onInvalidated` (pushes are delivered on
+    /// the connection's own reader thread, no isolation promise — see `OfficeWireConnection`'s own
+    /// header).
+    private final class PushCollector: @unchecked Sendable {
+        private let lock = NSLock()
+        private var invalidations: [(seq: UInt64, docId: String, keys: [TileKey])] = []
+        private var tileSeqs: [UInt64] = []
+        func recordInvalidation(seq: UInt64, docId: String, keys: [TileKey]) {
+            lock.lock(); invalidations.append((seq, docId, keys)); lock.unlock()
+        }
+        func recordTile(seq: UInt64) {
+            lock.lock(); tileSeqs.append(seq); lock.unlock()
+        }
+        func invalidationsSnapshot() -> [(seq: UInt64, docId: String, keys: [TileKey])] {
+            lock.lock(); defer { lock.unlock() }; return invalidations
+        }
+        func tileSeqsSnapshot() -> [UInt64] {
+            lock.lock(); defer { lock.unlock() }; return tileSeqs
+        }
+    }
+
+    func testMulticastInvalidationReachesBothSubscribersWithPerConnectionSeqAndCloseByNonOwnerIsRefused() async throws {
+        let stateDir = makeScratchDirectory()
+        let socketPath = stateDir.appendingPathComponent("office.sock").path
+
+        let process = Process()
+        process.executableURL = fixtureExecutableURL()
+        process.arguments = ["--socket-path", socketPath, "--state-path", stateDir.path,
+                              "--token", "t", "--mode", "multicastInvalidate"]
+        try process.run()
+        addTeardownBlock { if process.isRunning { process.terminate() } }
+        let socketAppeared = await waitUntil(timeout: 5.0) { FileManager.default.fileExists(atPath: socketPath) }
+        XCTAssertTrue(socketAppeared)
+
+        let docId = "doc-\(UUID().uuidString.prefix(8))"
+        let rect = OfficeTwipsRect(x: 0, y: 0, width: 5120, height: 5120)
+        let key0 = TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0)
+
+        // Connection A: opens the doc (becomes the OWNER) and subscribes.
+        let connectionA = OfficeWireConnection(socketPath: socketPath)
+        try await connectionA.open()
+        addTeardownBlock { connectionA.close() }
+        try await connectionA.send(.hello(seq: 1, role: .app, token: "t"))
+        guard case .helloOk = await connectionA.nextFrame(timeout: 5.0) else { return XCTFail("A hello failed") }
+        try await connectionA.send(.open(seq: 2, docId: docId, path: "/tmp/whatever-\(docId)"))
+        guard case .opened = await connectionA.nextFrame(timeout: 5.0) else { return XCTFail("A open failed") }
+        try await connectionA.send(.subscribeTiles(seq: 3, docId: docId, part: 0, zoomPPT: 1000, viewportTwips: rect))
+        guard case .subscribed = await connectionA.nextFrame(timeout: 5.0) else { return XCTFail("A subscribe failed") }
+
+        // Connection B: never opens — only subscribes to the doc A already opened.
+        let connectionB = OfficeWireConnection(socketPath: socketPath)
+        try await connectionB.open()
+        addTeardownBlock { connectionB.close() }
+        try await connectionB.send(.hello(seq: 1, role: .app, token: "t"))
+        guard case .helloOk = await connectionB.nextFrame(timeout: 5.0) else { return XCTFail("B hello failed") }
+        try await connectionB.send(.subscribeTiles(seq: 2, docId: docId, part: 0, zoomPPT: 1000, viewportTwips: rect))
+        guard case .subscribed = await connectionB.nextFrame(timeout: 5.0) else { return XCTFail("B subscribe failed") }
+
+        let collectorA = PushCollector()
+        let collectorB = PushCollector()
+        connectionA.onInvalidated = { seq, docId, keys in collectorA.recordInvalidation(seq: seq, docId: docId, keys: keys) }
+        connectionB.onInvalidated = { seq, docId, keys in collectorB.recordInvalidation(seq: seq, docId: docId, keys: keys) }
+        connectionA.onTile = { seq, _, _, _, _, _, _ in collectorA.recordTile(seq: seq) }
+
+        // Step 1: A paints ONE real tile (so the invalidation below has something to bump — an
+        // EMPTY cache has nothing to report; see TileCache.invalidate's own header). "multicastInvalidate"
+        // mode fires its synthetic trigger after EVERY accepted tileRequest, including this one —
+        // and routeDocumentEvent ALWAYS pushes the raw OfficeDocumentEvent to the opener (T3's
+        // original, unconditional contract — preserved even when zero tile keys end up bumped, as
+        // here: the cache is still empty at the moment this first trigger fires). That is A's
+        // allocator's FIRST use (seq 1, .documentEvent, not observed by this test); A's OWN .tile
+        // push for its own request is therefore the allocator's SECOND use — seq 2, not 1.
+        try await connectionA.send(.tileRequest(seq: 4, docId: docId, keys: [key0]))
+        guard case .tileRequestAccepted = await connectionA.nextFrame(timeout: 5.0) else { return XCTFail("A tileRequest not accepted") }
+        let tileArrived = await waitUntil(timeout: 5.0) { !collectorA.tileSeqsSnapshot().isEmpty }
+        XCTAssertTrue(tileArrived, "expected connection A's tileRequest to produce a .tile push before triggering the invalidation")
+        XCTAssertEqual(collectorA.tileSeqsSnapshot(), [2],
+            "A's push allocator: seq 1 was the raw documentEvent push from this same trigger (unobserved by this test, "
+            + "onDocumentEvent not wired up); this .tile push is the allocator's 2nd mint, not its 1st")
+
+        // Step 2: B sends an EMPTY tileRequest — a legal, already wire-tested shape
+        // (OfficeWireCodecTests) — purely to trigger this fixture mode's synthetic invalidation
+        // AFTER both connections are confirmed subscribed.
+        try await connectionB.send(.tileRequest(seq: 3, docId: docId, keys: []))
+        guard case .tileRequestAccepted = await connectionB.nextFrame(timeout: 5.0) else { return XCTFail("B tileRequest not accepted") }
+
+        let bothReceived = await waitUntil(timeout: 5.0) {
+            !collectorA.invalidationsSnapshot().isEmpty && !collectorB.invalidationsSnapshot().isEmpty
+        }
+        XCTAssertTrue(bothReceived, "both subscribers must receive the invalidated push (multicast)")
+
+        let pushA = try XCTUnwrap(collectorA.invalidationsSnapshot().first)
+        let pushB = try XCTUnwrap(collectorB.invalidationsSnapshot().first)
+        XCTAssertEqual(pushA.docId, docId)
+        XCTAssertEqual(pushB.docId, docId)
+        XCTAssertEqual(Set(pushA.keys), [key0], "the bumped key set must be the one real tile that was painted")
+        XCTAssertEqual(Set(pushB.keys), [key0])
+
+        // F8: the seq is per-CONNECTION, never a shared server-wide counter, for the IDENTICAL
+        // logical event delivered to both. A's own allocator has now minted seq 1 (its own raw
+        // documentEvent push from step 1's trigger) and seq 2 (its own .tile push) — this
+        // .invalidated push is A's allocator's 3rd mint (seq 3) plus the raw documentEvent push
+        // THIS trigger ALSO sends to the opener first (seq 4 would be next... concretely: this
+        // trigger mints seq 3 for A's own raw documentEvent, then seq 4 for A's .invalidated
+        // multicast copy). B's connection has never minted a push before this exact moment, so B's
+        // is its allocator's FIRST-EVER mint (seq 1) — proof the two connections' allocators are
+        // independent, not a shared server-wide counter (which could never produce "B's first push
+        // is seq 1" this late into A's own, much longer, push history if it were shared).
+        XCTAssertEqual(pushA.seq, 4, "A's 4th push overall (2 earlier .documentEvent/.tile pushes, then this trigger's own opener-documentEvent, then this multicast copy)")
+        XCTAssertEqual(pushB.seq, 1, "B's first-ever push on its OWN independent allocator")
+
+        // Close attempts.
+        try await connectionB.send(.close(seq: 10, docId: docId))
+        guard case .error(_, let reasonB) = await connectionB.nextFrame(timeout: 5.0) else {
+            return XCTFail("expected B's close to be refused")
+        }
+        XCTAssertEqual(reasonB, "notOwner", "F7: a non-owner connection may not close a doc it did not open")
+
+        try await connectionA.send(.close(seq: 11, docId: docId))
+        guard case .closed = await connectionA.nextFrame(timeout: 5.0) else {
+            return XCTFail("expected A (the real owner) to close successfully")
+        }
     }
 }
