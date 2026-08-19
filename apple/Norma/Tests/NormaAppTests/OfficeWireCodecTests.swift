@@ -35,6 +35,26 @@ final class OfficeWireCodecTests: XCTestCase {
             .documentEvent(seq: 17, docId: "doc-1", event: .modifiedChanged(true)),
             .documentEvent(seq: 18, docId: "doc-1", event: .modifiedChanged(false)),
             .documentEvent(seq: 19, docId: "doc-1", event: .closed),
+            // Task 4 — tile pipeline frames.
+            .subscribeTiles(seq: 20, docId: "doc-1", part: 0, zoomPPT: 1000,
+                             viewportTwips: OfficeTwipsRect(x: 0, y: 0, width: 10240, height: 5120)),
+            .unsubscribe(seq: 21, docId: "doc-1"),
+            .tileRequest(seq: 22, docId: "doc-1", keys: [
+                TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0),
+                TileKey(part: 0, zoomPPT: 1000, tileX: 1, tileY: 0),
+            ]),
+            .tileRequest(seq: 23, docId: "doc-1", keys: []), // an empty key list is a legal (if pointless) request
+            .subscribed(seq: 24, docId: "doc-1", keys: [TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0)]),
+            .unsubscribed(seq: 25, docId: "doc-1"),
+            .tileRequestAccepted(seq: 26, docId: "doc-1"),
+            .tile(seq: 27, docId: "doc-1", key: TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0),
+                  generation: 0, width: 512, height: 512, pixelsBase64: "AAAA"),
+            .tileFailed(seq: 28, docId: "doc-1", key: TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0),
+                        reason: "docNotOpen"),
+            .invalidated(seq: 29, docId: "doc-1", keys: [
+                TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0),
+                TileKey(part: 1, zoomPPT: 2000, tileX: -3, tileY: 7), // negative index + a second part/zoom
+            ]),
         ]
         for frame in samples {
             let line = try XCTUnwrap(String(data: frame.encodedLine(), encoding: .utf8))
@@ -60,6 +80,15 @@ final class OfficeWireCodecTests: XCTestCase {
             "closed": #"{"type":"closed","seq":1,"docId":"d"}"#,
             "error": #"{"type":"error","seq":1,"reason":"r"}"#,
             "documentEvent": #"{"type":"documentEvent","seq":1,"docId":"d","kind":"closed"}"#,
+            "subscribeTiles": #"{"type":"subscribeTiles","seq":1,"docId":"d","part":0,"zoomPPT":1000,"viewportTwips":{"x":0,"y":0,"width":1,"height":1}}"#,
+            "unsubscribe": #"{"type":"unsubscribe","seq":1,"docId":"d"}"#,
+            "tileRequest": #"{"type":"tileRequest","seq":1,"docId":"d","keys":[]}"#,
+            "subscribed": #"{"type":"subscribed","seq":1,"docId":"d","keys":[]}"#,
+            "unsubscribed": #"{"type":"unsubscribed","seq":1,"docId":"d"}"#,
+            "tileRequestAccepted": #"{"type":"tileRequestAccepted","seq":1,"docId":"d"}"#,
+            "tile": #"{"type":"tile","seq":1,"docId":"d","key":{"part":0,"zoomPPT":1000,"tileX":0,"tileY":0},"generation":0,"width":512,"height":512,"pixelsBase64":""}"#,
+            "tileFailed": #"{"type":"tileFailed","seq":1,"docId":"d","key":{"part":0,"zoomPPT":1000,"tileX":0,"tileY":0},"reason":"r"}"#,
+            "invalidated": #"{"type":"invalidated","seq":1,"docId":"d","keys":[]}"#,
         ]
         XCTAssertEqual(Set(fixtures.keys), Set(OfficeWireFrame.wireTypes),
                        "fixtures must cover exactly OfficeWireFrame.wireTypes, no more, no less")
@@ -86,6 +115,17 @@ final class OfficeWireCodecTests: XCTestCase {
         XCTAssertEqual(OfficeWireFrame.closed(seq: 109, docId: "d").seq, 109)
         XCTAssertEqual(OfficeWireFrame.error(seq: 110, reason: "r").seq, 110)
         XCTAssertEqual(OfficeWireFrame.documentEvent(seq: 111, docId: "d", event: .closed).seq, 111)
+        let rect = OfficeTwipsRect(x: 0, y: 0, width: 1, height: 1)
+        let tileKey = TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0)
+        XCTAssertEqual(OfficeWireFrame.subscribeTiles(seq: 112, docId: "d", part: 0, zoomPPT: 1000, viewportTwips: rect).seq, 112)
+        XCTAssertEqual(OfficeWireFrame.unsubscribe(seq: 113, docId: "d").seq, 113)
+        XCTAssertEqual(OfficeWireFrame.tileRequest(seq: 114, docId: "d", keys: []).seq, 114)
+        XCTAssertEqual(OfficeWireFrame.subscribed(seq: 115, docId: "d", keys: []).seq, 115)
+        XCTAssertEqual(OfficeWireFrame.unsubscribed(seq: 116, docId: "d").seq, 116)
+        XCTAssertEqual(OfficeWireFrame.tileRequestAccepted(seq: 117, docId: "d").seq, 117)
+        XCTAssertEqual(OfficeWireFrame.tile(seq: 118, docId: "d", key: tileKey, generation: 0, width: 512, height: 512, pixelsBase64: "").seq, 118)
+        XCTAssertEqual(OfficeWireFrame.tileFailed(seq: 119, docId: "d", key: tileKey, reason: "r").seq, 119)
+        XCTAssertEqual(OfficeWireFrame.invalidated(seq: 120, docId: "d", keys: []).seq, 120)
     }
 
     // MARK: - The brief's literal pin: unknown type -> error{seq,reason:"unknown"}
@@ -141,6 +181,31 @@ final class OfficeWireCodecTests: XCTestCase {
             #"{"type":"documentEvent","seq":1,"docId":"d","kind":"modifiedChanged"}"#, // missing "modified"
             #"{"type":"documentEvent","seq":1,"docId":"d","kind":"modifiedChanged","modified":1}"#, // NSNumber-boolean trap, inverted
             #"{"type":"documentEvent","seq":1,"kind":"closed"}"#,                     // missing docId (frame-level)
+        ]
+        for line in lines {
+            switch OfficeWireCodec.decodeInbound(line) {
+            case .rejected(let seq, let reason):
+                XCTAssertEqual(seq, 1)
+                XCTAssertEqual(reason, "malformed", "expected malformed for: \(line)")
+            case .frame, .unreadable:
+                XCTFail("expected .rejected(seq: 1, reason: \"malformed\") for: \(line)")
+            }
+        }
+    }
+
+    /// Task 4 — every new tile-frame shape rejects a missing/malformed field as "malformed" (never
+    /// silently substitutes a default) with the real seq recovered, matching the existing frames'
+    /// own discipline exactly.
+    func testTileFrameMalformedShapesAreRejected() {
+        let lines = [
+            #"{"type":"subscribeTiles","seq":1,"docId":"d","part":0,"zoomPPT":1000}"#,           // missing viewportTwips
+            #"{"type":"subscribeTiles","seq":1,"docId":"d","part":0,"zoomPPT":1000,"viewportTwips":{"x":0,"y":0,"width":1}}"#, // rect missing height
+            #"{"type":"tileRequest","seq":1,"docId":"d"}"#,                                       // missing keys
+            #"{"type":"tileRequest","seq":1,"docId":"d","keys":[{"part":0,"zoomPPT":1000,"tileX":0}]}"#, // key missing tileY
+            #"{"type":"tile","seq":1,"docId":"d","key":{"part":0,"zoomPPT":1000,"tileX":0,"tileY":0},"generation":0,"width":512,"pixelsBase64":""}"#, // missing height
+            #"{"type":"tile","seq":1,"docId":"d","key":{"part":0,"zoomPPT":1000,"tileX":0,"tileY":0},"generation":0,"width":512,"height":512}"#, // missing pixelsBase64
+            #"{"type":"tileFailed","seq":1,"docId":"d","key":{"part":0,"zoomPPT":1000,"tileX":0,"tileY":0}}"#, // missing reason
+            #"{"type":"invalidated","seq":1,"docId":"d"}"#,                                        // missing keys
         ]
         for line in lines {
             switch OfficeWireCodec.decodeInbound(line) {

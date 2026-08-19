@@ -69,6 +69,28 @@ public enum OfficeWireFrame: Equatable, Sendable {
     /// destroy or it doesn't; either way "not open anymore" is true after this).
     case close(seq: UInt64, docId: String)
 
+    /// Task 4 — registers this connection as a tile-push subscriber for `docId` (must already be
+    /// open — by ANY connection, not necessarily this one; see `OfficeHelperServer`'s multicast
+    /// seam) and reports the tile-set the CURRENT viewport needs, computed via
+    /// `TileMath.viewportTileKeys` — bookkeeping only, no painting happens here (the app decides
+    /// what to `tileRequest`, lazily, per the brief's own "app re-requests lazily"). Re-subscribing
+    /// (same connection, same or a different viewport) is idempotent: it just recomputes and
+    /// re-reports the key list; it does not duplicate this connection in the doc's subscriber list.
+    case subscribeTiles(seq: UInt64, docId: String, part: Int, zoomPPT: Int, viewportTwips: OfficeTwipsRect)
+    /// Task 4 — the inverse of `subscribeTiles`: this connection stops receiving `invalidated`
+    /// pushes for `docId`. Independent of `open`/`close` — a connection may unsubscribe from tile
+    /// pushes while keeping (or not owning) the document open, and closing a document implicitly
+    /// drops every subscriber (including the owner) without a separate `unsubscribe` needed.
+    case unsubscribe(seq: UInt64, docId: String)
+    /// Task 4 — asks for pixel data for specific tile coordinates. Answered in two stages: an
+    /// immediate `tileRequestAccepted`/`error` reply (this frame's own `seq`), then EACH key's
+    /// pixels stream separately as `tile`/`tileFailed` PUSHES (helper-minted seq) as they finish
+    /// painting on the LOK thread — painting takes real, sometimes-slow time, so it is never made
+    /// to block this request's own reply. Does not require an active `subscribeTiles` — a
+    /// connection may fetch specific tiles without being a standing subscriber, though in practice
+    /// every Stage-A caller subscribes first to learn which keys exist.
+    case tileRequest(seq: UInt64, docId: String, keys: [TileKey])
+
     // MARK: Responses (helper -> client)
 
     /// `hello` succeeded: `token` matched. `lokVersion` is now (Task 3) the REAL
@@ -123,13 +145,58 @@ public enum OfficeWireFrame: Equatable, Sendable {
     /// layer separate the two streams without knowing anything about outstanding request seqs.
     case documentEvent(seq: UInt64, docId: String, event: OfficeDocumentEvent)
 
+    /// Task 4 — answers `subscribeTiles`: the tile-set the requested viewport currently needs
+    /// (`TileMath.viewportTileKeys`, computed at request time — not cached against a future
+    /// viewport change; the caller re-`subscribeTiles`s whenever its own viewport moves enough to
+    /// matter, same "app decides, lazily" posture as tile fetching itself).
+    case subscribed(seq: UInt64, docId: String, keys: [TileKey])
+    /// Answers `unsubscribe`.
+    case unsubscribed(seq: UInt64, docId: String)
+    /// Answers `tileRequest`: the request itself was well-formed and `docId` is open — NOT a claim
+    /// that every key will succeed; each key's own outcome arrives later as a `tile`/`tileFailed`
+    /// push. A malformed request or an unopened `docId` gets `error{seq,reason}` instead of this.
+    case tileRequestAccepted(seq: UInt64, docId: String)
+    /// Task 4 — one tile's pixel payload, PUSHED (never a direct reply — see `tileRequest`'s own
+    /// header) in response to a `tileRequest` that named this `key`. `seq` is minted by the
+    /// receiving CONNECTION's own `OfficeWireSeqAllocator` (F8, T3 review: moved from a single
+    /// server-wide allocator to one-per-`ConnectionWriter`, matching this doc comment's own
+    /// original claim — see `OfficeHelperServer.ConnectionWriter`). `width`/`height` are always
+    /// `TileMath.tilePixelSize` today but are sent explicitly rather than assumed, so a future
+    /// change to that constant on one side alone cannot silently misinterpret the other side's
+    /// pixel buffer. `pixelsBase64` is the chosen transport realization (rung 1 of the
+    /// surface-transport decision — see task-4-report.md): the raw RGBA buffer, base64-encoded,
+    /// inside the SAME NDJSON line every other frame in this file already uses — zero framing
+    /// changes, reusing 100% of the existing line-buffered read/decode path on both ends (proven
+    /// safe for large single lines by `OfficeWireConnection.ingest`'s own amortized-linear buffer
+    /// scan, fixed alongside this frame's own landing).
+    case tile(seq: UInt64, docId: String, key: TileKey, generation: Int, width: Int, height: Int, pixelsBase64: String)
+    /// The failure counterpart to `tile` — refuse-never-ignore extended to the per-key granularity
+    /// `tileRequest` introduces: every key named in an accepted `tileRequest` gets EITHER a `tile`
+    /// OR a `tileFailed` push, never silence, even though the request itself already succeeded.
+    case tileFailed(seq: UInt64, docId: String, key: TileKey, reason: String)
+    /// Task 4 — pushed to every current subscriber of `docId` (the multicast fan-out —
+    /// `OfficeHelperServer`'s `DocEntry.connections`) whenever a real invalidation bumps one or
+    /// more cached tile generations (`TileCache.invalidate`'s return value, translated 1:1 into
+    /// this frame's `keys`). Deliberately NOT scoped to any one subscriber's own last-known
+    /// viewport — the helper reports every bumped key regardless of who currently cares, and each
+    /// subscriber filters locally against its own active tile-set (the same "app decides, lazily"
+    /// posture `tileRequest` already has) rather than the server tracking per-connection viewports
+    /// on an ongoing basis. Shares its base name with `OfficeDocumentEvent.invalidated` by design.
+    /// (matching this file's own established precedent of `OfficeWireFrame.opened`/`closed`
+    /// sharing names with their `OfficeDocumentEvent` counterparts) — the two are DIFFERENT wire
+    /// shapes serving different purposes: `OfficeDocumentEvent.invalidated` carries LOK's raw,
+    /// untranslated rects/part (unchanged since Task 3); THIS case carries the already-computed
+    /// tile coordinates those rects touched. Both are sent — see `OfficeHelperServer.routeDocumentEvent`.
+    case invalidated(seq: UInt64, docId: String, keys: [TileKey])
+
     /// The wire vocabulary, in frame-declaration order. A test walks this list the same way
     /// `EditorBridgeInbound.wireTypes`'s own test does — one fixture per name, decode, assert the
     /// case names itself the same way — so this array and `decode`/`wireType` cannot drift apart
     /// unnoticed.
     public static let wireTypes: [String] = [
-        "hello", "ping", "open", "close",
+        "hello", "ping", "open", "close", "subscribeTiles", "unsubscribe", "tileRequest",
         "helloOk", "refused", "pong", "opened", "openFailed", "closed", "error", "documentEvent",
+        "subscribed", "unsubscribed", "tileRequestAccepted", "tile", "tileFailed", "invalidated",
     ]
 
     public var wireType: String {
@@ -138,6 +205,9 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .ping: return "ping"
         case .open: return "open"
         case .close: return "close"
+        case .subscribeTiles: return "subscribeTiles"
+        case .unsubscribe: return "unsubscribe"
+        case .tileRequest: return "tileRequest"
         case .helloOk: return "helloOk"
         case .refused: return "refused"
         case .pong: return "pong"
@@ -146,6 +216,12 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .closed: return "closed"
         case .error: return "error"
         case .documentEvent: return "documentEvent"
+        case .subscribed: return "subscribed"
+        case .unsubscribed: return "unsubscribed"
+        case .tileRequestAccepted: return "tileRequestAccepted"
+        case .tile: return "tile"
+        case .tileFailed: return "tileFailed"
+        case .invalidated: return "invalidated"
         }
     }
 
@@ -155,6 +231,9 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .ping(let seq): return seq
         case .open(let seq, _, _): return seq
         case .close(let seq, _): return seq
+        case .subscribeTiles(let seq, _, _, _, _): return seq
+        case .unsubscribe(let seq, _): return seq
+        case .tileRequest(let seq, _, _): return seq
         case .helloOk(let seq, _): return seq
         case .refused(let seq, _): return seq
         case .pong(let seq): return seq
@@ -163,6 +242,12 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .closed(let seq, _): return seq
         case .error(let seq, _): return seq
         case .documentEvent(let seq, _, _): return seq
+        case .subscribed(let seq, _, _): return seq
+        case .unsubscribed(let seq, _): return seq
+        case .tileRequestAccepted(let seq, _): return seq
+        case .tile(let seq, _, _, _, _, _, _): return seq
+        case .tileFailed(let seq, _, _, _): return seq
+        case .invalidated(let seq, _, _): return seq
         }
     }
 
@@ -198,6 +283,30 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .documentEvent(_, let docId, let event):
             payload["docId"] = docId
             for (key, value) in event.encodedFields() { payload[key] = value }
+        case .subscribeTiles(_, let docId, let part, let zoomPPT, let viewportTwips):
+            payload["docId"] = docId
+            payload["part"] = part
+            payload["zoomPPT"] = zoomPPT
+            payload["viewportTwips"] = Self.encodeRect(viewportTwips)
+        case .unsubscribe(_, let docId), .unsubscribed(_, let docId), .tileRequestAccepted(_, let docId):
+            payload["docId"] = docId
+        case .tileRequest(_, let docId, let keys):
+            payload["docId"] = docId
+            payload["keys"] = keys.map { $0.jsonObject() }
+        case .subscribed(_, let docId, let keys), .invalidated(_, let docId, let keys):
+            payload["docId"] = docId
+            payload["keys"] = keys.map { $0.jsonObject() }
+        case .tile(_, let docId, let key, let generation, let width, let height, let pixelsBase64):
+            payload["docId"] = docId
+            payload["key"] = key.jsonObject()
+            payload["generation"] = generation
+            payload["width"] = width
+            payload["height"] = height
+            payload["pixelsBase64"] = pixelsBase64
+        case .tileFailed(_, let docId, let key, let reason):
+            payload["docId"] = docId
+            payload["key"] = key.jsonObject()
+            payload["reason"] = reason
         }
         let line: String
         if let json = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),
@@ -218,6 +327,32 @@ public enum OfficeWireFrame: Equatable, Sendable {
     public static func decode(_ line: String) -> OfficeWireFrame? {
         if case .frame(let frame) = OfficeWireCodec.decodeInbound(line) { return frame }
         return nil
+    }
+
+    // MARK: - Task 4 shared field encoders (rects, tile-key arrays)
+
+    static func encodeRect(_ rect: OfficeTwipsRect) -> [String: Any] {
+        ["x": rect.x, "y": rect.y, "width": rect.width, "height": rect.height]
+    }
+
+    static func decodeRect(_ object: Any?) -> OfficeTwipsRect? {
+        guard let dict = object as? [String: Any],
+              let x = int64Value(dict["x"]), let y = int64Value(dict["y"]),
+              let width = int64Value(dict["width"]), let height = int64Value(dict["height"]) else {
+            return nil
+        }
+        return OfficeTwipsRect(x: x, y: y, width: width, height: height)
+    }
+
+    static func decodeTileKeys(_ object: Any?) -> [TileKey]? {
+        guard let array = object as? [[String: Any]] else { return nil }
+        var keys: [TileKey] = []
+        keys.reserveCapacity(array.count)
+        for item in array {
+            guard let key = TileKey.decode(item) else { return nil }
+            keys.append(key)
+        }
+        return keys
     }
 }
 
@@ -553,6 +688,63 @@ public enum OfficeWireCodec {
                 return .rejected(seq: seq, reason: "malformed")
             }
             return .frame(.documentEvent(seq: seq, docId: docId, event: event))
+        case "subscribeTiles":
+            guard let docId = object["docId"] as? String,
+                  let part = intValue(object["part"]), let zoomPPT = intValue(object["zoomPPT"]),
+                  let viewportTwips = OfficeWireFrame.decodeRect(object["viewportTwips"]) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.subscribeTiles(seq: seq, docId: docId, part: part, zoomPPT: zoomPPT, viewportTwips: viewportTwips))
+        case "unsubscribe":
+            guard let docId = object["docId"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.unsubscribe(seq: seq, docId: docId))
+        case "tileRequest":
+            guard let docId = object["docId"] as? String,
+                  let keys = OfficeWireFrame.decodeTileKeys(object["keys"]) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.tileRequest(seq: seq, docId: docId, keys: keys))
+        case "subscribed":
+            guard let docId = object["docId"] as? String,
+                  let keys = OfficeWireFrame.decodeTileKeys(object["keys"]) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.subscribed(seq: seq, docId: docId, keys: keys))
+        case "unsubscribed":
+            guard let docId = object["docId"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.unsubscribed(seq: seq, docId: docId))
+        case "tileRequestAccepted":
+            guard let docId = object["docId"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.tileRequestAccepted(seq: seq, docId: docId))
+        case "tile":
+            guard let docId = object["docId"] as? String,
+                  let key = TileKey.decode(object["key"] as? [String: Any] ?? [:]),
+                  let generation = intValue(object["generation"]),
+                  let width = intValue(object["width"]), let height = intValue(object["height"]),
+                  let pixelsBase64 = object["pixelsBase64"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.tile(seq: seq, docId: docId, key: key, generation: generation,
+                                 width: width, height: height, pixelsBase64: pixelsBase64))
+        case "tileFailed":
+            guard let docId = object["docId"] as? String,
+                  let key = TileKey.decode(object["key"] as? [String: Any] ?? [:]),
+                  let reason = object["reason"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.tileFailed(seq: seq, docId: docId, key: key, reason: reason))
+        case "invalidated":
+            guard let docId = object["docId"] as? String,
+                  let keys = OfficeWireFrame.decodeTileKeys(object["keys"]) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.invalidated(seq: seq, docId: docId, keys: keys))
         default:
             // The type itself is unrecognized — the brief's exact case: error{seq,reason:"unknown"}.
             return .rejected(seq: seq, reason: "unknown")
