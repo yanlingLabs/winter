@@ -1,5 +1,13 @@
 import Foundation
 
+// Fix round 1, M1 — ignore SIGPIPE process-wide, as the very first thing this process does. See
+// NormaOfficeHelper's own main.swift for the full rationale (write() to a peer that already closed
+// its read side delivers SIGPIPE, whose DEFAULT disposition terminates the process before write()
+// can return -1 at all). This fixture links NO LibreOffice code, so unlike the real helper it has
+// had ZERO incidental protection against exactly that — this line is the only thing standing
+// between a stalled/dead test connection and a crash here.
+signal(SIGPIPE, SIG_IGN)
+
 // NormaOfficeHelperFixture — test-only spawnable stand-in for NormaOfficeHelper, used by
 // OfficeSupervisorTests. NOT part of the shipping app (it lives under Tests/, not Sources/, and
 // is only added to the test-facing build list in project.yml — see the "Fixture" target).

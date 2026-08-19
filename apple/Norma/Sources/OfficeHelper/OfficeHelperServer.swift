@@ -213,7 +213,6 @@ public final class OfficeHelperServer {
     /// is this connection's own subset of `docOwner`'s keys, so connection teardown can close
     /// exactly the documents IT opened without scanning the whole table.
     private final class ConnectionWriter {
-        let id: Int
         let fd: Int32
         let writeLock = NSLock()
         var ownedDocIds: Set<String> = []
@@ -227,8 +226,7 @@ public final class OfficeHelperServer {
         /// reason. One allocator per connection keeps each connection's own push-seq stream dense,
         /// matching how the client mints request seqs the same way.
         let pushSeqAllocator = OfficeWireSeqAllocator()
-        init(id: Int, fd: Int32) {
-            self.id = id
+        init(fd: Int32) {
             self.fd = fd
         }
     }
@@ -334,6 +332,21 @@ public final class OfficeHelperServer {
     /// fd — every async-push call site (`routeDocumentEvent`, `tileRequest`'s per-key pushes,
     /// close-notification pushes to remaining subscribers) shares this instead of re-deriving the
     /// lock/writeAll/unlock sequence each time.
+    ///
+    /// **KNOWN HAZARD, named but NOT fixed this round (fix round 1, I2 — bounded on purpose, a real
+    /// redesign is deferred to a task scoped against T6's actual client behavior)**: `writeAll`
+    /// below is a BLOCKING socket write under `writer.writeLock`. `routeDocumentEvent` — this
+    /// function's own biggest caller — runs on `LOKBridge`'s dedicated thread (synchronously,
+    /// reached from inside a real LOK callback; see that function's own header). Task 4 made this
+    /// reachable with real, large (up to ~1.4MB base64-encoded) payloads for the first time
+    /// (`.tile` pushes). A CLIENT that is suspended, or reading slowly, mid-receive of one such
+    /// push leaves this `write()` blocked indefinitely — which blocks `LOKBridge`'s ONE dedicated
+    /// thread, which is the SOLE executor of every LOK call for every open document on every
+    /// connection this helper serves (`LOKDedicatedThread`'s own single-thread rule). One stalled
+    /// client can therefore wedge every open/close/paint for every OTHER connection too, not just
+    /// its own. The real fix is either a non-blocking write or a bounded per-connection push queue
+    /// (decouple "LOK produced this frame" from "the socket accepted these bytes") — deliberately
+    /// NOT designed here; carried in the fix-round ledger (task-4-report.md) for a future round.
     private func pushFrame(_ frame: OfficeWireFrame, to writer: ConnectionWriter) {
         writer.writeLock.lock()
         writeAll(frame.encodedLine(), fd: writer.fd)
@@ -420,7 +433,7 @@ public final class OfficeHelperServer {
                 return nextConnectionId
             }
             let connectionThread = Thread { [weak self] in
-                self?.handleConnection(fd: clientFD, id: connectionId)
+                self?.handleConnection(fd: clientFD)
             }
             connectionThread.name = "office-helper.conn.\(connectionId)"
             connectionThread.start()
@@ -429,8 +442,8 @@ public final class OfficeHelperServer {
 
     // MARK: - Per-connection handling
 
-    private func handleConnection(fd: Int32, id: Int) {
-        let writer = ConnectionWriter(id: id, fd: fd)
+    private func handleConnection(fd: Int32) {
+        let writer = ConnectionWriter(fd: fd)
         defer {
             close(fd)
             // Task 3: a connection that disconnects without explicitly closing its documents
@@ -616,6 +629,22 @@ public final class OfficeHelperServer {
                 writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
                 return
             }
+            // Fix round 1, I1 — validated BEFORE the subscriber-list mutation below (a reviewer
+            // finding, not just belt-and-suspenders): a refused subscribe must leave no
+            // subscription behind. `viewportTwips`/`zoomPPT` arrive over the wire with no magnitude
+            // limit; a reviewer transcribed and RAN inputs here that trapped the helper (SIGTRAP)
+            // through `TileMath`'s then-unchecked arithmetic, and a separate, non-trapping huge-
+            // viewport input that would OOM/stall building one absurd NDJSON reply line. Both
+            // checks below are pure and cheap — see their own doc comments in `TileMath.swift` for
+            // exactly which traps each one closes.
+            guard TileMath.isZoomPPTValid(zoomPPT) else {
+                writeReply(.error(seq: seq, reason: "zoomPPTOutOfRange"), writer: writer)
+                return
+            }
+            guard TileMath.estimatedTileCount(rectTwips: viewportTwips, zoomPPT: zoomPPT) != nil else {
+                writeReply(.error(seq: seq, reason: "viewportTooLarge"), writer: writer)
+                return
+            }
             stateQueue.sync {
                 guard let entry = docOwner[docId] else { return } // could have raced closed; harmless no-op
                 if !entry.subscribers.contains(where: { $0 === writer }) {
@@ -684,6 +713,22 @@ public final class OfficeHelperServer {
     /// make a partial write plausible for the first time. A real write ERROR (EPIPE, ECONNRESET,
     /// ...) stops here rather than looping forever — the read loop's next `read()` will observe the
     /// closed connection and return on its own.
+    ///
+    /// **Corrected, fix round 1, M1**: the previous version of this comment implied `errno ==
+    /// EPIPE` handling here was what protected this process from a write to a peer that already
+    /// closed its read side. A reviewer traced this precisely: writing to such a socket delivers
+    /// `SIGPIPE`, and that signal's DEFAULT disposition TERMINATES the process outright, before
+    /// `write()` ever gets a chance to return `-1` to this function at all — a bare Swift process
+    /// confirmed to die this way. What ACTUALLY protected every write here, this whole time, is
+    /// that the vendored LibreOffice library installs `SIG_IGN` for `SIGPIPE` as an incidental side
+    /// effect of its own C++ runtime init (inside `lok_init_2`, `LOKBridge`'s job) — never something
+    /// THIS file arranged, and a version bump of that vendored library could silently remove it.
+    /// `NormaOfficeHelperFixture` links no LibreOffice code at all and had ZERO such protection.
+    /// Both `main.swift` entry points now call `signal(SIGPIPE, SIG_IGN)` explicitly, as the first
+    /// thing they do, making this a deliberate guarantee of THIS codebase rather than an accident
+    /// of a dependency — see either file's own comment. `EPIPE` is only ever OBSERVABLE by the
+    /// `errno == EPIPE` reasoning this function's own error handling already assumed BECAUSE that
+    /// signal is now (and was, incidentally, for the real helper) ignored process-wide.
     private func writeAll(_ data: Data, fd: Int32) {
         data.withUnsafeBytes { raw in
             var offset = 0

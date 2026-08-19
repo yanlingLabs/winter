@@ -940,6 +940,106 @@ final class OfficeHelperLiveTests: XCTestCase {
         try await helper.client.close(docId: docId)
     }
 
+    // MARK: - Fix round 1: the helper survives hostile wire-supplied tile geometry
+    //
+    // A reviewer transcribed and RAN three concrete inputs against the pre-fix code that trapped
+    // the real helper process (SIGTRAP, exit 133) — killing every open document on every
+    // connection, not just the offending request. These three tests drive the SAME class of input
+    // over the REAL wire against the REAL live helper (not the fixture — the fixture's synthetic
+    // bridge never touched the overflowing arithmetic to begin with) and assert a refusal FRAME,
+    // never a crash — then prove the helper is still alive and answering by pinging it afterward,
+    // which is the actual invariant this whole fix round exists to restore.
+
+    /// Trap #1 (`indexRange`'s old unchecked `origin + length - 1`) driven through `subscribeTiles`:
+    /// a viewport whose `x` sits 5 twips short of `Int64.max`, so adding even a tiny `width`
+    /// overflows the arithmetic the OLD code used to compute which tiles it covers.
+    func testHostileSubscribeTilesViewportOverflowIsRefusedAndTheHelperSurvives() async throws {
+        try skipUnlessVendorPresent()
+        let helper = try await spawnLiveHelper()
+        let docId = UUID().uuidString
+        _ = try await helper.client.open(docId: docId, path: Self.fixturesRoot.appendingPathComponent("gate.xlsx").path)
+
+        let hostileViewport = OfficeTwipsRect(x: Int64.max - 5, y: 0, width: 100, height: 5120)
+        do {
+            _ = try await helper.client.subscribeTiles(docId: docId, part: 0, zoomPPT: 1000, viewportTwips: hostileViewport)
+            XCTFail("expected a server refusal for an overflowing viewport, got a successful subscribe")
+        } catch OfficeHelperClientError.serverError(let reason) {
+            XCTAssertEqual(reason, "viewportTooLarge")
+        }
+
+        // The actual invariant this fix round restores: the helper is STILL ALIVE and answering —
+        // a SIGTRAP here would have taken the whole process down, and this `ping` would either hang
+        // (dead peer) or the connection would already be closed.
+        try await helper.client.ping()
+        try await helper.client.close(docId: docId)
+    }
+
+    /// Trap #2's NON-trapping variant (the reviewer's own "38 billion keys" measurement): a
+    /// REPRESENTABLE-but-huge viewport — every intermediate count is a valid, non-overflowing
+    /// Int64 value, so this is refused purely for exceeding `TileMath.maxTilesPerRectEnumeration`,
+    /// distinctly from the overflow case above (see `TileMathTests.testEstimatedTileCountAllFour
+    /// Outcomes` for the pure-math proof these are different code paths). Without the cap, this
+    /// would attempt to enumerate roughly 1e14 tile keys building the `subscribed` reply.
+    func testHugeButRepresentableViewportIsCappedNotEnumeratedAndTheHelperSurvives() async throws {
+        try skipUnlessVendorPresent()
+        let helper = try await spawnLiveHelper()
+        let docId = UUID().uuidString
+        _ = try await helper.client.open(docId: docId, path: Self.fixturesRoot.appendingPathComponent("gate.xlsx").path)
+
+        let hugeViewport = OfficeTwipsRect(x: 0, y: 0, width: 5120 * 10_000_000, height: 5120 * 10_000_000)
+        do {
+            _ = try await helper.client.subscribeTiles(docId: docId, part: 0, zoomPPT: 1000, viewportTwips: hugeViewport)
+            XCTFail("expected a server refusal for a huge viewport, got a successful subscribe")
+        } catch OfficeHelperClientError.serverError(let reason) {
+            XCTAssertEqual(reason, "viewportTooLarge")
+        }
+
+        try await helper.client.ping()
+        try await helper.client.close(docId: docId)
+    }
+
+    /// Trap #3 (`tileBoundsTwips`'s old unchecked `Int64(tileX) * span`) driven through
+    /// `tileRequest`: ONE hostile key (`tileX: Int.max`) mixed into a batch alongside one normal
+    /// key. The whole REQUEST is still accepted (`tileRequestAccepted`) — refusal happens per-key,
+    /// matching this protocol's existing `.tile`/`.tileFailed` granularity, not a whole-batch
+    /// rejection — so the normal key paints successfully while the hostile one fails cleanly.
+    func testHostileTileRequestKeyFailsThatKeyAloneAndTheHelperSurvives() async throws {
+        try skipUnlessVendorPresent()
+        let helper = try await spawnLiveHelper()
+        let docId = UUID().uuidString
+        _ = try await helper.client.open(docId: docId, path: Self.fixturesRoot.appendingPathComponent("gate.xlsx").path)
+
+        final class Outcomes: @unchecked Sendable {
+            let lock = NSLock()
+            var succeeded: [TileKey] = []
+            var failed: [(TileKey, String)] = []
+            func recordTile(_ key: TileKey) { lock.lock(); succeeded.append(key); lock.unlock() }
+            func recordFailure(_ key: TileKey, _ reason: String) { lock.lock(); failed.append((key, reason)); lock.unlock() }
+            func snapshot() -> (succeeded: [TileKey], failed: [(TileKey, String)]) {
+                lock.lock(); defer { lock.unlock() }; return (succeeded, failed)
+            }
+        }
+        let outcomes = Outcomes()
+        helper.client.onTile = { _, _, key, _, _, _, _ in outcomes.recordTile(key) }
+        helper.client.onTileFailed = { _, _, key, reason in outcomes.recordFailure(key, reason) }
+
+        let normalKey = TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0)
+        let hostileKey = TileKey(part: 0, zoomPPT: 1000, tileX: Int.max, tileY: 0)
+        try await helper.client.requestTiles(docId: docId, keys: [normalKey, hostileKey])
+
+        let bothArrived = await waitUntil(timeout: 10.0) {
+            let snapshot = outcomes.snapshot()
+            return snapshot.succeeded.count >= 1 && snapshot.failed.count >= 1
+        }
+        XCTAssertTrue(bothArrived, "expected exactly one .tile push and one .tileFailed push")
+        let final = outcomes.snapshot()
+        XCTAssertEqual(final.succeeded, [normalKey])
+        XCTAssertEqual(final.failed.map { $0.0 }, [hostileKey])
+
+        try await helper.client.ping()
+        try await helper.client.close(docId: docId)
+    }
+
     // MARK: - Task 4, debt #2: product-path pixel hash table (the NEW regression tripwire)
 
     /// Office Stage A Task 4, carried debt #2: "the gate table is unreachable from LOKBridge
@@ -1089,7 +1189,7 @@ final class OfficeHelperLiveTests: XCTestCase {
           COLD (real LOK paint x\(keys.count)): \(String(format: "%.1f", coldElapsed * 1000))ms total, \(String(format: "%.2f", coldPerTileMs))ms/tile, \(String(format: "%.1f", Double(keys.count) / coldElapsed)) tiles/sec
           WARM (cache hit x\(keys.count), transport-only): \(String(format: "%.1f", warmElapsed * 1000))ms total, \(String(format: "%.2f", warmPerTileMs))ms/tile, \(String(format: "%.1f", Double(keys.count) / warmElapsed)) tiles/sec
           Paint-attributable cost: ~\(String(format: "%.2f", paintAttributableMs))ms/tile (cold - warm)
-          Average wire payload: \(avgPayloadBytes) bytes/tile (base64 text; 1 MiB raw -> ~1.4x as base64 text)
+          Average wire payload: \(avgPayloadBytes) bytes/tile (base64 text; 1 MiB raw -> exactly 4/3x as base64 text, before the trailing-newline/JSON-envelope overhead on top)
         """)
 
         // The bar (per this task's own transport-decision framing): tile arrival is ASYNC over a

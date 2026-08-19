@@ -539,4 +539,137 @@ final class OfficeSupervisorTests: XCTestCase {
             return XCTFail("expected A (the real owner) to close successfully")
         }
     }
+
+    // MARK: - Fix round 1, discretionary: O(n²) ingest regression test
+    //
+    // `OfficeWireConnection.ingest`'s newline scan used to restart from `buffer.startIndex` on
+    // EVERY call, making total scan cost quadratic in a long line's byte count for a payload that
+    // (as real `.tile` pushes always do) arrives split across many separate socket reads — caught
+    // during Task 4's own transport measurement as a confounder, fixed with a `scannedPrefixLength`
+    // cursor (see that property's own header in `OfficeWireConnection.swift`). This test drives the
+    // REAL fix directly, deterministically, over a raw hand-rolled socket peer (this file's own
+    // established `leaveStaleSocketFile`-style Darwin socket pattern, extended to accept and write)
+    // — no LOK, no live helper, no fixture process — so it stays meaningful even after a future
+    // rung-2 transport rewrite replaces base64-in-NDJSON (it exercises line-buffering under
+    // fragmentation, not anything base64-specific).
+
+    /// Binds, listens, and — on a background thread, so the accept+write sequence never blocks the
+    /// caller — accepts exactly ONE connection and writes `data` in `chunkSize`-byte pieces,
+    /// back-to-back with no artificial delay between them (a real fragmented arrival is exactly
+    /// this: many separate small deliveries, not a slow-drip one — this test cares about SCAN cost
+    /// under fragmentation, not about simulating network latency).
+    private func startChunkedWritePeer(at path: String, data: Data, chunkSize: Int) {
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return XCTFail("socket() failed errno=\(errno)") }
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let pathBytes = Array(path.utf8)
+        let capacity = MemoryLayout.size(ofValue: addr.sun_path)
+        guard pathBytes.count < capacity else { return XCTFail("scratch socket path too long for sockaddr_un") }
+        withUnsafeMutableBytes(of: &addr.sun_path) { raw in
+            let buffer = raw.bindMemory(to: UInt8.self)
+            for index in 0..<capacity { buffer[index] = 0 }
+            for (index, byte) in pathBytes.enumerated() { buffer[index] = byte }
+        }
+        let bound = withUnsafePointer(to: &addr) { rawAddr -> Int32 in
+            rawAddr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                Darwin.bind(fd, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        guard bound == 0 else { close(fd); return XCTFail("bind() failed errno=\(errno)") }
+        guard listen(fd, 1) == 0 else { close(fd); return XCTFail("listen() failed errno=\(errno)") }
+
+        Thread {
+            let clientFD = accept(fd, nil, nil)
+            guard clientFD >= 0 else { return }
+            data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+                var offset = 0
+                while offset < raw.count {
+                    let thisChunk = min(chunkSize, raw.count - offset)
+                    let written = write(clientFD, raw.baseAddress!.advanced(by: offset), thisChunk)
+                    guard written > 0 else { break } // peer gone or real error -- nothing more to do
+                    offset += written
+                }
+            }
+            close(clientFD)
+            close(fd)
+        }.start()
+    }
+
+    func testIngestStaysLinearNotQuadraticForALongLineDeliveredInManySmallChunks() async throws {
+        // A real ~1.4MB `.tile` push, byte-for-byte the SAME `encodedLine()` production code
+        // produces — not a synthetic string, so this exercises the exact frame shape `ingest` has
+        // to buffer/scan/decode for real.
+        let bigPixels = Data(repeating: 0x41, count: TileMath.bytesPerTile).base64EncodedString()
+        let frame = OfficeWireFrame.tile(seq: 1, docId: "regression-doc",
+                                          key: TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0),
+                                          generation: 0, width: 512, height: 512, pixelsBase64: bigPixels)
+        let lineData = frame.encodedLine()
+        XCTAssertGreaterThan(lineData.count, 1_000_000, "setup: this line must be genuinely large, matching a real tile push")
+
+        let stateDir = makeScratchDirectory()
+        let socketPath = stateDir.appendingPathComponent("office.sock").path
+        // 1024 bytes/chunk: ~1,370 separate writes for a ~1.4MB line -- deliberately far below any
+        // socket buffer size, so this is NOT relying on best-effort OS coalescing to prove
+        // fragmentation happened; it is guaranteed by construction. Chosen (not just guessed) via a
+        // throwaway isolated benchmark of the two scan strategies at this exact payload size before
+        // landing this test: at 1,370 chunks, the OLD from-scratch-every-call rescan takes ~6.9s of
+        // pure in-memory scan cost (no I/O at all); the FIXED `scannedPrefixLength` path takes
+        // ~0.011s for the SAME input -- a ~650x difference, comfortably separated from the small,
+        // fixed per-chunk syscall overhead (~1,370 local Unix-socket read/write pairs, each on the
+        // order of microseconds) this REAL end-to-end test additionally pays on top of either.
+        startChunkedWritePeer(at: socketPath, data: lineData, chunkSize: 1024)
+
+        let socketAppeared = await waitUntil(timeout: 5.0) { FileManager.default.fileExists(atPath: socketPath) }
+        XCTAssertTrue(socketAppeared, "setup: the hand-rolled peer's socket file never appeared")
+
+        let connection = OfficeWireConnection(socketPath: socketPath)
+
+        // `.tile` is an unprompted PUSH — `ingest`'s own switch routes it straight to the `onTile`
+        // callback and NEVER into `frameQueue`, deliberately (see that function's own comment: a
+        // push must not be misattributed to whichever caller happens to be waiting on `nextFrame`
+        // at the moment it arrives). `nextFrame` would therefore never resolve with this frame at
+        // all — it would sit unconsumed until this test's own peer closes the connection, at which
+        // point `ingestClosed` resolves any outstanding wait with `nil`. Registering `onTile`
+        // BEFORE `open()` (matching every other live `.tile`-receiving test in this codebase, e.g.
+        // `OfficeHelperLiveTests`'s own collector-pattern tests) is the only correct way to observe
+        // this push at all.
+        final class Box: @unchecked Sendable {
+            let lock = NSLock()
+            private var received: (docId: String, key: TileKey, pixelsBase64: String)?
+            func record(_ docId: String, _ key: TileKey, _ pixelsBase64: String) {
+                lock.lock(); received = (docId, key, pixelsBase64); lock.unlock()
+            }
+            func snapshot() -> (docId: String, key: TileKey, pixelsBase64: String)? {
+                lock.lock(); defer { lock.unlock() }; return received
+            }
+        }
+        let box = Box()
+        connection.onTile = { _, docId, key, _, _, _, pixelsBase64 in box.record(docId, key, pixelsBase64) }
+
+        try await connection.open()
+
+        let start = Date()
+        let arrived = await waitUntil(timeout: 15.0) { box.snapshot() != nil }
+        let elapsed = Date().timeIntervalSince(start)
+
+        XCTAssertTrue(arrived, "onTile never fired for the ~1.4MB fragmented line")
+        guard let received = box.snapshot() else {
+            return XCTFail("onTile never fired with a usable payload")
+        }
+        XCTAssertEqual(received.docId, "regression-doc")
+        XCTAssertEqual(received.key, TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0))
+        XCTAssertEqual(received.pixelsBase64, bigPixels, "the ~1.4MB payload must arrive byte-for-byte intact across ~1,370 fragments")
+
+        // The actual regression bar, MEASURED not guessed (see the chunk-size comment above): the
+        // fixed path's pure algorithmic cost is ~0.011s at this exact payload/chunk shape; a
+        // quadratic-rescan regression would cost ~6.9s of pure scan time alone, before any of this
+        // test's real socket I/O is even added on top. 3s sits with wide margin above realistic
+        // end-to-end overhead for the fixed path and wide margin below the measured buggy-path cost
+        // -- not a tight pin, and deliberately far from this suite's own wall-clock flake boundary
+        // elsewhere.
+        XCTAssertLessThan(elapsed, 3.0,
+            "ingest took \(elapsed)s for a ~1.4MB line in 1024-byte fragments -- consistent with a "
+            + "quadratic rescan regression, not the fixed O(n) scannedPrefixLength path")
+    }
 }

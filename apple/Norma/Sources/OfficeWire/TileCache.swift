@@ -103,8 +103,13 @@ public struct TileCache: Sendable {
     /// empirically distinguishable from "current part only" against real LOK — see
     /// task-4-report.md).
     ///
-    /// Returns every `TileKey` actually bumped, in no particular order — the caller
-    /// (`OfficeHelperServer`) uses this list verbatim as the `invalidated{keys}` wire push.
+    /// Returns every `TileKey` actually bumped, SORTED by `(part, zoomPPT, tileX, tileY)` — fix
+    /// round 1, discretionary: the underlying `Dictionary.keys` iteration order is unspecified, so
+    /// leaving it unsorted made every wire-level capture of an `invalidated{keys}` push
+    /// non-deterministic to diff between runs. Sorting costs nothing observable (this list is
+    /// bounded by how many distinct coordinates a document's session has ever painted, never the
+    /// pathological sizes `estimatedTileCount` guards against elsewhere) and the caller
+    /// (`OfficeHelperServer`) already uses this list verbatim as the `invalidated{keys}` wire push.
     @discardableResult
     public mutating func invalidate(rectsTwips: [OfficeTwipsRect], part: Int) -> [TileKey] {
         let touchedKeys: [TileKey]
@@ -113,7 +118,19 @@ public struct TileCache: Sendable {
         } else {
             touchedKeys = generations.keys.filter { key in
                 guard key.part == part else { return false }
-                let bounds = TileMath.tileBoundsTwips(tileX: key.tileX, tileY: key.tileY, zoomPPT: key.zoomPPT)
+                // Fix round 1, I1's trap #3 (the "poisoned cached key" half): `tileBoundsTwips` is
+                // now `nil`-safe rather than trapping, but a `nil` here still needs a DECISION, not
+                // just an absence of a crash. A key whose own coordinates are no longer
+                // representable/valid (e.g. a hostile tileX or zoomPPT that reached `recordPaint`
+                // via some caller of this pure API directly, before this fix round's handler-level
+                // guards existed on the wire path) cannot be tested for intersection at all — this
+                // SKIPS it (excluded from `touchedKeys`, generation not bumped, not evicted) rather
+                // than either crashing the WHOLE invalidation pass over one bad key, or guessing
+                // that it matches. It simply sits inert in the ledger, exactly like any other known
+                // key nobody has asked about since.
+                guard let bounds = TileMath.tileBoundsTwips(tileX: key.tileX, tileY: key.tileY, zoomPPT: key.zoomPPT) else {
+                    return false
+                }
                 return rectsTwips.contains { $0.intersects(bounds) }
             }
         }
@@ -122,7 +139,9 @@ public struct TileCache: Sendable {
             pixelsByKey.removeValue(forKey: key)
             lruOrder.removeAll { $0 == key }
         }
-        return touchedKeys
+        return touchedKeys.sorted { lhs, rhs in
+            (lhs.part, lhs.zoomPPT, lhs.tileX, lhs.tileY) < (rhs.part, rhs.zoomPPT, rhs.tileX, rhs.tileY)
+        }
     }
 
     private mutating func touch(_ key: TileKey) {

@@ -39,12 +39,19 @@ final class TileRenderer {
     }
 
     /// The requested tile's CURRENT generation + RGBA pixels — a cache hit, or a fresh
-    /// `paintPartTile` call (canonicalized to RGBA) on a miss.
-    func paint(key: TileKey) -> (generation: Int, pixels: Data) {
+    /// `paintPartTile` call (canonicalized to RGBA) on a miss. Throws `LOKBridge.TileError
+    /// .invalidGeometry` (fix round 1, I1's trap #3) when `key`'s coordinates/zoom are out of the
+    /// sane bounds `TileMath.tileBoundsTwips` enforces — a cache HIT never throws (its pixels are
+    /// already painted; nothing here needs to recompute bounds for an already-cached key), so a
+    /// once-legitimate key stays servable from cache even if some future bound tightening would
+    /// reject it fresh. `LOKBridge.paintTile`'s existing `throws` propagates this straight through
+    /// to `OfficeHelperServer`'s `tileRequest` handler's EXISTING `do`/`catch`, becoming a
+    /// `.tileFailed` push — no handler changes needed for this path.
+    func paint(key: TileKey) throws -> (generation: Int, pixels: Data) {
         if let hit = cache.lookup(key: key) {
             return (hit.generation, hit.pixels)
         }
-        let pixels = renderRaw(key: key)
+        let pixels = try renderRaw(key: key)
         let generation = cache.recordPaint(key: key, pixels: pixels)
         return (generation, pixels)
     }
@@ -66,9 +73,16 @@ final class TileRenderer {
     /// (`paintPartTile`'s own C signature) — never observed to matter for Stage A's fixtures
     /// (twips values in the tens of thousands, nowhere near `Int32.max`), but a truncating
     /// conversion rather than a crashing one costs nothing and avoids a pathological-document trap.
-    private func renderRaw(key: TileKey) -> Data {
+    private func renderRaw(key: TileKey) throws -> Data {
         let size = TileMath.tilePixelSize
-        let bounds = TileMath.tileBoundsTwips(tileX: key.tileX, tileY: key.tileY, zoomPPT: key.zoomPPT)
+        guard let bounds = TileMath.tileBoundsTwips(tileX: key.tileX, tileY: key.tileY, zoomPPT: key.zoomPPT) else {
+            // Fix round 1, I1's trap #3: this used to call `paintPartTile` with truncated garbage
+            // derived from bounds that had already overflowed computing — now refused before ever
+            // touching LOK, for the key AS REQUESTED (a hostile `tileRequest.keys` entry) rather
+            // than the "poisoned ledger key on a LATER unrelated invalidation" half of this same
+            // trap, which `TileCache.invalidate` handles separately (see its own comment).
+            throw LOKBridge.TileError.invalidGeometry(key)
+        }
         var buffer = [UInt8](repeating: 0, count: TileMath.bytesPerTile)
         buffer.withUnsafeMutableBufferPointer { rawBuffer in
             handle.pointee.pClass.pointee.paintPartTile?(

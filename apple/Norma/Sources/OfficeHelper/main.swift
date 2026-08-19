@@ -1,5 +1,17 @@
 import Foundation
 
+// Fix round 1, M1 — ignore SIGPIPE process-wide, unconditionally, as the very first thing this
+// process does. A write() to a socket whose peer already closed its read side delivers SIGPIPE,
+// and that signal's DEFAULT disposition TERMINATES the process before write() ever gets a chance
+// to return -1/EPIPE to calling Swift code — a bare Swift process was confirmed to die this way. Up
+// to this fix round, this process had ONLY ever survived that by accident: the vendored
+// LibreOffice library installs its own SIG_IGN for SIGPIPE as a side effect of `lok_init_2`'s C++
+// runtime init (below, inside `LOKBridge.init`) — never something this file arranged, and a future
+// vendor version bump could silently remove it. This line makes it this process's OWN, deliberate
+// guarantee instead of an accident of a dependency. See `OfficeHelperServer.writeAll`'s own comment
+// for the full trace.
+signal(SIGPIPE, SIG_IGN)
+
 // NormaOfficeHelper entry point. Office Stage A Task 2 stood up a supervised, NOT-launchd process
 // (the app spawns this directly — see `OfficeHelperSupervisor`) whose listeners came up with no
 // LibreOfficeKit loaded. Task 3: LOK now boots for real, HERE, before the socket ever binds — see

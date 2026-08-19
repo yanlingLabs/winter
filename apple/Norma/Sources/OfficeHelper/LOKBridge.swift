@@ -168,9 +168,16 @@ final class LOKBridge: OfficeDocumentBridge {
     /// the one key affected, the same "the helper always survives" posture `LoadError` already has.
     enum TileError: Error, CustomStringConvertible {
         case docNotOpen(String)
+        /// Fix round 1, I1's trap #3: `key`'s coordinates/zoom fail `TileMath.tileBoundsTwips`'s
+        /// own sane-bounds check (a hostile `tileRequest.keys` entry — extreme tileX/tileY/zoomPPT
+        /// transcribed straight off the wire with no magnitude limit). Thrown by
+        /// `TileRenderer.renderRaw`, never a crash — same "the helper always survives" posture
+        /// `.docNotOpen` already has.
+        case invalidGeometry(TileKey)
         var description: String {
             switch self {
             case .docNotOpen(let docId): return "tile requested for a docId that is not open: \(docId)"
+            case .invalidGeometry(let key): return "tile key geometry is out of range and cannot be painted: \(key)"
             }
         }
     }
@@ -341,7 +348,7 @@ final class LOKBridge: OfficeDocumentBridge {
 
     private func paintTileOnDedicatedThread(docId: String, key: TileKey) throws -> TilePaintResult {
         guard let doc = documents[docId] else { throw TileError.docNotOpen(docId) }
-        let (generation, pixels) = doc.tileRenderer.paint(key: key)
+        let (generation, pixels) = try doc.tileRenderer.paint(key: key)
         return TilePaintResult(generation: generation, pixels: pixels,
                                 width: TileMath.tilePixelSize, height: TileMath.tilePixelSize)
     }

@@ -79,19 +79,61 @@ final class TileCacheTests: XCTestCase {
 
     // MARK: - Generation bumping: the non-empty, part-scoped case
 
-    func testNonEmptyInvalidationOnlyBumpsIntersectingKeysOfTheMatchingPart() {
+    func testNonEmptyInvalidationOnlyBumpsIntersectingKeysOfTheMatchingPart() throws {
         var cache = TileCache(capacity: 32)
         cache.recordPaint(key: key(0, 0, part: 0), pixels: pixels(1)) // will intersect
         cache.recordPaint(key: key(5, 5, part: 0), pixels: pixels(2)) // will NOT intersect (far away)
         cache.recordPaint(key: key(0, 0, part: 1), pixels: pixels(3)) // same coords, DIFFERENT part
 
-        let dirtyRect = TileMath.tileBoundsTwips(tileX: 0, tileY: 0, zoomPPT: 1000)
+        // Fix round 1: tileBoundsTwips is now Optional (nil only for out-of-range input — see its
+        // own doc comment); (0, 0, 1000) is always in range, so XCTUnwrap here documents that
+        // assumption with a real, readable failure if it's ever violated, rather than a bare `!`.
+        let dirtyRect = try XCTUnwrap(TileMath.tileBoundsTwips(tileX: 0, tileY: 0, zoomPPT: 1000))
         let bumped = cache.invalidate(rectsTwips: [dirtyRect], part: 0)
 
         XCTAssertEqual(Set(bumped), [key(0, 0, part: 0)])
         XCTAssertEqual(cache.lookup(key: key(0, 0, part: 0)), nil, "bumped key's stale pixels are evicted")
         XCTAssertNotNil(cache.lookup(key: key(5, 5, part: 0)), "non-intersecting key untouched")
         XCTAssertNotNil(cache.lookup(key: key(0, 0, part: 1)), "other-part key untouched despite same coords")
+    }
+
+    /// Fix round 1, I1 trap #3's "poisoned cached key" half: `recordPaint` is a PURE, unvalidated
+    /// API (by design — validation belongs at the wire boundary, `OfficeHelperServer`'s handlers;
+    /// see `TileMath.swift`'s own "wire-input safety bounds" header) that accepts any `TileKey`,
+    /// including one with an out-of-range `tileX` that could never legitimately reach here through
+    /// today's (now-guarded) `tileRequest` handler. Once such a key is in the never-evicted
+    /// `generations` ledger by ANY means, a later, otherwise-unrelated non-empty invalidation used
+    /// to recompute `tileBoundsTwips` for it unconditionally and CRASH — killing the whole
+    /// invalidation pass, including every OTHER, legitimate key it was also trying to check.
+    /// `tileBoundsTwips` returning `nil` instead is necessary but not sufficient; this test proves
+    /// `TileCache.invalidate`'s own consumption of that `nil` is correct: no crash, the poisoned key
+    /// is excluded from the result (never bumped, never evicted — inert), AND a legitimate,
+    /// genuinely-intersecting key in the SAME pass still gets bumped normally — proving the filter
+    /// continues past the bad key rather than the whole pass silently aborting on it.
+    ///
+    /// Deliberately NOT attempted over the wire/live helper: the fixture's `FakeOfficeDocumentBridge`
+    /// uses wrapping (`&*`/`&+`) arithmetic for its synthetic pixels and never calls
+    /// `TileMath.tileBoundsTwips` at all, so it was never at risk and cannot be used to get a
+    /// poisoned key into a REAL `TileCache` this way; the real `LOKBridge` path now refuses a
+    /// hostile key at paint time (`TileRenderer.renderRaw`'s new `throw`), so it can no longer be
+    /// used to plant one either. This pure API is the only reachable way to construct the scenario
+    /// at all post-fix — which is itself evidence the wire-level guards are doing their job.
+    func testInvalidationSkipsAPoisonedLedgerKeyRatherThanCrashingAndStillBumpsLegitimateKeys() throws {
+        var cache = TileCache(capacity: 32)
+        let poisoned = key(Int.max, 0, part: 0) // out of TileMath.isTileIndexValid's range
+        cache.recordPaint(key: poisoned, pixels: pixels(1))
+        cache.recordPaint(key: key(0, 0, part: 0), pixels: pixels(2)) // legitimate, WILL intersect
+        cache.recordPaint(key: key(9, 9, part: 0), pixels: pixels(3)) // legitimate, will NOT intersect
+
+        let dirtyRect = try XCTUnwrap(TileMath.tileBoundsTwips(tileX: 0, tileY: 0, zoomPPT: 1000))
+        let bumped = cache.invalidate(rectsTwips: [dirtyRect], part: 0) // must not crash
+
+        XCTAssertEqual(bumped, [key(0, 0, part: 0)],
+                        "only the legitimate, intersecting key is bumped -- the poisoned key is excluded, "
+                        + "not treated as a match, and does not abort the pass for the key after it")
+        XCTAssertTrue(cache.knownKeysForTesting.contains(poisoned),
+                       "the poisoned key is untouched, not removed -- it just sits inert, same as any "
+                       + "other known key nobody has asked about since")
     }
 
     /// The inversion trap the advisor flagged: an EMPTY rect list is LOK's "drop every tile"
@@ -118,10 +160,10 @@ final class TileCacheTests: XCTestCase {
         XCTAssertEqual(bumped, [key(0, 0)], "only the one ever-painted key can be bumped")
     }
 
-    func testInvalidationOnAnEmptyCacheBumpsNothing() {
+    func testInvalidationOnAnEmptyCacheBumpsNothing() throws {
         var cache = TileCache(capacity: 32)
         XCTAssertEqual(cache.invalidate(rectsTwips: [], part: 0), [])
-        let rect = TileMath.tileBoundsTwips(tileX: 0, tileY: 0, zoomPPT: 1000)
+        let rect = try XCTUnwrap(TileMath.tileBoundsTwips(tileX: 0, tileY: 0, zoomPPT: 1000))
         XCTAssertEqual(cache.invalidate(rectsTwips: [rect], part: 0), [])
     }
 
