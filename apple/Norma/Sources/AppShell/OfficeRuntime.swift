@@ -447,8 +447,20 @@ final class OfficeRuntime: ObservableObject {
                     guard let self else { return }
                     let needed = self.tileStore.keysNeedingRequest(docId: docId, candidates: keys)
                     guard !needed.isEmpty else { return }
-                    self.tileStore.markRequested(docId: docId, keys: needed)
-                    _ = try? await driver.requestTiles(docId, needed)
+                    // T6 review F2: mark in-flight only AFTER the send succeeds (the store's own
+                    // `markRequested` doc already says so) — `markRequested` before the `await`, with
+                    // the throw swallowed by `try?`, left a thrown send's keys stuck in-flight
+                    // forever: `keysNeedingRequest` would filter them out of every future subscribe
+                    // with nothing ever going back to request them. Every throw path today happens to
+                    // coincide with a store eviction EXCEPT `.timedOut`, which is one back-pressure
+                    // config change from reachable — so `catch` explicitly frees the keys rather than
+                    // relying on that coincidence.
+                    do {
+                        try await driver.requestTiles(docId, needed)
+                        self.tileStore.markRequested(docId: docId, keys: needed)
+                    } catch {
+                        for key in needed { self.tileStore.markFailed(docId: docId, key: key) }
+                    }
                 }
 
             case .unsubscribe(let docId):

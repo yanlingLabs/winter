@@ -141,8 +141,16 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// convention (`ShellSessionHostTests.OfficeDriverRecorder` is private to that file) — captures
     /// the FULL `subscribeTiles` call, unlike the other files' recorders, since this is the one
     /// place a test needs to see the `part` argument itself.
-    private final class SubscribeCapturingDriverRecorder {
-        private(set) var subscribeCalls: [(docId: String, part: Int, zoomPPT: Int, viewportTwips: OfficeTwipsRect)] = []
+    private final class SubscribeCapturingDriverRecorder: @unchecked Sendable {
+        // T6 review F3: `subscribeTiles` runs off the main actor when driven concurrently (a nested
+        // type does NOT inherit its enclosing `@MainActor` test class's isolation) — same lock-backed
+        // shape as `ShellSessionHostTests.OfficeDriverRecorder`/`PanelDocumentTabTests
+        // .DocumentOfficeDriverRecorder` and this codebase's wider precedent.
+        private let lock = NSLock()
+        private var _subscribeCalls: [(docId: String, part: Int, zoomPPT: Int, viewportTwips: OfficeTwipsRect)] = []
+        var subscribeCalls: [(docId: String, part: Int, zoomPPT: Int, viewportTwips: OfficeTwipsRect)] {
+            lock.lock(); defer { lock.unlock() }; return _subscribeCalls
+        }
         var driver: OfficeRuntime.Driver {
             OfficeRuntime.Driver(
                 helperState: { .ready }, startHelper: { },
@@ -150,7 +158,7 @@ final class OfficeTileCanvasViewTests: XCTestCase {
                                                             sizeTwips: OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)) },
                 close: { _ in },
                 subscribeTiles: { [unowned self] docId, part, zoomPPT, viewportTwips in
-                    self.subscribeCalls.append((docId, part, zoomPPT, viewportTwips))
+                    self.lock.lock(); self._subscribeCalls.append((docId, part, zoomPPT, viewportTwips)); self.lock.unlock()
                     return []
                 },
                 unsubscribeTiles: { _ in },

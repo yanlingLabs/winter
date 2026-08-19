@@ -258,11 +258,15 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
 
     override func scrollWheel(with event: NSEvent) {
         guard event.type == .scrollWheel else { return super.scrollWheel(with: event) }
-        var dx = event.scrollingDeltaX
-        var dy = event.scrollingDeltaY
-        // Same compensation `TrackpadHorizontalSwipeRecognizer.handle` applies to the identical
-        // event fields, one gesture axis over.
-        if event.isDirectionInvertedFromDevice { dx *= -1; dy *= -1 }
+        // T6 review F1: `scrollingDeltaX/Y` already carries the user's Natural-Scrolling preference
+        // (that's why `NSScrollView` never consults `isDirectionInvertedFromDevice` for content
+        // scrolling either) — `TrackpadHorizontalSwipeRecognizer` compensates via that flag because
+        // it wants the PHYSICAL finger direction for a gesture, not content motion. Re-inverting here
+        // canceled the OS's own inversion, so the canvas scrolled backwards vs. the chat
+        // transcript/sidebar/editor in the same window for every default-setting (Natural Scrolling
+        // ON) user. `origin -= delta` alone is correct for this view's flipped, top-down origin.
+        let dx = event.scrollingDeltaX
+        let dy = event.scrollingDeltaY
         scrollOrigin = CGPoint(x: clampedOriginX(scrollOrigin.x - dx), y: clampedOriginY(scrollOrigin.y - dy))
         relayoutVisibleTiles()
         scheduleThrottledSubscribe()

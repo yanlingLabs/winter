@@ -166,8 +166,14 @@ final class PanelDocumentTabTests: XCTestCase {
     // `PanelFilesTabTests`'/`EditorTabTests`' own convention — `ShellSessionHostTests
     // .OfficeDriverRecorder` is private to that file)
 
-    private final class DocumentOfficeDriverRecorder {
-        private(set) var openCalls: [(docId: String, path: String)] = []
+    private final class DocumentOfficeDriverRecorder: @unchecked Sendable {
+        // T6 review F3: `open` runs off the main actor when driven concurrently (a nested type does
+        // NOT inherit its enclosing `@MainActor` test class's isolation) — same lock-backed shape as
+        // `ShellSessionHostTests.OfficeDriverRecorder` and this codebase's wider precedent
+        // (`ShellScriptedTransport`/`ShellTransportFactory`/`MutableDisk`).
+        private let lock = NSLock()
+        private var _openCalls: [(docId: String, path: String)] = []
+        var openCalls: [(docId: String, path: String)] { lock.lock(); defer { lock.unlock() }; return _openCalls }
         var openMetadata: [String: OfficeDocumentMetadata] = [:]
         var defaultMetadata = OfficeDocumentMetadata(
             type: .text, parts: 1, sizeTwips: OfficeDocumentSize(widthTwips: 100, heightTwips: 100))
@@ -178,7 +184,7 @@ final class PanelDocumentTabTests: XCTestCase {
                 helperState: { [unowned self] in self.state },
                 startHelper: { },
                 open: { [unowned self] docId, path in
-                    self.openCalls.append((docId, path))
+                    self.lock.lock(); self._openCalls.append((docId, path)); self.lock.unlock()
                     return self.openMetadata[path] ?? self.defaultMetadata
                 },
                 close: { _ in },

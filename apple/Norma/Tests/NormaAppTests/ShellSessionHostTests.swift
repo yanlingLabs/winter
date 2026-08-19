@@ -3752,14 +3752,37 @@ final class ShellSessionHostTests: XCTestCase {
     /// (a raw helper spawn is exactly as unreachable under XCTest as a raw CEF call). ONE recorder
     /// per factory, shared across every session it mints — the real architecture's own shape (one
     /// app-wide client), not a test convenience shortcut.
-    private final class OfficeDriverRecorder {
-        private(set) var openCalls: [(docId: String, path: String)] = []
-        private(set) var closeCalls: [String] = []
-        private(set) var subscribeCalls: [String] = []
-        private(set) var unsubscribeCalls: [String] = []
-        private(set) var startHelperCalls = 0
+    private final class OfficeDriverRecorder: @unchecked Sendable {
+        // T6 review F3: `performTeardown` fans a `close` per document out onto concurrent detached
+        // `Task`s, and these closures run off the main actor — a NESTED type does NOT inherit its
+        // enclosing `@MainActor` test class's isolation, so unsynchronized concurrent appends here
+        // raced and silently lost entries (~25% of `testTeardownOfficeRuntimeRemovesItFromTheTable`
+        // runs). Same lock-backed shape as `ShellScriptedTransport`/`ShellTransportFactory`/
+        // `MutableDisk`, this file's own established precedent for a double touched off-actor.
+        private let lock = NSLock()
+        private var _openCalls: [(docId: String, path: String)] = []
+        private var _closeCalls: [String] = []
+        private var _subscribeCalls: [String] = []
+        private var _unsubscribeCalls: [String] = []
+        private var _startHelperCalls = 0
         /// office-plumbing Task 6 — every `requestTiles` call, in order: `(docId, keys)`.
-        private(set) var requestCalls: [(docId: String, keys: [TileKey])] = []
+        private var _requestCalls: [(docId: String, keys: [TileKey])] = []
+        /// T6 review F2's own drill — every `requestTiles` call refused via `requestTilesShouldFail`,
+        /// recorded before the throw so a test can wait on the failure path having actually run
+        /// rather than racing its own assertions against the Task that runs it.
+        private var _requestFailureCalls: [(docId: String, keys: [TileKey])] = []
+
+        var openCalls: [(docId: String, path: String)] { lock.lock(); defer { lock.unlock() }; return _openCalls }
+        var closeCalls: [String] { lock.lock(); defer { lock.unlock() }; return _closeCalls }
+        var subscribeCalls: [String] { lock.lock(); defer { lock.unlock() }; return _subscribeCalls }
+        var unsubscribeCalls: [String] { lock.lock(); defer { lock.unlock() }; return _unsubscribeCalls }
+        var startHelperCalls: Int { lock.lock(); defer { lock.unlock() }; return _startHelperCalls }
+        var requestCalls: [(docId: String, keys: [TileKey])] {
+            lock.lock(); defer { lock.unlock() }; return _requestCalls
+        }
+        var requestFailureCalls: [(docId: String, keys: [TileKey])] {
+            lock.lock(); defer { lock.unlock() }; return _requestFailureCalls
+        }
 
         var state: OfficeHelperSupervisor.State = .ready
         var openFailures: [String: String] = [:] // path -> reason
@@ -3771,6 +3794,9 @@ final class ShellSessionHostTests: XCTestCase {
         /// tests never look at tiles at all, and an empty reply means `perform`'s `.subscribe` case
         /// has nothing to request, so `requestCalls` simply stays empty for them too.
         var subscribeReplies: [String: [TileKey]] = [:] // docId -> keys
+        /// T6 review F2's own drill: when set, `requestTiles` throws instead of recording a success —
+        /// proves a thrown send leaves its keys requestable again rather than stuck in-flight forever.
+        var requestTilesShouldFail = false
 
         /// Carry 6's own drill: an `open` for a suspended path does not return until
         /// `resumeOpen(forPath:)` is called — the seam that lets a test park an open MID-FLIGHT,
@@ -3786,9 +3812,11 @@ final class ShellSessionHostTests: XCTestCase {
         var driver: OfficeRuntime.Driver {
             OfficeRuntime.Driver(
                 helperState: { [unowned self] in self.state },
-                startHelper: { [unowned self] in self.startHelperCalls += 1 },
+                startHelper: { [unowned self] in
+                    self.lock.lock(); self._startHelperCalls += 1; self.lock.unlock()
+                },
                 open: { [unowned self] docId, path in
-                    self.openCalls.append((docId, path))
+                    self.lock.lock(); self._openCalls.append((docId, path)); self.lock.unlock()
                     if self.suspendedOpens.remove(path) != nil {
                         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
                             self.pendingOpenContinuations[path] = continuation
@@ -3799,14 +3827,22 @@ final class ShellSessionHostTests: XCTestCase {
                     }
                     return self.openMetadata[path] ?? self.defaultMetadata
                 },
-                close: { [unowned self] docId in self.closeCalls.append(docId) },
+                close: { [unowned self] docId in
+                    self.lock.lock(); self._closeCalls.append(docId); self.lock.unlock()
+                },
                 subscribeTiles: { [unowned self] docId, _, _, _ in
-                    self.subscribeCalls.append(docId)
+                    self.lock.lock(); self._subscribeCalls.append(docId); self.lock.unlock()
                     return self.subscribeReplies[docId] ?? []
                 },
-                unsubscribeTiles: { [unowned self] docId in self.unsubscribeCalls.append(docId) },
+                unsubscribeTiles: { [unowned self] docId in
+                    self.lock.lock(); self._unsubscribeCalls.append(docId); self.lock.unlock()
+                },
                 requestTiles: { [unowned self] docId, keys in
-                    self.requestCalls.append((docId, keys))
+                    if self.requestTilesShouldFail {
+                        self.lock.lock(); self._requestFailureCalls.append((docId, keys)); self.lock.unlock()
+                        throw OfficeHelperClientError.timedOut
+                    }
+                    self.lock.lock(); self._requestCalls.append((docId, keys)); self.lock.unlock()
                 })
         }
     }
@@ -4069,7 +4105,11 @@ final class ShellSessionHostTests: XCTestCase {
 
         runtime.subscribeTiles(path: "/a.xlsx", part: 0, zoomPPT: 1000, viewportTwips: sampleViewport)
 
-        await officeWaitUntil(timeout: 2) { !office.recorder.requestCalls.isEmpty }
+        // T6 review F2: anchor on the store's in-flight count — the LAST step of the effect's Task
+        // now that `markRequested` trails the send — rather than the recorder's append, which
+        // happens off-actor a beat earlier; anchoring on the append alone left a window where this
+        // job's own assertions could run before `markRequested` actually landed.
+        await officeWaitUntil(timeout: 2) { runtime.tileStore.inFlightCountForTesting == 3 }
         XCTAssertEqual(office.recorder.requestCalls.count, 1)
         XCTAssertEqual(office.recorder.requestCalls[0].docId, docId)
         XCTAssertEqual(Set(office.recorder.requestCalls[0].keys), Set(keys))
@@ -4094,7 +4134,10 @@ final class ShellSessionHostTests: XCTestCase {
         office.recorder.subscribeReplies[docId] = [k0, k1]
 
         runtime.subscribeTiles(path: "/a.xlsx", part: 0, zoomPPT: 1000, viewportTwips: sampleViewport)
-        await officeWaitUntil(timeout: 2) { office.recorder.requestCalls.count == 1 }
+        // T6 review F2: anchor on the store's in-flight count (the LAST step of the effect's Task,
+        // now that `markRequested` trails the send) rather than the recorder's append — the ingest
+        // below needs `markRequested` to have already run, or k1 could read as "not in flight."
+        await officeWaitUntil(timeout: 2) { runtime.tileStore.inFlightCountForTesting == 2 }
 
         // k0 "arrives" (a stand-in for the real push); k1 stays in flight, untouched.
         runtime.tileStore.ingest(docId: docId, key: k0, generation: 0, pixels: Data(repeating: 1, count: 4))
@@ -4107,6 +4150,41 @@ final class ShellSessionHostTests: XCTestCase {
         XCTAssertEqual(office.recorder.requestCalls[1].docId, docId)
         XCTAssertEqual(office.recorder.requestCalls[1].keys, [k2],
                        "only the genuinely-missing key is requested a second time")
+    }
+
+    /// T6 review F2: `markRequested` used to fire BEFORE the send, with the throw swallowed by
+    /// `try?` — a thrown `requestTiles` left its keys marked in-flight forever, so
+    /// `keysNeedingRequest` would never offer them again (a permanent placeholder at those
+    /// coordinates). The fix marks in-flight only after a successful send and explicitly frees the
+    /// keys in a catch. `.timedOut` stands in for the one throw path that does not already coincide
+    /// with a store eviction (the review's own finding).
+    func testAThrowingRequestTilesLeavesItsKeysRequestableAgainRatherThanStuckInFlightForever() async {
+        let (host, _) = makeHost()
+        let office = officeFactory()
+        host.makeOfficeRuntime = office.make
+        let runtime = host.officeRuntime(for: "S1")
+        runtime.open("/a.xlsx")
+        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.documents["/a.xlsx"] != nil }
+        let docId = runtime.stateSnapshot.documents["/a.xlsx"]!.docId
+        let keys = [tileKey(0, 0), tileKey(1, 0)]
+        office.recorder.subscribeReplies[docId] = keys
+        office.recorder.requestTilesShouldFail = true
+
+        runtime.subscribeTiles(path: "/a.xlsx", part: 0, zoomPPT: 1000, viewportTwips: sampleViewport)
+
+        // Wait on the failure path itself having run (recorded before the throw) rather than on the
+        // store's in-flight count, which would read as trivially "zero" even before the Task starts.
+        await officeWaitUntil(timeout: 2) { !office.recorder.requestFailureCalls.isEmpty }
+        XCTAssertTrue(office.recorder.requestCalls.isEmpty, "a thrown send is never recorded as a successful request")
+        XCTAssertEqual(runtime.tileStore.inFlightCountForTesting, 0, "a thrown send marks nothing in flight")
+        XCTAssertEqual(runtime.tileStore.keysNeedingRequest(docId: docId, candidates: keys), keys,
+                       "the failed keys are requestable again, not stuck in flight forever")
+
+        // A subsequent subscribe, now with a healthy driver, must actually re-request them.
+        office.recorder.requestTilesShouldFail = false
+        runtime.subscribeTiles(path: "/a.xlsx", part: 0, zoomPPT: 1000, viewportTwips: sampleViewport)
+        await officeWaitUntil(timeout: 2) { !office.recorder.requestCalls.isEmpty }
+        XCTAssertEqual(Set(office.recorder.requestCalls[0].keys), Set(keys))
     }
 
     /// The routing half of tile delivery (`ShellSessionHost.officeRuntime(owning:)`) — a linear scan
