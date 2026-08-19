@@ -82,8 +82,19 @@ func panelTabContent(for tab: PanelTab, host: ShellSessionHost? = nil,
         return PanelWebTab(tab: tab,
                            model: PanelWebTabModels.model(for: tab, host: host, sessionId: sessionId),
                            runtime: .shared)
-    case .document, .note:
+    case .note:
         return PanelPlaceholderTab(tab: tab)
+    // office-plumbing Task 6: the fifth kind with a real surface — Stage A's placeholder arm,
+    // replaced (the same handoff `.code`'s/`.diff`'s/`.files`' own TEMPORARY arms took before their
+    // own tasks). The model is looked up (not built) here for the same reason every other kind's
+    // is: this function runs on every render pass, and a model born here would be reborn here — for
+    // a document tab that would mean losing `hasRequestedOpen`'s own bookkeeping (and the canvas's
+    // registered `canvasHost`) on every visit. Nothing on this line touches the office helper:
+    // `bind` records the host/session and hops off the current pass; the first open happens once
+    // the runtime resolves.
+    case .document:
+        return PanelDocumentTab(tab: tab,
+                                model: PanelDocumentTabModels.model(for: tab, host: host, sessionId: sessionId))
     // editor-product Task 5: the third kind with a real surface — Stage A's placeholder arm,
     // replaced. The model is looked up (not built) here for the reason `.web`'s and `.diff`'s are:
     // this function runs on every render pass, and a model born here would be reborn here — for a

@@ -4185,4 +4185,105 @@ final class ShellSessionHostTests: XCTestCase {
         // closure struct) after `officeDoubles` releases it in `tearDown`.
         await officeWaitUntil(timeout: 2) { office.recorder.closeCalls.count == 1 }
     }
+
+    // MARK: - office-plumbing Task 6: the document door — mirrors `openFileTab`'s own wire-level
+    // proofs, at the smaller set this door actually needs (path resolution is `resolvedFilePath`'s
+    // own, already-pinned proof; this is about the `.document` kind and the retry obligation).
+
+    /// **Mint: one `panel.openTab`, kind `document`, carrying the absolute path and basename — and
+    /// the panel is revealed.** Mirrors `testAFileDoorClickWithNoExistingTabMintsACodeTabWith
+    /// AbsolutePathAndBasenameAndRevealsThePanel`.
+    func testADocumentDoorClickWithNoExistingTabMintsADocumentTabAndRevealsThePanel() async {
+        let (host, factory, mgmt) = await makeHostWithManagement()
+        defer { host.deselect() }
+        host.setShellVisible(true)
+        host.select("S1")
+        await waitUntilMade(factory, 1)
+        await answerHandshake(factory.made[0], sessionId: "S1")
+
+        var revealed = 0
+        host.onRevealPanel = { revealed += 1 }
+
+        host.openDocumentTab("/repo/gate.xlsx", sessionId: "S1")
+        await feedWaitUntil { mgmt.methods.contains("panel.openTab") }
+        guard let open = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.openTab" }) else {
+            return XCTFail("a document-door click with nothing open must mint a tab: \(mgmt.methods)")
+        }
+        let params = open["params"] as? [String: Any]
+        XCTAssertEqual(params?["sessionId"] as? String, "S1")
+        XCTAssertEqual(params?["kind"] as? String, "document")
+        XCTAssertEqual(params?["url"] as? String, "/repo/gate.xlsx")
+        XCTAssertEqual(params?["title"] as? String, "gate.xlsx")
+        XCTAssertNil(params?["diffId"])
+        XCTAssertEqual(revealed, 1, "a tab nobody can see is not an opened document")
+    }
+
+    /// **The second click: `panel.activateTab`, no second mint.** Mirrors `testASecondFileDoorClick
+    /// OnTheSamePathActivatesInsteadOfMintingASecondTab`.
+    func testASecondDocumentDoorClickOnTheSamePathActivatesInsteadOfMintingASecondTab() async {
+        let (host, factory, mgmt) = await makeHostWithManagement()
+        defer { host.deselect() }
+        host.setShellVisible(true)
+        host.select("S1")
+        await waitUntilMade(factory, 1)
+        await answerHandshake(factory.made[0], sessionId: "S1")
+
+        host.panelStore.applyFetchedSnapshot(
+            sessionId: "S1",
+            tabs: [PanelTab(tabId: "t7", kind: .document, url: "/repo/gate.xlsx", title: "gate.xlsx")],
+            activeTabId: nil)
+
+        host.openDocumentTab("/repo/gate.xlsx", sessionId: "S1")
+        await feedWaitUntil { mgmt.methods.contains("panel.activateTab") }
+        guard let activate = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.activateTab" }) else {
+            return XCTFail("a document door click for an already-open path must activate it: \(mgmt.methods)")
+        }
+        XCTAssertEqual((activate["params"] as? [String: Any])?["tabId"] as? String, "t7")
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertEqual(mgmt.methods.filter { $0 == "panel.openTab" }.count, 0,
+                       "one tab per document — a second click must never mint: \(mgmt.methods)")
+    }
+
+    /// **The retry obligation**: an existing tab whose path currently sits in the runtime's
+    /// `openFailures` gets a fresh `open()` alongside the activate — mirrors editor's own HANDOFFS
+    /// obligation (`openFileTab`'s doc), applied to `OfficeRuntime.open` instead of
+    /// `EditorRuntime.openFile` (no `Task` needed here: `OfficeRuntime.open` is not `async`).
+    func testActivatingATabWhosePathIsInOpenFailuresAlsoRetriesTheOpen() async {
+        // **No `select`/`deselect` here, deliberately** (unlike this section's other two document-
+        // door tests): `openDocumentTab` reaches `openPanelTab`'s EXPLICIT `sessionId:` door, which
+        // needs no attachment at all (`ShellSessionHost.openPanelTab`'s own doc). This test's own
+        // retry SUCCEEDS (the simulated failure is removed before the retry), which means the
+        // runtime holds a genuinely open document by the time this function returns — a `defer {
+        // host.deselect() }` here would fire `releaseOfficeRuntimeIfClean`'s ALWAYS-release policy
+        // (Stage A office tabs are never dirty) synchronously, spawning a NEW fire-and-forget
+        // `driver.close` `Task` this test has no `await` point left to settle before `officeDoubles`
+        // releases the recorder in `tearDown` — exactly the unowned-reference crash class this
+        // file's own recorder doc warns about. Simplest fix: nothing here needs an attach at all.
+        let (host, _, mgmt) = await makeHostWithManagement()
+        let office = officeFactory()
+        host.makeOfficeRuntime = office.make
+
+        let runtime = host.officeRuntime(for: "S1")
+        office.recorder.openFailures["/repo/bad.xlsx"] = "garbage file"
+        runtime.open("/repo/bad.xlsx")
+        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.openFailures["/repo/bad.xlsx"] != nil }
+        office.recorder.openFailures.removeValue(forKey: "/repo/bad.xlsx") // "the file got fixed"
+
+        host.panelStore.applyFetchedSnapshot(
+            sessionId: "S1",
+            tabs: [PanelTab(tabId: "t9", kind: .document, url: "/repo/bad.xlsx", title: "bad.xlsx")],
+            activeTabId: nil)
+
+        host.openDocumentTab("/repo/bad.xlsx", sessionId: "S1")
+        await feedWaitUntil { mgmt.methods.contains("panel.activateTab") }
+        await officeWaitUntil(timeout: 2) { office.recorder.openCalls.filter { $0.path == "/repo/bad.xlsx" }.count == 2 }
+        XCTAssertEqual(office.recorder.openCalls.filter { $0.path == "/repo/bad.xlsx" }.count, 2,
+                       "the first (failed) open plus the retry from re-clicking the same path")
+        // Hygiene, not an assertion: the retry SUCCEEDS (the simulated failure was cleared above),
+        // so this runtime now holds a genuinely open document — release it explicitly and wait for
+        // the resulting close to settle, rather than leaving it for a test-ending `deselect()` this
+        // test deliberately does not call (see the header comment on why that would be unsafe here).
+        host.teardownOfficeRuntime(for: "S1")
+        await officeWaitUntil(timeout: 2) { office.recorder.closeCalls.count == 1 }
+    }
 }

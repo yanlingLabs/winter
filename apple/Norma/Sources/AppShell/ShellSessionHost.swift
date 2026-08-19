@@ -629,6 +629,11 @@ final class ShellSessionHost: ObservableObject {
         let shownTabIds = Set(shownTabs.map(\.tabId))
         PanelEditorTabModels.discardAll(except: shownTabIds)
         PanelFilesTabModels.discardAll(except: shownTabIds)
+        // office-plumbing Task 6: same class of bug, same fix — a `.document` tab's model holds a
+        // live `OfficeRuntime.$state` subscription (and, while its canvas is mounted, a live tile
+        // subscription on the shared helper); a departed session's tab must not keep either alive
+        // just because its `PanelTab` row is still cached elsewhere.
+        PanelDocumentTabModels.discardAll(except: shownTabIds)
     }
 
     /// **editor-product Task 5: the code tab's door — the one place a TAB may mint a runtime.**
@@ -1193,6 +1198,20 @@ final class ShellSessionHost: ObservableObject {
         // editor-product Task 7: and the files tab's, which releases its tree's watchers and
         // Combine subscription — see `PanelFilesTabModels.discard`/`PanelFilesTabModel.deactivate`.
         PanelFilesTabModels.discard(tabId: tabId)
+        // office-plumbing Task 6: and the document tab's — including the RUNTIME'S OWN open
+        // document, closed right HERE rather than behind a gate the way `.code`'s `requestCloseTab`
+        // fronts this same method. Stage A documents are never dirty (view-only — there is no edit
+        // surface yet), so the two-call split editor-product Task 10 built specifically to let a
+        // dirty-close sheet run BEFORE the runtime's model/watcher are released has nothing to
+        // protect here: there is no unsaved state a sheet could ask about. `runtime.close(path)`
+        // evicts the doc's own tiles from `OfficeTileStore` too (`OfficeRuntime.perform`'s
+        // `.helperClose` case) — closing the tab is what makes that eviction correct: a closed
+        // document's cached pixels are dead weight for the rest of the process's life.
+        if let tab = panelStore.tabs.first(where: { $0.tabId == tabId }), tab.kind == .document,
+           let path = tab.url, !path.isEmpty, let officeRuntime = existingOfficeRuntime(for: sessionId) {
+            officeRuntime.close(path)
+        }
+        PanelDocumentTabModels.discard(tabId: tabId)
         Task { @MainActor [weak self] in
             _ = try? await client.closePanelTab(sessionId: sessionId, tabId: tabId)
             if self?.attachedSessionId == nil { self?.refreshPanelTabs(for: sessionId) }
@@ -1356,6 +1375,45 @@ final class ShellSessionHost: ObservableObject {
         }
         // editor-product T3: the reveal carries the editor pre-warm with it — see `openDiffTab`'s
         // identical call, immediately above.
+        revealPanel()
+    }
+
+    /// office-plumbing Task 6: **the document door — dedupe/activate semantics identical to
+    /// `openFileTab`** (this task's own interface note), over `.document` tabs instead of `.code`.
+    ///
+    /// **No roots resolution needed for the OPEN itself** (unlike `.code`'s `editorRuntimeForCodeTab`
+    /// gate) — `officeRuntime(for:)` mints unconditionally, the same "an open is its own pre-warm"
+    /// shape `editorRuntimeForCodeTab`'s own doc names, minus the gate: minting an `OfficeRuntime`
+    /// stands nothing heavy up by itself (no process, no socket — see that method's own doc), so
+    /// there is no "this session has no working directory" question worth asking first. `path`
+    /// STILL resolves through `resolvedFilePath` below, for the identical reason `openFileTab`
+    /// does: a relative path from the tree must collide with an absolute click on the same file.
+    ///
+    /// The retry obligation is the same one `openFileTab` carries: an existing tab whose path
+    /// currently sits in `openFailures` gets a fresh `open()` alongside the activate, so a retried
+    /// file (permissions fixed, file re-created) does not keep showing a stale sentence forever.
+    /// `OfficeRuntime.open` is NOT `async` (unlike `EditorRuntime.openFile`), so the retry needs no
+    /// `Task` wrapper — it is fire-and-forget from this door's own perspective already.
+    func openDocumentTab(_ path: String, sessionId: String) {
+        let row = directory.rows.first { $0.sessionId == sessionId }
+        let absolutePath = resolvedFilePath(path, row: row)
+        let tabs = panelStore.allSessionTabStates[sessionId]?.tabs ?? []
+        let openFailures = Set((existingOfficeRuntime(for: sessionId)?.stateSnapshot.openFailures
+            ?? [:]).keys)
+        switch panelDocumentTabAction(tabs: tabs, path: absolutePath, openFailures: openFailures) {
+        case .activate(let tabId, let retryOpen):
+            activatePanelTab(tabId, sessionId: sessionId)
+            if retryOpen {
+                existingOfficeRuntime(for: sessionId)?.open(absolutePath)
+            }
+        case .mint(let title):
+            openPanelTab(kind: .document, url: absolutePath, title: title, sessionId: sessionId)
+        }
+        // Reveal the panel on both branches — an activate behind a hidden panel is a click that
+        // visibly does nothing, mirroring `openFileTab`/`openDiffTab`'s identical calls. Unlike
+        // theirs, this carries no office-specific pre-warm: `panelDidReveal` only pre-warms the
+        // EDITOR (`editorPrewarmTarget`) — office has no pre-warm door of its own (`officeRuntime
+        // (for:)`'s own doc: "an open is its own pre-warm"), so this call is purely "show the panel."
         revealPanel()
     }
 
