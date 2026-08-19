@@ -128,7 +128,16 @@ struct OfficeRuntimeState: Equatable {
     /// `.openFailed` arm) — this banner sits ABOVE a canvas that keeps rendering, mirroring
     /// `EditorRuntimeState.banners`' identical split from `EditorRuntimeState.openFailures`.
     /// Cleared by a successful (re)open of the same path (`.opened`'s own doc: a document that just
-    /// opened cannot still be saying it was deleted) and by close/teardown.
+    /// opened cannot still be saying it was deleted) and by close/teardown, and — Task 8 review — by
+    /// a matching `.reloadFailed` (that arm's own comment: the banner goes with the document it was
+    /// about). One interleaving is disclosed, not solved, same class as the runtime's own close-
+    /// during-reload resurrection race: `.externalDeleted` sets this banner while `documents[path]`
+    /// still holds the pre-delete entry; if an ALREADY-in-flight reload for that same path then
+    /// succeeds (`.opened` lands after the delete), its arm clears this banner along with everything
+    /// else `.opened` resets, leaving the tab showing freshly-reloaded content for a file that is, at
+    /// that instant, actually gone — no banner, and no further watcher event will re-fire (the
+    /// baseline was already replaced by the reload's own re-arm). Bounded: the NEXT external write or
+    /// delete of that path fires normally and the state resynchronizes: nothing here can wedge.
     var documentBanners: [String: String] = [:]
 }
 
@@ -188,11 +197,13 @@ enum OfficeRuntimeEvent: Equatable {
 /// call, so the reducer's tests read as claims about the runtime rather than about the socket.
 ///
 /// The brief names five: `.helperOpen`, `.helperClose`, `.subscribe`, `.unsubscribe`,
-/// `.emitBanner`. Two more are added here, mirroring `EditorRuntimeEffect`'s own extra members
-/// beyond its headline `.createBrowser`/`.registerWithHub` pair: `.ensureHelperReady` (the "ask the
-/// possibly-already-running shared helper to be ready" step `.openRequested` needs from `.idle`/
-/// `.failed`) and `.teardown` (releasing everything this runtime holds, on the same terms as
-/// `EditorRuntimeEffect.teardown(browserId:)`).
+/// `.emitBanner`. Five more are added here. Two predate Task 8, mirroring `EditorRuntimeEffect`'s
+/// own extra members beyond its headline `.createBrowser`/`.registerWithHub` pair:
+/// `.ensureHelperReady` (the "ask the possibly-already-running shared helper to be ready" step
+/// `.openRequested` needs from `.idle`/`.failed`) and `.teardown` (releasing everything this
+/// runtime holds, on the same terms as `EditorRuntimeEffect.teardown(browserId:)`). Task 8 adds
+/// three more for the file-watch/reload story: `.watchFile`, `.unwatchFile`, `.reloadDocument`
+/// (each documented at its own case below).
 enum OfficeRuntimeEffect: Equatable {
     case ensureHelperReady
     case helperOpen(path: String)
@@ -219,12 +230,14 @@ enum OfficeRuntimeEffect: Equatable {
     /// (`scrollOrigin`/`zoomPPT`) survives untouched.
     case reloadDocument(path: String, oldDocId: String)
     /// Task 5: whenever the reducer decides something is worth telling the user, this fires
-    /// alongside the state it also writes (`failureReason` for a helper death,
-    /// `openFailures[path]` for one document) — the effect is the transient, "say it once" half; the
-    /// state is the durable, "a later render can still read it" half. No banner UI surface exists
-    /// yet in Stage A (T6+ wires one against `documents`/`openFailures`/`failureReason`) —
-    /// `OfficeRuntime`'s own performer for this case is a documented no-op relay; the effect still
-    /// fires and is asserted by the reducer tests, matching the brief's named effect list.
+    /// alongside the state it also writes (`failureReason` for a helper death, `openFailures[path]`
+    /// for one document, `documentBanners[path]` since Task 8 for an external change/deletion) — the
+    /// effect is the transient, "say it once" half; the state is the durable, "a later render can
+    /// still read it" half. The UI reads the durable state directly rather than the effect: T6's
+    /// `OfficeDocumentViewportStateView` renders `openFailures`/`failureReason`, and T8's
+    /// `OfficeDocumentBannerView` renders `documentBanners`. So `OfficeRuntime`'s own performer for
+    /// this case stays a documented no-op relay — the effect still fires and is asserted by the
+    /// reducer tests, matching the brief's named effect list, but nothing subscribes to it.
     case emitBanner(reason: String)
     /// Release every open docId (closing each is the imperative half's job — see
     /// `OfficeRuntime.performTeardown`); never touches the shared helper PROCESS itself, which
@@ -380,6 +393,15 @@ enum OfficeRuntimeReducer {
             guard state.documents[path]?.docId == oldDocId else { return (next, []) }
             next.documents.removeValue(forKey: path)
             next.openFailures[path] = reason
+            // Task 8 review: the banner goes with the document, exactly as `.closeRequested` already
+            // reasons above. Without this, a delete-during-reload interleaving (external change starts
+            // a reload; the file is deleted before the round trip lands; `.externalDeleted` sets the
+            // "File was deleted on disk" banner while the old entry is still present; the in-flight
+            // reload then fails and lands here) would leave that banner standing over the full-screen
+            // `.openFailed` state this arm produces instead — two failure surfaces for one path, and a
+            // `documentBanners` entry with no document behind it, which is exactly the invariant this
+            // field's own header rules out.
+            next.documentBanners.removeValue(forKey: path)
             let basename = (path as NSString).lastPathComponent
             return (next, [.emitBanner(reason: "Couldn't reload \(basename): \(reason)"),
                            .unwatchFile(path: path)])
@@ -668,9 +690,10 @@ final class OfficeRuntime: ObservableObject {
                 Task { [driver] in await driver.unsubscribeTiles(docId) }
 
             case .emitBanner:
-                // No banner UI surface exists in Stage A yet — T6+ wires one against
-                // `state.failureReason`/`state.openFailures`, which is what a future banner view
-                // actually reads (this effect's own doc explains the split). Documented no-op relay.
+                // The UI reads durable state directly, not this effect: T6's
+                // `OfficeDocumentViewportStateView` renders `state.failureReason`/`state.openFailures`,
+                // T8's `OfficeDocumentBannerView` renders `state.documentBanners` (this effect's own
+                // doc explains the split). Documented no-op relay.
                 break
 
             case .teardown(let docIds):

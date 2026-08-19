@@ -348,6 +348,30 @@ final class OfficeRuntimeReducerTests: XCTestCase {
                                  .unwatchFile(path: "/a.xlsx")])
     }
 
+    /// **Review fix**: a delete that lands WHILE a reload is in flight sets `documentBanners` (the
+    /// document entry is still present, so `.externalDeleted`'s guard passes); if that same reload
+    /// then fails, `.reloadFailed` must not leave that banner standing over the `.openFailed` state
+    /// it produces instead — `documentBanners` and `documents` must agree on whether there is a
+    /// document to be a banner ABOUT (this state's own header names the invariant).
+    func testReloadFailedClearsAnyDeletedBannerLeftBehindByAConcurrentExternalDelete() {
+        let (open, _) = reduce(ready(), [.openRequested(path: "/a.xlsx"),
+                                         .opened(path: "/a.xlsx", docId: "doc-a", metadata: metadata)])
+        // The file vanished while some in-flight reload (for this same "doc-a") was still pending —
+        // the document entry is untouched, so the delete's guard passes and the banner is set.
+        let (deleted, _) = reduce(open, [.externalDeleted(path: "/a.xlsx")])
+        XCTAssertEqual(deleted.documentBanners["/a.xlsx"], "File was deleted on disk", "sanity")
+
+        let (state, effects) = reduce(deleted, [
+            .reloadFailed(path: "/a.xlsx", oldDocId: "doc-a", reason: "corrupt file")
+        ])
+        XCTAssertNil(state.documentBanners["/a.xlsx"], "no document left behind for this banner to be "
+                     + "about — the failure sentence below replaces it instead")
+        XCTAssertNil(state.documents["/a.xlsx"])
+        XCTAssertEqual(state.openFailures["/a.xlsx"], "corrupt file")
+        XCTAssertEqual(effects, [.emitBanner(reason: "Couldn't reload a.xlsx: corrupt file"),
+                                 .unwatchFile(path: "/a.xlsx")])
+    }
+
     /// **The stale-failure guard, the case it exists for.** Two independent reloads for the same
     /// path: the SECOND succeeds and replaces `documents[path]` with a newer docId BEFORE the FIRST's
     /// own failure lands. The stale failure must not clobber the genuinely-fine newer document.
