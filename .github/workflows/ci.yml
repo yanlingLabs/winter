@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# A new push to a PR cancels the previous run for that PR.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The TypeScript workspaces. Split per package so a failure names the layer it came from.
+  # NOTE: the Swift side (NormaProtocol / NormaKit / the Norma app) is deliberately NOT built here —
+  # it depends on ~480 MB of vendored artifacts (CEF, Monaco, iroh) that are fetched, not committed.
+  # Those are covered by the local build; see CONTRIBUTING.md.
+  test:
+    name: test · ${{ matrix.package }}
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [protocol, core, cli, plugin-sdk]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Test
+        working-directory: packages/${{ matrix.package }}
+        run: bun test
+
+  # The protocol package generates a JSON schema and the Swift round-trip fixtures. If a schema
+  # change landed without re-running the generator, the tree is dirty here — which is exactly the
+  # drift the checklist in CONTRIBUTING.md exists to prevent.
+  protocol-codegen:
+    name: protocol codegen is committed
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Regenerate
+        working-directory: packages/protocol
+        run: bun run generate
+
+      - name: Fail if the generated output differs from what is committed
+        run: |
+          if ! git diff --quiet; then
+            echo "::error::Generated protocol artifacts are out of date. Run 'pnpm protocol:generate' and commit the result."
+            git --no-pager diff --stat
+            exit 1
+          fi

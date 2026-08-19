@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 Questions, ideas and general discussion
+    url: https://github.com/yanlingLabs/norma/discussions
+    about: Not sure it's a bug? Want to argue about the roadmap? Start here.
+  - name: 🔒 Report a security vulnerability
+    url: https://github.com/yanlingLabs/norma/security/advisories/new
+    about: Please report security problems privately — never as a public issue.

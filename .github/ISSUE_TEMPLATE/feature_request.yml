@@ -1,0 +1,50 @@
+name: 💡 Feature request
+description: Suggest something Norma should be able to do.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check the [roadmap](https://github.com/yanlingLabs/norma#roadmap) first — a fair bit is
+        already planned. If your idea is more of an open question than a request, the
+        [discussions](https://github.com/yanlingLabs/norma/discussions) board is a better home.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you actually trying to do?
+      description: Describe the situation, not the solution. What gets in your way today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like Norma to do?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part of Norma?
+      multiple: true
+      options:
+        - Chat mode
+        - Code mode
+        - Dispatch mode
+        - Cowork / Build (planned modes)
+        - The Mac app / orb / panel
+        - The CLI or TUI
+        - iPhone app or the Swift kits
+        - Agent tools, MCP, skills, add-ons
+        - Memory
+        - Providers and models
+        - Something else
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Anything you've tried, or alternatives you've considered

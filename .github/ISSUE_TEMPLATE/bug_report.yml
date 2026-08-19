@@ -1,0 +1,106 @@
+name: 🐞 Bug report
+description: Something in Norma doesn't work the way it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time. If this is a **security** problem, please close this and
+        [report it privately](https://github.com/yanlingLabs/norma/security/advisories/new) instead.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect, and what did you get instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open a Code session in …
+        2. Ask her to …
+        3. …
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Where did it happen?
+      multiple: true
+      options:
+        - Mac app (chat window)
+        - The orb / four-finger field
+        - The panel (browser, editor, files, diffs)
+        - Terminal (norma CLI / TUI)
+        - The daemon (norma-core)
+        - iPhone app
+        - Plugins / add-ons / MCP
+        - Not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Which mode?
+      options:
+        - Chat
+        - Code
+        - Dispatch
+        - Not applicable / not sure
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Norma version
+      description: "`norma --version`, or the version in the menu bar's About."
+      placeholder: "0.2.013"
+    validations:
+      required: true
+
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: "26.1"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: provider
+    attributes:
+      label: How is your model configured?
+      options:
+        - ChatGPT account (Codex OAuth)
+        - OpenAI API key
+        - Not relevant to this bug
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs, transcript excerpt, or screenshot
+      description: |
+        Anything you can share. **Please scrub API keys, tokens, file paths you'd rather not
+        publish, and anything private from your session transcript** — this issue is public.
+      render: shell
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you file
+      options:
+        - label: I searched existing issues and this isn't already reported.
+          required: true
+        - label: I'm on the latest release (or I've said above why I'm not).
+          required: true
+        - label: I've removed anything private from what I pasted.
+          required: true
