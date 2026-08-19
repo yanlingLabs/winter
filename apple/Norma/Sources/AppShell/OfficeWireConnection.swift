@@ -47,6 +47,21 @@ final class OfficeWireConnection: @unchecked Sendable {
     private let transport: NormaTransport
     private let lock = NSLock()
     private var buffer = Data()
+    /// Task 4 — how many leading bytes of `buffer` are ALREADY confirmed newline-free. Without
+    /// this, `ingest`'s newline scan restarted from `buffer.startIndex` on every call — fine for
+    /// the small control frames every OTHER frame in this file produces, but a single `tile` push
+    /// (base64 RGBA pixels, ~1.4MB as text — the transport decision's own chosen rung, see
+    /// `OfficeWireFrame.tile`'s header) commonly arrives split across many `UnixSocketTransport`
+    /// read chunks: each `ingest` call before the terminating newline appears would re-scan the
+    /// ENTIRE buffer accumulated so far, making total scan cost quadratic in the line's length
+    /// (caught during this task's own transport measurement, not by a correctness test — a
+    /// confounder that would have inflated every arrival-latency number). Reset to 0 only when a
+    /// line is actually consumed (`removeSubrange` shifts everything after it down to index 0,
+    /// invalidating any prior "scanned up to here" offset); advanced to `buffer.count` whenever a
+    /// scan finds no newline in the new tail, so the NEXT call resumes exactly where this one left
+    /// off. Net effect: every byte is scanned at most once as part of finding the line it belongs
+    /// to — linear in total bytes, not quadratic in chunk count.
+    private var scannedPrefixLength = 0
     private var frameQueue: [OfficeWireFrame] = []
     private var waiter: PendingWait?
     private var streamClosed = false
@@ -73,6 +88,16 @@ final class OfficeWireConnection: @unchecked Sendable {
     /// seqs. `nil` (the default): pushes are silently dropped — correct for every Stage A caller
     /// except the one that sets this (`OfficeHelperClient`, via `OfficeHelperSupervisor`).
     var onDocumentEvent: (@Sendable (String, OfficeDocumentEvent) -> Void)?
+
+    /// Task 4 — the same "never through `frameQueue`" routing as `onDocumentEvent` above, for the
+    /// three NEW push-only frame types tiles introduce. `.subscribed`/`.unsubscribed`/
+    /// `.tileRequestAccepted` are direct, seq-correlated REPLIES (awaited via the normal
+    /// `nextFrame`/`expectReply` path in `OfficeHelperClient`, exactly like `opened`/`closed`) and
+    /// are deliberately NOT listed here — only frames the helper sends WITHOUT a matching
+    /// outstanding request need this treatment.
+    var onTile: (@Sendable (String, TileKey, Int, Int, Int, String) -> Void)?      // docId, key, generation, width, height, pixelsBase64
+    var onTileFailed: (@Sendable (String, TileKey, String) -> Void)?               // docId, key, reason
+    var onInvalidated: (@Sendable (String, [TileKey]) -> Void)?                    // docId, keys
 
     init(socketPath: String) {
         transport = UnixSocketTransport(path: socketPath)
@@ -178,11 +203,22 @@ final class OfficeWireConnection: @unchecked Sendable {
         var toDeliver: OfficeWireFrame?
         var pending: PendingWait?
         var pushesToDeliver: [(String, OfficeDocumentEvent)] = []
+        // Task 4 — the three new async-push shapes, collected the same way `pushesToDeliver`
+        // already is (under `lock`, delivered to callbacks after `lock.unlock()` below).
+        var tilesToDeliver: [(String, TileKey, Int, Int, Int, String)] = []
+        var tileFailuresToDeliver: [(String, TileKey, String)] = []
+        var invalidationsToDeliver: [(String, [TileKey])] = []
         lock.lock()
         buffer.append(data)
-        while let newlineIndex = buffer.firstIndex(of: 0x0A) {
+        while true {
+            let searchStart = buffer.index(buffer.startIndex, offsetBy: scannedPrefixLength)
+            guard let newlineIndex = buffer[searchStart...].firstIndex(of: 0x0A) else {
+                scannedPrefixLength = buffer.count // nothing new to find until more bytes arrive
+                break
+            }
             let lineData = buffer.subdata(in: buffer.startIndex..<newlineIndex)
             buffer.removeSubrange(buffer.startIndex...newlineIndex)
+            scannedPrefixLength = 0 // the remaining buffer is a fresh, unscanned tail
             // F4 (T2 review), client side: an undecodable line is now LOGGED, not silently
             // dropped — "your call on shape, disclose it." Logging only, not surfaced as a
             // delivered frame: this client has no reply mechanism (it isn't the one being asked
@@ -194,14 +230,21 @@ final class OfficeWireConnection: @unchecked Sendable {
             // from a mysteriously timed-out request.
             if let line = String(data: lineData, encoding: .utf8) {
                 if let frame = OfficeWireFrame.decode(line) {
-                    // Task 3: `.documentEvent` is an unprompted PUSH, never a reply — routed
-                    // straight to `onDocumentEvent`, NEVER into `frameQueue` (see this property's
-                    // own header for the real interleaving bug this avoids). Collected here, under
-                    // THIS lock hold, but the callback itself fires after `lock.unlock()` below —
+                    // Task 3/4: unprompted PUSHES never go into `frameQueue` — routed straight to
+                    // their own dedicated callback (see `onDocumentEvent`/`onTile`/`onTileFailed`/
+                    // `onInvalidated`'s own headers for the real interleaving bug this avoids).
+                    // Collected here, under THIS lock hold; delivered after `lock.unlock()` below —
                     // never invoke an arbitrary caller-supplied closure while holding `lock`.
-                    if case .documentEvent(_, let docId, let event) = frame {
+                    switch frame {
+                    case .documentEvent(_, let docId, let event):
                         pushesToDeliver.append((docId, event))
-                    } else {
+                    case .tile(_, let docId, let key, let generation, let width, let height, let pixelsBase64):
+                        tilesToDeliver.append((docId, key, generation, width, height, pixelsBase64))
+                    case .tileFailed(_, let docId, let key, let reason):
+                        tileFailuresToDeliver.append((docId, key, reason))
+                    case .invalidated(_, let docId, let keys):
+                        invalidationsToDeliver.append((docId, keys))
+                    default:
                         frameQueue.append(frame)
                     }
                 } else {
@@ -219,6 +262,15 @@ final class OfficeWireConnection: @unchecked Sendable {
         lock.unlock()
         for (docId, event) in pushesToDeliver {
             onDocumentEvent?(docId, event)
+        }
+        for (docId, key, generation, width, height, pixelsBase64) in tilesToDeliver {
+            onTile?(docId, key, generation, width, height, pixelsBase64)
+        }
+        for (docId, key, reason) in tileFailuresToDeliver {
+            onTileFailed?(docId, key, reason)
+        }
+        for (docId, keys) in invalidationsToDeliver {
+            onInvalidated?(docId, keys)
         }
         if let pending, let toDeliver, pending.once.trip() {
             pending.continuation.resume(returning: toDeliver)

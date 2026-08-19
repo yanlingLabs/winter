@@ -47,6 +47,21 @@ final class OfficeHelperClient {
         didSet { connection.onDocumentEvent = { [onDocumentEvent] docId, event in onDocumentEvent?(docId, event) } }
     }
 
+    /// Task 4 — the tile-pipeline counterparts to `onDocumentEvent` above, same settable-closure
+    /// shape (not an `AsyncStream`, same carry-driven restraint) proxied straight through to the
+    /// underlying `OfficeWireConnection`'s own dedicated push callbacks.
+    var onTile: ((String, TileKey, Int, Int, Int, String) -> Void)? {
+        didSet { connection.onTile = { [onTile] docId, key, generation, width, height, pixelsBase64 in
+            onTile?(docId, key, generation, width, height, pixelsBase64)
+        } }
+    }
+    var onTileFailed: ((String, TileKey, String) -> Void)? {
+        didSet { connection.onTileFailed = { [onTileFailed] docId, key, reason in onTileFailed?(docId, key, reason) } }
+    }
+    var onInvalidated: ((String, [TileKey]) -> Void)? {
+        didSet { connection.onInvalidated = { [onInvalidated] docId, keys in onInvalidated?(docId, keys) } }
+    }
+
     init(connection: OfficeWireConnection, seqAllocator: OfficeWireSeqAllocator, requestTimeout: TimeInterval) {
         self.connection = connection
         self.seqAllocator = seqAllocator
@@ -101,12 +116,61 @@ final class OfficeHelperClient {
         }
     }
 
+    /// Closing a doc this connection did NOT open surfaces as `.serverError(reason: "notOwner")`
+    /// (F7, Task 4 review carry) — same discrimination shape as `alreadyOpen` (Task 3): a protocol-
+    /// level refusal, not a document-shaped failure, so it is NOT a distinct thrown case the way
+    /// `.openFailed` is.
     func close(docId: String) async throws {
         let seq = seqAllocator.nextSeq()
         try await connection.send(.close(seq: seq, docId: docId))
         let reply = try await expectReply(seq: seq)
         switch reply {
         case .closed: return
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    // MARK: - Task 4: tiles
+
+    /// Registers this connection as a tile-push subscriber for `docId` (which must already be open
+    /// — by ANY connection, not necessarily this one) and returns the tile-set the CURRENT
+    /// viewport needs (`TileMath.viewportTileKeys`, computed server-side so client and server can
+    /// never disagree about the mapping). Produces `TileHandle`-equivalent identity for T6: the
+    /// returned `[TileKey]` is exactly what a caller then feeds to `tileRequest` to fetch pixels.
+    func subscribeTiles(docId: String, part: Int, zoomPPT: Int, viewportTwips: OfficeTwipsRect) async throws -> [TileKey] {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.subscribeTiles(seq: seq, docId: docId, part: part, zoomPPT: zoomPPT, viewportTwips: viewportTwips))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .subscribed(_, _, let keys): return keys
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    func unsubscribeTiles(docId: String) async throws {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.unsubscribe(seq: seq, docId: docId))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .unsubscribed: return
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    /// Asks for pixel data for `keys`. Only the IMMEDIATE acceptance is awaited here — each key's
+    /// actual pixels (or failure) arrive later as `onTile`/`onTileFailed` pushes, exactly as many
+    /// times as `keys.count` for a well-behaved helper (refuse-never-ignore, extended to per-key
+    /// granularity — see `OfficeWireFrame.tileFailed`'s own header), never awaited synchronously by
+    /// this method itself — painting can be slow and must not block the reply.
+    func requestTiles(docId: String, keys: [TileKey]) async throws {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.tileRequest(seq: seq, docId: docId, keys: keys))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .tileRequestAccepted: return
         case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
         default: throw OfficeHelperClientError.unexpectedReply(reply)
         }
