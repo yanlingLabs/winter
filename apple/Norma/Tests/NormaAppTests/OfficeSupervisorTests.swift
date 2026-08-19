@@ -611,13 +611,12 @@ final class OfficeSupervisorTests: XCTestCase {
         let socketPath = stateDir.appendingPathComponent("office.sock").path
         // 1024 bytes/chunk: ~1,370 separate writes for a ~1.4MB line -- deliberately far below any
         // socket buffer size, so this is NOT relying on best-effort OS coalescing to prove
-        // fragmentation happened; it is guaranteed by construction. Chosen (not just guessed) via a
-        // throwaway isolated benchmark of the two scan strategies at this exact payload size before
-        // landing this test: at 1,370 chunks, the OLD from-scratch-every-call rescan takes ~6.9s of
-        // pure in-memory scan cost (no I/O at all); the FIXED `scannedPrefixLength` path takes
-        // ~0.011s for the SAME input -- a ~650x difference, comfortably separated from the small,
-        // fixed per-chunk syscall overhead (~1,370 local Unix-socket read/write pairs, each on the
-        // order of microseconds) this REAL end-to-end test additionally pays on top of either.
+        // fragmentation happened; it is guaranteed by construction. Micro-round 2: this comment
+        // previously cited a throwaway in-memory-only benchmark (~6.9s buggy / ~0.011s fixed) that
+        // did NOT reproduce against the REAL call path -- a re-review mutation-tested this test by
+        // reverting `ingest`'s scan to the literal pre-fix from-scratch rescan and measured the
+        // buggy path at ~1.15s here, not ~6.9s. See the assertion's own comment below for the real,
+        // mutation-verified pair this test is actually calibrated against.
         startChunkedWritePeer(at: socketPath, data: lineData, chunkSize: 1024)
 
         let socketAppeared = await waitUntil(timeout: 5.0) { FileManager.default.fileExists(atPath: socketPath) }
@@ -661,14 +660,18 @@ final class OfficeSupervisorTests: XCTestCase {
         XCTAssertEqual(received.key, TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0))
         XCTAssertEqual(received.pixelsBase64, bigPixels, "the ~1.4MB payload must arrive byte-for-byte intact across ~1,370 fragments")
 
-        // The actual regression bar, MEASURED not guessed (see the chunk-size comment above): the
-        // fixed path's pure algorithmic cost is ~0.011s at this exact payload/chunk shape; a
-        // quadratic-rescan regression would cost ~6.9s of pure scan time alone, before any of this
-        // test's real socket I/O is even added on top. 3s sits with wide margin above realistic
-        // end-to-end overhead for the fixed path and wide margin below the measured buggy-path cost
-        // -- not a tight pin, and deliberately far from this suite's own wall-clock flake boundary
-        // elsewhere.
-        XCTAssertLessThan(elapsed, 3.0,
+        // The actual regression bar, MEASURED against the REAL call path, not an isolated
+        // in-memory guess (micro-round 2: a re-review mutation-tested this test by reverting
+        // `ingest`'s scan to the literal pre-fix from-scratch-every-call rescan and running this
+        // exact test against it): fixed path ~0.03s, broken path ~1.15s/1.180s on this hardware --
+        // a ~38x separation, not the ~650x an isolated (no real socket I/O, no Swift Data
+        // bridging through the actual `ingest`) benchmark had suggested; that isolated number did
+        // NOT reproduce here and this test is calibrated against the real, mutation-verified pair
+        // instead. 0.5s sits >=15x above the fixed path's ~0.03s and >=2.3x below the broken path's
+        // ~1.15s -- comfortably separates the two without being a hair-trigger pin, and (unlike the
+        // prior 3.0s ceiling) actually FAILS against a reverted fix on this hardware, which is the
+        // whole point of a regression test.
+        XCTAssertLessThan(elapsed, 0.5,
             "ingest took \(elapsed)s for a ~1.4MB line in 1024-byte fragments -- consistent with a "
             + "quadratic rescan regression, not the fixed O(n) scannedPrefixLength path")
     }

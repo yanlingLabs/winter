@@ -146,8 +146,15 @@ final class TileCacheTests: XCTestCase {
         cache.recordPaint(key: key(0, 0, part: 1), pixels: pixels(3))
 
         let bumped = cache.invalidate(rectsTwips: [], part: 0) // EMPTY, part is a don't-care here
-        XCTAssertEqual(Set(bumped), Set([key(0, 0, part: 0), key(9, 9, part: 0), key(0, 0, part: 1)]),
-                        "EMPTY must bump every key ever painted, regardless of part")
+        // Micro-round 2: exact sorted-array equality, not Set(bumped) -- a Set comparison is
+        // order-insensitive and left `invalidate`'s own sort-by-(part,zoomPPT,tileX,tileY) (fix
+        // round 1, discretionary) completely untested despite this being the one test with enough
+        // distinct keys to make an ordering assertion meaningful. All three keys share zoomPPT
+        // 1000 (the `key()` helper's default), so the tie-broken order is by (part, tileX, tileY):
+        // part 0 before part 1; within part 0, tileX 0 before tileX 9.
+        XCTAssertEqual(bumped, [key(0, 0, part: 0), key(9, 9, part: 0), key(0, 0, part: 1)],
+                        "EMPTY must bump every key ever painted, regardless of part, sorted by "
+                        + "(part, zoomPPT, tileX, tileY)")
         XCTAssertNil(cache.lookup(key: key(0, 0, part: 0)))
         XCTAssertNil(cache.lookup(key: key(9, 9, part: 0)))
         XCTAssertNil(cache.lookup(key: key(0, 0, part: 1)))

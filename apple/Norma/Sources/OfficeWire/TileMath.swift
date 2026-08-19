@@ -206,13 +206,21 @@ public enum TileMath {
     }
 
     /// `range.upperBound - range.lowerBound + 1`, computed with CHECKED arithmetic — never
-    /// `range.count`. For a `ClosedRange<Int>` built from wire-derived (client-controlled, no
-    /// magnitude limit) bounds, `.count`'s own internal `upperBound - lowerBound` can itself
-    /// overflow and trap INSIDE the standard library, before any code of this file's own runs on
-    /// the result — e.g. `origin: 0, length: .max` at `zoomPPT: maxZoomPPT` produces two
-    /// individually-representable indices far enough apart that `.count` traps computing their
-    /// distance. `nil` on overflow, the same "cannot represent this" meaning every other checked
-    /// operation in this file uses.
+    /// `range.count`. **Corrected, micro-round 2**: for a range this file's OWN `indexRange`
+    /// produces, this can never actually overflow, and the previous version of this comment's cited
+    /// example (`origin: 0, length: .max` at `zoomPPT: maxZoomPPT`) does NOT trap — dividing by a
+    /// positive span cannot INCREASE a distance, so `indexRange`'s own two floor-divisions (`minIndex
+    /// = floorDiv(origin, span)`, `maxIndex = floorDiv(lastTwip, span)`, `span >= 1` always per
+    /// `tileSpanTwips`) can only shrink or preserve the twip-distance, never grow it: index-distance
+    /// <= twip-distance (`lastTwip - origin == length - 1`) <= `Int64.max - 1`, and that upper bound
+    /// is exactly what `indexRange`'s own checked `origin + length - 1` arithmetic already
+    /// guarantees is representable. So — mirroring `maxTileIndexMagnitude`'s own honest framing —
+    /// avoiding `.count` here is defense-in-depth, not load-bearing for anything `indexRange`
+    /// itself ever hands this function: it protects a HYPOTHETICAL future caller passing a
+    /// `ClosedRange<Int>` from somewhere else entirely, not the one call site (`estimatedTileCount`)
+    /// this file actually has today. Still correct to keep total/never-trapping regardless — `nil`
+    /// on overflow, the same "cannot represent this" meaning every other checked operation in this
+    /// file uses.
     private static func axisCount(_ range: ClosedRange<Int>) -> Int? {
         let (span, overflowedSub) = range.upperBound.subtractingReportingOverflow(range.lowerBound)
         guard !overflowedSub else { return nil }
