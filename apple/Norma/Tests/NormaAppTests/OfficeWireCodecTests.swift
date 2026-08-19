@@ -261,10 +261,21 @@ final class OfficeWireCodecTests: XCTestCase {
     // These two parsers translate LibreOfficeKit's raw callback payload strings into
     // `OfficeDocumentEvent`. They live on `OfficeDocumentEvent` (not `LOKBridge`, their one real
     // caller) specifically so this table can reach them: `LOKBridge` is a `type: tool` Xcode
-    // target no test bundle can import, and no Stage-A wire verb provokes a real LOK callback
-    // (Stage A never paints a tile or edits a document), so this table is — as of Task 3 — the
-    // ONLY exercise of this parsing logic anywhere. Every case below was read directly off the
-    // implementation, not off a live LOK firing.
+    // target no test bundle can import.
+    //
+    // As of Task 3, no Stage-A wire verb provoked a real LOK callback (Stage A never painted a tile
+    // or edited a document), so this table was the ONLY exercise of this parsing logic anywhere,
+    // and every case below was read directly off the implementation, not off a live LOK firing.
+    //
+    // Task 4 changed that for ONE of the two parsers: `OfficeHelperLiveTests.testRealLOKCallback
+    // ProbeCapturesRawPayloadsAndCrossChecksTheParsers` now spawns the real helper, opens a real
+    // fixture, paints real tiles, and feeds whatever LOK actually fires through both parsers.
+    // `parseModifiedStatus` WAS cross-checked there against a genuine `.uno:ModifiedStatus=false`
+    // firing and parsed it correctly. `parseInvalidateTiles` was NOT — that same live probe observed
+    // zero `LOK_CALLBACK_INVALIDATE_TILES` firings against a view-only document with no edit verb
+    // available, so this table remains its only exercise, and every case below is still read
+    // directly off the implementation rather than off live data. See that parser's own doc comment
+    // in `OfficeWire.swift` for the full re-judgment of both parsers' lenient-default behaviors.
 
     func testParseInvalidateTilesRecognizedShapes() {
         let size4 = OfficeDocumentEvent.parseInvalidateTiles("10, 20, 300, 400")

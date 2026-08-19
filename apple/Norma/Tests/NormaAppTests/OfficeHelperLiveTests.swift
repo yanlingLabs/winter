@@ -562,6 +562,14 @@ final class OfficeHelperLiveTests: XCTestCase {
     // MARK: - Raw-buffer SHA tripwire (carry #6) — via the committed spike, NOT the real tile
     // pipeline (Task 4 owns that). Exact spike parameters: 512x512 canvas, tile origin (0,0),
     // 3000x3000 twips (the spike's own default), matching how the gate's pinned table was produced.
+    //
+    // This is the VENDOR-INTEGRITY half of a two-test split (Task 4, debt #2): did the vendored
+    // dylib itself change, checked WITHOUT `FONTCONFIG_FILE` — the no-override baseline the gate
+    // table was originally pinned under. Its product-path sibling,
+    // `testProductPathPixelHashesForAllSixFixturesAndHashStabilityAcrossTwoRequests` below, is the
+    // REGRESSION tripwire for this task's own `TileRenderer`/`LOKBridge` pipeline through the real
+    // production fontconfig config — the two deliberately pin DIFFERENT hashes for the same fixture,
+    // see that test's own header for why. Different jobs, both live.
 
     func testGateXlsxRawTileHashMatchesTheGateTablePin() throws {
         try skipUnlessVendorPresent()
@@ -748,6 +756,20 @@ final class OfficeHelperLiveTests: XCTestCase {
         try await helper.client.close(docId: docId)
         try? await Task.sleep(nanoseconds: 1_000_000_000)
 
+        // CAPTURE-MECHANISM LIMITATION (not a LOK or production-parser limitation — disclosed here
+        // because a live run surfaced it): `StderrCapture.ingest` splits purely on 0x0A. If a real
+        // callback's `payload` itself CONTAINS an embedded newline (observed live: a STATE_CHANGED
+        // firing whose logged payload was just `"{"` — the opening brace of what is presumably a
+        // multi-line JSON/JSDIALOG-shaped payload, cut at its own first internal `\n`), the line
+        // that carries the `[LOKBridge raw callback]` prefix is counted correctly (one real firing
+        // = one prefixed line, so `rawLines.count` below is NOT inflated), but that line's `payload=`
+        // text is TRUNCATED relative to what LOK actually sent — the remaining lines of a multi-line
+        // payload land in the buffer as their own unprefixed "lines" and are filtered OUT here, not
+        // reattached. Neither Stage A parser this test cross-checks is affected: both
+        // `parseInvalidateTiles` and `parseModifiedStatus` only ever recognize single-line payload
+        // shapes by protocol definition, and every type=0/type=8 firing observed below arrived intact
+        // on one line. Anyone reading a future probe run should not mistake a bare `"{"` for a real,
+        // complete payload — it is an artifact of this line-based capture, not of LOK.
         let rawLines = (helper.stderrCapture?.linesSnapshot() ?? []).filter { $0.contains("[LOKBridge raw callback]") }
         print("[callback probe] \(rawLines.count) raw LOK callback(s) observed across open + 2x paintTile + close:")
         for line in rawLines { print("  " + line) }
@@ -1071,10 +1093,21 @@ final class OfficeHelperLiveTests: XCTestCase {
         """)
 
         // The bar (per this task's own transport-decision framing): tile arrival is ASYNC over a
-        // placeholder, not a 16ms-per-frame budget — comfortably clearing "tens of ms" is the bar,
-        // not CEF's video-frame cadence. A generous ceiling, not a tight pin — the PRINTED numbers
-        // above are the real evidence this task's report cites; this just fails the suite outright
-        // on a severe regression.
+        // placeholder, not a 16ms-per-frame budget. A generous ceiling, not a tight pin — the
+        // PRINTED numbers above are the real evidence this task's report cites; this just fails
+        // the suite outright on a severe regression.
+        //
+        // IMPORTANT for anyone reading the printed numbers: `onTile` above only measures
+        // `base64.utf8.count` — it never calls `Data(base64Encoded:)`. So neither warmPerTileMs
+        // nor coldPerTileMs includes base64 *decode* cost; they cover socket transfer + ingest()'s
+        // full-line String(data:) conversion + decodeInbound's line.data(using:) conversion back +
+        // JSON parsing of the giant tile-payload string. A real pixel-consuming client (e.g. one
+        // that builds a CGImage/IOSurface from the tile) pays decode ADDITIONALLY on top of these
+        // numbers — measured separately (throwaway isolated benchmark, not committed) at
+        // ~19ms/tile for `Data(base64Encoded:)` on a 512x512 RGBA tile's base64 text. So the
+        // realistic end-to-end for a pixel-consuming client is ~warm+19ms and ~cold+19ms per tile,
+        // not the raw numbers printed above — see task-4-report.md for the full accounting and the
+        // resulting "clears with modest headroom, not comfortably" transport verdict.
         XCTAssertLessThan(warmPerTileMs, 200, "transport-only per-tile cost ballooned past a generous 200ms ceiling")
     }
 }

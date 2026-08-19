@@ -544,10 +544,25 @@ public enum OfficeDocumentEvent: Equatable, Sendable {
     /// one part anyway. `nil` for anything that doesn't parse as either shape.
     ///
     /// Lives here (not on `LOKBridge`, its one real caller) so a test can reach it at all:
-    /// `LOKBridge` is a `type: tool` Xcode target no test bundle can import, and no Stage-A wire
-    /// verb can provoke a real LOK callback (Stage A never paints a tile or edits a document), so
-    /// without this move the parser would have zero test coverage, permanently, regardless of how
-    /// thoroughly the rest of the wire surface is exercised.
+    /// `LOKBridge` is a `type: tool` Xcode target no test bundle can import. Task 4's live callback
+    /// probe (`OfficeHelperLiveTests.testRealLOKCallbackProbeCapturesRawPayloadsAndCrossChecksThe
+    /// Parsers`) DOES now provoke real LOK callbacks over open+paintTile+close, so this parser is no
+    /// longer permanently zero-coverage against real firings — but that probe observed **zero**
+    /// `LOK_CALLBACK_INVALIDATE_TILES` firings against a view-only document with no edit verb
+    /// available (Stage A ships none), so this function specifically remains untested against real
+    /// data; the table test below is still its only exercise.
+    ///
+    /// **Re-judged leniency (Task 4, debt #1), one clause at a time:**
+    /// - `"EMPTY"` and the 4-field shape: both structurally reachable and both covered by the table
+    ///   test; no real firing was observed to cross-check either, but neither is a leniency question
+    ///   — they're the two documented shapes, not a fallback.
+    /// - **The `fields[4] ?? 0` part-defaulting IS the leniency in question, and it stays
+    ///   unjudged, honestly**: zero real `INVALIDATE_TILES` firings means zero real 5-field-vs-4-field
+    ///   payloads to check the default against. `LOK_FEATURE_PART_IN_INVALIDATION_CALLBACK` is set
+    ///   unconditionally in `LOKBridge`, so production should always get 5 fields when this callback
+    ///   ever DOES fire — but that claim is a header-doc reading, not something Task 4's probe
+    ///   confirmed live. Structurally unreachable until a Stage-B edit verb exists to provoke a real
+    ///   invalidation; revisit this comment the day one does.
     static func parseInvalidateTiles(_ payload: String) -> OfficeDocumentEvent? {
         let trimmed = payload.trimmingCharacters(in: .whitespaces)
         if trimmed == "EMPTY" {
@@ -568,7 +583,17 @@ public enum OfficeDocumentEvent: Equatable, Sendable {
     /// `.uno:Bold=true` as its example. Stage A only cares about `.uno:ModifiedStatus` (dirty
     /// tracking); every other state-changed payload is ignored (returns `nil`, folded into "not a
     /// callback type this vocabulary covers" by the caller). Same test-reachability rationale as
-    /// `parseInvalidateTiles` above.
+    /// `parseInvalidateTiles` above — UNLIKE that function, this one WAS cross-checked against a
+    /// real firing: Task 4's live probe observed a genuine `.uno:ModifiedStatus=false` payload from
+    /// opening `gate.xlsx`, and this function parsed it correctly (`.modifiedChanged(false)`).
+    ///
+    /// **Re-judged leniency (Task 4, debt #1): the `== "true"` fallback-to-false for any non-"true"
+    /// suffix.** The one real firing observed was a clean, well-formed `"false"` — the leniency
+    /// itself (what happens on garbage after the `=`) remains unexercised by real data. Kept as the
+    /// safe default: every real `.uno:ModifiedStatus` firing this codebase's own LOK vendor tree is
+    /// documented to emit is exactly `"true"` or `"false"` (`LibreOfficeKitEnums.h`'s own example),
+    /// so folding anything else to `false` fails closed (never reports "dirty" on a payload shape
+    /// nobody has ever actually seen) rather than crashing or mis-parsing outward.
     static func parseModifiedStatus(_ payload: String) -> OfficeDocumentEvent? {
         let prefix = ".uno:ModifiedStatus="
         guard payload.hasPrefix(prefix) else { return nil }
