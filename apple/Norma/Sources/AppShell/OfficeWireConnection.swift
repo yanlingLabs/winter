@@ -332,6 +332,17 @@ final class OfficeWireConnection: @unchecked Sendable {
                     break scanLoop // stop trusting this stream; nothing after this line can be framed safely
                 }
                 pendingTileHeader = header
+            case .tileHeaderMalformed(let seq, let reason):
+                // Wave fix (T5.5 review Minor-B) — same refusal shape as the byteCount-mismatch
+                // branch right above, for the same reason: a `"tile"` line whose OWN structure
+                // failed to decode may still have raw payload bytes following it on the wire (see
+                // `OfficeWireInbound.tileHeaderMalformed`'s own header), and there is no `byteCount`
+                // to trust even if there were — nothing safe to do except stop scanning immediately.
+                // Falling through to `.rejected`'s "log and keep scanning" would newline-scan
+                // straight into those bytes hunting for `0x0A`, exactly the garbage-line storm this
+                // case exists to prevent.
+                refusalReason = "tile header (seq=\(seq)) failed to decode: \(reason)"
+                break scanLoop
             case .rejected, .unreadable:
                 NSLog("[OfficeWireConnection] dropped an undecodable line from the helper: %@", line)
             }

@@ -422,32 +422,59 @@ final class OfficeRuntimeReducerTests: XCTestCase {
 
     // MARK: - helperDied / helperUnavailable — carry 4: EVERY phase, and it is never terminal
 
-    func testHelperDiedFromEveryPhaseClearsEverythingFailsAndBanners() {
+    /// **Wave fix (T9 review M8)**: `.helperDied`/`.helperUnavailable` now ALSO emits `.unwatchFile`
+    /// for every path that had an open document — see that reducer arm's own comment for why. Phases
+    /// with no open documents keep the old, effects-are-just-the-banner shape; `"ready-with-doc"` and
+    /// the new `"ready-with-two-docs"` prove the per-path emission (sorted, so two docs assert a
+    /// stable order rather than depending on `Dictionary`'s own iteration order).
+    func testHelperDiedFromEveryPhaseClearsEverythingFailsAndBannersAndUnwatchesEveryOpenDocument() {
         let idle = OfficeRuntimeState()
         let (starting, _) = reduce(OfficeRuntimeState(), [.openRequested(path: "/a.xlsx")])
         let openReady = ready()
         let (openWithDoc, _) = reduce(openReady, [.openRequested(path: "/a.xlsx"),
                                                    .opened(path: "/a.xlsx", docId: "doc-a", metadata: metadata)])
+        let (openWithTwoDocs, _) = reduce(openReady, [.openRequested(path: "/a.xlsx"),
+                                                       .opened(path: "/a.xlsx", docId: "doc-a", metadata: metadata),
+                                                       .openRequested(path: "/b.xlsx"),
+                                                       .opened(path: "/b.xlsx", docId: "doc-b", metadata: metadata)])
         let (alreadyFailed, _) = reduce(idle, [.helperDied])
 
-        for (label, phase) in [("idle", idle), ("starting", starting), ("ready-empty", openReady),
-                                ("ready-with-doc", openWithDoc), ("failed", alreadyFailed)] {
+        let banner = OfficeRuntimeEffect.emitBanner(reason: "The office helper stopped unexpectedly.")
+        let cases: [(String, OfficeRuntimeState, [OfficeRuntimeEffect])] = [
+            ("idle", idle, [banner]),
+            ("starting", starting, [banner]),
+            ("ready-empty", openReady, [banner]),
+            ("ready-with-doc", openWithDoc, [banner, .unwatchFile(path: "/a.xlsx")]),
+            ("ready-with-two-docs", openWithTwoDocs, [banner, .unwatchFile(path: "/a.xlsx"), .unwatchFile(path: "/b.xlsx")]),
+            ("failed", alreadyFailed, [banner]),
+        ]
+        for (label, phase, expectedEffects) in cases {
             let (state, effects) = reduce(phase, [.helperDied])
             XCTAssertEqual(state.phase, .failed, label)
             XCTAssertEqual(state.documents, [:], label)
             XCTAssertEqual(state.pendingOpens, [], label)
             XCTAssertEqual(state.openFailures, [:], label)
             XCTAssertEqual(state.failureReason, "The office helper stopped unexpectedly.", label)
-            XCTAssertEqual(effects, [.emitBanner(reason: "The office helper stopped unexpectedly.")], label)
+            XCTAssertEqual(effects, expectedEffects, label)
         }
     }
 
-    func testHelperUnavailableFromEveryPhaseAlsoFailsWithItsOwnReason() {
-        for phase in [OfficeRuntimeState(), reduce(OfficeRuntimeState(), [.openRequested(path: "/a.xlsx")]).0, ready()] {
+    func testHelperUnavailableFromEveryPhaseAlsoFailsWithItsOwnReasonAndUnwatchesEveryOpenDocument() {
+        let openReady = ready()
+        let (openWithDoc, _) = reduce(openReady, [.openRequested(path: "/a.xlsx"),
+                                                   .opened(path: "/a.xlsx", docId: "doc-a", metadata: metadata)])
+        let banner = OfficeRuntimeEffect.emitBanner(reason: "The office helper couldn't be started.")
+        let cases: [(OfficeRuntimeState, [OfficeRuntimeEffect])] = [
+            (OfficeRuntimeState(), [banner]),
+            (reduce(OfficeRuntimeState(), [.openRequested(path: "/a.xlsx")]).0, [banner]),
+            (openReady, [banner]),
+            (openWithDoc, [banner, .unwatchFile(path: "/a.xlsx")]),
+        ]
+        for (phase, expectedEffects) in cases {
             let (state, effects) = reduce(phase, [.helperUnavailable])
             XCTAssertEqual(state.phase, .failed)
             XCTAssertEqual(state.failureReason, "The office helper couldn't be started.")
-            XCTAssertEqual(effects, [.emitBanner(reason: "The office helper couldn't be started.")])
+            XCTAssertEqual(effects, expectedEffects)
         }
     }
 
@@ -523,26 +550,40 @@ final class OfficeRuntimeReducerTests: XCTestCase {
 final class OfficeHelperRequestQueueTests: XCTestCase {
 
     /// The whole point: a second operation enqueued WHILE the first is still running must not start
-    /// until the first has fully finished. `async let` requests both "concurrently" from the
-    /// caller's perspective — proving the queue itself, not merely the test's own sequencing, is
-    /// what keeps them apart.
+    /// until the first has fully finished.
+    ///
+    /// **Wave fix (T5.5 review flake-sibling — the reviewer's own named-but-not-yet-fixed twin of
+    /// `testThreeOperationsRunInEnqueueOrder`'s fix below)**: this test originally used `async let
+    /// first/second` to request both "concurrently" from the caller's perspective. That races two
+    /// children independently onto this `@MainActor`-isolated queue, and their ARRIVAL order is not
+    /// guaranteed to match SOURCE order — the identical unsound premise that made the sibling test
+    /// ~25% flaky before its own fix (see that test's own header for the full reasoning); this one
+    /// survived 20 iterations at review time but shares the exact same structural race and is
+    /// fix-same-shape the moment it ever trips. `Task { @MainActor in ... }`, created back-to-back
+    /// with no `await` between them, pins enqueue order to source order by construction instead —
+    /// verified flake-free across 20 iterations (`-test-iterations 20`, 0 failures) before landing,
+    /// the same bar the sibling fix used.
     func testTwoOverlappingOperationsRunStrictlySequentially() async throws {
         let queue = OfficeHelperRequestQueue()
         final class OrderBox { var events: [String] = [] }
         let box = OrderBox()
 
-        async let first: Int = queue.run {
-            box.events.append("first-start")
-            try await Task.sleep(nanoseconds: 100_000_000) // 100ms — comfortably longer than "second" needs
-            box.events.append("first-end")
-            return 1
+        let first = Task { @MainActor in
+            try await queue.run {
+                box.events.append("first-start")
+                try await Task.sleep(nanoseconds: 100_000_000) // 100ms — comfortably longer than "second" needs
+                box.events.append("first-end")
+                return 1
+            }
         }
-        async let second: Int = queue.run {
-            box.events.append("second-start")
-            return 2
+        let second = Task { @MainActor in
+            try await queue.run {
+                box.events.append("second-start")
+                return 2
+            }
         }
 
-        let results = try await (first, second)
+        let results = try await (first.value, second.value)
 
         XCTAssertEqual(results.0, 1)
         XCTAssertEqual(results.1, 2)
@@ -749,6 +790,95 @@ final class OfficeRuntimeWatcherTests: XCTestCase {
 
         XCTAssertEqual(watchers.watchers.count, 2)
         XCTAssertTrue(watchers.watchers.values.allSatisfy(\.isStopped))
+    }
+
+    // MARK: - Wave fix (T9 review M8): watches on helper death
+
+    /// **`open -> kill -> watchers empty`**: mirrors `testTeardownStopsEveryWatch` exactly, swapping
+    /// `runtime.teardown()` for `runtime.handle(supervisorEvent: .helperDied)` — the SAME "every open
+    /// document's watch must stop" claim, for the death path instead of the teardown path. Asserted
+    /// synchronously right after the call: `handle(supervisorEvent:)` -> `dispatch` -> `perform`'s
+    /// `.unwatchFile` case all run inline, no `Task { }`, no `await`.
+    func testHelperDiedStopsEveryWatch() async throws {
+        let pathA = try scratchFile(name: "a.xlsx")
+        let pathB = try scratchFile(name: "b.xlsx")
+        let watchers = OfficeWatcherRecorder()
+        let runtime = OfficeRuntime(sessionId: "S1", driver: makeDriver(), makeWatcher: watchers.factory)
+        runtimes.append(runtime)
+        runtime.open(pathA)
+        runtime.open(pathB)
+        _ = await waitUntil { runtime.stateSnapshot.documents.count == 2 }
+
+        runtime.handle(supervisorEvent: .helperDied)
+
+        XCTAssertEqual(watchers.watchers.count, 2)
+        XCTAssertTrue(watchers.watchers.values.allSatisfy(\.isStopped), "every watcher this runtime "
+                      + "owned must stop the instant the helper dies — deferring to a later close can "
+                      + "never happen once .helperDied has already wiped `documents`")
+        XCTAssertEqual(runtime.stateSnapshot.phase, .failed)
+    }
+
+    /// **`close-after-death releases the fds`** — really: closing after death is a harmless no-op
+    /// BECAUSE death already released them, not because the close itself does anything. Before this
+    /// fix, `.closeRequested`'s own `.unwatchFile` was the ONLY door that ever stopped a watch, and
+    /// it is gated on `state.documents[path]` existing — already wiped by `.helperDied` — so a close
+    /// after death was a PERMANENT no-op and the fd never released for the runtime's remaining
+    /// lifetime. This proves the release now happens at death, and that a subsequent close does not
+    /// crash or double-stop anything.
+    func testCloseAfterHelperDiedIsHarmlessSinceDeathAlreadyReleasedTheWatch() async throws {
+        let path = try scratchFile()
+        let watchers = OfficeWatcherRecorder()
+        let runtime = OfficeRuntime(sessionId: "S1", driver: makeDriver(), makeWatcher: watchers.factory)
+        runtimes.append(runtime)
+        runtime.open(path)
+        _ = await waitUntil { runtime.stateSnapshot.documents[path] != nil }
+        let watcher = try XCTUnwrap(watchers.watchers[path])
+
+        runtime.handle(supervisorEvent: .helperDied)
+        XCTAssertTrue(watcher.isStopped, "the fd-owning watcher must already be released at death")
+
+        runtime.close(path) // documents[path] is already nil post-death — must not crash or double-stop
+        XCTAssertTrue(watcher.isStopped)
+    }
+
+    /// **`death -> reopen RE-SEEDS the baseline (no spurious reload of already-current content)`**:
+    /// the file changes WHILE the helper is down (simulating an edit made during the outage, or
+    /// simply time passing) — the watch for it was stopped at death, so nothing observes this. On
+    /// reopen (the retry-affordance path — carry 4, `.failed` retries like `.idle`), a genuinely NEW
+    /// watcher must be armed (proving the stale pre-death entry was really removed, not merely that
+    /// `startWatching`'s own guard silently no-op'd), which is what lets the baseline re-seed to the
+    /// file as reopen itself just read it. The very next fire — an ordinary lock-file-sibling churn,
+    /// the ordinary case T3 already disclosed — must then be silent: a stale pre-death baseline would
+    /// instead misread the mid-outage edit as happening NOW and spuriously reload content that is
+    /// already exactly what is on screen.
+    func testHelperDiedThenReopenReSeedsTheBaselineSoTheNextFireIsNotASpuriousReload() async throws {
+        let path = try scratchFile(contents: "one")
+        let watchers = OfficeWatcherRecorder()
+        let runtime = OfficeRuntime(sessionId: "S1", driver: makeDriver(), makeWatcher: watchers.factory)
+        runtimes.append(runtime)
+        runtime.open(path)
+        _ = await waitUntil { runtime.stateSnapshot.documents[path] != nil }
+
+        runtime.handle(supervisorEvent: .helperDied)
+        _ = await waitUntil { runtime.stateSnapshot.phase == .failed }
+
+        try "two, a genuinely different length".write(toFile: path, atomically: true, encoding: .utf8)
+
+        runtime.open(path) // the retry affordance path
+        let reopened = await waitUntil { runtime.stateSnapshot.documents[path] != nil }
+        XCTAssertTrue(reopened)
+        let reopenedDocId = runtime.stateSnapshot.documents[path]?.docId
+
+        XCTAssertEqual(watchers.created.filter { $0 == path }.count, 2, "the reopen must re-arm a "
+                       + "genuinely new watcher — a leftover pre-death entry would make "
+                       + "startWatching's own guard silently skip re-seeding the baseline")
+
+        runtime.fileChangedOnDisk(path) // simulates the very next benign fire after the reopen
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.docId, reopenedDocId, "no genuine change "
+                       + "since the reopen — a stale pre-death baseline would misread the mid-outage "
+                       + "edit as happening NOW and trigger a spurious reload of content that is "
+                       + "already current")
     }
 
     /// A factory that cannot watch anything is not a failure: the document opens, the tab works, and

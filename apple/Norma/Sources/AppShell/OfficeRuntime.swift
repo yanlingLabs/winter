@@ -430,7 +430,36 @@ enum OfficeRuntimeReducer {
             var fresh = OfficeRuntimeState()
             fresh.phase = .failed
             fresh.failureReason = reason
-            return (fresh, [.emitBanner(reason: reason)])
+            // **Wave fix (T9 review M8)**: every watch this runtime armed for a now-cleared document
+            // must stop HERE, not wait for a close that can never arrive — `.closeRequested`'s own
+            // `.unwatchFile` is gated on `state.documents[path]` existing (see that arm above), and
+            // this event just wiped `documents` entirely, so a close for any of these paths after
+            // this point is a permanent no-op forever (not merely "leaks until teardown," which is
+            // what the pre-fix behavior actually was — a session-long runtime may never tear down).
+            // Left unstopped, the watch leaks its fd for the runtime's remaining lifetime AND, worse,
+            // a later reopen of the SAME path finds `startWatching`'s own guard (`watchers[path] ==
+            // nil`) still false, so the baseline never re-seeds: the first fire after reopen would be
+            // judged against a baseline frozen from BEFORE the death, misreading an ordinary,
+            // already-reflected change as a fresh external edit and spuriously reloading content that
+            // is already current.
+            //
+            // Emitted as `.unwatchFile` per path — reusing the SAME effect (and the SAME imperative
+            // performer, `OfficeRuntime.perform`'s `.unwatchFile` case) `.closeRequested`/
+            // `.reloadFailed` already use — rather than `OfficeRuntime.handle(supervisorEvent:)`
+            // walking its own `watchers` table directly the way `performTeardown` does. The two
+            // existing precedents point opposite ways, and the difference is what makes this the
+            // right one: `performTeardown`'s direct walk EXECUTES a decision the reducer ALREADY
+            // made (`.teardownRequested` -> `.teardown(docIds:)`) — the walk is a mechanical detail
+            // of running that one effect, not a second, independent decision. `handle(supervisorEvent:)`
+            // runs BEFORE any dispatch (it is where `tileStore.evictEverything()` already lives, of
+            // necessity — the tile store holds no reducer-visible state for an effect to name), so a
+            // table-walk there would be the IMPERATIVE half deciding something on its own, which is
+            // exactly what this file's own opening claim rules out ("the reducer is the only thing
+            // that decides what they mean"). Naming every open path as its own effect keeps "what
+            // happens" entirely inside the reducer. Sorted for deterministic test assertions — a
+            // dictionary has no ordering of its own to preserve.
+            let unwatchEffects = state.documents.keys.sorted().map { OfficeRuntimeEffect.unwatchFile(path: $0) }
+            return (fresh, [.emitBanner(reason: reason)] + unwatchEffects)
 
         case .teardownRequested:
             // From every phase, including `.idle` — the effect is emitted unconditionally so the

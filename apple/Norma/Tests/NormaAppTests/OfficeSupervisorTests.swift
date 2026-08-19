@@ -108,15 +108,17 @@ final class OfficeSupervisorTests: XCTestCase {
         XCTAssertEqual(supervisor.state, .stopped)
         XCTAssertNil(supervisor.client)
 
-        // F5 (T2 review): pins maxAttempts=3 and backoff=0.05 (this file's `configuration(mode:)`)
-        // as LOAD-BEARING, not merely documentation the test happens to stay green under. Without
-        // this floor, the test would pass identically with maxAttempts silently dropped to 1 (an
-        // implementation change nothing else here would catch). Post-F1/F2 fix, each of the 3
-        // attempts now costs close to the full handshakeTimeout=1.0s (silent mode never replies,
-        // so nextFrame always runs out its budget) — floor: 3×1.0 + 2×0.05 = 3.10s. 2.5s is
-        // generous-but-discriminating: comfortably below the real 3.10s floor, while still well
-        // above what 1 attempt (~1.0s) or 2 attempts (~2.05s) would produce, so either regressing
-        // silently fails this assertion.
+        // F5 (T2 review): pins maxAttempts=3 (this file's `configuration(mode:)`) as LOAD-BEARING,
+        // not merely documentation the test happens to stay green under. Without this floor, the
+        // test would pass identically with maxAttempts silently dropped to 1 (an implementation
+        // change nothing else here would catch). Post-F1/F2 fix, each of the 3 attempts now costs
+        // close to the full handshakeTimeout=1.0s (silent mode never replies, so nextFrame always
+        // runs out its budget) — floor: 3×1.0 + 2×0.05 = 3.10s. 2.5s is generous-but-discriminating:
+        // comfortably below the real 3.10s floor, while still well above what 1 attempt (~1.0s) or
+        // 2 attempts (~2.05s) would produce, so either regressing silently fails this assertion.
+        // **Wave fix (T2-F5)**: this floor does NOT similarly pin `backoff=0.05` — 3×1.0 + 2×0 =
+        // 3.0s would still clear 2.5s if backoff silently dropped to 0, so that specific regression
+        // is not what this assertion catches (the doc claim above was overbroad on that point).
         XCTAssertGreaterThanOrEqual(elapsed, 2.5,
             "3 attempts at handshakeTimeout=1.0s + 2×0.05s backoff should floor around 3.10s "
             + "(measured \(elapsed)s) — maxAttempts/backoff may have silently changed")
@@ -733,6 +735,71 @@ final class OfficeSupervisorTests: XCTestCase {
             + "mode should never scan, so this should be comfortably sub-second")
     }
 
+    /// **Wave fix (T5.5 review Minor-A)**: the O(n²) test above now exercises the TILE path, which
+    /// rung 2 moved off any scan entirely (see its own header) — it can no longer regress the thing
+    /// `scannedPrefixLength` actually guards today: a large CONTROL frame's newline scan
+    /// (`subscribed`/`invalidated` can carry up to `TileMath.maxTilesPerRectEnumeration` keys of
+    /// JSON, thousands of bytes — `OfficeWireConnection.scannedPrefixLength`'s own header names
+    /// this exactly). This test fills that gap: a `.subscribed` reply at the PRODUCTION ceiling
+    /// (4096 keys, the largest this wire can ever legally carry), delivered in small chunks, must
+    /// stay fast.
+    ///
+    /// **Ceiling calibrated by the mutation method** (this file's own established practice — see
+    /// the O(n²) test above): `scannedPrefixLength`'s effect was temporarily reverted
+    /// (`searchStart` forced to `buffer.startIndex` on every call, restoring the pre-Task-4
+    /// quadratic rescan) in a scratch build, this exact test run against it, then restored.
+    /// Measured 2026-08-19 (a 199,661-byte line, 4096 keys, 8-byte chunks — 24,958 fragments):
+    /// fixed 0.029s/0.030s (two runs), mutated 0.471s. A first calibration pass at 64-byte chunks
+    /// (fixed 0.023s, mutated 0.070s) was rejected as too close together — only ~3x apart and both
+    /// under 100ms, indistinguishable from scheduling/socket noise on a busy machine; the fragment
+    /// count needed to be pushed harder, not the frame size, to get a reliable separation (the
+    /// frame is already at the wire's own production ceiling — see below). Ceiling set to 0.15s:
+    /// ~5x the fixed measurement, ~3x below the mutated one — comfortably discriminating without
+    /// being hair-triggered on a loaded CI machine.
+    func testIngestStaysLinearNotQuadraticForALargeControlFrameDeliveredInManySmallChunks() async throws {
+        var keys: [TileKey] = []
+        var probe = OfficeWireFrame.subscribed(seq: 1, docId: "large-control-doc", keys: keys)
+        while keys.count < TileMath.maxTilesPerRectEnumeration {
+            keys.append(TileKey(part: 0, zoomPPT: 1000, tileX: keys.count, tileY: 0))
+            probe = .subscribed(seq: 1, docId: "large-control-doc", keys: keys)
+        }
+        let line = probe.encodedLine()
+        XCTAssertEqual(keys.count, TileMath.maxTilesPerRectEnumeration, "setup: built at the production ceiling")
+        XCTAssertGreaterThan(line.count, 150_000, "setup: the control frame must be genuinely large, not a token fixture")
+
+        let stateDir = makeScratchDirectory()
+        let socketPath = stateDir.appendingPathComponent("office.sock").path
+        // 8 bytes/chunk -- much smaller than the retired tile test's 1024, deliberately: at
+        // coarser chunk sizes (1KB, even 64B) a header this size fragments into too few pieces
+        // for a quadratic rescan to separate from ordinary scheduling/socket noise -- exactly the
+        // class of ceiling that already produced one green-for-wrong-reason regression in this
+        // suite's own history (Task 4 review). See this test's own header for the actual
+        // calibration numbers at both chunk sizes.
+        startChunkedWritePeer(at: socketPath, data: line, chunkSize: 8)
+
+        let socketAppeared = await waitUntil(timeout: 5.0) { FileManager.default.fileExists(atPath: socketPath) }
+        XCTAssertTrue(socketAppeared, "setup: the hand-rolled peer's socket file never appeared")
+
+        let connection = OfficeWireConnection(socketPath: socketPath)
+        try await connection.open()
+        defer { connection.close() }
+
+        let start = Date()
+        let reply = await connection.nextFrame(timeout: 30.0)
+        let elapsed = Date().timeIntervalSince(start)
+
+        guard case .subscribed(let seq, let docId, let receivedKeys) = reply else {
+            return XCTFail("expected .subscribed, got \(String(describing: reply))")
+        }
+        XCTAssertEqual(seq, 1)
+        XCTAssertEqual(docId, "large-control-doc")
+        XCTAssertEqual(receivedKeys.count, TileMath.maxTilesPerRectEnumeration)
+
+        XCTAssertLessThan(elapsed, 0.15,
+            "ingest took \(elapsed)s for a \(line.count)-byte control frame in 8-byte fragments -- "
+          + "linear scannedPrefixLength should be comfortably faster than this")
+    }
+
     // MARK: - Task 5.5 — rung-2 tile transport: pure reader tests
     //
     // All five tests below drive `OfficeWireConnection.ingest` over a real Unix socket via the raw,
@@ -943,6 +1010,48 @@ final class OfficeSupervisorTests: XCTestCase {
         let closed = await waitUntil(timeout: 5.0) { box.snapshot().closed }
         XCTAssertTrue(closed, "a byteCount:0 tile header must refuse (close) the connection")
         XCTAssertTrue(box.snapshot().arrivals.isEmpty, "byteCount:0 must never be treated as a legitimate empty tile")
+    }
+
+    /// **Wave fix (T5.5 review Minor-B)** — a `"tile"`-typed line whose OWN structure fails to
+    /// decode (here: missing `height`) must refuse the connection exactly like a structurally-valid-
+    /// but-wrong `byteCount` already does above — NOT log-and-continue the way every OTHER malformed
+    /// line does (`.rejected`'s own treatment; see `OfficeWireInbound.tileHeaderMalformed`'s own
+    /// header for the desync hazard this closes). Proven with a bait: a well-formed `"ping"` line
+    /// placed immediately after the malformed tile header. Under the pre-fix behavior (fall through
+    /// to `.rejected`'s "log and keep scanning"), this ping would eventually surface via `nextFrame`
+    /// — the tile line's own missing payload bytes never arrive, so the scan just keeps looking for
+    /// the next newline and finds this one; under the fix, the connection is torn down before the
+    /// scan ever reaches it. The falsifiable proof that no garbage-line scan happens, not merely that
+    /// nothing bad happened to fire on this particular input.
+    func testMalformedTileHeaderRefusesTheConnectionRatherThanScanningThePayloadAsGarbageLines() async throws {
+        // Missing "height" — a required field `TileWireHeader` cannot decode without.
+        let malformedHeader = Data(#"{"type":"tile","seq":1,"docId":"d","key":{"part":0,"zoomPPT":1000,"tileX":0,"tileY":0},"generation":0,"width":512,"byteCount":100}"#.utf8) + Data([0x0A])
+        let baitPing = Data(#"{"type":"ping","seq":2}"#.utf8) + Data([0x0A])
+        let wireBytes = malformedHeader + baitPing
+
+        let stateDir = makeScratchDirectory()
+        let socketPath = stateDir.appendingPathComponent("office.sock").path
+        // Small chunks: proves the refusal survives fragmented delivery of the malformed header
+        // itself, not just a monolithic one.
+        startChunkedWritePeer(at: socketPath, data: wireBytes, chunkSize: 16)
+
+        let socketAppeared = await waitUntil(timeout: 5.0) { FileManager.default.fileExists(atPath: socketPath) }
+        XCTAssertTrue(socketAppeared, "setup: the hand-rolled peer's socket file never appeared")
+
+        let connection = OfficeWireConnection(socketPath: socketPath)
+        let box = TileArrivalBox()
+        connection.onTile = { _, docId, key, _, _, _, pixels in box.recordTile(docId, key, pixels) }
+        connection.onClosed = { box.recordClosed() }
+        try await connection.open()
+        defer { connection.close() }
+
+        let reply = await connection.nextFrame(timeout: 3.0)
+        XCTAssertNil(reply, "the bait \"ping\" line after the malformed tile header must NEVER "
+                     + "surface — the connection must refuse before its scan ever reaches it")
+        let closed = await waitUntil(timeout: 5.0) { box.snapshot().closed }
+        XCTAssertTrue(closed, "a malformed tile header must refuse (close) the connection, like the "
+                     + "byteCount-mismatch case already does")
+        XCTAssertTrue(box.snapshot().arrivals.isEmpty)
     }
 
     /// A hostile-huge `byteCount` (comfortably larger than any real tile could ever be, and larger

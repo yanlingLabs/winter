@@ -183,7 +183,7 @@ final class OfficeWireCodecTests: XCTestCase {
         case .rejected(let seq, let reason):
             XCTAssertEqual(seq, 42)
             XCTAssertEqual(reason, "unknown")
-        case .frame, .tilePending, .unreadable:
+        case .frame, .tilePending, .tileHeaderMalformed, .unreadable:
             XCTFail("expected .rejected(seq: 42, reason: \"unknown\")")
         }
     }
@@ -196,7 +196,7 @@ final class OfficeWireCodecTests: XCTestCase {
         case .rejected(let seq, let reason):
             XCTAssertEqual(seq, 7)
             XCTAssertEqual(reason, "malformed")
-        case .frame, .tilePending, .unreadable:
+        case .frame, .tilePending, .tileHeaderMalformed, .unreadable:
             XCTFail("expected .rejected(seq: 7, reason: \"malformed\")")
         }
     }
@@ -214,7 +214,7 @@ final class OfficeWireCodecTests: XCTestCase {
             case .rejected(let seq, let reason):
                 XCTAssertEqual(seq, 1)
                 XCTAssertEqual(reason, "malformed", "expected malformed for: \(line)")
-            case .frame, .tilePending, .unreadable:
+            case .frame, .tilePending, .tileHeaderMalformed, .unreadable:
                 XCTFail("expected .rejected(seq: 1, reason: \"malformed\") for: \(line)")
             }
         }
@@ -235,7 +235,7 @@ final class OfficeWireCodecTests: XCTestCase {
             case .rejected(let seq, let reason):
                 XCTAssertEqual(seq, 1)
                 XCTAssertEqual(reason, "malformed", "expected malformed for: \(line)")
-            case .frame, .tilePending, .unreadable:
+            case .frame, .tilePending, .tileHeaderMalformed, .unreadable:
                 XCTFail("expected .rejected(seq: 1, reason: \"malformed\") for: \(line)")
             }
         }
@@ -243,17 +243,16 @@ final class OfficeWireCodecTests: XCTestCase {
 
     /// Task 4 — every new tile-frame shape rejects a missing/malformed field as "malformed" (never
     /// silently substitutes a default) with the real seq recovered, matching the existing frames'
-    /// own discipline exactly.
+    /// own discipline exactly. **Wave fix (T5.5 review Minor-B)**: `"tile"`'s own three malformed
+    /// shapes moved to `testTileHeaderMalformedShapesAreTileHeaderMalformedNotRejected` below — they
+    /// now decode to the dedicated `.tileHeaderMalformed`, not `.rejected` (see `OfficeWireInbound`'s
+    /// own header for why "tile" alone needs the distinction).
     func testTileFrameMalformedShapesAreRejected() {
         let lines = [
             #"{"type":"subscribeTiles","seq":1,"docId":"d","part":0,"zoomPPT":1000}"#,           // missing viewportTwips
             #"{"type":"subscribeTiles","seq":1,"docId":"d","part":0,"zoomPPT":1000,"viewportTwips":{"x":0,"y":0,"width":1}}"#, // rect missing height
             #"{"type":"tileRequest","seq":1,"docId":"d"}"#,                                       // missing keys
             #"{"type":"tileRequest","seq":1,"docId":"d","keys":[{"part":0,"zoomPPT":1000,"tileX":0}]}"#, // key missing tileY
-            // Task 5.5: "byteCount", not "pixelsBase64" — see OfficeWireFrame.tile's own doc comment.
-            #"{"type":"tile","seq":1,"docId":"d","key":{"part":0,"zoomPPT":1000,"tileX":0,"tileY":0},"generation":0,"width":512,"byteCount":0}"#, // missing height
-            #"{"type":"tile","seq":1,"docId":"d","key":{"part":0,"zoomPPT":1000,"tileX":0,"tileY":0},"generation":0,"width":512,"height":512}"#, // missing byteCount
-            #"{"type":"tile","seq":1,"docId":"d","key":{"part":0,"zoomPPT":1000,"tileX":0,"tileY":0},"generation":0,"width":512,"height":512,"byteCount":-1}"#, // byteCount negative: structurally invalid (a count can't be negative), distinct from the exact-size POLICY refusal `OfficeWireConnection.ingest` decides for a structurally-valid-but-wrong-size byteCount
             #"{"type":"tileFailed","seq":1,"docId":"d","key":{"part":0,"zoomPPT":1000,"tileX":0,"tileY":0}}"#, // missing reason
             #"{"type":"invalidated","seq":1,"docId":"d"}"#,                                        // missing keys
         ]
@@ -262,8 +261,31 @@ final class OfficeWireCodecTests: XCTestCase {
             case .rejected(let seq, let reason):
                 XCTAssertEqual(seq, 1)
                 XCTAssertEqual(reason, "malformed", "expected malformed for: \(line)")
-            case .frame, .tilePending, .unreadable:
+            case .frame, .tilePending, .tileHeaderMalformed, .unreadable:
                 XCTFail("expected .rejected(seq: 1, reason: \"malformed\") for: \(line)")
+            }
+        }
+    }
+
+    /// **Wave fix (T5.5 review Minor-B)**: split out of `testTileFrameMalformedShapesAreRejected`
+    /// above — a `"tile"` line whose OWN structure fails to decode is `.tileHeaderMalformed`, a
+    /// dedicated outcome `OfficeWireConnection.ingest` refuses the connection over (rather than
+    /// `.rejected`'s "log and keep scanning," which would newline-scan into any raw payload bytes
+    /// that follow — see `OfficeWireInbound.tileHeaderMalformed`'s own header).
+    func testTileHeaderMalformedShapesAreTileHeaderMalformedNotRejected() {
+        // Task 5.5: "byteCount", not "pixelsBase64" — see OfficeWireFrame.tile's own doc comment.
+        let lines = [
+            #"{"type":"tile","seq":1,"docId":"d","key":{"part":0,"zoomPPT":1000,"tileX":0,"tileY":0},"generation":0,"width":512,"byteCount":0}"#, // missing height
+            #"{"type":"tile","seq":1,"docId":"d","key":{"part":0,"zoomPPT":1000,"tileX":0,"tileY":0},"generation":0,"width":512,"height":512}"#, // missing byteCount
+            #"{"type":"tile","seq":1,"docId":"d","key":{"part":0,"zoomPPT":1000,"tileX":0,"tileY":0},"generation":0,"width":512,"height":512,"byteCount":-1}"#, // byteCount negative: structurally invalid (a count can't be negative), distinct from the exact-size POLICY refusal `OfficeWireConnection.ingest` decides for a structurally-valid-but-wrong-size byteCount
+        ]
+        for line in lines {
+            switch OfficeWireCodec.decodeInbound(line) {
+            case .tileHeaderMalformed(let seq, let reason):
+                XCTAssertEqual(seq, 1)
+                XCTAssertEqual(reason, "malformed", "expected malformed for: \(line)")
+            case .frame, .tilePending, .rejected, .unreadable:
+                XCTFail("expected .tileHeaderMalformed(seq: 1, reason: \"malformed\") for: \(line)")
             }
         }
     }

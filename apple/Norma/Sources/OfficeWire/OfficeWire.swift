@@ -698,6 +698,21 @@ public enum OfficeWireInbound: Equatable, Sendable {
     /// `OfficeWireFrame.wireTypes` (reason `"unknown"` — the brief's literal pin) or it IS a known
     /// type whose required fields are missing or mistyped (reason `"malformed"`).
     case rejected(seq: UInt64, reason: String)
+    /// **office-plumbing wave fix (T5.5 review Minor-B)** — a `"tile"`-typed line whose OWN
+    /// structure failed to decode (a missing/mistyped `docId`/`key`/`generation`/`width`/`height`/
+    /// `byteCount`). Deliberately NOT folded into `.rejected`, even though the two carry the same
+    /// `(seq, reason)` shape: every OTHER wire type's malformed line is self-contained — nothing on
+    /// the wire depends on having decoded it, so `.rejected`'s own "log and keep scanning" handling
+    /// (`OfficeWireConnection.ingest`) is safe. A `"tile"` line is different — on a well-formed
+    /// stream, raw pixel bytes ALWAYS follow it, whether or not THIS reader could parse the header
+    /// naming them. If this case fell through to `.rejected`'s treatment, `ingest` would newline-scan
+    /// straight into up to a tile's worth of raw RGBA bytes hunting for `0x0A` — pixel bytes
+    /// routinely contain it (~1/256 of a ~1MiB payload, on the order of 4,000 spurious "lines") —
+    /// producing thousands of pointless decode-and-log cycles instead of the one honest outcome:
+    /// this stream can no longer be trusted to be in sync, exactly the reasoning the byteCount-
+    /// mismatch refusal (`ingest`'s own `.tilePending` case) already acts on for a structurally-VALID
+    /// header carrying an untrustworthy size.
+    case tileHeaderMalformed(seq: UInt64, reason: String)
     /// Not even an envelope: not valid JSON, not a JSON object, no string `type`, or `seq` itself
     /// missing/mistyped/negative. Nothing here is trustworthy enough to echo — a reply, if the
     /// caller chooses to send one, must use the seq-unknown sentinel (`0`) with reason
@@ -834,7 +849,9 @@ public enum OfficeWireCodec {
                   let generation = intValue(object["generation"]),
                   let width = intValue(object["width"]), let height = intValue(object["height"]),
                   let byteCount = intValue(object["byteCount"]), byteCount >= 0 else {
-                return .rejected(seq: seq, reason: "malformed")
+                // Wave fix (T5.5 review Minor-B): `.tileHeaderMalformed`, never `.rejected` — see
+                // `OfficeWireInbound`'s own header for why "tile" alone needs this distinction.
+                return .tileHeaderMalformed(seq: seq, reason: "malformed")
             }
             return .tilePending(TileWireHeader(seq: seq, docId: docId, key: key, generation: generation,
                                                 width: width, height: height, byteCount: byteCount))

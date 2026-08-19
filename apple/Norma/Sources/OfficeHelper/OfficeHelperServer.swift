@@ -582,6 +582,16 @@ public final class OfficeHelperServer {
             // refused outright, so there is nothing to stay in sync FOR.
             writeReply(.error(seq: header.seq, reason: "not authenticated"), writer: writer)
             return false
+        // Wave fix (T5.5 review Minor-B): a `"tile"` line that failed to decode ITS OWN structure —
+        // treated identically to `.rejected` right below, same as `.tilePending` right above treats
+        // a structurally-VALID tile header identically to any other illegal-from-a-client frame. The
+        // desync hazard `.tileHeaderMalformed` exists to name is specific to `OfficeWireConnection`
+        // (the CLIENT side, reading a PUSH that raw payload bytes always follow) — this server never
+        // enters a payload-accumulation mode for anything a client sends, so it has no equivalent
+        // hazard to guard against; answering with an error and surviving is exactly right here.
+        case .tileHeaderMalformed(let seq, let reason):
+            writeReply(.error(seq: seq, reason: reason), writer: writer)
+            return false
         case .rejected(let seq, let reason):
             writeReply(.error(seq: seq, reason: reason), writer: writer)
             return false
@@ -734,6 +744,10 @@ public final class OfficeHelperServer {
             // (`OfficeWireCodecTests`) already cover "client sends a tile-shaped line" at the
             // decode level; this is the server's own behavioral answer to it arriving for real.
             writeReply(.error(seq: header.seq, reason: "unexpected"), writer: writer)
+        // Wave fix (T5.5 review Minor-B) — same "not this server's hazard" reasoning as the
+        // pre-auth arm above.
+        case .tileHeaderMalformed(let seq, let reason):
+            writeReply(.error(seq: seq, reason: reason), writer: writer)
         case .rejected(let seq, let reason):
             writeReply(.error(seq: seq, reason: reason), writer: writer)
         case .unreadable:

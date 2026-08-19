@@ -437,6 +437,18 @@ func officeOpenWithLabel(forFileAt path: String?) -> String {
 struct PanelDocumentChrome: View {
     @ObservedObject var model: PanelDocumentTabModel
     let tab: PanelTab
+    /// Wave fix (T7-F2) — hoisted out of `body`: `officeOpenWithLabel` does a LIVE LaunchServices
+    /// lookup (`NSWorkspace.shared.urlForApplication`), measured at ~0.112ms/call, and `body` can
+    /// re-evaluate up to 60Hz during scroll — calling it inline there was up to ~0.7% of a frame
+    /// spent on a lookup whose only input, `model.path`, is a `let` that never changes for this
+    /// model's lifetime (Stage A has no rename/move). Computed once, at construction.
+    private let openWithLabel: String
+
+    init(model: PanelDocumentTabModel, tab: PanelTab) {
+        self.model = model
+        self.tab = tab
+        self.openWithLabel = officeOpenWithLabel(forFileAt: model.path)
+    }
 
     var body: some View {
         HStack(spacing: panelEditorChromeGap) {
@@ -457,7 +469,7 @@ struct PanelDocumentChrome: View {
             // NSWorkspace, so it cannot go stale the way a close door reaching a bound-but-unattached
             // session's runtime could (the T6 review's N5 note, never a shipped door here).
             ShellTitlebarButton(systemImage: "arrow.up.forward.app",
-                                label: officeOpenWithLabel(forFileAt: model.path),
+                                label: openWithLabel,
                                 size: panelChromeButtonSize) {
                 guard let path = model.path, !path.isEmpty else { return }
                 NSWorkspace.shared.open(URL(fileURLWithPath: path))
