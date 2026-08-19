@@ -704,6 +704,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             EditorBridgeHarness.start(delegate: self)
             return
         }
+        // office-plumbing Task 9 — the office harness's own unattended gate, same shape as the
+        // editor's own two lines above (`NORMA_OFFICE_HARNESS=1`). Stage A's exit gate: the real
+        // helper, the real vendored LibreOffice, `ShellSessionHost`'s real production wiring — never
+        // this process's own `boot()`, for the identical reason the editor's harness avoids it.
+        if OfficeHarness.isRequested {
+            OfficeHarness.start(delegate: self)
+            return
+        }
         #endif
         // DD-T4: stamp NORMA_HOME + NORMA_PROFILE into this process's env BEFORE the first
         // `NormaPaths` read (which happens inside `boot()` — `supervisor.start()`'s socket probe,
@@ -1216,6 +1224,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mb.onOpenEditorHarness = { [weak self] in
             guard let self else { return }
             EditorBridgeHarness.open(delegate: self)
+        }
+        // office-plumbing Task 9 — wired the same way, before `install()`, for the same reason.
+        mb.onOpenOfficeHarness = { [weak self] in
+            guard let self else { return }
+            OfficeHarness.open(delegate: self)
         }
         #endif
         mb.install()
