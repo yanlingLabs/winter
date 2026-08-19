@@ -1,5 +1,8 @@
 import Foundation
 import Security
+#if canImport(Darwin)
+import Darwin
+#endif
 
 /// A completed office-helper request whose reply didn't match what was expected: a timeout, a
 /// server-side refusal (`error{reason}`), or a structurally different frame than the one call
@@ -8,12 +11,19 @@ enum OfficeHelperClientError: Error, CustomStringConvertible, Equatable {
     case timedOut
     case serverError(reason: String)
     case unexpectedReply(OfficeWireFrame)
+    /// Task 3 — a document-shaped failure (garbage file, unreadable path, ...), kept distinct from
+    /// `.serverError` (a protocol-level refusal: bad token, malformed frame, `alreadyOpen`, ...) so
+    /// a caller can tell "this document is bad" apart from "something is wrong with the
+    /// connection/protocol" without string-matching `reason`. The brief's own garbage-survival test
+    /// needs exactly this discrimination: assert THIS case, not merely "open() threw something."
+    case openFailed(reason: String)
 
     var description: String {
         switch self {
         case .timedOut: return "office helper request timed out"
         case .serverError(let reason): return "office helper refused: \(reason)"
         case .unexpectedReply(let frame): return "office helper sent an unexpected reply: \(frame)"
+        case .openFailed(let reason): return "office helper could not open the document: \(reason)"
         }
     }
 }
@@ -27,6 +37,15 @@ final class OfficeHelperClient {
     private let connection: OfficeWireConnection
     private let seqAllocator: OfficeWireSeqAllocator
     private let requestTimeout: TimeInterval
+
+    /// Task 3 — every `.documentEvent` push this connection receives, forwarded from
+    /// `OfficeWireConnection.onDocumentEvent` (see that property's own header: pushes bypass the
+    /// request/reply path entirely, so this fires independently of `ping`/`open`/`close` calls).
+    /// Settable, not an `AsyncStream` (carry: don't add more single-consumer coupling than the
+    /// brief already has, but don't build multicast yet either — Task 4's job). `nil` by default.
+    var onDocumentEvent: ((String, OfficeDocumentEvent) -> Void)? {
+        didSet { connection.onDocumentEvent = { [onDocumentEvent] docId, event in onDocumentEvent?(docId, event) } }
+    }
 
     init(connection: OfficeWireConnection, seqAllocator: OfficeWireSeqAllocator, requestTimeout: TimeInterval) {
         self.connection = connection
@@ -63,14 +82,20 @@ final class OfficeHelperClient {
         }
     }
 
-    /// Stage A bookkeeping only — see `OfficeWireFrame.open`'s own doc comment. LibreOfficeKit is
-    /// not loaded until Task 3; this proves the round trip, nothing more.
-    func open(docId: String, path: String) async throws {
+    /// Task 3: `open` is real — loads the document via the helper's `LOKBridge` and returns its
+    /// metadata. `.error(reason:"alreadyOpen")` (this task's own double-open ruling — see
+    /// `OfficeHelperServer.handlePostAuthLine`'s own comment) surfaces as `.serverError`, same as
+    /// any other protocol-level refusal; a genuine `openFailed` (garbage document, bad path)
+    /// surfaces as the distinct `.openFailed` case so a caller can discriminate "this document is
+    /// bad" from "something is wrong with the request itself" without string-matching.
+    func open(docId: String, path: String) async throws -> OfficeDocumentMetadata {
         let seq = seqAllocator.nextSeq()
         try await connection.send(.open(seq: seq, docId: docId, path: path))
         let reply = try await expectReply(seq: seq)
         switch reply {
-        case .opened: return
+        case .opened(_, _, let type, let parts, let sizeTwips):
+            return OfficeDocumentMetadata(type: type, parts: parts, sizeTwips: sizeTwips)
+        case .openFailed(_, _, let reason): throw OfficeHelperClientError.openFailed(reason: reason)
         case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
         default: throw OfficeHelperClientError.unexpectedReply(reply)
         }
@@ -121,7 +146,18 @@ final class OfficeHelperSupervisor {
     struct Configuration {
         var helperExecutableURL: URL
         var socketDirectory: URL
-        var handshakeTimeout: TimeInterval = 5.0
+        /// Task 3 finding, empirical (see task-3-report.md): LOK now boots BEFORE the socket even
+        /// binds (main.swift's boot-sequencing — `helloOk.lokVersion` must be the real BuildId the
+        /// moment the FIRST `hello` answers, carry T3-c), so this budget must absorb a cold
+        /// `dlopen` of a ~127MB merged dylib plus a fontconfig font-directory scan, not just a
+        /// socket connect. Measured directly: a COLD run (first `libmergedlo.dylib` load this OS
+        /// session — page cache empty) needed MORE than the Task 2 default of 5.0s; a WARM run
+        /// (same session, pages already cached by the kernel — persists across helper process
+        /// respawns, since the cache lives below the process level) completed in ~8s. 30s is a
+        /// deliberately generous budget for the one-time cold-cache cost — NOT a claim that every
+        /// boot takes this long; T5+ may want to show the user a loading state for a first office
+        /// tab open, but that is UX polish out of this task's scope, not a correctness requirement.
+        var handshakeTimeout: TimeInterval = 30.0
         var maxAttempts: Int = 3
         var backoff: TimeInterval = 0.25
         /// Forwarded to the helper as `--idle-exit-seconds` when set. `nil` (production) lets the
@@ -281,7 +317,7 @@ final class OfficeHelperSupervisor {
         // UnixSocketTransport connect-timeout on it.
         while !FileManager.default.fileExists(atPath: socketPath) {
             if Date() >= deadline || myGeneration != generation {
-                process.terminate()
+                Self.forceKill(process) // SIGKILL, not SIGTERM — carry #4, see forceKill's own header
                 return false
             }
             try? await Task.sleep(nanoseconds: 20_000_000) // 20ms
@@ -317,14 +353,14 @@ final class OfficeHelperSupervisor {
 
         guard succeeded else {
             connection.close()
-            process.terminate()
+            Self.forceKill(process) // SIGKILL, not SIGTERM — carry #4, see forceKill's own header
             return false
         }
         guard myGeneration == generation else {
             // A newer start() superseded this attempt while the handshake was in flight — leave
             // the newer attempt's own process/connection alone; tear down only this stale one.
             connection.close()
-            process.terminate()
+            Self.forceKill(process) // SIGKILL, not SIGTERM — carry #4, see forceKill's own header
             return false
         }
 
@@ -386,6 +422,24 @@ final class OfficeHelperSupervisor {
         }
         connection.onClosed = fire
         process.terminationHandler = { _ in fire() }
+    }
+
+    /// Task 3, carry #4 (EARNED): SIGTERM-equivalence to `_exit(0)` does NOT hold once LOK is
+    /// loaded. `Process.terminate()` sends SIGTERM; measured directly against the real helper with
+    /// a Writer document open (`sofficerc`'s `CrashDumpEnable=true`): the process still dies
+    /// PROMPTLY (~22ms, no crash report generated) — but `Process.terminationReason` reports
+    /// `.exit` with `terminationStatus == 255`, not `.uncaughtSignal` with status 15, meaning
+    /// SOMETHING intercepts the raw signal and calls its own exit path rather than dying from
+    /// SIGTERM's default disposition untouched (almost certainly LO's own crash-handler
+    /// infrastructure, installed because `CrashDumpEnable=true`; the absence of any resulting
+    /// crash report is consistent with that handler itself using a destructor-skipping exit, but
+    /// this is inference, not proof — see task-3-report.md's full measurement). The carry's own
+    /// instruction is explicit that "a handler runs" is disqualifying on its own, independent of
+    /// whether the OUTCOME still looks safe: SIGKILL — which no userspace handler can intercept —
+    /// replaces SIGTERM on every kill path below.
+    private static func forceKill(_ process: Process) {
+        guard process.isRunning else { return }
+        kill(process.processIdentifier, SIGKILL)
     }
 
     /// A per-launch capability token: 32 random bytes, hex-encoded. Known only to this process and

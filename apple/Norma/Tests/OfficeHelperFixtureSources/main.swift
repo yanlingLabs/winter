@@ -48,9 +48,15 @@ default:
     fail("unknown --mode \(mode) (expected ok | silent | dieAfterHello)")
 }
 
+// Task 3: OfficeHelperServer now requires a documentBridge. The fixture never links LOKBridge
+// (no bridging header, no LOK C symbols — see project.yml's excludes on this target) — its whole
+// point is exercising OfficeHelperServer's CONNECTION-level failure paths (handshake timeout,
+// death-after-hello, token mismatch), none of which are document-shaped (OfficeSupervisorTests
+// never calls open/close). FakeOfficeDocumentBridge is Task 2's own old bookkeeping-only behavior,
+// now given a name.
 let server = OfficeHelperServer(
     socketPath: socketPath, statePath: statePath, expectedToken: token,
-    idleExitSeconds: idleExitSeconds, hooks: hooks)
+    idleExitSeconds: idleExitSeconds, hooks: hooks, documentBridge: FakeOfficeDocumentBridge())
 
 do {
     try server.start()

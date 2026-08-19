@@ -12,6 +12,16 @@ import XCTest
 /// message naming exactly what's missing): a live gate that goes live the moment the artifact
 /// exists, not a hard requirement of every possible test invocation (e.g. a target list that
 /// doesn't include `NormaOfficeHelper`).
+///
+/// Task 3 update: this binary now boots REAL LibreOfficeKit unconditionally (main.swift's boot
+/// sequencing runs before the socket even binds) — this test spawns the STANDALONE build product
+/// (`BUILT_PRODUCTS_DIR/NormaOfficeHelper`, not the app-embedded copy; `OfficeHelperLiveTests`'
+/// `.officeLive` class owns the embedded-root proof), which has no `Contents/Resources/LibreOffice`
+/// sibling of its own — so it now ALSO needs `--lok-root` pointing at the vendor tree, and is
+/// ALSO vendor-gated. `lokVersion` is no longer the Stage-A placeholder (one of the sentinel's 4
+/// pinned call sites — see `officeWireStageALOKVersionPlaceholder`'s own header); the STRICT
+/// VERSION-PIN comparison lives in `OfficeHelperLiveTests` (this file's own scope stays "the
+/// supervision contract," not LOK specifics).
 final class OfficeHelperLiveSmokeTests: XCTestCase {
     private var scratchDirs: [URL] = []
 
@@ -37,6 +47,15 @@ final class OfficeHelperLiveSmokeTests: XCTestCase {
         return true
     }
 
+    /// `#filePath` for this file is `<repoRoot>/apple/Norma/Tests/NormaAppTests/OfficeHelperLiveSmokeTests.swift`
+    /// — five `deletingLastPathComponent()` hops strip the filename, `NormaAppTests`, `Tests`,
+    /// `Norma`, `apple`, leaving `<repoRoot>` (same climbing pattern as `CliLauncher.defaultRepoRoot`).
+    private static var vendorProductSetRoot: URL {
+        var url = URL(fileURLWithPath: #filePath)
+        for _ in 0..<5 { url = url.deletingLastPathComponent() }
+        return url.appendingPathComponent("apple/Norma/vendor/libreoffice/product-set", isDirectory: true)
+    }
+
     func testRealHelperBindsHandshakesPingsAndIdleExits() async throws {
         let helperURL = Bundle.main.bundleURL.deletingLastPathComponent()
             .appendingPathComponent("NormaOfficeHelper")
@@ -44,6 +63,14 @@ final class OfficeHelperLiveSmokeTests: XCTestCase {
                       "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
                         + "(\(helperURL.path)) — add it to the scheme's build list and re-run. "
                         + "This pin goes live the moment it's built.")
+        // Task 3: this standalone build product has no Contents/Resources/LibreOffice sibling of
+        // its own (that only exists inside the app-embedded copy) — --lok-root points it at the
+        // vendor tree instead, same shape either way (Frameworks/+Resources/ as real siblings).
+        let vendorRoot = Self.vendorProductSetRoot
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
+                      "LibreOffice vendor tree not present at \(vendorRoot.path) — run "
+                        + "`bun run libreoffice:fetch` from the repo root. This pin goes live the "
+                        + "moment it's fetched.")
 
         let stateDir = makeScratchDirectory()
         let socketPath = stateDir.appendingPathComponent("office.sock").path
@@ -54,12 +81,16 @@ final class OfficeHelperLiveSmokeTests: XCTestCase {
         // 1s idle-exit (not the brief's real 120s default): this test bounds its own wait at 8s
         // below, not two real minutes, to prove idle-exit happens at all.
         process.arguments = ["--socket-path", socketPath, "--state-path", stateDir.path,
-                              "--token", token, "--idle-exit-seconds", "1"]
+                              "--token", token, "--idle-exit-seconds", "1",
+                              "--lok-root", vendorRoot.path]
         try process.run()
         addTeardownBlock { if process.isRunning { process.terminate() } }
 
-        let socketAppeared = await waitUntil(timeout: 5.0) { FileManager.default.fileExists(atPath: socketPath) }
-        XCTAssertTrue(socketAppeared, "real helper never created its socket file")
+        // 60s: matches OfficeHelperLiveTests' own measured bound (a cold libmergedlo.dylib dlopen
+        // this OS session needed more than 20s; see that file's comment for the full measurement).
+        let socketAppeared = await waitUntil(timeout: 60.0) { FileManager.default.fileExists(atPath: socketPath) }
+        XCTAssertTrue(socketAppeared, "real helper never created its socket file (LOK boot now runs before bind — "
+                        + "a cold dlopen can need well over the old 5s budget; see task-3 report)")
 
         let connection = OfficeWireConnection(socketPath: socketPath)
         try await connection.open()
@@ -74,9 +105,12 @@ final class OfficeHelperLiveSmokeTests: XCTestCase {
             return
         }
         XCTAssertEqual(seq, 1)
-        // Stage A has no LibreOfficeKit loaded yet (Task 3) — this pins the honest placeholder,
-        // not a guessed real version string.
-        XCTAssertEqual(lokVersion, officeWireStageALOKVersionPlaceholder)
+        // Task 3: LOK now boots for real even for this "just prove the supervision contract" test
+        // — one of the lok-not-loaded sentinel's 4 pinned call sites (see that constant's own
+        // header). The STRICT VERSION-PIN-vs-BuildId comparison lives in OfficeHelperLiveTests;
+        // this assertion only proves LOK really did boot here (not the placeholder, not empty).
+        XCTAssertNotEqual(lokVersion, officeWireStageALOKVersionPlaceholder)
+        XCTAssertFalse(lokVersion.isEmpty)
 
         try await connection.send(.ping(seq: 2))
         guard let pingReply = await connection.nextFrame(timeout: 5.0) else {

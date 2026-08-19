@@ -819,6 +819,17 @@ targets:
         SWIFT_VERSION: "5.9"
         MACOSX_DEPLOYMENT_TARGET: "26.0"
         OTHER_CODE_SIGN_FLAGS: -i com.norma.office-helper
+        # Office Stage A Task 3 — LOKBridge.swift dlopens LibreOfficeKit via lok_init_2 and calls
+        # through its C vtable structs directly. SCOPED TO THIS TARGET ONLY: neither Norma.app nor
+        # NormaOfficeHelperFixture link the bridging header (the fixture excludes LOKBridge.swift
+        # itself below, and stays LOK-free by design — see OfficeHelperServer.swift's
+        # OfficeDocumentBridge header). Same mechanism as the Norma target's own
+        # SWIFT_OBJC_BRIDGING_HEADER (CEF interop), a separate header because this target needs
+        # none of CEF's C++/gnu++20 surface — LOK's public headers are plain C.
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/OfficeHelper/Support/OfficeHelperBridge.h
+        HEADER_SEARCH_PATHS:
+          - $(inherited)
+          - $(SRCROOT)/Sources/OfficeKit/include
       configs:
         Release:
           OTHER_SWIFT_FLAGS: -file-prefix-map $(HOME)=/builder
@@ -842,6 +853,14 @@ targets:
       - path: Sources/OfficeHelper
         excludes:
           - main.swift
+          # Office Stage A Task 3 — LOKBridge.swift needs the SWIFT_OBJC_BRIDGING_HEADER only the
+          # real NormaOfficeHelper target carries (LOK C symbols); this fixture stays LOK-free by
+          # design (see OfficeHelperServer.swift's OfficeDocumentBridge / FakeOfficeDocumentBridge
+          # header) and would fail to compile if it swept this file in. Support/ (the bridging
+          # header itself) excluded too for the same reason, though a stray .h reference alone
+          # would be inert without the build setting — belt and suspenders.
+          - LOKBridge.swift
+          - Support
       - path: Tests/OfficeHelperFixtureSources
     settings:
       base:

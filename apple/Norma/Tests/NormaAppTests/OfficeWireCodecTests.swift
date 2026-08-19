@@ -10,6 +10,7 @@ final class OfficeWireCodecTests: XCTestCase {
     // MARK: - Round trip
 
     func testEveryFrameTypeRoundTrips() throws {
+        let size = OfficeDocumentSize(widthTwips: 26593, heightTwips: 13005)
         let samples: [OfficeWireFrame] = [
             .hello(seq: 1, role: .app, token: "tok-app"),
             .hello(seq: 2, role: .agent, token: "tok-agent"),
@@ -19,9 +20,21 @@ final class OfficeWireCodecTests: XCTestCase {
             .helloOk(seq: 6, lokVersion: officeWireStageALOKVersionPlaceholder),
             .refused(seq: 7, reason: "token mismatch"),
             .pong(seq: 8),
-            .opened(seq: 9, docId: "doc-1"),
-            .closed(seq: 10, docId: "doc-1"),
-            .error(seq: 11, reason: "unknown"),
+            .opened(seq: 9, docId: "doc-1", type: .spreadsheet, parts: 3, sizeTwips: size),
+            .openFailed(seq: 10, docId: "doc-2", reason: "documentLoad failed: garbage input"),
+            .closed(seq: 11, docId: "doc-1"),
+            .error(seq: 12, reason: "unknown"),
+            // Task 3 — documentEvent, one sample per OfficeDocumentEvent case (advisor's own
+            // point: round-trip all five even though only invalidated/modifiedChanged are ever
+            // actually emitted by LOKBridge in Stage A — T4 inherits this codec unchanged).
+            .documentEvent(seq: 13, docId: "doc-1", event: .opened(type: .text, parts: 1, sizeTwips: size)),
+            .documentEvent(seq: 14, docId: "doc-1", event: .openFailed(reason: "nope")),
+            .documentEvent(seq: 15, docId: "doc-1", event: .invalidated(
+                rectsTwips: [OfficeTwipsRect(x: 0, y: 0, width: 1000, height: 2000)], part: 0)),
+            .documentEvent(seq: 16, docId: "doc-1", event: .invalidated(rectsTwips: [], part: 0)), // "EMPTY"
+            .documentEvent(seq: 17, docId: "doc-1", event: .modifiedChanged(true)),
+            .documentEvent(seq: 18, docId: "doc-1", event: .modifiedChanged(false)),
+            .documentEvent(seq: 19, docId: "doc-1", event: .closed),
         ]
         for frame in samples {
             let line = try XCTUnwrap(String(data: frame.encodedLine(), encoding: .utf8))
@@ -42,9 +55,11 @@ final class OfficeWireCodecTests: XCTestCase {
             "helloOk": #"{"type":"helloOk","seq":1,"lokVersion":"v"}"#,
             "refused": #"{"type":"refused","seq":1,"reason":"r"}"#,
             "pong": #"{"type":"pong","seq":1}"#,
-            "opened": #"{"type":"opened","seq":1,"docId":"d"}"#,
+            "opened": #"{"type":"opened","seq":1,"docId":"d","docType":"text","parts":1,"widthTwips":100,"heightTwips":200}"#,
+            "openFailed": #"{"type":"openFailed","seq":1,"docId":"d","reason":"r"}"#,
             "closed": #"{"type":"closed","seq":1,"docId":"d"}"#,
             "error": #"{"type":"error","seq":1,"reason":"r"}"#,
+            "documentEvent": #"{"type":"documentEvent","seq":1,"docId":"d","kind":"closed"}"#,
         ]
         XCTAssertEqual(Set(fixtures.keys), Set(OfficeWireFrame.wireTypes),
                        "fixtures must cover exactly OfficeWireFrame.wireTypes, no more, no less")
@@ -58,6 +73,7 @@ final class OfficeWireCodecTests: XCTestCase {
     // MARK: - seq echo
 
     func testSeqAccessorReturnsTheMintedValueForEveryCase() {
+        let size = OfficeDocumentSize(widthTwips: 1, heightTwips: 1)
         XCTAssertEqual(OfficeWireFrame.hello(seq: 100, role: .app, token: "t").seq, 100)
         XCTAssertEqual(OfficeWireFrame.ping(seq: 101).seq, 101)
         XCTAssertEqual(OfficeWireFrame.open(seq: 102, docId: "d", path: "/p").seq, 102)
@@ -65,9 +81,11 @@ final class OfficeWireCodecTests: XCTestCase {
         XCTAssertEqual(OfficeWireFrame.helloOk(seq: 104, lokVersion: "v").seq, 104)
         XCTAssertEqual(OfficeWireFrame.refused(seq: 105, reason: "r").seq, 105)
         XCTAssertEqual(OfficeWireFrame.pong(seq: 106).seq, 106)
-        XCTAssertEqual(OfficeWireFrame.opened(seq: 107, docId: "d").seq, 107)
-        XCTAssertEqual(OfficeWireFrame.closed(seq: 108, docId: "d").seq, 108)
-        XCTAssertEqual(OfficeWireFrame.error(seq: 109, reason: "r").seq, 109)
+        XCTAssertEqual(OfficeWireFrame.opened(seq: 107, docId: "d", type: .text, parts: 1, sizeTwips: size).seq, 107)
+        XCTAssertEqual(OfficeWireFrame.openFailed(seq: 108, docId: "d", reason: "r").seq, 108)
+        XCTAssertEqual(OfficeWireFrame.closed(seq: 109, docId: "d").seq, 109)
+        XCTAssertEqual(OfficeWireFrame.error(seq: 110, reason: "r").seq, 110)
+        XCTAssertEqual(OfficeWireFrame.documentEvent(seq: 111, docId: "d", event: .closed).seq, 111)
     }
 
     // MARK: - The brief's literal pin: unknown type -> error{seq,reason:"unknown"}
@@ -92,6 +110,46 @@ final class OfficeWireCodecTests: XCTestCase {
             XCTAssertEqual(reason, "malformed")
         case .frame, .unreadable:
             XCTFail("expected .rejected(seq: 7, reason: \"malformed\")")
+        }
+    }
+
+    /// Task 3 — `opened`'s three new fields (`docType`/`parts`/`widthTwips`/`heightTwips`) are each
+    /// required; missing any one is "malformed", not a partially-decoded frame with defaults.
+    func testOpenedMissingAnyNewFieldIsMalformed() {
+        let base = #"{"type":"opened","seq":1,"docId":"d""#
+        let missingDocType = base + #","parts":1,"widthTwips":1,"heightTwips":1}"#
+        let missingParts = base + #","docType":"text","widthTwips":1,"heightTwips":1}"#
+        let missingSize = base + #","docType":"text","parts":1}"#
+        let unknownDocType = base + #","docType":"spreadsheat","parts":1,"widthTwips":1,"heightTwips":1}"# // typo on purpose
+        for line in [missingDocType, missingParts, missingSize, unknownDocType] {
+            switch OfficeWireCodec.decodeInbound(line) {
+            case .rejected(let seq, let reason):
+                XCTAssertEqual(seq, 1)
+                XCTAssertEqual(reason, "malformed", "expected malformed for: \(line)")
+            case .frame, .unreadable:
+                XCTFail("expected .rejected(seq: 1, reason: \"malformed\") for: \(line)")
+            }
+        }
+    }
+
+    /// Task 3 — `documentEvent` with an unrecognized/missing `kind`, or a `kind` whose OWN fields
+    /// don't decode, is "malformed" at the FRAME level (not a partially-decoded event).
+    func testDocumentEventMalformedShapesAreRejected() {
+        let lines = [
+            #"{"type":"documentEvent","seq":1,"docId":"d"}"#,                        // missing kind
+            #"{"type":"documentEvent","seq":1,"docId":"d","kind":"madeUp"}"#,         // unknown kind
+            #"{"type":"documentEvent","seq":1,"docId":"d","kind":"modifiedChanged"}"#, // missing "modified"
+            #"{"type":"documentEvent","seq":1,"docId":"d","kind":"modifiedChanged","modified":1}"#, // NSNumber-boolean trap, inverted
+            #"{"type":"documentEvent","seq":1,"kind":"closed"}"#,                     // missing docId (frame-level)
+        ]
+        for line in lines {
+            switch OfficeWireCodec.decodeInbound(line) {
+            case .rejected(let seq, let reason):
+                XCTAssertEqual(seq, 1)
+                XCTAssertEqual(reason, "malformed", "expected malformed for: \(line)")
+            case .frame, .unreadable:
+                XCTFail("expected .rejected(seq: 1, reason: \"malformed\") for: \(line)")
+            }
         }
     }
 

@@ -16,6 +16,53 @@ public enum OfficeHelperServerError: Error, CustomStringConvertible {
     }
 }
 
+/// Task 3 — what `OfficeHelperServer` needs from something that can load/unload documents.
+/// `LOKBridge` (the real implementation, `NormaOfficeHelper` only) and `FakeOfficeDocumentBridge`
+/// (below, used by `NormaOfficeHelperFixture`'s spy binary) both conform — `OfficeHelperServer`
+/// itself never touches a LOK symbol, matching Task 2's own design: `NormaOfficeHelperFixture`
+/// links this file UNCHANGED and must keep building without the bridging header / LOK C symbols
+/// `LOKBridge.swift` needs (see project.yml: that one file is excluded from the fixture target).
+public protocol OfficeDocumentBridge: AnyObject {
+    /// A short, honest self-description for `helloOk.lokVersion` — the real LOK `BuildId` for
+    /// `LOKBridge`, `officeWireStageALOKVersionPlaceholder` for the fake. Read once, before the
+    /// first `hello` ever answers.
+    var lokVersionString: String { get }
+
+    /// Loads `path` under `docId`. Throws (never traps/crashes the process) on any failure — a
+    /// garbage document, an unreadable path, or any other `documentLoad`-shaped failure.
+    /// `OfficeHelperServer` translates a thrown error into `openFailed` and keeps serving —
+    /// the helper surviving a bad document is the whole point of this being a thrown Swift error,
+    /// not a fatal one.
+    func open(docId: String, path: String) throws -> OfficeDocumentMetadata
+
+    /// Destroys `docId`'s handle, if any is tracked. A no-op (not an error) for an untracked
+    /// `docId` — matches `close`'s wire-level idempotence (`OfficeHelperServer` itself is the
+    /// source of truth for "is this docId open"; a bridge is never asked to close something it
+    /// never opened in a well-behaved server, but must not crash if it happens).
+    func close(docId: String)
+
+    /// Fires for every asynchronous, unprompted event a still-open document produces (real LOK
+    /// callbacks for `LOKBridge`; never for the fake, which has nothing to push). Set ONCE, by
+    /// `OfficeHelperServer` at construction, before any document ever opens.
+    var onEvent: ((String, OfficeDocumentEvent) -> Void)? { get set }
+}
+
+/// `NormaOfficeHelperFixture`'s bridge — behaves exactly like Task 2's own Stage-A bookkeeping
+/// (every `open` "succeeds" with placeholder metadata nobody asserts on; `close` no-ops; nothing is
+/// ever pushed). `OfficeSupervisorTests` never calls `open`/`close` at all (its scenarios are
+/// handshake/death-detection, not document-shaped) — this exists so the fixture's `main.swift`
+/// has SOMETHING to construct `OfficeHelperServer` with, honestly reporting "no real LOK here"
+/// via `officeWireStageALOKVersionPlaceholder` for `helloOk.lokVersion`.
+public final class FakeOfficeDocumentBridge: OfficeDocumentBridge {
+    public let lokVersionString = officeWireStageALOKVersionPlaceholder
+    public var onEvent: ((String, OfficeDocumentEvent) -> Void)?
+    public init() {}
+    public func open(docId: String, path: String) throws -> OfficeDocumentMetadata {
+        OfficeDocumentMetadata(type: .other, parts: 1, sizeTwips: OfficeDocumentSize(widthTwips: 0, heightTwips: 0))
+    }
+    public func close(docId: String) {}
+}
+
 /// Office Stage A Task 2 — the helper's Unix-socket listener plus per-connection protocol
 /// handler. Runs identically whether started from `NormaOfficeHelper`'s real `main.swift` or the
 /// out-of-process test fixture's (`Tests/OfficeHelperFixtureSources/main.swift`): the fixture
@@ -57,11 +104,26 @@ public final class OfficeHelperServer {
         }
     }
 
+    /// Task 3 — one per accepted connection: the raw fd plus a write lock BOTH the reply path
+    /// (`writeReply`, called from this connection's own thread) and the async push path (LOK
+    /// callbacks, arriving on `LOKBridge`'s dedicated thread — see `OfficeHelperServer`'s own
+    /// header below) must hold before writing, so the two streams can never interleave bytes on
+    /// the wire. `ownedDocIds` (guarded by `stateQueue`, not `writeLock` — a different concern)
+    /// is this connection's own subset of `docOwner`'s keys, so connection teardown can close
+    /// exactly the documents IT opened without scanning the whole table.
+    private final class ConnectionWriter {
+        let fd: Int32
+        let writeLock = NSLock()
+        var ownedDocIds: Set<String> = []
+        init(fd: Int32) { self.fd = fd }
+    }
+
     private let socketPath: String
     private let statePath: String
     private let expectedToken: String
     private let idleExitSeconds: Double
     private let hooks: Hooks
+    private let documentBridge: OfficeDocumentBridge
     private let log: (String) -> Void
 
     private var listenFD: Int32 = -1
@@ -69,14 +131,29 @@ public final class OfficeHelperServer {
     /// Every mutable field below is touched ONLY from `stateQueue` (accessed via `.sync`, never
     /// `.async`, so idle-exit accounting is never stale by even one connection open/close when a
     /// test inspects timing) — connection threads call in, they never touch these directly.
+    ///
+    /// **Invariant: no code running under `stateQueue.sync` may call into `documentBridge`.**
+    /// `documentBridge.open`/`.close` block on `LOKBridge`'s own dedicated thread, which can
+    /// synchronously invoke `pushSeqAllocator`/`docOwner` lookups (via `onEvent`, wired in `init`
+    /// below) from INSIDE that same blocked call — calling into the bridge while already holding
+    /// `stateQueue` would risk exactly the kind of cross-lock ordering that turns into a deadlock
+    /// the moment the two paths ever nest. Every call site below copies what it needs out of
+    /// `stateQueue` first, then calls the bridge, then (if necessary) re-enters `stateQueue`
+    /// separately for bookkeeping.
     private let stateQueue = DispatchQueue(label: "office-helper.state")
-    private var documents: Set<String> = []
+    /// docId -> the connection that opened it. Doubles as Task 2's old `documents` set for
+    /// idle-exit accounting (`docOwner.isEmpty`) — one table, not two that could drift apart.
+    private var docOwner: [String: ConnectionWriter] = [:]
     private var connectionCount = 0
     private var idleTimer: DispatchSourceTimer?
     private var nextConnectionId = 0
+    /// Mints `seq` for HELPER-INITIATED `documentEvent` pushes — a separate stream from any
+    /// client's own request `seq`s (see `OfficeWireFrame.documentEvent`'s own header).
+    private let pushSeqAllocator = OfficeWireSeqAllocator()
 
     public init(socketPath: String, statePath: String, expectedToken: String,
                 idleExitSeconds: Double = 120, hooks: Hooks = Hooks(),
+                documentBridge: OfficeDocumentBridge,
                 log: @escaping (String) -> Void = { message in
                     FileHandle.standardError.write(Data((message + "\n").utf8))
                 }) {
@@ -85,7 +162,26 @@ public final class OfficeHelperServer {
         self.expectedToken = expectedToken
         self.idleExitSeconds = idleExitSeconds
         self.hooks = hooks
+        self.documentBridge = documentBridge
         self.log = log
+        documentBridge.onEvent = { [weak self] docId, event in
+            self?.routeDocumentEvent(docId: docId, event: event)
+        }
+    }
+
+    /// The async-push counterpart to `writeReply` — called from whatever thread `documentBridge`
+    /// fires its callback on (LOKBridge's dedicated thread, for the real bridge; never, for the
+    /// fake). Copies the owning connection's `ConnectionWriter` reference out of `stateQueue`
+    /// FIRST, then writes under only that writer's own lock — never while holding `stateQueue` (a
+    /// blocking socket write inside `stateQueue.sync` would wedge idle-exit accounting behind a
+    /// slow/stuck client for as long as the write takes).
+    private func routeDocumentEvent(docId: String, event: OfficeDocumentEvent) {
+        guard let writer = stateQueue.sync(execute: { docOwner[docId] }) else { return }
+        let seq = pushSeqAllocator.nextSeq()
+        let frame = OfficeWireFrame.documentEvent(seq: seq, docId: docId, event: event)
+        writer.writeLock.lock()
+        writeAll(frame.encodedLine(), fd: writer.fd)
+        writer.writeLock.unlock()
     }
 
     /// Binds, listens, and starts accepting on a dedicated background thread. Returns once the
@@ -178,10 +274,22 @@ public final class OfficeHelperServer {
     // MARK: - Per-connection handling
 
     private func handleConnection(fd: Int32, id: Int) {
+        let writer = ConnectionWriter(fd: fd)
         defer {
             close(fd)
-            stateQueue.sync {
+            // Task 3: a connection that disconnects without explicitly closing its documents
+            // (a crash, a dropped socket) must not leak them — copy the owned set out, close each
+            // OUTSIDE stateQueue (the bridge-call invariant above), then remove the bookkeeping in
+            // a second, separate stateQueue hop.
+            let owned = stateQueue.sync { () -> Set<String> in
                 connectionCount -= 1
+                return writer.ownedDocIds
+            }
+            for docId in owned {
+                documentBridge.close(docId: docId)
+            }
+            stateQueue.sync {
+                for docId in owned { docOwner.removeValue(forKey: docId) }
                 refreshIdleStateLocked()
             }
         }
@@ -218,17 +326,17 @@ public final class OfficeHelperServer {
                     // unrecoverable (there is no JSON to read one from), so this is the same
                     // sentinel-seq path `OfficeWireCodec.decodeInbound`'s `.unreadable` case
                     // already uses for a line that IS valid UTF-8 but isn't valid JSON.
-                    writeReply(.error(seq: OfficeWireCodec.unreadableSeqSentinel, reason: "malformed"), fd: fd)
+                    writeReply(.error(seq: OfficeWireCodec.unreadableSeqSentinel, reason: "malformed"), writer: writer)
                     if !authenticated { return } // same pre-auth rule as every other opening violation
                     continue
                 }
 
                 if !authenticated {
-                    guard handleOpeningLine(line, fd: fd) else { return } // reply sent; done either way
+                    guard handleOpeningLine(line, writer: writer) else { return } // reply sent; done either way
                     authenticated = true
                     continue
                 }
-                handlePostAuthLine(line, fd: fd)
+                handlePostAuthLine(line, writer: writer)
             }
         }
     }
@@ -238,27 +346,27 @@ public final class OfficeHelperServer {
     /// gets exactly one reply and the connection ends (refuse-never-ignore still means a reply is
     /// always sent; it does not mean the connection survives an auth failure). Returns `true` only
     /// when authentication succeeded, in which case the caller keeps reading on this connection.
-    private func handleOpeningLine(_ line: String, fd: Int32) -> Bool {
+    private func handleOpeningLine(_ line: String, writer: ConnectionWriter) -> Bool {
         switch OfficeWireCodec.decodeInbound(line) {
         case .frame(.hello(let seq, _, let token)):
             guard token == expectedToken else {
-                writeReply(.refused(seq: seq, reason: "token mismatch"), fd: fd)
+                writeReply(.refused(seq: seq, reason: "token mismatch"), writer: writer)
                 return false
             }
             // `role` is accepted but not yet branched on — Stage A gives app and agent the same
             // credential and the same greeting; Stage C is what gives the daemon its own token and
             // its own verbs.
-            writeReply(.helloOk(seq: seq, lokVersion: officeWireStageALOKVersionPlaceholder), fd: fd)
+            writeReply(.helloOk(seq: seq, lokVersion: documentBridge.lokVersionString), writer: writer)
             hooks.afterHelloOkWritten?()
             return true
         case .frame(let frame):
-            writeReply(.error(seq: frame.seq, reason: "not authenticated"), fd: fd)
+            writeReply(.error(seq: frame.seq, reason: "not authenticated"), writer: writer)
             return false
         case .rejected(let seq, let reason):
-            writeReply(.error(seq: seq, reason: reason), fd: fd)
+            writeReply(.error(seq: seq, reason: reason), writer: writer)
             return false
         case .unreadable:
-            writeReply(.error(seq: OfficeWireCodec.unreadableSeqSentinel, reason: "malformed"), fd: fd)
+            writeReply(.error(seq: OfficeWireCodec.unreadableSeqSentinel, reason: "malformed"), writer: writer)
             return false
         }
     }
@@ -267,39 +375,75 @@ public final class OfficeHelperServer {
     /// its own initiative (only a read error/EOF does, in `handleConnection`) — a bad frame after
     /// a good handshake is a protocol violation to answer, not a reason to drop a session the
     /// client may recover from.
-    private func handlePostAuthLine(_ line: String, fd: Int32) {
+    private func handlePostAuthLine(_ line: String, writer: ConnectionWriter) {
         switch OfficeWireCodec.decodeInbound(line) {
         case .frame(.ping(let seq)):
-            writeReply(.pong(seq: seq), fd: fd)
+            writeReply(.pong(seq: seq), writer: writer)
         case .frame(.open(let seq, let docId, let path)):
-            _ = path // Stage A: no LOK, so the path is validated-by-decoding only; Task 3 uses it.
-            stateQueue.sync {
-                documents.insert(docId)
-                refreshIdleStateLocked()
+            // Task 3: open is REAL now. Double-open ruling (this task's own carry, decided here):
+            // a second `open` of an already-tracked `docId` is `error{alreadyOpen}`, checked and
+            // answered WITHOUT ever calling the bridge — real LOK document handles are not
+            // idempotently re-openable the way Task 2's pure bookkeeping was (a silent re-load
+            // would leak or double-own a handle); `close` first is the honest way to reload the
+            // same docId. `close` itself stays idempotent (see its own case below) — there is no
+            // equivalent double-destruction risk.
+            let alreadyOpen = stateQueue.sync { docOwner[docId] != nil }
+            if alreadyOpen {
+                writeReply(.error(seq: seq, reason: "alreadyOpen"), writer: writer)
+                return
             }
-            writeReply(.opened(seq: seq, docId: docId), fd: fd)
+            do {
+                // Never called while holding stateQueue (the bridge-call invariant above) — this
+                // line runs on the connection's own thread with no lock held at all.
+                let metadata = try documentBridge.open(docId: docId, path: path)
+                stateQueue.sync {
+                    docOwner[docId] = writer
+                    writer.ownedDocIds.insert(docId)
+                    refreshIdleStateLocked()
+                }
+                writeReply(.opened(seq: seq, docId: docId, type: metadata.type, parts: metadata.parts,
+                                    sizeTwips: metadata.sizeTwips), writer: writer)
+            } catch {
+                // The helper SURVIVES a failed open (the brief's own garbage-file requirement) —
+                // nothing here tears down the bridge or the connection; the next `open` (even of
+                // the SAME docId, since it was never tracked) works normally.
+                writeReply(.openFailed(seq: seq, docId: docId, reason: "\(error)"), writer: writer)
+            }
         case .frame(.close(let seq, let docId)):
+            // Idempotent: closing an untracked docId still acks `closed` (Task 2's own precedent,
+            // unchanged) — the bridge itself tolerates being asked to close something it never
+            // opened (see `OfficeDocumentBridge.close`'s own doc comment), so this never needs to
+            // branch on whether docOwner actually had it.
+            documentBridge.close(docId: docId)
             stateQueue.sync {
-                documents.remove(docId)
+                if let owner = docOwner.removeValue(forKey: docId) {
+                    owner.ownedDocIds.remove(docId)
+                }
                 refreshIdleStateLocked()
             }
-            writeReply(.closed(seq: seq, docId: docId), fd: fd)
+            writeReply(.closed(seq: seq, docId: docId), writer: writer)
         case .frame(.hello(let seq, _, _)):
-            writeReply(.error(seq: seq, reason: "already authenticated"), fd: fd)
+            writeReply(.error(seq: seq, reason: "already authenticated"), writer: writer)
         case .frame(let frame):
-            // helloOk/refused/pong/opened/closed/error: structurally valid frames that are never
-            // legal for a CLIENT to send — the helper only ever sends these.
-            writeReply(.error(seq: frame.seq, reason: "unexpected"), fd: fd)
+            // helloOk/openFailed/refused/pong/opened/closed/error/documentEvent: structurally
+            // valid frames that are never legal for a CLIENT to send — the helper only ever sends
+            // these.
+            writeReply(.error(seq: frame.seq, reason: "unexpected"), writer: writer)
         case .rejected(let seq, let reason):
-            writeReply(.error(seq: seq, reason: reason), fd: fd)
+            writeReply(.error(seq: seq, reason: reason), writer: writer)
         case .unreadable:
-            writeReply(.error(seq: OfficeWireCodec.unreadableSeqSentinel, reason: "malformed"), fd: fd)
+            writeReply(.error(seq: OfficeWireCodec.unreadableSeqSentinel, reason: "malformed"), writer: writer)
         }
     }
 
-    private func writeReply(_ frame: OfficeWireFrame, fd: Int32) {
+    /// Task 3: takes `writer.writeLock` — the SAME lock the async push path
+    /// (`routeDocumentEvent`) takes around its own write to this connection's `fd` — so a reply
+    /// and a push can never interleave bytes on the wire.
+    private func writeReply(_ frame: OfficeWireFrame, writer: ConnectionWriter) {
         guard !hooks.suppressReplies else { return }
-        writeAll(frame.encodedLine(), fd: fd)
+        writer.writeLock.lock()
+        writeAll(frame.encodedLine(), fd: writer.fd)
+        writer.writeLock.unlock()
     }
 
     /// Writes every byte of `data` to `fd`, looping past partial writes and retrying on EINTR (F6,
@@ -335,7 +479,7 @@ public final class OfficeHelperServer {
     private func refreshIdleStateLocked() {
         idleTimer?.cancel()
         idleTimer = nil
-        guard documents.isEmpty && connectionCount == 0 else { return }
+        guard docOwner.isEmpty && connectionCount == 0 else { return }
         let timer = DispatchSource.makeTimerSource(queue: stateQueue)
         timer.schedule(deadline: .now() + idleExitSeconds)
         timer.setEventHandler { [log, idleExitSeconds] in

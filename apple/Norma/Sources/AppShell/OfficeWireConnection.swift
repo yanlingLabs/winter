@@ -57,6 +57,23 @@ final class OfficeWireConnection: @unchecked Sendable {
     /// `@MainActor` itself; this connection makes no isolation promises about when it fires.
     var onClosed: (@Sendable () -> Void)?
 
+    /// Task 3 — fires for every `.documentEvent` frame this connection receives, from the
+    /// reader task's own thread (no isolation promise, same as `onClosed`). **Never delivered
+    /// through `nextFrame`/`frameQueue`** — see `ingest(_:)`'s own comment for the real bug this
+    /// avoids: before Task 3, every frame a helper could send was a direct reply to a request this
+    /// connection's single outstanding `nextFrame` waiter was already expecting. A `.documentEvent`
+    /// push has no such waiter — it can arrive between two ordinary requests. Queuing it into the
+    /// SAME `frameQueue` a `ping`/`open`/`close` call drains would let it be handed to whichever
+    /// call is CURRENTLY awaiting a reply, failing that call with a seq mismatch while the real
+    /// reply it should have gotten sits queued behind the misdelivered push — a real, reachable bug
+    /// the moment async pushes exist on a connection also doing ordinary request/response traffic
+    /// (proven by `testDocumentEventPushDoesNotStarveAConcurrentPingReply` in
+    /// `OfficeHelperLiveTests`). Routing by CASE at ingest time, before anything touches
+    /// `frameQueue`, is what keeps the two streams apart with no dependency on tracking outstanding
+    /// seqs. `nil` (the default): pushes are silently dropped — correct for every Stage A caller
+    /// except the one that sets this (`OfficeHelperClient`, via `OfficeHelperSupervisor`).
+    var onDocumentEvent: (@Sendable (String, OfficeDocumentEvent) -> Void)?
+
     init(socketPath: String) {
         transport = UnixSocketTransport(path: socketPath)
     }
@@ -160,6 +177,7 @@ final class OfficeWireConnection: @unchecked Sendable {
     private func ingest(_ data: Data) {
         var toDeliver: OfficeWireFrame?
         var pending: PendingWait?
+        var pushesToDeliver: [(String, OfficeDocumentEvent)] = []
         lock.lock()
         buffer.append(data)
         while let newlineIndex = buffer.firstIndex(of: 0x0A) {
@@ -176,7 +194,16 @@ final class OfficeWireConnection: @unchecked Sendable {
             // from a mysteriously timed-out request.
             if let line = String(data: lineData, encoding: .utf8) {
                 if let frame = OfficeWireFrame.decode(line) {
-                    frameQueue.append(frame)
+                    // Task 3: `.documentEvent` is an unprompted PUSH, never a reply — routed
+                    // straight to `onDocumentEvent`, NEVER into `frameQueue` (see this property's
+                    // own header for the real interleaving bug this avoids). Collected here, under
+                    // THIS lock hold, but the callback itself fires after `lock.unlock()` below —
+                    // never invoke an arbitrary caller-supplied closure while holding `lock`.
+                    if case .documentEvent(_, let docId, let event) = frame {
+                        pushesToDeliver.append((docId, event))
+                    } else {
+                        frameQueue.append(frame)
+                    }
                 } else {
                     NSLog("[OfficeWireConnection] dropped an undecodable line from the helper: %@", line)
                 }
@@ -190,6 +217,9 @@ final class OfficeWireConnection: @unchecked Sendable {
             waiter = nil
         }
         lock.unlock()
+        for (docId, event) in pushesToDeliver {
+            onDocumentEvent?(docId, event)
+        }
         if let pending, let toDeliver, pending.once.trip() {
             pending.continuation.resume(returning: toDeliver)
         }

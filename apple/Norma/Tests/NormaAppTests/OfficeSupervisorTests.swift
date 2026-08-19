@@ -42,9 +42,13 @@ final class OfficeSupervisorTests: XCTestCase {
         Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelperFixture")
     }
 
-    /// Short timings so the "3 attempts, all failing" test costs low single-digit seconds, not the
-    /// brief's real production 5s/attempt. Production code (`Configuration.production()`) never
-    /// goes through this initializer.
+    /// Short timings so the "3 attempts, all failing" test costs low single-digit seconds, not
+    /// production's real per-attempt budget (`Configuration.production()`'s `handshakeTimeout`,
+    /// raised from the brief's 5.0s to 30.0s in Task 3 — see that property's own comment: LOK boot
+    /// now runs before the socket even binds, and a cold `dlopen` of the merged dylib measured
+    /// well over 5s). Production code (`Configuration.production()`) never goes through this
+    /// initializer — this fixture uses the FAKE bridge (no real LOK), so its own handshake is fast
+    /// regardless of what production's real-world timeout needs to be.
     private func configuration(mode: String, idleExitSeconds: Int? = nil) -> OfficeHelperSupervisor.Configuration {
         OfficeHelperSupervisor.Configuration(
             helperExecutableURL: fixtureExecutableURL(),
@@ -183,9 +187,12 @@ final class OfficeSupervisorTests: XCTestCase {
     // MARK: - F1: a stale socket file from a prior dead helper must not block the next attempt
 
     /// Binds, listens, then closes WITHOUT unlinking — leaves a real Unix-domain-socket special
-    /// file on disk with nothing listening on it, exactly what a SIGTERM'd helper leaves behind
-    /// (SIGTERM's default disposition runs no unlink-on-exit cleanup; only a helper that reaches
-    /// its OWN `start()` unlinks stale paths, and a killed one never gets that far again). Mirrors
+    /// file on disk with nothing listening on it, exactly what a KILLED helper leaves behind
+    /// (Task 2: SIGTERM's default disposition runs no unlink-on-exit cleanup; Task 3 switched the
+    /// supervisor's kill signal to SIGKILL — carry #4, `OfficeHelperSupervisor.forceKill`'s own
+    /// header — which is stricter still, since no userspace handler can intercept it to clean up
+    /// either. Either way: only a helper that reaches its OWN `start()` unlinks stale paths, and a
+    /// killed one never gets that far again). Mirrors
     /// `OfficeHelperServer.start()`'s own bind sequence exactly, deliberately, so this is a
     /// faithful reproduction of the artifact rather than a guess at its shape.
     private func leaveStaleSocketFile(at path: String) {

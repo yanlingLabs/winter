@@ -57,3 +57,11 @@ apple/Norma/vendor/monaco/
 # wired into any Xcode build gate (unlike vendor/cef and vendor/monaco above) — that is
 # downstream work (the helper target that embeds product-set/).
 apple/Norma/vendor/libreoffice/
+
+# Office Stage A Task 3 finding: LibreOfficeKit creates a standard LO lock file next to any
+# document it documentLoad()s (even view-only, never edited) — ",user,host,timestamp,url;" — and
+# closing the document (LOKDocument destroy()) does NOT remove it. OfficeHelperLiveTests opens the
+# committed office/ fixtures directly from their real checkout path, so every live-gated test run
+# leaves one of these behind next to gate.docx. Harmless (LO recreates/overwrites it fine on the
+# next open) but must never be committed as tracked-tree noise.
+.~lock.*#
