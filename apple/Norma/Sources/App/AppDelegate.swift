@@ -221,6 +221,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appModel = model
     }
 
+    /// office-plumbing Task 5: test-only seam, mirroring `setAppModelForTesting` immediately above
+    /// for the identical reason. `appWindow` is otherwise `private(set)` and only ever populated by
+    /// the heavy `summonAppWindow()` path (a real `AppModel`, a real window, a host built from
+    /// `model.directory`/`model.makeDetachedFeed` with no injection point of its own). The quit
+    /// sweep's order pin (`AppLifecycleTests`) needs a `ShellSessionHost` whose `editorRuntimes`/
+    /// `officeRuntimes` tables it controls directly, so it can prove `editorQuitGate.teardownAll
+    /// Runtimes` reaches the REAL host wiring — not just `EditorQuitGate.run()`'s own pure ordering
+    /// contract, which the existing spy-based tests already pin. This lets a test hand in exactly
+    /// that host, without booting the rest of the app shell.
+    func setAppWindowForTesting(_ controller: AppWindowController) {
+        appWindow = controller
+    }
+
     /// Registers a freshly spawned detached window and wires its one-shot `onClosed` to remove it
     /// from `detachedWindows` again. Called by `orb.onWindowDetach`'s closure below (Task 4's
     /// detach choreography — yellow on the morph window) and by `spawnDetachedWindow` (Task 5,
@@ -689,6 +702,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // harness inside an ordinary run, for a human to watch.
         if EditorBridgeHarness.isRequested {
             EditorBridgeHarness.start(delegate: self)
+            return
+        }
+        // office-plumbing Task 9 — the office harness's own unattended gate, same shape as the
+        // editor's own two lines above (`NORMA_OFFICE_HARNESS=1`). Stage A's exit gate: the real
+        // helper, the real vendored LibreOffice, `ShellSessionHost`'s real production wiring — never
+        // this process's own `boot()`, for the identical reason the editor's harness avoids it.
+        if OfficeHarness.isRequested {
+            OfficeHarness.start(delegate: self)
             return
         }
         #endif
@@ -1204,6 +1225,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             EditorBridgeHarness.open(delegate: self)
         }
+        // office-plumbing Task 9 — wired the same way, before `install()`, for the same reason.
+        mb.onOpenOfficeHarness = { [weak self] in
+            guard let self else { return }
+            OfficeHarness.open(delegate: self)
+        }
         #endif
         mb.install()
         menuBar = mb
@@ -1300,6 +1326,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// already passed `EditorSaveCoordinator`'s pull completes its rename AFTER this runs
     /// (`EditorRuntime.performTeardown`'s own doc — harmless, and documented there, not re-litigated
     /// here).
+    ///
+    /// **office-plumbing Task 5: the office leg grows here too, editor-teardown-THEN-office-teardown
+    /// (sequence `["editorTeardown", "officeTeardown", "proceed"]`), inside this SAME closure.**
+    /// `EditorQuitGate.run()` calls `proceedWithQuit(teardownAllRuntimes())` — the argument is
+    /// evaluated to completion before the call, so everything this closure's BODY does (both legs)
+    /// is strictly ordered before `proceedWithQuit` ever runs; no second closure or gate field is
+    /// needed to pin that. The editor precedent's own quit-gate lesson — pre-warmed runtimes must
+    /// die before the settle beat — applies identically to a pre-warmed office helper process, which
+    /// is why the office leg is NOT deferred to `applicationWillTerminate` or left for the OS to
+    /// reap: `ShellSessionHost.teardownAllOfficeRuntimesAndStopHelper()` walks every session's office
+    /// runtime (closing its documents) and THEN SIGKILLs the shared helper, synchronously, before
+    /// this closure returns. The returned `Int` stays EDITOR-ONLY on purpose — it feeds
+    /// `forceSettle` for `quitReleasingBrowserViews`'s CEF drain beat below, which the office leg has
+    /// no equivalent of (a SIGKILL needs no run-loop settle time the way an unparented CEF browser
+    /// does) — summing the two counts would make a browser-less, office-only quit ask for a settle
+    /// beat it does not need.
     lazy var editorQuitGate = EditorQuitGate(
         dirtyRuntimeStates: { [weak self] in
             guard let host = self?.appWindow?.host else { return [] }
@@ -1308,7 +1350,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         teardownAllRuntimes: { [weak self] in
             guard let host = self?.appWindow?.host else { return 0 }
             let sessionIds = Array(host.editorRuntimes.keys)
-            for sessionId in sessionIds { host.teardownEditorRuntime(for: sessionId) }
+            for sessionId in sessionIds { host.teardownEditorRuntime(for: sessionId) } // editorTeardown
+            host.teardownAllOfficeRuntimesAndStopHelper() // officeTeardown — see this property's own doc
             return sessionIds.count
         },
         presentAlert: { dirtyPaths in presentQuitDirtyAlert(dirtyPaths: dirtyPaths) },

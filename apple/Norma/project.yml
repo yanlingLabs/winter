@@ -27,6 +27,14 @@ targets:
     platform: macOS
     sources:
       - path: Sources
+        # office-plumbing Task 2: Sources/OfficeHelper/main.swift is the NormaOfficeHelper
+        # target's OWN entry point (below), compiled separately for that target. Without this
+        # exclude, the `- path: Sources` directory sweep has no per-subdirectory opt-out and would
+        # ALSO compile it into this app target, colliding with Sources/App/main.swift. Sources/
+        # OfficeWire IS swept normally here — it is the shared wire codec both targets compile, by
+        # design (see that file's own header comment for why it lives outside OfficeHelper/).
+        excludes:
+          - OfficeHelper
       - path: Support/AppIcon.icns
       # DD-T4: dev icon bundles alongside dist; the config-selected CFBundleIconFile
       # ($(NORMA_APP_ICON)) picks AppIcon (dist) / AppIconDev (dev) at build time.
@@ -58,6 +66,12 @@ targets:
       - package: NormaProtocol
       - package: Sparkle
       - target: NormaHelper
+        embed: false
+      # office-plumbing Task 2: same build-order-only relationship as NormaHelper immediately
+      # above — NormaOfficeHelper is a bare `type: tool` product (like NormaHelper, unlike the CEF
+      # helpers' full .app bundles below) that the "Embed NormaOfficeHelper" postCompileScript
+      # copies by hand; xcodegen's automatic embedding machinery is not involved either way.
+      - target: NormaOfficeHelper
         embed: false
       # panel-cef Task 6a: the app now LINKS CEF's C++/C-API translation layer, which Task 4 built
       # for the helper targets alone. `Sources/CEF/NormaCEF.mm` calls CefInitialize /
@@ -136,6 +150,25 @@ targets:
             echo "error: Monaco editor assets not vendored at ${MONACO_DIR}." >&2
             echo "error: from the repo root, run: bun run scripts/fetch-monaco.ts" >&2
             echo "error: (or: bun run monaco:fetch) — then rebuild." >&2
+            exit 1
+          fi
+      - name: Check LibreOffice vendored
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          # office-plumbing Task 2 (carry T2-c): same three-part check as the CEF/Monaco gates
+          # above, for the same reason — directory existence alone would false-pass a tree left
+          # partial by a run killed mid-extract (scripts/fetch-libreoffice.ts only writes
+          # .vendored-version after the whole product-set finishes unpacking). The vendored tree
+          # itself was not wired into any preBuildScripts gate before this task; this is that
+          # wiring.
+          LIBREOFFICE_DIR="${SRCROOT}/vendor/libreoffice"
+          if [ ! -d "${LIBREOFFICE_DIR}/product-set/Frameworks" ] || \
+             [ ! -d "${LIBREOFFICE_DIR}/product-set/Resources" ] || \
+             [ ! -f "${LIBREOFFICE_DIR}/product-set/Frameworks/libmergedlo.dylib" ] || \
+             [ ! -f "${LIBREOFFICE_DIR}/.vendored-version" ]; then
+            echo "error: LibreOffice product-set not vendored at ${LIBREOFFICE_DIR}." >&2
+            echo "error: from the repo root, run: bun run libreoffice:fetch" >&2
             exit 1
           fi
     postCompileScripts:
@@ -380,6 +413,184 @@ targets:
             rm -rf "${DEST_FRAMEWORKS}/${NAME}.app"
             ditto "${SRC}" "${DEST_FRAMEWORKS}/${NAME}.app"
           done
+      - name: Embed NormaOfficeHelper
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          # office-plumbing Task 2 — bare-tool product, embedded exactly like "Embed NormaHelper"
+          # above (NormaOfficeHelper is `type: tool`, not a nested .app bundle: the brief's
+          # "embeds NOTHING itself" plus "follow how NormaHelper is embedded today"). Unlike
+          # NormaHelper (an SMAppService launchd daemon with its own rewritten plist),
+          # NormaOfficeHelper is spawned DIRECTLY by OfficeHelperSupervisor — no launchd
+          # registration, no plist, no dev/dist Label split needed (each app instance spawns only
+          # its OWN embedded copy; there is no shared system-wide service-name table to collide
+          # in), just the executable at the same Contents/MacOS/ NormaHelper already uses.
+          DEST_MACOS="${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/MacOS"
+          mkdir -p "${DEST_MACOS}"
+          cp "${BUILT_PRODUCTS_DIR}/NormaOfficeHelper" "${DEST_MACOS}/NormaOfficeHelper"
+      - name: Embed LibreOffice (signed)
+        basedOnDependencyAnalysis: false
+        # bash, not the project-wide default /bin/sh (which on macOS is bash running in a
+        # POSIX-restricted mode): this script relies on `<(...)` process substitution to avoid a
+        # classic POSIX subshell trap — piping `find` into `while read` instead would run the loop
+        # in a subshell, silently discarding SIGNED_COUNT's increments the moment the loop exits.
+        shell: /bin/bash
+        script: |
+          set -euo pipefail
+          # office-plumbing Task 2. Two jobs, same shape as "Embed CEF framework" above (one level
+          # simpler: LibreOffice's product-set is a plain directory tree, not a .framework bundle
+          # Xcode's product validator inspects, so there is no versioned-layout restructuring here):
+          #
+          #   1. COPY, preserving REAL directories throughout — never a symlinked installPath
+          #      ancestor (carry T2-b). dyld resolves a dlopen'd library through directory symlinks
+          #      to its REAL path BEFORE LOK's ${ORIGIN}-relative bootstrap (fundamentalrc's
+          #      BRAND_BASE_DIR chain) ever runs, so a symlinked installPath would silently load
+          #      the WRONG Resources/ instead of failing loudly — bit the productization gate
+          #      twice (trim-gate-report.md). `ditto` of a tree that is ALREADY symlink-free
+          #      (verified: zero symlinks anywhere under vendor/libreoffice/product-set/) stays
+          #      symlink-free, so a flat, real-directory copy is both the simplest option and the
+          #      correct one — unlike CEF's framework, nothing here calls for a Versions/A +
+          #      top-level-symlinks rewrite.
+          #   2. SIGN every Mach-O the copy contains with THIS build's identity (carry T2-a). The
+          #      vendored dylibs arrive adhoc/linker-signed (`codesign -dv` on any of them shows
+          #      `flags=0x20002(adhoc,linker-signed)`, `TeamIdentifier=not set`) — they were built
+          #      LOCALLY (scripts/build-libreoffice.ts's documented recipe), not harvested from a
+          #      notarized official distribution the way CEF is, so unlike CEF/Sparkle there was
+          #      never a Developer-ID-signed source to begin with; the prior notarization proof in
+          #      task-1-gate-report.md was against a DIFFERENT artifact (the TDF dmg harvest) and
+          #      does not transfer to this from-source build. Library validation under the
+          #      hardened runtime requires the SAME team ID as the loading process for anything
+          #      dlopen'd in-process — the helper dlopens libmergedlo.dylib (Task 3), which
+          #      transitively pulls in the other 65 — so signing depth-first with this build's
+          #      identity is what makes that load legal. (Full notarization is a release-pipeline
+          #      concern, out of scope here — this phase establishes the SIGNING POSTURE only.)
+          #
+          # DESTINATION: Contents/Resources/LibreOffice/, NOT Contents/Frameworks/LibreOffice/ —
+          # an implementer-discovered deviation from the brief's own wording, forced by a real
+          # codesign failure, not a style choice. `Contents/Frameworks/` (with `PlugIns/`,
+          # `XPCServices/`) is Apple's "nested code" territory (TN2206): sealing the outer app
+          # requires every IMMEDIATE item there to be independently-signed code — a `.framework`, a
+          # bare dylib, or an executable — nothing else. LibreOffice's product-set is a loose mixed
+          # tree (66 dylibs AND ~200MB of plain resources side by side), which is not any of those,
+          # so codesign recursed into it looking for nested code and failed on the first plain
+          # resource it found: `Norma.app: code object is not signed at all — In subcomponent:
+          # …/Contents/Frameworks/LibreOffice/Resources/classification/example_nl-NL.xml` (a bare
+          # XML file; `file` and `codesign -dv` both agree it is not, and never was, a Mach-O).
+          # Contents/Resources/ carries no such nested-code obligation — signed Mach-Os living there
+          # are just ordinary resources, hashed byte-for-byte with their own embedded signatures
+          # intact, exactly like this same script block's neighbor two phases down ("Embed
+          # norma-core" ships a signed Mach-O executable at Contents/Resources/norma-core through
+          # every notarized release). T2-b's real invariant is RELATIVE, not about which Apple
+          # bundle directory contains it: LOK's ${ORIGIN} bootstrap resolves from libmergedlo's own
+          # real path, so `Frameworks/` and `Resources/` as real siblings inside `LibreOffice/` is
+          # what matters, and that is preserved wherever `LibreOffice/` itself sits.
+          #
+          # NAME-SCAN NOTE (historical + current state) — at Task 2 time, deliberately NOT
+          # excluded here or in scripts/release-lib.ts, for the reasons below. SINCE THEN: the
+          # leaking 20260818 asset was DELETED from GitHub, the 20260819 re-cut rebuilt the engine
+          # scrubbed (neutral prefix-map paths + --with-vendor=Norma + a bytes-level name-scan
+          # gate inside build-libreoffice.ts, so a leaking artifact is unproducible), and the
+          # whole-branch review authorized exactly ONE single-file NAME_SCAN_EXCLUSIONS entry in
+          # release-lib.ts for a natural-language collision inside IANA registry data (measured:
+          # 1 file of 3,296, zero hits on every other pattern). The scan stays ON everywhere else.
+          # The original Task-2 finding, kept for the record:
+          # for this task asked for a NAME_SCAN_EXCLUSIONS entry for Contents/Frameworks/
+          # LibreOffice/ (now Contents/Resources/LibreOffice/, per the relocation above), mirroring
+          # the EditorAssets/vs precedent. Measuring first (that file's own rule: "widening this
+          # list is a security decision, not a build fix," and the EditorAssets precedent itself was
+          # only added after measuring zero hits) found the OPPOSITE of zero hits: the local
+          # builder's account name appears in plaintext in 8 of the 66 vendored dylibs (152 string
+          # occurrences — boost/property_tree __FILE__ literals; build-libreoffice.ts's recipe never
+          # applied Norma's own -file-prefix-map/-oso_prefix privacy flags, which only cover Norma's
+          # OWN Swift/ObjC++ compiles, not LibreOffice's separate from-source build) AND in two
+          # Resources config files (versionrc's `Vendor=`, registry/main.xcd's `ooVendor` —
+          # LibreOffice's own build-identity field, user-facing in a real install). That is exactly
+          # the identity leak the release name-scan exists to catch, and it is already present in
+          # the then-published vendor-libreoffice-20260818 release asset (since deleted). Excluding
+          # the path wholesale would have blinded a fail-closed privacy gate to a proven leak — so
+          # the scan stayed ON until the scrubbed re-cut landed (see the current-state note above).
+          LIBREOFFICE_SRC="${SRCROOT}/vendor/libreoffice/product-set"
+          DEST_RESOURCES="${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Resources"
+          DEST="${DEST_RESOURCES}/LibreOffice"
+
+          # Copying ~488MB and signing 66 Mach-Os on every incremental build is not acceptable, and
+          # basedOnDependencyAnalysis:false means this phase runs on every one — same stamp
+          # discipline as "Embed CEF framework" above. The trailing token is this script's own
+          # EMBED-RECIPE revision: bump it whenever the layout or signing below changes (recipe-2:
+          # the Frameworks/ -> Resources/ relocation above), so an existing build directory re-does
+          # the work instead of skipping on a stale-but-matching stamp — and so a build directory
+          # that still has a STALE copy at the OLD Contents/Frameworks/LibreOffice/ path (nothing
+          # ever removes that path on its own; only this script's own DEST is ever rm -rf'd) is
+          # forced to redo the copy rather than leaving both an old, wrong copy AND a new, right one
+          # on disk together.
+          STAMP="${TARGET_TEMP_DIR}/libreoffice-embed.stamp"
+          WANT="$(cat "${SRCROOT}/vendor/libreoffice/.vendored-version")|${EXPANDED_CODE_SIGN_IDENTITY}|${CONFIGURATION}|recipe-2"
+          if [ -d "${DEST}" ] && [ -f "${STAMP}" ] && [ "$(cat "${STAMP}")" = "${WANT}" ]; then
+            echo "LibreOffice product-set already embedded and signed for this identity — skipping"
+            exit 0
+          fi
+
+          # Stale copy at the pre-relocation path (Contents/Frameworks/LibreOffice/), if any, from a
+          # build directory that predates recipe-2 — removed so it cannot both fail codesign AND
+          # sit there unexplained alongside the correct Resources/ copy.
+          rm -rf "${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Frameworks/LibreOffice"
+
+          rm -f "${STAMP}"
+          rm -rf "${DEST}"
+          mkdir -p "${DEST_RESOURCES}" "${TARGET_TEMP_DIR}"
+          ditto "${LIBREOFFICE_SRC}" "${DEST}"
+
+          # T2-b gate: zero DIRECTORY symlinks anywhere in the embedded tree (a file symlink would
+          # not trigger the dyld hazard the carry describes, and none are expected either way since
+          # the vendored source has none at all).
+          SYMLINK_VIOLATIONS=0
+          while IFS= read -r -d '' LINK; do
+            if [ -d "${LINK}" ]; then
+              echo "error: directory symlink found in embedded LibreOffice tree: ${LINK}" >&2
+              SYMLINK_VIOLATIONS=$((SYMLINK_VIOLATIONS + 1))
+            fi
+          done < <(find "${DEST}" -type l -print0)
+          if [ "${SYMLINK_VIOLATIONS}" -gt 0 ]; then
+            echo "error: ${SYMLINK_VIOLATIONS} directory symlink(s) under Contents/Resources/LibreOffice/ —" >&2
+            echo "error: dyld would resolve a dlopen path through them before LOK's \${ORIGIN} bootstrap" >&2
+            echo "error: runs, silently loading the wrong Resources/. See carry T2-b (progress.md)." >&2
+            exit 1
+          fi
+          if [ ! -d "${DEST}/Resources" ] || [ -L "${DEST}/Resources" ]; then
+            echo "error: Contents/Resources/LibreOffice/Resources must be a real directory, the" >&2
+            echo "error: literal sibling of Frameworks/ — the vendored layout ditto was supposed to" >&2
+            echo "error: preserve. Investigate the copy; do not paper over with a symlink." >&2
+            exit 1
+          fi
+
+          # Enumerate real Mach-Os by CONTENT, not by a `*.dylib` glob: 8 of the 66 vendored
+          # libraries carry a version suffix AFTER the .dylib extension (libuno_sal.dylib.3,
+          # libicui18n.dylib.78, ...) — a bare `*.dylib` glob silently misses every one of those.
+          SRC_MACHO_COUNT=0
+          while IFS= read -r -d '' F; do
+            if file "${F}" | grep -q "Mach-O"; then SRC_MACHO_COUNT=$((SRC_MACHO_COUNT + 1)); fi
+          done < <(find "${LIBREOFFICE_SRC}/Frameworks" -type f -print0)
+
+          TS=""
+          if [ "${CONFIGURATION}" = "Release" ]; then TS="--timestamp"; fi
+
+          SIGNED_COUNT=0
+          while IFS= read -r -d '' F; do
+            if file "${F}" | grep -q "Mach-O"; then
+              codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --options runtime ${TS} "${F}"
+              SIGNED_COUNT=$((SIGNED_COUNT + 1))
+            fi
+          done < <(find "${DEST}/Frameworks" -type f -print0)
+
+          if [ "${SIGNED_COUNT}" -ne "${SRC_MACHO_COUNT}" ] || [ "${SIGNED_COUNT}" -eq 0 ]; then
+            echo "error: signed ${SIGNED_COUNT} Mach-Os in the embedded LibreOffice tree but the" >&2
+            echo "error: vendored source has ${SRC_MACHO_COUNT} — the copy or the Mach-O enumeration" >&2
+            echo "error: is wrong. Investigate before shipping; do not widen this check to hide it." >&2
+            exit 1
+          fi
+
+          printf '%s' "${WANT}" > "${STAMP}"
+          echo "LibreOffice product-set embedded + signed: ${SIGNED_COUNT} Mach-Os, identity ${EXPANDED_CODE_SIGN_IDENTITY}"
       - name: Embed norma-core
         basedOnDependencyAnalysis: false
         script: |
@@ -583,6 +794,95 @@ targets:
           DEPLOYMENT_POSTPROCESSING: YES
           STRIP_INSTALLED_PRODUCT: YES
           STRIP_STYLE: debugging
+  # office-plumbing Task 2 — the office helper process, `type: tool` like NormaHelper above (a
+  # bare executable, no bundle Xcode's product validator inspects — "embeds NOTHING itself" per
+  # the brief). Unlike NormaHelper this is NOT an SMAppService launchd daemon: OfficeHelperSupervisor
+  # (Sources/AppShell/OfficeHelperSupervisor.swift) spawns it DIRECTLY with Process(), handing it
+  # a socket path, a scratch state directory, and a per-launch token as CLI args — so there is no
+  # dev/dist mach-service-Label split to carry the way NormaHelper's OTHER_CODE_SIGN_FLAGS below
+  # has (each app instance only ever spawns its OWN embedded copy).
+  #
+  # LSUIElement (via INFOPLIST_KEY_LSUIElement below): the brief's stated shape for this target,
+  # carried even though a bare `type: tool` product is never Launch-Services-activated the way an
+  # actual .app bundle would be (nothing here ever puts it in the Dock or app switcher regardless)
+  # — kept for parity with what a full app-bundle shape of this target would need, and because
+  # GENERATE_INFOPLIST_FILE already gives `type: tool` a real __TEXT,__info_plist section to carry
+  # it in.
+  NormaOfficeHelper:
+    type: tool
+    platform: macOS
+    sources:
+      - path: Sources/OfficeWire
+      - path: Sources/OfficeHelper
+    settings:
+      base:
+        PRODUCT_NAME: NormaOfficeHelper
+        PRODUCT_BUNDLE_IDENTIFIER: com.norma.office-helper
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_LSUIElement: YES
+        CODE_SIGN_IDENTITY: "Apple Development"
+        DEVELOPMENT_TEAM: 37N77U9RSZ
+        CODE_SIGN_STYLE: Manual
+        SWIFT_VERSION: "5.9"
+        MACOSX_DEPLOYMENT_TARGET: "26.0"
+        OTHER_CODE_SIGN_FLAGS: -i com.norma.office-helper
+        # Office Stage A Task 3 — LOKBridge.swift dlopens LibreOfficeKit via lok_init_2 and calls
+        # through its C vtable structs directly. SCOPED TO THIS TARGET ONLY: neither Norma.app nor
+        # NormaOfficeHelperFixture link the bridging header (the fixture excludes LOKBridge.swift
+        # itself below, and stays LOK-free by design — see OfficeHelperServer.swift's
+        # OfficeDocumentBridge header). Same mechanism as the Norma target's own
+        # SWIFT_OBJC_BRIDGING_HEADER (CEF interop), a separate header because this target needs
+        # none of CEF's C++/gnu++20 surface — LOK's public headers are plain C.
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/OfficeHelper/Support/OfficeHelperBridge.h
+        HEADER_SEARCH_PATHS:
+          - $(inherited)
+          - $(SRCROOT)/Sources/OfficeKit/include
+      configs:
+        Release:
+          OTHER_SWIFT_FLAGS: -file-prefix-map $(HOME)=/builder
+          OTHER_LDFLAGS: -Wl,-oso_prefix,$(HOME)/
+          DEPLOYMENT_POSTPROCESSING: YES
+          STRIP_INSTALLED_PRODUCT: YES
+          STRIP_STYLE: debugging
+  # office-plumbing Task 2 — TEST-ONLY spawnable stand-in for NormaOfficeHelper
+  # (OfficeSupervisorTests). Lives under Tests/ rather than Sources/ specifically so it is never
+  # swept by the app target's own `- path: Sources` entry (no exclude needed there, unlike
+  # OfficeHelper/ above) and reads as test infrastructure by its location alone. It links the SAME
+  # OfficeHelperServer.swift the real helper does (excluding only that target's own main.swift) —
+  # deliberately not a second, hand-rolled reimplementation of the protocol that could drift from
+  # the real one; see Tests/OfficeHelperFixtureSources/main.swift's header for the three failure
+  # modes it drives via OfficeHelperServer.Hooks.
+  NormaOfficeHelperFixture:
+    type: tool
+    platform: macOS
+    sources:
+      - path: Sources/OfficeWire
+      - path: Sources/OfficeHelper
+        excludes:
+          - main.swift
+          # Office Stage A Task 3 — LOKBridge.swift needs the SWIFT_OBJC_BRIDGING_HEADER only the
+          # real NormaOfficeHelper target carries (LOK C symbols); this fixture stays LOK-free by
+          # design (see OfficeHelperServer.swift's OfficeDocumentBridge / FakeOfficeDocumentBridge
+          # header) and would fail to compile if it swept this file in. Support/ (the bridging
+          # header itself) excluded too for the same reason, though a stray .h reference alone
+          # would be inert without the build setting — belt and suspenders.
+          # TileRenderer.swift (Task 4) joins this list for the identical reason:
+          # `UnsafeMutablePointer<LibreOfficeKitDocument>` is a LOK C type only visible through the
+          # same bridging header this fixture deliberately does not carry.
+          - LOKBridge.swift
+          - TileRenderer.swift
+          - Support
+      - path: Tests/OfficeHelperFixtureSources
+    settings:
+      base:
+        PRODUCT_NAME: NormaOfficeHelperFixture
+        PRODUCT_BUNDLE_IDENTIFIER: com.norma.office-helper-fixture
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_IDENTITY: "Apple Development"
+        DEVELOPMENT_TEAM: 37N77U9RSZ
+        CODE_SIGN_STYLE: Manual
+        SWIFT_VERSION: "5.9"
+        MACOSX_DEPLOYMENT_TARGET: "26.0"
   # panel-cef Task 4 — CEF's own generated C++/C-API translation layer ("libcef_dll_wrapper" in
   # CEF's own CMakeLists.txt, vendored verbatim alongside include/ and Release/ by fetch-cef.ts).
   # CefExecuteProcess / CefScopedLibraryLoader / CefScopedSandboxContext — what the five helper
@@ -852,6 +1152,15 @@ schemes:
       targets:
         Norma: all
         NormaHelper: all
+        NormaOfficeHelper: all
+        # F7 (T2 review, "if trivial"): [test], not `all` — the fixture is test-only infrastructure
+        # (Tests/OfficeHelperFixtureSources/, never embedded, never touched by any postCompileScript),
+        # so it belongs in the same scheme-action scope as NormaAppTests itself immediately below,
+        # not built as part of a plain `build`/`build-for-testing` action that has no testing intent.
+        # `build-for-testing` still builds it: that action IS "prepare for the test action," which is
+        # exactly what `[test]` scopes this to — the same reasoning that already makes NormaAppTests'
+        # own `[test]` scoping work today.
+        NormaOfficeHelperFixture: [test]
         CEFHelperBase: all
         CEFHelperAlerts: all
         CEFHelperGPU: all

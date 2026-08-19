@@ -431,4 +431,90 @@ final class AppLifecycleTests: XCTestCase {
         XCTAssertFalse(delegate.reallyQuitting,
                        "Review must undo the arm, or a later plain ⌘Q silently full-quits")
     }
+
+    // MARK: - office-plumbing Task 5: the quit sweep grows the office leg
+
+    /// **The order pin** (the plan's own sequence style: `["editorTeardown", "officeTeardown",
+    /// "proceed"]`), as a documented equivalent of that literal array. The REAL
+    /// `AppDelegate.editorQuitGate` wiring runs BOTH legs inside its ONE `teardownAllRuntimes`
+    /// closure — a straight-line synchronous function body (the editor loop, then ONE call to
+    /// `teardownAllOfficeRuntimesAndStopHelper()`, then `return`), so Swift's own execution order
+    /// is what pins "editor leg before office leg" here; there is no concurrency between them for a
+    /// test to race. This spy stands in for that closure's two-line body — see
+    /// `testAppDelegateTeardownAllRuntimesClosureWalksBothRuntimeTablesAndStopsTheSharedOfficeHelper`
+    /// immediately below for the proof that the REAL wiring (not merely this spy's say-so) reaches
+    /// both tables.
+    func testEditorQuitGateTeardownAllRuntimesRepresentsBothLegsStrictlyBeforeProceed() {
+        var order: [String] = []
+        let gate = EditorQuitGate(
+            dirtyRuntimeStates: { [] },
+            teardownAllRuntimes: {
+                order.append("editorTeardown") // host.teardownEditorRuntime(for:), looped
+                order.append("officeTeardown") // host.teardownAllOfficeRuntimesAndStopHelper()
+                return 2
+            },
+            presentAlert: { _ in .review },
+            proceedWithQuit: { count in order.append("proceed(\(count))") },
+            cancelQuit: { XCTFail("nothing is dirty here — cancelQuit must never run") })
+
+        gate.run()
+
+        XCTAssertEqual(order, ["editorTeardown", "officeTeardown", "proceed(2)"],
+                       "both legs complete, in order, strictly before the settle beat")
+    }
+
+    /// **The real-wiring proof**: `AppDelegate.editorQuitGate.teardownAllRuntimes` — the actual
+    /// production closure, not a spy standing in for it — reaches a REAL `ShellSessionHost` and
+    /// tears down BOTH tables. Driven the same way
+    /// `testEditorQuitGateCancelQuitResetsReallyQuittingSoALaterPlainQuitDoesNotSilentlyFullyQuit`
+    /// already established is safe: calling one closure DIRECTLY, never `run()`/`proceedWithQuit` on
+    /// a delegate with `reallyQuitting == true` (see this file's own header on why that would reach
+    /// `NSApp.terminate` from inside the xctest host). `setAppWindowForTesting` is the seam that
+    /// makes a REAL host reachable here without booting the rest of the app shell.
+    ///
+    /// No editor runtimes are minted (Task 10's own suite already proves that leg's behavior
+    /// thoroughly; re-proving it here would only test-double what T10 already owns for real) — this
+    /// test's only job is proving Task 5's ADDITION is actually wired into the closure T10 built,
+    /// not a parallel one that looks right in isolation but is never reached.
+    func testAppDelegateTeardownAllRuntimesClosureWalksBothRuntimeTablesAndStopsTheSharedOfficeHelper() {
+        let directory = SessionDirectory(lister: { [] })
+        let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        // Mints the shared, never-started (inert — no process spawn happens until `start()`)
+        // `OfficeHelperSupervisor`, exactly as any first office door would.
+        _ = host.officeRuntime(for: "S1")
+        XCTAssertEqual(host.officeRuntimes.count, 1)
+        XCTAssertNotNil(host.officeHelperSupervisor)
+
+        let controller = AppWindowController(directory: directory, host: host,
+                                             frame: NSRect(x: 0, y: 0, width: 100, height: 100))
+        let delegate = AppDelegate()
+        delegate.setAppWindowForTesting(controller)
+
+        let torn = delegate.editorQuitGate.teardownAllRuntimes()
+
+        XCTAssertEqual(torn, 0, "the returned count stays EDITOR-only (feeds the CEF settle beat, "
+                       + "which the office leg has no equivalent of) — zero editor runtimes were "
+                       + "ever minted in this test")
+        XCTAssertEqual(host.officeRuntimes.count, 0, "the office leg ran too, inside the SAME closure")
+        XCTAssertEqual(host.officeHelperSupervisor?.state, .stopped, "and it stopped the shared helper")
+    }
+
+    /// The office leg must not misbehave on a host that never touched office at all — the ordinary
+    /// case for every quit until a document tab has actually been opened once.
+    func testAppDelegateTeardownAllRuntimesToleratesAHostThatNeverTouchedOffice() {
+        let directory = SessionDirectory(lister: { [] })
+        let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        XCTAssertNil(host.officeHelperSupervisor)
+
+        let controller = AppWindowController(directory: directory, host: host,
+                                             frame: NSRect(x: 0, y: 0, width: 100, height: 100))
+        let delegate = AppDelegate()
+        delegate.setAppWindowForTesting(controller)
+
+        let torn = delegate.editorQuitGate.teardownAllRuntimes()
+
+        XCTAssertEqual(torn, 0)
+        XCTAssertNil(host.officeHelperSupervisor, "still never minted — the quit leg must not "
+                     + "construct one just to immediately stop it")
+    }
 }

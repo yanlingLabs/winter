@@ -1127,10 +1127,25 @@ let fileDoorToolNames: Set<String> = ["read", "write", "edit", "notebook_edit"]
 ///     itself, against the SAME field, never the daemon's `cwd` alias). Offering a button for a
 ///     relative path with no base would silently open a tab for a path resolved against nothing
 ///     sensible.
+///  4. **office-plumbing Task 7: an office extension (`officeFileExtensions`, `PanelEditorTab.swift`)
+///     does NOT get gate 3's absolute-path exemption.** Unlike a code read, opening an office
+///     document is PRODUCT POLICY scoped to sessions that carry a real working directory — the SAME
+///     `editorTabSessionRoots == .present` gate the Files tab door and the editor pre-warm already
+///     enforce (`panelFilesDoorShown`'s own doc), restated here rather than re-derived: `.document`
+///     already exists on the wire since Task 6, so a dirless click would decode and open FINE — this
+///     is not that decode-compat class of guard. Office rides working directories because the
+///     product says so, a deliberately NARROWER rule than the code door it shares this predicate
+///     with, not a wider one. `panelTabKind(forFilePath:)` is the SAME classifier
+///     `ShellSessionHost.openFileOrDocumentTab` uses to act on the click — referenced directly
+///     rather than re-derived, since a second copy of "is this path an office extension" here would
+///     be the identical drift `panelTabKind`'s own doc warns against.
 func toolDetailIsClickablePath(name: String, detail: String, sessionHasWorkingDirectory: Bool) -> Bool {
     guard fileDoorToolNames.contains(name), !detail.isEmpty,
           detail.count < SessionReducer.maxToolDetailCharacters else {
         return false
+    }
+    if panelTabKind(forFilePath: detail) == .document {
+        return sessionHasWorkingDirectory
     }
     return detail.hasPrefix("/") || sessionHasWorkingDirectory
 }

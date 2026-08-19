@@ -47,3 +47,22 @@ apple/Norma/vendor/cef/
 # (npm registry tarball, pinned there). The Norma Xcode build fails loudly naming that command
 # if this tree is absent (project.yml preBuildScripts).
 apple/Norma/vendor/monaco/
+
+# LibreOffice (LibreOfficeKit) headless macOS arm64 product-set, from-source build
+# (--enable-headless, svp VCL backend, zero source patches) — ~488MB unpacked, ~154MiB
+# compressed; too large to commit. Fetched + sha256-verified via scripts/fetch-libreoffice.ts
+# from a dedicated GitHub release asset (vendor-libreoffice-20260819, pinned there — see its own
+# release notes at https://github.com/yanlingLabs/norma/releases/tag/vendor-libreoffice-20260819
+# for the full probe/build/licensing story). GO — proves tdf#145127 does not block a native macOS
+# headless embed. Wired into project.yml's "Check LibreOffice vendored" preBuildScripts gate,
+# same as vendor/cef and vendor/monaco above — a build fails loudly naming the fetch command if
+# this tree is absent.
+apple/Norma/vendor/libreoffice/
+
+# Office Stage A Task 3 finding: LibreOfficeKit creates a standard LO lock file next to any
+# document it documentLoad()s (even view-only, never edited) — ",user,host,timestamp,url;" — and
+# closing the document (LOKDocument destroy()) does NOT remove it. OfficeHelperLiveTests opens the
+# committed office/ fixtures directly from their real checkout path, so every live-gated test run
+# leaves one of these behind next to gate.docx. Harmless (LO recreates/overwrites it fine on the
+# next open) but must never be committed as tracked-tree noise.
+.~lock.*#

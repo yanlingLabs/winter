@@ -362,6 +362,23 @@ for (const target of nestedSparkleHelpers) {
   if (existsSync(target)) assertSigned(target, `Sparkle.framework nested helper (${target.split("/").pop()})`);
 }
 
+// --- Office (office-plumbing wave) ------------------------------------------
+// NormaOfficeHelper is Norma's own compiled binary (like NormaHelper above), embedded at
+// Contents/MacOS/ — TeamIdentifier + secure timestamp checked and enrolled in HARDENING_PINS below,
+// same as every other component this repo compiles. The vendored LibreOffice product-set (T2) is
+// NOT this repo's own build output — 66 dylibs, individually re-signed depth-first at embed time —
+// so it is not walked in full here; libmergedlo.dylib (the LOK entry point every Mach-O in that
+// tree dlopens through) gets a single team-ID + timestamp probe as a spot check that the embed
+// phase's re-signing actually ran, without duplicating that phase's own full-tree verification.
+// NOT added to HARDENING_PINS — that array asserts hardened-runtime ENTITLEMENTS, a decision this
+// repo makes only about code IT compiles; LibreOffice's own dylibs carry whatever entitlements the
+// from-source build gave them.
+assertSigned(join(app, "Contents", "MacOS", "NormaOfficeHelper"), "NormaOfficeHelper");
+assertSigned(
+  join(app, "Contents", "Resources", "LibreOffice", "Frameworks", "libmergedlo.dylib"),
+  "LibreOffice (libmergedlo.dylib, team-ID probe only)",
+);
+
 // --- CEF (panel-cef Task 5) -------------------------------------------------
 // The framework, its five dlopen'd dylibs, and the five helper bundles. `--deep --strict` above
 // already proves the seals nest correctly; this roster proves the two things it does NOT check
@@ -416,6 +433,11 @@ const HARDENING_PINS: { path: string; label: string; expect: string[] }[] = [
   { path: app, label: "Norma.app", expect: [] },
   { path: join(app, "Contents", "MacOS", "NormaHelper"), label: "NormaHelper", expect: [] },
   { path: join(app, "Contents", "Resources", "norma-core"), label: "norma-core", expect: [] },
+  // office-plumbing wave — Norma's own compiled binary, same posture as NormaHelper/norma-core
+  // above (no hardened-runtime relaxation of any kind). The vendored LibreOffice product-set is
+  // deliberately NOT enrolled here — see the team-ID-only probe on libmergedlo.dylib above this
+  // array, and that probe's own comment for why.
+  { path: join(app, "Contents", "MacOS", "NormaOfficeHelper"), label: "NormaOfficeHelper", expect: [] },
   // panel-cef Task 6a: the GPU helper joined the Renderer. Chromium routes the GPU process to the
   // `(GPU)` bundle only when it needs the JIT-capable variant — SwiftShader — which a Mac with a
   // working Metal path never reaches, so this was invisible until Task 6a forced the software path
@@ -446,8 +468,10 @@ for (const pin of HARDENING_PINS) {
 }
 console.log(
   "Signatures verified: codesign --verify --deep --strict PASS; TeamIdentifier + secure timestamp confirmed on " +
-    "app + norma-core + NormaHelper + Sparkle.framework + its nested helpers + CEF framework + its 5 libraries + " +
-    `the 5 CEF helpers; hardened-runtime entitlements pinned across all ${HARDENING_PINS.length} components this ` +
+    "app + norma-core + NormaHelper + NormaOfficeHelper + Sparkle.framework + its nested helpers + CEF framework + " +
+    "its 5 libraries + the 5 CEF helpers + the vendored LibreOffice's libmergedlo.dylib (identity probe only — " +
+    `not part of the entitlements roster below); hardened-runtime entitlements pinned across all ${HARDENING_PINS.length} ` +
+    `components this ` +
     // Both halves derived from HARDENING_PINS rather than typed, so this sentence cannot go stale
     // the way its predecessor did when the pin widened (Task 5 caught that one; Task 6a widened it
     // again by giving the GPU helper allow-jit).
@@ -489,6 +513,44 @@ const NOTICES: { file: string; label: string; minBytes: number; mustContain: str
     mustContain: "<html",
   },
 ];
+// office-plumbing wave (whole-branch N4) — same reasoning as the CEF pair above: LibreOfficeKit
+// ships MPL-2.0 core plus a mix of LGPL/MPL-1.1-licensed externals, whose notices this file
+// reproduces. Lives at Contents/Resources/LibreOffice/Resources/, NOT Contents/Resources/Licenses/
+// like the CEF pair — that is where project.yml's "Embed LibreOffice (signed)" phase places the
+// WHOLE vendored product-set (Frameworks/ + Resources/ as siblings, keeping LOK's own relative
+// path assumptions intact — see that phase's own comment); this gate gained a second `licensesDir`
+// -relative root rather than moving the file, to avoid disturbing that placement. minBytes measured
+// against the real vendored file (378,658 bytes as of the 20260819 asset) with generous headroom
+// for a truncated-copy floor, well below the real size.
+const officeLicenseDir = join(app, "Contents", "Resources", "LibreOffice", "Resources");
+const OFFICE_NOTICES: { file: string; label: string; minBytes: number; mustContain: string; dir: string }[] = [
+  {
+    file: "LICENSE.html",
+    label: "LibreOfficeKit licensing and legal information",
+    minBytes: 100_000,
+    mustContain: "Mozilla Public License, v. 2.0",
+    dir: officeLicenseDir,
+  },
+];
+for (const n of OFFICE_NOTICES) {
+  const p = join(n.dir, n.file);
+  if (!existsSync(p)) {
+    fail(
+      `${n.label} missing from the built app at ${p}\n` +
+        `  This is an MPL-2.0/LGPL redistribution obligation, not an optional resource.\n` +
+        `  Check apple/Norma/project.yml's "Embed LibreOffice (signed)" phase.`,
+    );
+  }
+  const bytes = statSync(p).size;
+  if (bytes < n.minBytes) fail(`${n.label} at ${p} is ${bytes} bytes — expected at least ${n.minBytes} (truncated copy?)`);
+  const fd = openSync(p, "r");
+  const buf = Buffer.alloc(65536);
+  const read = readSync(fd, buf, 0, buf.length, 0);
+  closeSync(fd);
+  const head = buf.subarray(0, read).toString("utf8");
+  if (!head.includes(n.mustContain)) fail(`${n.label} at ${p} does not contain ${JSON.stringify(n.mustContain)} — wrong file?`);
+  console.log(`  ${n.file}: ${bytes} bytes, content check OK`);
+}
 for (const n of NOTICES) {
   const p = join(licensesDir, n.file);
   if (!existsSync(p)) {

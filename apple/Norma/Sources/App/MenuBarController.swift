@@ -105,6 +105,13 @@ final class MenuBarController {
     var onOpenEditorHarness: (() -> Void)?
     let editorHarnessItem = NSMenuItem(title: "Editor Bridge Harness…",
                                        action: #selector(didOpenEditorHarness), keyEquivalent: "")
+
+    /// office-plumbing Task 9 — the office harness's own door for a human, same shape and same
+    /// reasoning as `onOpenEditorHarness` right above (nil-by-default IS the mount condition; set
+    /// before `install()`).
+    var onOpenOfficeHarness: (() -> Void)?
+    let officeHarnessItem = NSMenuItem(title: "Office Harness…",
+                                       action: #selector(didOpenOfficeHarness), keyEquivalent: "")
     #endif
 
     // MARK: - Task DD-T5: live activity icon (idle/thinking/working, rotating pulse frames)
@@ -296,6 +303,11 @@ final class MenuBarController {
             editorHarnessItem.target = self
             menu.addItem(editorHarnessItem)
         }
+        // office-plumbing Task 9 — same mount condition, same reasoning, see `onOpenOfficeHarness`.
+        if onOpenOfficeHarness != nil {
+            officeHarnessItem.target = self
+            menu.addItem(officeHarnessItem)
+        }
         #endif
         pairDeviceItem.target = self
         menu.addItem(pairDeviceItem)
@@ -467,6 +479,7 @@ final class MenuBarController {
     @objc private func didChat() { openChat() }
     #if DEBUG
     @objc private func didOpenEditorHarness() { onOpenEditorHarness?() }
+    @objc private func didOpenOfficeHarness() { onOpenOfficeHarness?() }
     #endif
     @objc private func didOpenDashboard() { openDashboard() }
     @objc private func didOpenPluginManager() { openPluginManager() }

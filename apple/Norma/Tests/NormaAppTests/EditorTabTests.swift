@@ -265,6 +265,66 @@ final class EditorTabTests: XCTestCase {
             .joined(separator: "\n")
     }
 
+    // MARK: - office-plumbing Task 7: the file-open router (PURE)
+
+    /// The router table the brief itself asks for: every `officeFileExtensions` member routes to
+    /// `.document`; ordinary code extensions and anything unrecognized keep routing to `.code` — the
+    /// editor's own established fallback, unchanged from every path opened before this task existed.
+    func testPanelTabKindRoutesOfficeExtensionsToDocumentAndEverythingElseToCode() {
+        for ext in officeFileExtensions {
+            XCTAssertEqual(panelTabKind(forFilePath: "/repo/gate.\(ext)"), .document,
+                           "\(ext) is an office extension — it must route to a document tab")
+        }
+        for ext in ["ts", "swift", "py", "json", "md", "txt", "rs", "go"] {
+            XCTAssertEqual(panelTabKind(forFilePath: "/repo/engine.\(ext)"), .code,
+                           "\(ext) is not an office extension — it must keep routing to a code tab")
+        }
+        XCTAssertEqual(panelTabKind(forFilePath: "/repo/README"), .code,
+                       "no extension at all falls to the editor's own established fallback")
+        XCTAssertEqual(panelTabKind(forFilePath: "/repo/whatever.foo"), .code,
+                       "an unrecognized extension falls to the editor's own established fallback")
+    }
+
+    /// Case-insensitive: `.XLSX` and `.xlsx` must open the SAME kind, matching the classifier's own
+    /// documented `.lowercased()` before comparing against `officeFileExtensions`.
+    func testPanelTabKindIsCaseInsensitiveOnTheExtension() {
+        XCTAssertEqual(panelTabKind(forFilePath: "/repo/GATE.XLSX"), .document)
+        XCTAssertEqual(panelTabKind(forFilePath: "/repo/Gate.Xlsx"), .document)
+        XCTAssertEqual(panelTabKind(forFilePath: "/repo/Engine.TS"), .code)
+    }
+
+    /// A relative spelling classifies identically to an absolute one — the router runs on the
+    /// extension alone, before `resolvedFilePath` (each door's OWN next step) ever sees the string.
+    func testPanelTabKindDoesNotCareWhetherThePathIsAbsoluteOrRelative() {
+        XCTAssertEqual(panelTabKind(forFilePath: "gate.xlsx"), .document)
+        XCTAssertEqual(panelTabKind(forFilePath: "src/engine.ts"), .code)
+    }
+
+    /// Mirrors `shellPanelCodeOnly` immediately above, pointed at `ShellSessionHost.swift` — the
+    /// `onOpenFile` closure wired to `WindowContentView` is SwiftUI body code no test can construct
+    /// and reflect into the way `ToolRunCallDetailText`'s own tests do, so this is a source pin: the
+    /// transcript's file door must call the router, never the old direct `openFileTab` call this
+    /// task's own edit replaced.
+    private func shellSessionHostCodeOnly() throws -> String {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // NormaAppTests
+            .deletingLastPathComponent()   // Tests
+            .deletingLastPathComponent()   // Norma
+            .appendingPathComponent("Sources/AppShell/ShellSessionHost.swift")
+        let source = try String(contentsOf: url, encoding: .utf8)
+        return source.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.drop(while: { $0 == " " }).hasPrefix("//") ? "" : String($0) }
+            .joined(separator: "\n")
+    }
+
+    func testTheTranscriptsFileDoorCallsTheRouterNotOpenFileTabDirectly() throws {
+        let code = try shellSessionHostCodeOnly()
+        XCTAssertTrue(code.contains("host.openFileOrDocumentTab(path, sessionId: sessionId)"),
+                      "the onOpenFile closure must call the router")
+        XCTAssertFalse(code.contains("host.openFileTab(path, sessionId: sessionId)"),
+                       "the old direct call must be gone — the router is the only path in")
+    }
+
     // MARK: - The plan (PURE)
 
     private func ready(models: [String: Bool] = [:], current: String? = nil,

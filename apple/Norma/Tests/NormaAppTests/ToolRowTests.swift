@@ -464,6 +464,11 @@ final class ToolRowTests: XCTestCase {
     /// editor-product Task 6: `"openFileTab"` joins the banned list — the SECOND transcript→panel
     /// door (`WindowContentView.onOpenFile`) is built on the identical closure discipline, and this
     /// is the pin that keeps it that way.
+    ///
+    /// office-plumbing Task 7: `"openDocumentTab"` and `"openFileOrDocumentTab"` join it too — the
+    /// transcript's file door now can open EITHER kind (`ShellSessionHost.openFileOrDocumentTab`'s
+    /// own doc), and `ChatContent/` must be as unable to reach for the new door as it already is for
+    /// the old one.
     func testChatContentNeverReachesForTheShellHost() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
@@ -477,7 +482,7 @@ final class ToolRowTests: XCTestCase {
                 .map { $0.drop(while: { $0 == " " }).hasPrefix("//") ? "" : String($0) }
                 .joined(separator: "\n")
             for name in ["ShellSessionHost", "PanelStore", "openPanelTab", "activatePanelTab",
-                         "openFileTab"] {
+                         "openFileTab", "openDocumentTab", "openFileOrDocumentTab"] {
                 XCTAssertFalse(code.contains(name),
                                "\(url.lastPathComponent) reaches for \(name) — the diff/file doors "
                                + "must stay closures the window layer injects")
@@ -542,6 +547,36 @@ final class ToolRowTests: XCTestCase {
         XCTAssertTrue(toolDetailIsClickablePath(name: "read", detail: underCeiling,
                                                 sessionHasWorkingDirectory: true),
                       "comfortably under the ceiling — clipToolDetail never touched this one")
+    }
+
+    // MARK: - office-plumbing Task 7: the office extension's dirs-gate (PURE)
+
+    /// **The divergence from gate 3, directly contrasted**: an ABSOLUTE code path stays clickable in
+    /// a dirless session (the test above this section proves it, unchanged by this task); an
+    /// ABSOLUTE office path does NOT — office rides working directories as product policy, restated
+    /// at this gate the same way `panelFilesDoorShown`'s own doc restates the Files tab's identical
+    /// rule.
+    func testAnAbsoluteOfficePathIsNotClickableWithoutAWorkingDirectoryUnlikeCode() {
+        XCTAssertFalse(toolDetailIsClickablePath(name: "read", detail: "/repo/gate.xlsx",
+                                                 sessionHasWorkingDirectory: false),
+                       "an office extension needs a working directory even when absolute")
+        XCTAssertTrue(toolDetailIsClickablePath(name: "read", detail: "/repo/gate.xlsx",
+                                                sessionHasWorkingDirectory: true),
+                      "present dirs clear the office gate exactly like every other file-door path")
+        // The contrast, in the same test: an absolute CODE path is unaffected by any of this.
+        XCTAssertTrue(toolDetailIsClickablePath(name: "read", detail: "/repo/engine.ts",
+                                                sessionHasWorkingDirectory: false),
+                      "code paths keep the pre-Task-7 rule — reads carry no path fence")
+    }
+
+    /// Every `officeFileExtensions` member is gated identically — this is not a single-extension
+    /// special case.
+    func testEveryOfficeExtensionIsGatedOnWorkingDirectoriesWhenAbsolute() {
+        for ext in officeFileExtensions {
+            XCTAssertFalse(toolDetailIsClickablePath(name: "read", detail: "/repo/gate.\(ext)",
+                                                     sessionHasWorkingDirectory: false),
+                           "\(ext) must be gated on dirs even though the path is absolute")
+        }
     }
 
     // MARK: - editor-product Task 6: the row itself (with-closure → Button, nil → today's plain text)
@@ -622,5 +657,28 @@ final class ToolRowTests: XCTestCase {
         let view = ToolRunCallDetailText(line: line(name: "edit", detail: "src/a.ts"),
                                          onOpenFile: { _ in }, sessionHasWorkingDirectory: true)
         _ = try XCTUnwrap(Self.firstDescendant(ToolRowFilePathButton.self, in: view.body))
+    }
+
+    // MARK: - office-plumbing Task 7: the office gate at the view layer
+
+    /// The office gate reaches all the way to the rendered view — an ABSOLUTE office path (unlike an
+    /// absolute code path, `testAWiredDoorOffersARelativePathOnceTheSessionHasAWorkingDirectory`'s
+    /// own sibling proofs above) renders no button at all in a dirless session.
+    @MainActor
+    func testAWiredDoorRefusesAnAbsoluteOfficePathWithoutAWorkingDirectory() {
+        let view = ToolRunCallDetailText(line: line(detail: "/repo/gate.xlsx"),
+                                         onOpenFile: { _ in }, sessionHasWorkingDirectory: false)
+        XCTAssertNil(Self.firstDescendant(ToolRowFilePathButton.self, in: view.body),
+                    "an absolute office path with no working directory must not become a button")
+    }
+
+    /// The positive mirror: the SAME absolute office path becomes a real, correctly-addressed button
+    /// once the session carries a working directory.
+    @MainActor
+    func testAWiredDoorOffersAnAbsoluteOfficePathOnceTheSessionHasAWorkingDirectory() throws {
+        let view = ToolRunCallDetailText(line: line(detail: "/repo/gate.xlsx"),
+                                         onOpenFile: { _ in }, sessionHasWorkingDirectory: true)
+        let button = try XCTUnwrap(Self.firstDescendant(ToolRowFilePathButton.self, in: view.body))
+        XCTAssertEqual(button.path, "/repo/gate.xlsx")
     }
 }

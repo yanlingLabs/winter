@@ -157,14 +157,17 @@ final class PanelFilesTabModel: ObservableObject {
     /// relative click against, so the chrome names the same directory the door treats as canonical.
     var primaryRootPath: String? { tree.sections.first?.rootPath }
 
-    /// **The tree row's click — routed through the Task-6 door, never a parallel open path.** Task
-    /// 6's review named this door's retry as the ONLY cure for a tab stuck on a previously-failed
-    /// path (the lazy-open guard on a code tab is keyed on runtime+path precisely so it never
-    /// self-retries) — a second "open a file" mechanism here would silently lose that cure for
-    /// every click the tree makes.
+    /// **The tree row's click — routed through the office-plumbing Task 7 router, never a parallel
+    /// open path.** Task 6's review named the file door's retry as the ONLY cure for a tab stuck on a
+    /// previously-failed path (the lazy-open guard on a code tab is keyed on runtime+path precisely
+    /// so it never self-retries) — a second "open a file" mechanism here would silently lose that
+    /// cure for every click the tree makes. `ShellSessionHost.openFileOrDocumentTab` decides `.code`
+    /// vs `.document` by extension and delegates to whichever door already carries that cure — this
+    /// call makes no kind decision of its own, and gets the fire-time dirs re-check that method's own
+    /// doc names for free.
     func openFile(_ path: String) {
         guard let host, let sessionId else { return }
-        host.openFileTab(path, sessionId: sessionId)
+        host.openFileOrDocumentTab(path, sessionId: sessionId)
     }
 
     /// Test seam: drive one refresh cycle synchronously, the way `activate()` does, without a view.

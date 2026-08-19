@@ -369,6 +369,17 @@ final class ShellSessionHost: ObservableObject {
             .store(in: &cancellables)
     }
 
+    /// office-plumbing Task 5: releases `officeEventsFanOutTask` — see that property's own doc for
+    /// why an uncancelled `Task` iterating a never-finished `AsyncStream` would otherwise outlive
+    /// this host entirely, strongly holding `officeHelperSupervisor` (and, transitively, whatever it
+    /// pins alive) forever. Every other resource this host owns already tears down on its own
+    /// (`cancellables`' `AnyCancellable`s cancel themselves on deinit; `officeRuntimes`/
+    /// `editorRuntimes` are plain dictionaries of objects nothing else references once this host is
+    /// gone) — this is the one exception, because a bare `Task` has no such auto-cancel behavior.
+    deinit {
+        officeEventsFanOutTask?.cancel()
+    }
+
     // MARK: - T4: the landing's roster verbs (bare RPCs — see `managementClient`'s doc for why these
     // never go through `makeFeed`'s attaching harness)
 
@@ -618,6 +629,11 @@ final class ShellSessionHost: ObservableObject {
         let shownTabIds = Set(shownTabs.map(\.tabId))
         PanelEditorTabModels.discardAll(except: shownTabIds)
         PanelFilesTabModels.discardAll(except: shownTabIds)
+        // office-plumbing Task 6: same class of bug, same fix — a `.document` tab's model holds a
+        // live `OfficeRuntime.$state` subscription (and, while its canvas is mounted, a live tile
+        // subscription on the shared helper); a departed session's tab must not keep either alive
+        // just because its `PanelTab` row is still cached elsewhere.
+        PanelDocumentTabModels.discardAll(except: shownTabIds)
     }
 
     /// **editor-product Task 5: the code tab's door — the one place a TAB may mint a runtime.**
@@ -681,6 +697,256 @@ final class ShellSessionHost: ObservableObject {
             return
         }
         editorRuntimes.removeValue(forKey: sessionId)?.teardown()
+    }
+
+    // MARK: - office-plumbing Task 5: the office runtimes
+
+    /// **One office runtime per session that has one.** Unlike `editorRuntimes` — where each entry
+    /// owns its own CEF browser — the underlying resource here (`OfficeHelperSupervisor`) is
+    /// APP-WIDE and shared across every entry in this table; see `officeHelperSupervisor`'s own doc
+    /// for the fan-out this implies. Sessions are ADDED on first `officeRuntime(for:)` (there is no
+    /// pre-warm door yet — T6/T7 own the file-tree/transcript doors that will call `open` directly,
+    /// which is its own pre-warm, the same "an open is its own prewarm" shape `editorRuntimeForCodeTab`
+    /// already establishes) and REMOVED by a departure (`releaseOfficeRuntimeIfClean` — ALWAYS, see
+    /// its own doc) or an explicit `teardownOfficeRuntime`.
+    private(set) var officeRuntimes: [String: OfficeRuntime] = [:]
+
+    /// The ONE app-wide helper supervisor, minted lazily on the FIRST `officeRuntime(for:)` call —
+    /// never in `init`, because `ShellSessionHostTests` constructs many hosts per run and a
+    /// supervisor built (with a fan-out `Task` started) for every one of them, whether or not that
+    /// test ever touches office, would be pure waste. `nil` is also what lets the quit path
+    /// (`teardownAllOfficeRuntimesAndStopHelper`) answer "nothing to kill" for a host that never
+    /// touched office, without minting one just to ask.
+    private(set) var officeHelperSupervisor: OfficeHelperSupervisor?
+
+    /// How the supervisor is built. Test seam, mirroring `makeEditorRuntime`'s own reason:
+    /// production spawns a real subprocess (`OfficeHelperSupervisor.Configuration.production()`),
+    /// which nothing under XCTest may touch directly.
+    var makeOfficeHelperSupervisor: () -> OfficeHelperSupervisor = {
+        OfficeHelperSupervisor(configuration: .production())
+    }
+
+    /// Serializes every call any `OfficeRuntime` in this table makes into the shared supervisor's
+    /// client — see `OfficeHelperRequestQueue`'s own header for why a raw, un-serialized call is not
+    /// safe from more than one caller at a time. ONE instance per host, for the same reason there is
+    /// only one supervisor per host: both describe the one shared connection.
+    private let officeRequestQueue = OfficeHelperRequestQueue()
+
+    /// How a runtime is made, GIVEN its driver — the host computes the driver (closing over
+    /// `officeHelperSupervisor`/`officeRequestQueue`) and hands it in, rather than `OfficeRuntime`
+    /// reaching for a shared global the way `EditorRuntime.CEFDriver.production` can (CEF's own
+    /// global C functions): the office helper is owned per-host, not process-wide. Test seam:
+    /// overridden to IGNORE the passed driver and substitute a recorder-backed one, exactly as
+    /// `editorFactory().make` does for `makeEditorRuntime`.
+    var makeOfficeRuntime: (String, OfficeRuntime.Driver) -> OfficeRuntime = { sessionId, driver in
+        OfficeRuntime(sessionId: sessionId, driver: driver)
+    }
+
+    /// The consumer of `officeHelperSupervisor.events` — **the ONE reader** the stream's own header
+    /// requires (`OfficeHelperSupervisor.events`: "still single-consumer... a real constraint for
+    /// whichever future task is the first to actually need a second reader" — this is that task).
+    /// Started once, alongside the supervisor itself, and fans every event out to every runtime
+    /// currently in `officeRuntimes` via `broadcastOfficeHelperEvent`. Cancelled on `deinit` — an
+    /// `AsyncStream` never finishes on its own here, so an uncancelled Task would iterate it forever,
+    /// strongly holding the supervisor alive past this host's own lifetime.
+    private var officeEventsFanOutTask: Task<Void, Never>?
+
+    /// The session's office runtime, minted on first use. Mints the shared supervisor (and starts
+    /// its fan-out) on the very first call across this host's whole lifetime, not per session.
+    @discardableResult
+    func officeRuntime(for sessionId: String) -> OfficeRuntime {
+        if let existing = officeRuntimes[sessionId] { return existing }
+        let supervisor = ensureOfficeHelperSupervisor()
+        let runtime = makeOfficeRuntime(sessionId, officeDriver(for: supervisor))
+        officeRuntimes[sessionId] = runtime
+        return runtime
+    }
+
+    /// The session's office runtime **if it already has one** — mirrors `existingEditorRuntime`.
+    func existingOfficeRuntime(for sessionId: String) -> OfficeRuntime? { officeRuntimes[sessionId] }
+
+    private func ensureOfficeHelperSupervisor() -> OfficeHelperSupervisor {
+        if let existing = officeHelperSupervisor { return existing }
+        let supervisor = makeOfficeHelperSupervisor()
+        officeHelperSupervisor = supervisor
+        officeEventsFanOutTask = Task { [weak self] in
+            for await event in supervisor.events {
+                guard let self else { return }
+                // Task 6: wire the tile push callbacks onto the FRESH client BEFORE fanning the
+                // event out to every runtime — `broadcastOfficeHelperEvent` is what flushes queued
+                // opens and unblocks the first `subscribeTiles` call, so wiring it after would race
+                // the first tiles home.
+                if case .ready = event {
+                    self.wireOfficeTileCallbacks(on: supervisor)
+                }
+                self.broadcastOfficeHelperEvent(event)
+            }
+        }
+        return supervisor
+    }
+
+    /// Task 6 — (re)points the shared client's tile push callbacks at this host's routing. Called
+    /// every time a fresh client comes up: `OfficeHelperSupervisor.client` is re-minted per attempt
+    /// (a new `OfficeHelperClient` on every successful `attemptOnce`), so a wiring done once at
+    /// supervisor-creation time would go stale the moment the helper dies and relaunches.
+    ///
+    /// Fires from the reader task's own thread — no isolation promise
+    /// (`OfficeWireConnection.onTile`'s own doc) — so every callback body hops to `@MainActor`
+    /// before touching anything: `officeRuntimes`, `OfficeRuntime` and `OfficeTileStore` are all
+    /// main-actor-isolated.
+    private func wireOfficeTileCallbacks(on supervisor: OfficeHelperSupervisor) {
+        supervisor.client?.onTile = { [weak self] _, docId, key, generation, _, _, pixels in
+            // `width`/`height` (the two skipped params) are the wire's own claim, unvalidated by
+            // the reader — obligation 8: `TileMath`/the `TileKey` itself are authoritative on
+            // dimensions, never these two ints. Nothing downstream of this callback reads them.
+            Task { @MainActor [weak self] in
+                self?.officeRuntime(owning: docId)?.tileStore.ingest(
+                    docId: docId, key: key, generation: generation, pixels: pixels)
+            }
+        }
+        supervisor.client?.onTileFailed = { [weak self] _, docId, key, reason in
+            Task { @MainActor [weak self] in
+                self?.officeRuntime(owning: docId)?.tileStore.markFailed(docId: docId, key: key)
+                NSLog("[ShellSessionHost] office tile failed doc=\(docId) key=\(key): \(reason)")
+            }
+        }
+        supervisor.client?.onInvalidated = { [weak self] _, docId, keys in
+            Task { @MainActor [weak self] in
+                self?.officeRuntime(owning: docId)?.tileStore.invalidate(docId: docId, keys: keys)
+            }
+        }
+    }
+
+    /// The runtime that currently owns `docId` — a linear scan over `officeRuntimes.values`,
+    /// deliberately not a maintained reverse index: `OfficeRuntimeState.documents` (keyed by path)
+    /// is already the one source of truth for "which docId belongs to which runtime", and a second,
+    /// hand-maintained map could only ever drift from it. Bounded by how many sessions have office
+    /// documents open at once, times how many each holds — realistically single digits, cheap to
+    /// scan on every tile push. `nil` for a docId whose runtime already closed it or tore down —
+    /// the push is simply dropped, which is correct: nothing is showing it any more.
+    func officeRuntime(owning docId: String) -> OfficeRuntime? {
+        officeRuntimes.values.first { $0.stateSnapshot.documents.values.contains { $0.docId == docId } }
+    }
+
+    /// The fan-out itself, split out as a directly-callable, directly-testable method — the real
+    /// `AsyncStream` loop above is deliberately NOT where the routing logic lives: nothing can
+    /// inject events into a real supervisor's stream from a test, but this method needs no
+    /// supervisor at all to drive with synthetic `OfficeHelperEvent`s against a table of spy
+    /// runtimes (`ShellSessionHostTests`' office suite does exactly that).
+    func broadcastOfficeHelperEvent(_ event: OfficeHelperEvent) {
+        for runtime in officeRuntimes.values {
+            runtime.handle(supervisorEvent: event)
+        }
+    }
+
+    /// The production `OfficeRuntime.Driver` — every call routed through `officeRequestQueue` (the
+    /// single-outstanding-request funnel), reaching whatever `officeHelperSupervisor.client` is live
+    /// AT CALL TIME (never captured once — the client changes across a death+relaunch). `close`/
+    /// `unsubscribeTiles` never throw to their caller (fire-and-forget everywhere `OfficeRuntime`
+    /// uses them — see `OfficeRuntime.Driver`'s own doc) and simply no-op when there is no live
+    /// client to ask — but a failure that DOES reach one of them (the helper died mid-request, a
+    /// malformed reply) is still worth a line, the same "fire-and-forget is not the same as silent"
+    /// discipline `EditorRuntime`'s own NSLog calls keep for its own no-caller-to-tell failures.
+    private func officeDriver(for supervisor: OfficeHelperSupervisor) -> OfficeRuntime.Driver {
+        let queue = officeRequestQueue
+        return OfficeRuntime.Driver(
+            helperState: { [weak supervisor] in supervisor?.state ?? .notStarted },
+            startHelper: { [weak supervisor] in await supervisor?.start() },
+            open: { [weak supervisor] docId, path in
+                try await queue.run {
+                    guard let client = supervisor?.client else {
+                        throw OfficeHelperClientError.serverError(reason: "helper not connected")
+                    }
+                    return try await client.open(docId: docId, path: path)
+                }
+            },
+            close: { [weak supervisor] docId in
+                do {
+                    try await queue.run {
+                        guard let client = supervisor?.client else { return }
+                        try await client.close(docId: docId)
+                    }
+                } catch {
+                    NSLog("[ShellSessionHost] office close(\(docId)) failed: \(error)")
+                }
+            },
+            subscribeTiles: { [weak supervisor] docId, part, zoomPPT, viewportTwips in
+                try await queue.run {
+                    guard let client = supervisor?.client else {
+                        throw OfficeHelperClientError.serverError(reason: "helper not connected")
+                    }
+                    return try await client.subscribeTiles(docId: docId, part: part, zoomPPT: zoomPPT,
+                                                            viewportTwips: viewportTwips)
+                }
+            },
+            unsubscribeTiles: { [weak supervisor] docId in
+                do {
+                    try await queue.run {
+                        guard let client = supervisor?.client else { return }
+                        try await client.unsubscribeTiles(docId: docId)
+                    }
+                } catch {
+                    NSLog("[ShellSessionHost] office unsubscribeTiles(\(docId)) failed: \(error)")
+                }
+            },
+            // office-plumbing Task 6: its own `queue.run`, never composed inside `subscribeTiles`'s
+            // — see `OfficeRuntime.perform`'s `.subscribe` case for why the two must stay two
+            // sequential awaits (obligation 2: nesting `officeRequestQueue.run` deadlocks every
+            // later office call on this host, not just the nested pair).
+            requestTiles: { [weak supervisor] docId, keys in
+                try await queue.run {
+                    guard let client = supervisor?.client else {
+                        throw OfficeHelperClientError.serverError(reason: "helper not connected")
+                    }
+                    try await client.requestTiles(docId: docId, keys: keys)
+                }
+            })
+    }
+
+    /// Release a session's office runtime outright, closing whatever documents it holds. **Never
+    /// touches the shared helper PROCESS** — the helper is app-wide, and another session's
+    /// documents may still be open on it; killing the process here would break them. The door for a
+    /// session that is genuinely going away; the shell's own departures go through
+    /// `releaseOfficeRuntimeIfClean` below instead, and the quit path's OWN process kill is
+    /// `teardownAllOfficeRuntimesAndStopHelper`, a level above this.
+    func teardownOfficeRuntime(for sessionId: String) {
+        officeRuntimes.removeValue(forKey: sessionId)?.teardown()
+    }
+
+    /// The shell is leaving `sessionId`. **Stage A has no dirty state to protect — a document tab is
+    /// view-only — so this ALWAYS releases**, unlike `releaseEditorRuntimeIfClean`'s clean-only
+    /// gate. Today "clean-only" and "always" are the exact same rule, because nothing in
+    /// `OfficeRuntimeState` can ever BE dirty yet; Stage B's editable surface is what will need the
+    /// real gate `editorRuntimeReleasedOnDeparture` already models for the editor side, and this
+    /// comment is the pin that keeps this call site honest about which rule it is actually following
+    /// once that lands.
+    private func releaseOfficeRuntimeIfClean(for sessionId: String) {
+        officeRuntimes.removeValue(forKey: sessionId)?.teardown()
+    }
+
+    /// office-plumbing Task 5 — the quit path's process-kill door: walks every session's office
+    /// runtime (closing its documents) THEN stops the shared helper process.
+    ///
+    /// **What "order matters" actually buys, corrected after T5 review (M1)**: the loop below only
+    /// CREATES each runtime's close `Task` (fire-and-forget, spawned by `OfficeRuntime.teardown()` ->
+    /// `performTeardown`) — it does not run it. Everything here is `@MainActor`-serial, so `stop()`
+    /// below runs to completion, including nilling `client`, before any of those already-scheduled
+    /// close `Task` bodies get a turn to execute. The guaranteed ordering is Task-CREATION order only.
+    /// The practical consequence: on the quit path, every one of those close bodies later hits
+    /// `officeDriver(for:)`'s `guard let client = supervisor?.client else { return }` and no-ops —
+    /// **no close RPC frame ever reaches the wire here**. The `SIGKILL` inside `stop()` is what
+    /// actually reclaims the process; this is not a clean close handshake racing a kill and winning.
+    /// Any future "flush an edit on quit" door (Stage B) must NOT be built on the assumption this
+    /// comment used to make — it needs its own await-before-kill, not this ordering.
+    ///
+    /// Tolerates a host that never touched office at all: `officeHelperSupervisor == nil` skips the
+    /// kill outright (nothing was ever spawned), and an empty `officeRuntimes` table walks zero times.
+    @discardableResult
+    func teardownAllOfficeRuntimesAndStopHelper() -> Int {
+        let sessionIds = Array(officeRuntimes.keys)
+        for sessionId in sessionIds { teardownOfficeRuntime(for: sessionId) }
+        officeHelperSupervisor?.stop()
+        return sessionIds.count
     }
 
     /// **Show the panel** — and take the pre-warm with it. Every door that opens a tab goes through
@@ -932,6 +1198,20 @@ final class ShellSessionHost: ObservableObject {
         // editor-product Task 7: and the files tab's, which releases its tree's watchers and
         // Combine subscription — see `PanelFilesTabModels.discard`/`PanelFilesTabModel.deactivate`.
         PanelFilesTabModels.discard(tabId: tabId)
+        // office-plumbing Task 6: and the document tab's — including the RUNTIME'S OWN open
+        // document, closed right HERE rather than behind a gate the way `.code`'s `requestCloseTab`
+        // fronts this same method. Stage A documents are never dirty (view-only — there is no edit
+        // surface yet), so the two-call split editor-product Task 10 built specifically to let a
+        // dirty-close sheet run BEFORE the runtime's model/watcher are released has nothing to
+        // protect here: there is no unsaved state a sheet could ask about. `runtime.close(path)`
+        // evicts the doc's own tiles from `OfficeTileStore` too (`OfficeRuntime.perform`'s
+        // `.helperClose` case) — closing the tab is what makes that eviction correct: a closed
+        // document's cached pixels are dead weight for the rest of the process's life.
+        if let tab = panelStore.tabs.first(where: { $0.tabId == tabId }), tab.kind == .document,
+           let path = tab.url, !path.isEmpty, let officeRuntime = existingOfficeRuntime(for: sessionId) {
+            officeRuntime.close(path)
+        }
+        PanelDocumentTabModels.discard(tabId: tabId)
         Task { @MainActor [weak self] in
             _ = try? await client.closePanelTab(sessionId: sessionId, tabId: tabId)
             if self?.attachedSessionId == nil { self?.refreshPanelTabs(for: sessionId) }
@@ -1096,6 +1376,83 @@ final class ShellSessionHost: ObservableObject {
         // editor-product T3: the reveal carries the editor pre-warm with it — see `openDiffTab`'s
         // identical call, immediately above.
         revealPanel()
+    }
+
+    /// office-plumbing Task 6: **the document door — dedupe/activate semantics identical to
+    /// `openFileTab`** (this task's own interface note), over `.document` tabs instead of `.code`.
+    ///
+    /// **No roots resolution needed for the OPEN itself** (unlike `.code`'s `editorRuntimeForCodeTab`
+    /// gate) — `officeRuntime(for:)` mints unconditionally, the same "an open is its own pre-warm"
+    /// shape `editorRuntimeForCodeTab`'s own doc names, minus the gate: minting an `OfficeRuntime`
+    /// stands nothing heavy up by itself (no process, no socket — see that method's own doc), so
+    /// there is no "this session has no working directory" question worth asking first. `path`
+    /// STILL resolves through `resolvedFilePath` below, for the identical reason `openFileTab`
+    /// does: a relative path from the tree must collide with an absolute click on the same file.
+    ///
+    /// The retry obligation is the same one `openFileTab` carries: an existing tab whose path
+    /// currently sits in `openFailures` gets a fresh `open()` alongside the activate, so a retried
+    /// file (permissions fixed, file re-created) does not keep showing a stale sentence forever.
+    /// `OfficeRuntime.open` is NOT `async` (unlike `EditorRuntime.openFile`), so the retry needs no
+    /// `Task` wrapper — it is fire-and-forget from this door's own perspective already.
+    func openDocumentTab(_ path: String, sessionId: String) {
+        let row = directory.rows.first { $0.sessionId == sessionId }
+        let absolutePath = resolvedFilePath(path, row: row)
+        let tabs = panelStore.allSessionTabStates[sessionId]?.tabs ?? []
+        let openFailures = Set((existingOfficeRuntime(for: sessionId)?.stateSnapshot.openFailures
+            ?? [:]).keys)
+        switch panelDocumentTabAction(tabs: tabs, path: absolutePath, openFailures: openFailures) {
+        case .activate(let tabId, let retryOpen):
+            activatePanelTab(tabId, sessionId: sessionId)
+            if retryOpen {
+                existingOfficeRuntime(for: sessionId)?.open(absolutePath)
+            }
+        case .mint(let title):
+            openPanelTab(kind: .document, url: absolutePath, title: title, sessionId: sessionId)
+        }
+        // Reveal the panel on both branches — an activate behind a hidden panel is a click that
+        // visibly does nothing, mirroring `openFileTab`/`openDiffTab`'s identical calls. Unlike
+        // theirs, this carries no office-specific pre-warm: `panelDidReveal` only pre-warms the
+        // EDITOR (`editorPrewarmTarget`) — office has no pre-warm door of its own (`officeRuntime
+        // (for:)`'s own doc: "an open is its own pre-warm"), so this call is purely "show the panel."
+        revealPanel()
+    }
+
+    /// office-plumbing Task 7: **the ONE router both UI doors call — never `openFileTab`/
+    /// `openDocumentTab` directly.** `panelTabKind(forFilePath:)` (`PanelEditorTab.swift`) decides
+    /// `.code` vs `.document` off the extension alone; this method is nothing more than that decision
+    /// plus a call to whichever door already exists for it. Both underlying doors keep their own full
+    /// contract unchanged (dedupe/activate, the retry obligation, the panel reveal) — this adds no
+    /// behavior of its own beyond the gate immediately below, which is deliberate: a router that ALSO
+    /// reimplemented dedupe or retry would be exactly the "second spelling" `panelTabKind`'s own doc
+    /// warns against, one layer up.
+    ///
+    /// **Callers**: `PanelFilesTabModel.openFile` (the tree) and the `onOpenFile` closure wired to
+    /// `WindowContentView` below (the transcript). Neither calls `openFileTab`/`openDocumentTab`
+    /// itself any more — `ToolRowTests.testChatContentNeverReachesForTheShellHost`'s banned-name list
+    /// is extended this task to also name this method and `openDocumentTab`, so `ChatContent/` could
+    /// not reach for either even by accident.
+    ///
+    /// **The fire-time belt** (`EditorTabTests.testShellPanelGatesTheFilesDoorAndWiresItToTheHosts
+    /// RealDoor`'s own "render time AND fire time" precedent, restated here for a second door): the
+    /// transcript's clickability render (`toolDetailIsClickablePath`) can go stale between paint and
+    /// click — a session hop lands in the gap — so the `.document` branch re-checks the SAME
+    /// `editorTabSessionRoots == .present` predicate the render-time gate used, against the CURRENT
+    /// rows, immediately before acting, and silently refuses rather than falling back to `.code`:
+    /// opening a binary office file as text would violate the policy `toolDetailIsClickablePath`'s
+    /// own doc states ("office rides working directories" — gate 4), not honor a degraded version of
+    /// it. The tree door is already gated structurally (its rows only exist at `.present`), so this
+    /// belt costs it nothing and covers it — and any future caller — for free, rather than needing
+    /// its own copy.
+    func openFileOrDocumentTab(_ path: String, sessionId: String) {
+        switch panelTabKind(forFilePath: path) {
+        case .document:
+            guard editorTabSessionRoots(sessionId: sessionId, rows: directory.rows) == .present else {
+                return
+            }
+            openDocumentTab(path, sessionId: sessionId)
+        default:
+            openFileTab(path, sessionId: sessionId)
+        }
     }
 
     /// editor-product Task 7: **the Files tab's door — dedupe by KIND alone, one per session.**
@@ -1957,6 +2314,9 @@ final class ShellSessionHost: ObservableObject {
         // editor-product T3: the departing session's editor goes only if it is holding nothing
         // unsaved (`editorRuntimeReleasedOnDeparture`). A hop is not a quit.
         if let departing = attachedSessionId { releaseEditorRuntimeIfClean(for: departing) }
+        // office-plumbing Task 5: same departure moment, ALWAYS-release policy (Stage A has no
+        // dirty state to protect) — see `releaseOfficeRuntimeIfClean`'s own doc.
+        if let departing = attachedSessionId { releaseOfficeRuntimeIfClean(for: departing) }
         attachedSessionId = sessionId
         refreshOutputFiles(for: sessionId)
         openOutputFile = nil
@@ -2051,6 +2411,9 @@ final class ShellSessionHost: ObservableObject {
         // editor-product T3: same departure policy as the hop above — a hidden shell releases a
         // CLEAN editor and keeps a dirty one. ⌘W is not a quit, and nothing warns here.
         if let departing = attachedSessionId { releaseEditorRuntimeIfClean(for: departing) }
+        // office-plumbing Task 5: same departure moment, ALWAYS-release policy — see
+        // `releaseOfficeRuntimeIfClean`'s own doc.
+        if let departing = attachedSessionId { releaseOfficeRuntimeIfClean(for: departing) }
         live.feedTask?.cancel()
         live.feedTask = nil
         live.feed.stop()
@@ -2754,9 +3117,15 @@ struct ShellSessionView: View {
                         // immediately above — same three-homes opt-in, same read-fresh-at-click-time
                         // rule (a hop between the click and this call must not file the tab into a
                         // session the user has left).
+                        //
+                        // office-plumbing Task 7: routes through `openFileOrDocumentTab`, not
+                        // `openFileTab` directly — an office-extension path now opens a `.document`
+                        // tab instead of trying to render binary bytes as code. See that method's own
+                        // doc for why this is the ONE router, called by both UI doors, and for the
+                        // fire-time dirs re-check it applies before minting a document tab.
                         onOpenFile: { path in
                             guard let sessionId = host.attachedSessionId else { return }
-                            host.openFileTab(path, sessionId: sessionId)
+                            host.openFileOrDocumentTab(path, sessionId: sessionId)
                         },
                         // editor-product Task 6: the row-level clickability gate's one dynamic
                         // input — see `WindowContentView.sessionHasWorkingDirectory`'s own doc.
