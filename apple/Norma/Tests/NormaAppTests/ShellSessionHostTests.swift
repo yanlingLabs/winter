@@ -4286,4 +4286,74 @@ final class ShellSessionHostTests: XCTestCase {
         host.teardownOfficeRuntime(for: "S1")
         await officeWaitUntil(timeout: 2) { office.recorder.closeCalls.count == 1 }
     }
+
+    /// **`closePanelTab`'s own new leg**: closing a `.document` tab must reach the runtime's own
+    /// `close(path)` — unconditionally, unlike `.code` (gated by `requestCloseTab`; Stage A documents
+    /// are never dirty, so there is nothing here for a gate to protect — see `closePanelTab`'s own
+    /// comment). Unlike the retry test above, `select`/`deselect` IS safe here: by the time `defer {
+    /// host.deselect() }` fires, this test has already awaited the close to completion, so the
+    /// runtime's `documents` is empty and `deselect`'s own `releaseOfficeRuntimeIfClean` -> `teardown`
+    /// walks zero docIds — no second close `Task` to leave dangling.
+    func testClosingADocumentTabReachesTheRuntimesOwnCloseDoor() async {
+        let (host, factory, mgmt) = await makeHostWithManagement()
+        defer { host.deselect() }
+        let office = officeFactory()
+        host.makeOfficeRuntime = office.make
+        host.setShellVisible(true)
+        host.select("S1")
+        await waitUntilMade(factory, 1)
+        await answerHandshake(factory.made[0], sessionId: "S1")
+
+        let runtime = host.officeRuntime(for: "S1")
+        runtime.open("/repo/gate.xlsx")
+        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.documents["/repo/gate.xlsx"] != nil }
+        let docId = runtime.stateSnapshot.documents["/repo/gate.xlsx"]!.docId
+
+        host.panelStore.applyFetchedSnapshot(
+            sessionId: "S1",
+            tabs: [PanelTab(tabId: "t1", kind: .document, url: "/repo/gate.xlsx", title: "gate.xlsx")],
+            activeTabId: nil)
+
+        host.closePanelTab("t1")
+        await feedWaitUntil { mgmt.methods.contains("panel.closeTab") }
+        await officeWaitUntil(timeout: 2) { office.recorder.closeCalls.count == 1 }
+        XCTAssertEqual(office.recorder.closeCalls, [docId])
+        XCTAssertTrue(runtime.stateSnapshot.documents.isEmpty, "the reducer's own close removed the entry")
+    }
+
+    /// A `.code` tab whose `url` happens to equal an open document's path must NOT trigger an office
+    /// close — the kind filter (`tab.kind == .document`) is load-bearing, mirroring
+    /// `panelDocumentTabAction`'s own identical guard against a coincidentally-matching `.code` tab.
+    /// This test tears down explicitly (not via `deselect`) since the document is DELIBERATELY still
+    /// open when the assertion runs — see the header comment on the test above for why that ordering
+    /// matters for safety, not just tidiness.
+    func testClosingANonDocumentTabNeverReachesTheOfficeCloseDoor() async {
+        let (host, factory, mgmt) = await makeHostWithManagement()
+        let office = officeFactory()
+        host.makeOfficeRuntime = office.make
+        host.setShellVisible(true)
+        host.select("S1")
+        await waitUntilMade(factory, 1)
+        await answerHandshake(factory.made[0], sessionId: "S1")
+
+        let runtime = host.officeRuntime(for: "S1")
+        runtime.open("/repo/gate.xlsx")
+        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.documents["/repo/gate.xlsx"] != nil }
+
+        host.panelStore.applyFetchedSnapshot(
+            sessionId: "S1",
+            tabs: [PanelTab(tabId: "t1", kind: .code, url: "/repo/gate.xlsx", title: "gate.xlsx")],
+            activeTabId: nil)
+
+        host.closePanelTab("t1")
+        await feedWaitUntil { mgmt.methods.contains("panel.closeTab") }
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(office.recorder.closeCalls.count, 0, "a same-path .code tab must not close the document")
+
+        // Hygiene: the document this test opened is still open — release it explicitly, then
+        // deselect (nothing left for it to close, so it is safe here too).
+        host.teardownOfficeRuntime(for: "S1")
+        await officeWaitUntil(timeout: 2) { office.recorder.closeCalls.count == 1 }
+        host.deselect()
+    }
 }
