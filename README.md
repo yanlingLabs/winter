@@ -28,16 +28,33 @@ screen, drive your Mac, remember things about you as plain files you can read, a
 updated without ever interrupting you. When you leave your desk, your iPhone picks up the same
 sessions over an encrypted direct link — no cloud in the middle.
 
+## Install
+
 ```sh
-brew tap yanlingLabs/norma && brew install --cask norma
+brew tap yanlingLabs/norma
+brew install --cask norma
 ```
+
+Or grab the latest `.dmg` from [Releases](https://github.com/yanlingLabs/norma/releases/latest),
+open it, and drag Norma to your Applications folder.
+
+Requires **macOS 26 or later** on Apple silicon. Then point her at the model you already pay for:
+
+```sh
+norma login              # sign in with your ChatGPT account
+norma login --api-key    # or paste an OpenAI API key
+```
+
+That's the whole setup. She's in your menu bar, and `norma` works in any terminal. Details on
+[models, reasoning effort and search keys](#bringing-your-own-ai) are further down. (Newer Homebrew
+may ask you to trust the tap once: `brew trust yanlingLabs/norma`.)
 
 ## Table of contents
 
 - [The three modes](#the-three-modes) · [Surfaces](#surfaces-where-you-talk-to-her)
 - [What she can actually do](#what-she-can-actually-do) · [Memory](#memory-that-you-can-read)
 - [Background sessions](#background-sessions-and-multiple-harnesses) · [Extending Norma](#extending-norma)
-- [Privacy & security](#your-mac-your-data) · [Install](#install) · [Bring your own AI](#bringing-your-own-ai)
+- [Privacy & security](#your-mac-your-data) · [Bring your own AI](#bringing-your-own-ai)
 - [For developers](#for-developers) · [Roadmap](#roadmap) · [FAQ](#faq)
 
 ## The three modes
@@ -173,30 +190,10 @@ This part matters more than anything else here, so we'll say it plainly:
   are all in this repository under Apache-2.0. (The iOS app itself is closed source; the kits it is
   built on are not.)
 
-## Install
-
-Download the latest `.dmg` from [Releases](https://github.com/yanlingLabs/norma/releases/latest),
-open it, drag Norma to Applications.
-
-Or with Homebrew:
-
-```sh
-brew tap yanlingLabs/norma
-brew install --cask norma
-```
-
-Requires **macOS 26 or later**, Apple silicon. Once installed, look for her in the menu bar — and
-type `norma` in any terminal when you'd rather talk to her there. (Newer Homebrew may ask you to
-trust the tap once: `brew trust yanlingLabs/norma`.)
-
 ## Bringing your own AI
 
-Norma is the assistant; the intelligence behind her is your own. Two ways to connect her:
-
-```sh
-norma login                      # sign in with your ChatGPT account
-norma login --api-key            # or paste an OpenAI API key
-```
+Norma is the assistant; the intelligence behind her is your own — either your existing ChatGPT
+subscription or an OpenAI API key, whichever you signed in with during [install](#install).
 
 Available models are the GPT-5.6 family — `sol`, `terra` and `luna` — selectable per session, with a
 reasoning-effort setting from `none` through `max`, plus Norma's own `ultra` tier:
