@@ -50,9 +50,9 @@ final class OfficeHelperClient {
     /// Task 4 — the tile-pipeline counterparts to `onDocumentEvent` above, same settable-closure
     /// shape (not an `AsyncStream`, same carry-driven restraint) proxied straight through to the
     /// underlying `OfficeWireConnection`'s own dedicated push callbacks.
-    var onTile: ((UInt64, String, TileKey, Int, Int, Int, String) -> Void)? {
-        didSet { connection.onTile = { [onTile] seq, docId, key, generation, width, height, pixelsBase64 in
-            onTile?(seq, docId, key, generation, width, height, pixelsBase64)
+    var onTile: ((UInt64, String, TileKey, Int, Int, Int, Data) -> Void)? {
+        didSet { connection.onTile = { [onTile] seq, docId, key, generation, width, height, pixels in
+            onTile?(seq, docId, key, generation, width, height, pixels)
         } }
     }
     var onTileFailed: ((UInt64, String, TileKey, String) -> Void)? {

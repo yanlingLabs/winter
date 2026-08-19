@@ -714,9 +714,9 @@ final class OfficeHelperLiveTests: XCTestCase {
         return digest.map { String(format: "%02x", $0) }.joined()
     }
 
-    private static func sha256Hex(base64: String) -> String {
-        guard let raw = Data(base64Encoded: base64) else { return "<undecodable base64>" }
-        return SHA256.hash(data: raw).map { String(format: "%02x", $0) }.joined()
+    // Task 5.5: no base64 to decode anymore — `onTile` hands over raw pixel `Data` directly.
+    private static func sha256Hex(_ raw: Data) -> String {
+        SHA256.hash(data: raw).map { String(format: "%02x", $0) }.joined()
     }
 
     // MARK: - Task 4, debt #1: real-callback-shape proof
@@ -843,16 +843,16 @@ final class OfficeHelperLiveTests: XCTestCase {
 
         final class TileCollector: @unchecked Sendable {
             private let lock = NSLock()
-            private var pushes: [(generation: Int, pixelsBase64: String)] = []
-            func record(generation: Int, pixelsBase64: String) {
-                lock.lock(); pushes.append((generation, pixelsBase64)); lock.unlock()
+            private var pushes: [(generation: Int, pixels: Data)] = []
+            func record(generation: Int, pixels: Data) {
+                lock.lock(); pushes.append((generation, pixels)); lock.unlock()
             }
-            func snapshot() -> [(generation: Int, pixelsBase64: String)] {
+            func snapshot() -> [(generation: Int, pixels: Data)] {
                 lock.lock(); defer { lock.unlock() }; return pushes
             }
         }
         let collector = TileCollector()
-        helper.client.onTile = { _, _, _, generation, _, _, pixelsBase64 in collector.record(generation: generation, pixelsBase64: pixelsBase64) }
+        helper.client.onTile = { _, _, _, generation, _, _, pixels in collector.record(generation: generation, pixels: pixels) }
 
         _ = try await helper.client.open(docId: docId, path: originalPath.path)
         try await helper.client.requestTiles(docId: docId, keys: [key])
@@ -869,13 +869,13 @@ final class OfficeHelperLiveTests: XCTestCase {
         let pushes = collector.snapshot()
         let beforePush = try XCTUnwrap(pushes.first)
         let afterPush = pushes[1]
-        print("[reload drill] before (original, orange fill): generation=\(beforePush.generation) sha256=\(Self.sha256Hex(base64: beforePush.pixelsBase64))")
-        print("[reload drill] after  (modified, blue fill):   generation=\(afterPush.generation) sha256=\(Self.sha256Hex(base64: afterPush.pixelsBase64))")
+        print("[reload drill] before (original, orange fill): generation=\(beforePush.generation) sha256=\(Self.sha256Hex(beforePush.pixels))")
+        print("[reload drill] after  (modified, blue fill):   generation=\(afterPush.generation) sha256=\(Self.sha256Hex(afterPush.pixels))")
 
         XCTAssertEqual(beforePush.generation, 0, "a fresh document's first-ever paint of any coordinate starts at generation 0")
         XCTAssertEqual(afterPush.generation, 0, "the RE-OPENED docId gets a BRAND NEW TileRenderer/TileCache — also starts at 0, "
                         + "not a continuation of the prior open's generation (see this test's own header)")
-        XCTAssertNotEqual(beforePush.pixelsBase64, afterPush.pixelsBase64,
+        XCTAssertNotEqual(beforePush.pixels, afterPush.pixels,
                            "the fill-color edit must be visible at tile (0,0) — the edited cell is the very first content in the sheet")
     }
 
@@ -901,27 +901,26 @@ final class OfficeHelperLiveTests: XCTestCase {
         XCTAssertEqual(firstSubscribed, expectedKeys, "server-computed viewport key set must match TileMath's own, independently computed")
 
         final class Box: @unchecked Sendable {
-            let lock = NSLock(); var base64ByKey: [TileKey: String] = [:]
-            func record(_ key: TileKey, _ base64: String) { lock.lock(); base64ByKey[key] = base64; lock.unlock() }
-            func snapshot() -> [TileKey: String] { lock.lock(); defer { lock.unlock() }; return base64ByKey }
+            let lock = NSLock(); var pixelsByKey: [TileKey: Data] = [:]
+            func record(_ key: TileKey, _ pixels: Data) { lock.lock(); pixelsByKey[key] = pixels; lock.unlock() }
+            func snapshot() -> [TileKey: Data] { lock.lock(); defer { lock.unlock() }; return pixelsByKey }
         }
         let box = Box()
-        helper.client.onTile = { _, _, key, _, _, _, base64 in box.record(key, base64) }
+        helper.client.onTile = { _, _, key, _, _, _, pixels in box.record(key, pixels) }
         try await helper.client.requestTiles(docId: docId, keys: Array(firstSubscribed))
         let allArrived = await waitUntil(timeout: 10.0) { box.snapshot().count >= firstSubscribed.count }
         XCTAssertTrue(allArrived, "expected a .tile push for every key in the first subscribe's own reported set")
 
         let firstPixels = box.snapshot()
-        for (key, base64) in firstPixels {
-            guard let raw = Data(base64Encoded: base64) else { return XCTFail("undecodable base64 for \(key)") }
-            XCTAssertEqual(raw.count, TileMath.bytesPerTile, "\(key): tile byte count")
+        for (key, pixels) in firstPixels {
+            XCTAssertEqual(pixels.count, TileMath.bytesPerTile, "\(key): tile byte count")
         }
         // At least the origin tile (which the six-format matrix already knows carries real
         // "NORMA GATE" content) must be non-blank; edge tiles at this viewport's far corners may
         // legitimately be blank if gate.xlsx's content doesn't reach that far — asserting non-blank
         // on the ORIGIN tile specifically is the honest, content-aware version of "non-blank."
         let originKey = TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0)
-        let originPixels = try XCTUnwrap(Data(base64Encoded: try XCTUnwrap(firstPixels[originKey])))
+        let originPixels = try XCTUnwrap(firstPixels[originKey])
         XCTAssertGreaterThan(Set(originPixels).count, 1, "origin tile appears blank")
 
         // Second subscribe, SAME viewport — the key set must be identical, and (since nothing
@@ -1121,12 +1120,12 @@ final class OfficeHelperLiveTests: XCTestCase {
 
             final class Box: @unchecked Sendable {
                 let lock = NSLock()
-                var pushes: [String] = []
-                func record(_ base64: String) { lock.lock(); pushes.append(base64); lock.unlock() }
-                func snapshot() -> [String] { lock.lock(); defer { lock.unlock() }; return pushes }
+                var pushes: [Data] = []
+                func record(_ pixels: Data) { lock.lock(); pushes.append(pixels); lock.unlock() }
+                func snapshot() -> [Data] { lock.lock(); defer { lock.unlock() }; return pushes }
             }
             let box = Box()
-            helper.client.onTile = { _, _, _, _, _, _, base64 in box.record(base64) }
+            helper.client.onTile = { _, _, _, _, _, _, pixels in box.record(pixels) }
 
             // First request: real paint. Second, IDENTICAL request: a TileCache hit (stability).
             try await helper.client.requestTiles(docId: docId, keys: [key])
@@ -1137,11 +1136,14 @@ final class OfficeHelperLiveTests: XCTestCase {
             XCTAssertTrue(secondArrived, "\(fixture): expected a SECOND .tile push (cache hit)")
 
             let pushes = box.snapshot()
-            let base64First = pushes[0]
-            let base64Second = pushes[1]
-            XCTAssertEqual(base64First, base64Second, "\(fixture): pixel hash must be STABLE across two subscribes/requests")
+            let raw = pushes[0]
+            let second = pushes[1]
+            XCTAssertEqual(raw, second, "\(fixture): pixel hash must be STABLE across two subscribes/requests")
 
-            let raw = try XCTUnwrap(Data(base64Encoded: base64First), "\(fixture): pixelsBase64 did not decode")
+            // Task 5.5: no base64 decode step anymore — `onTile` already hands over raw pixel
+            // `Data`. This IS the tripwire the task exists to prove: hashing these bytes directly
+            // (envelope changed, payload identical) must land on the EXACT SAME pinned hashes below
+            // as rung 1's `Data(base64Encoded:)`-then-hash path did.
             XCTAssertEqual(raw.count, TileMath.bytesPerTile, "\(fixture): tile byte count")
             XCTAssertGreaterThan(Set(raw).count, 1, "\(fixture): tile appears blank (all one byte value) — NON-BLANK requirement")
 
@@ -1191,7 +1193,9 @@ final class OfficeHelperLiveTests: XCTestCase {
             func snapshot() -> (count: Int, totalBytes: Int) { lock.lock(); defer { lock.unlock() }; return (count, totalBytes) }
         }
         let counter = ArrivalCounter()
-        helper.client.onTile = { _, _, _, _, _, _, base64 in counter.record(byteCount: base64.utf8.count) }
+        // Task 5.5: `pixels.count` is now the REAL wire payload size (raw RGBA, no base64 inflation)
+        // — see this test's own updated commentary below on what changed about these numbers.
+        helper.client.onTile = { _, _, _, _, _, _, pixels in counter.record(byteCount: pixels.count) }
 
         let coldStart = Date()
         try await helper.client.requestTiles(docId: docId, keys: keys)
@@ -1218,7 +1222,7 @@ final class OfficeHelperLiveTests: XCTestCase {
           COLD (real LOK paint x\(keys.count)): \(String(format: "%.1f", coldElapsed * 1000))ms total, \(String(format: "%.2f", coldPerTileMs))ms/tile, \(String(format: "%.1f", Double(keys.count) / coldElapsed)) tiles/sec
           WARM (cache hit x\(keys.count), transport-only): \(String(format: "%.1f", warmElapsed * 1000))ms total, \(String(format: "%.2f", warmPerTileMs))ms/tile, \(String(format: "%.1f", Double(keys.count) / warmElapsed)) tiles/sec
           Paint-attributable cost: ~\(String(format: "%.2f", paintAttributableMs))ms/tile (cold - warm)
-          Average wire payload: \(avgPayloadBytes) bytes/tile (base64 text; 1 MiB raw -> exactly 4/3x as base64 text, before the trailing-newline/JSON-envelope overhead on top)
+          Average wire payload: \(avgPayloadBytes) bytes/tile (raw RGBA — Task 5.5 rung 2: no base64 inflation, this IS the byte count on the wire)
         """)
 
         // The bar (per this task's own transport-decision framing): tile arrival is ASYNC over a
@@ -1226,18 +1230,18 @@ final class OfficeHelperLiveTests: XCTestCase {
         // PRINTED numbers above are the real evidence this task's report cites; this just fails
         // the suite outright on a severe regression.
         //
-        // IMPORTANT for anyone reading the printed numbers: `onTile` above only measures
-        // `base64.utf8.count` — it never calls `Data(base64Encoded:)`. So neither warmPerTileMs
-        // nor coldPerTileMs includes base64 *decode* cost; they cover socket transfer + ingest()'s
-        // full-line String(data:) conversion + decodeInbound's line.data(using:) conversion back +
-        // JSON parsing of the giant tile-payload string. A real pixel-consuming client (e.g. one
-        // that builds a CGImage/IOSurface from the tile) pays decode ADDITIONALLY on top of these
-        // numbers — measured separately (throwaway isolated benchmark, not committed) at
-        // ~19ms/tile for `Data(base64Encoded:)` on a 512x512 RGBA tile's base64 text. So the
-        // realistic end-to-end for a pixel-consuming client is ~warm+19ms and ~cold+19ms per tile,
-        // not the raw numbers printed above — see task-4-report.md for the full accounting and the
-        // resulting "clears with modest headroom, not comfortably" transport verdict.
-        XCTAssertLessThan(warmPerTileMs, 200, "transport-only per-tile cost ballooned past a generous 200ms ceiling")
+        // Task 5.5 note (rung 2 supersedes the rung-1 accounting this comment used to carry):
+        // `onTile` now hands over the pixel `Data` directly — `pixels.count` is the REAL wire byte
+        // count with NOTHING left to decode afterward (no base64, no separate `Data(base64Encoded:)`
+        // step a real pixel-consuming client would still owe under rung 1). warmPerTileMs/
+        // coldPerTileMs are therefore the FULL, HONEST end-to-end numbers a real consumer sees —
+        // socket transfer + ingest()'s header-line decode + payload-accumulation copy — with no
+        // "+19ms" footnote to add on top the way rung 1's own version of this comment had to carry.
+        // See task-5.5-report.md for the rung-1-vs-rung-2 before/after pair measured in the same
+        // session as this comment's own ceiling below.
+        XCTAssertLessThan(warmPerTileMs, 80, "transport-only per-tile cost ballooned past rung 2's own ceiling "
+                            + "(measured ~26ms/tile under rung 1's base64-in-NDJSON; expect roughly raw-socket-plus-paint "
+                            + "territory now, comfortably under this bar — see this test's own report entry for the real number)")
     }
 }
 

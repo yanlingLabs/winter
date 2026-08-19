@@ -9,6 +9,14 @@ final class OfficeWireCodecTests: XCTestCase {
 
     // MARK: - Round trip
 
+    /// **Task 5.5: `.tile` is deliberately EXCLUDED from this array.** Every other frame's whole
+    /// envelope is one NDJSON line, so `OfficeWireFrame.decode(line) == frame` is a meaningful
+    /// round trip; `.tile`'s pixel bytes are no longer part of any line at all (see that case's own
+    /// doc comment), so `decode(_:)` correctly — not a bug — returns `nil` for a `.tile` header
+    /// line (it decodes to `.tilePending`, a DIFFERENT `OfficeWireCodec.decodeInbound` outcome, not
+    /// a complete frame). Asserting `decode(tileLine) == tileFrame` here would be asserting
+    /// something the type system no longer promises. `.tile`'s own two-phase round trip is
+    /// `testTileHeaderRoundTripsAndPayloadSurvivesSeparately` right below.
     func testEveryFrameTypeRoundTrips() throws {
         let size = OfficeDocumentSize(widthTwips: 26593, heightTwips: 13005)
         let samples: [OfficeWireFrame] = [
@@ -47,8 +55,7 @@ final class OfficeWireCodecTests: XCTestCase {
             .subscribed(seq: 24, docId: "doc-1", keys: [TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0)]),
             .unsubscribed(seq: 25, docId: "doc-1"),
             .tileRequestAccepted(seq: 26, docId: "doc-1"),
-            .tile(seq: 27, docId: "doc-1", key: TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0),
-                  generation: 0, width: 512, height: 512, pixelsBase64: "AAAA"),
+            // .tile deliberately omitted — see this test's own header comment.
             .tileFailed(seq: 28, docId: "doc-1", key: TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0),
                         reason: "docNotOpen"),
             .invalidated(seq: 29, docId: "doc-1", keys: [
@@ -61,6 +68,33 @@ final class OfficeWireCodecTests: XCTestCase {
             XCTAssertTrue(line.hasSuffix("\n"), "every encoded line must be newline-terminated: \(line)")
             XCTAssertEqual(OfficeWireFrame.decode(line), frame, "round trip failed for \(frame)")
         }
+    }
+
+    /// Task 5.5 — `.tile`'s own two-phase round trip: `encodedLine()` produces a HEADER line
+    /// (byteCount, no pixel bytes) that decodes via `OfficeWireCodec.decodeInbound` to
+    /// `.tilePending`, never `.frame`; `tilePayload` separately carries the exact pixel bytes the
+    /// original frame was constructed with. Together these two checks are the honest equivalent of
+    /// "round trips" for a frame whose envelope is no longer one self-contained line.
+    func testTileHeaderRoundTripsAndPayloadSurvivesSeparately() throws {
+        let key = TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0)
+        let pixels = Data([0x00, 0x01, 0x0A, 0xFF]) // deliberately includes a 0x0A byte
+        let frame = OfficeWireFrame.tile(seq: 27, docId: "doc-1", key: key, generation: 3,
+                                          width: 512, height: 512, pixels: pixels)
+
+        XCTAssertEqual(frame.tilePayload, pixels, "tilePayload must be exactly the pixel bytes the frame was built with")
+
+        let line = try XCTUnwrap(String(data: frame.encodedLine(), encoding: .utf8))
+        XCTAssertTrue(line.hasSuffix("\n"), "the header line must still be newline-terminated")
+        XCTAssertFalse(line.contains("pixelsBase64"), "rung 2 must never emit the rung-1 field name")
+        XCTAssertTrue(line.contains("\"byteCount\":\(pixels.count)"), "the header must report the payload's exact byte count")
+
+        XCTAssertNil(OfficeWireFrame.decode(line), "a bare tile header is not a complete frame — see decode(_:)'s own contract")
+
+        guard case .tilePending(let header) = OfficeWireCodec.decodeInbound(line) else {
+            return XCTFail("expected .tilePending for a tile header line, got \(OfficeWireCodec.decodeInbound(line))")
+        }
+        XCTAssertEqual(header, TileWireHeader(seq: 27, docId: "doc-1", key: key, generation: 3,
+                                               width: 512, height: 512, byteCount: pixels.count))
     }
 
     /// Same parity discipline as `EditorBridgeInbound.wireTypes`'s own test: one minimal fixture
@@ -86,15 +120,29 @@ final class OfficeWireCodecTests: XCTestCase {
             "subscribed": #"{"type":"subscribed","seq":1,"docId":"d","keys":[]}"#,
             "unsubscribed": #"{"type":"unsubscribed","seq":1,"docId":"d"}"#,
             "tileRequestAccepted": #"{"type":"tileRequestAccepted","seq":1,"docId":"d"}"#,
-            "tile": #"{"type":"tile","seq":1,"docId":"d","key":{"part":0,"zoomPPT":1000,"tileX":0,"tileY":0},"generation":0,"width":512,"height":512,"pixelsBase64":""}"#,
+            // Task 5.5: "byteCount", not "pixelsBase64" — see OfficeWireFrame.tile's own doc comment.
+            // 0 is a perfectly fine STRUCTURAL fixture here (this test is about the envelope
+            // decoding to the right CASE, not about the exact-size-or-refuse policy check, which is
+            // `OfficeWireConnection.ingest`'s job — see this file's own byteCount-policy tests).
+            "tile": #"{"type":"tile","seq":1,"docId":"d","key":{"part":0,"zoomPPT":1000,"tileX":0,"tileY":0},"generation":0,"width":512,"height":512,"byteCount":0}"#,
             "tileFailed": #"{"type":"tileFailed","seq":1,"docId":"d","key":{"part":0,"zoomPPT":1000,"tileX":0,"tileY":0},"reason":"r"}"#,
             "invalidated": #"{"type":"invalidated","seq":1,"docId":"d","keys":[]}"#,
         ]
         XCTAssertEqual(Set(fixtures.keys), Set(OfficeWireFrame.wireTypes),
                        "fixtures must cover exactly OfficeWireFrame.wireTypes, no more, no less")
         for type in OfficeWireFrame.wireTypes {
-            let frame = try XCTUnwrap(OfficeWireFrame.decode(try XCTUnwrap(fixtures[type])),
-                                       "\(type) fixture failed to decode")
+            let line = try XCTUnwrap(fixtures[type])
+            if type == "tile" {
+                // Task 5.5: "tile" is the one wireType that never decodes to `.frame` anymore — see
+                // `OfficeWireInbound`'s own header. The parity claim this test makes for every other
+                // type ("this fixture decodes to the case its own name says") becomes, for tile,
+                // "this fixture decodes to `.tilePending`, never `.frame` or a rejection."
+                guard case .tilePending = OfficeWireCodec.decodeInbound(line) else {
+                    return XCTFail("\"tile\" fixture must decode to .tilePending, got \(OfficeWireCodec.decodeInbound(line))")
+                }
+                continue
+            }
+            let frame = try XCTUnwrap(OfficeWireFrame.decode(line), "\(type) fixture failed to decode")
             XCTAssertEqual(frame.wireType, type)
         }
     }
@@ -123,7 +171,7 @@ final class OfficeWireCodecTests: XCTestCase {
         XCTAssertEqual(OfficeWireFrame.subscribed(seq: 115, docId: "d", keys: []).seq, 115)
         XCTAssertEqual(OfficeWireFrame.unsubscribed(seq: 116, docId: "d").seq, 116)
         XCTAssertEqual(OfficeWireFrame.tileRequestAccepted(seq: 117, docId: "d").seq, 117)
-        XCTAssertEqual(OfficeWireFrame.tile(seq: 118, docId: "d", key: tileKey, generation: 0, width: 512, height: 512, pixelsBase64: "").seq, 118)
+        XCTAssertEqual(OfficeWireFrame.tile(seq: 118, docId: "d", key: tileKey, generation: 0, width: 512, height: 512, pixels: Data()).seq, 118)
         XCTAssertEqual(OfficeWireFrame.tileFailed(seq: 119, docId: "d", key: tileKey, reason: "r").seq, 119)
         XCTAssertEqual(OfficeWireFrame.invalidated(seq: 120, docId: "d", keys: []).seq, 120)
     }
@@ -135,7 +183,7 @@ final class OfficeWireCodecTests: XCTestCase {
         case .rejected(let seq, let reason):
             XCTAssertEqual(seq, 42)
             XCTAssertEqual(reason, "unknown")
-        case .frame, .unreadable:
+        case .frame, .tilePending, .unreadable:
             XCTFail("expected .rejected(seq: 42, reason: \"unknown\")")
         }
     }
@@ -148,7 +196,7 @@ final class OfficeWireCodecTests: XCTestCase {
         case .rejected(let seq, let reason):
             XCTAssertEqual(seq, 7)
             XCTAssertEqual(reason, "malformed")
-        case .frame, .unreadable:
+        case .frame, .tilePending, .unreadable:
             XCTFail("expected .rejected(seq: 7, reason: \"malformed\")")
         }
     }
@@ -166,7 +214,7 @@ final class OfficeWireCodecTests: XCTestCase {
             case .rejected(let seq, let reason):
                 XCTAssertEqual(seq, 1)
                 XCTAssertEqual(reason, "malformed", "expected malformed for: \(line)")
-            case .frame, .unreadable:
+            case .frame, .tilePending, .unreadable:
                 XCTFail("expected .rejected(seq: 1, reason: \"malformed\") for: \(line)")
             }
         }
@@ -187,7 +235,7 @@ final class OfficeWireCodecTests: XCTestCase {
             case .rejected(let seq, let reason):
                 XCTAssertEqual(seq, 1)
                 XCTAssertEqual(reason, "malformed", "expected malformed for: \(line)")
-            case .frame, .unreadable:
+            case .frame, .tilePending, .unreadable:
                 XCTFail("expected .rejected(seq: 1, reason: \"malformed\") for: \(line)")
             }
         }
@@ -202,8 +250,10 @@ final class OfficeWireCodecTests: XCTestCase {
             #"{"type":"subscribeTiles","seq":1,"docId":"d","part":0,"zoomPPT":1000,"viewportTwips":{"x":0,"y":0,"width":1}}"#, // rect missing height
             #"{"type":"tileRequest","seq":1,"docId":"d"}"#,                                       // missing keys
             #"{"type":"tileRequest","seq":1,"docId":"d","keys":[{"part":0,"zoomPPT":1000,"tileX":0}]}"#, // key missing tileY
-            #"{"type":"tile","seq":1,"docId":"d","key":{"part":0,"zoomPPT":1000,"tileX":0,"tileY":0},"generation":0,"width":512,"pixelsBase64":""}"#, // missing height
-            #"{"type":"tile","seq":1,"docId":"d","key":{"part":0,"zoomPPT":1000,"tileX":0,"tileY":0},"generation":0,"width":512,"height":512}"#, // missing pixelsBase64
+            // Task 5.5: "byteCount", not "pixelsBase64" — see OfficeWireFrame.tile's own doc comment.
+            #"{"type":"tile","seq":1,"docId":"d","key":{"part":0,"zoomPPT":1000,"tileX":0,"tileY":0},"generation":0,"width":512,"byteCount":0}"#, // missing height
+            #"{"type":"tile","seq":1,"docId":"d","key":{"part":0,"zoomPPT":1000,"tileX":0,"tileY":0},"generation":0,"width":512,"height":512}"#, // missing byteCount
+            #"{"type":"tile","seq":1,"docId":"d","key":{"part":0,"zoomPPT":1000,"tileX":0,"tileY":0},"generation":0,"width":512,"height":512,"byteCount":-1}"#, // byteCount negative: structurally invalid (a count can't be negative), distinct from the exact-size POLICY refusal `OfficeWireConnection.ingest` decides for a structurally-valid-but-wrong-size byteCount
             #"{"type":"tileFailed","seq":1,"docId":"d","key":{"part":0,"zoomPPT":1000,"tileX":0,"tileY":0}}"#, // missing reason
             #"{"type":"invalidated","seq":1,"docId":"d"}"#,                                        // missing keys
         ]
@@ -212,7 +262,7 @@ final class OfficeWireCodecTests: XCTestCase {
             case .rejected(let seq, let reason):
                 XCTAssertEqual(seq, 1)
                 XCTAssertEqual(reason, "malformed", "expected malformed for: \(line)")
-            case .frame, .unreadable:
+            case .frame, .tilePending, .unreadable:
                 XCTFail("expected .rejected(seq: 1, reason: \"malformed\") for: \(line)")
             }
         }

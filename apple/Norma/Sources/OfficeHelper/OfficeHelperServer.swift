@@ -121,8 +121,15 @@ public final class FakeOfficeDocumentBridge: OfficeDocumentBridge {
 
     /// A small, deterministic, key-dependent pixel pattern (never blank, never identical across
     /// distinct keys) — enough for a wire-level test to tell two tiles apart without needing real
-    /// rendering. Not RGBA-shaped/sized like a real tile; wire-level tests assert on IDENTITY
-    /// (which key, which generation), never on pixel content matching `TileMath.bytesPerTile`.
+    /// rendering. Wire-level tests assert on IDENTITY (which key, which generation), never on real
+    /// pixel CONTENT — but the SIZE is no longer free to pick arbitrarily (Task 5.5 review carry):
+    /// `OfficeWireConnection.ingest`'s exact-size-or-refuse contract closes the connection on any
+    /// `.tile` push whose `byteCount` isn't exactly `TileMath.bytesPerTile` (every tile this system
+    /// produces today IS that size — see that check's own doc comment), and this fake bridge's
+    /// pushes cross the SAME real wire `OfficeSupervisorTests`' multicast test drives end to end.
+    /// A pre-Task-5.5 4x4/16-byte fake tile would therefore get its own connection refused the
+    /// instant it tried to push one — sized to the real constant instead, even though nothing here
+    /// renders real content.
     public func paintTile(docId: String, key: TileKey) throws -> TilePaintResult {
         lock.lock()
         defer { lock.unlock() }
@@ -130,9 +137,10 @@ public final class FakeOfficeDocumentBridge: OfficeDocumentBridge {
             throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)")
         }
         let tag = UInt8(truncatingIfNeeded: key.tileX &* 31 &+ key.tileY &* 7 &+ key.part)
-        let pixels = Data(repeating: tag, count: 16)
+        let pixels = Data(repeating: tag, count: TileMath.bytesPerTile)
         let generation = caches[docId]!.recordPaint(key: key, pixels: pixels)
-        return TilePaintResult(generation: generation, pixels: pixels, width: 4, height: 4)
+        return TilePaintResult(generation: generation, pixels: pixels,
+                                width: TileMath.tilePixelSize, height: TileMath.tilePixelSize)
     }
 
     public func applyTileInvalidation(docId: String, rectsTwips: [OfficeTwipsRect], part: Int) -> [TileKey] {
@@ -328,28 +336,45 @@ public final class OfficeHelperServer {
         }
     }
 
-    /// The one place that locks a `ConnectionWriter`'s own write lock and writes a frame to its
-    /// fd — every async-push call site (`routeDocumentEvent`, `tileRequest`'s per-key pushes,
-    /// close-notification pushes to remaining subscribers) shares this instead of re-deriving the
-    /// lock/writeAll/unlock sequence each time.
+    /// Task 5.5 — writes one frame's full wire envelope: the NDJSON header line, then (for `.tile`
+    /// ONLY — every other case's `tilePayload` is `nil`) its raw pixel bytes immediately after,
+    /// with no framing between them beyond the header's own `byteCount` field. **Caller must
+    /// already hold `writer.writeLock`** — this is the shared body `writeReply`/`pushFrame` call
+    /// from inside their own lock hold, so header and payload can never be split by an interleaving
+    /// write from the OTHER path (a reply racing a push, or two pushes) landing bytes between them.
+    /// A future frame type that ever needs a similar two-part envelope gets it for free by growing
+    /// `tilePayload`'s definition rather than by this function changing.
+    private func writeFrameLocked(_ frame: OfficeWireFrame, writer: ConnectionWriter) {
+        writeAll(frame.encodedLine(), fd: writer.fd)
+        if let payload = frame.tilePayload {
+            writeAll(payload, fd: writer.fd)
+        }
+    }
+
+    /// The one place that locks a `ConnectionWriter`'s own write lock and writes a frame (header +
+    /// optional payload, via `writeFrameLocked`) to its fd — every async-push call site
+    /// (`routeDocumentEvent`, `tileRequest`'s per-key pushes, close-notification pushes to
+    /// remaining subscribers) shares this instead of re-deriving the lock/write/unlock sequence
+    /// each time.
     ///
     /// **KNOWN HAZARD, named but NOT fixed this round (fix round 1, I2 — bounded on purpose, a real
     /// redesign is deferred to a task scoped against T6's actual client behavior)**: `writeAll`
-    /// below is a BLOCKING socket write under `writer.writeLock`. `routeDocumentEvent` — this
-    /// function's own biggest caller — runs on `LOKBridge`'s dedicated thread (synchronously,
-    /// reached from inside a real LOK callback; see that function's own header). Task 4 made this
-    /// reachable with real, large (up to ~1.4MB base64-encoded) payloads for the first time
-    /// (`.tile` pushes). A CLIENT that is suspended, or reading slowly, mid-receive of one such
-    /// push leaves this `write()` blocked indefinitely — which blocks `LOKBridge`'s ONE dedicated
-    /// thread, which is the SOLE executor of every LOK call for every open document on every
-    /// connection this helper serves (`LOKDedicatedThread`'s own single-thread rule). One stalled
-    /// client can therefore wedge every open/close/paint for every OTHER connection too, not just
-    /// its own. The real fix is either a non-blocking write or a bounded per-connection push queue
-    /// (decouple "LOK produced this frame" from "the socket accepted these bytes") — deliberately
-    /// NOT designed here; carried in the fix-round ledger (task-4-report.md) for a future round.
+    /// (inside `writeFrameLocked`) is a BLOCKING socket write under `writer.writeLock`.
+    /// `routeDocumentEvent` — this function's own biggest caller — runs on `LOKBridge`'s dedicated
+    /// thread (synchronously, reached from inside a real LOK callback; see that function's own
+    /// header). Task 4 made this reachable with real, large (up to ~1MiB raw, Task 5.5 deleted the
+    /// ~1.4MB base64 inflation) payloads for the first time (`.tile` pushes). A CLIENT that is
+    /// suspended, or reading slowly, mid-receive of one such push leaves this `write()` blocked
+    /// indefinitely — which blocks `LOKBridge`'s ONE dedicated thread, which is the SOLE executor of
+    /// every LOK call for every open document on every connection this helper serves
+    /// (`LOKDedicatedThread`'s own single-thread rule). One stalled client can therefore wedge every
+    /// open/close/paint for every OTHER connection too, not just its own. The real fix is either a
+    /// non-blocking write or a bounded per-connection push queue (decouple "LOK produced this
+    /// frame" from "the socket accepted these bytes") — deliberately NOT designed here; carried in
+    /// the fix-round ledger (task-4-report.md) for a future round.
     private func pushFrame(_ frame: OfficeWireFrame, to writer: ConnectionWriter) {
         writer.writeLock.lock()
-        writeAll(frame.encodedLine(), fd: writer.fd)
+        writeFrameLocked(frame, writer: writer)
         writer.writeLock.unlock()
     }
 
@@ -550,6 +575,13 @@ public final class OfficeHelperServer {
         case .frame(let frame):
             writeReply(.error(seq: frame.seq, reason: "not authenticated"), writer: writer)
             return false
+        case .tilePending(let header):
+            // Task 5.5: a `"tile"` line is PUSH-only (helper -> client) — a client sending one
+            // pre-auth is exactly as illegal as any other frame here, refused identically. No
+            // payload bytes are read off the stream for this — the connection is about to be
+            // refused outright, so there is nothing to stay in sync FOR.
+            writeReply(.error(seq: header.seq, reason: "not authenticated"), writer: writer)
+            return false
         case .rejected(let seq, let reason):
             writeReply(.error(seq: seq, reason: reason), writer: writer)
             return false
@@ -672,9 +704,13 @@ public final class OfficeHelperServer {
             for key in keys {
                 do {
                     let result = try documentBridge.paintTile(docId: docId, key: key)
+                    // Task 5.5: no base64 encode — `result.pixels` (raw RGBA) crosses the wire as
+                    // the frame's out-of-band payload, written by `pushFrame`/`writeFrameLocked`
+                    // immediately after this line's own header. This IS the transport-decision win:
+                    // rung 1's `.base64EncodedString()` call here is simply gone.
                     pushFrame(.tile(seq: writer.pushSeqAllocator.nextSeq(), docId: docId, key: key,
                                      generation: result.generation, width: result.width, height: result.height,
-                                     pixelsBase64: result.pixels.base64EncodedString()),
+                                     pixels: result.pixels),
                               to: writer)
                 } catch {
                     pushFrame(.tileFailed(seq: writer.pushSeqAllocator.nextSeq(), docId: docId, key: key,
@@ -689,6 +725,15 @@ public final class OfficeHelperServer {
             // valid frames that are never legal for a CLIENT to send — the helper only ever sends
             // these.
             writeReply(.error(seq: frame.seq, reason: "unexpected"), writer: writer)
+        case .tilePending(let header):
+            // Task 5.5: `tile` joins the same "helper-only, never legal from a client" family as
+            // the `.frame(let frame)` arm right above — refused identically (`"unexpected"`), never
+            // read as a payload-bearing push. No byteCount bytes are consumed off the stream here:
+            // this connection is not a `.tile` PRODUCER, so there is no "next bytes are the
+            // payload" state for it to enter — the wire-level malformed-shape tests
+            // (`OfficeWireCodecTests`) already cover "client sends a tile-shaped line" at the
+            // decode level; this is the server's own behavioral answer to it arriving for real.
+            writeReply(.error(seq: header.seq, reason: "unexpected"), writer: writer)
         case .rejected(let seq, let reason):
             writeReply(.error(seq: seq, reason: reason), writer: writer)
         case .unreadable:
@@ -698,11 +743,14 @@ public final class OfficeHelperServer {
 
     /// Task 3: takes `writer.writeLock` — the SAME lock the async push path
     /// (`routeDocumentEvent`) takes around its own write to this connection's `fd` — so a reply
-    /// and a push can never interleave bytes on the wire.
+    /// and a push can never interleave bytes on the wire. `.tile` is never actually sent through
+    /// this path in production (it is always a PUSH, via `pushFrame` — see that frame's own doc
+    /// comment), but `writeFrameLocked` handles it correctly regardless, so this stays true even if
+    /// that ever changes.
     private func writeReply(_ frame: OfficeWireFrame, writer: ConnectionWriter) {
         guard !hooks.suppressReplies else { return }
         writer.writeLock.lock()
-        writeAll(frame.encodedLine(), fd: writer.fd)
+        writeFrameLocked(frame, writer: writer)
         writer.writeLock.unlock()
     }
 

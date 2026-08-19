@@ -163,13 +163,23 @@ public enum OfficeWireFrame: Equatable, Sendable {
     /// original claim — see `OfficeHelperServer.ConnectionWriter`). `width`/`height` are always
     /// `TileMath.tilePixelSize` today but are sent explicitly rather than assumed, so a future
     /// change to that constant on one side alone cannot silently misinterpret the other side's
-    /// pixel buffer. `pixelsBase64` is the chosen transport realization (rung 1 of the
-    /// surface-transport decision — see task-4-report.md): the raw RGBA buffer, base64-encoded,
-    /// inside the SAME NDJSON line every other frame in this file already uses — zero framing
-    /// changes, reusing 100% of the existing line-buffered read/decode path on both ends (proven
-    /// safe for large single lines by `OfficeWireConnection.ingest`'s own amortized-linear buffer
-    /// scan, fixed alongside this frame's own landing).
-    case tile(seq: UInt64, docId: String, key: TileKey, generation: Int, width: Int, height: Int, pixelsBase64: String)
+    /// pixel buffer.
+    ///
+    /// **Task 5.5 — rung 2 of the surface-transport decision (task-4-report.md rung 1; the T4
+    /// review's own ruling): `pixels` is the raw RGBA buffer, never base64.** The wire envelope for
+    /// THIS ONE frame type is no longer "one NDJSON line" the way every other frame in this file
+    /// still is: `encodedLine()` for `.tile` emits only the HEADER (type/seq/docId/key/generation/
+    /// width/height/`byteCount`), newline-terminated exactly like any other line; the `byteCount`
+    /// raw bytes of `pixels` follow IMMEDIATELY after, with no framing of their own (no length
+    /// prefix beyond `byteCount` itself, no trailing delimiter) — see `tilePayload` below, and
+    /// `OfficeWireConnection.ingest`'s own header for why a plain newline scan cannot be used to
+    /// find where the payload ends (raw RGBA bytes routinely contain `0x0A`). `OfficeHelperServer`'s
+    /// `pushFrame`/`writeFrameLocked` write both parts under the SAME connection write-lock hold, so
+    /// no other frame (a reply, or another push) can ever land bytes between the header and its
+    /// payload. This case's own Swift shape is otherwise unchanged from rung 1 — `pixels` is exactly
+    /// what `pixelsBase64` used to decode to, byte-for-byte (the transport envelope changed; the
+    /// pixel content did not — the live product-path hash pins are the tripwire for that claim).
+    case tile(seq: UInt64, docId: String, key: TileKey, generation: Int, width: Int, height: Int, pixels: Data)
     /// The failure counterpart to `tile` — refuse-never-ignore extended to the per-key granularity
     /// `tileRequest` introduces: every key named in an accepted `tileRequest` gets EITHER a `tile`
     /// OR a `tileFailed` push, never silence, even though the request itself already succeeded.
@@ -296,13 +306,16 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .subscribed(_, let docId, let keys), .invalidated(_, let docId, let keys):
             payload["docId"] = docId
             payload["keys"] = keys.map { $0.jsonObject() }
-        case .tile(_, let docId, let key, let generation, let width, let height, let pixelsBase64):
+        case .tile(_, let docId, let key, let generation, let width, let height, let pixels):
+            // Task 5.5: the header line carries `byteCount`, never the pixel bytes themselves —
+            // see this case's own doc comment. `encodedLine()` for `.tile` is therefore ONLY ever
+            // half of the wire envelope; callers that need the other half read `tilePayload` below.
             payload["docId"] = docId
             payload["key"] = key.jsonObject()
             payload["generation"] = generation
             payload["width"] = width
             payload["height"] = height
-            payload["pixelsBase64"] = pixelsBase64
+            payload["byteCount"] = pixels.count
         case .tileFailed(_, let docId, let key, let reason):
             payload["docId"] = docId
             payload["key"] = key.jsonObject()
@@ -326,6 +339,16 @@ public enum OfficeWireFrame: Equatable, Sendable {
     /// `OfficeWireCodec.decodeInbound` instead.
     public static func decode(_ line: String) -> OfficeWireFrame? {
         if case .frame(let frame) = OfficeWireCodec.decodeInbound(line) { return frame }
+        return nil
+    }
+
+    /// Task 5.5 — the raw bytes that must follow this frame's `encodedLine()` header on the wire,
+    /// or `nil` for every frame except `.tile` (the ONE case whose envelope is more than one NDJSON
+    /// line — see that case's own doc comment). `OfficeHelperServer.writeFrameLocked` writes
+    /// `encodedLine()` then, if this is non-nil, these bytes too, under the SAME connection
+    /// write-lock hold — the two writes must never be split across an interleaving push.
+    public var tilePayload: Data? {
+        if case .tile(_, _, _, _, _, _, let pixels) = self { return pixels }
         return nil
     }
 
@@ -613,12 +636,63 @@ public enum OfficeDocumentEvent: Equatable, Sendable {
 /// touching any one of them.
 public let officeWireStageALOKVersionPlaceholder = "lok-not-loaded"
 
+/// Task 5.5 — a `.tile` frame's HEADER, decoded from its NDJSON line alone — everything
+/// `OfficeWireFrame.tile` carries except the pixel bytes themselves, which are never part of the
+/// line (see that case's own doc comment). Lives here, not as a nested type, because both
+/// `OfficeWireCodec.decodeInbound` (produces it) and `OfficeWireConnection.ingest` (the one real
+/// consumer — combines it with `byteCount` raw bytes read off the stream to synthesize a complete
+/// `OfficeWireFrame.tile`) need it, and it is meaningless without the codec that produces it.
+public struct TileWireHeader: Equatable, Sendable {
+    public let seq: UInt64
+    public let docId: String
+    public let key: TileKey
+    public let generation: Int
+    public let width: Int
+    public let height: Int
+    /// How many raw bytes follow this header line on the wire. Structurally validated here only as
+    /// "a non-negative integer" (`OfficeWireCodec.decodeInbound`'s own decode-level contract,
+    /// mirroring `unsignedSeq`'s discipline) — the SEMANTIC policy question ("is this a size we are
+    /// willing to trust/allocate for") is deliberately NOT this type's job; see
+    /// `OfficeWireConnection.ingest`'s own exact-size-or-refuse check, which is where that decision
+    /// is made and documented.
+    public let byteCount: Int
+    public init(seq: UInt64, docId: String, key: TileKey, generation: Int, width: Int, height: Int, byteCount: Int) {
+        self.seq = seq
+        self.docId = docId
+        self.key = key
+        self.generation = generation
+        self.width = width
+        self.height = height
+        self.byteCount = byteCount
+    }
+}
+
 /// The result of trying to read one NDJSON line as a frame a HELPER must answer. Three-way so the
 /// helper can always echo the caller's real `seq` when it has one, and only fall back to the
 /// seq-unknown sentinel when the line gave it no seq at all.
+///
+/// **Task 5.5 adds a fourth case, `.tilePending`, for exactly one wire type (`"tile"`)**: unlike
+/// every other frame, a `.tile` line alone is never a COMPLETE frame anymore — the pixel bytes
+/// that used to live inline (`pixelsBase64`) now follow the line as raw, out-of-band bytes (see
+/// `OfficeWireFrame.tile`'s own doc comment). `.frame`'s own contract — "this line, and only this
+/// line, decoded to a full, usable value" — would be dishonest for `"tile"`, so it gets its own
+/// outcome instead of `.frame(.tile(..., pixels: Data()))` with a fake empty payload. Both server
+/// switches over this enum (`OfficeHelperServer.handleOpeningLine`/`.handlePostAuthLine`) gain one
+/// new arm each for it — a CLIENT should never legitimately send a `"tile"` line (tile is a
+/// PUSH-only, helper->client shape), so both arms simply refuse it exactly like any other
+/// helper-only frame a client tried to send (`"not authenticated"` / `"unexpected"`).
+/// `OfficeWireFrame.decode(_:)` returns `nil` for a `"tile"` line, consistent with its own
+/// documented contract ("did this parse to a full, usable frame") — the one real consumer that
+/// needs the header (`OfficeWireConnection.ingest`) calls `OfficeWireCodec.decodeInbound` directly
+/// instead, precisely so it can see this case.
 public enum OfficeWireInbound: Equatable, Sendable {
     /// Decoded completely.
     case frame(OfficeWireFrame)
+    /// A `.tile` header line decoded completely, but the frame it describes is not yet complete —
+    /// `header.byteCount` raw bytes must still be read off the stream before a real
+    /// `OfficeWireFrame.tile` exists. See this enum's own header for why this cannot simply be
+    /// `.frame(.tile(...))`.
+    case tilePending(TileWireHeader)
     /// The envelope decoded (a JSON object with a string `type` and a recoverable non-negative
     /// integer `seq`), but the frame itself didn't: either `type` is not one of
     /// `OfficeWireFrame.wireTypes` (reason `"unknown"` — the brief's literal pin) or it IS a known
@@ -748,15 +822,22 @@ public enum OfficeWireCodec {
             }
             return .frame(.tileRequestAccepted(seq: seq, docId: docId))
         case "tile":
+            // Task 5.5: `byteCount` replaces `pixelsBase64` — this is a HEADER-only decode now
+            // (`.tilePending`, never `.frame`), see `OfficeWireInbound`'s own doc comment. Structural
+            // validation only: a present, non-negative integer (mirrors `unsignedSeq`'s own
+            // NSNumber-boolean-trap discipline one line down, applied to a plain `Int` rather than a
+            // `UInt64`). Whether THIS PARTICULAR value is a byte count the reader is willing to
+            // trust/buffer for is a separate, semantic question `OfficeWireConnection.ingest` decides
+            // — not this decode-level structural check.
             guard let docId = object["docId"] as? String,
                   let key = TileKey.decode(object["key"] as? [String: Any] ?? [:]),
                   let generation = intValue(object["generation"]),
                   let width = intValue(object["width"]), let height = intValue(object["height"]),
-                  let pixelsBase64 = object["pixelsBase64"] as? String else {
+                  let byteCount = intValue(object["byteCount"]), byteCount >= 0 else {
                 return .rejected(seq: seq, reason: "malformed")
             }
-            return .frame(.tile(seq: seq, docId: docId, key: key, generation: generation,
-                                 width: width, height: height, pixelsBase64: pixelsBase64))
+            return .tilePending(TileWireHeader(seq: seq, docId: docId, key: key, generation: generation,
+                                                width: width, height: height, byteCount: byteCount))
         case "tileFailed":
             guard let docId = object["docId"] as? String,
                   let key = TileKey.decode(object["key"] as? [String: Any] ?? [:]),

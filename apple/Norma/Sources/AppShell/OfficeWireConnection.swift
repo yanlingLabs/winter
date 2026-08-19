@@ -47,21 +47,37 @@ final class OfficeWireConnection: @unchecked Sendable {
     private let transport: NormaTransport
     private let lock = NSLock()
     private var buffer = Data()
-    /// Task 4 — how many leading bytes of `buffer` are ALREADY confirmed newline-free. Without
-    /// this, `ingest`'s newline scan restarted from `buffer.startIndex` on every call — fine for
-    /// the small control frames every OTHER frame in this file produces, but a single `tile` push
-    /// (base64 RGBA pixels, ~1.4MB as text — the transport decision's own chosen rung, see
-    /// `OfficeWireFrame.tile`'s header) commonly arrives split across many `UnixSocketTransport`
-    /// read chunks: each `ingest` call before the terminating newline appears would re-scan the
-    /// ENTIRE buffer accumulated so far, making total scan cost quadratic in the line's length
-    /// (caught during this task's own transport measurement, not by a correctness test — a
-    /// confounder that would have inflated every arrival-latency number). Reset to 0 only when a
-    /// line is actually consumed (`removeSubrange` shifts everything after it down to index 0,
-    /// invalidating any prior "scanned up to here" offset); advanced to `buffer.count` whenever a
+    /// Task 4 — how many leading bytes of `buffer` are ALREADY confirmed newline-free, while in
+    /// LINE-SCANNING mode (`pendingTileHeader == nil` — see that field's own header for the other
+    /// mode). Without this, the newline scan below restarted from `buffer.startIndex` on every
+    /// call — fine for a short line, but a control frame CAN still be large (`subscribed`/
+    /// `invalidated` report up to `TileMath.maxTilesPerRectEnumeration` keys, thousands of bytes of
+    /// JSON) and can still arrive split across many `UnixSocketTransport` read chunks: each `ingest`
+    /// call before the terminating newline appears would otherwise re-scan the entire buffer
+    /// accumulated so far, making total scan cost quadratic in the line's length. Reset to 0 only
+    /// when a line is actually consumed (`removeSubrange` shifts everything after it down to index
+    /// 0, invalidating any prior "scanned up to here" offset); advanced to `buffer.count` whenever a
     /// scan finds no newline in the new tail, so the NEXT call resumes exactly where this one left
     /// off. Net effect: every byte is scanned at most once as part of finding the line it belongs
     /// to — linear in total bytes, not quadratic in chunk count.
+    ///
+    /// **Task 5.5 note**: this was originally written to protect a `.tile` push specifically (rung
+    /// 1's base64 payload lived INSIDE the line being scanned, ~1.4MB of text). Rung 2 moves tile
+    /// pixels out of any scanned line entirely (see `pendingTileHeader`) — so the quadratic risk
+    /// this field guards against no longer applies to tiles at all, only to the (much smaller, but
+    /// not unbounded) control frames named above. Kept for them; the reasoning narrowed, the field
+    /// did not retire.
     private var scannedPrefixLength = 0
+    /// Task 5.5 — non-nil exactly when the NEXT `header.byteCount` bytes of `buffer` are a `.tile`
+    /// push's raw pixel payload, not another NDJSON line: set the moment a `.tile` header line
+    /// decodes (`OfficeWireCodec.decodeInbound` returning `.tilePending`) and its `byteCount` passes
+    /// the exact-size check (see `ingest`'s own comment on that check); cleared the moment enough
+    /// bytes have accumulated to complete the payload. While non-nil, `ingest`'s scan loop does
+    /// ONLY a length comparison (`buffer.count >= header.byteCount`) — **never** a newline scan or
+    /// any other inspection of these bytes, because raw RGBA payload bytes routinely contain `0x0A`
+    /// (the landmine the T4 review named directly: a plain newline scan cannot see past/through
+    /// payload bytes to find where the payload ends or where the next real line begins).
+    private var pendingTileHeader: TileWireHeader?
     private var frameQueue: [OfficeWireFrame] = []
     private var waiter: PendingWait?
     private var streamClosed = false
@@ -99,7 +115,7 @@ final class OfficeWireConnection: @unchecked Sendable {
     // `onDocumentEvent`'s payload, it is genuinely useful here for a caller/test wanting to reason
     // about per-connection push ordering (e.g. detecting out-of-order delivery), and costs nothing
     // to thread through since `ingest()` already has it off the decoded frame.
-    var onTile: (@Sendable (UInt64, String, TileKey, Int, Int, Int, String) -> Void)?  // seq, docId, key, generation, width, height, pixelsBase64
+    var onTile: (@Sendable (UInt64, String, TileKey, Int, Int, Int, Data) -> Void)?  // seq, docId, key, generation, width, height, pixels
     var onTileFailed: (@Sendable (UInt64, String, TileKey, String) -> Void)?           // seq, docId, key, reason
     var onInvalidated: (@Sendable (UInt64, String, [TileKey]) -> Void)?                // seq, docId, keys
 
@@ -209,12 +225,36 @@ final class OfficeWireConnection: @unchecked Sendable {
         var pushesToDeliver: [(String, OfficeDocumentEvent)] = []
         // Task 4 — the three new async-push shapes, collected the same way `pushesToDeliver`
         // already is (under `lock`, delivered to callbacks after `lock.unlock()` below).
-        var tilesToDeliver: [(UInt64, String, TileKey, Int, Int, Int, String)] = []
+        var tilesToDeliver: [(UInt64, String, TileKey, Int, Int, Int, Data)] = []
         var tileFailuresToDeliver: [(UInt64, String, TileKey, String)] = []
         var invalidationsToDeliver: [(UInt64, String, [TileKey])] = []
+        // Task 5.5 — set at most once per call, the moment a `.tile` header's `byteCount` fails the
+        // exact-size check below; non-nil means "tear this connection down after this scan loop."
+        // Collected here (under `lock`, exactly like every delivery array above) rather than acted
+        // on immediately: `close()` -> `ingestClosed()` re-enters `lock`, and `NSLock` is not
+        // recursive — calling it while THIS function still holds `lock` would deadlock.
+        var refusalReason: String?
         lock.lock()
         buffer.append(data)
-        while true {
+        scanLoop: while true {
+            if let header = pendingTileHeader {
+                // Task 5.5 payload-accumulation mode — THE LANDMINE this rewrite exists for: these
+                // bytes are NEVER scanned for anything (raw RGBA routinely contains 0x0A, which a
+                // newline scan would misread as a line terminator). A pure length comparison against
+                // `buffer.count` is the entire cost of this branch on every `ingest` call until
+                // enough bytes have arrived — O(1) per call, so fragmentation (many small chunks)
+                // cannot make this quadratic; there is no scan here to repeat.
+                guard buffer.count >= header.byteCount else { break } // wait for more data to arrive
+                let payloadEnd = buffer.index(buffer.startIndex, offsetBy: header.byteCount)
+                let pixels = buffer.subdata(in: buffer.startIndex..<payloadEnd)
+                buffer.removeSubrange(buffer.startIndex..<payloadEnd)
+                scannedPrefixLength = 0 // the remaining buffer is a fresh, unscanned tail
+                pendingTileHeader = nil
+                tilesToDeliver.append((header.seq, header.docId, header.key, header.generation,
+                                        header.width, header.height, pixels))
+                continue scanLoop // more may already be buffered: the next header, even a full next tile
+            }
+
             let searchStart = buffer.index(buffer.startIndex, offsetBy: scannedPrefixLength)
             guard let newlineIndex = buffer[searchStart...].firstIndex(of: 0x0A) else {
                 scannedPrefixLength = buffer.count // nothing new to find until more bytes arrive
@@ -232,30 +272,68 @@ final class OfficeWireConnection: @unchecked Sendable {
             // also a signal something is more fundamentally wrong (a protocol version mismatch, a
             // corrupted stream) that a developer should be able to see in the log, not just infer
             // from a mysteriously timed-out request.
-            if let line = String(data: lineData, encoding: .utf8) {
-                if let frame = OfficeWireFrame.decode(line) {
-                    // Task 3/4: unprompted PUSHES never go into `frameQueue` — routed straight to
-                    // their own dedicated callback (see `onDocumentEvent`/`onTile`/`onTileFailed`/
-                    // `onInvalidated`'s own headers for the real interleaving bug this avoids).
-                    // Collected here, under THIS lock hold; delivered after `lock.unlock()` below —
-                    // never invoke an arbitrary caller-supplied closure while holding `lock`.
-                    switch frame {
-                    case .documentEvent(_, let docId, let event):
-                        pushesToDeliver.append((docId, event))
-                    case .tile(let seq, let docId, let key, let generation, let width, let height, let pixelsBase64):
-                        tilesToDeliver.append((seq, docId, key, generation, width, height, pixelsBase64))
-                    case .tileFailed(let seq, let docId, let key, let reason):
-                        tileFailuresToDeliver.append((seq, docId, key, reason))
-                    case .invalidated(let seq, let docId, let keys):
-                        invalidationsToDeliver.append((seq, docId, keys))
-                    default:
-                        frameQueue.append(frame)
-                    }
-                } else {
-                    NSLog("[OfficeWireConnection] dropped an undecodable line from the helper: %@", line)
-                }
-            } else {
+            guard let line = String(data: lineData, encoding: .utf8) else {
                 NSLog("[OfficeWireConnection] dropped a non-UTF-8 line from the helper (%d bytes)", lineData.count)
+                continue scanLoop
+            }
+            // Task 5.5: reads via `OfficeWireCodec.decodeInbound` directly now, not
+            // `OfficeWireFrame.decode` — the plain `decode` collapses `.tilePending` to `nil`
+            // (correctly, per its own contract: a tile header alone is not a complete frame), which
+            // is exactly the case THIS function must see distinctly to enter payload-accumulation
+            // mode. See `OfficeWireInbound`'s own header for the full reasoning.
+            switch OfficeWireCodec.decodeInbound(line) {
+            case .frame(let frame):
+                // Task 3/4: unprompted PUSHES never go into `frameQueue` — routed straight to
+                // their own dedicated callback (see `onDocumentEvent`/`onTile`/`onTileFailed`/
+                // `onInvalidated`'s own headers for the real interleaving bug this avoids).
+                // Collected here, under THIS lock hold; delivered after `lock.unlock()` below —
+                // never invoke an arbitrary caller-supplied closure while holding `lock`.
+                switch frame {
+                case .documentEvent(_, let docId, let event):
+                    pushesToDeliver.append((docId, event))
+                case .tile:
+                    // Unreachable by construction (Task 5.5): `decodeInbound` never produces
+                    // `.frame(.tile(...))` anymore — a `"tile"` line always decodes to
+                    // `.tilePending` instead, handled in the case below. Listed explicitly (not
+                    // folded into `default`) and logged rather than silently queued: `frameQueue`
+                    // is exactly the misattribution hazard `onTile`'s own header warns against for
+                    // every other push type, so a future decode regression that somehow
+                    // reintroduces this shape must not silently re-open that hazard for tiles too.
+                    NSLog("[OfficeWireConnection] unreachable: decodeInbound produced .frame(.tile) "
+                          + "— dropping rather than risking frameQueue misattribution")
+                case .tileFailed(let seq, let docId, let key, let reason):
+                    tileFailuresToDeliver.append((seq, docId, key, reason))
+                case .invalidated(let seq, let docId, let keys):
+                    invalidationsToDeliver.append((seq, docId, keys))
+                default:
+                    frameQueue.append(frame)
+                }
+            case .tilePending(let header):
+                // Task 5.5 — exact-size-or-refuse (the T4 review's own byteCount-cap precedent,
+                // applied client-side): every tile this system paints today is EXACTLY
+                // `TileMath.bytesPerTile` (512x512 RGBA, 1 MiB — see that constant's own doc
+                // comment). `byteCount == 0` is refused by this SAME rule, not a special case — it
+                // is simply not the one legal size, so "is zero legal" needs no separate answer
+                // (the brief's own "byteCount 0 — legal? define" is answered HERE: no, uniformly).
+                // A disagreeing `byteCount` — zero, truncated/lying, or hostile-huge — is not a
+                // size this reader will ever wait to accumulate: honoring it either desyncs
+                // framing (a wrong-but-plausible count makes the NEXT header start at the wrong
+                // offset once payload bytes finally stop, or never) or, for a huge value, blocks
+                // indefinitely accumulating bytes that may never arrive while holding an unbounded
+                // buffer — the exact DoS shape `TileMath.maxTilesPerRectEnumeration`/
+                // `isZoomPPTValid` already refuse server-side for the identical reason. There is no
+                // reply mechanism for a push (refuse-never-ignore's usual "answer with an error
+                // frame" has nothing to answer INTO here), so the only thing left to refuse is the
+                // connection itself — recorded here, acted on after this scan loop and after
+                // `lock.unlock()` (see `refusalReason`'s own declaration above).
+                guard header.byteCount == TileMath.bytesPerTile else {
+                    refusalReason = "tile byteCount \(header.byteCount) != \(TileMath.bytesPerTile) "
+                        + "(docId=\(header.docId) key=\(header.key))"
+                    break scanLoop // stop trusting this stream; nothing after this line can be framed safely
+                }
+                pendingTileHeader = header
+            case .rejected, .unreadable:
+                NSLog("[OfficeWireConnection] dropped an undecodable line from the helper: %@", line)
             }
         }
         if waiter != nil, !frameQueue.isEmpty {
@@ -267,8 +345,8 @@ final class OfficeWireConnection: @unchecked Sendable {
         for (docId, event) in pushesToDeliver {
             onDocumentEvent?(docId, event)
         }
-        for (seq, docId, key, generation, width, height, pixelsBase64) in tilesToDeliver {
-            onTile?(seq, docId, key, generation, width, height, pixelsBase64)
+        for (seq, docId, key, generation, width, height, pixels) in tilesToDeliver {
+            onTile?(seq, docId, key, generation, width, height, pixels)
         }
         for (seq, docId, key, reason) in tileFailuresToDeliver {
             onTileFailed?(seq, docId, key, reason)
@@ -278,6 +356,17 @@ final class OfficeWireConnection: @unchecked Sendable {
         }
         if let pending, let toDeliver, pending.once.trip() {
             pending.continuation.resume(returning: toDeliver)
+        }
+        // Task 5.5 — refuse-never-ignore for a malformed tile byteCount: this connection cannot be
+        // trusted to still be in sync (see the `.tilePending` case above), so it is torn down the
+        // same way any other fatal transport condition is. `close()` wakes any pending waiter with
+        // `nil` and fires `onClosed`, which `OfficeHelperSupervisor`'s death-detection turns into
+        // `.helperDied` exactly as it would for a real crash — the honest, if slightly surprising,
+        // observable outcome of "the helper's own wire framing can no longer be trusted." Called
+        // AFTER `lock.unlock()` above — see `refusalReason`'s own declaration for why.
+        if let refusalReason {
+            NSLog("[OfficeWireConnection] refusing connection: %@", refusalReason)
+            close()
         }
     }
 

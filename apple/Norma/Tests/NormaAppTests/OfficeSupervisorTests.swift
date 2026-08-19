@@ -540,32 +540,38 @@ final class OfficeSupervisorTests: XCTestCase {
         }
     }
 
-    // MARK: - Fix round 1, discretionary: O(n²) ingest regression test
+    // MARK: - Fix round 1, discretionary: O(n²) ingest regression test — Task 5.5 re-pointed
     //
     // `OfficeWireConnection.ingest`'s newline scan used to restart from `buffer.startIndex` on
     // EVERY call, making total scan cost quadratic in a long line's byte count for a payload that
-    // (as real `.tile` pushes always do) arrives split across many separate socket reads — caught
-    // during Task 4's own transport measurement as a confounder, fixed with a `scannedPrefixLength`
-    // cursor (see that property's own header in `OfficeWireConnection.swift`). This test drives the
-    // REAL fix directly, deterministically, over a raw hand-rolled socket peer (this file's own
-    // established `leaveStaleSocketFile`-style Darwin socket pattern, extended to accept and write)
-    // — no LOK, no live helper, no fixture process — so it stays meaningful even after a future
-    // rung-2 transport rewrite replaces base64-in-NDJSON (it exercises line-buffering under
-    // fragmentation, not anything base64-specific).
+    // (rung 1's base64 `.tile` pushes always did) arrived split across many separate socket reads —
+    // caught during Task 4's own transport measurement as a confounder, fixed with a
+    // `scannedPrefixLength` cursor (see that property's own header in `OfficeWireConnection.swift`).
+    //
+    // **Task 5.5 update**: rung 2 moves tile pixels out of any scanned line entirely — a `.tile`
+    // push is now a small NDJSON header plus `byteCount` raw bytes consumed by a pure LENGTH check
+    // (`buffer.count >= header.byteCount`), never a scan. The specific quadratic mechanism this test
+    // was written to catch (re-scanning an ever-growing buffer for a `\n` inside a multi-hundred-KB
+    // line) can no longer occur for tiles AT ALL — there is no scan in the payload-accumulation path
+    // to regress. Re-pointed at the new loop rather than deleted (the brief's own instruction):
+    // still proves fragmented delivery of a ~1MiB payload completes fast and byte-exact, and the
+    // mutation check below (temporarily reintroducing the STRUCK-DOWN hazard — scanning payload
+    // bytes for `\n` — the landmine itself) is the honest way to "re-verify separation" for a loop
+    // shape that no longer has the old bug available to revert to.
 
     /// Binds, listens, and — on a background thread, so the accept+write sequence never blocks the
-    /// caller — accepts exactly ONE connection and writes `data` in `chunkSize`-byte pieces,
-    /// back-to-back with no artificial delay between them (a real fragmented arrival is exactly
-    /// this: many separate small deliveries, not a slow-drip one — this test cares about SCAN cost
-    /// under fragmentation, not about simulating network latency).
-    private func startChunkedWritePeer(at path: String, data: Data, chunkSize: Int) {
+    /// caller — accepts exactly ONE connection. Returns the bound listening fd (already `listen()`-
+    /// ing), or `nil` after failing the test, so callers can share this setup while choosing their
+    /// own write strategy (fixed chunk size vs. seeded-variable, below).
+    @discardableResult
+    private func bindAndListenScratchSocket(at path: String) -> Int32? {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard fd >= 0 else { return XCTFail("socket() failed errno=\(errno)") }
+        guard fd >= 0 else { XCTFail("socket() failed errno=\(errno)"); return nil }
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
         let pathBytes = Array(path.utf8)
         let capacity = MemoryLayout.size(ofValue: addr.sun_path)
-        guard pathBytes.count < capacity else { return XCTFail("scratch socket path too long for sockaddr_un") }
+        guard pathBytes.count < capacity else { XCTFail("scratch socket path too long for sockaddr_un"); return nil }
         withUnsafeMutableBytes(of: &addr.sun_path) { raw in
             let buffer = raw.bindMemory(to: UInt8.self)
             for index in 0..<capacity { buffer[index] = 0 }
@@ -576,9 +582,16 @@ final class OfficeSupervisorTests: XCTestCase {
                 Darwin.bind(fd, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
             }
         }
-        guard bound == 0 else { close(fd); return XCTFail("bind() failed errno=\(errno)") }
-        guard listen(fd, 1) == 0 else { close(fd); return XCTFail("listen() failed errno=\(errno)") }
+        guard bound == 0 else { close(fd); XCTFail("bind() failed errno=\(errno)"); return nil }
+        guard listen(fd, 1) == 0 else { close(fd); XCTFail("listen() failed errno=\(errno)"); return nil }
+        return fd
+    }
 
+    /// Accepts exactly ONE connection on `fd` and writes `data` in `chunkSize`-byte pieces,
+    /// back-to-back with no artificial delay between them (a real fragmented arrival is exactly
+    /// this: many separate small deliveries, not a slow-drip one — this test cares about SCAN/
+    /// buffering cost under fragmentation, not about simulating network latency).
+    private func writeInFixedChunks(fd: Int32, data: Data, chunkSize: Int) {
         Thread {
             let clientFD = accept(fd, nil, nil)
             guard clientFD >= 0 else { return }
@@ -596,28 +609,79 @@ final class OfficeSupervisorTests: XCTestCase {
         }.start()
     }
 
+    /// Convenience wrapper matching this test's own pre-existing call shape (bind + fixed-chunk
+    /// write in one call) — every EXISTING call site in this file uses this name.
+    private func startChunkedWritePeer(at path: String, data: Data, chunkSize: Int) {
+        guard let fd = bindAndListenScratchSocket(at: path) else { return }
+        writeInFixedChunks(fd: fd, data: data, chunkSize: chunkSize)
+    }
+
+    /// Task 5.5 — a tiny deterministic PRNG (xorshift64), NOT cryptographic, chosen ONLY for
+    /// reproducibility: the same `seed` produces the exact same chunk-size sequence on every run, so
+    /// a rare boundary-position failure this fuzzes into existence is exactly as reproducible as any
+    /// other test failure — unlike `Int.random`/`SystemRandomNumberGenerator`, which would make one
+    /// vanish on re-run.
+    private struct SeededXorshift {
+        private var state: UInt64
+        init(seed: UInt64) { state = seed == 0 ? 0xdead_beef : seed }
+        mutating func next() -> UInt64 {
+            state ^= state << 13
+            state ^= state >> 7
+            state ^= state << 17
+            return state
+        }
+        mutating func nextInt(in range: ClosedRange<Int>) -> Int {
+            let span = UInt64(range.upperBound - range.lowerBound + 1)
+            return range.lowerBound + Int(next() % span)
+        }
+    }
+
+    /// Accepts exactly ONE connection on `fd` and writes `data` in VARIABLE-sized pieces drawn from
+    /// `seed` (`chunkRange` per write, re-rolled every write) — deliberately hits many different
+    /// relative offsets across a run (a boundary landing mid-header, exactly on the header/payload
+    /// transition, deep inside a payload, or exactly on a SECOND frame's own header/payload
+    /// transition when a chunk happens to be large enough to span both) without hand-enumerating
+    /// each case.
+    private func writeInVariableChunks(fd: Int32, data: Data, seed: UInt64, chunkRange: ClosedRange<Int> = 1...8192) {
+        Thread {
+            let clientFD = accept(fd, nil, nil)
+            guard clientFD >= 0 else { return }
+            var rng = SeededXorshift(seed: seed)
+            data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+                var offset = 0
+                while offset < raw.count {
+                    let thisChunk = min(rng.nextInt(in: chunkRange), raw.count - offset)
+                    let written = write(clientFD, raw.baseAddress!.advanced(by: offset), thisChunk)
+                    guard written > 0 else { break }
+                    offset += written
+                }
+            }
+            close(clientFD)
+            close(fd)
+        }.start()
+    }
+
     func testIngestStaysLinearNotQuadraticForALongLineDeliveredInManySmallChunks() async throws {
-        // A real ~1.4MB `.tile` push, byte-for-byte the SAME `encodedLine()` production code
-        // produces — not a synthetic string, so this exercises the exact frame shape `ingest` has
-        // to buffer/scan/decode for real.
-        let bigPixels = Data(repeating: 0x41, count: TileMath.bytesPerTile).base64EncodedString()
+        // Task 5.5: the envelope is now HEADER (small NDJSON line) + `byteCount` raw bytes — no
+        // single giant "line" exists anymore. Built via the real `encodedLine()`/`tilePayload`
+        // production path (not hand-written JSON), so this exercises the exact bytes `ingest` has
+        // to buffer/scan/consume for a real tile push.
+        let bigPixels = Data(repeating: 0x41, count: TileMath.bytesPerTile)
         let frame = OfficeWireFrame.tile(seq: 1, docId: "regression-doc",
                                           key: TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0),
-                                          generation: 0, width: 512, height: 512, pixelsBase64: bigPixels)
-        let lineData = frame.encodedLine()
-        XCTAssertGreaterThan(lineData.count, 1_000_000, "setup: this line must be genuinely large, matching a real tile push")
+                                          generation: 0, width: 512, height: 512, pixels: bigPixels)
+        let header = frame.encodedLine()
+        let payload = try XCTUnwrap(frame.tilePayload)
+        XCTAssertLessThan(header.count, 300, "setup: the HEADER line must stay small under rung 2 — the size moved to the payload")
+        XCTAssertEqual(payload.count, TileMath.bytesPerTile, "setup: the payload must be exactly one tile's worth of bytes")
+        let wireBytes = header + payload
 
         let stateDir = makeScratchDirectory()
         let socketPath = stateDir.appendingPathComponent("office.sock").path
-        // 1024 bytes/chunk: ~1,370 separate writes for a ~1.4MB line -- deliberately far below any
-        // socket buffer size, so this is NOT relying on best-effort OS coalescing to prove
-        // fragmentation happened; it is guaranteed by construction. Micro-round 2: this comment
-        // previously cited a throwaway in-memory-only benchmark (~6.9s buggy / ~0.011s fixed) that
-        // did NOT reproduce against the REAL call path -- a re-review mutation-tested this test by
-        // reverting `ingest`'s scan to the literal pre-fix from-scratch rescan and measured the
-        // buggy path at ~1.15s here, not ~6.9s. See the assertion's own comment below for the real,
-        // mutation-verified pair this test is actually calibrated against.
-        startChunkedWritePeer(at: socketPath, data: lineData, chunkSize: 1024)
+        // 1024 bytes/chunk: ~1,025 separate writes for a ~1MiB payload (plus one for the header) --
+        // deliberately far below any socket buffer size, so this is NOT relying on best-effort OS
+        // coalescing to prove fragmentation happened; it is guaranteed by construction.
+        startChunkedWritePeer(at: socketPath, data: wireBytes, chunkSize: 1024)
 
         let socketAppeared = await waitUntil(timeout: 5.0) { FileManager.default.fileExists(atPath: socketPath) }
         XCTAssertTrue(socketAppeared, "setup: the hand-rolled peer's socket file never appeared")
@@ -635,16 +699,16 @@ final class OfficeSupervisorTests: XCTestCase {
         // this push at all.
         final class Box: @unchecked Sendable {
             let lock = NSLock()
-            private var received: (docId: String, key: TileKey, pixelsBase64: String)?
-            func record(_ docId: String, _ key: TileKey, _ pixelsBase64: String) {
-                lock.lock(); received = (docId, key, pixelsBase64); lock.unlock()
+            private var received: (docId: String, key: TileKey, pixels: Data)?
+            func record(_ docId: String, _ key: TileKey, _ pixels: Data) {
+                lock.lock(); received = (docId, key, pixels); lock.unlock()
             }
-            func snapshot() -> (docId: String, key: TileKey, pixelsBase64: String)? {
+            func snapshot() -> (docId: String, key: TileKey, pixels: Data)? {
                 lock.lock(); defer { lock.unlock() }; return received
             }
         }
         let box = Box()
-        connection.onTile = { _, docId, key, _, _, _, pixelsBase64 in box.record(docId, key, pixelsBase64) }
+        connection.onTile = { _, docId, key, _, _, _, pixels in box.record(docId, key, pixels) }
 
         try await connection.open()
 
@@ -652,27 +716,273 @@ final class OfficeSupervisorTests: XCTestCase {
         let arrived = await waitUntil(timeout: 15.0) { box.snapshot() != nil }
         let elapsed = Date().timeIntervalSince(start)
 
-        XCTAssertTrue(arrived, "onTile never fired for the ~1.4MB fragmented line")
+        XCTAssertTrue(arrived, "onTile never fired for the ~1MiB fragmented payload")
         guard let received = box.snapshot() else {
             return XCTFail("onTile never fired with a usable payload")
         }
         XCTAssertEqual(received.docId, "regression-doc")
         XCTAssertEqual(received.key, TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0))
-        XCTAssertEqual(received.pixelsBase64, bigPixels, "the ~1.4MB payload must arrive byte-for-byte intact across ~1,370 fragments")
+        XCTAssertEqual(received.pixels, bigPixels, "the ~1MiB payload must arrive byte-for-byte intact across ~1,025 fragments")
 
-        // The actual regression bar, MEASURED against the REAL call path, not an isolated
-        // in-memory guess (micro-round 2: a re-review mutation-tested this test by reverting
-        // `ingest`'s scan to the literal pre-fix from-scratch-every-call rescan and running this
-        // exact test against it): fixed path ~0.03s, broken path ~1.15s/1.180s on this hardware --
-        // a ~38x separation, not the ~650x an isolated (no real socket I/O, no Swift Data
-        // bridging through the actual `ingest`) benchmark had suggested; that isolated number did
-        // NOT reproduce here and this test is calibrated against the real, mutation-verified pair
-        // instead. 0.5s sits >=15x above the fixed path's ~0.03s and >=2.3x below the broken path's
-        // ~1.15s -- comfortably separates the two without being a hair-trigger pin, and (unlike the
-        // prior 3.0s ceiling) actually FAILS against a reverted fix on this hardware, which is the
-        // whole point of a regression test.
-        XCTAssertLessThan(elapsed, 0.5,
-            "ingest took \(elapsed)s for a ~1.4MB line in 1024-byte fragments -- consistent with a "
-            + "quadratic rescan regression, not the fixed O(n) scannedPrefixLength path")
+        // The regression bar: payload-accumulation mode does a pure `buffer.count >= byteCount`
+        // comparison per `ingest` call, never a scan — so this should complete in well under a
+        // second regardless of fragmentation. Generous (not hair-trigger) on purpose, matching this
+        // suite's own established discretion for timing assertions.
+        XCTAssertLessThan(elapsed, 1.0,
+            "ingest took \(elapsed)s for a ~1MiB payload in 1024-byte fragments -- payload-accumulation "
+            + "mode should never scan, so this should be comfortably sub-second")
+    }
+
+    // MARK: - Task 5.5 — rung-2 tile transport: pure reader tests
+    //
+    // All five tests below drive `OfficeWireConnection.ingest` over a real Unix socket via the raw,
+    // hand-rolled peers above (`startChunkedWritePeer`/`writeInVariableChunks`) — no LOK, no live
+    // helper, no `OfficeHelperServer` on the other end. This is deliberate: these are claims about
+    // the READER alone (framing, fragmentation, refusal), independent of anything the server ever
+    // actually sends — the same reasoning the O(n²) test right above already established for this
+    // file.
+
+    /// Hand-built (NOT via `OfficeWireFrame.encodedLine()`), specifically so `byteCount` can
+    /// disagree with whatever bytes (if any) actually follow — exactly what the byteCount-refusal
+    /// tests below need to prove `ingest`'s exact-size-or-refuse check fires off the HEADER alone,
+    /// never by waiting to see what shows up after it.
+    private func rawTileHeaderLine(byteCount: Int, seq: UInt64 = 1, docId: String = "d") -> Data {
+        let json = "{\"type\":\"tile\",\"seq\":\(seq),\"docId\":\"\(docId)\","
+            + "\"key\":{\"part\":0,\"zoomPPT\":1000,\"tileX\":0,\"tileY\":0},"
+            + "\"generation\":0,\"width\":512,\"height\":512,\"byteCount\":\(byteCount)}\n"
+        return Data(json.utf8)
+    }
+
+    /// A locked box collecting every `onTile` firing, plus an `onClosed` latch — the shared
+    /// observation rig every test below needs (some assert a tile arrived, some assert the
+    /// connection closed and NOTHING arrived).
+    private final class TileArrivalBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var arrivals: [(docId: String, key: TileKey, pixels: Data)] = []
+        private var closed = false
+        func recordTile(_ docId: String, _ key: TileKey, _ pixels: Data) {
+            lock.lock(); arrivals.append((docId, key, pixels)); lock.unlock()
+        }
+        func recordClosed() { lock.lock(); closed = true; lock.unlock() }
+        func snapshot() -> (arrivals: [(docId: String, key: TileKey, pixels: Data)], closed: Bool) {
+            lock.lock(); defer { lock.unlock() }; return (arrivals, closed)
+        }
+    }
+
+    /// Fuzz (a few seeds): TWO real tiles, back-to-back on one connection, delivered through
+    /// VARIABLE-sized chunks — different boundary positions on every seed, including (whenever a
+    /// large chunk happens to span it) a boundary landing inside the SECOND tile's own header while
+    /// the first tile's payload-accumulation mode is still technically "just finished." Exercises
+    /// the brief's own ask ("header/payload boundary split across arbitrary chunk boundaries") far
+    /// more thoroughly than any one hand-picked split could.
+    func testTileHeaderAndPayloadSurviveVariableChunkFragmentation() async throws {
+        for seed: UInt64 in [1, 2, 3] {
+            let key0 = TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0)
+            let key1 = TileKey(part: 0, zoomPPT: 1000, tileX: 1, tileY: 0)
+            let pixels0 = Data(repeating: 0x11, count: TileMath.bytesPerTile)
+            let pixels1 = Data(repeating: 0x22, count: TileMath.bytesPerTile)
+            let frame0 = OfficeWireFrame.tile(seq: 1, docId: "fuzz-doc", key: key0, generation: 0,
+                                               width: 512, height: 512, pixels: pixels0)
+            let frame1 = OfficeWireFrame.tile(seq: 2, docId: "fuzz-doc", key: key1, generation: 0,
+                                               width: 512, height: 512, pixels: pixels1)
+            let wireBytes = frame0.encodedLine() + frame0.tilePayload! + frame1.encodedLine() + frame1.tilePayload!
+
+            let stateDir = makeScratchDirectory()
+            let socketPath = stateDir.appendingPathComponent("office.sock").path
+            guard let fd = bindAndListenScratchSocket(at: socketPath) else { return }
+            writeInVariableChunks(fd: fd, data: wireBytes, seed: seed)
+
+            let socketAppeared = await waitUntil(timeout: 5.0) { FileManager.default.fileExists(atPath: socketPath) }
+            XCTAssertTrue(socketAppeared, "seed \(seed): setup — the hand-rolled peer's socket file never appeared")
+
+            let connection = OfficeWireConnection(socketPath: socketPath)
+            let box = TileArrivalBox()
+            connection.onTile = { _, docId, key, _, _, _, pixels in box.recordTile(docId, key, pixels) }
+            try await connection.open()
+            defer { connection.close() }
+
+            let bothArrived = await waitUntil(timeout: 10.0) { box.snapshot().arrivals.count >= 2 }
+            XCTAssertTrue(bothArrived, "seed \(seed): expected both tiles, got \(box.snapshot().arrivals.count)")
+
+            let arrivals = box.snapshot().arrivals
+            let byKey = Dictionary(uniqueKeysWithValues: arrivals.map { ($0.key, $0.pixels) })
+            XCTAssertEqual(byKey[key0], pixels0, "seed \(seed): tile 0 payload must arrive byte-exact")
+            XCTAssertEqual(byKey[key1], pixels1, "seed \(seed): tile 1 payload must arrive byte-exact")
+            XCTAssertTrue(arrivals.allSatisfy { $0.docId == "fuzz-doc" }, "seed \(seed): docId must survive fragmentation")
+        }
+    }
+
+    /// The one split position the brief names literally: EXACTLY on the header/payload boundary —
+    /// chunk 1 is the header line and nothing else, chunk 2 is the entire payload and nothing else.
+    /// A seeded fuzz run might never happen to land exactly here by chance; this pins it explicitly.
+    func testHeaderPayloadBoundarySplitExactlyAtTheBoundary() async throws {
+        let key = TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0)
+        let pixels = Data(repeating: 0x33, count: TileMath.bytesPerTile)
+        let frame = OfficeWireFrame.tile(seq: 1, docId: "boundary-doc", key: key, generation: 0,
+                                          width: 512, height: 512, pixels: pixels)
+        let header = frame.encodedLine()
+
+        let stateDir = makeScratchDirectory()
+        let socketPath = stateDir.appendingPathComponent("office.sock").path
+        guard let fd = bindAndListenScratchSocket(at: socketPath) else { return }
+        Thread {
+            let clientFD = accept(fd, nil, nil)
+            guard clientFD >= 0 else { return }
+            _ = header.withUnsafeBytes { write(clientFD, $0.baseAddress, $0.count) }
+            _ = pixels.withUnsafeBytes { write(clientFD, $0.baseAddress, $0.count) }
+            close(clientFD)
+            close(fd)
+        }.start()
+
+        let socketAppeared = await waitUntil(timeout: 5.0) { FileManager.default.fileExists(atPath: socketPath) }
+        XCTAssertTrue(socketAppeared, "setup: the hand-rolled peer's socket file never appeared")
+
+        let connection = OfficeWireConnection(socketPath: socketPath)
+        let box = TileArrivalBox()
+        connection.onTile = { _, docId, key, _, _, _, pixels in box.recordTile(docId, key, pixels) }
+        try await connection.open()
+        defer { connection.close() }
+
+        let arrived = await waitUntil(timeout: 5.0) { !box.snapshot().arrivals.isEmpty }
+        XCTAssertTrue(arrived, "onTile never fired for a header-then-payload two-write delivery")
+        XCTAssertEqual(box.snapshot().arrivals.first?.pixels, pixels)
+    }
+
+    /// THE LANDMINE, directly: a payload that is `0x0A` in EVERY byte — the single most adversarial
+    /// input a newline-scanning reader could receive. Delivered in small fixed chunks (reusing the
+    /// O(n²) test's own peer) so a broken implementation that still scanned payload bytes for `\n`
+    /// would misread nearly every byte as a line terminator, not just an occasional unlucky one.
+    func testTilePayloadContainingOnly0x0ABytesArrivesIntact() async throws {
+        let key = TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0)
+        let pixels = Data(repeating: 0x0A, count: TileMath.bytesPerTile)
+        let frame = OfficeWireFrame.tile(seq: 1, docId: "landmine-doc", key: key, generation: 0,
+                                          width: 512, height: 512, pixels: pixels)
+        let wireBytes = frame.encodedLine() + pixels
+
+        let stateDir = makeScratchDirectory()
+        let socketPath = stateDir.appendingPathComponent("office.sock").path
+        startChunkedWritePeer(at: socketPath, data: wireBytes, chunkSize: 4096)
+
+        let socketAppeared = await waitUntil(timeout: 5.0) { FileManager.default.fileExists(atPath: socketPath) }
+        XCTAssertTrue(socketAppeared, "setup: the hand-rolled peer's socket file never appeared")
+
+        let connection = OfficeWireConnection(socketPath: socketPath)
+        let box = TileArrivalBox()
+        connection.onTile = { _, docId, key, _, _, _, pixels in box.recordTile(docId, key, pixels) }
+        try await connection.open()
+        defer { connection.close() }
+
+        let arrived = await waitUntil(timeout: 10.0) { !box.snapshot().arrivals.isEmpty }
+        XCTAssertTrue(arrived, "onTile never fired for an all-0x0A payload")
+        let received = box.snapshot().arrivals.first
+        XCTAssertEqual(received?.pixels, pixels, "an all-0x0A payload must survive byte-for-byte — "
+                        + "a broken newline-scanning reader would fragment or truncate this")
+        XCTAssertEqual(received?.pixels.count, TileMath.bytesPerTile)
+    }
+
+    /// EOF mid-payload: the header arrives, byteCount is legal, but the peer vanishes partway
+    /// through the payload. Refuse-never-ignore's own answer here (there is no reply mechanism for
+    /// a push, so nothing can be "answered"): the connection observes closed, cleanly, and no
+    /// partial/corrupt tile is ever handed to `onTile`.
+    func testEOFMidPayloadClosesTheConnectionWithoutDeliveringATile() async throws {
+        let key = TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0)
+        let pixels = Data(repeating: 0x44, count: TileMath.bytesPerTile)
+        let frame = OfficeWireFrame.tile(seq: 1, docId: "eof-doc", key: key, generation: 0,
+                                          width: 512, height: 512, pixels: pixels)
+        let header = frame.encodedLine()
+        let partialPayload = pixels.prefix(TileMath.bytesPerTile / 2) // half the promised bytes, then silence
+
+        let stateDir = makeScratchDirectory()
+        let socketPath = stateDir.appendingPathComponent("office.sock").path
+        guard let fd = bindAndListenScratchSocket(at: socketPath) else { return }
+        Thread {
+            let clientFD = accept(fd, nil, nil)
+            guard clientFD >= 0 else { return }
+            _ = header.withUnsafeBytes { write(clientFD, $0.baseAddress, $0.count) }
+            _ = partialPayload.withUnsafeBytes { write(clientFD, $0.baseAddress, $0.count) }
+            close(clientFD) // EOF -- the other half of the promised byteCount never arrives
+            close(fd)
+        }.start()
+
+        let socketAppeared = await waitUntil(timeout: 5.0) { FileManager.default.fileExists(atPath: socketPath) }
+        XCTAssertTrue(socketAppeared, "setup: the hand-rolled peer's socket file never appeared")
+
+        let connection = OfficeWireConnection(socketPath: socketPath)
+        let box = TileArrivalBox()
+        connection.onTile = { _, docId, key, _, _, _, pixels in box.recordTile(docId, key, pixels) }
+        connection.onClosed = { box.recordClosed() }
+        try await connection.open()
+        defer { connection.close() }
+
+        let closed = await waitUntil(timeout: 5.0) { box.snapshot().closed }
+        XCTAssertTrue(closed, "the connection must observe closed after EOF mid-payload, not hang forever")
+        XCTAssertTrue(box.snapshot().arrivals.isEmpty, "a truncated payload must never reach onTile as a partial/corrupt tile")
+        XCTAssertTrue(connection.isClosed)
+    }
+
+    /// `byteCount: 0` — refused, not treated as "a legitimately empty tile." Answers the brief's own
+    /// "byteCount 0: legal? define" with the SAME exact-size-or-refuse rule every other wrong
+    /// byteCount gets (see `ingest`'s own comment): 0 is simply not the one legal size
+    /// (`TileMath.bytesPerTile`), so it needs no special-case reasoning of its own. Refusal is
+    /// observable the same way EOF-mid-payload's is: the connection closes, `onTile` never fires.
+    func testTileByteCountZeroRefusesTheConnection() async throws {
+        let stateDir = makeScratchDirectory()
+        let socketPath = stateDir.appendingPathComponent("office.sock").path
+        startChunkedWritePeer(at: socketPath, data: rawTileHeaderLine(byteCount: 0), chunkSize: 4096)
+
+        let socketAppeared = await waitUntil(timeout: 5.0) { FileManager.default.fileExists(atPath: socketPath) }
+        XCTAssertTrue(socketAppeared, "setup: the hand-rolled peer's socket file never appeared")
+
+        let connection = OfficeWireConnection(socketPath: socketPath)
+        let box = TileArrivalBox()
+        connection.onTile = { _, docId, key, _, _, _, pixels in box.recordTile(docId, key, pixels) }
+        connection.onClosed = { box.recordClosed() }
+        try await connection.open()
+        defer { connection.close() }
+
+        let closed = await waitUntil(timeout: 5.0) { box.snapshot().closed }
+        XCTAssertTrue(closed, "a byteCount:0 tile header must refuse (close) the connection")
+        XCTAssertTrue(box.snapshot().arrivals.isEmpty, "byteCount:0 must never be treated as a legitimate empty tile")
+    }
+
+    /// A hostile-huge `byteCount` (comfortably larger than any real tile could ever be, and larger
+    /// than this test will ever send) must be refused OFF THE HEADER ALONE — promptly, never by
+    /// entering payload-accumulation mode and waiting to see whether that many bytes eventually
+    /// arrive (they never will here; this is exactly the unbounded-buffer/DoS shape the T4 review's
+    /// own `TileMath.maxTilesPerRectEnumeration`/`isZoomPPTValid` precedent refuses server-side for
+    /// the identical reason). The short timeout below is itself part of the claim: a reader that
+    /// mistakenly WAITED for the declared byteCount would still be sitting there well past it.
+    func testTileByteCountHugeRefusesTheConnectionPromptlyWithoutAccumulating() async throws {
+        let stateDir = makeScratchDirectory()
+        let socketPath = stateDir.appendingPathComponent("office.sock").path
+        // Only the header is ever sent — no payload bytes follow, on purpose: if the reader ever
+        // mistakenly entered payload-accumulation mode for this byteCount, it would simply hang
+        // (nothing more is coming), and the timeout below would fail loudly rather than silently
+        // passing for the wrong reason.
+        startChunkedWritePeer(at: socketPath, data: rawTileHeaderLine(byteCount: 999_999_999), chunkSize: 4096)
+
+        let socketAppeared = await waitUntil(timeout: 5.0) { FileManager.default.fileExists(atPath: socketPath) }
+        XCTAssertTrue(socketAppeared, "setup: the hand-rolled peer's socket file never appeared")
+
+        let connection = OfficeWireConnection(socketPath: socketPath)
+        let box = TileArrivalBox()
+        connection.onTile = { _, docId, key, _, _, _, pixels in box.recordTile(docId, key, pixels) }
+        connection.onClosed = { box.recordClosed() }
+        let start = Date()
+        try await connection.open()
+        defer { connection.close() }
+
+        // 10s wait budget (generous, absorbs CI slowness) vs. a 1.0s ASSERTION ceiling well below
+        // it: a reader that mistakenly entered payload-accumulation mode for 999,999,999 bytes
+        // would still be sitting in `waitUntil` at the 1.0s mark (nothing more is ever sent), so
+        // comparing `elapsed` against the SAME number used to bound the wait would be tautological
+        // — this gap is what makes "promptly, not a timeout-shaped wait" a real claim, not a
+        // trivially-true one.
+        let closed = await waitUntil(timeout: 10.0) { box.snapshot().closed }
+        let elapsed = Date().timeIntervalSince(start)
+        XCTAssertTrue(closed, "a hostile-huge byteCount must refuse (close) the connection promptly, not hang")
+        XCTAssertLessThan(elapsed, 1.0, "refusal took \(elapsed)s -- should be near-instant (decode-time), "
+                            + "not a timeout-shaped wait for bytes that were never coming")
+        XCTAssertTrue(box.snapshot().arrivals.isEmpty)
     }
 }
