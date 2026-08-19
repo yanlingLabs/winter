@@ -121,7 +121,8 @@ final class OfficeSupervisorTests: XCTestCase {
         // is not what this assertion catches (the doc claim above was overbroad on that point).
         XCTAssertGreaterThanOrEqual(elapsed, 2.5,
             "3 attempts at handshakeTimeout=1.0s + 2×0.05s backoff should floor around 3.10s "
-            + "(measured \(elapsed)s) — maxAttempts/backoff may have silently changed")
+            + "(measured \(elapsed)s) — maxAttempts may have silently changed (this floor does "
+            + "not discriminate a backoff regression to 0; see the doc comment)")
 
         var iterator = supervisor.events.makeAsyncIterator()
         let first = await iterator.next()

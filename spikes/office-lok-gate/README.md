@@ -57,11 +57,15 @@ HOME=/tmp/lok-gate-home LANG=en_US.UTF-8 spikes/office-lok-gate/out/office-lok-g
 ```
 
 Against TODAY's vendored tree (`apple/Norma/vendor/libreoffice/product-set/Frameworks`), this
-spike's own `lok_init_2()` call is expected to SUCCEED, not crash — that headless build is
-exactly what closed tdf#145127 for this project. This spike was not re-run against it (Task 1v2
-verified the GO build with a dedicated harness instead — see `scripts/build-libreoffice.ts` and
-the release notes linked above) and `main.c` still hardcodes the old `program/Frameworks` shape,
-so treat this spike itself as retired rather than adjusting it to the new layout.
+spike's `lok_init_2()` call SUCCEEDS — measured, not merely expected: the re-cut verification
+ran this spike UNMODIFIED against the fully-rebuilt product-set and all six pinned tile SHA-256s
+MATCHED (recut-report, "Hash table vs gate pins"). `main.c` takes its install path from argv[1]
+(only a doc-comment parenthetical still mentions the old `program/Frameworks` wording), so it
+works against `product-set/Frameworks` as-is. One measured caveat: the Writer formats
+(gate.docx/gate.odt) exit 134 at process teardown — the known SwDLL static-destructor crash
+AFTER main returns, accepted branch-wide; the rendered output is flushed and judged by SHA
+before that. The spike stays useful as a standalone repro/verification tool; the product path's
+own verification lives in the Office harness.
 
 ## Regenerating the fixtures (if the seeds change)
 

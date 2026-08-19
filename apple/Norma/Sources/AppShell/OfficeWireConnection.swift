@@ -368,7 +368,9 @@ final class OfficeWireConnection: @unchecked Sendable {
         if let pending, let toDeliver, pending.once.trip() {
             pending.continuation.resume(returning: toDeliver)
         }
-        // Task 5.5 — refuse-never-ignore for a malformed tile byteCount: this connection cannot be
+        // Task 5.5 + wave — refuse-never-ignore for BOTH tile-refusal sources (a well-formed
+        // header whose byteCount is not exactly bytesPerTile, and a "tile"-typed line that fails
+        // structural decode entirely): this connection cannot be
         // trusted to still be in sync (see the `.tilePending` case above), so it is torn down the
         // same way any other fatal transport condition is. `close()` wakes any pending waiter with
         // `nil` and fires `onClosed`, which `OfficeHelperSupervisor`'s death-detection turns into

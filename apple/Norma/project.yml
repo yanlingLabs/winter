@@ -160,8 +160,8 @@ targets:
           # above, for the same reason — directory existence alone would false-pass a tree left
           # partial by a run killed mid-extract (scripts/fetch-libreoffice.ts only writes
           # .vendored-version after the whole product-set finishes unpacking). The vendored tree
-          # itself is not yet wired into any preBuildScripts gate before this task (its own header
-          # comment says so); this is that wiring.
+          # itself was not wired into any preBuildScripts gate before this task; this is that
+          # wiring.
           LIBREOFFICE_DIR="${SRCROOT}/vendor/libreoffice"
           if [ ! -d "${LIBREOFFICE_DIR}/product-set/Frameworks" ] || \
              [ ! -d "${LIBREOFFICE_DIR}/product-set/Resources" ] || \
@@ -485,7 +485,15 @@ targets:
           # real path, so `Frameworks/` and `Resources/` as real siblings inside `LibreOffice/` is
           # what matters, and that is preserved wherever `LibreOffice/` itself sits.
           #
-          # NAME-SCAN NOTE — deliberately NOT touched here or in scripts/release-lib.ts. The brief
+          # NAME-SCAN NOTE (historical + current state) — at Task 2 time, deliberately NOT
+          # excluded here or in scripts/release-lib.ts, for the reasons below. SINCE THEN: the
+          # leaking 20260818 asset was DELETED from GitHub, the 20260819 re-cut rebuilt the engine
+          # scrubbed (neutral prefix-map paths + --with-vendor=Norma + a bytes-level name-scan
+          # gate inside build-libreoffice.ts, so a leaking artifact is unproducible), and the
+          # whole-branch review authorized exactly ONE single-file NAME_SCAN_EXCLUSIONS entry in
+          # release-lib.ts for a natural-language collision inside IANA registry data (measured:
+          # 1 file of 3,296, zero hits on every other pattern). The scan stays ON everywhere else.
+          # The original Task-2 finding, kept for the record:
           # for this task asked for a NAME_SCAN_EXCLUSIONS entry for Contents/Frameworks/
           # LibreOffice/ (now Contents/Resources/LibreOffice/, per the relocation above), mirroring
           # the EditorAssets/vs precedent. Measuring first (that file's own rule: "widening this
@@ -498,10 +506,9 @@ targets:
           # Resources config files (versionrc's `Vendor=`, registry/main.xcd's `ooVendor` —
           # LibreOffice's own build-identity field, user-facing in a real install). That is exactly
           # the identity leak the release name-scan exists to catch, and it is already present in
-          # the PUBLISHED vendor-libreoffice-20260818 release asset today. Excluding this path would
-          # blind a fail-closed privacy gate to a leak already proven present — the scan must stay
-          # ON so a real release blocks here until build-libreoffice.ts applies a path-scrub and the
-          # asset is re-cut. Full per-file table in task-2-report.md.
+          # the then-published vendor-libreoffice-20260818 release asset (since deleted). Excluding
+          # the path wholesale would have blinded a fail-closed privacy gate to a proven leak — so
+          # the scan stayed ON until the scrubbed re-cut landed (see the current-state note above).
           LIBREOFFICE_SRC="${SRCROOT}/vendor/libreoffice/product-set"
           DEST_RESOURCES="${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Resources"
           DEST="${DEST_RESOURCES}/LibreOffice"

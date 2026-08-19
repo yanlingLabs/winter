@@ -149,8 +149,8 @@ export const NAME_SCAN_EXCLUSIONS: readonly RegExp[] = [
   // subtag and its human-readable name, in dozens of languages — the guard's pattern happens to
   // also be the correctly-spelled name of one of them. Not an identity leak: this file is
   // unmodified upstream registry data (liblangtag's own vendored copy, itself sourced from IANA),
-  // never touched by this machine's compiler, and the match is a natural-language collision of
-  // exactly the same shape the CEF rule above already found and excluded — deliberately NOT named
+  // never touched by this machine's compiler, and the match is a natural-language collision —
+  // deliberately NOT named
   // here (the collision's own substring/language name is exactly what this guard exists to keep
   // out of a tracked file, so republishing it in this comment would be the leak class itself).
   // Zero hits everywhere else in the tree, including every Mach-O this repo itself compiles or
