@@ -468,6 +468,32 @@ final class OfficeHelperSupervisor {
         return true
     }
 
+    /// Office Stage A Task 5 (carry 3) — **the quit path's kill door.** Not in Task 2's original
+    /// interface (`start()`/`state`/`client`/`events` only) — added here because the quit sweep
+    /// needs a SYNCHRONOUS way to make the helper process go away: "supervisor kill is SIGKILL +
+    /// socket close; do not await async drains in teardown" (the runtime teardown contract this
+    /// mirrors — `OfficeRuntime.teardown()`'s own header).
+    ///
+    /// Bumps `generation` FIRST, before touching the process — the same reason `attemptOnce`'s own
+    /// failure paths do: it makes `armDeathDetection`'s closure see `myGeneration != generation` and
+    /// stay silent, so a kill WE initiated never turns into a spurious `.helperDied` fanned out to
+    /// every runtime a beat after the app already knows it asked for this. `forceKill` is SIGKILL,
+    /// never `terminate()` — carry #4's own finding (SIGTERM is intercepted once LOK is loaded)
+    /// applies exactly as much to a deliberate stop as to a failed handshake attempt.
+    ///
+    /// Idempotent and safe from every state, including `.notStarted` (nothing to kill) and
+    /// `.starting` (an attempt in flight is abandoned — its own generation check in `attemptOnce`
+    /// then unwinds it without touching whatever this call does next).
+    func stop() {
+        generation += 1
+        if let process { Self.forceKill(process) } // forceKill itself no-ops when not running
+        connection?.close()
+        connection = nil
+        client = nil
+        process = nil
+        state = .stopped
+    }
+
     /// Bounds `connection.open()` by `timeout`, independent of `UnixSocketTransport`'s own
     /// internal ~3s connect timeout (F2, T2 review). NOT a `withTaskGroup` race — same reasoning
     /// `OfficeWireConnection`'s own header gives at length for `nextFrame`: NormaKit's `open()` has

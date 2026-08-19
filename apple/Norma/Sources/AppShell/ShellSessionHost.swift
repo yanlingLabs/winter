@@ -369,6 +369,17 @@ final class ShellSessionHost: ObservableObject {
             .store(in: &cancellables)
     }
 
+    /// office-plumbing Task 5: releases `officeEventsFanOutTask` — see that property's own doc for
+    /// why an uncancelled `Task` iterating a never-finished `AsyncStream` would otherwise outlive
+    /// this host entirely, strongly holding `officeHelperSupervisor` (and, transitively, whatever it
+    /// pins alive) forever. Every other resource this host owns already tears down on its own
+    /// (`cancellables`' `AnyCancellable`s cancel themselves on deinit; `officeRuntimes`/
+    /// `editorRuntimes` are plain dictionaries of objects nothing else references once this host is
+    /// gone) — this is the one exception, because a bare `Task` has no such auto-cancel behavior.
+    deinit {
+        officeEventsFanOutTask?.cancel()
+    }
+
     // MARK: - T4: the landing's roster verbs (bare RPCs — see `managementClient`'s doc for why these
     // never go through `makeFeed`'s attaching harness)
 
@@ -681,6 +692,186 @@ final class ShellSessionHost: ObservableObject {
             return
         }
         editorRuntimes.removeValue(forKey: sessionId)?.teardown()
+    }
+
+    // MARK: - office-plumbing Task 5: the office runtimes
+
+    /// **One office runtime per session that has one.** Unlike `editorRuntimes` — where each entry
+    /// owns its own CEF browser — the underlying resource here (`OfficeHelperSupervisor`) is
+    /// APP-WIDE and shared across every entry in this table; see `officeHelperSupervisor`'s own doc
+    /// for the fan-out this implies. Sessions are ADDED on first `officeRuntime(for:)` (there is no
+    /// pre-warm door yet — T6/T7 own the file-tree/transcript doors that will call `open` directly,
+    /// which is its own pre-warm, the same "an open is its own prewarm" shape `editorRuntimeForCodeTab`
+    /// already establishes) and REMOVED by a departure (`releaseOfficeRuntimeIfClean` — ALWAYS, see
+    /// its own doc) or an explicit `teardownOfficeRuntime`.
+    private(set) var officeRuntimes: [String: OfficeRuntime] = [:]
+
+    /// The ONE app-wide helper supervisor, minted lazily on the FIRST `officeRuntime(for:)` call —
+    /// never in `init`, because `ShellSessionHostTests` constructs many hosts per run and a
+    /// supervisor built (with a fan-out `Task` started) for every one of them, whether or not that
+    /// test ever touches office, would be pure waste. `nil` is also what lets the quit path
+    /// (`teardownAllOfficeRuntimesAndStopHelper`) answer "nothing to kill" for a host that never
+    /// touched office, without minting one just to ask.
+    private(set) var officeHelperSupervisor: OfficeHelperSupervisor?
+
+    /// How the supervisor is built. Test seam, mirroring `makeEditorRuntime`'s own reason:
+    /// production spawns a real subprocess (`OfficeHelperSupervisor.Configuration.production()`),
+    /// which nothing under XCTest may touch directly.
+    var makeOfficeHelperSupervisor: () -> OfficeHelperSupervisor = {
+        OfficeHelperSupervisor(configuration: .production())
+    }
+
+    /// Serializes every call any `OfficeRuntime` in this table makes into the shared supervisor's
+    /// client — see `OfficeHelperRequestQueue`'s own header for why a raw, un-serialized call is not
+    /// safe from more than one caller at a time. ONE instance per host, for the same reason there is
+    /// only one supervisor per host: both describe the one shared connection.
+    private let officeRequestQueue = OfficeHelperRequestQueue()
+
+    /// How a runtime is made, GIVEN its driver — the host computes the driver (closing over
+    /// `officeHelperSupervisor`/`officeRequestQueue`) and hands it in, rather than `OfficeRuntime`
+    /// reaching for a shared global the way `EditorRuntime.CEFDriver.production` can (CEF's own
+    /// global C functions): the office helper is owned per-host, not process-wide. Test seam:
+    /// overridden to IGNORE the passed driver and substitute a recorder-backed one, exactly as
+    /// `editorFactory().make` does for `makeEditorRuntime`.
+    var makeOfficeRuntime: (String, OfficeRuntime.Driver) -> OfficeRuntime = { sessionId, driver in
+        OfficeRuntime(sessionId: sessionId, driver: driver)
+    }
+
+    /// The consumer of `officeHelperSupervisor.events` — **the ONE reader** the stream's own header
+    /// requires (`OfficeHelperSupervisor.events`: "still single-consumer... a real constraint for
+    /// whichever future task is the first to actually need a second reader" — this is that task).
+    /// Started once, alongside the supervisor itself, and fans every event out to every runtime
+    /// currently in `officeRuntimes` via `broadcastOfficeHelperEvent`. Cancelled on `deinit` — an
+    /// `AsyncStream` never finishes on its own here, so an uncancelled Task would iterate it forever,
+    /// strongly holding the supervisor alive past this host's own lifetime.
+    private var officeEventsFanOutTask: Task<Void, Never>?
+
+    /// The session's office runtime, minted on first use. Mints the shared supervisor (and starts
+    /// its fan-out) on the very first call across this host's whole lifetime, not per session.
+    @discardableResult
+    func officeRuntime(for sessionId: String) -> OfficeRuntime {
+        if let existing = officeRuntimes[sessionId] { return existing }
+        let supervisor = ensureOfficeHelperSupervisor()
+        let runtime = makeOfficeRuntime(sessionId, officeDriver(for: supervisor))
+        officeRuntimes[sessionId] = runtime
+        return runtime
+    }
+
+    /// The session's office runtime **if it already has one** — mirrors `existingEditorRuntime`.
+    func existingOfficeRuntime(for sessionId: String) -> OfficeRuntime? { officeRuntimes[sessionId] }
+
+    private func ensureOfficeHelperSupervisor() -> OfficeHelperSupervisor {
+        if let existing = officeHelperSupervisor { return existing }
+        let supervisor = makeOfficeHelperSupervisor()
+        officeHelperSupervisor = supervisor
+        officeEventsFanOutTask = Task { [weak self] in
+            for await event in supervisor.events {
+                guard let self else { return }
+                self.broadcastOfficeHelperEvent(event)
+            }
+        }
+        return supervisor
+    }
+
+    /// The fan-out itself, split out as a directly-callable, directly-testable method — the real
+    /// `AsyncStream` loop above is deliberately NOT where the routing logic lives: nothing can
+    /// inject events into a real supervisor's stream from a test, but this method needs no
+    /// supervisor at all to drive with synthetic `OfficeHelperEvent`s against a table of spy
+    /// runtimes (`ShellSessionHostTests`' office suite does exactly that).
+    func broadcastOfficeHelperEvent(_ event: OfficeHelperEvent) {
+        for runtime in officeRuntimes.values {
+            runtime.handle(supervisorEvent: event)
+        }
+    }
+
+    /// The production `OfficeRuntime.Driver` — every call routed through `officeRequestQueue` (the
+    /// single-outstanding-request funnel), reaching whatever `officeHelperSupervisor.client` is live
+    /// AT CALL TIME (never captured once — the client changes across a death+relaunch). `close`/
+    /// `unsubscribeTiles` never throw to their caller (fire-and-forget everywhere `OfficeRuntime`
+    /// uses them — see `OfficeRuntime.Driver`'s own doc) and simply no-op when there is no live
+    /// client to ask — but a failure that DOES reach one of them (the helper died mid-request, a
+    /// malformed reply) is still worth a line, the same "fire-and-forget is not the same as silent"
+    /// discipline `EditorRuntime`'s own NSLog calls keep for its own no-caller-to-tell failures.
+    private func officeDriver(for supervisor: OfficeHelperSupervisor) -> OfficeRuntime.Driver {
+        let queue = officeRequestQueue
+        return OfficeRuntime.Driver(
+            helperState: { [weak supervisor] in supervisor?.state ?? .notStarted },
+            startHelper: { [weak supervisor] in await supervisor?.start() },
+            open: { [weak supervisor] docId, path in
+                try await queue.run {
+                    guard let client = supervisor?.client else {
+                        throw OfficeHelperClientError.serverError(reason: "helper not connected")
+                    }
+                    return try await client.open(docId: docId, path: path)
+                }
+            },
+            close: { [weak supervisor] docId in
+                do {
+                    try await queue.run {
+                        guard let client = supervisor?.client else { return }
+                        try await client.close(docId: docId)
+                    }
+                } catch {
+                    NSLog("[ShellSessionHost] office close(\(docId)) failed: \(error)")
+                }
+            },
+            subscribeTiles: { [weak supervisor] docId, part, zoomPPT, viewportTwips in
+                try await queue.run {
+                    guard let client = supervisor?.client else {
+                        throw OfficeHelperClientError.serverError(reason: "helper not connected")
+                    }
+                    return try await client.subscribeTiles(docId: docId, part: part, zoomPPT: zoomPPT,
+                                                            viewportTwips: viewportTwips)
+                }
+            },
+            unsubscribeTiles: { [weak supervisor] docId in
+                do {
+                    try await queue.run {
+                        guard let client = supervisor?.client else { return }
+                        try await client.unsubscribeTiles(docId: docId)
+                    }
+                } catch {
+                    NSLog("[ShellSessionHost] office unsubscribeTiles(\(docId)) failed: \(error)")
+                }
+            })
+    }
+
+    /// Release a session's office runtime outright, closing whatever documents it holds. **Never
+    /// touches the shared helper PROCESS** — the helper is app-wide, and another session's
+    /// documents may still be open on it; killing the process here would break them. The door for a
+    /// session that is genuinely going away; the shell's own departures go through
+    /// `releaseOfficeRuntimeIfClean` below instead, and the quit path's OWN process kill is
+    /// `teardownAllOfficeRuntimesAndStopHelper`, a level above this.
+    func teardownOfficeRuntime(for sessionId: String) {
+        officeRuntimes.removeValue(forKey: sessionId)?.teardown()
+    }
+
+    /// The shell is leaving `sessionId`. **Stage A has no dirty state to protect — a document tab is
+    /// view-only — so this ALWAYS releases**, unlike `releaseEditorRuntimeIfClean`'s clean-only
+    /// gate. Today "clean-only" and "always" are the exact same rule, because nothing in
+    /// `OfficeRuntimeState` can ever BE dirty yet; Stage B's editable surface is what will need the
+    /// real gate `editorRuntimeReleasedOnDeparture` already models for the editor side, and this
+    /// comment is the pin that keeps this call site honest about which rule it is actually following
+    /// once that lands.
+    private func releaseOfficeRuntimeIfClean(for sessionId: String) {
+        officeRuntimes.removeValue(forKey: sessionId)?.teardown()
+    }
+
+    /// office-plumbing Task 5 — the quit path's process-kill door: walks every session's office
+    /// runtime (closing its documents) THEN stops the shared helper process. **Order matters**: the
+    /// editor precedent's own quit-gate lesson was "pre-warmed [runtimes] must die before the settle
+    /// beat," and here it is also what keeps a runtime's own teardown (a `driver.close` call routed
+    /// through `officeRequestQueue`) from racing the process's own death — every runtime's close is
+    /// fired (fire-and-forget, the same "obligation 5" `AppDelegate.editorQuitGate` documents for a
+    /// save in flight) BEFORE the kill, never after. Tolerates a host that never touched office at
+    /// all: `officeHelperSupervisor == nil` skips the kill outright (nothing was ever spawned), and
+    /// an empty `officeRuntimes` table walks zero times.
+    @discardableResult
+    func teardownAllOfficeRuntimesAndStopHelper() -> Int {
+        let sessionIds = Array(officeRuntimes.keys)
+        for sessionId in sessionIds { teardownOfficeRuntime(for: sessionId) }
+        officeHelperSupervisor?.stop()
+        return sessionIds.count
     }
 
     /// **Show the panel** — and take the pre-warm with it. Every door that opens a tab goes through
@@ -1957,6 +2148,9 @@ final class ShellSessionHost: ObservableObject {
         // editor-product T3: the departing session's editor goes only if it is holding nothing
         // unsaved (`editorRuntimeReleasedOnDeparture`). A hop is not a quit.
         if let departing = attachedSessionId { releaseEditorRuntimeIfClean(for: departing) }
+        // office-plumbing Task 5: same departure moment, ALWAYS-release policy (Stage A has no
+        // dirty state to protect) — see `releaseOfficeRuntimeIfClean`'s own doc.
+        if let departing = attachedSessionId { releaseOfficeRuntimeIfClean(for: departing) }
         attachedSessionId = sessionId
         refreshOutputFiles(for: sessionId)
         openOutputFile = nil
@@ -2051,6 +2245,9 @@ final class ShellSessionHost: ObservableObject {
         // editor-product T3: same departure policy as the hop above — a hidden shell releases a
         // CLEAN editor and keeps a dirty one. ⌘W is not a quit, and nothing warns here.
         if let departing = attachedSessionId { releaseEditorRuntimeIfClean(for: departing) }
+        // office-plumbing Task 5: same departure moment, ALWAYS-release policy — see
+        // `releaseOfficeRuntimeIfClean`'s own doc.
+        if let departing = attachedSessionId { releaseOfficeRuntimeIfClean(for: departing) }
         live.feedTask?.cancel()
         live.feedTask = nil
         live.feed.stop()
