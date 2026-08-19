@@ -1,11 +1,23 @@
-# office-lok-gate spike — NO-GO
+# office-lok-gate spike — history: NO-GO on the official dmg, later reversed to GO from-source
 
 Scratch spike for Office Stage A Task 1 (the LibreOfficeKit embed go/no-go gate). **Not shipped**,
-not wired into any Xcode target. Result: **NO-GO** — see
-`../../docs/superpowers/research/2026-08-18-lok-embed-gate.md` for the full report, evidence, and
-root-cause analysis. Short version: `lok_init_2()` crashes on macOS (AppKit main-thread violation
-inside VCL's Aqua backend, on a thread LOK spawns internally) — a confirmed, currently open
-upstream gap (tdf#145127), not a bug in how this spike calls it.
+not wired into any Xcode target.
+
+**Original result (against the official, dmg-packaged LibreOffice): NO-GO.** `lok_init_2()`
+crashed on macOS (AppKit main-thread violation inside VCL's Aqua backend, on a thread LOK spawns
+internally) — a confirmed, then-open upstream gap (tdf#145127). See git history and the release
+notes at https://github.com/yanlingLabs/norma/releases/tag/vendor-libreoffice-20260819 for the
+full investigation.
+
+**That verdict was later overturned.** A from-scratch native macOS arm64 build with
+`--enable-headless` (the svp/headless VCL backend, the same shape iOS's own LibreOffice port
+uses) builds and runs cleanly from stock upstream `LibreOffice/core` master, with ZERO source
+patches — `tdf#145127` blocks the Aqua backend only, not the source tree. `scripts/fetch-
+libreoffice.ts` now vendors THAT build (a pre-built, hash-pinned release asset — see its own
+header for the recipe that produced it), and the GO story is what Office Stage A builds against
+today. This spike's own NO-GO reproduction below is kept as the historical record of the
+ORIGINAL finding, not a recipe that still matches what gets vendored today (see the note at the
+end of that section).
 
 ## Files
 
@@ -22,36 +34,41 @@ upstream gap (tdf#145127), not a bug in how this spike calls it.
   **official, mounted, read-only** `soffice --headless --convert-to` — never installed to
   `/Applications`, never touching `~/.norma*`.
 
-## Reproducing the gate
+## Reproducing the ORIGINAL NO-GO (historical — does not match today's vendored tree)
+
+The commands below reproduce the ORIGINAL finding, from when `scripts/fetch-libreoffice.ts`
+harvested the official, dmg-packaged LibreOffice (mount + copy + trim, producing a `program/`
+tree). That is not what the script does anymore — see its own header. Today
+`scripts/fetch-libreoffice.ts` vendors the GO, from-source, headless build into `product-set/`
+(**not** `program/`), fetched as one pre-built, hash-pinned release asset (the `-r2` asset on
+`vendor-libreoffice-20260819`); running the commands below against a fresh fetch will not find a
+`program/` directory at all.
 
 ```sh
-# 1. Harvest (downloads ~284MB, mounts+copies+trims to apple/Norma/vendor/libreoffice/ -- gitignored)
-bun run scripts/fetch-libreoffice.ts
-
-# 2. Build the spike
-spikes/office-lok-gate/build.sh
-
-# 3. Run it against the harvested set. Expect exit 134 (SIGABRT) and an
-#    NSInternalInconsistencyException stack trace -- that IS the gate's current, correct result.
+# Historical shape (no longer produced by fetch-libreoffice.ts):
 mkdir -p /tmp/lok-gate-profile
 HOME=/tmp/lok-gate-home LANG=en_US.UTF-8 spikes/office-lok-gate/out/office-lok-gate \
   "$(pwd)/apple/Norma/vendor/libreoffice/program/Frameworks" \
   /tmp/lok-gate-profile \
   "$(pwd)/apple/Norma/Tests/NormaAppTests/Fixtures/office/gate.xlsx" \
   /tmp/gate-tile.png /tmp/gate-tile.raw
+# Result at the time: exit 134 (SIGABRT), an NSInternalInconsistencyException stack trace — the
+# gate's ORIGINAL, correct result against the Aqua-backed official dmg.
 ```
 
-If this someday exits 0 and prints `VERSION:`/`RESULT: OK` instead, `tdf#145127` has closed
-upstream (a real headless macOS VCL implementation shipped) — re-read the gate report, this plan
-is worth reviving, and Task 2+ can proceed against a validated set (re-run the full gate steps in
-the report, including a REAL trim validation this time, before trusting any smaller size number).
+Against TODAY's vendored tree (`apple/Norma/vendor/libreoffice/product-set/Frameworks`), this
+spike's own `lok_init_2()` call is expected to SUCCEED, not crash — that headless build is
+exactly what closed tdf#145127 for this project. This spike was not re-run against it (Task 1v2
+verified the GO build with a dedicated harness instead — see `scripts/build-libreoffice.ts` and
+the release notes linked above) and `main.c` still hardcodes the old `program/Frameworks` shape,
+so treat this spike itself as retired rather than adjusting it to the new layout.
 
 ## Regenerating the fixtures (if the seeds change)
 
-Requires the official LibreOffice dmg mounted read-only at `LibreOffice.app` (see
-`scripts/fetch-libreoffice.ts` for the pinned download URL/sha256 — the dmg's `soffice` binary is
-what actually does the conversion; the harvested/trimmed vendor tree has no `soffice` executable
-of its own, only the LOK library entry points):
+Requires the official LibreOffice dmg mounted read-only at `LibreOffice.app` (this is a SEPARATE,
+one-time fixture-generation step, unrelated to what `scripts/fetch-libreoffice.ts` vendors — the
+dmg's `soffice` binary is what actually does the conversion; the vendored product-set has no
+`soffice` executable of its own, only the LOK library entry points):
 
 ```sh
 SOFFICE=/Volumes/LibreOffice/LibreOffice.app/Contents/MacOS/soffice

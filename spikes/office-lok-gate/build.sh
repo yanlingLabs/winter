@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Builds the office-lok-gate spike CLI. NOT part of any Xcode target -- scratch only.
-# See ../../docs/superpowers/research/2026-08-18-lok-embed-gate.md for the full gate report
-# (NO-GO) and ./README.md for how this spike was used to produce it.
+# History: this spike originally proved NO-GO against the official, dmg-packaged LibreOffice
+# (see git history and ./README.md). That verdict was later overturned by a from-scratch native
+# build (--enable-headless) -- see the release notes at
+# https://github.com/yanlingLabs/norma/releases/tag/vendor-libreoffice-20260819 for the full
+# story, and ./README.md for how this spike fits into it today.
 set -euo pipefail
 cd "$(dirname "$0")"
 mkdir -p out

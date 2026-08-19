@@ -6,18 +6,18 @@
  *
  * =====================================================================================
  * GO. This is a from-scratch rewrite of an earlier version of this script that vendored the
- * OFFICIAL LibreOffice mac dmg and was a confirmed NO-GO (see git history / docs/superpowers/
- * research/2026-08-18-lok-embed-gate.md if that context is ever needed again): the official dmg
- * ships the desktop Aqua VCL backend only, and LibreOfficeKit's lok_init_2() crashes on it --
- * AppKit's "NSWindow only on the main thread" rule, hit from LOK's own internally-spawned
- * worker thread. That was a fact about ONE PACKAGING of LibreOffice, not about the source tree:
- * a from-scratch native build with --enable-headless (the svp/headless VCL backend, the same
- * shape iOS's own LibreOffice port uses) builds and runs cleanly on macOS arm64 from stock
- * upstream `LibreOffice/core` master, with ZERO source patches. See
- * .superpowers/sdd/2026-08-18-office-plumbing/{svp-probe-report.md,trim-gate-report.md} for the
- * full probe, the six-fixture pixel-hash proof, and the licensing inventory this script's
- * LICENSES/ bundle is sourced from. scripts/build-libreoffice.ts documents the from-source
- * recipe that produced the artifact this script fetches (informational -- not run in CI).
+ * OFFICIAL LibreOffice mac dmg and was a confirmed NO-GO (see git history for that investigation
+ * if it is ever needed again): the official dmg ships the desktop Aqua VCL backend only, and
+ * LibreOfficeKit's lok_init_2() crashes on it -- AppKit's "NSWindow only on the main thread"
+ * rule, hit from LOK's own internally-spawned worker thread. That was a fact about ONE PACKAGING
+ * of LibreOffice, not about the source tree: a from-scratch native build with --enable-headless
+ * (the svp/headless VCL backend, the same shape iOS's own LibreOffice port uses) builds and runs
+ * cleanly on macOS arm64 from stock upstream `LibreOffice/core` master, with ZERO source
+ * patches. See the release notes at
+ * https://github.com/yanlingLabs/norma/releases/tag/vendor-libreoffice-20260819 for the full
+ * probe, the six-fixture pixel-hash proof, and the licensing inventory this script's LICENSES/
+ * bundle is sourced from. scripts/build-libreoffice.ts documents the from-source recipe that
+ * produced the artifact this script fetches (informational -- not run in CI).
  * =====================================================================================
  *
  * Usage: bun run scripts/fetch-libreoffice.ts          (or: bun run libreoffice:fetch)
@@ -51,7 +51,7 @@
  *     dyld resolves a dlopen'd library through directory symlinks to its REAL path before LOK's
  *     ${ORIGIN}-relative bootstrap (fundamentalrc's BRAND_BASE_DIR=${ORIGIN}/.. chain) ever
  *     runs, so a symlinked installPath silently loads the WRONG Resources/ instead of failing
- *     loudly (bit the productization gate twice -- see trim-gate-report.md). ditto (below)
+ *     loudly (bit the productization gate twice -- see the release notes linked above). ditto (below)
  *     preserves real-directory placement the same way fetch-cef.ts's framework copies do.
  *   apple/Norma/vendor/libreoffice/LICENSES/            -- per-project license texts + MANIFEST.md
  *   apple/Norma/vendor/libreoffice/VERSION-PIN            -- commit/flags/recipe-hash/engine facts
@@ -64,10 +64,12 @@
  * shape: program/, LICENSE-MPL.txt, the old NO-GO VERSION-PIN) cannot linger alongside the new one.
  *
  * --- Build-gate message ---
- * This vendor tree is not yet wired into any Xcode preBuildScripts gate (unlike vendor/cef and
- * vendor/monaco) -- that is downstream work (the helper target that embeds it). This script's
- * own success/failure output is written to be loud and specific either way, matching
- * fetch-monaco.ts's tone, so it reads correctly once such a gate does name this command.
+ * This vendor tree IS wired into an Xcode preBuildScripts gate, same as vendor/cef and
+ * vendor/monaco: project.yml's "Check LibreOffice vendored" phase (added office-plumbing Task 2)
+ * fails the build loudly, naming this exact command, if product-set/{Frameworks,Resources},
+ * libmergedlo.dylib, or .vendored-version is missing. This script's own success/failure output
+ * is written to match fetch-monaco.ts's tone regardless, so a direct run and a build failure
+ * that shells out to it read the same way.
  */
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
@@ -91,9 +93,10 @@ const RELEASE_TAG = "vendor-libreoffice-20260819";
 const ASSET_NAME = "libreoffice-headless-macos-arm64-11482c8f-r2.tar.zst";
 const ASSET_URL = buildAssetUrl({ repo: GH_REPO, tag: RELEASE_TAG, assetName: ASSET_NAME });
 // Hand-pinned at package time from an independent `shasum -a 256` of the actual uploaded file,
-// then re-verified against a fresh public download before being transcribed here (see
-// recut-report.md's "asset URL + SHA" section for that verification run). See header comment
-// for why this single pin (not a belt-and-braces live check) is nonetheless load-bearing here.
+// then re-verified against a fresh public download before being transcribed here (see the
+// release notes at https://github.com/yanlingLabs/norma/releases/tag/vendor-libreoffice-20260819
+// for that verification run). See header comment for why this single pin (not a belt-and-braces
+// live check) is nonetheless load-bearing here.
 const PINNED_SHA256 = "38cc143c1b689a273f38d031a1eb0ecadf1a43d241e1d62b6ebe4bc6d80dcb39";
 if (!isValidSha256Hex(PINNED_SHA256)) {
   throw new Error(`PINNED_SHA256 is not a well-formed 64-char lowercase hex string: ${PINNED_SHA256}`);
@@ -301,15 +304,21 @@ try {
 
   const productSetBytes =
     Number(execFileSync("du", ["-sk", PRODUCT_SET_DIR], { encoding: "utf8" }).trim().split(/\s+/)[0]) * 1024;
+  // T1v2 review F6: `productSetBytes / 1e6` (decimal mega) rendered "~512 MB" for a tree every
+  // other measurement in this project's own history calls "488MB" (`du -sk`'s own KiB blocks, the
+  // binary/1024-based unit) -- technically defensible for its OWN label but inconsistent with
+  // every other size this codebase quotes for the identical tree (this file's own header comment
+  // included). Dividing by 1024*1024 instead renders the number everyone already means.
   console.log(
     `\nVendored LibreOffice product-set (${RELEASE_TAG}, LibreOffice/core @ ${LIBREOFFICE_CORE_COMMIT}) at ${VENDOR_DIR}\n` +
-      `  product-set/: ~${(productSetBytes / 1e6).toFixed(0)} MB (du -sk, block-rounded)\n` +
+      `  product-set/: ~${(productSetBytes / (1024 * 1024)).toFixed(0)} MB (du -sk, block-rounded)\n` +
       `  stamp:        ${STAMP_PATH}\n\n` +
       `LOK installPath = ${PRODUCT_SET_DIR}/Frameworks (the directory containing libmergedlo.dylib).\n` +
       `Read ${VERSION_PIN_PATH} before wiring this up -- it has the engine facts embedders need:\n` +
       `dlopen entry point, the _Exit(0) teardown mitigation for Writer formats, the three\n` +
       `fontconfig <dir> lines for correct system-font rendering, and why libskialo.dylib ships\n` +
-      `unconditionally. This tree is NOT yet wired into any Xcode build gate.\n`,
+      `unconditionally. This tree is wired into project.yml's "Check LibreOffice vendored"\n` +
+      `preBuildScripts gate.\n`,
   );
 } finally {
   rmSync(tmp, { recursive: true, force: true });

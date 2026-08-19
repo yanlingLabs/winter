@@ -6,13 +6,13 @@
  * the "documented, not run in CI" half of Task 1: it exists to be read, smoke-parsed (`--help`
  * or the no-args/`--dry-run` default, both side-effect-free), and someday actually run by a
  * human with hours, ~60GB free disk, and AC power -- NOT invoked by any automation, and NOT run
- * as part of this task (see .superpowers/sdd/2026-08-18-office-plumbing/task-1v2-report.md).
+ * as part of this task (see git history for that work).
  *
- * Every fact below is transcribed from two primary sources, both in this repo:
- *   .superpowers/sdd/2026-08-18-office-plumbing/svp-probe-report.md   (recon, L0-L4 build phase)
- *   .superpowers/sdd/2026-08-18-office-plumbing/trim-gate-report.md   (v1->v2 trim, product-set assembly)
- * Re-read those for the evidence and reasoning behind each step; this file carries only the
- * actions, in the order they were actually run.
+ * Every fact below is transcribed from primary sources recorded during development -- private
+ * SDD process docs, not committed in this repo. See the release notes at
+ * https://github.com/yanlingLabs/norma/releases/tag/vendor-libreoffice-20260819 and git history
+ * for the evidence and reasoning behind each step; this file carries only the actions, in the
+ * order they were actually run.
  *
  * --- RE-CUT (privacy scrub), 2026-08-19 ---
  * The first cut of this artifact (vendor-libreoffice-20260818) leaked the builder's macOS
@@ -86,7 +86,7 @@
  *                      at this commit). --workdir itself must be identity-free -- see the RE-CUT
  *                      note above; this script does not and cannot enforce that choice for you.
  *   2. configure    -- MAKE=gmake-steered autogen.sh with the 33-flag v2+scrub recipe (32 flags
- *                      verbatim from trim-gate-report.md plus --with-vendor=Norma). Deliberately
+ *                      verbatim from the release notes linked above plus --with-vendor=Norma). Deliberately
  *                      NO CC/CXX override -- see the RE-CUT note above for why. Do NOT add
  *                      --disable-skia -- see the constant's own comment for why that specific
  *                      flag fails to compile on this platform.
@@ -131,7 +131,7 @@
  *
  * --- FONTCONFIG note (the un-taken build-system-patch option) ---
  * The runtime FONTCONFIG_FILE workaround this script reproduces is what was actually verified
- * (trim-gate-report.md Deliverable 3). Baking the same three <dir> entries into
+ * (see the release notes linked above). Baking the same three <dir> entries into
  * external/fontconfig/ExternalPackage_fontconfig_data.mk instead (so a stock product-set needs
  * no runtime env var) is a real option the recon identified and NOBODY has implemented or
  * tested -- doing so would be this build's first-ever source-adjacent patch (the "zero source
@@ -261,8 +261,9 @@ function prefixMapFlags(builddir: string): string[] {
   ];
 }
 
-// The v2 trimmed+merged configure line (trim-gate-report.md, "V2 configure flags + L0/L2
-// evidence") plus one RE-CUT addition, --with-vendor=Norma: unset, LibreOffice's own configure
+// The v2 trimmed+merged configure line (see the release notes linked in this file's own header
+// for the "V2 configure flags + L0/L2 evidence" behind it) plus one RE-CUT addition,
+// --with-vendor=Norma: unset, LibreOffice's own configure
 // (configure.ac ~15626-15645) defaults OOO_VENDOR to $USERNAME/$USER/`id -u -n` -- i.e. the
 // builder's own macOS account name -- and bakes it verbatim into Resources/versionrc's `Vendor=`
 // line and Resources/registry/main.xcd's `ooVendor` property. That is exactly the second leak
@@ -319,9 +320,9 @@ const BUILD_ARGS = ["gb_SUPPRESS_TESTS=T"];
 const CLOSURE_RECIPE_SCRIPT_PATH = join(ROOT, "scripts", "build-libreoffice-closure-recipe.sh");
 const CLOSURE_RECIPE_SHA256 = "dfe3b5d45770ca314f01da659b8b1a8c4c6ebcb7cfd76a6ee20312ce988d6ae5";
 
-// The three <dir> entries recon found missing from the shipped fontconfig/fonts.conf (recon §4;
-// re-verified in trim-gate-report.md Deliverable 3: without these, a macOS system font request
-// like "Helvetica Neue" silently substitutes a bundled fallback serif instead of erroring).
+// The three <dir> entries recon found missing from the shipped fontconfig/fonts.conf (re-verified
+// per the release notes linked in this file's own header: without these, a macOS system font
+// request like "Helvetica Neue" silently substitutes a bundled fallback serif instead of erroring).
 const FONTCONFIG_DIRS = ["/System/Library/Fonts", "/Library/Fonts", "~/Library/Fonts"];
 
 function fontconfigWorkaroundXml(cacheDir: string): string {
@@ -336,9 +337,9 @@ function fontconfigWorkaroundXml(cacheDir: string): string {
 }
 
 // Sourced from core/workdir/UnpackedTarball/<project>/{COPYING,LICENSE}* -- exactly the files
-// svp-probe-report.md's "Deliverable 4: licensing inventory" table cites, one entry per
-// LICENSES/ subdirectory this recipe produces. Mirrors LICENSES/MANIFEST.md's own table; keep
-// the two in sync if either changes.
+// the release notes' own "licensing inventory" table cites (linked in this file's own header),
+// one entry per LICENSES/ subdirectory this recipe produces. Mirrors LICENSES/MANIFEST.md's own
+// table; keep the two in sync if either changes.
 const LICENSE_SOURCES: Record<string, string[]> = {
   cairo: ["COPYING", "COPYING-LGPL-2.1", "COPYING-MPL-1.1"],
   fontconfig: ["COPYING"],

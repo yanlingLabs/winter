@@ -51,11 +51,12 @@ apple/Norma/vendor/monaco/
 # LibreOffice (LibreOfficeKit) headless macOS arm64 product-set, from-source build
 # (--enable-headless, svp VCL backend, zero source patches) — ~488MB unpacked, ~154MiB
 # compressed; too large to commit. Fetched + sha256-verified via scripts/fetch-libreoffice.ts
-# from a dedicated GitHub release asset (vendor-libreoffice-20260818, pinned there). GO — proves
-# tdf#145127 does not block a native macOS headless embed; see
-# .superpowers/sdd/2026-08-18-office-plumbing/{svp-probe-report.md,trim-gate-report.md}. NOT yet
-# wired into any Xcode build gate (unlike vendor/cef and vendor/monaco above) — that is
-# downstream work (the helper target that embeds product-set/).
+# from a dedicated GitHub release asset (vendor-libreoffice-20260819, pinned there — see its own
+# release notes at https://github.com/yanlingLabs/norma/releases/tag/vendor-libreoffice-20260819
+# for the full probe/build/licensing story). GO — proves tdf#145127 does not block a native macOS
+# headless embed. Wired into project.yml's "Check LibreOffice vendored" preBuildScripts gate,
+# same as vendor/cef and vendor/monaco above — a build fails loudly naming the fetch command if
+# this tree is absent.
 apple/Norma/vendor/libreoffice/
 
 # Office Stage A Task 3 finding: LibreOfficeKit creates a standard LO lock file next to any
