@@ -28,7 +28,7 @@ Closes #
 - [ ] No secrets, tokens, or personal paths in the diff or fixtures
 - [ ] If I added a setting, it hot-reloads — no daemon restart required
 - [ ] If I added a `SessionEvent` variant or RPC method, I walked the full checklist in
-      [CONTRIBUTING.md](../CONTRIBUTING.md#changing-the-protocol), including the Swift side
+      [CONTRIBUTING.md](https://github.com/yanlingLabs/norma/blob/main/CONTRIBUTING.md#changing-the-protocol), including the Swift side
 
 ## Screenshots
 

@@ -157,8 +157,11 @@ This part matters more than anything else here, so we'll say it plainly:
   Keychain — never in a config file, never in plain text, never in a fixture.
 - **Everything she remembers is a file you own.** Memory, settings, session logs — all plain files
   under `~/.norma`. Move them, back them up, read them, delete them.
-- **Nothing leaves your machine except model calls.** Web fetching is local. Your phone talks to
-  your Mac directly and end-to-end encrypted. There is no Norma server in the loop.
+- **Nothing leaves your machine except model calls.** Web fetching is local, and there is no Norma
+  account, backend or telemetry. Your phone connects to your Mac directly, end-to-end encrypted; if
+  the two can't hole-punch to each other, the connection falls back to relaying through an
+  [iroh](https://iroh.computer) relay we run — which forwards ciphertext it cannot read, and never
+  sees a session.
 - **The shell is sandboxed.** Commands run under a macOS seatbelt profile with an explicit writable
   set; writes outside your project need your consent, and Norma's own credential directory is
   denied to the agent unconditionally.
@@ -294,8 +297,10 @@ Norma's three modes, not the product. The product is the whole assistant.
 **Does it need a subscription?** It needs *a* model. Either your existing ChatGPT account or an
 OpenAI API key. Norma itself is free and open source.
 
-**Does my data go through your servers?** No. Model calls go to your provider. Your phone connects
-to your Mac directly. Nothing else leaves the machine.
+**Does my data go through your servers?** There is no Norma backend, no account and no telemetry.
+Model calls go to your provider. Your phone connects to your Mac directly; when a direct connection
+isn't possible it falls back to relaying through an iroh relay we run, which only ever forwards
+ciphertext — it can't read a session, and holds nothing.
 
 **Windows or Linux?** Not today — Norma is deeply native macOS. A web UI is on the roadmap for the
 chat surface.

@@ -89,8 +89,10 @@ Stated plainly, so you know what you're auditing:
 
 - **Credentials never touch disk.** API keys and OAuth tokens live in the macOS Keychain
   (`Bun.secrets`, service `com.norma.core`).
-- **Data stays local.** There is no Norma server. Model calls go to your provider; web fetching is
-  performed locally; the phone connects to your Mac directly and end-to-end encrypted.
+- **Data stays local.** There is no Norma backend, account or telemetry. Model calls go to your
+  provider; web fetching is performed locally; the phone connects to your Mac directly and
+  end-to-end encrypted. When a direct path can't be established, the connection relays through an
+  iroh relay we operate (`infra/relay/`) — it forwards ciphertext only, and terminates nothing.
 - **Shell commands are sandboxed** under a seatbelt profile with a per-session writable set. So are
   the model-authored workflow scripts, which run in a separate confined subprocess.
 - **Reads are unrestricted by design** — `read`/`glob`/`grep`/`ls` have no path fence. That is a
