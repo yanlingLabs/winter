@@ -15,10 +15,12 @@ private enum LOKCallbackType {
     static let stateChanged: Int32 = 8      // LibreOfficeKitEnums.h:229 (LOK_CALLBACK_STATE_CHANGED)
 }
 
-private enum LOKTileMode {
-    static let rgba: Int32 = 0   // LibreOfficeKitEnums.h:40 (LOK_TILEMODE_RGBA)
-    static let bgra: Int32 = 1   // LibreOfficeKitEnums.h:41 (LOK_TILEMODE_BGRA)
-}
+// LOKTileMode (LOK_TILEMODE_RGBA/BGRA, LibreOfficeKitEnums.h:40-41) lived here for
+// `debugPaintTile`'s BGRA->RGBA canonicalization — deleted (T3 review F2: that function had zero
+// callers despite its comment claiming to BE the carry-6 tripwire; the REAL tripwire is
+// `testGateXlsxRawTileHashMatchesTheGateTablePin`, which runs the committed spike, not this
+// bridge). Task 4 re-adds tile-mode handling for real, reviewed, as part of the actual tile
+// pipeline — not resurrected from here unproven.
 
 /// "Request to have the part number as an 5th value in the LOK_CALLBACK_INVALIDATE_TILES payload."
 /// — LibreOfficeKitEnums.h:85-89 (`LOK_FEATURE_PART_IN_INVALIDATION_CALLBACK = 1ULL << 2`). Set at
@@ -125,9 +127,16 @@ final class LOKDedicatedThread {
 /// **The kit is never destroyed.** `kit->pClass->destroy(kit)` exists in the C API (the spike, a
 /// one-shot CLI, calls it) but this helper's whole lifetime model is "load once, serve documents,
 /// `_exit(0)` — never a normal return" (the plan's own global constraint, earned by the Writer
-/// exit-time `SwDLL::~SwDLL` SIGSEGV during LIFO C++ static teardown). Calling `destroy` would
-/// invite exactly that crash outside of process exit, for no benefit (the process is going to
-/// `_exit` anyway). Only DOCUMENTS get destroyed, on `close`.
+/// exit-time `SwDLL::~SwDLL` SIGSEGV during LIFO C++ static teardown — observed as process **exit
+/// 134** (128 + SIGABRT, 6: an uncaught C++ exception from inside that teardown, not a raw SIGSEGV
+/// reported directly; `spikes/office-lok-gate/README.md` and the Stage-A gate reports name the same
+/// number). Calling `destroy` would invite exactly that crash outside of process exit, for no
+/// benefit (the process is going to `_exit` anyway). Only DOCUMENTS get destroyed, on `close`.
+/// Carry #6's own disposition check: exit 134 never appeared in any of this task's live-test runs
+/// (six-format matrix, SIGTERM-with-Writer-open, ~15 total boots) — every exit path past
+/// `lok_init_2` uses `_exit`, which skips the static-destructor teardown this crash needs by
+/// definition (see `OfficeHelperServer`'s own idle-exit `_exit(0)` call site for the other half of
+/// that guarantee, at the process-supervision level rather than this bridge's own document layer).
 final class LOKBridge: OfficeDocumentBridge {
     enum BootError: Error, CustomStringConvertible {
         case installPathMissing(String)
@@ -292,33 +301,6 @@ final class LOKBridge: OfficeDocumentBridge {
         doc.context.release()
     }
 
-    /// The regression tripwire (carry #6) — NOT the real tile pipeline (Task 4 owns
-    /// `TileRenderer`/IOSurfaces/caching/generations). A minimal, direct `paintTile` passthrough,
-    /// exact spike parameters, so a live test can hash a fixed buffer against the gate's pinned
-    /// table. Canonicalizes BGRA -> RGBA in place exactly like the spike (main.c:176-185) before
-    /// returning, so the hash is comparable to the gate table regardless of what `getTileMode`
-    /// reports.
-    func debugPaintTile(docId: String, canvasWidth: Int32, canvasHeight: Int32,
-                         tilePosX: Int32, tilePosY: Int32, tileWidth: Int32, tileHeight: Int32) -> Data? {
-        thread.sync { () -> Data? in
-            guard let doc = self.documents[docId] else { return nil }
-            var buffer = [UInt8](repeating: 0, count: Int(canvasWidth) * Int(canvasHeight) * 4)
-            buffer.withUnsafeMutableBufferPointer { ptr in
-                doc.handle.pointee.pClass.pointee.paintTile?(
-                    doc.handle, ptr.baseAddress, canvasWidth, canvasHeight, tilePosX, tilePosY, tileWidth, tileHeight)
-            }
-            let tileMode = doc.handle.pointee.pClass.pointee.getTileMode?(doc.handle) ?? LOKTileMode.rgba
-            if tileMode == LOKTileMode.bgra {
-                var index = 0
-                while index + 2 < buffer.count {
-                    buffer.swapAt(index, index + 2)
-                    index += 4
-                }
-            }
-            return Data(buffer)
-        }
-    }
-
     // MARK: - Callback translation
 
     /// Runs on `thread` (see `lokBridgeDocumentCallback`'s own header). Translates the handful of
@@ -362,37 +344,102 @@ final class LOKBridge: OfficeDocumentBridge {
     /// signed, read-only app bundle (the bootstraprc trap: `UserInstallation` defaults to
     /// `$ORIGIN/..`, resolving INSIDE the bundle). `file://` URL form, not a bare path — LOK's own
     /// `lok_init_2` rejects `user_profile_url[0] == '/'` (`LibreOfficeKitInit.h:306-313`).
+    ///
+    /// **T3 review F4 (Minor)**: sweeps every PRE-EXISTING `lok-profile-*` directory under
+    /// `statePath` before minting this boot's own — measured, unbounded growth otherwise (3 boots
+    /// against one stable `--state-path` left 3 separate directories; `_exit` means no `atexit`
+    /// ever runs to clean one up on the way out, by design — carry #3). Safe because a
+    /// `--state-path` is one-live-helper-at-a-time by construction (the socket bind is exclusive to
+    /// it: `OfficeHelperServer.start()`'s unlink-before-bind, mirrored by
+    /// `OfficeHelperSupervisor`'s own pre-spawn unlink), so ANY `lok-profile-*` directory already
+    /// present the moment a NEW boot reaches this call can only belong to a now-dead PRIOR instance
+    /// of this same helper, never a live one — safe to discard wholesale rather than trying to
+    /// detect and reuse-if-clean. Keeps the per-boot UUID (not a fixed, reused name) — parallel
+    /// test runs each mint their own scratch `--state-path` already
+    /// (`OfficeHelperLiveTests.makeScratchDirectory()`), so this sweep never races a DIFFERENT
+    /// helper's own profile directory; it only ever cleans up after itself.
     private static func prepareUserProfile(statePath: URL) throws -> String {
+        Self.sweepStaleProfileDirectories(statePath: statePath)
         let profileDir = statePath.appendingPathComponent("lok-profile-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: profileDir, withIntermediateDirectories: true)
         return URL(fileURLWithPath: profileDir.path, isDirectory: true).absoluteString
     }
 
+    /// Best-effort — a sweep failure (permissions, a concurrent deletion, an unreadable entry, ...)
+    /// must never fail this boot: `prepareUserProfile` mints its own fresh directory regardless of
+    /// whether this succeeds, so the worst case is one more undeleted leftover, never a boot
+    /// failure.
+    private static func sweepStaleProfileDirectories(statePath: URL) {
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            at: statePath, includingPropertiesForKeys: nil) else { return }
+        for entry in entries where entry.lastPathComponent.hasPrefix("lok-profile-") {
+            try? FileManager.default.removeItem(at: entry)
+        }
+    }
+
     /// Writes a generated `fonts.conf` under `--state-path` and points `FONTCONFIG_FILE` at it —
-    /// carry #5. `<include>`s the vendored product-set's OWN `Resources/fontconfig/fonts.conf`
-    /// (so LO's bundled fonts — Liberation etc, referenced by that file's own `<dir>` entries —
-    /// stay discoverable) and then REASSERTS the three macOS system font directories explicitly,
-    /// unconditionally.
+    /// carry #5.
     ///
-    /// **Empirical note, worth recording**: the svp probe's own report claimed the bundled
-    /// `fonts.conf` ships with ZERO macOS `<dir>` entries. The copy actually vendored in THIS
-    /// worktree already lists all three (`/System/Library/Fonts`, `/Library/Fonts`,
-    /// `~/Library/Fonts`) plus more (`/System/Library/Assets{,V2}`) — see the task-3 report for
-    /// the full comparison and a hypothesis for the discrepancy. This override makes the guarantee
-    /// true regardless of which fact is current or survives a future re-vendor: it does not rely
-    /// on the bundled file's own content being any particular thing.
+    /// **T3 review F1 (Important) — rewritten from the original shape.** The original version
+    /// `<include>`d the vendored product-set's WHOLE `Resources/fontconfig/fonts.conf` — LO's own
+    /// stock config, whose own `<dir>` list scans `/System/Library/Assets` (measured: 0 bytes,
+    /// empty on this OS version) AND `/System/Library/AssetsV2` (measured: **56GB** — Apple's
+    /// Continuity/Handoff/on-demand font-asset cache; nothing an office document ever needs).
+    /// Measured cost of that scan: a COLD boot (brand-new `--state-path`, no fontconfig cache yet)
+    /// took **20.2-20.6s** and wrote a **~78MB / ~72,000-file** cache under `--state-path`; WARM
+    /// (same machine/session, cache already primed) took ~7.3s. Under concurrent XCTest load,
+    /// 24-56s cold against the (then-)30.0s handshake budget — enough to plausibly exhaust
+    /// `OfficeHelperSupervisor`'s 3 attempts on a loaded machine's first-ever launch and report
+    /// `.helperUnavailable` before the helper ever got to serve a document.
     ///
-    /// `<cachedir>` is pinned under `--state-path` too — the bundled conf's own cachedirs point at
-    /// `/usr/local/var/cache/fontconfig` and `~/.fontconfig`, outside this helper's scratch
-    /// sandbox (the hard rule: never touch the user's real paths). fontconfig tolerates an
-    /// unwritable/nonexistent cachedir by skipping it, so the bundled conf's own (unreachable in a
-    /// sandboxed test run) entries riding along via `<include>` are harmless, not a hazard.
+    /// Fixed at the root rather than only by raising the timeout: this method now writes its OWN
+    /// explicit `<dir>` list — the three real macOS font directories below, PLUS the vendor's own
+    /// bundled-font directory (`Resources/fonts/truetype` — where the Carlito/Liberation TTFs the
+    /// aliases below resolve to actually live in this tree; listed explicitly here rather than
+    /// assumed auto-registered by LO's own runtime, so this override does not depend on an
+    /// unverified LO-internal mechanism) — and `<include>`s ONLY the vendored
+    /// `Resources/fontconfig/conf.d` DIRECTORY, bypassing the top-level file (and its
+    /// AssetsV2-scanning `<dir>` list) entirely while keeping 100% of its alias/hinting/
+    /// antialiasing RULES — `conf.d/30-metric-aliases.conf`'s Calibri->Carlito, Cambria->Caladea,
+    /// Arial->Liberation Sans, etc — unmodified, in their original load order (these are
+    /// declarative XML `<alias>`/`<match>` rules; which directories get SCANNED for glyph data is
+    /// an orthogonal concern from which alias RULES get loaded — verified, not just argued, below).
+    /// The 4 small, static, non-path-dependent alias blocks the top-level file ALSO carried
+    /// (deprecated "mono"/"sans serif"/"sans"/"system ui" spellings -> their canonical CSS names)
+    /// are inlined directly in the template below rather than pulled in via a second `<include>` —
+    /// free either way, costs nothing, one less moving part to reason about.
+    ///
+    /// **Verified, not just argued** (the review's own condition for either fix shape): re-measured
+    /// cold boot against THIS config — real compiled `NormaOfficeHelper`, fresh `--state-path` per
+    /// sample, `--lok-root` at the vendor tree, timed from process spawn to the socket file
+    /// appearing (this file's boot-sequencing invariant: LOK finishes loading before the socket
+    /// ever binds — see `main.swift`'s own header — so that window is exactly what
+    /// `OfficeHelperSupervisor`'s handshake budget has to absorb). AC power, Low Power Mode off,
+    /// display kept awake (`caffeinate -u`) for every sample, to rule out the display-asleep
+    /// measurement-artifact class this repo has hit before (see memory: CEF 30fps cap). Three
+    /// samples, this machine's first LOK boot in several hours (session-cold, not reboot-cold) then
+    /// two back-to-back: **2.371s, 1.403s, 1.404s** — against the old config's measured
+    /// **20.2-20.6s cold / ~7.3s warm**. Each sample's own `<state-path>/fontconfig/cache` landed at
+    /// **6.4MB / 6 files**, not the old **~78MB / ~72,000 files** (fix-round-1 section of
+    /// task-3-report.md has the full transcript). Also re-ran the six-format matrix: `gate.ods`
+    /// prints `size=26775x13005` — the EXACT width the ALWAYS-ON fontconfig override produced
+    /// before this rewrite (the one fixture that override was shown, in the original T3 pass, to
+    /// perturb versus a no-override baseline — a real, disclosed font-substitution effect, not a
+    /// bug), zero delta — and the pixel-hash tripwire's `with-env` hash
+    /// (`0062d124af16cfd301fed9444b7b882e5eeb683e956e2154cf2903b0eddfd77c`) reproduced byte-for-byte
+    /// against the same pre-fix value too. Both are stronger than "compatible": the metric-compatible
+    /// alias chain didn't just survive this rewrite, it produced IDENTICAL output.
+    ///
+    /// `<cachedir>` stays pinned under `--state-path`, never the user's real `~/.fontconfig` or
+    /// `/usr/local/var/cache/fontconfig` (the hard rule: never touch the user's real paths) — true
+    /// before this fix and unchanged by it.
     private static func configureFontconfig(installRoot: URL, statePath: URL) throws {
         let fontconfigDir = statePath.appendingPathComponent("fontconfig", isDirectory: true)
         let cacheDir = fontconfigDir.appendingPathComponent("cache", isDirectory: true)
         try FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
 
-        let bundledConf = installRoot.appendingPathComponent("Resources/fontconfig/fonts.conf")
+        let bundledConfD = installRoot.appendingPathComponent("Resources/fontconfig/conf.d")
+        let bundledFontsDir = installRoot.appendingPathComponent("Resources/fonts/truetype")
         let confPath = fontconfigDir.appendingPathComponent("fonts.conf")
         let homeFonts = (NSHomeDirectory() as NSString).appendingPathComponent("Library/Fonts")
 
@@ -401,10 +448,27 @@ final class LOKBridge: OfficeDocumentBridge {
         <!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
         <fontconfig>
         \t<cachedir>\(cacheDir.path)</cachedir>
-        \t<include ignore_missing="yes">\(bundledConf.path)</include>
         \t<dir>/System/Library/Fonts</dir>
         \t<dir>/Library/Fonts</dir>
         \t<dir>\(homeFonts)</dir>
+        \t<dir>\(bundledFontsDir.path)</dir>
+        \t<include ignore_missing="yes">\(bundledConfD.path)</include>
+        \t<match target="pattern">
+        \t\t<test qual="any" name="family"><string>mono</string></test>
+        \t\t<edit name="family" mode="assign" binding="same"><string>monospace</string></edit>
+        \t</match>
+        \t<match target="pattern">
+        \t\t<test qual="any" name="family"><string>sans serif</string></test>
+        \t\t<edit name="family" mode="assign" binding="same"><string>sans-serif</string></edit>
+        \t</match>
+        \t<match target="pattern">
+        \t\t<test qual="any" name="family"><string>sans</string></test>
+        \t\t<edit name="family" mode="assign" binding="same"><string>sans-serif</string></edit>
+        \t</match>
+        \t<match target="pattern">
+        \t\t<test qual="any" name="family"><string>system ui</string></test>
+        \t\t<edit name="family" mode="assign" binding="same"><string>system-ui</string></edit>
+        \t</match>
         </fontconfig>
         """
         try xml.write(to: confPath, atomically: true, encoding: .utf8)

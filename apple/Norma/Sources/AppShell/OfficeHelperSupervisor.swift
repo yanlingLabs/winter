@@ -219,6 +219,20 @@ final class OfficeHelperSupervisor {
     private(set) var process: Process?
     private var connection: OfficeWireConnection?
 
+    /// The `Process` most recently spawned by `attemptOnce`, set right after `process.run()`
+    /// succeeds — unlike `process` above (which only ever holds a SUCCESSFUL attempt's process),
+    /// this is overwritten on EVERY attempt, success or failure. Exists purely for T3 review F3's
+    /// own regression tripwire: a FAILED attempt's process is otherwise unobservable from outside
+    /// `attemptOnce` (it is a local variable there), so nothing could previously assert which
+    /// signal a TIMED-OUT attempt's kill path actually sent — a refactor from `forceKill`
+    /// (`SIGKILL`) back to `process.terminate()` (`SIGTERM`) stayed green with no test noticing.
+    /// `OfficeSupervisorTests.testHandshakeTimeoutKillPathSendsSIGKILLNotSIGTERM` reads this,
+    /// via `@testable import`, after a deliberately-timed-out attempt, and asserts
+    /// `.terminationStatus == SIGKILL` (the LOK-free fixture has no crash-handler to intercept a
+    /// raw signal, so `.terminationReason` alone reads `.uncaughtSignal` for EITHER signal —
+    /// `.terminationStatus` is the actual discriminator, per the review's own note).
+    private(set) var lastAttemptProcess: Process?
+
     init(configuration: Configuration) {
         self.configuration = configuration
         var continuation: AsyncStream<OfficeHelperEvent>.Continuation!
@@ -307,6 +321,7 @@ final class OfficeHelperSupervisor {
         } catch {
             return false
         }
+        lastAttemptProcess = process // F3 (T3 review) — every attempt, success or failure; see its own header
 
         let deadline = Date().addingTimeInterval(configuration.handshakeTimeout)
 

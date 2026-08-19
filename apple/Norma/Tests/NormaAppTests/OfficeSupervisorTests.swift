@@ -120,6 +120,58 @@ final class OfficeSupervisorTests: XCTestCase {
         XCTAssertEqual(first, .helperUnavailable)
     }
 
+    // MARK: - F3 (T3 review): the timeout-kill path must send SIGKILL, not SIGTERM
+
+    /// T3's own carry #4 measured that SIGTERM is intercepted once LOK is loaded (an EARNED
+    /// finding against the REAL helper — see `OfficeHelperLiveTests`'s SIGTERM test) and switched
+    /// `OfficeHelperSupervisor.forceKill` to SIGKILL. Nothing asserted WHICH signal the supervisor
+    /// actually sends, though — a future refactor back to `process.terminate()` (SIGTERM) would
+    /// stay green here with no test noticing. This is that tripwire: drives a real attempt through
+    /// the handshake-TIMEOUT kill path. "silent" mode DOES bind and accept the connection (per its
+    /// own definition at `testHandshakeTimeoutExhaustsAllAttemptsThenHelperUnavailable`'s comment:
+    /// "accepts every connection and decodes every frame... but never writes a reply") — so the
+    /// socket-file poll succeeds immediately and it is the POST-CONNECT hello-wait's own deadline
+    /// (`attemptOnce`'s `guard succeeded else { ...; Self.forceKill(process); ... }`) that actually
+    /// fires here, not the earlier socket-file-poll deadline. Either `forceKill` call site would
+    /// prove the same fact about the SIGNAL sent; this test happens to exercise this one. Inspects
+    /// the killed process's own termination directly via `lastAttemptProcess` — see that
+    /// property's own header on `OfficeHelperSupervisor` for why it exists: a FAILED attempt's
+    /// process is otherwise unobservable, a local variable inside `attemptOnce`, never assigned to
+    /// the public `process` property, which only ever holds a SUCCESSFUL attempt.
+    ///
+    /// `terminationStatus`, not `terminationReason`, is the discriminator: the fixture is LOK-free
+    /// (`FakeOfficeDocumentBridge`, no crash-handler installed), so a bare process dying from
+    /// EITHER SIGTERM or SIGKILL's own default disposition reads `.terminationReason ==
+    /// .uncaughtSignal` regardless of which signal it was — only `.terminationStatus` (POSIX
+    /// convention: the raw signal number, for a death-by-uncaught-signal) actually tells 9 apart
+    /// from 15.
+    func testHandshakeTimeoutKillPathSendsSIGKILLNotSIGTERM() async throws {
+        // maxAttempts: 1 keeps this deterministic and cheap — one timed-out attempt is all this
+        // needs; the retry-count/backoff floor is already `testHandshakeTimeoutExhaustsAllAttempts...`'s
+        // own job, not this test's.
+        let supervisor = OfficeHelperSupervisor(configuration: OfficeHelperSupervisor.Configuration(
+            helperExecutableURL: fixtureExecutableURL(), socketDirectory: makeScratchDirectory(),
+            handshakeTimeout: 1.0, maxAttempts: 1, backoff: 0.05, idleExitSeconds: nil,
+            extraArguments: ["--mode", "silent"]))
+
+        await supervisor.start()
+        XCTAssertEqual(supervisor.state, .stopped, "a single timed-out attempt with maxAttempts=1 must exhaust immediately")
+
+        let killedProcess = try XCTUnwrap(supervisor.lastAttemptProcess,
+            "attemptOnce should have recorded the process it spawned (and then killed) even though the attempt failed")
+        // Safe even if it already exited (returns immediately) — guarantees the OS has actually
+        // reaped it and populated terminationStatus/terminationReason before we read either below,
+        // rather than racing Foundation's own asynchronous SIGCHLD handling.
+        killedProcess.waitUntilExit()
+
+        XCTAssertEqual(killedProcess.terminationReason, .uncaughtSignal,
+            "the LOK-free fixture has no signal handler to intercept — a bare kill (either signal) "
+            + "should always read as .uncaughtSignal here")
+        XCTAssertEqual(killedProcess.terminationStatus, SIGKILL,
+            "supervisor's timeout-kill path must send SIGKILL (9); a regression back to "
+            + "process.terminate() would leave this at SIGTERM (15) — carry #4's whole point")
+    }
+
     // MARK: - Death after a successful handshake -> .helperDied
 
     func testHelperDyingRightAfterHandshakeIsReportedAsHelperDied() async {

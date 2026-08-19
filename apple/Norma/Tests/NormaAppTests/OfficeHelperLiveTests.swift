@@ -105,9 +105,14 @@ final class OfficeHelperLiveTests: XCTestCase {
     /// Passing BOTH `helperURL` (the app-embedded copy) AND `installRoot: nil` (no `--lok-root`
     /// override) is what `testEmbeddedRootBoots...` uses for the carry-1 "real built app" proof —
     /// the helper then resolves its LOK root from its own embedded bundle position.
+    ///
+    /// `stateDir: nil` (default) mints a fresh scratch directory per call, as before. Passing an
+    /// EXPLICIT `stateDir` — reusing a directory a PRIOR (now-dead) call already used — is what
+    /// `testStaleProfileDirectoriesAreSweptOnTheNextBootOfTheSameStatePath` (F4, T3 review) needs:
+    /// proving the sweep, which requires two boots against the literal same `--state-path`.
     private func spawnLiveHelper(
         helperURL: URL? = nil, installRoot: URL? = OfficeHelperLiveTests.vendorProductSetRoot,
-        idleExitSeconds: Int = 30
+        idleExitSeconds: Int = 30, stateDir: URL? = nil
     ) async throws -> LiveHelper {
         let resolvedHelperURL = helperURL ?? Bundle.main.bundleURL.deletingLastPathComponent()
             .appendingPathComponent("NormaOfficeHelper")
@@ -115,13 +120,23 @@ final class OfficeHelperLiveTests: XCTestCase {
                       "NormaOfficeHelper was not built into this run (\(resolvedHelperURL.path)) — "
                         + "add it to the scheme's build list and re-run.")
 
-        let stateDir = makeScratchDirectory()
-        let socketPath = stateDir.appendingPathComponent("office.sock").path
+        let resolvedStateDir = stateDir ?? makeScratchDirectory()
+        let socketPath = resolvedStateDir.appendingPathComponent("office.sock").path
         let token = "officelive-\(UUID().uuidString.prefix(8))"
+
+        // Mirrors OfficeHelperSupervisor.attemptOnce's own pre-spawn unlink (its F1, T2 review): a
+        // PRIOR helper against this same `stateDir` — killed via SIGKILL, as
+        // `testStaleProfileDirectoriesAreSweptOnTheNextBootOfTheSameStatePath` (F4) does between
+        // its two boots — leaves its socket FILE on disk (no unlink-on-death). Without removing it
+        // here first, the `waitUntil` poll below would return true INSTANTLY against the stale
+        // file, and `connection.open()` would then connect into a dead inode rather than waiting
+        // for the fresh helper to actually bind — a no-op for every fresh `stateDir` (nothing to
+        // remove), load-bearing only for a reused one.
+        try? FileManager.default.removeItem(at: URL(fileURLWithPath: socketPath))
 
         let process = Process()
         process.executableURL = resolvedHelperURL
-        var arguments = ["--socket-path", socketPath, "--state-path", stateDir.path,
+        var arguments = ["--socket-path", socketPath, "--state-path", resolvedStateDir.path,
                           "--token", token, "--idle-exit-seconds", String(idleExitSeconds)]
         if let installRoot { arguments += ["--lok-root", installRoot.path] }
         process.arguments = arguments
@@ -152,7 +167,7 @@ final class OfficeHelperLiveTests: XCTestCase {
             throw XCTSkip("handshake failed")
         }
         let client = OfficeHelperClient(connection: connection, seqAllocator: OfficeWireSeqAllocator(), requestTimeout: 15.0)
-        return LiveHelper(process: process, connection: connection, client: client, stateDir: stateDir, lokVersion: lokVersion)
+        return LiveHelper(process: process, connection: connection, client: client, stateDir: resolvedStateDir, lokVersion: lokVersion)
     }
 
     // MARK: - Six formats
@@ -184,14 +199,27 @@ final class OfficeHelperLiveTests: XCTestCase {
     /// LO product-set fetched" — stable there in practice — but a future mismatch on a different
     /// machine or after installing a font that shifts ODF's default-font resolution should be read
     /// as environment-dependent, not necessarily a regression.
+    ///
+    /// **T3 review F6 (Minor)**: `gate.ods`'s width is therefore checked against a TOLERANCE band
+    /// (±300 twips around 26775, i.e. roughly ±0.2in — comfortably covers a plausible font-metric
+    /// shift on a different machine while still catching a genuinely broken value: 0, a wildly
+    /// different font's width, or the document failing to carry its column width at all) rather
+    /// than an exact match. Every OTHER dimension of every OTHER fixture — including `gate.xlsx`'s
+    /// own width, OOXML's fixed-unit column width, immune to font availability by construction —
+    /// stays an EXACT pin; only this one machine-relative value gets slack.
     func testSixFormatsOpenWithSaneTypePartsAndSize() async throws {
         try skipUnlessVendorPresent()
         let helper = try await spawnLiveHelper()
 
-        struct Expectation { let fixture: String; let type: OfficeDocumentKind; let parts: Int; let widthTwips: Int64; let heightTwips: Int64 }
+        struct Expectation {
+            let fixture: String; let type: OfficeDocumentKind; let parts: Int
+            let widthTwips: Int64; let heightTwips: Int64
+            /// 0 (exact match) for every fixture except `gate.ods` — F6 above.
+            var widthToleranceTwips: Int64 = 0
+        }
         let expectations: [Expectation] = [
             Expectation(fixture: "gate.xlsx", type: .spreadsheet, parts: 1, widthTwips: 26593, heightTwips: 13005),
-            Expectation(fixture: "gate.ods", type: .spreadsheet, parts: 1, widthTwips: 26775, heightTwips: 13005),
+            Expectation(fixture: "gate.ods", type: .spreadsheet, parts: 1, widthTwips: 26775, heightTwips: 13005, widthToleranceTwips: 300),
             Expectation(fixture: "gate.pptx", type: .presentation, parts: 1, widthTwips: 15876, heightTwips: 8931),
             Expectation(fixture: "gate.odp", type: .presentation, parts: 1, widthTwips: 15875, heightTwips: 8930),
             Expectation(fixture: "gate.docx", type: .text, parts: 1, widthTwips: 12474, heightTwips: 17406),
@@ -203,7 +231,10 @@ final class OfficeHelperLiveTests: XCTestCase {
             let metadata = try await helper.client.open(docId: docId, path: path)
             XCTAssertEqual(metadata.type, expectation.type, "\(expectation.fixture): type")
             XCTAssertEqual(metadata.parts, expectation.parts, "\(expectation.fixture): parts")
-            XCTAssertEqual(metadata.sizeTwips.widthTwips, expectation.widthTwips, "\(expectation.fixture): widthTwips")
+            let widthDelta = abs(metadata.sizeTwips.widthTwips - expectation.widthTwips)
+            XCTAssertLessThanOrEqual(widthDelta, expectation.widthToleranceTwips,
+                "\(expectation.fixture): widthTwips \(metadata.sizeTwips.widthTwips) is \(widthDelta) twips away "
+                + "from expected \(expectation.widthTwips), outside the ±\(expectation.widthToleranceTwips) tolerance")
             XCTAssertEqual(metadata.sizeTwips.heightTwips, expectation.heightTwips, "\(expectation.fixture): heightTwips")
             print("[six-format matrix] \(expectation.fixture): type=\(metadata.type) parts=\(metadata.parts) "
                     + "size=\(metadata.sizeTwips.widthTwips)x\(metadata.sizeTwips.heightTwips)")
@@ -304,6 +335,55 @@ final class OfficeHelperLiveTests: XCTestCase {
                         + "(the bootstraprc trap: writing here means UserInstallation resolved to the wrong place)")
     }
 
+    // MARK: - Stale profile-directory sweep (F4, T3 review)
+
+    /// `LOKBridge.prepareUserProfile` sweeps every pre-existing `lok-profile-*` directory under
+    /// `--state-path` before minting its own — that method's own header: unbounded growth
+    /// otherwise (measured: 3 boots against one stable `--state-path` left 3 separate directories;
+    /// `_exit` means no `atexit` ever runs to clean one up on the way out, by design). Proves it
+    /// end to end: two SEPARATE helper processes, booted SEQUENTIALLY against the exact SAME
+    /// `--state-path` (the second boot starts only once the first is confirmed fully dead —
+    /// matching the "one live helper per state-path at a time" invariant the sweep's own safety
+    /// argument depends on), leave exactly ONE `lok-profile-*` directory once the second is up —
+    /// the FIRST boot's own, now stale, must be gone.
+    func testStaleProfileDirectoriesAreSweptOnTheNextBootOfTheSameStatePath() async throws {
+        try skipUnlessVendorPresent()
+        let sharedStateDir = makeScratchDirectory()
+
+        let first = try await spawnLiveHelper(stateDir: sharedStateDir)
+        let firstProfileDirs = try Self.profileDirectories(under: sharedStateDir)
+        XCTAssertEqual(firstProfileDirs.count, 1, "setup: first boot should leave exactly one lok-profile-* directory")
+
+        // SIGKILL — matching how a dead helper actually goes away once LOK is loaded in
+        // production (`OfficeHelperSupervisor.forceKill`, carry #4) — and confirmed fully reaped
+        // (`waitUntilExit` + a poll) before the second boot starts.
+        let killResult = kill(first.process.processIdentifier, SIGKILL)
+        XCTAssertEqual(killResult, 0, "setup: kill(SIGKILL) syscall itself failed: errno \(errno)")
+        first.process.waitUntilExit()
+        let firstDied = await waitUntil(timeout: 5.0) { !first.process.isRunning }
+        XCTAssertTrue(firstDied, "setup: first helper must be fully dead before the second boots against the same state path")
+
+        let second = try await spawnLiveHelper(stateDir: sharedStateDir)
+        let secondProfileDirs = try Self.profileDirectories(under: sharedStateDir)
+        XCTAssertEqual(secondProfileDirs.count, 1,
+            "expected the sweep to remove the FIRST boot's now-stale profile directory, leaving only "
+            + "the second boot's own — found \(secondProfileDirs.map { $0.lastPathComponent })")
+        XCTAssertNotEqual(firstProfileDirs.first, secondProfileDirs.first,
+            "the surviving directory should be the SECOND boot's own fresh one, not a coincidental "
+            + "reuse of the first boot's directory name")
+
+        // The sweep must not have left the second helper in a broken state.
+        let docId = UUID().uuidString
+        let metadata = try await second.client.open(docId: docId, path: Self.fixturesRoot.appendingPathComponent("gate.xlsx").path)
+        XCTAssertEqual(metadata.type, .spreadsheet, "the second helper must still be fully functional after the sweep")
+        try await second.client.close(docId: docId)
+    }
+
+    private static func profileDirectories(under stateDir: URL) throws -> [URL] {
+        try FileManager.default.contentsOfDirectory(at: stateDir, includingPropertiesForKeys: nil)
+            .filter { $0.lastPathComponent.hasPrefix("lok-profile-") }
+    }
+
     // MARK: - Embedded root (carry #1: at least one test against the REAL built app)
 
     func testEmbeddedRootBootsAgainstTheRealBuiltAppAndBundleStaysUntouched() async throws {
@@ -396,15 +476,41 @@ final class OfficeHelperLiveTests: XCTestCase {
     func testDocumentEventPushDoesNotStarveAConcurrentPingReply() async throws {
         try skipUnlessVendorPresent()
         let helper = try await spawnLiveHelper()
+        // F5 (T3 review): `observedPushes` is written from `onDocumentEvent`'s own callback —
+        // delivered from `OfficeWireConnection`'s reader thread (see that property's header: pushes
+        // are dispatched at `ingest()` time, off the socket-read path, never on this test's own
+        // task) — and read below on the test's own task after open+ping+close all return. Latent
+        // only because LOK fires zero callbacks in Stage A's own tests (no tile ever painted, every
+        // open view-only — nothing to race on, today); T4 makes this load-bearing the moment a real
+        // push can actually land WHILE this test's own task is mid-read. One NSLock around both
+        // sides closes the race now rather than leaving it as a trap for T4 to trip over.
+        let observedPushesLock = NSLock()
         var observedPushes: [(String, OfficeDocumentEvent)] = []
-        helper.client.onDocumentEvent = { docId, event in observedPushes.append((docId, event)) }
+        // Plain (non-`async`) local functions, deliberately — `NSLock.lock()`/`.unlock()` called
+        // DIRECTLY from an `async` function's own body triggers "unavailable from asynchronous
+        // contexts" under strict concurrency checking (harmless here — neither call ever spans a
+        // suspension point — but still worth not shipping a new warning). Wrapping each critical
+        // section in its own synchronous function, called FROM the async test body, keeps the
+        // `.lock()`/`.unlock()` call sites themselves inside a synchronous context.
+        func recordPush(_ docId: String, _ event: OfficeDocumentEvent) {
+            observedPushesLock.lock()
+            observedPushes.append((docId, event))
+            observedPushesLock.unlock()
+        }
+        func snapshotPushes() -> [(String, OfficeDocumentEvent)] {
+            observedPushesLock.lock()
+            defer { observedPushesLock.unlock() }
+            return observedPushes
+        }
+        helper.client.onDocumentEvent = { docId, event in recordPush(docId, event) }
 
         let docId = UUID().uuidString
         _ = try await helper.client.open(docId: docId, path: Self.fixturesRoot.appendingPathComponent("gate.xlsx").path)
         try await helper.client.ping() // the regression assertion: this must not time out / mis-deliver
         try await helper.client.close(docId: docId)
-        print("[push interleaving] observed \(observedPushes.count) push(es) around open+ping+close; "
-                + "events=\(observedPushes.map { $0.1 })")
+        let pushesSnapshot = snapshotPushes()
+        print("[push interleaving] observed \(pushesSnapshot.count) push(es) around open+ping+close; "
+                + "events=\(pushesSnapshot.map { $0.1 })")
     }
 
     // MARK: - Raw-buffer SHA tripwire (carry #6) — via the committed spike, NOT the real tile
@@ -433,7 +539,11 @@ final class OfficeHelperLiveTests: XCTestCase {
     /// with and without, disclose, don't ask"). A mirror of `LOKBridge.configureFontconfig`'s
     /// shape, not a call into it (that method is `private` inside a DIFFERENT target this test
     /// bundle does not link — see LOKBridge.swift's own header for why NormaOfficeHelperFixture/
-    /// NormaAppTests stay LOK-symbol-free).
+    /// NormaAppTests stay LOK-symbol-free). **T3 review F1**: this mirror was updated alongside the
+    /// real method — see `LOKBridge.configureFontconfig`'s own header for what changed and why
+    /// (own explicit `<dir>` list skipping `/System/Library/AssetsV2`, `<include>` of `conf.d`
+    /// only, the 4 alias blocks inlined) — kept in sync so this test still exercises the SAME
+    /// config shape production actually ships, not a stale pre-fix one.
     func testFontconfigOverridePixelEffectOnGateXlsxIsObservedAndReported() throws {
         try skipUnlessVendorPresent()
         let spikeBinary = try Self.buildSpike()
@@ -446,7 +556,8 @@ final class OfficeHelperLiveTests: XCTestCase {
         let confDir = makeScratchDirectory()
         let cacheDir = confDir.appendingPathComponent("cache", isDirectory: true)
         try FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
-        let bundledConf = Self.vendorProductSetRoot.appendingPathComponent("Resources/fontconfig/fonts.conf")
+        let bundledConfD = Self.vendorProductSetRoot.appendingPathComponent("Resources/fontconfig/conf.d")
+        let bundledFontsDir = Self.vendorProductSetRoot.appendingPathComponent("Resources/fonts/truetype")
         let confPath = confDir.appendingPathComponent("fonts.conf")
         let homeFonts = (NSHomeDirectory() as NSString).appendingPathComponent("Library/Fonts")
         let xml = """
@@ -454,10 +565,27 @@ final class OfficeHelperLiveTests: XCTestCase {
         <!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
         <fontconfig>
         \t<cachedir>\(cacheDir.path)</cachedir>
-        \t<include ignore_missing="yes">\(bundledConf.path)</include>
         \t<dir>/System/Library/Fonts</dir>
         \t<dir>/Library/Fonts</dir>
         \t<dir>\(homeFonts)</dir>
+        \t<dir>\(bundledFontsDir.path)</dir>
+        \t<include ignore_missing="yes">\(bundledConfD.path)</include>
+        \t<match target="pattern">
+        \t\t<test qual="any" name="family"><string>mono</string></test>
+        \t\t<edit name="family" mode="assign" binding="same"><string>monospace</string></edit>
+        \t</match>
+        \t<match target="pattern">
+        \t\t<test qual="any" name="family"><string>sans serif</string></test>
+        \t\t<edit name="family" mode="assign" binding="same"><string>sans-serif</string></edit>
+        \t</match>
+        \t<match target="pattern">
+        \t\t<test qual="any" name="family"><string>sans</string></test>
+        \t\t<edit name="family" mode="assign" binding="same"><string>sans-serif</string></edit>
+        \t</match>
+        \t<match target="pattern">
+        \t\t<test qual="any" name="family"><string>system ui</string></test>
+        \t\t<edit name="family" mode="assign" binding="same"><string>system-ui</string></edit>
+        \t</match>
         </fontconfig>
         """
         try xml.write(to: confPath, atomically: true, encoding: .utf8)
