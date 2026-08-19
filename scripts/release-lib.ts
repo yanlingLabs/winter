@@ -142,6 +142,21 @@ export const NAME_SCAN_EXCLUSIONS: readonly RegExp[] = [
   // deliberately NOT covered by this pattern and stays fully scanned — only vendored, unreviewed
   // third-party bytes get this treatment.
   /^Contents\/Resources\/EditorAssets\/vs(\/|$)/,
+  // office-plumbing wave — a THIRD rationale, closer to the CEF rule's above than the Monaco
+  // rule's: a real scan of the vendored LibreOffice product-set (Contents/Resources/LibreOffice,
+  // 3,296 files) with this guard's own pattern found exactly ONE hit, in this one file. IANA's
+  // language-subtag registry is a plain-text catalogue of every registered language/region/variant
+  // subtag and its human-readable name, in dozens of languages — the guard's pattern happens to
+  // also be the correctly-spelled name of one of them. Not an identity leak: this file is
+  // unmodified upstream registry data (liblangtag's own vendored copy, itself sourced from IANA),
+  // never touched by this machine's compiler, and the match is a natural-language collision of
+  // exactly the same shape the CEF rule above already found and excluded — deliberately NOT named
+  // here (the collision's own substring/language name is exactly what this guard exists to keep
+  // out of a tracked file, so republishing it in this comment would be the leak class itself).
+  // Zero hits everywhere else in the tree, including every Mach-O this repo itself compiles or
+  // links. Anchored to this ONE file, not a directory — every other file in liblangtag/, and
+  // every other file in the LibreOffice tree, stays fully scanned.
+  /^Contents\/Resources\/LibreOffice\/Resources\/liblangtag\/language-subtag-registry\.xml$/,
 ];
 
 export interface NameScanPlanInputs {

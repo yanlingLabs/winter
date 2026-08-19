@@ -281,6 +281,21 @@ describe("nameScanPlan (panel-cef Task 5 — §11b's exclusion, expressed in the
     // Unrelated CEF paths are unaffected by this rule.
     expect(m("Contents/MacOS/Norma")).toBe(false);
   });
+
+  test("NAME_SCAN_EXCLUSIONS matches the LibreOffice language-subtag-registry.xml file only — nothing else in that tree", () => {
+    const lo = "Contents/Resources/LibreOffice";
+    const m = (p: string) => NAME_SCAN_EXCLUSIONS.some((re) => re.test(p));
+    expect(m(`${lo}/Resources/liblangtag/language-subtag-registry.xml`)).toBe(true);
+    // Anchored to that ONE file — not its parent directory, not a sibling, not the dylib tree.
+    expect(m(`${lo}/Resources/liblangtag`)).toBe(false);
+    expect(m(`${lo}/Resources`)).toBe(false);
+    expect(m(lo)).toBe(false);
+    expect(m(`${lo}/Frameworks/libmergedlo.dylib`)).toBe(false);
+    expect(m(`${lo}/Resources/liblangtag/language-subtag-registry.txt`)).toBe(false); // wrong extension
+    expect(m(`${lo}/Resources/other/language-subtag-registry.xml`)).toBe(false); // wrong directory
+    // Not a blanket filename match anywhere in the bundle.
+    expect(m("Contents/Resources/language-subtag-registry.xml")).toBe(false);
+  });
 });
 
 describe("appcastInsertPlan", () => {
