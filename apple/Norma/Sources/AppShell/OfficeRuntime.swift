@@ -280,6 +280,14 @@ final class OfficeRuntime: ObservableObject {
         var subscribeTiles: (_ docId: String, _ part: Int, _ zoomPPT: Int,
                              _ viewportTwips: OfficeTwipsRect) async throws -> [TileKey]
         var unsubscribeTiles: (_ docId: String) async -> Void
+        /// Task 6 — the pixel-fetch half `subscribeTiles` deliberately leaves undone (that call
+        /// only REGISTERS the subscription and reports which keys the current viewport needs; this
+        /// is what actually asks for their bytes). Routed through
+        /// `ShellSessionHost.officeRequestQueue` in production, on the SAME terms as every other
+        /// Driver call — see `OfficeHelperRequestQueue`'s own header. Never throws to a caller that
+        /// cannot do anything about it: `perform(_:)`'s `.subscribe` case treats a failure here as
+        /// fire-and-forget, matching `close`/`unsubscribeTiles`.
+        var requestTiles: (_ docId: String, _ keys: [TileKey]) async throws -> Void
     }
 
     let sessionId: String
@@ -288,6 +296,14 @@ final class OfficeRuntime: ObservableObject {
     /// names it by — mirrors `EditorRuntime.state`/`.stateSnapshot` exactly.
     @Published private(set) var state = OfficeRuntimeState()
     var stateSnapshot: OfficeRuntimeState { state }
+
+    /// Task 6 — **this runtime's own pixel pool, never `@Published`.** See `OfficeTileStore`'s own
+    /// header for why: `state` above is the reducer's small, diffable truth (which documents, which
+    /// phase); this is the heavy, high-frequency half (tile bytes, dozens of pushes a second during
+    /// a scroll) that must never ride the same invalidation channel. One per runtime — a session can
+    /// hold several open `.document` tabs, and they share this one pool (`OfficeTileStore.Key`
+    /// scopes every entry by `docId`).
+    let tileStore = OfficeTileStore()
 
     private let driver: Driver
     private let makeDocId: () -> String
@@ -352,8 +368,14 @@ final class OfficeRuntime: ObservableObject {
         case .ready:
             perform(dispatch(.helperBecameReady))
         case .helperDied:
+            // Task 6: every docId this runtime's store still holds dies with the helper, in the
+            // SAME beat the reducer wipes `state.documents` below — see `OfficeTileStore
+            // .evictEverything`'s own header for why this is the sweep that keeps a dead-connection
+            // in-flight marker from wedging a placeholder forever.
+            tileStore.evictEverything()
             perform(dispatch(.helperDied))
         case .helperUnavailable:
+            tileStore.evictEverything()
             perform(dispatch(.helperUnavailable))
         }
     }
@@ -405,14 +427,28 @@ final class OfficeRuntime: ObservableObject {
                 }
 
             case .helperClose(let docId):
+                // Task 6: the store's own docId-scoped entries die with the document — see
+                // `OfficeTileStore.evictAll`'s own header.
+                tileStore.evictAll(docId: docId)
                 Task { [driver] in await driver.close(docId) }
 
             case .subscribe(let docId, let part, let zoomPPT, let viewportTwips):
-                Task { [driver] in
-                    // T6 owns consuming the returned `[TileKey]` — T5 only builds the door and fires
-                    // the wire call. A failure here is logged by the production driver; there is no
-                    // reducer state yet that a subscribe failure would change.
-                    _ = try? await driver.subscribeTiles(docId, part, zoomPPT, viewportTwips)
+                // Task 6: `subscribeTiles` only REGISTERS the subscription and reports which keys
+                // the current viewport needs — this is what actually asks for their bytes. Filtered
+                // through the store first (obligation 3: never re-request a tile already cached or
+                // already in flight — see `OfficeTileStore.keysNeedingRequest`'s own header for the
+                // "big batch pins the connection" amplifier this closes). The two driver calls are
+                // deliberately SEQUENTIAL `await`s, never composed inside one `officeRequestQueue
+                // .run` — obligation 2, permanent deadlock otherwise.
+                Task { [weak self, driver] in
+                    guard let keys = try? await driver.subscribeTiles(docId, part, zoomPPT, viewportTwips) else {
+                        return
+                    }
+                    guard let self else { return }
+                    let needed = self.tileStore.keysNeedingRequest(docId: docId, candidates: keys)
+                    guard !needed.isEmpty else { return }
+                    self.tileStore.markRequested(docId: docId, keys: needed)
+                    _ = try? await driver.requestTiles(docId, needed)
                 }
 
             case .unsubscribe(let docId):
@@ -433,6 +469,9 @@ final class OfficeRuntime: ObservableObject {
     private func performTeardown(docIds: [String]) {
         generation += 1
         for docId in docIds {
+            // Task 6: same store hygiene as the single-document close path — see
+            // `OfficeTileStore.evictAll`'s own header.
+            tileStore.evictAll(docId: docId)
             Task { [driver] in await driver.close(docId) }
         }
     }

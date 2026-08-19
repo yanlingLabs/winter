@@ -3758,12 +3758,19 @@ final class ShellSessionHostTests: XCTestCase {
         private(set) var subscribeCalls: [String] = []
         private(set) var unsubscribeCalls: [String] = []
         private(set) var startHelperCalls = 0
+        /// office-plumbing Task 6 — every `requestTiles` call, in order: `(docId, keys)`.
+        private(set) var requestCalls: [(docId: String, keys: [TileKey])] = []
 
         var state: OfficeHelperSupervisor.State = .ready
         var openFailures: [String: String] = [:] // path -> reason
         var openMetadata: [String: OfficeDocumentMetadata] = [:] // path -> override
         var defaultMetadata = OfficeDocumentMetadata(
             type: .spreadsheet, parts: 1, sizeTwips: OfficeDocumentSize(widthTwips: 100, heightTwips: 100))
+        /// office-plumbing Task 6 — what `subscribeTiles` reports as the current viewport's key set,
+        /// per docId. Empty (the pre-Task-6 default) unless a test opts in — most existing office
+        /// tests never look at tiles at all, and an empty reply means `perform`'s `.subscribe` case
+        /// has nothing to request, so `requestCalls` simply stays empty for them too.
+        var subscribeReplies: [String: [TileKey]] = [:] // docId -> keys
 
         /// Carry 6's own drill: an `open` for a suspended path does not return until
         /// `resumeOpen(forPath:)` is called — the seam that lets a test park an open MID-FLIGHT,
@@ -3795,9 +3802,12 @@ final class ShellSessionHostTests: XCTestCase {
                 close: { [unowned self] docId in self.closeCalls.append(docId) },
                 subscribeTiles: { [unowned self] docId, _, _, _ in
                     self.subscribeCalls.append(docId)
-                    return []
+                    return self.subscribeReplies[docId] ?? []
                 },
-                unsubscribeTiles: { [unowned self] docId in self.unsubscribeCalls.append(docId) })
+                unsubscribeTiles: { [unowned self] docId in self.unsubscribeCalls.append(docId) },
+                requestTiles: { [unowned self] docId, keys in
+                    self.requestCalls.append((docId, keys))
+                })
         }
     }
 
@@ -4031,5 +4041,148 @@ final class ShellSessionHostTests: XCTestCase {
         XCTAssertEqual(office.recorder.openCalls.map(\.path), ["/a.xlsx"], "opened exactly once")
         XCTAssertEqual(office.recorder.closeCalls.count, 1, "the now-orphaned document is closed "
                        + "rather than leaked on the shared helper — never a second open either")
+    }
+
+    // MARK: - office-plumbing Task 6: the pixel-fetch half of `.subscribe`
+
+    private func tileKey(_ x: Int, _ y: Int, part: Int = 0, zoomPPT: Int = 1000) -> TileKey {
+        TileKey(part: part, zoomPPT: zoomPPT, tileX: x, tileY: y)
+    }
+
+    private let sampleViewport = OfficeTwipsRect(x: 0, y: 0, width: 5120, height: 5120)
+
+    /// `.subscribe`'s effect performer must consume the `[TileKey]` `subscribeTiles` reports and ask
+    /// for their pixels through `requestTiles` — the door T4/T5 deliberately left as a documented
+    /// no-op ("T6 owns consuming the returned `[TileKey]`", `OfficeRuntime.perform`'s own prior
+    /// comment). A pristine store has nothing cached and nothing in flight, so every reported key is
+    /// requested.
+    func testSubscribingRequestsExactlyTheKeysSubscribeTilesReportedWhenNothingIsCachedOrInFlight() async {
+        let (host, _) = makeHost()
+        let office = officeFactory()
+        host.makeOfficeRuntime = office.make
+        let runtime = host.officeRuntime(for: "S1")
+        runtime.open("/a.xlsx")
+        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.documents["/a.xlsx"] != nil }
+        let docId = runtime.stateSnapshot.documents["/a.xlsx"]!.docId
+        let keys = [tileKey(0, 0), tileKey(1, 0), tileKey(0, 1)]
+        office.recorder.subscribeReplies[docId] = keys
+
+        runtime.subscribeTiles(path: "/a.xlsx", part: 0, zoomPPT: 1000, viewportTwips: sampleViewport)
+
+        await officeWaitUntil(timeout: 2) { !office.recorder.requestCalls.isEmpty }
+        XCTAssertEqual(office.recorder.requestCalls.count, 1)
+        XCTAssertEqual(office.recorder.requestCalls[0].docId, docId)
+        XCTAssertEqual(Set(office.recorder.requestCalls[0].keys), Set(keys))
+        XCTAssertEqual(runtime.tileStore.inFlightCountForTesting, 3, "every requested key is tracked in flight")
+    }
+
+    /// Obligation 3: a second subscribe covering an overlapping viewport must not re-request a key
+    /// that is already cached (arrived) or already in flight (requested, no answer yet) — the "big
+    /// batch pins the connection" amplifier the T5.5 review carried forward. `tileStore.ingest` is
+    /// called directly here, standing in for a real `onTile` push (which needs a live wire — the
+    /// routing that DELIVERS a push to the right store is proven separately, live, in
+    /// `OfficeRuntimeLiveTests`; this test is about the FILTERING decision alone).
+    func testASecondSubscribeSkipsKeysAlreadyCachedOrStillInFlight() async {
+        let (host, _) = makeHost()
+        let office = officeFactory()
+        host.makeOfficeRuntime = office.make
+        let runtime = host.officeRuntime(for: "S1")
+        runtime.open("/a.xlsx")
+        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.documents["/a.xlsx"] != nil }
+        let docId = runtime.stateSnapshot.documents["/a.xlsx"]!.docId
+        let (k0, k1, k2) = (tileKey(0, 0), tileKey(1, 0), tileKey(0, 1))
+        office.recorder.subscribeReplies[docId] = [k0, k1]
+
+        runtime.subscribeTiles(path: "/a.xlsx", part: 0, zoomPPT: 1000, viewportTwips: sampleViewport)
+        await officeWaitUntil(timeout: 2) { office.recorder.requestCalls.count == 1 }
+
+        // k0 "arrives" (a stand-in for the real push); k1 stays in flight, untouched.
+        runtime.tileStore.ingest(docId: docId, key: k0, generation: 0, pixels: Data(repeating: 1, count: 4))
+
+        // A scrolled viewport now needs k0 (cached), k1 (still in flight) and k2 (genuinely new).
+        office.recorder.subscribeReplies[docId] = [k0, k1, k2]
+        runtime.subscribeTiles(path: "/a.xlsx", part: 0, zoomPPT: 1000, viewportTwips: sampleViewport)
+
+        await officeWaitUntil(timeout: 2) { office.recorder.requestCalls.count == 2 }
+        XCTAssertEqual(office.recorder.requestCalls[1].docId, docId)
+        XCTAssertEqual(office.recorder.requestCalls[1].keys, [k2],
+                       "only the genuinely-missing key is requested a second time")
+    }
+
+    /// The routing half of tile delivery (`ShellSessionHost.officeRuntime(owning:)`) — a linear scan
+    /// by docId, deliberately not a maintained reverse index (see that method's own doc). Exercised
+    /// directly here since the closures that CALL it (`wireOfficeTileCallbacks`) only ever fire off
+    /// a real `OfficeHelperClient`'s pushes — proven end to end, live, in `OfficeRuntimeLiveTests`.
+    func testOfficeRuntimeOwningDocIdFindsTheRuntimeThatHoldsIt() async {
+        let (host, _) = makeHost()
+        let office = officeFactory()
+        host.makeOfficeRuntime = office.make
+        let r1 = host.officeRuntime(for: "S1")
+        let r2 = host.officeRuntime(for: "S2")
+        r1.open("/a.xlsx")
+        r2.open("/b.xlsx")
+        await officeWaitUntil(timeout: 2) {
+            r1.stateSnapshot.documents["/a.xlsx"] != nil && r2.stateSnapshot.documents["/b.xlsx"] != nil
+        }
+        let docIdA = r1.stateSnapshot.documents["/a.xlsx"]!.docId
+        let docIdB = r2.stateSnapshot.documents["/b.xlsx"]!.docId
+
+        XCTAssertTrue(host.officeRuntime(owning: docIdA) === r1)
+        XCTAssertTrue(host.officeRuntime(owning: docIdB) === r2)
+        XCTAssertNil(host.officeRuntime(owning: "no-such-doc"))
+    }
+
+    /// Store hygiene: a helper death must clear EVERY runtime's tile store, not just the one that
+    /// happened to trigger it — `OfficeRuntime.handle(supervisorEvent:)`'s own `.helperDied`/
+    /// `.helperUnavailable` cases, mirroring the reducer's own "every runtime, every phase" fan-out
+    /// (see `OfficeRuntimeState.Phase`'s doc).
+    func testHelperDeathEvictsEveryRuntimesTileStore() async {
+        let (host, _) = makeHost()
+        let office = officeFactory()
+        host.makeOfficeRuntime = office.make
+        let r1 = host.officeRuntime(for: "S1")
+        let r2 = host.officeRuntime(for: "S2")
+        r1.open("/a.xlsx")
+        r2.open("/b.xlsx")
+        await officeWaitUntil(timeout: 2) {
+            r1.stateSnapshot.documents["/a.xlsx"] != nil && r2.stateSnapshot.documents["/b.xlsx"] != nil
+        }
+        let docIdA = r1.stateSnapshot.documents["/a.xlsx"]!.docId
+        let docIdB = r2.stateSnapshot.documents["/b.xlsx"]!.docId
+        r1.tileStore.ingest(docId: docIdA, key: tileKey(0, 0), generation: 0, pixels: Data([1]))
+        r2.tileStore.ingest(docId: docIdB, key: tileKey(0, 0), generation: 0, pixels: Data([2]))
+        XCTAssertEqual(r1.tileStore.cachedCountForTesting, 1)
+        XCTAssertEqual(r2.tileStore.cachedCountForTesting, 1)
+
+        host.broadcastOfficeHelperEvent(.helperDied)
+
+        XCTAssertEqual(r1.tileStore.cachedCountForTesting, 0, "S1's store is cleared too, not just S2's")
+        XCTAssertEqual(r2.tileStore.cachedCountForTesting, 0)
+    }
+
+    /// A document close must release its own tiles from the store — `OfficeRuntime.perform`'s
+    /// `.helperClose` case — without touching a DIFFERENT document's cached pixels.
+    func testClosingADocumentEvictsOnlyItsOwnTilesFromTheStore() async {
+        let (host, _) = makeHost()
+        let office = officeFactory()
+        host.makeOfficeRuntime = office.make
+        let runtime = host.officeRuntime(for: "S1")
+        runtime.open("/a.xlsx")
+        runtime.open("/b.xlsx")
+        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.documents.count == 2 }
+        let docIdA = runtime.stateSnapshot.documents["/a.xlsx"]!.docId
+        let docIdB = runtime.stateSnapshot.documents["/b.xlsx"]!.docId
+        runtime.tileStore.ingest(docId: docIdA, key: tileKey(0, 0), generation: 0, pixels: Data([1]))
+        runtime.tileStore.ingest(docId: docIdB, key: tileKey(0, 0), generation: 0, pixels: Data([2]))
+
+        runtime.close("/a.xlsx")
+
+        XCTAssertNil(runtime.tileStore.tile(docId: docIdA, key: tileKey(0, 0)), "a.xlsx's tile is gone")
+        XCTAssertNotNil(runtime.tileStore.tile(docId: docIdB, key: tileKey(0, 0)), "b.xlsx's tile is untouched")
+        // Hygiene, not an assertion (mirrors `testTeardownOfficeRuntimeRemovesItFromTheTableAnd
+        // ClosesEveryOpenDocument`'s own comment): let the fire-and-forget close settle before this
+        // test returns, so nothing is left orphaned to touch `office.recorder` (an `[unowned self]`
+        // closure struct) after `officeDoubles` releases it in `tearDown`.
+        await officeWaitUntil(timeout: 2) { office.recorder.closeCalls.count == 1 }
     }
 }

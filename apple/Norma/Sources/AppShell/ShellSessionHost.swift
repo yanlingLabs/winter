@@ -767,10 +767,60 @@ final class ShellSessionHost: ObservableObject {
         officeEventsFanOutTask = Task { [weak self] in
             for await event in supervisor.events {
                 guard let self else { return }
+                // Task 6: wire the tile push callbacks onto the FRESH client BEFORE fanning the
+                // event out to every runtime — `broadcastOfficeHelperEvent` is what flushes queued
+                // opens and unblocks the first `subscribeTiles` call, so wiring it after would race
+                // the first tiles home.
+                if case .ready = event {
+                    self.wireOfficeTileCallbacks(on: supervisor)
+                }
                 self.broadcastOfficeHelperEvent(event)
             }
         }
         return supervisor
+    }
+
+    /// Task 6 — (re)points the shared client's tile push callbacks at this host's routing. Called
+    /// every time a fresh client comes up: `OfficeHelperSupervisor.client` is re-minted per attempt
+    /// (a new `OfficeHelperClient` on every successful `attemptOnce`), so a wiring done once at
+    /// supervisor-creation time would go stale the moment the helper dies and relaunches.
+    ///
+    /// Fires from the reader task's own thread — no isolation promise
+    /// (`OfficeWireConnection.onTile`'s own doc) — so every callback body hops to `@MainActor`
+    /// before touching anything: `officeRuntimes`, `OfficeRuntime` and `OfficeTileStore` are all
+    /// main-actor-isolated.
+    private func wireOfficeTileCallbacks(on supervisor: OfficeHelperSupervisor) {
+        supervisor.client?.onTile = { [weak self] _, docId, key, generation, _, _, pixels in
+            // `width`/`height` (the two skipped params) are the wire's own claim, unvalidated by
+            // the reader — obligation 8: `TileMath`/the `TileKey` itself are authoritative on
+            // dimensions, never these two ints. Nothing downstream of this callback reads them.
+            Task { @MainActor [weak self] in
+                self?.officeRuntime(owning: docId)?.tileStore.ingest(
+                    docId: docId, key: key, generation: generation, pixels: pixels)
+            }
+        }
+        supervisor.client?.onTileFailed = { [weak self] _, docId, key, reason in
+            Task { @MainActor [weak self] in
+                self?.officeRuntime(owning: docId)?.tileStore.markFailed(docId: docId, key: key)
+                NSLog("[ShellSessionHost] office tile failed doc=\(docId) key=\(key): \(reason)")
+            }
+        }
+        supervisor.client?.onInvalidated = { [weak self] _, docId, keys in
+            Task { @MainActor [weak self] in
+                self?.officeRuntime(owning: docId)?.tileStore.invalidate(docId: docId, keys: keys)
+            }
+        }
+    }
+
+    /// The runtime that currently owns `docId` — a linear scan over `officeRuntimes.values`,
+    /// deliberately not a maintained reverse index: `OfficeRuntimeState.documents` (keyed by path)
+    /// is already the one source of truth for "which docId belongs to which runtime", and a second,
+    /// hand-maintained map could only ever drift from it. Bounded by how many sessions have office
+    /// documents open at once, times how many each holds — realistically single digits, cheap to
+    /// scan on every tile push. `nil` for a docId whose runtime already closed it or tore down —
+    /// the push is simply dropped, which is correct: nothing is showing it any more.
+    func officeRuntime(owning docId: String) -> OfficeRuntime? {
+        officeRuntimes.values.first { $0.stateSnapshot.documents.values.contains { $0.docId == docId } }
     }
 
     /// The fan-out itself, split out as a directly-callable, directly-testable method — the real
@@ -832,6 +882,18 @@ final class ShellSessionHost: ObservableObject {
                     }
                 } catch {
                     NSLog("[ShellSessionHost] office unsubscribeTiles(\(docId)) failed: \(error)")
+                }
+            },
+            // office-plumbing Task 6: its own `queue.run`, never composed inside `subscribeTiles`'s
+            // — see `OfficeRuntime.perform`'s `.subscribe` case for why the two must stay two
+            // sequential awaits (obligation 2: nesting `officeRequestQueue.run` deadlocks every
+            // later office call on this host, not just the nested pair).
+            requestTiles: { [weak supervisor] docId, keys in
+                try await queue.run {
+                    guard let client = supervisor?.client else {
+                        throw OfficeHelperClientError.serverError(reason: "helper not connected")
+                    }
+                    try await client.requestTiles(docId: docId, keys: keys)
                 }
             })
     }
