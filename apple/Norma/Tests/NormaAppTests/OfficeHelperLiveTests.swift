@@ -998,6 +998,35 @@ final class OfficeHelperLiveTests: XCTestCase {
         try await helper.client.close(docId: docId)
     }
 
+    /// Trap #2's TRAPPING variant, over the real wire — the coordinator's own instruction was to
+    /// drive each of the three trap inputs over the wire; the two tests above cover trap #1 and
+    /// trap #2's non-trapping OOM sibling, but not this, the actual `estimatedTileCount`
+    /// multiplication-overflow branch itself. At the finest allowed zoom (`TileMath.maxZoomPPT`,
+    /// span == 5 twips/tile) a length just under `Int64.max / 2` keeps `indexRange` itself
+    /// representable (~4.6e18 twips, under `Int64.max`'s ~9.2e18) but produces a per-axis tile
+    /// count around 9.2e17 — squaring that for a 2D viewport overflows `Int64` in the
+    /// multiplication itself (see `TileMathTests.testEstimatedTileCountAllFourOutcomes`'s case (d)
+    /// for the exact same shape proven purely). A handler-valid `zoomPPT` (comfortably inside
+    /// `isZoomPPTValid`'s range) is the point — this must be refused by the OVERFLOW check inside
+    /// `estimatedTileCount`, not by the earlier `isZoomPPTValid` guard.
+    func testOverflowingViewportAtTheFinestValidZoomIsRefusedAndTheHelperSurvives() async throws {
+        try skipUnlessVendorPresent()
+        let helper = try await spawnLiveHelper()
+        let docId = UUID().uuidString
+        _ = try await helper.client.open(docId: docId, path: Self.fixturesRoot.appendingPathComponent("gate.xlsx").path)
+
+        let overflowingViewport = OfficeTwipsRect(x: 0, y: 0, width: Int64.max / 2 - 1, height: Int64.max / 2 - 1)
+        do {
+            _ = try await helper.client.subscribeTiles(docId: docId, part: 0, zoomPPT: TileMath.maxZoomPPT, viewportTwips: overflowingViewport)
+            XCTFail("expected a server refusal for a genuinely overflowing tile count, got a successful subscribe")
+        } catch OfficeHelperClientError.serverError(let reason) {
+            XCTAssertEqual(reason, "viewportTooLarge")
+        }
+
+        try await helper.client.ping()
+        try await helper.client.close(docId: docId)
+    }
+
     /// Trap #3 (`tileBoundsTwips`'s old unchecked `Int64(tileX) * span`) driven through
     /// `tileRequest`: ONE hostile key (`tileX: Int.max`) mixed into a batch alongside one normal
     /// key. The whole REQUEST is still accepted (`tileRequestAccepted`) — refusal happens per-key,
