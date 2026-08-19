@@ -16,14 +16,46 @@ import Foundation
 /// several open documents (several `.document` tabs in the same session), and this store is shared
 /// across all of them.
 ///
-/// **No persistent "generations" ledger**, unlike `TileCache.generations` — and deliberately not a
-/// missing feature: the helper-side cache needs one because ITS OWN `invalidate` has to keep bumping
-/// a generation for a coordinate it may have evicted long ago, so a later re-paint never appears to
-/// regress. This store never paints anything; every generation number it will ever see arrives
-/// ALREADY DECIDED, stamped on the incoming `onTile` push by the one place that mints them (the
-/// helper's `TileCache.recordPaint`). An evicted-then-later-refetched key simply gets told the
-/// current generation again over the wire — there is nothing for this side to remember about a key
-/// it no longer holds.
+/// **No persistent PER-KEY "generations" ledger**, unlike `TileCache.generations` — and, as far as a
+/// re-PAINTED key goes, deliberately not a missing feature: the helper-side cache needs one because
+/// ITS OWN `invalidate` has to keep bumping a generation for a coordinate it may have evicted long
+/// ago, so a later re-paint never appears to regress. This store never paints anything; every
+/// generation number it will ever see arrives ALREADY DECIDED, stamped on the incoming `onTile` push
+/// by the one place that mints them (the helper's `TileCache.recordPaint`). An evicted-then-later-
+/// refetched key simply gets told the current generation again over the wire — there is nothing for
+/// THAT case for this side to remember.
+///
+/// **office-plumbing Task 8 correction**: the paragraph above used to end there, claiming "nothing to
+/// remember" full stop — true for a re-painted key, false for `invalidate` itself, which this task is
+/// the first to actually exercise (a reload's `.reloadDocument` effect closes the whole document
+/// instead — see `evictAll`'s own doc — so `invalidate` proper stays reachable only from a genuine
+/// same-docId edit, Stage B territory; T8 is what made reasoning about it precise enough to catch the
+/// bug below). `invalidate` evicted a cached ENTRY but left that key's IN-FLIGHT marker untouched —
+/// a request sent just before an invalidation resolves AFTER it, `ingest` has no cached generation
+/// left to compare the late reply against (the entry is gone), and the late, pre-invalidation reply
+/// is accepted as if it were current. Clearing the in-flight marker too (below) does not erase that
+/// ONE stale frame — the reply that was already in flight still lands and still paints, once — but it
+/// closes the WORSE half: without it, `keysNeedingRequest` also believes a fresh ask is still
+/// outstanding and refuses to issue one, so nothing EVER corrects that one stale frame. With it, the
+/// very next viewport pass re-requests the key and the stale frame is superseded. A full per-key
+/// ledger (reject any arrival at or below an invalidated generation, closing even the one stale
+/// frame) was considered and set aside: Stage A never calls `invalidate` at all, so there is no live
+/// call site to justify the extra bookkeeping against yet — this is deliberately the cheaper half of
+/// the review's own either/or.
+///
+/// The RELOAD path's own version of "a reply arrives for something this store has moved on from" is
+/// closed differently, and completely, by construction rather than by a ledger: a reload always mints
+/// a NEW docId (T6 review F4), and `evictAll(docId:)` — called synchronously, before the new open
+/// even starts (`OfficeRuntime.perform`'s `.reloadDocument` case) — clears the OLD docId's entries,
+/// in-flight markers AND pending-arrival record all at once. A reply that was in flight for the OLD
+/// docId and resolves after that can still be `ingest`ed (this store does not track "which docIds are
+/// still open" — nothing stops it), but the entry it (re-)creates is addressed under a `Key` nothing
+/// downstream ever looks up again: the canvas that used to read that docId has already moved on to
+/// the new one (`OfficeTileCanvasView.syncDocumentIdentity`), and a fresh open never reuses a retired
+/// docId. The phantom entry is genuinely inert dead weight, not a correctness hazard — bounded by the
+/// LRU cap like anything else here, never read, never confused for the new document's own entries
+/// (different `docId` in the key). `testALateArrivalForAClosedDocIdCannotContaminateAFreshDocIds
+/// Entries` is the proof.
 @MainActor
 final class OfficeTileStore {
     struct Key: Hashable {
@@ -146,9 +178,14 @@ final class OfficeTileStore {
         var changed: Set<TileKey> = []
         for key in keys {
             let k = Key(docId: docId, tileKey: key)
-            guard entries.removeValue(forKey: k) != nil else { continue }
-            lruOrder.removeAll { $0 == k }
-            changed.insert(key)
+            let hadEntry = entries.removeValue(forKey: k) != nil
+            if hadEntry { lruOrder.removeAll { $0 == k } }
+            // office-plumbing Task 8 (the store header's own correction, above): a key can be
+            // invalidated while a request for it is still outstanding, with NOTHING cached yet
+            // (`hadEntry == false`) — clearing the marker here is what lets the NEXT viewport pass
+            // ask for it again instead of believing, forever, that an ask is still in flight.
+            let wasInFlight = inFlight.remove(k) != nil
+            if hadEntry || wasInFlight { changed.insert(key) }
         }
         guard !changed.isEmpty else { return }
         pendingArrivals[docId, default: []].formUnion(changed)

@@ -100,12 +100,15 @@ struct OfficeTileCanvasRepresentable: NSViewRepresentable {
     }
 
     /// The drift re-assert (mirrors `EditorViewportView.updateNSView`'s own doc on why
-    /// `.activateOnly` exists): `documents[path].activePart` is written by ANY `subscribeTiles` call
-    /// for this doc, including one the MODEL fired as a nominal placeholder before the canvas's own
-    /// accurate one lands. Re-applying here — `setActivePart` itself no-ops when the value already
-    /// matches — keeps the canvas honest if something outside it ever moves `activePart` first.
+    /// `.activateOnly` exists), NOW ALSO the office-plumbing Task 8 (T6 review F4) reload seam:
+    /// `documents[path].activePart` is written by ANY `subscribeTiles` call for this doc, including
+    /// one the MODEL fired as a nominal placeholder before the canvas's own accurate one lands, and
+    /// `docId`/`sizeTwips` change out from under this view exactly once — the moment a reload
+    /// replaces the document with a freshly-minted docId. `syncDocumentIdentity` handles both: a
+    /// no-op re-assert when nothing changed, and the reload seam when it did. See that method's own
+    /// header for why this is NOT `.id(docId)` on the representable.
     func updateNSView(_ nsView: OfficeTileCanvasView, context: Context) {
-        nsView.setActivePart(activePart)
+        nsView.syncDocumentIdentity(docId: docId, sizeTwips: sizeTwips, activePart: activePart)
     }
 
     /// Obligation 1's own cross-file precedent (`EditorViewportView.dismantleNSView`,
@@ -136,21 +139,28 @@ struct OfficeTileCanvasRepresentable: NSViewRepresentable {
 final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
     private let runtime: OfficeRuntime
     private let path: String
-    private let docId: String
+    /// **office-plumbing Task 8 (T6 review F4): mutable, not `let`, as of this task.** A reload
+    /// replaces the open document with a freshly-minted docId (`OfficeRuntimeReducer.opened`'s own
+    /// doc) while this SAME view instance keeps running — `syncDocumentIdentity` is the one place
+    /// that updates it. Readable (not writable) from outside this file: `PanelDocumentTabTests`/
+    /// `OfficeTileCanvasViewTests` pin that a reload's `.opened` actually reaches here.
+    private(set) var docId: String
     /// Weak — registered as `model.canvasHost` in `mount()`, explicitly cleared in `unmount()` (the
     /// SwiftUI dismantle path). See `OfficeDocumentCanvasHost`'s own header for why this lives on
     /// the model rather than the runtime, and `EditorRuntime.viewportHost`'s doc for why the
     /// clearing must be explicit rather than trusted to weak zeroing (which does not run `didSet`
     /// and, here, could not reach the model's stored property from outside it anyway).
     private weak var model: PanelDocumentTabModel?
-    /// The size to clamp scrolling against. Captured once at open time (`OfficeRuntimeState
+    /// The size to clamp scrolling against. Captured at open time (`OfficeRuntimeState
     /// .DocumentEntry.sizeTwips`, itself LOK's `getDocumentSize()` at open) — **disclosed
-    /// imprecision**: a multi-sheet spreadsheet's sheets can have different used ranges, and Stage A
-    /// has no per-part size to clamp against instead (`OfficeRuntimeState` carries exactly one
-    /// `sizeTwips` per document, not per part). A soft UX bound, not a correctness one: scrolling
-    /// past real content simply shows placeholders forever (the store has nothing to serve there),
-    /// nothing breaks.
-    private let sizeTwips: OfficeDocumentSize
+    /// imprecision, unchanged by Task 8**: a multi-sheet spreadsheet's sheets can have different used
+    /// ranges, and Stage A has no per-part size to clamp against instead (`OfficeRuntimeState`
+    /// carries exactly one `sizeTwips` per document, not per part). A soft UX bound, not a
+    /// correctness one: scrolling past real content simply shows placeholders forever (the store has
+    /// nothing to serve there), nothing breaks. **Mutable as of Task 8**: a reload's fresh `opened{}`
+    /// carries its own `sizeTwips` — see `syncDocumentIdentity`'s own header for why this must be
+    /// re-applied, and re-clamped against, rather than left at whatever the document held before.
+    private var sizeTwips: OfficeDocumentSize
 
     private(set) var part: Int
     private(set) var zoomPPT: Int = 1000
@@ -252,6 +262,79 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
         clearVisibleTiles()
         relayoutVisibleTiles()
         performSubscribe()
+    }
+
+    // MARK: - office-plumbing Task 8 (T6 review F4): the reload seam
+
+    /// **Runs on EVERY `updateNSView`, not only when a reload happened** — this SUBSUMES the old
+    /// `setActivePart(activePart)`-only drift re-assert; see that method's own doc for why re-
+    /// applying a part that already matches must stay a no-op, which still holds on the `else`
+    /// branch below.
+    ///
+    /// Before this task, `docId`/`sizeTwips` were `let`: nothing ever told this view a RELOAD had
+    /// replaced the document underneath it with a freshly-minted docId
+    /// (`OfficeRuntimeReducer.opened`'s own doc — a reload IS a new docId, by construction of how
+    /// `.reloadDocument` reopens). Without this, `applyContents`'s `runtime.tileStore.tile(docId:
+    /// self.docId, ...)` read and `mount()`'s `tilesArrived` filter (`arrival.docId == self.docId`)
+    /// would both keep comparing against the OLD, already-evicted docId forever — every tile stays a
+    /// placeholder, permanently. That was the T6 review's F4 finding.
+    ///
+    /// **Deliberately NOT `.id(docId)` on the representable** — the alternative the review named
+    /// alongside this one, and the more obvious-looking fix. Rejected because it is wrong for THIS
+    /// task specifically: `.id(docId)` forces SwiftUI to tear down and rebuild this whole `NSView` on
+    /// every reload (`dismantleNSView` -> `unmount()`, then a fresh `makeNSView`), which would reset
+    /// `scrollOrigin` to `.zero` and `zoomPPT` to its 100% default — losing exactly the view state
+    /// (`{activePart, scrollTwips, zoomPPT}`) this task exists to PRESERVE. Mutating in place costs
+    /// no more code and keeps both untouched for free, since they are this view's own ivars and nei-
+    /// ther a reload nor this method ever recreates the view.
+    func syncDocumentIdentity(docId newDocId: String, sizeTwips newSizeTwips: OfficeDocumentSize, activePart: Int) {
+        guard newDocId != docId else {
+            setActivePart(activePart) // the pre-Task-8 drift re-assert, unchanged
+            return
+        }
+        docId = newDocId
+        sizeTwips = newSizeTwips
+        // Never `setActivePart` here — that method zeroes `scrollOrigin` (correct for a discrete
+        // part-strip click, wrong for a reload, which must PRESERVE scroll) and would also skip
+        // entirely if `activePart` happens to already equal `part`, leaving the stale docId's layers
+        // in place. Assigned directly instead; `clearVisibleTiles()` below is what actually matters.
+        part = max(0, activePart)
+        // The old docId's tile-store entries are already gone — `OfficeRuntime`'s `.reloadDocument`
+        // effect performer evicts them (`tileStore.evictAll(docId:)`) before the new open even
+        // starts — so every currently-laid-out layer would otherwise keep showing the LAST FRAME of
+        // a document that no longer exists rather than the placeholder tone obligation 4 requires.
+        clearVisibleTiles()
+        // T8 interface obligation 3: re-clamp against the FRESH size — a reload can change how much
+        // document there is (this view's own disclosed imprecision, above), so the OLD size's clamp
+        // could now be wrong in either direction. `scrollOrigin` itself is READ, never reset — this
+        // is the actual preservation, not merely the absence of a reset.
+        scrollOrigin = CGPoint(x: clampedOriginX(scrollOrigin.x), y: clampedOriginY(scrollOrigin.y))
+        relayoutVisibleTiles()
+        performSubscribe()
+    }
+
+    // MARK: - Test seams (office-plumbing Task 8)
+
+    /// A synthetic `NSEvent(.scrollWheel)` has no public convenience initializer in AppKit — this
+    /// lets a test establish a NONZERO scroll position directly, the same shape
+    /// `PanelDocumentTabModel.refreshForTesting()` already uses for an analogous reason. Clamped
+    /// through the same path `scrollWheel(with:)` itself uses, so a test cannot accidentally assert
+    /// against an out-of-bounds value production code could never actually reach.
+    func setScrollOriginForTesting(_ point: CGPoint) {
+        scrollOrigin = CGPoint(x: clampedOriginX(point.x), y: clampedOriginY(point.y))
+    }
+    var scrollOriginForTesting: CGPoint { scrollOrigin }
+
+    /// A synthetic `NSEvent(.magnify)` is equally awkward to construct — this reaches the SAME
+    /// `applyZoom` a real pinch/⌘± gesture reaches and then subscribes immediately, mirroring
+    /// `zoomStep`'s own two-call shape (a test's zoom is a discrete action, like ⌘±, not a continuous
+    /// pinch) — so a test establishes a non-default zoom through the identical clamp/resubscribe path
+    /// production code uses, not a hand-rolled shortcut.
+    @discardableResult
+    func setZoomForTesting(_ zoomPPT: Int) -> Bool {
+        guard applyZoom(zoomPPT) else { return false }
+        performSubscribe()
+        return true
     }
 
     // MARK: - Scroll (native momentum, no NSScrollView — obligation 9)

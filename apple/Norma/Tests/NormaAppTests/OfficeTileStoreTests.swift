@@ -179,6 +179,75 @@ final class OfficeTileStoreTests: XCTestCase {
         XCTAssertEqual(store.cachedCountForTesting, 0)
     }
 
+    /// office-plumbing Task 8 (F5): the bug the store's own header now documents at length. Before
+    /// this fix, `invalidate` only touched `entries` — a key that was IN FLIGHT (requested, nothing
+    /// cached yet) survived an invalidation untouched, so `keysNeedingRequest` kept believing an ask
+    /// for it was still outstanding forever, and the eventual (stale, pre-invalidation) reply would
+    /// be the last word on it.
+    func testInvalidateOfAnInFlightKeyWithNoCachedEntryClearsItsInFlightMarker() {
+        let store = OfficeTileStore()
+        store.markRequested(docId: "d1", keys: [key(0, 0)])
+        XCTAssertEqual(store.keysNeedingRequest(docId: "d1", candidates: [key(0, 0)]), [],
+                       "sanity: freshly marked, so not yet askable again")
+
+        store.invalidate(docId: "d1", keys: [key(0, 0)])
+
+        XCTAssertEqual(store.keysNeedingRequest(docId: "d1", candidates: [key(0, 0)]), [key(0, 0)],
+                       "an invalidated key must become askable again, not stay in flight forever")
+        XCTAssertEqual(store.inFlightCountForTesting, 0)
+    }
+
+    /// The disclosed residual the store's header names: the STALE reply itself, already in flight
+    /// before the invalidation, can still land and still paint — ONE frame, immediately correctable
+    /// (the previous test proves a fresh ask follows). This test pins that the store does not go
+    /// further than that — it does not (today) refuse the late arrival outright, which would require
+    /// the per-key ledger the header explains was deliberately not built yet.
+    func testALateArrivalForAnInvalidatedKeyIsStillAcceptedThisIsTheDisclosedResidual() {
+        let store = OfficeTileStore()
+        store.markRequested(docId: "d1", keys: [key(0, 0)])
+        store.invalidate(docId: "d1", keys: [key(0, 0)])
+
+        let accepted = store.ingest(docId: "d1", key: key(0, 0), generation: 0, pixels: pixels(9))
+
+        XCTAssertTrue(accepted, "the disclosed residual: a reply already in flight when the "
+                      + "invalidation fired still lands — see OfficeTileStore's own header")
+        XCTAssertNotNil(store.tile(docId: "d1", key: key(0, 0)))
+    }
+
+    /// office-plumbing Task 8 (F5, the reload story): the OTHER half of the store header's
+    /// correction — a reload never calls `invalidate`, it calls `evictAll` for the OLD docId (a
+    /// document close in disguise) and mints a NEW docId for the reopen. A reply that was in flight
+    /// for the OLD docId and resolves AFTER `evictAll` ran can still be `ingest`ed — this store keeps
+    /// no notion of "which docIds are still open" — but the entry it creates is addressed under a
+    /// `Key` nothing downstream ever reads again. This test is the airtight half of that story: it
+    /// does NOT hide the phantom entry (asserting it away would be dishonest about what the code
+    /// does); it proves the entry is INERT — a completely independent docId's own reads, writes and
+    /// `keysNeedingRequest` accounting are untouched by it.
+    func testALateArrivalForAClosedDocIdCannotContaminateAFreshDocIdsEntries() {
+        let store = OfficeTileStore()
+        store.ingest(docId: "old", key: key(0, 0), generation: 0, pixels: pixels(1))
+        store.markRequested(docId: "old", keys: [key(1, 0)])
+
+        // The reload: the old docId is closed exactly the way `OfficeRuntime.perform`'s
+        // `.reloadDocument` case closes it — `evictAll`, synchronously, before the new open starts.
+        store.evictAll(docId: "old")
+
+        // A reply for the OLD docId, already in flight before the close, resolves late.
+        let phantomAccepted = store.ingest(docId: "old", key: key(1, 0), generation: 0, pixels: pixels(2))
+        XCTAssertTrue(phantomAccepted, "disclosed, not hidden: the store cannot tell a late arrival "
+                      + "for a retired docId apart from a legitimate one on its own")
+
+        // The NEW docId a reload's reopen mints is a value nothing before this line ever mentioned —
+        // its own entries, in-flight bookkeeping and lookups must behave as if "old" never existed.
+        store.ingest(docId: "new", key: key(0, 0), generation: 0, pixels: pixels(3))
+        XCTAssertEqual(store.tile(docId: "new", key: key(0, 0))?.pixels, pixels(3))
+        XCTAssertEqual(store.keysNeedingRequest(docId: "new", candidates: [key(1, 0)]), [key(1, 0)],
+                       "the old docId's in-flight marker for key(1,0) must not leak into a same-keyed "
+                       + "request against the unrelated new docId")
+        XCTAssertNil(store.tile(docId: "new", key: key(1, 0)), "the phantom lives ONLY under the old, "
+                     + "retired docId — never under the new one")
+    }
+
     // MARK: - Hygiene sweeps
 
     func testEvictAllReleasesOnlyTheNamedDocIdsEntriesAndInFlightMarkers() {

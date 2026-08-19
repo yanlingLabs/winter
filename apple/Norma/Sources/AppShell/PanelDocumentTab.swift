@@ -326,6 +326,17 @@ final class PanelDocumentTabModel: ObservableObject {
                                    hasRequestedOpen: hasRequestedOpen)
     }
 
+    /// office-plumbing Task 8: this tab's own banner text, or `nil` — mirrors `PanelEditorTabModel
+    /// .banner`'s door (`OfficeRuntimeState.documentBanners`, single source, read directly — the T5
+    /// review's "emitBanner is a relay" note stands), except there is no dismiss/reload/keep-mine
+    /// choice to route: Stage A's one banner reason answers itself (the file reappearing and
+    /// reopening clears it — `OfficeRuntimeReducer.opened`'s own doc), so unlike `EditorTabBanner`
+    /// this is a plain optional `String`, not an enum with buttons.
+    var banner: String? {
+        guard let path else { return nil }
+        return runtimeState?.documentBanners[path]
+    }
+
     /// Test seam: drive one refresh cycle synchronously, without a view.
     func refreshForTesting() { refresh() }
 }
@@ -465,6 +476,21 @@ struct PanelDocumentContent: View {
     @ObservedObject var model: PanelDocumentTabModel
 
     var body: some View {
+        VStack(spacing: 0) {
+            // office-plumbing Task 8 — above everything, including the calm states: mirrors
+            // `PanelEditorContent.body`'s identical placement and identical reasoning (a file that
+            // was deleted while its tab was showing something else still has something to say, and a
+            // banner that only rendered over the canvas would be invisible exactly when it matters).
+            if let banner = model.banner {
+                OfficeDocumentBannerView(text: banner)
+            }
+            viewport
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onAppear { model.activate() }
+    }
+
+    private var viewport: some View {
         Group {
             switch model.plan {
             case .showCanvas(let path, let docId, let type, let parts, let sizeTwips, let activePart):
@@ -484,7 +510,37 @@ struct PanelDocumentContent: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onAppear { model.activate() }
+    }
+}
+
+// MARK: - office-plumbing Task 8: the banner
+
+/// **One row above the canvas, ONE source, no buttons.** The look reuses `EditorBannerView`'s exact
+/// vocabulary (`PanelEditorTab.swift`'s own header explains the tokens: `Theme.elevatedSurface` +
+/// `Theme.hairline`, `.primary` text, no danger tone — this palette has none) rather than inventing a
+/// second one; the shape is smaller because the CONTENT is smaller — Stage A has exactly one banner
+/// reason, it persists (nothing to lose, per the brief), and there is nothing to choose between, so
+/// there are no action buttons at all, dismiss included.
+struct OfficeDocumentBannerView: View {
+    let text: String
+
+    var body: some View {
+        HStack(spacing: panelEditorBannerGap) {
+            Text(text)
+                .font(Typography.caption(.medium))
+                .foregroundStyle(.primary)
+                .lineLimit(2)
+                .truncationMode(.middle)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: panelEditorBannerGap)
+        }
+        .padding(.horizontal, panelTabPillInset)
+        .padding(.vertical, panelEditorBannerVerticalPadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.elevatedSurface)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Theme.hairline).frame(height: 1)
+        }
     }
 }
 

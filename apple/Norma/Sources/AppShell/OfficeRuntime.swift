@@ -1,4 +1,62 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#endif
+
+// MARK: - office-plumbing Task 8: what a change on disk MEANS
+
+/// **PURE: a file's identity+content fingerprint, cheap enough to take on every debounced watcher
+/// fire.** Stage A documents are binary (xlsx/docx/...) and view-only, so — unlike
+/// `EditorFileWatcher.swift`'s `EditorDiskChange`, which reads and diffs the whole file as TEXT —
+/// there is nothing to decode and nothing to lose by comparing metadata instead of bytes: a `stat(2)`
+/// answers "did this move" exactly as well as a full read would, at a cost close to zero.
+///
+/// All three fields matter, not just mtime: `inode` catches a replace-via-rename (a new inode can
+/// legitimately keep an identical mtime on a fast enough clock); `size` and the nanosecond-resolution
+/// mtime together catch an in-place rewrite that happens to land in the same second POSIX time
+/// reports (`st_mtimespec` is nanosecond already — Foundation's own `Date`-based attributes API
+/// rounds this away, which is why this reads the raw `stat` struct instead).
+struct OfficeFileStat: Equatable {
+    var inode: UInt64
+    var size: Int64
+    var modifiedSeconds: Int64
+    var modifiedNanoseconds: Int64
+}
+
+/// `nil` when the path cannot be stat'd — the ONLY signal `officeDiskChange` treats as "gone" (a
+/// permissions flap that merely makes a file unreadable is a different, rarer case Stage A does not
+/// try to distinguish from a deletion; `EditorRuntime.fileChangedOnDisk`'s own `.notFound`-only
+/// carve-out is a refinement this simpler surface does not need yet — a stat failure is already the
+/// narrowest signal available here, unlike a full read, which can fail for many additional reasons).
+func officeFileStat(atPath path: String) -> OfficeFileStat? {
+    var info = stat()
+    guard stat(path, &info) == 0 else { return nil }
+    return OfficeFileStat(inode: UInt64(info.st_ino), size: Int64(info.st_size),
+                          modifiedSeconds: Int64(info.st_mtimespec.tv_sec),
+                          modifiedNanoseconds: Int64(info.st_mtimespec.tv_nsec))
+}
+
+/// The classification itself — deliberately a two-way fork, not `EditorDiskChange`'s four-way one:
+/// **no suppression bag, and so no `.ours` case** (the T8 brief, verbatim: "Stage A never writes
+/// office files from the app," so unlike the editor there is no "was this our own save landing"
+/// question to ask; every difference from the baseline is external by construction — see
+/// `OfficeRuntime.fileChangedOnDisk`'s own header, the site Stage B's save work must revisit).
+enum OfficeDiskChange: Equatable {
+    /// The stat is exactly what this runtime already knew — the overwhelmingly common answer: a
+    /// sibling file changing in the same watched directory, a LOK lock file churning beside the
+    /// document (T3's own disclosed concern), a `touch` with no real content change.
+    case unchanged
+    /// Different from the baseline. The agent, another editor, `git checkout` — Stage A cannot tell
+    /// which, and a view-only surface has no reason to.
+    case external
+    case deleted
+}
+
+func officeDiskChange(stat: OfficeFileStat?, baseline: OfficeFileStat?) -> OfficeDiskChange {
+    guard let stat else { return .deleted }
+    if let baseline, stat == baseline { return .unchanged }
+    return .external
+}
 
 // MARK: - The state (PURE — `OfficeRuntimeReducerTests` drives every row of this without a helper)
 
@@ -59,6 +117,19 @@ struct OfficeRuntimeState: Equatable {
     /// helper death clears every document at once (see `.helperDied` below), so nothing document-
     /// scoped could ever hold this by the time anything reads it.
     var failureReason: String?
+    /// **office-plumbing Task 8**: what an open document's tab is saying ABOVE the canvas — today
+    /// exactly one reason ever lands here ("File was deleted on disk"), but this is a `[String:
+    /// String]` rather than a `Set<String>` of "deleted" paths for the same reason `openFailures` is
+    /// a dictionary of reasons rather than a set of paths: Stage B's first save-conflict banner
+    /// reuses this field verbatim rather than inventing a second one. **Deliberately separate from
+    /// `openFailures`**: a deleted-while-open document still HAS a `documents[path]` entry (nothing
+    /// to lose — the last-rendered tiles stay on screen, per the brief), so it must never route
+    /// through the failure sentence that REPLACES the canvas (`officeDocumentViewportPlan`'s
+    /// `.openFailed` arm) — this banner sits ABOVE a canvas that keeps rendering, mirroring
+    /// `EditorRuntimeState.banners`' identical split from `EditorRuntimeState.openFailures`.
+    /// Cleared by a successful (re)open of the same path (`.opened`'s own doc: a document that just
+    /// opened cannot still be saying it was deleted) and by close/teardown.
+    var documentBanners: [String: String] = [:]
 }
 
 // MARK: - Events
@@ -84,6 +155,25 @@ enum OfficeRuntimeEvent: Equatable {
     /// coordinates mean and what it does with the returned tile keys.
     case subscribeRequested(path: String, part: Int, zoomPPT: Int, viewportTwips: OfficeTwipsRect)
     case unsubscribeRequested(path: String)
+
+    // MARK: office-plumbing Task 8 — the world changing underneath an open document
+
+    /// **The watcher's verdict for an open document's file: different from what Swift last saw.**
+    /// Unlike `EditorRuntimeEvent.externalChanged`, this carries no text and no dirty/clean fork —
+    /// Stage A documents are binary and view-only, so there is nothing to diff and nothing to lose:
+    /// every arrival of this event is answered the SAME way, a silent reload (see this reducer's own
+    /// `.externalChangeDetected` arm). `OfficeRuntime.fileChangedOnDisk`'s own header states why no
+    /// suppression bag exists yet.
+    case externalChangeDetected(path: String)
+    /// The watched file is gone.
+    case externalDeleted(path: String)
+    /// **A `.reloadDocument` effect's reopen failed** — carries the docId it was trying to REPLACE,
+    /// which is what lets this event tell a genuine failure apart from a stale one: a second,
+    /// independent reload for the same path (two external writes close enough together to both mint
+    /// their own reopen) may already have SUCCEEDED and replaced `oldDocId` with a newer entry by
+    /// the time this failure lands, and a failure that blindly cleared `documents[path]` regardless
+    /// would then discard a document that is genuinely fine. See this reducer's own arm.
+    case reloadFailed(path: String, oldDocId: String, reason: String)
     /// The shared supervisor's own death/never-came-up signals, fanned out to every runtime in the
     /// table (`ShellSessionHost`'s own broadcast — see its header). Legal, and identically handled,
     /// from every phase — carry 4's own words, and `OfficeRuntimeReducerTests
@@ -109,6 +199,25 @@ enum OfficeRuntimeEffect: Equatable {
     case helperClose(docId: String)
     case subscribe(docId: String, part: Int, zoomPPT: Int, viewportTwips: OfficeTwipsRect)
     case unsubscribe(docId: String)
+    /// office-plumbing Task 8: start/stop the file watch — emitted by `.opened` (fires the instant
+    /// this runtime records the document, fresh open OR reload alike — `startWatching`'s own guard
+    /// makes a reload's re-arm a no-op) and by `.closeRequested`/`.reloadFailed`. Mirrors
+    /// `EditorRuntimeEffect.watchFile`/`.unwatchFile` exactly; teardown does NOT emit these per-path
+    /// (mirrors `EditorRuntimeReducer.teardownRequested`'s identical choice) — the imperative half's
+    /// `performTeardown` walks its OWN `watchers` table directly, since only it holds one.
+    case watchFile(path: String)
+    case unwatchFile(path: String)
+    /// office-plumbing Task 8: **the reload itself** — helper close (`oldDocId`) + a fresh open of
+    /// `path`, exactly as `.helperOpen` opens any other path, under a NEWLY MINTED docId (T6 review
+    /// F4's own finding: reload IS a new docId — see `OfficeTileCanvasView.syncDocumentIdentity`'s
+    /// header for the app-side consequence). Deliberately does NOT ask the reducer to clear
+    /// `documents[path]` first: the OLD entry stays exactly where it is until the new one is ready,
+    /// which is what keeps `officeDocumentViewportPlan` returning `.showCanvas` continuously through
+    /// the round trip — the tab keeps showing its last-good frame (never a placeholder/booting flash)
+    /// and, just as importantly, `PanelDocumentContent`'s `switch` never leaves the `.showCanvas`
+    /// case, so SwiftUI never dismantles `OfficeTileCanvasView` and the view state living on it
+    /// (`scrollOrigin`/`zoomPPT`) survives untouched.
+    case reloadDocument(path: String, oldDocId: String)
     /// Task 5: whenever the reducer decides something is worth telling the user, this fires
     /// alongside the state it also writes (`failureReason` for a helper death,
     /// `openFailures[path]` for one document) — the effect is the transient, "say it once" half; the
@@ -178,9 +287,36 @@ enum OfficeRuntimeReducer {
             // not bump that generation).
             guard state.phase == .ready else { return (next, []) }
             next.openFailures.removeValue(forKey: path)
+            // office-plumbing Task 8: a document that just (re)opened cannot still be saying it was
+            // deleted — the reload success path is what answers a deleted-then-restored file.
+            next.documentBanners.removeValue(forKey: path)
+            // **Task 8: this is ALSO how a reload preserves `activePart` without a second, reload-
+            // only version of this event.** `.reloadDocument` never clears `documents[path]` before
+            // its own reopen resolves (see that effect's own header), so a RELOAD's `.opened` finds
+            // the OLD entry still sitting here — a FRESH open never does (`.openRequested`'s `.ready`
+            // arm guards `state.documents[path] == nil` before ever emitting `.helperOpen`), so
+            // `previousActivePart` is 0 there regardless and this line changes nothing about a fresh
+            // open. Clamped because a modified file may now have FEWER parts than the one it
+            // replaced (T8 interface obligation).
+            let previousEntry = state.documents[path]
+            let previousActivePart = min(previousEntry?.activePart ?? 0, max(metadata.parts - 1, 0))
             next.documents[path] = OfficeRuntimeState.DocumentEntry(
-                docId: docId, type: metadata.type, parts: metadata.parts, sizeTwips: metadata.sizeTwips)
-            return (next, [])
+                docId: docId, type: metadata.type, parts: metadata.parts, activePart: previousActivePart,
+                sizeTwips: metadata.sizeTwips)
+            var effects: [OfficeRuntimeEffect] = [.watchFile(path: path)]
+            // **Task 8, the overwrite-orphan guard**: two reloads for the same path close enough
+            // together (the debounce's own window) each mint and open their own fresh docId
+            // independently; if BOTH succeed, the second `.opened` to land here would otherwise
+            // silently overwrite the first's entry, leaving ITS docId open on the shared helper with
+            // no owner left to ever close it. Whichever docId this replaces — if it differs from the
+            // one just arriving — gets a compensating close. In the ordinary single-reload case that
+            // docId was ALREADY closed by `.reloadDocument`'s own effect performer, and close is
+            // idempotent (T3), so the extra call here costs nothing when it is not needed and
+            // prevents a real leak when it is.
+            if let previousEntry, previousEntry.docId != docId {
+                effects.append(.helperClose(docId: previousEntry.docId))
+            }
+            return (next, effects)
 
         case .openFailed(let path, let reason):
             guard state.phase == .ready else { return (next, []) }
@@ -191,9 +327,13 @@ enum OfficeRuntimeReducer {
         case .closeRequested(let path):
             next.pendingOpens.removeAll { $0 == path }
             next.openFailures.removeValue(forKey: path)
+            next.documentBanners.removeValue(forKey: path) // Task 8: no path to still be a document about
             guard let doc = state.documents[path] else { return (next, []) }
             next.documents.removeValue(forKey: path)
-            return (next, [.helperClose(docId: doc.docId)])
+            // Task 8: the watch goes with the document — "a watcher exists exactly while a document
+            // does" is an invariant of this reducer, mirroring `EditorRuntimeReducer.closeRequested`'s
+            // identical one for models.
+            return (next, [.helperClose(docId: doc.docId), .unwatchFile(path: path)])
 
         case .subscribeRequested(let path, let part, let zoomPPT, let viewportTwips):
             guard state.phase == .ready, let doc = state.documents[path] else { return (next, []) }
@@ -203,6 +343,46 @@ enum OfficeRuntimeReducer {
         case .unsubscribeRequested(let path):
             guard state.phase == .ready, let doc = state.documents[path] else { return (next, []) }
             return (next, [.unsubscribe(docId: doc.docId)])
+
+        // MARK: office-plumbing Task 8
+
+        case .externalChangeDetected(let path):
+            // Gated on the DOCUMENT, like every other arm describing what the helper's copy holds:
+            // the watcher's read runs off this beat and can land after a close or a teardown moved
+            // this path out of `documents` (mirrors `EditorRuntimeReducer.externalChanged`'s
+            // identical guard and identical reasoning).
+            guard let doc = state.documents[path] else { return (next, []) }
+            // A file that just proved it still exists (and moved) cannot also be showing "File was
+            // deleted on disk."
+            next.documentBanners.removeValue(forKey: path)
+            // **Stage A is view-only — there is no dirty buffer to protect, so unlike the editor's
+            // clean/dirty fork this is ALWAYS a silent reload; nothing here ever shows a "keep mine"
+            // choice, because Stage A never has a "mine" to keep** (the brief, verbatim). `next`
+            // deliberately still shows the OLD docId — see `.reloadDocument`'s own header for why.
+            return (next, [.reloadDocument(path: path, oldDocId: doc.docId)])
+
+        case .externalDeleted(let path):
+            // **Deleted → banner that PERSISTS, view-only so nothing to lose** (the brief, verbatim):
+            // the document entry is left completely untouched — the tab keeps showing its last
+            // rendered tiles, exactly as they were, with this sentence overlaid above them.
+            guard state.documents[path] != nil else { return (next, []) }
+            let reason = "File was deleted on disk"
+            next.documentBanners[path] = reason
+            return (next, [.emitBanner(reason: reason)])
+
+        case .reloadFailed(let path, let oldDocId, let reason):
+            guard state.phase == .ready else { return (next, []) }
+            // **The stale-failure guard**: only act if this path still shows the very entry this
+            // reload was trying to replace. A second, independent reload for the same path may
+            // already have SUCCEEDED (a fresh `.opened` replaced `oldDocId` with a newer docId) by
+            // the time this failure lands — see this event's own header. If so, there is nothing to
+            // do: the newer document is genuinely fine, and its own watch is already running.
+            guard state.documents[path]?.docId == oldDocId else { return (next, []) }
+            next.documents.removeValue(forKey: path)
+            next.openFailures[path] = reason
+            let basename = (path as NSString).lastPathComponent
+            return (next, [.emitBanner(reason: "Couldn't reload \(basename): \(reason)"),
+                           .unwatchFile(path: path)])
 
         case .helperDied, .helperUnavailable:
             // **Carry 4, both halves at once.** Every open document's docId lives only on the
@@ -307,6 +487,22 @@ final class OfficeRuntime: ObservableObject {
 
     private let driver: Driver
     private let makeDocId: () -> String
+    /// office-plumbing Task 8: how a watch is made — the SAME seam `EditorRuntime` was already built
+    /// with (`EditorFileWatcherFactory`), reused verbatim rather than forked: its only requirement is
+    /// "a live watch somebody can stop" (`FileTreeWatching`), which has nothing editor-specific in
+    /// it. Defaults to the real `DispatchSourceFileWatcher`, exactly as `EditorRuntime`'s own default
+    /// does; test seam otherwise.
+    private let makeWatcher: EditorFileWatcherFactory
+    /// One watch per open document's path — mirrors `EditorRuntime.watchers` exactly, including the
+    /// invariant this reducer states at its own two sites (`.opened`/`.closeRequested`): a watcher
+    /// exists exactly while `documents[path]` does.
+    private var watchers: [String: FileTreeWatching] = [:]
+    /// office-plumbing Task 8: what Swift last saw on disk for a watched path — `nil` means nothing
+    /// is known yet (armed but never fired). See `officeDiskChange`'s own header for why this is a
+    /// cheap `stat()` snapshot rather than the editor's own read-the-whole-file text baseline: office
+    /// documents are binary, so there is nothing to decode, and the only question a view-only surface
+    /// needs answered is "did the file move," which a stat already answers.
+    private var diskBaselines: [String: OfficeFileStat] = [:]
 
     /// **Carry 6's belt: bumped by `teardown()`, checked by every in-flight `.helperOpen` before it
     /// dispatches its result.** Mirrors `OfficeHelperSupervisor.generation`'s own reasoning exactly:
@@ -317,10 +513,14 @@ final class OfficeRuntime: ObservableObject {
     /// helper — see `perform(_:)`'s `.helperOpen` case for both halves.
     private(set) var generation = 0
 
-    init(sessionId: String, driver: Driver, makeDocId: @escaping () -> String = { UUID().uuidString }) {
+    init(sessionId: String, driver: Driver, makeDocId: @escaping () -> String = { UUID().uuidString },
+         makeWatcher: @escaping EditorFileWatcherFactory = { path, onChange in
+             DispatchSourceFileWatcher(path: path, onChange: onChange)
+         }) {
         self.sessionId = sessionId
         self.driver = driver
         self.makeDocId = makeDocId
+        self.makeWatcher = makeWatcher
     }
 
     // MARK: The doors
@@ -405,26 +605,23 @@ final class OfficeRuntime: ObservableObject {
                 }
 
             case .helperOpen(let path):
-                let docId = makeDocId()
-                let myGeneration = generation
-                Task { [weak self, driver] in
-                    guard let self else { return }
-                    do {
-                        let metadata = try await driver.open(docId, path)
-                        guard myGeneration == self.generation else {
-                            // Carry 6: teardown superseded this open while it was in flight. The
-                            // document is now open on the shared helper with no owner left to close
-                            // it — compensate rather than orphan it. Never dispatch into the fresh
-                            // state teardown just produced.
-                            await driver.close(docId)
-                            return
-                        }
-                        self.perform(self.dispatch(.opened(path: path, docId: docId, metadata: metadata)))
-                    } catch {
-                        guard myGeneration == self.generation else { return } // superseded AND failed: nothing to compensate, nothing to record
-                        self.perform(self.dispatch(.openFailed(path: path, reason: Self.describe(error))))
-                    }
-                }
+                openAndDispatch(path: path, myGeneration: generation, reloadingDocId: nil)
+
+            case .reloadDocument(let path, let oldDocId):
+                // Task 8: same store hygiene as an ordinary close (`.helperClose`'s own doc) — the
+                // old docId's tiles are gone THE INSTANT this fires, synchronously, before the new
+                // open even starts, so a stray push arriving for it lands nowhere (the store has no
+                // record of it left to overwrite, and nothing downstream ever asks for that docId
+                // again — see `OfficeTileStore`'s own header on why a late arrival here is bounded).
+                tileStore.evictAll(docId: oldDocId)
+                Task { [driver] in await driver.close(oldDocId) }
+                openAndDispatch(path: path, myGeneration: generation, reloadingDocId: oldDocId)
+
+            case .watchFile(let path):
+                startWatching(path)
+
+            case .unwatchFile(let path):
+                stopWatching(path)
 
             case .helperClose(let docId):
                 // Task 6: the store's own docId-scoped entries die with the document — see
@@ -482,6 +679,42 @@ final class OfficeRuntime: ObservableObject {
         }
     }
 
+    /// **Shared by `.helperOpen` and `.reloadDocument`** (Task 8): mint a docId, ask the helper to
+    /// open `path` under it, and dispatch the outcome — identical machinery either way, since a
+    /// reload's reopen is, from the helper's own point of view, an ordinary open of a path it has
+    /// never heard this fresh docId for. `reloadingDocId` is `nil` for a plain `.helperOpen` (routes
+    /// a failure through `.openFailed`, unchanged from before this task) and the docId being replaced
+    /// for a `.reloadDocument` (routes a failure through the docId-qualified `.reloadFailed` instead
+    /// — see that event's own header for why a plain `.openFailed` would be the wrong shape here:
+    /// unlike a fresh open, `documents[path]` may already hold something by the time this resolves,
+    /// and an unqualified failure could not tell "genuinely my failure" from "superseded, ignore me").
+    private func openAndDispatch(path: String, myGeneration: Int, reloadingDocId: String?) {
+        let docId = makeDocId()
+        Task { [weak self, driver] in
+            guard let self else { return }
+            do {
+                let metadata = try await driver.open(docId, path)
+                guard myGeneration == self.generation else {
+                    // Carry 6: teardown superseded this open while it was in flight. The document is
+                    // now open on the shared helper with no owner left to close it — compensate
+                    // rather than orphan it. Never dispatch into the fresh state teardown just
+                    // produced.
+                    await driver.close(docId)
+                    return
+                }
+                self.perform(self.dispatch(.opened(path: path, docId: docId, metadata: metadata)))
+            } catch {
+                guard myGeneration == self.generation else { return } // superseded AND failed: nothing to compensate, nothing to record
+                let reason = Self.describe(error)
+                if let reloadingDocId {
+                    self.perform(self.dispatch(.reloadFailed(path: path, oldDocId: reloadingDocId, reason: reason)))
+                } else {
+                    self.perform(self.dispatch(.openFailed(path: path, reason: reason)))
+                }
+            }
+        }
+    }
+
     private func performTeardown(docIds: [String]) {
         generation += 1
         for docId in docIds {
@@ -489,6 +722,87 @@ final class OfficeRuntime: ObservableObject {
             // `OfficeTileStore.evictAll`'s own header.
             tileStore.evictAll(docId: docId)
             Task { [driver] in await driver.close(docId) }
+        }
+        // Task 8: every watch this runtime owns dies HERE, unconditionally — mirrors
+        // `EditorRuntime.performTeardown`'s identical ordering (stated at that site: harmless only
+        // because nothing is left to notice a watch firing after this). A fresh runtime re-arms
+        // whatever it opens from scratch, so the first thing it knows about any path is today's stat.
+        for (_, watcher) in watchers { watcher.stop() }
+        watchers.removeAll()
+        diskBaselines.removeAll()
+    }
+
+    // MARK: - office-plumbing Task 8: the world changing underneath an open document
+
+    /// Start watching `path` — armed by the `.watchFile` effect, which `.opened` emits the INSTANT
+    /// this runtime records the document (`perform(_:)` runs effects synchronously, in order, right
+    /// after `dispatch` returns), so there is no window between "this document exists" and "its
+    /// watch is live" for an external change to fall into. Idempotent: a reload's own `.opened` fires
+    /// `.watchFile` again for a path already being watched, and this simply does nothing the second
+    /// time.
+    ///
+    /// The baseline is seeded HERE, from the file as it is right now — not from whatever the open
+    /// just reported, because Stage A never reads the file's bytes at all (LOK does that, over in the
+    /// helper); a `stat()` is the cheapest fact this side can independently confirm.
+    private func startWatching(_ path: String) {
+        guard watchers[path] == nil else { return }
+        diskBaselines[path] = officeFileStat(atPath: path)
+        guard let watcher = makeWatcher(path, { [weak self] in
+            Task { @MainActor [weak self] in self?.fileChangedOnDisk(path) }
+        }) else {
+            NSLog("[OfficeRuntime] \(sessionId): could not watch \(path) — external changes to it "
+                  + "will not be noticed")
+            return
+        }
+        watchers[path] = watcher
+    }
+
+    private func stopWatching(_ path: String) {
+        watchers.removeValue(forKey: path)?.stop()
+        diskBaselines.removeValue(forKey: path)
+    }
+
+    /// **The watcher's handler — one debounced fire, one stat, one decision.** Internal, not private,
+    /// and deliberately synchronous (unlike `EditorRuntime.fileChangedOnDisk`, which is `async`
+    /// because it reads a whole file off-actor): `officeFileStat` is a single `stat(2)` call, cheap
+    /// enough to make right here, which also means there is no cross-actor gap in which the world
+    /// could move again before this finishes — no generation counter is needed the way the editor's
+    /// `watchGenerations` is.
+    ///
+    /// **No suppression bag** (T8 brief, verbatim): Stage A never writes an office file from the app,
+    /// so there is no "was this our own save landing" question to ask — the editor's
+    /// `noteExpectedWrite`/`consumeExpectedWrite`/`editorDiskChange`-with-`expectedWrites` machinery
+    /// has nothing to filter here yet. Recorded at this exact seam so Stage B (once save exists)
+    /// inherits that pattern KNOWINGLY rather than rediscovering it under a live bug report.
+    ///
+    /// **Still filters NOISE, though — this is not "any fire reloads."** The directory source this
+    /// watcher includes (`DispatchSourceFileWatcher`'s own doc) fires for ANY entry changing in the
+    /// same directory, not just `path` itself — a sibling file the agent also touched, or (T3's own
+    /// disclosed, now independently confirmed concern) a LOK lock file (`.~lock.<name>#`) churning
+    /// beside the document on every open/close. `officeDiskChange` compares `path`'s OWN stat against
+    /// what this runtime last saw for it — a sibling's or a lock file's churn touches neither, so it
+    /// reads `.unchanged` and this returns having done nothing, exactly as it must.
+    func fileChangedOnDisk(_ path: String) {
+        guard state.documents[path] != nil else { return }
+        let stat = officeFileStat(atPath: path)
+        switch officeDiskChange(stat: stat, baseline: diskBaselines[path]) {
+        case .unchanged:
+            return
+        case .external:
+            // Recorded BEFORE the dispatch, exactly like `EditorRuntime.fileChangedOnDisk`'s own
+            // ordering and for the identical reason: whatever the reducer (and, downstream, the
+            // reload) does with this, THIS is what the file now holds, and the NEXT fire — including
+            // one that arrives while this reload is still in flight — must be measured against it,
+            // not against a baseline this reload has already superseded.
+            diskBaselines[path] = stat
+            perform(dispatch(.externalChangeDetected(path: path)))
+        case .deleted:
+            // Cleared, not left stale: Swift knows nothing about the contents of a file that is not
+            // there, and clearing this is what makes the file COMING BACK a change again even if it
+            // comes back byte-for-byte identical to what this runtime last saw (mirrors
+            // `EditorRuntime.fileChangedOnDisk`'s identical `diskBaseline.removeValue`).
+            diskBaselines.removeValue(forKey: path)
+            perform(dispatch(.externalDeleted(path: path)))
         }
     }
 

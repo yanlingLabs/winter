@@ -221,6 +221,151 @@ final class OfficeTileCanvasViewTests: XCTestCase {
         view.unmount() // hygiene — see the other files' identical comment on settling before teardown
     }
 
+    // MARK: - syncDocumentIdentity: the reload seam (office-plumbing Task 8, T6 review F4)
+
+    /// **The F4 pin.** A docId change must (a) actually update `docId` — the property `applyContents`
+    /// and the `tilesArrived` filter both compare against, the exact thing that was silently stale
+    /// before this task — and (b) resubscribe, immediately, so the new docId's tiles are ever asked
+    /// for at all. Without either half, every tile after a reload is a permanent placeholder.
+    func testSyncDocumentIdentityWithANewDocIdUpdatesTheCanvasAndResubscribes() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
+        view.mount()
+        _ = await waitUntil { recorder.subscribeCalls.count == 1 }
+        XCTAssertEqual(view.docId, "doc-1")
+
+        let newSizeTwips = OfficeDocumentSize(widthTwips: 200_000, heightTwips: 200_000)
+        view.syncDocumentIdentity(docId: "doc-2", sizeTwips: newSizeTwips, activePart: 0)
+
+        XCTAssertEqual(view.docId, "doc-2", "T6 review F4: the canvas must track the reload's new "
+                       + "docId — a stale copy is a permanent placeholder")
+        let resubscribed = await waitUntil { recorder.subscribeCalls.count == 2 }
+        XCTAssertTrue(resubscribed, "a docId change must resubscribe — the new docId's tiles are "
+                      + "never asked for otherwise")
+
+        view.unmount()
+    }
+
+    /// **The preservation half.** A `.id(docId)`-on-the-representable fix (the review's OTHER named
+    /// option, deliberately not taken) would tear down and rebuild this view on every reload,
+    /// resetting `scrollOrigin`/`zoomPPT` to their defaults — exactly what this task exists to
+    /// PRESERVE. Proven at the observable level: the resubscribe's own viewport must still reflect
+    /// the scrolled position established BEFORE the reload, not a reset-to-origin one.
+    func testSyncDocumentIdentityWithANewDocIdPreservesTheScrollPosition() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let sizeTwips = OfficeDocumentSize(widthTwips: 1_000_000, heightTwips: 1_000_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
+        view.mount()
+        _ = await waitUntil { recorder.subscribeCalls.count == 1 }
+
+        view.setScrollOriginForTesting(CGPoint(x: 400, y: 250))
+        let scrolled = view.scrollOriginForTesting
+        XCTAssertGreaterThan(scrolled.x, 0, "sanity: the scroll actually took effect and was not "
+                             + "immediately clamped back to zero by the tiny document size")
+
+        view.syncDocumentIdentity(docId: "doc-2", sizeTwips: sizeTwips, activePart: 0)
+
+        XCTAssertEqual(view.scrollOriginForTesting, scrolled, "the same document size reloaded must "
+                       + "not move the scroll position at all — it was never reset, only re-clamped")
+        _ = await waitUntil { recorder.subscribeCalls.count == 2 }
+        let secondViewport = recorder.subscribeCalls[1].viewportTwips
+        XCTAssertGreaterThan(secondViewport.x, 0, "the RESUBSCRIBE after reload must ask for the "
+                             + "scrolled viewport, not a reset-to-origin one — this is what `.id"
+                             + "(docId)` would have broken")
+
+        view.unmount()
+    }
+
+    /// The other third of `{activePart, scrollTwips, zoomPPT}`: `syncDocumentIdentity` never touches
+    /// `zoomPPT` at all, so preservation is true by construction — pinned against a NON-default value
+    /// so the claim is not vacuously true of the 100% starting point every other test leaves it at.
+    func testSyncDocumentIdentityWithANewDocIdPreservesTheZoomLevel() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let sizeTwips = OfficeDocumentSize(widthTwips: 1_000_000, heightTwips: 1_000_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
+        view.mount()
+        _ = await waitUntil { recorder.subscribeCalls.count == 1 }
+
+        XCTAssertTrue(view.setZoomForTesting(2000))
+        XCTAssertEqual(view.zoomPPT, 2000, "sanity")
+        _ = await waitUntil { recorder.subscribeCalls.count == 2 } // the zoom change's own resubscribe
+
+        view.syncDocumentIdentity(docId: "doc-2", sizeTwips: sizeTwips, activePart: 0)
+
+        XCTAssertEqual(view.zoomPPT, 2000, "a reload must not reset zoom back to the 100% default")
+        let reloadResubscribed = await waitUntil { recorder.subscribeCalls.count == 3 }
+        XCTAssertTrue(reloadResubscribed)
+        XCTAssertEqual(recorder.subscribeCalls[2].zoomPPT, 2000, "the RESUBSCRIBE after reload must "
+                       + "ask at the preserved zoom, not the 100% default")
+
+        view.unmount()
+    }
+
+    /// T8 interface obligation 3: a reload's fresh `sizeTwips` must actually be consumed — the scroll
+    /// clamp is a function of it, so a document that shrank must pull an out-of-bounds scroll back in.
+    func testSyncDocumentIdentityReClampsScrollAgainstTheFreshSizeTwips() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let largeSize = OfficeDocumentSize(widthTwips: 2_000_000, heightTwips: 2_000_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+                                        sizeTwips: largeSize, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
+        view.mount()
+        _ = await waitUntil { recorder.subscribeCalls.count == 1 }
+        view.setScrollOriginForTesting(CGPoint(x: 5000, y: 5000)) // deep into the large document
+        let deepScroll = view.scrollOriginForTesting
+        XCTAssertGreaterThan(deepScroll.x, 100, "sanity: genuinely scrolled far from the origin")
+
+        // The reload's own document is much smaller — the old scroll position is now out of bounds.
+        let tinySize = OfficeDocumentSize(widthTwips: 100, heightTwips: 100)
+        view.syncDocumentIdentity(docId: "doc-2", sizeTwips: tinySize, activePart: 0)
+
+        XCTAssertLessThan(view.scrollOriginForTesting.x, deepScroll.x, "T8 obligation 3: the fresh, "
+                          + "smaller sizeTwips must actually be consumed by the clamp, not the stale "
+                          + "large one the view was constructed with")
+
+        // Hygiene, not an assertion (task-6-report's own recipe note, repeated by every sibling test
+        // in this file): `syncDocumentIdentity`'s own docId change fires a SECOND resubscribe —
+        // settle it before `unmount()`/return lets `recorder` deallocate, or the still-in-flight
+        // Task's `[unowned self]` closure crashes the whole process the moment it resumes.
+        _ = await waitUntil { recorder.subscribeCalls.count == 2 }
+
+        view.unmount()
+    }
+
+    /// The `else` branch — a `syncDocumentIdentity` call carrying the SAME docId (what `updateNSView`
+    /// sends on every ordinary render, reload or not) must degrade to exactly the pre-Task-8 drift
+    /// re-assert: idempotent, no extra resubscribe.
+    func testSyncDocumentIdentityWithTheSameDocIdIsTheOrdinaryDriftReassertNotAReload() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
+        view.mount()
+        _ = await waitUntil { recorder.subscribeCalls.count == 1 }
+
+        view.syncDocumentIdentity(docId: "doc-1", sizeTwips: sizeTwips, activePart: 0)
+
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertEqual(recorder.subscribeCalls.count, 1, "the SAME docId, SAME part must not "
+                       + "resubscribe — this is the ordinary re-render path, not a reload")
+        XCTAssertEqual(view.docId, "doc-1")
+
+        view.unmount()
+    }
+
     /// The registered `OfficeDocumentCanvasHost` — proves the model's `selectPart` door
     /// (`PanelDocumentTabModel.selectPart`, `PanelDocumentTabTests` own its unit test) reaches a
     /// REAL mounted canvas end to end, not just a test double conforming to the protocol.

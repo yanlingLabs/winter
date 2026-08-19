@@ -343,6 +343,41 @@ final class PanelDocumentTabTests: XCTestCase {
         XCTAssertEqual(office.openCalls.count, 1, "at most once per (runtime, path)")
     }
 
+    /// office-plumbing Task 8: `model.banner` is the tab's own door onto `OfficeRuntimeState
+    /// .documentBanners` — proven end to end through a real `OfficeRuntime`/`ShellSessionHost` pair,
+    /// not just the pure dictionary lookup, so a future change to how `documentBanners` gets wired to
+    /// the model cannot silently stop reaching this door. `fileChangedOnDisk` is driven directly
+    /// (internal, not private, for exactly this reason — `OfficeRuntimeWatcherTests`' own header
+    /// states it) rather than through a real filesystem watcher, which `OfficeRuntimeWatcherTests`
+    /// already owns proving the wiring for; that same file's `OfficeRuntimeReducerTests` section owns
+    /// the reducer-level proof that the banner CLEARS on a successful reopen — this test's job is
+    /// only the model's own door, not re-proving the reducer.
+    func testBannerSurfacesFromRuntimeStateThroughTheModelsOwnDoor() async {
+        let office = DocumentOfficeDriverRecorder()
+        let host = makeHost(office: office)
+        let model = PanelDocumentTabModel(tabId: "t1", path: "/a.xlsx")
+        model.bind(host: host, sessionId: "S1")
+        model.activate()
+        _ = await waitUntil { office.openCalls.count == 1 }
+        _ = await waitUntil { model.runtime?.stateSnapshot.documents["/a.xlsx"] != nil }
+        XCTAssertNil(model.banner, "no banner before anything has happened to the file")
+
+        // "/a.xlsx" does not really exist on disk — `officeFileStat` reports `nil` for it, which
+        // `fileChangedOnDisk` treats as deleted regardless of what baseline preceded it.
+        model.runtime?.fileChangedOnDisk("/a.xlsx")
+
+        let bannered = await waitUntil { model.banner != nil }
+        XCTAssertTrue(bannered)
+        XCTAssertEqual(model.banner, "File was deleted on disk")
+    }
+
+    /// `model.banner` is `nil` for a tab with no path at all — unreachable through any shipped door
+    /// (`PanelDocumentTabModel.path`'s own doc), but a guard worth pinning rather than force-unwrapping.
+    func testBannerIsNilForATabWithNoPath() {
+        let model = PanelDocumentTabModel(tabId: "t1", path: nil)
+        XCTAssertNil(model.banner)
+    }
+
     /// The failed-vs-idle gate's own local proof, end to end through the model: `hasRequestedOpen`
     /// flips true only once the deferred open Task has actually fired.
     func testHasRequestedOpenBecomesTrueOnlyAfterTheDeferredOpenFires() async {
