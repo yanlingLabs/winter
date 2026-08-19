@@ -45,6 +45,49 @@ public protocol OfficeDocumentBridge: AnyObject {
     /// callbacks for `LOKBridge`; never for the fake, which has nothing to push). Set ONCE, by
     /// `OfficeHelperServer` at construction, before any document ever opens.
     var onEvent: ((String, OfficeDocumentEvent) -> Void)? { get set }
+
+    /// Task 4 — paints (or returns an already-cached copy of) one tile. Called from a CONNECTION
+    /// thread (never from inside a LOK callback) — `LOKBridge`'s implementation marshals onto its
+    /// dedicated thread via `thread.sync`, same as `open`/`close`. Throws on any failure (an
+    /// unopened `docId`, an out-of-range part, a real LOK paint failure) — the helper always
+    /// survives, exactly like a failed `open`; `OfficeHelperServer` translates this into a
+    /// `tileFailed` push for the one key that failed, never tearing down the connection or the
+    /// document.
+    func paintTile(docId: String, key: TileKey) throws -> TilePaintResult
+
+    /// Task 4 — applies an already-parsed invalidation (rects/part, the SAME payload
+    /// `OfficeDocumentEvent.invalidated` carries) to `docId`'s tile cache: bumps every affected
+    /// cached key's generation and evicts its stale pixels (`TileCache.invalidate`). Returns the
+    /// keys actually bumped, for `OfficeHelperServer` to multicast as an `.invalidated` push.
+    ///
+    /// **Threading contract, the opposite of every other method on this protocol**: called ONLY
+    /// from `OfficeHelperServer.routeDocumentEvent`, itself reached SYNCHRONOUSLY from inside
+    /// `onEvent`'s own callback — which, for `LOKBridge`, fires while ALREADY running on the LOK
+    /// dedicated thread (see `lokBridgeDocumentCallback`'s own guarantee). `LOKBridge`'s
+    /// implementation MUST NOT call `thread.sync` here — doing so would be the exact reentrant-
+    /// `sync`-from-a-job-already-running-on-`thread` deadlock `LOKDedicatedThread`'s own header
+    /// warns against. An empty-`generations` doc (never painted) or an unopened `docId` simply
+    /// returns `[]` — never throws (there is no request here whose failure needs reporting; an
+    /// invalidation for a document nobody has ever asked to paint has nothing to bump).
+    func applyTileInvalidation(docId: String, rectsTwips: [OfficeTwipsRect], part: Int) -> [TileKey]
+}
+
+/// The result of a successful `OfficeDocumentBridge.paintTile` call — helper-internal (never
+/// crosses the wire directly; `OfficeHelperServer` reads these fields to build a `tile` wire
+/// frame). Lives here, not `OfficeWire.swift`, because nothing outside `Sources/OfficeHelper`
+/// needs it: the app-side `OfficeHelperClient` decodes the wire frame's own primitive fields
+/// directly, never this struct.
+public struct TilePaintResult: Equatable, Sendable {
+    public let generation: Int
+    public let pixels: Data
+    public let width: Int
+    public let height: Int
+    public init(generation: Int, pixels: Data, width: Int, height: Int) {
+        self.generation = generation
+        self.pixels = pixels
+        self.width = width
+        self.height = height
+    }
 }
 
 /// `NormaOfficeHelperFixture`'s bridge — behaves exactly like Task 2's own Stage-A bookkeeping
@@ -53,14 +96,60 @@ public protocol OfficeDocumentBridge: AnyObject {
 /// handshake/death-detection, not document-shaped) — this exists so the fixture's `main.swift`
 /// has SOMETHING to construct `OfficeHelperServer` with, honestly reporting "no real LOK here"
 /// via `officeWireStageALOKVersionPlaceholder` for `helloOk.lokVersion`.
+/// Task 4 additions: synthetic (never-real-LOK) tile support, so the WIRE-LEVEL tile plumbing
+/// (subscribe/request/multicast/invalidate/F7-ownership) is testable fast, over a real socket,
+/// without booting real LOK — only pixel CORRECTNESS needs the vendor-gated live tests against
+/// `LOKBridge`. Guarded by one `NSLock`: unlike the real bridge (single-threaded by the dedicated-
+/// thread discipline), this fake can be reached concurrently from a connection thread
+/// (`paintTile`, via `tileRequest`) and from a test's own synthetic-invalidation trigger
+/// (`simulateInvalidation`, wired through `OfficeHelperServer.Hooks` — see that type's own header)
+/// running on yet another thread.
 public final class FakeOfficeDocumentBridge: OfficeDocumentBridge {
     public let lokVersionString = officeWireStageALOKVersionPlaceholder
     public var onEvent: ((String, OfficeDocumentEvent) -> Void)?
+    private let lock = NSLock()
+    private var caches: [String: TileCache] = [:]
+
     public init() {}
     public func open(docId: String, path: String) throws -> OfficeDocumentMetadata {
-        OfficeDocumentMetadata(type: .other, parts: 1, sizeTwips: OfficeDocumentSize(widthTwips: 0, heightTwips: 0))
+        lock.lock(); caches[docId] = TileCache(capacity: 32); lock.unlock()
+        return OfficeDocumentMetadata(type: .other, parts: 1, sizeTwips: OfficeDocumentSize(widthTwips: 0, heightTwips: 0))
     }
-    public func close(docId: String) {}
+    public func close(docId: String) {
+        lock.lock(); caches.removeValue(forKey: docId); lock.unlock()
+    }
+
+    /// A small, deterministic, key-dependent pixel pattern (never blank, never identical across
+    /// distinct keys) — enough for a wire-level test to tell two tiles apart without needing real
+    /// rendering. Not RGBA-shaped/sized like a real tile; wire-level tests assert on IDENTITY
+    /// (which key, which generation), never on pixel content matching `TileMath.bytesPerTile`.
+    public func paintTile(docId: String, key: TileKey) throws -> TilePaintResult {
+        lock.lock()
+        defer { lock.unlock() }
+        guard caches[docId] != nil else {
+            throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)")
+        }
+        let tag = UInt8(truncatingIfNeeded: key.tileX &* 31 &+ key.tileY &* 7 &+ key.part)
+        let pixels = Data(repeating: tag, count: 16)
+        let generation = caches[docId]!.recordPaint(key: key, pixels: pixels)
+        return TilePaintResult(generation: generation, pixels: pixels, width: 4, height: 4)
+    }
+
+    public func applyTileInvalidation(docId: String, rectsTwips: [OfficeTwipsRect], part: Int) -> [TileKey] {
+        lock.lock()
+        defer { lock.unlock() }
+        guard caches[docId] != nil else { return [] }
+        return caches[docId]!.invalidate(rectsTwips: rectsTwips, part: part)
+    }
+
+    /// Test-only trigger: fires `onEvent` with a raw `.invalidated` event exactly the shape a real
+    /// LOK callback would produce, for a doc this fake has open. Never called by production code —
+    /// only by `Tests/OfficeHelperFixtureSources/main.swift`'s synthetic modes, wired through
+    /// `OfficeHelperServer.Hooks.afterTileRequestAccepted` (see that field's own header for why
+    /// THAT is the trigger this repo picked over a timer or a new wire verb).
+    public func simulateInvalidation(docId: String, rectsTwips: [OfficeTwipsRect] = [], part: Int = 0) {
+        onEvent?(docId, .invalidated(rectsTwips: rectsTwips, part: part))
+    }
 }
 
 /// Office Stage A Task 2 — the helper's Unix-socket listener plus per-connection protocol
@@ -97,10 +186,22 @@ public final class OfficeHelperServer {
         /// `_exit(0)` — simulates a crash immediately after a successful handshake, for the
         /// supervisor's death-detection path.
         public var afterHelloOkWritten: (@Sendable () -> Void)?
+        /// Task 4 test seam: called synchronously, on the connection's own thread, immediately
+        /// after a `tileRequestAccepted` reply is written — with the `docId` that was requested.
+        /// `Tests/OfficeHelperFixtureSources/main.swift`'s multicast-test mode wires this to
+        /// `FakeOfficeDocumentBridge.simulateInvalidation`, so a test can provoke a deterministic,
+        /// synthetic tile invalidation without depending on whether real LOK ever fires a live
+        /// callback for a view-only document (see task-4-report.md's debt-1 finding) and without a
+        /// timer-based race or a new, test-only wire verb — `tileRequest` already needs to exist,
+        /// including its own explicitly-tested "empty keys list" shape (`OfficeWireCodecTests`),
+        /// which doubles as this trigger's payload-free ping.
+        public var afterTileRequestAccepted: (@Sendable (String) -> Void)?
 
-        public init(suppressReplies: Bool = false, afterHelloOkWritten: (@Sendable () -> Void)? = nil) {
+        public init(suppressReplies: Bool = false, afterHelloOkWritten: (@Sendable () -> Void)? = nil,
+                    afterTileRequestAccepted: (@Sendable (String) -> Void)? = nil) {
             self.suppressReplies = suppressReplies
             self.afterHelloOkWritten = afterHelloOkWritten
+            self.afterTileRequestAccepted = afterTileRequestAccepted
         }
     }
 
@@ -112,10 +213,41 @@ public final class OfficeHelperServer {
     /// is this connection's own subset of `docOwner`'s keys, so connection teardown can close
     /// exactly the documents IT opened without scanning the whole table.
     private final class ConnectionWriter {
+        let id: Int
         let fd: Int32
         let writeLock = NSLock()
         var ownedDocIds: Set<String> = []
-        init(fd: Int32) { self.fd = fd }
+        /// F8 (Task 4 review carry): PER-CONNECTION, not per-server — was previously a single
+        /// `OfficeHelperServer`-wide `pushSeqAllocator` shared by every connection's pushes, which
+        /// contradicted this exact field's own doc comment on `OfficeWireFrame.documentEvent`
+        /// ("a dedicated per-connection `OfficeWireSeqAllocator`"). Multicast (Task 4) makes the
+        /// mismatch concrete: fanning the SAME invalidation out to two subscriber connections from
+        /// one shared allocator would burn two seq values for what is, from either connection's
+        /// OWN point of view, a single push — leaving gaps in that connection's stream for no
+        /// reason. One allocator per connection keeps each connection's own push-seq stream dense,
+        /// matching how the client mints request seqs the same way.
+        let pushSeqAllocator = OfficeWireSeqAllocator()
+        init(id: Int, fd: Int32) {
+            self.id = id
+            self.fd = fd
+        }
+    }
+
+    /// Task 4 — the multicast seam (dispatch note: "docOwner: [String: ConnectionWriter] ->
+    /// [ConnectionWriter]"). `opener` is the ONE connection that called `open` for this `docId` —
+    /// the sole connection allowed to `close` it (F7 below) — kept as a direct reference (not
+    /// merely an id) so `routeDocumentEvent` can push the raw `OfficeDocumentEvent` stream to it
+    /// without a lookup. `subscribers` is a SEPARATE, independently-growable list of connections
+    /// that called `subscribeTiles` against this (already-open) doc — which may or may not include
+    /// `opener` itself (opening a doc does not imply wanting its tile pushes; a connection that
+    /// wants both calls `subscribeTiles` explicitly after its own `open`) — and is what
+    /// `.invalidated` pushes multicast to. A doc with only ever one interested party (every Stage-A
+    /// scenario except this task's own multicast test) simply has `subscribers.count <= 1`; the
+    /// type does not special-case that, so it costs nothing when unused.
+    private final class DocEntry {
+        let opener: ConnectionWriter
+        var subscribers: [ConnectionWriter] = []
+        init(opener: ConnectionWriter) { self.opener = opener }
     }
 
     private let socketPath: String
@@ -141,15 +273,12 @@ public final class OfficeHelperServer {
     /// `stateQueue` first, then calls the bridge, then (if necessary) re-enters `stateQueue`
     /// separately for bookkeeping.
     private let stateQueue = DispatchQueue(label: "office-helper.state")
-    /// docId -> the connection that opened it. Doubles as Task 2's old `documents` set for
-    /// idle-exit accounting (`docOwner.isEmpty`) — one table, not two that could drift apart.
-    private var docOwner: [String: ConnectionWriter] = [:]
+    /// docId -> its `DocEntry` (opener + tile subscribers). Doubles as Task 2's old `documents` set
+    /// for idle-exit accounting (`docOwner.isEmpty`) — one table, not two that could drift apart.
+    private var docOwner: [String: DocEntry] = [:]
     private var connectionCount = 0
     private var idleTimer: DispatchSourceTimer?
     private var nextConnectionId = 0
-    /// Mints `seq` for HELPER-INITIATED `documentEvent` pushes — a separate stream from any
-    /// client's own request `seq`s (see `OfficeWireFrame.documentEvent`'s own header).
-    private let pushSeqAllocator = OfficeWireSeqAllocator()
 
     public init(socketPath: String, statePath: String, expectedToken: String,
                 idleExitSeconds: Double = 120, hooks: Hooks = Hooks(),
@@ -171,14 +300,41 @@ public final class OfficeHelperServer {
 
     /// The async-push counterpart to `writeReply` — called from whatever thread `documentBridge`
     /// fires its callback on (LOKBridge's dedicated thread, for the real bridge; never, for the
-    /// fake). Copies the owning connection's `ConnectionWriter` reference out of `stateQueue`
-    /// FIRST, then writes under only that writer's own lock — never while holding `stateQueue` (a
-    /// blocking socket write inside `stateQueue.sync` would wedge idle-exit accounting behind a
-    /// slow/stuck client for as long as the write takes).
+    /// fake). Copies whatever `ConnectionWriter`(s) it needs out of `stateQueue` FIRST, then writes
+    /// under only that writer's own lock — never while holding `stateQueue` (a blocking socket
+    /// write inside `stateQueue.sync` would wedge idle-exit accounting behind a slow/stuck client
+    /// for as long as the write takes). `pushFrame` below is the one place that actually locks+writes.
+    ///
+    /// Task 4: does TWO jobs now, in sequence. (1) The raw `OfficeDocumentEvent` still goes to the
+    /// doc's OPENER only — Task 3's original, unchanged contract. (2) A REAL invalidation
+    /// additionally translates into bumped tile keys (`documentBridge.applyTileInvalidation`) and
+    /// multicasts a top-level `.invalidated` push to every TILE SUBSCRIBER — a separate list from
+    /// "the opener" (see `DocEntry`'s own header). Calling the bridge here, unguarded by
+    /// `stateQueue`, follows the same invariant every other bridge call site in this file already
+    /// does; for the REAL bridge this call is additionally already running ON `LOKBridge`'s
+    /// dedicated thread by construction (this whole function is reached synchronously from inside
+    /// a LOK callback) — see `OfficeDocumentBridge.applyTileInvalidation`'s own header for why its
+    /// implementation must never re-enter `thread.sync` here.
     private func routeDocumentEvent(docId: String, event: OfficeDocumentEvent) {
-        guard let writer = stateQueue.sync(execute: { docOwner[docId] }) else { return }
-        let seq = pushSeqAllocator.nextSeq()
-        let frame = OfficeWireFrame.documentEvent(seq: seq, docId: docId, event: event)
+        guard let entry = stateQueue.sync(execute: { docOwner[docId] }) else { return }
+        pushFrame(.documentEvent(seq: entry.opener.pushSeqAllocator.nextSeq(), docId: docId, event: event),
+                  to: entry.opener)
+
+        guard case .invalidated(let rects, let part) = event else { return }
+        let bumpedKeys = documentBridge.applyTileInvalidation(docId: docId, rectsTwips: rects, part: part)
+        guard !bumpedKeys.isEmpty else { return }
+        let subscribers = stateQueue.sync { entry.subscribers }
+        for subscriber in subscribers {
+            pushFrame(.invalidated(seq: subscriber.pushSeqAllocator.nextSeq(), docId: docId, keys: bumpedKeys),
+                      to: subscriber)
+        }
+    }
+
+    /// The one place that locks a `ConnectionWriter`'s own write lock and writes a frame to its
+    /// fd — every async-push call site (`routeDocumentEvent`, `tileRequest`'s per-key pushes,
+    /// close-notification pushes to remaining subscribers) shares this instead of re-deriving the
+    /// lock/writeAll/unlock sequence each time.
+    private func pushFrame(_ frame: OfficeWireFrame, to writer: ConnectionWriter) {
         writer.writeLock.lock()
         writeAll(frame.encodedLine(), fd: writer.fd)
         writer.writeLock.unlock()
@@ -274,7 +430,7 @@ public final class OfficeHelperServer {
     // MARK: - Per-connection handling
 
     private func handleConnection(fd: Int32, id: Int) {
-        let writer = ConnectionWriter(fd: fd)
+        let writer = ConnectionWriter(id: id, fd: fd)
         defer {
             close(fd)
             // Task 3: a connection that disconnects without explicitly closing its documents
@@ -288,9 +444,28 @@ public final class OfficeHelperServer {
             for docId in owned {
                 documentBridge.close(docId: docId)
             }
+            var closeNotifications: [(subscriber: ConnectionWriter, docId: String)] = []
             stateQueue.sync {
-                for docId in owned { docOwner.removeValue(forKey: docId) }
+                for docId in owned {
+                    if let entry = docOwner.removeValue(forKey: docId) {
+                        for subscriber in entry.subscribers where subscriber !== writer {
+                            closeNotifications.append((subscriber, docId))
+                        }
+                    }
+                }
+                // Task 4: this connection may ALSO be a mere tile SUBSCRIBER (never the opener) of
+                // docs it does not own — a dangling entry there would try to write to this now-
+                // closing fd on a future invalidation (a stale-fd bug, possibly worse than inert if
+                // the fd number is later reassigned by the kernel to an unrelated connection).
+                // Swept out of EVERY doc's subscriber list, not just the ones this connection owned.
+                for entry in docOwner.values {
+                    entry.subscribers.removeAll { $0 === writer }
+                }
                 refreshIdleStateLocked()
+            }
+            for (subscriber, docId) in closeNotifications {
+                pushFrame(.documentEvent(seq: subscriber.pushSeqAllocator.nextSeq(), docId: docId, event: .closed),
+                          to: subscriber)
             }
         }
 
@@ -397,7 +572,7 @@ public final class OfficeHelperServer {
                 // line runs on the connection's own thread with no lock held at all.
                 let metadata = try documentBridge.open(docId: docId, path: path)
                 stateQueue.sync {
-                    docOwner[docId] = writer
+                    docOwner[docId] = DocEntry(opener: writer)
                     writer.ownedDocIds.insert(docId)
                     refreshIdleStateLocked()
                 }
@@ -410,18 +585,74 @@ public final class OfficeHelperServer {
                 writeReply(.openFailed(seq: seq, docId: docId, reason: "\(error)"), writer: writer)
             }
         case .frame(.close(let seq, let docId)):
-            // Idempotent: closing an untracked docId still acks `closed` (Task 2's own precedent,
-            // unchanged) — the bridge itself tolerates being asked to close something it never
-            // opened (see `OfficeDocumentBridge.close`'s own doc comment), so this never needs to
-            // branch on whether docOwner actually had it.
+            // F7 (Task 4 review carry): only the connection that OPENED a doc may close it. An
+            // UNTRACKED docId stays idempotent (Task 2's own precedent, unchanged — there is no
+            // "wrong owner" to check against something not tracked at all); a TRACKED docId whose
+            // opener is a DIFFERENT connection is refused outright, never silently reassigned.
+            let entry = stateQueue.sync { docOwner[docId] }
+            if let entry, entry.opener !== writer {
+                writeReply(.error(seq: seq, reason: "notOwner"), writer: writer)
+                return
+            }
             documentBridge.close(docId: docId)
-            stateQueue.sync {
-                if let owner = docOwner.removeValue(forKey: docId) {
-                    owner.ownedDocIds.remove(docId)
-                }
+            let remainingSubscribers = stateQueue.sync { () -> [ConnectionWriter] in
+                let subscribers = docOwner[docId]?.subscribers.filter { $0 !== writer } ?? []
+                docOwner.removeValue(forKey: docId)
+                writer.ownedDocIds.remove(docId)
                 refreshIdleStateLocked()
+                return subscribers
+            }
+            // Task 4: any OTHER connection still tile-subscribed to this doc learns it is gone —
+            // the one real construction site of OfficeDocumentEvent.closed (declared since Task 3,
+            // never built until now). The CLOSING connection gets the direct `.closed` reply below
+            // instead; this is only for everyone else.
+            for subscriber in remainingSubscribers {
+                pushFrame(.documentEvent(seq: subscriber.pushSeqAllocator.nextSeq(), docId: docId, event: .closed),
+                          to: subscriber)
             }
             writeReply(.closed(seq: seq, docId: docId), writer: writer)
+        case .frame(.subscribeTiles(let seq, let docId, let part, let zoomPPT, let viewportTwips)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            stateQueue.sync {
+                guard let entry = docOwner[docId] else { return } // could have raced closed; harmless no-op
+                if !entry.subscribers.contains(where: { $0 === writer }) {
+                    entry.subscribers.append(writer)
+                }
+            }
+            let keys = TileMath.viewportTileKeys(part: part, zoomPPT: zoomPPT, viewportTwips: viewportTwips)
+            writeReply(.subscribed(seq: seq, docId: docId, keys: keys), writer: writer)
+        case .frame(.unsubscribe(let seq, let docId)):
+            stateQueue.sync {
+                docOwner[docId]?.subscribers.removeAll { $0 === writer }
+            }
+            writeReply(.unsubscribed(seq: seq, docId: docId), writer: writer)
+        case .frame(.tileRequest(let seq, let docId, let keys)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            writeReply(.tileRequestAccepted(seq: seq, docId: docId), writer: writer)
+            hooks.afterTileRequestAccepted?(docId)
+            // Each key paints (or hits cache) independently and pushes AS SOON AS IT IS READY —
+            // never buffered into one giant reply — to THIS connection only (a targeted fetch, not
+            // a broadcast; see `OfficeWireFrame.tile`'s own header for why this differs from
+            // `.invalidated`'s multicast). Never called while holding stateQueue.
+            for key in keys {
+                do {
+                    let result = try documentBridge.paintTile(docId: docId, key: key)
+                    pushFrame(.tile(seq: writer.pushSeqAllocator.nextSeq(), docId: docId, key: key,
+                                     generation: result.generation, width: result.width, height: result.height,
+                                     pixelsBase64: result.pixels.base64EncodedString()),
+                              to: writer)
+                } catch {
+                    pushFrame(.tileFailed(seq: writer.pushSeqAllocator.nextSeq(), docId: docId, key: key,
+                                           reason: "\(error)"),
+                              to: writer)
+                }
+            }
         case .frame(.hello(let seq, _, _)):
             writeReply(.error(seq: seq, reason: "already authenticated"), writer: writer)
         case .frame(let frame):

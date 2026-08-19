@@ -161,6 +161,20 @@ final class LOKBridge: OfficeDocumentBridge {
         }
     }
 
+    /// Task 4 — a tile operation named a `docId` this bridge has no open handle for (a benign race:
+    /// `OfficeHelperServer` already checks `docOwner[docId]` before calling in, but another
+    /// connection could close the doc between that check and this call reaching the dedicated
+    /// thread). Never a crash — `OfficeHelperServer` translates this into a `tileFailed` push for
+    /// the one key affected, the same "the helper always survives" posture `LoadError` already has.
+    enum TileError: Error, CustomStringConvertible {
+        case docNotOpen(String)
+        var description: String {
+            switch self {
+            case .docNotOpen(let docId): return "tile requested for a docId that is not open: \(docId)"
+            }
+        }
+    }
+
     /// Boxed alongside each open document's native handle, `Unmanaged.passRetained` at
     /// `registerCallback` time and `.release()`d at `close` — never before, never twice (both
     /// enforced by `documents` being the single source of truth: a docId's context is retained
@@ -179,6 +193,11 @@ final class LOKBridge: OfficeDocumentBridge {
     private struct OpenDocument {
         let handle: UnsafeMutablePointer<LibreOfficeKitDocument>
         let context: Unmanaged<DocumentCallbackContext>
+        /// Task 4 — one tile pool per open document, constructed alongside the handle in
+        /// `openOnDedicatedThread` (never lazily on first tile request — `getTileMode()` is cheap
+        /// and reading it once up front keeps `TileRenderer.init` free of its own failure mode to
+        /// handle later).
+        let tileRenderer: TileRenderer
     }
 
     private let thread: LOKDedicatedThread
@@ -255,6 +274,24 @@ final class LOKBridge: OfficeDocumentBridge {
         thread.sync { self.closeOnDedicatedThread(docId: docId) }
     }
 
+    /// Task 4 — called from a CONNECTION thread (`OfficeHelperServer`'s `.tileRequest` handler),
+    /// never from inside a LOK callback — marshals onto `thread` exactly like `open`/`close` above.
+    func paintTile(docId: String, key: TileKey) throws -> TilePaintResult {
+        try thread.sync { try self.paintTileOnDedicatedThread(docId: docId, key: key) }
+    }
+
+    /// Task 4 — the OPPOSITE threading contract from every other method on this bridge: called
+    /// ONLY from `OfficeHelperServer.routeDocumentEvent`, itself reached synchronously from inside
+    /// `handleCallback` below — which, per `lokBridgeDocumentCallback`'s own guarantee, is ALREADY
+    /// running on `thread` by the time this executes. Calling `thread.sync` here would be the exact
+    /// reentrant-deadlock hazard `LOKDedicatedThread`'s own header warns against (a job already
+    /// running on `thread` trying to enqueue and wait for another job on the same thread) — this
+    /// method touches `documents` DIRECTLY instead, relying on already being on the right thread.
+    func applyTileInvalidation(docId: String, rectsTwips: [OfficeTwipsRect], part: Int) -> [TileKey] {
+        guard let doc = documents[docId] else { return [] }
+        return doc.tileRenderer.applyInvalidation(rectsTwips: rectsTwips, part: part)
+    }
+
     // MARK: - Dedicated-thread-only implementation
 
     private func openOnDedicatedThread(docId: String, path: String) throws -> OfficeDocumentMetadata {
@@ -289,7 +326,8 @@ final class LOKBridge: OfficeDocumentBridge {
         var height: Int = 0
         rawDoc.pointee.pClass.pointee.getDocumentSize?(rawDoc, &width, &height)
 
-        documents[docId] = OpenDocument(handle: rawDoc, context: unmanagedContext)
+        documents[docId] = OpenDocument(handle: rawDoc, context: unmanagedContext,
+                                          tileRenderer: TileRenderer(handle: rawDoc))
         return OfficeDocumentMetadata(
             type: kind, parts: parts,
             sizeTwips: OfficeDocumentSize(widthTwips: Int64(width), heightTwips: Int64(height)))
@@ -299,6 +337,13 @@ final class LOKBridge: OfficeDocumentBridge {
         guard let doc = documents.removeValue(forKey: docId) else { return }
         doc.handle.pointee.pClass.pointee.destroy?(doc.handle)
         doc.context.release()
+    }
+
+    private func paintTileOnDedicatedThread(docId: String, key: TileKey) throws -> TilePaintResult {
+        guard let doc = documents[docId] else { throw TileError.docNotOpen(docId) }
+        let (generation, pixels) = doc.tileRenderer.paint(key: key)
+        return TilePaintResult(generation: generation, pixels: pixels,
+                                width: TileMath.tilePixelSize, height: TileMath.tilePixelSize)
     }
 
     // MARK: - Callback translation

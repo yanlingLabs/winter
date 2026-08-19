@@ -859,7 +859,11 @@ targets:
           # header) and would fail to compile if it swept this file in. Support/ (the bridging
           # header itself) excluded too for the same reason, though a stray .h reference alone
           # would be inert without the build setting — belt and suspenders.
+          # TileRenderer.swift (Task 4) joins this list for the identical reason:
+          # `UnsafeMutablePointer<LibreOfficeKitDocument>` is a LOK C type only visible through the
+          # same bridging header this fixture deliberately does not carry.
           - LOKBridge.swift
+          - TileRenderer.swift
           - Support
       - path: Tests/OfficeHelperFixtureSources
     settings:
