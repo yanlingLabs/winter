@@ -265,9 +265,11 @@ struct ShellPanel: View {
                 // panel-cef Task 6a wired the shown tab's own chrome slot; Task 6b FILLED it. A
                 // `.web` tab renders `PanelWebChrome` here — back / forward / reload-or-stop, the
                 // centred URL field, the `⋮` overflow — inside the same 85pt band as the tab strip
-                // above, with no hairline between them (`PanelWebChrome`'s own metrics doc). Every
-                // other kind still renders `Color.clear` (`PanelPlaceholderTab.makeChrome`), which
-                // is the blank row Plan A drew.
+                // above, with no hairline between them (`PanelWebChrome`'s own metrics doc). `.code`/
+                // `.diff`/`.files`/`.document` each fill their own chrome row now too (`PanelEditor
+                // Chrome`/`PanelDiffChrome`/`PanelFilesChrome`/`PanelDocumentChrome`); only `.note`
+                // still renders `Color.clear` (`PanelPlaceholderTab.makeChrome`), the blank row
+                // Plan A drew for every kind before any of them had a real surface.
                 Group {
                     if let content = activeTabContent {
                         content.makeChrome()

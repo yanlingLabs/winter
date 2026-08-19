@@ -860,11 +860,18 @@ final class CEFRuntimeTests: XCTestCase {
         XCTAssertFalse(filesContent is PanelWebTab, "…and never a browser")
         PanelFilesTabModels.removeAllForTesting()
 
-        for kind in [PanelTabKind.document, .note] {
-            let tab = PanelTab(tabId: "t2", kind: kind, url: nil, title: nil)
-            XCTAssertTrue(panelTabContent(for: tab) is PanelPlaceholderTab,
-                          "\(kind) must not render a browser")
-        }
+        // office-plumbing Task 6: the fifth kind with a real surface — pulled out of the shared
+        // still-placeholder loop below, mirroring `.diff`/`.code`/`.files`' own identical moves
+        // above (this test's own header explains why: the move is what makes a FUTURE silent
+        // regression of this door impossible, not just today's).
+        let document = PanelTab(tabId: "t6", kind: .document, url: "/tmp/gate.xlsx", title: nil)
+        let documentContent = panelTabContent(for: document)
+        XCTAssertTrue(documentContent is PanelDocumentTab, "a document tab renders the tile canvas")
+        XCTAssertFalse(documentContent is PanelWebTab, "…and never a browser of its own")
+        PanelDocumentTabModels.removeAllForTesting()
+
+        let note = PanelTab(tabId: "t2", kind: .note, url: nil, title: nil)
+        XCTAssertTrue(panelTabContent(for: note) is PanelPlaceholderTab, "note must not render a browser")
     }
 
     /// Every kind resolves to a REAL SF Symbol, `.diff` included (diff-tabs Task 9's
