@@ -120,6 +120,10 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
     private var tile3DocId = ""
     private let tile3Key = TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0)
     private var tile3FirstHash = ""
+    /// Wave fix (T9 review M4) — every cold-filled tile's hash across the SAME 512x512@100% viewport
+    /// `6.freshTiles` re-fills after the overwrite+reload, as a SET (not just tile (0,0)'s single
+    /// hash): read by `performFreshTiles6` for the "the hash CHANGES" compare.
+    private var tile3AllHashes: Set<String> = []
 
     // MARK: Drill 5 — the templated multi-sheet fixture
 
@@ -135,6 +139,11 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
     // MARK: Drill 7 — the mirror-case, on gate.odt
 
     private var doc7Path = ""
+    /// Wave fix (T9 review I1/I2) — the classification `7.observe` computed, read back by
+    /// `7.siblingTouch` instead of re-deriving branch membership from fresh state a second time:
+    /// one source of truth for "which branch are we in" removes any chance of the two steps
+    /// silently disagreeing about it. See `classifyOfficeHarnessMirrorCaseObservation`'s own header.
+    private var doc7Observation: OfficeHarnessMirrorCaseObservation?
 
     // MARK: Drill 8 — SIGKILL + reopen, on the SHARED helper
 
@@ -696,10 +705,15 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
         guard entry.pixels.count == TileMath.bytesPerTile else { return (false, "wrong byte count: \(entry.pixels.count)") }
         guard entry.pixels.contains(where: { $0 != 0 }) else { return (false, "tile (0,0) is entirely zero — a blank paint") }
         tile3FirstHash = Self.sha256Hex(entry.pixels)
+        // Wave fix (T9 review M4) — the full SET of hashes across every tile this viewport covers,
+        // not just (0,0): `6.freshTiles`' own compare needs the whole set (see that step's own doc).
+        tile3AllHashes = Set(keys.compactMap { runtime.tileStore.tile(docId: self.tile3DocId, key: $0)?.pixels }
+            .map { Self.sha256Hex($0) })
         let msPerTile = fillElapsedMs / Double(keys.count)
         return (true, "cold-filled \(keys.count) tile(s) in \(Int(fillElapsedMs))ms "
                      + "(\(String(format: "%.1f", msPerTile))ms/tile — PERF NOTE, not a gate); "
-                     + "tile (0,0) non-blank, sha256=\(tile3FirstHash)")
+                     + "tile (0,0) non-blank, sha256=\(tile3FirstHash); \(tile3AllHashes.count) distinct "
+                     + "hash(es) across \(keys.count) tile(s)")
     }
 
     private func performTileEvict3() async -> (Bool, String) {
@@ -861,6 +875,13 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
         return (true, "reloaded silently: \(doc6OriginalDocId) -> \(doc6NewDocId)")
     }
 
+    /// **Wave fix (T9 review M4)**: this used to only check non-blank, never that the paint actually
+    /// CHANGED after the overwrite+reload — a stale-cache bug could pass this step for free. The fix
+    /// is a SET compare against `3.cold`'s own `tile3AllHashes` (the identical 512x512@100% viewport,
+    /// same `keys`), not a single-tile compare: `makeModifiedXlsxInPlace`'s edit lands in
+    /// `sharedStrings.xml`, and comparing only tile (0,0) could false-red if that particular string
+    /// happens to render outside tile (0,0)'s own bounds — the whole-set compare still changes
+    /// because SOME tile in the viewport changed, wherever the edit actually rendered.
     private func performFreshTiles6() async -> (Bool, String) {
         guard let path = fixturePaths["gate.xlsx"], !doc6NewDocId.isEmpty else { return (false, "6.reload must run first") }
         let viewport = officeViewportTwips(scrollOrigin: .zero, visibleSize: CGSize(width: 512, height: 512), zoomPPT: 1000)
@@ -875,7 +896,16 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
             return entry.pixels.contains { $0 != 0 }
         }
         guard nonBlank else { return (false, "some fresh tiles under the new docId are blank") }
-        return (true, "\(keys.count) fresh non-blank tile(s) under the new docId \(doc6NewDocId)")
+        let newHashes = Set(keys.compactMap { runtime.tileStore.tile(docId: self.doc6NewDocId, key: $0)?.pixels }
+            .map { Self.sha256Hex($0) })
+        guard newHashes != tile3AllHashes else {
+            return (false, "the fresh tile-hash SET is IDENTICAL to 3.cold's own set (\(tile3AllHashes.count) "
+                          + "hash(es)) — the overwrite+reload produced pixel-identical output, which should "
+                          + "not happen for genuinely different content")
+        }
+        return (true, "\(keys.count) fresh non-blank tile(s) under the new docId \(doc6NewDocId); hash SET "
+                     + "changed vs 3.cold's own set (\(tile3AllHashes.count) -> \(newHashes.count) distinct "
+                     + "hash(es))")
     }
 
     private func performDelete6() async -> (Bool, String) {
@@ -919,9 +949,15 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
 
     private func performDelayedDelete7() async -> (Bool, String) {
         guard !doc7Path.isEmpty else { return (false, "7.overwrite must run first") }
-        try? await Task.sleep(nanoseconds: 700_000_000) // ~0.7s — inside the reload round trip, on purpose
+        // Wave fix (T9 review M6) — shortened from the original ~0.7s, which gave the reopen's own
+        // round trip enough time to always complete first, making BRANCH B (banner persisted) near-
+        // deterministic and defeating the point of an honestly-documented race. 120-200ms keeps the
+        // delete genuinely contested against the in-flight reopen (randomized within the band so
+        // repeated runs are not pinned to one edge of it).
+        let delayMs = Int.random(in: 120...200)
+        try? await Task.sleep(nanoseconds: UInt64(delayMs) * 1_000_000)
         do { try FileManager.default.removeItem(atPath: doc7Path) } catch { return (false, "delete failed: \(error)") }
-        return (true, "deleted ~0.7s after the overwrite, while the reopen may still be in flight")
+        return (true, "deleted ~\(delayMs)ms after the overwrite, while the reopen may still be in flight")
     }
 
     /// **Documents the interleaving; does not fix it.** Three outcomes are all legitimate, per this
@@ -931,61 +967,95 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
     /// after the reopen (the ordinary post-reload delete case), or the delete can land BEFORE LOK's
     /// `open()` ever reads the file (the reopen fails outright). This step records whichever happened
     /// as a definite observation rather than asserting one is "the" right answer.
+    ///
+    /// **Wave fix (T9 review I1)**: the classification itself is `classifyOfficeHarnessMirrorCase
+    /// Observation` (`OfficeHarnessScript.swift`, pure, pins-suite tested) — a fourth, UNRECOGNIZED
+    /// outcome (no document AND no openFailure) is a state `OfficeRuntimeReducer` should never
+    /// produce, not a fourth legitimate race branch, and now fails this step (`recognized == false`)
+    /// instead of passing silently. The result is stashed in `doc7Observation` for `7.siblingTouch`
+    /// to read back rather than re-derive.
     private func performObserve7() async -> (Bool, String) {
         guard !doc7Path.isEmpty else { return (false, "7.delayedDelete must run first") }
         try? await Task.sleep(nanoseconds: 3_000_000_000) // a bounded settle window, not a wait for one outcome
         let hasDocument = runtime.stateSnapshot.documents[doc7Path] != nil
         let banner = runtime.stateSnapshot.documentBanners[doc7Path]
         let openFailure = runtime.stateSnapshot.openFailures[doc7Path]
-        let verdict: String
-        if hasDocument, banner == nil {
-            verdict = "BRANCH A (reload won, no banner) — the in-flight reopen's .opened landed AFTER "
-                    + "the delete-fire's .externalDeleted, clearing the banner along with everything "
-                    + "else .opened resets. Content shows for a file that is, at this instant, actually "
-                    + "gone — the quiescent-directory window the brief names."
-        } else if hasDocument, banner != nil {
-            verdict = "BRANCH B (banner persisted) — the delete-fire's .externalDeleted landed AFTER "
-                    + "the reopen's own .opened; the ordinary post-reload delete case applied."
-        } else if !hasDocument, openFailure != nil {
-            verdict = "BRANCH C (reopen failed) — the delete landed before LOK's open() could read the "
-                    + "file; the in-flight reopen failed via .reloadFailed (openFailures set, the "
-                    + "banner cleared by that arm's own post-review fix, c277793a)."
-        } else {
-            verdict = "UNRECOGNIZED state — hasDocument=\(hasDocument) banner=\(banner ?? "nil") "
-                    + "openFailure=\(openFailure ?? "nil")"
-        }
-        notes.append("7.observe (the mirror-case drill): \(verdict)")
-        return (true, verdict)
+        let observation = classifyOfficeHarnessMirrorCaseObservation(
+            hasDocument: hasDocument, banner: banner, openFailure: openFailure)
+        doc7Observation = observation
+        notes.append("7.observe (the mirror-case drill): \(observation.verdict)")
+        return (observation.recognized, observation.verdict)
     }
 
+    /// **Wave fix (T9 review I1/I2)**: reads `doc7Observation` (set by `7.observe`, which must have
+    /// run first) instead of re-reading `documents`/`documentBanners` fresh — one classification, not
+    /// two independent ones that could disagree. Branch C's SKIP keeps its own honest text; the
+    /// UNRECOGNIZED/poisoned state gets its OWN SKIP text rather than being mislabeled "branch C"
+    /// (I1's own finding); branch B — the banner is ALREADY standing when this step begins — records
+    /// the same honest "not applicable" shape branch C's SKIP already gets, instead of a 0ms pass
+    /// with an unearned causal claim (I2); branch A alone keeps the real assertion.
     private func performSiblingTouch7() async -> (Bool, String) {
-        guard !doc7Path.isEmpty else { return (false, "7.observe must run first") }
-        guard runtime.stateSnapshot.documents[doc7Path] != nil else {
+        guard let observation = doc7Observation else { return (false, "7.observe must run first") }
+        switch observation.branch {
+        case .c:
             return (true, "SKIPPED — branch C (reopen failed) left no document behind to banner over; "
                          + "this leg only applies when a document survived the interleaving")
+        case .unrecognized:
+            return (true, "SKIPPED — 7.observe recorded its own UNRECOGNIZED/poisoned state (already "
+                         + "failed there); this is NOT branch C's honest reopen-failed case and must "
+                         + "not be mislabeled as one")
+        case .b:
+            return (true, "branch B: not applicable — banner pre-existing; watcher-fire not observed "
+                         + "(the delete-fire's .externalDeleted already landed before this step began, "
+                         + "so writing a sibling file and immediately observing the banner would be a "
+                         + "0ms pass that never actually waited for the watcher to fire — not a real "
+                         + "causal proof that a sibling touch re-fires anything)")
+        case .a:
+            let siblingPath = fixturesScratchDir.appendingPathComponent("t9-mirror-sibling-\(UUID().uuidString.prefix(6)).txt").path
+            do { try "sibling touch".write(toFile: siblingPath, atomically: true, encoding: .utf8) }
+            catch { return (false, "could not write the sibling file: \(error)") }
+            let bannered = await waitUntil(timeout: 12) { self.runtime.stateSnapshot.documentBanners[self.doc7Path] != nil }
+            guard bannered else { return (false, "branch A: the sibling touch never re-fired the deleted-file banner") }
+            return (true, "branch A: a sibling-file touch re-fired the directory watcher; banner: "
+                         + "\"\(runtime.stateSnapshot.documentBanners[doc7Path] ?? "?")\"")
         }
-        let siblingPath = fixturesScratchDir.appendingPathComponent("t9-mirror-sibling-\(UUID().uuidString.prefix(6)).txt").path
-        do { try "sibling touch".write(toFile: siblingPath, atomically: true, encoding: .utf8) }
-        catch { return (false, "could not write the sibling file: \(error)") }
-        let bannered = await waitUntil(timeout: 12) { self.runtime.stateSnapshot.documentBanners[self.doc7Path] != nil }
-        guard bannered else { return (false, "the sibling touch never re-fired the deleted-file banner") }
-        return (true, "a sibling-file touch re-fired the directory watcher; banner: "
-                     + "\"\(runtime.stateSnapshot.documentBanners[doc7Path] ?? "?")\"")
     }
 
     // MARK: Drill 8 — helper SIGKILL, .helperDied, tab failure state, reopen recovers
 
+    /// **Wave fix (T9 review I1)**: `host.officeHelperSupervisor?.process?.processIdentifier` reads a
+    /// `Process` object's LAST-KNOWN pid — it does not, on its own, prove that process is still
+    /// alive. Without a liveness check, a pre-existing corpse (the shared helper already dead for
+    /// some unrelated reason before this drill ever runs) would still hand back a plausible-looking
+    /// pid, and `8.kill`'s SIGKILL against it would fail silently (see that step's own fix) — the
+    /// drill would then wait for a `.helperDied` that either never arrives or already arrived for a
+    /// different reason, misreporting what it actually exercised. `kill(pid, 0)` sends no signal —
+    /// it only asks "does this pid exist and am I allowed to signal it" — the standard POSIX
+    /// liveness probe.
     private func performCapturePid8() async -> (Bool, String) {
         guard let pid = host.officeHelperSupervisor?.process?.processIdentifier else {
             return (false, "no live supervisor process to capture a pid from")
         }
+        guard kill(pid, 0) == 0 else {
+            return (false, "pid \(pid) is already dead (kill(pid, 0) != 0, errno \(errno)) — a "
+                          + "pre-existing corpse, not a live helper for this drill to kill")
+        }
         pid8Before = pid
-        return (true, "captured shared-helper pid \(pid)")
+        return (true, "captured shared-helper pid \(pid) (liveness-checked via kill(pid, 0) == 0)")
     }
 
+    /// **Wave fix (T9 review I1)**: `kill(2)`'s return value was previously discarded — a
+    /// pre-existing corpse (one `8.capturePid`'s own new liveness check did not already catch —
+    /// e.g. a race between capture and this step) would make `kill()` fail with `ESRCH` and this
+    /// step would still report PASS, because nothing ever looked at the result. Checking `== 0`
+    /// closes that: this drill cannot go green for a helper that was already gone before the kill.
     private func performKill8() async -> (Bool, String) {
         guard pid8Before != 0 else { return (false, "8.capturePid must run first") }
-        kill(pid8Before, SIGKILL)
+        let result = kill(pid8Before, SIGKILL)
+        guard result == 0 else {
+            return (false, "kill(\(pid8Before), SIGKILL) returned \(result) (errno \(errno)) — the "
+                          + "process was already gone before this drill could kill it")
+        }
         return (true, "SIGKILL sent to pid \(pid8Before) directly — never supervisor.stop() (which bumps "
                      + "generation FIRST and would suppress the .helperDied signal this drill needs to observe)")
     }
@@ -997,13 +1067,14 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
             return (false, "documents dict was not cleared: \(runtime.stateSnapshot.documents.keys.sorted())")
         }
         guard let reason = runtime.stateSnapshot.failureReason else { return (false, "no failureReason recorded") }
-        // DISCLOSED, not a T9 defect: `.helperDied`'s handler clears `documents` but never stops the
-        // imperative-half file watchers those documents had open (`OfficeRuntime.swift`'s own
-        // `watchers` dict) — they leak until `teardown()`, harmlessly no-op'ing against a docId the
-        // reducer no longer knows about in the meantime. This drill exercises exactly that state.
-        notes.append("8.diedObserved: file watchers for the documents open at kill time are not stopped "
-                    + "by .helperDied (only teardown() stops them) — they leak harmlessly until this run's "
-                    + "own teardown; not a regression this task introduces, recorded for visibility")
+        // Wave fix (T9 review M8): this used to disclose that `.helperDied` left the imperative-half
+        // file watchers running (leaking until `teardown()`). That is no longer true — the reducer's
+        // `.helperDied`/`.helperUnavailable` arm now emits `.unwatchFile` for every document that was
+        // open at kill time (`OfficeRuntimeReducer.swift`), so this drill's own kill exercises watcher
+        // teardown too, not just document/phase clearing. Recorded as a positive assertion instead of
+        // a disclosed gap.
+        notes.append("8.diedObserved: file watchers for the documents open at kill time ARE stopped by "
+                    + ".helperDied (wave fix, T9 review M8) — no watcher leak survives this kill")
         return (true, "phase == .failed; every open document cleared; failureReason: \"\(reason)\"")
     }
 
@@ -1034,6 +1105,15 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
 
     // MARK: Drill 9 — scroll/zoom viewport churn (reuses gate.xlsx, freshly reopened by drill 8)
 
+    /// **Wave fix (T9 review M5)**: "peak in-flight" used to be a SINGLE sample taken once, after the
+    /// whole 8-step loop finished — not a peak at all, just wherever the count happened to sit at that
+    /// one instant. Now a running max, sampled once per iteration. Still not a continuously-tracked
+    /// true peak (`.subscribe`'s own effect marks tiles in-flight from inside an async `Task`, past an
+    /// `await` on the helper round trip — `OfficeRuntime.perform`'s `.subscribe` case — so a sample
+    /// taken synchronously right after `subscribeTiles()` returns mostly reads what the PREVIOUS
+    /// iteration left behind, not this one's own ask): sampled after each 40ms sleep instead, giving
+    /// that async work more of a chance to land, and every individual sample is disclosed in the
+    /// evidence string rather than presenting the max as an exact measurement.
     private func performRapidScroll9() async -> (Bool, String) {
         guard let path = fixturePaths["gate.xlsx"], let doc = runtime.stateSnapshot.documents[path] else {
             return (false, "gate.xlsx is not open — drill 8 must have reopened it")
@@ -1041,21 +1121,26 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
         let docId = doc.docId
         let zoomPPT = 1000
         var lastKeys: [TileKey] = []
+        var peakInFlight = 0
+        var samples: [Int] = []
         for step in 0..<8 {
             let origin = CGPoint(x: 0, y: Double(step) * 300)
             let viewport = officeViewportTwips(scrollOrigin: origin, visibleSize: CGSize(width: 400, height: 400), zoomPPT: zoomPPT)
             lastKeys = TileMath.viewportTileKeys(part: 0, zoomPPT: zoomPPT, viewportTwips: viewport)
             runtime.subscribeTiles(path: path, part: 0, zoomPPT: zoomPPT, viewportTwips: viewport)
             try? await Task.sleep(nanoseconds: 40_000_000) // faster than a cold fill settles — during-reload scroll (N2)
+            let sample = runtime.tileStore.inFlightCountForTesting
+            samples.append(sample)
+            peakInFlight = max(peakInFlight, sample)
         }
-        let inFlightNow = runtime.tileStore.inFlightCountForTesting
-        guard inFlightNow <= 256 else { return (false, "in-flight tile count \(inFlightNow) — unbounded churn") }
+        guard peakInFlight <= 256 else { return (false, "peak in-flight tile count \(peakInFlight) — unbounded churn") }
         let settled = await waitUntil(timeout: 15) {
             lastKeys.allSatisfy { self.runtime.tileStore.tile(docId: docId, key: $0) != nil }
         }
         guard settled else { return (false, "the final viewport in the scroll storm never settled") }
-        return (true, "8 rapid viewport asks during a cold fill; peak in-flight \(inFlightNow); the final "
-                     + "viewport settled cleanly — no crash, bounded churn")
+        return (true, "8 rapid viewport asks during a cold fill; peak in-flight \(peakInFlight) (max of 8 "
+                     + "samples taken ~40ms after each ask, not a continuously-tracked true peak — "
+                     + "samples: \(samples)); the final viewport settled cleanly — no crash, bounded churn")
     }
 
     private func performZoomStep9() async -> (Bool, String) {
@@ -1145,6 +1230,12 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
 
     // MARK: Drill 11 — second-copy hygiene
 
+    /// **Wave fix (T9 review M3)**: the loop below checked every root against a prefix built FROM
+    /// `scratchRoot` itself (`root.path.hasPrefix(scratchRoot.path)`) — for every root this file's
+    /// own `init` constructs by appending a path component to `scratchRoot`, that is a tautology, true
+    /// by string construction with no live process or socket involved at all. What actually proves
+    /// this run's own supervisor lives where it claims is a real, existing `office.sock` under
+    /// `sharedSupervisorStateDir` — the shared helper's socket, live for the whole run since `0.setup`.
     private func performStatePaths11() async -> (Bool, String) {
         let roots = [scratchRoot, fixturesScratchDir, sharedSupervisorStateDir, throwawayHelper1StateDir,
                      throwawayHelper10StateDir, zipSurgeryScratchDir]
@@ -1154,8 +1245,14 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
             }
             guard !root.path.contains(".norma") else { return (false, "\(root.path) touches a .norma path — collision risk") }
         }
+        let sharedSocketPath = sharedSupervisorStateDir.appendingPathComponent("office.sock").path
+        guard FileManager.default.fileExists(atPath: sharedSocketPath) else {
+            return (false, "the shared supervisor's own office.sock does not exist at \(sharedSocketPath) "
+                          + "— the path-prefix checks above are true of any string, live or not; this is "
+                          + "the one check that proves a REAL socket lives under this run's own root")
+        }
         return (true, "every scratch socket/state path used this run lives under \(scratchRoot.path); "
-                     + "none touch ~/.norma or ~/.norma-dev")
+                     + "none touch ~/.norma or ~/.norma-dev; office.sock genuinely exists at \(sharedSocketPath)")
     }
 
     private func performUserCachesUntouched11() async -> (Bool, String) {

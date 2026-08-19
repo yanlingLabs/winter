@@ -40,6 +40,24 @@ final class OfficeHarnessScriptTests: XCTestCase {
         }
     }
 
+    /// **Wave fix (T9 review M2)**: `3.resubscribe` must run AFTER `3.evict`, never before — asking
+    /// again without first evicting would only prove the tile store returns its own cached bytes (a
+    /// cache-hit tautology), never that LOK painted anything for real (`performTileResubscribe3`'s
+    /// own header makes the identical claim about why `3.evict` exists).
+    func testDrillThreesInternalOrderIsColdEvictResubscribe() throws {
+        let ids = OfficeHarnessPlan.steps.filter { $0.drill == 3 }.map(\.id)
+        XCTAssertEqual(ids, ["3.cold", "3.evict", "3.resubscribe"])
+    }
+
+    /// **Wave fix (T9 review M2)**: the fixture must be built before it can be opened, opened before
+    /// either part can be filled, and BOTH parts' pixels must be captured before `5.distinct`
+    /// compares them — `5.part0` stores `multiPart0Pixels` for `5.distinct` to read, and `5.part1` is
+    /// what makes part 1's own tile available in the store for `5.distinct` to read fresh.
+    func testDrillFivesInternalOrderIsBuildOpenPart0Part1Distinct() throws {
+        let ids = OfficeHarnessPlan.steps.filter { $0.drill == 5 }.map(\.id)
+        XCTAssertEqual(ids, ["5.build", "5.open", "5.part0", "5.part1", "5.distinct"])
+    }
+
     /// **Drill 6's own internal order is load-bearing**: nothing to reload until the file has
     /// actually changed, the new docId must exist before tiles can be requested under it, delete
     /// must follow the fresh-tile proof (this is the T8 drill's own shape, exercised in-harness), and
@@ -153,5 +171,34 @@ final class OfficeHarnessScriptTests: XCTestCase {
         for ext in ["xlsx", "ods", "pptx", "odp", "docx", "odt"] {
             XCTAssertEqual(panelTabKind(forFilePath: "/probe.\(ext)"), .document, "\(ext) must classify as .document")
         }
+    }
+
+    // MARK: - Wave fix (T9 review I1): the mirror-case classifier fails closed on the poisoned state
+
+    /// The three legitimate branches all recognize — this is the acceptance for I1's OTHER half
+    /// (T9 review I1/I2's "7.siblingTouch branch-C mislabel" fix): `OfficeHarness.performSiblingTouch7`
+    /// switches on `.branch` directly, so a regression here would misroute that step's own text too.
+    func testMirrorCaseObservationClassifierRecognizesAllThreeLegitimateBranches() {
+        XCTAssertEqual(classifyOfficeHarnessMirrorCaseObservation(
+            hasDocument: true, banner: nil, openFailure: nil).branch, .a)
+        XCTAssertEqual(classifyOfficeHarnessMirrorCaseObservation(
+            hasDocument: true, banner: "File was deleted on disk", openFailure: nil).branch, .b)
+        XCTAssertEqual(classifyOfficeHarnessMirrorCaseObservation(
+            hasDocument: false, banner: nil, openFailure: "corrupt file").branch, .c)
+        for branch in [OfficeHarnessMirrorCaseBranch.a, .b, .c] {
+            XCTAssertNotEqual(branch, .unrecognized)
+        }
+    }
+
+    /// **The acceptance this wave item exists for, made executable**: a poisoned-state simulation
+    /// (no document AND no openFailure — a combination `OfficeRuntimeReducer` should never produce)
+    /// must fail closed, not pass silently the way the pre-fix `OfficeHarness.performObserve7` did
+    /// for every branch including this one.
+    func testMirrorCaseObservationClassifierFailsClosedOnThePoisonedUnrecognizedState() {
+        let poisoned = classifyOfficeHarnessMirrorCaseObservation(hasDocument: false, banner: nil, openFailure: nil)
+        XCTAssertEqual(poisoned.branch, .unrecognized)
+        XCTAssertFalse(poisoned.recognized, "the no-document/no-openFailure combination must be "
+                       + "UNRECOGNIZED, never silently accepted as a fourth legitimate race branch")
+        XCTAssertTrue(poisoned.verdict.contains("UNRECOGNIZED"), "the evidence string must name the state honestly")
     }
 }

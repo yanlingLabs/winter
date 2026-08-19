@@ -92,7 +92,7 @@ enum OfficeHarnessPlan {
         step("6.restore", 6, "the file coming back clears the banner", 30),
 
         step("7.overwrite", 7, "overwrite gate.odt's scratch copy", 5),
-        step("7.delayedDelete", 7, "delete ~0.5-1s later — inside the reload round trip, on purpose", 5),
+        step("7.delayedDelete", 7, "delete ~120-200ms later — inside the reload round trip, on purpose", 5),
         step("7.observe", 7, "record the observed interleaving honestly — this documents it, does not fix it", 15),
         step("7.siblingTouch", 7, "touch a sibling file; the banner arrives if a document survived the interleaving", 15),
 
@@ -121,6 +121,64 @@ enum OfficeHarnessPlan {
 
     private static func step(_ id: String, _ drill: Int, _ title: String, _ timeout: TimeInterval) -> OfficeHarnessStep {
         OfficeHarnessStep(id: id, drill: drill, title: title, timeout: timeout)
+    }
+}
+
+// MARK: - office-plumbing wave fix (T9 review I1) — the mirror-case's own classification, pure
+
+/// Which of drill 7's (the mirror-case's) three legitimate outcomes `7.observe` recorded, or that
+/// none of them fit. Not `#if DEBUG`, same reason `OfficeHarnessPlan` above isn't: this needs to be
+/// callable from the pins suite with no live helper, no runtime, nothing helper-shaped at all.
+enum OfficeHarnessMirrorCaseBranch: Equatable {
+    /// The in-flight reopen's `.opened` landed AFTER the delete-fire's `.externalDeleted` — content
+    /// shows for a file that is, at this instant, actually gone (the quiescent-directory window).
+    case a
+    /// The delete-fire's `.externalDeleted` landed AFTER the reopen's own `.opened` — the ordinary
+    /// post-reload delete case.
+    case b
+    /// The delete landed before LOK's `open()` could read the file — the in-flight reopen failed.
+    case c
+    /// Neither branch A, B, nor C — a state `OfficeRuntimeReducer` should never produce (no document
+    /// AND no openFailure). A poisoned state, not a fourth legitimate race outcome.
+    case unrecognized
+}
+
+struct OfficeHarnessMirrorCaseObservation: Equatable {
+    let branch: OfficeHarnessMirrorCaseBranch
+    let verdict: String
+    /// `false` exactly for `.unrecognized` — the one outcome this classification must fail closed
+    /// on rather than pass silently (T9 review I1's own finding: the pre-fix code returned `true`
+    /// for every branch, this one included).
+    var recognized: Bool { branch != .unrecognized }
+}
+
+/// Extracted from `OfficeHarness.performObserve7` (T9 review I1) so the poisoned/UNRECOGNIZED
+/// branch can be pinned by a plain unit test instead of only by reading the live-run transcript.
+/// `hasDocument`/`banner`/`openFailure` are exactly `OfficeRuntimeState`'s own
+/// `documents[path] != nil` / `documentBanners[path]` / `openFailures[path]`, read at the mirror-
+/// case drill's own settle point.
+func classifyOfficeHarnessMirrorCaseObservation(hasDocument: Bool, banner: String?, openFailure: String?)
+    -> OfficeHarnessMirrorCaseObservation {
+    if hasDocument, banner == nil {
+        return OfficeHarnessMirrorCaseObservation(branch: .a, verdict:
+            "BRANCH A (reload won, no banner) — the in-flight reopen's .opened landed AFTER "
+          + "the delete-fire's .externalDeleted, clearing the banner along with everything "
+          + "else .opened resets. Content shows for a file that is, at this instant, actually "
+          + "gone — the quiescent-directory window the brief names.")
+    } else if hasDocument, banner != nil {
+        return OfficeHarnessMirrorCaseObservation(branch: .b, verdict:
+            "BRANCH B (banner persisted) — the delete-fire's .externalDeleted landed AFTER "
+          + "the reopen's own .opened; the ordinary post-reload delete case applied.")
+    } else if !hasDocument, openFailure != nil {
+        return OfficeHarnessMirrorCaseObservation(branch: .c, verdict:
+            "BRANCH C (reopen failed) — the delete landed before LOK's open() could read the "
+          + "file; the in-flight reopen failed via .reloadFailed (openFailures set, the "
+          + "banner cleared by that arm's own post-review fix, c277793a).")
+    } else {
+        return OfficeHarnessMirrorCaseObservation(branch: .unrecognized, verdict:
+            "UNRECOGNIZED state — hasDocument=\(hasDocument) banner=\(banner ?? "nil") "
+          + "openFailure=\(openFailure ?? "nil") — a state the reducer should never produce, "
+          + "not a legitimate race branch; failing rather than passing silently")
     }
 }
 
