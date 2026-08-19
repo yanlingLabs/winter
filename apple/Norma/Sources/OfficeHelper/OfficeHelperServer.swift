@@ -194,13 +194,34 @@ public final class OfficeHelperServer {
             let bytesRead = readBuffer.withUnsafeMutableBytes { raw -> Int in
                 read(fd, raw.baseAddress, raw.count)
             }
-            if bytesRead <= 0 { return } // 0 = peer closed; <0 = read error — either way, done.
+            if bytesRead == 0 { return } // peer closed
+            if bytesRead < 0 {
+                // F6 (T2 review): EINTR — this read() was interrupted by a signal before any data
+                // arrived; the CONNECTION is still perfectly valid, only this one call was cut
+                // short. Treating it the same as a real error/EOF (the previous `bytesRead <= 0`
+                // check did) would drop a healthy connection over nothing more than an interrupted
+                // system call. Any other errno IS a real read error — done.
+                if errno == EINTR { continue }
+                return
+            }
             buffer.append(contentsOf: readBuffer[0..<bytesRead])
 
             while let newlineIndex = buffer.firstIndex(of: 0x0A) {
                 let lineData = buffer.subdata(in: buffer.startIndex..<newlineIndex)
                 buffer.removeSubrange(buffer.startIndex...newlineIndex)
-                guard let line = String(data: lineData, encoding: .utf8) else { continue }
+                guard let line = String(data: lineData, encoding: .utf8) else {
+                    // F4 fix (T2 review): this used to `continue` — silently dropping a line that
+                    // isn't even valid UTF-8, never answering it. Refuse-never-ignore's whole point
+                    // is that EVERY line gets a reply; bytes that can't even become a `String`
+                    // still owe one — proven live: without this, whoever sent it starves for its
+                    // own full request timeout instead of being told anything. `seq` is
+                    // unrecoverable (there is no JSON to read one from), so this is the same
+                    // sentinel-seq path `OfficeWireCodec.decodeInbound`'s `.unreadable` case
+                    // already uses for a line that IS valid UTF-8 but isn't valid JSON.
+                    writeReply(.error(seq: OfficeWireCodec.unreadableSeqSentinel, reason: "malformed"), fd: fd)
+                    if !authenticated { return } // same pre-auth rule as every other opening violation
+                    continue
+                }
 
                 if !authenticated {
                     guard handleOpeningLine(line, fd: fd) else { return } // reply sent; done either way
@@ -278,9 +299,30 @@ public final class OfficeHelperServer {
 
     private func writeReply(_ frame: OfficeWireFrame, fd: Int32) {
         guard !hooks.suppressReplies else { return }
-        let data = frame.encodedLine()
-        _ = data.withUnsafeBytes { raw -> Int in
-            write(fd, raw.baseAddress, raw.count)
+        writeAll(frame.encodedLine(), fd: fd)
+    }
+
+    /// Writes every byte of `data` to `fd`, looping past partial writes and retrying on EINTR (F6,
+    /// T2 review). POSIX permits a single `write()` to a blocking socket to accept fewer bytes than
+    /// requested even when it isn't full — today's frames are a few dozen bytes and this has never
+    /// been observed to matter, but Task 3's real LOK version strings (and later document content)
+    /// make a partial write plausible for the first time. A real write ERROR (EPIPE, ECONNRESET,
+    /// ...) stops here rather than looping forever — the read loop's next `read()` will observe the
+    /// closed connection and return on its own.
+    private func writeAll(_ data: Data, fd: Int32) {
+        data.withUnsafeBytes { raw in
+            var offset = 0
+            let total = raw.count
+            while offset < total {
+                let n = write(fd, raw.baseAddress!.advanced(by: offset), total - offset)
+                if n > 0 {
+                    offset += n
+                } else if n < 0 && errno == EINTR {
+                    continue
+                } else {
+                    return
+                }
+            }
         }
     }
 

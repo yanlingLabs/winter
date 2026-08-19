@@ -34,14 +34,30 @@ final class OfficeHelperClient {
         self.requestTimeout = requestTimeout
     }
 
-    func ping() async throws {
-        let seq = seqAllocator.nextSeq()
-        try await connection.send(.ping(seq: seq))
+    /// Awaits the next frame and requires its `seq` to match `seq` before returning it — checked
+    /// for EVERY reply shape, including `.error` (F7, T2 review). Previously only the success arms
+    /// (`.pong`/`.opened`/`.closed`) checked `replySeq == seq`, via a `case ... where` guard;
+    /// `.error` matched on TYPE alone, so a stale error reply left over from an earlier,
+    /// already-abandoned request on this connection could be misattributed as belonging to
+    /// whatever request is CURRENTLY awaiting a reply — this connection supports only one
+    /// outstanding wait at a time (`OfficeWireConnection`'s own header), but a reply to a TIMED-OUT
+    /// request can still arrive late and queue, exactly the shape that made this reachable. A seq
+    /// mismatch — of any frame type, `.error` included — throws `.unexpectedReply`, never
+    /// `.serverError`: only a same-seq `.error` is genuinely this request's own answer.
+    private func expectReply(seq: UInt64) async throws -> OfficeWireFrame {
         guard let reply = await connection.nextFrame(timeout: requestTimeout) else {
             throw OfficeHelperClientError.timedOut
         }
+        guard reply.seq == seq else { throw OfficeHelperClientError.unexpectedReply(reply) }
+        return reply
+    }
+
+    func ping() async throws {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.ping(seq: seq))
+        let reply = try await expectReply(seq: seq)
         switch reply {
-        case .pong(let replySeq) where replySeq == seq: return
+        case .pong: return
         case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
         default: throw OfficeHelperClientError.unexpectedReply(reply)
         }
@@ -52,11 +68,9 @@ final class OfficeHelperClient {
     func open(docId: String, path: String) async throws {
         let seq = seqAllocator.nextSeq()
         try await connection.send(.open(seq: seq, docId: docId, path: path))
-        guard let reply = await connection.nextFrame(timeout: requestTimeout) else {
-            throw OfficeHelperClientError.timedOut
-        }
+        let reply = try await expectReply(seq: seq)
         switch reply {
-        case .opened(let replySeq, _) where replySeq == seq: return
+        case .opened: return
         case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
         default: throw OfficeHelperClientError.unexpectedReply(reply)
         }
@@ -65,11 +79,9 @@ final class OfficeHelperClient {
     func close(docId: String) async throws {
         let seq = seqAllocator.nextSeq()
         try await connection.send(.close(seq: seq, docId: docId))
-        guard let reply = await connection.nextFrame(timeout: requestTimeout) else {
-            throw OfficeHelperClientError.timedOut
-        }
+        let reply = try await expectReply(seq: seq)
         switch reply {
-        case .closed(let replySeq, _) where replySeq == seq: return
+        case .closed: return
         case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
         default: throw OfficeHelperClientError.unexpectedReply(reply)
         }
@@ -161,9 +173,14 @@ final class OfficeHelperSupervisor {
     /// (death detection, a superseded attempt's own late handshake reply) captures the generation
     /// it belongs to and checks it against the CURRENT generation before touching state — so a
     /// stale signal from an attempt this supervisor has already moved past can never clobber a
-    /// newer one's result.
-    private var generation = 0
-    private var process: Process?
+    /// newer one's result. `private(set)`, not `private` — F3's own regression test
+    /// (`testStartWhileReadyIsANoOpAndDoesNotOrphanTheRunningHelper`) asserts on it directly, via
+    /// `@testable import`, to prove a redundant `start()` mints no new generation.
+    private(set) var generation = 0
+    /// `private(set)`, not `private` — F3's own test reads `.processIdentifier`/`.isRunning`
+    /// directly to prove a redundant `start()` neither spawns a second process nor orphans the
+    /// first one.
+    private(set) var process: Process?
     private var connection: OfficeWireConnection?
 
     init(configuration: Configuration) {
@@ -177,8 +194,20 @@ final class OfficeHelperSupervisor {
     /// `configuration.backoff` between a killed attempt and the next. Returns once ready or once
     /// every attempt has failed (`.helperUnavailable`) — see the type's own header for why nothing
     /// past that point retries on its own.
+    ///
+    /// **Only `.notStarted` and `.stopped` can begin a new attempt cycle — `.starting` and
+    /// `.ready` are both no-ops (F3, T2 review).** `.starting` was always guarded (re-entrancy);
+    /// `.ready` was NOT, and a second `start()` call while a helper was already running and
+    /// healthy would bump `generation` — invalidating the CURRENT generation's death-detection
+    /// closures — spawn a brand-new process, and overwrite `process`/`connection`/`client` with
+    /// it, all WITHOUT ever terminating the old process or closing its connection: an orphaned
+    /// helper (in Task 3, ~488MB of mapped LOK) whose own idle-exit can never arm, because its
+    /// still-open connection permanently pins its `connectionCount` above zero. "The next explicit
+    /// `start()` is the only door back in" (the type's own header) means back in from a FAILED
+    /// state (`.stopped`, whether from `.helperDied` or `.helperUnavailable`) — not a redundant
+    /// call while already succeeded.
     func start() async {
-        guard state != .starting else { return }
+        guard state == .notStarted || state == .stopped else { return }
         state = .starting
         client = nil
         generation += 1
@@ -213,6 +242,20 @@ final class OfficeHelperSupervisor {
         } catch {
             return false
         }
+
+        // F1 fix (T2 review): a PRIOR attempt's helper, killed via SIGTERM, leaves its socket
+        // FILE on disk — SIGTERM's default disposition does not run any unlink-on-exit cleanup,
+        // and the SERVER's own unlink-before-bind only helps a helper that gets far enough to
+        // start(); it does nothing for the path a killed helper leaves behind. Without this, the
+        // existence-poll below returns true INSTANTLY against the stale file (nothing has to
+        // create it — it's already there), and connecting proceeds into a dead inode: nothing is
+        // listening, and empirically (T2 review, reproduced) UnixSocketTransport's connect does
+        // not fail fast against that shape — it burns close to its own internal ~3s timeout before
+        // giving up, per attempt. Worse: a crash-respawn sequence could connect to a PREVIOUS
+        // generation's still-live helper instead of the new one if the stale path briefly outlives
+        // its owner. Removing the file HERE, immediately before spawning, is the fix — the poll
+        // below then only ever sees a socket file the FRESH process itself created.
+        try? FileManager.default.removeItem(at: URL(fileURLWithPath: socketPath))
 
         let process = Process()
         process.executableURL = configuration.helperExecutableURL
@@ -249,17 +292,27 @@ final class OfficeHelperSupervisor {
         var succeeded = false
         var lokVersion = ""
 
-        do {
-            try await connection.open()
-            try await connection.send(.hello(seq: helloSeq, role: .app, token: token))
-            let remaining = max(0, deadline.timeIntervalSinceNow)
-            if let reply = await connection.nextFrame(timeout: remaining),
-               case .helloOk(let replySeq, let replyLokVersion) = reply, replySeq == helloSeq {
-                succeeded = true
-                lokVersion = replyLokVersion
+        // F2 fix (T2 review): `connection.open()` was UNBOUNDED by `deadline` — it is a single
+        // `async throws` call with no timeout parameter of its own, governed only by
+        // `UnixSocketTransport`'s hardcoded ~3s internal connect timeout, regardless of how much
+        // of THIS attempt's budget the socket-file poll above already spent. Worst case per
+        // attempt was measurably ~(handshakeTimeout + 3s), not handshakeTimeout — three attempts
+        // at the brief's 5s/attempt could cost ~24s, not ~15s. `openWithDeadline` bounds it to
+        // whatever budget remains right now, so the poll + connect + hello-wait together never
+        // exceed `handshakeTimeout` by more than scheduling noise.
+        let connectBudget = max(0, deadline.timeIntervalSinceNow)
+        if await openWithDeadline(connection, timeout: connectBudget) {
+            do {
+                try await connection.send(.hello(seq: helloSeq, role: .app, token: token))
+                let remaining = max(0, deadline.timeIntervalSinceNow)
+                if let reply = await connection.nextFrame(timeout: remaining),
+                   case .helloOk(let replySeq, let replyLokVersion) = reply, replySeq == helloSeq {
+                    succeeded = true
+                    lokVersion = replyLokVersion
+                }
+            } catch {
+                succeeded = false
             }
-        } catch {
-            succeeded = false
         }
 
         guard succeeded else {
@@ -283,6 +336,36 @@ final class OfficeHelperSupervisor {
         armDeathDetection(generation: myGeneration, process: process, connection: connection)
         eventsContinuation.yield(.ready(lokVersion: lokVersion))
         return true
+    }
+
+    /// Bounds `connection.open()` by `timeout`, independent of `UnixSocketTransport`'s own
+    /// internal ~3s connect timeout (F2, T2 review). NOT a `withTaskGroup` race — same reasoning
+    /// `OfficeWireConnection`'s own header gives at length for `nextFrame`: NormaKit's `open()` has
+    /// no cancellation checks of its own (its 3s deadline is a plain `queue.asyncAfter`, not
+    /// `Task`-aware), so a structured group would still AWAIT the abandoned attempt before this
+    /// function could return, defeating the bound entirely. This is the same unstructured
+    /// continuation-race pattern instead: whichever of "connect finished" or "timeout elapsed"
+    /// happens first wins, via a shared `OnceFlag`; an abandoned connect attempt keeps running
+    /// in the background on its own time, awaited by no one once this returns.
+    ///
+    /// `true` only once actually connected within `timeout`; `false` on timeout OR a thrown
+    /// connect error.
+    private func openWithDeadline(_ connection: OfficeWireConnection, timeout: TimeInterval) async -> Bool {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            let once = OnceFlag()
+            Task {
+                do {
+                    try await connection.open()
+                    if once.trip() { continuation.resume(returning: true) }
+                } catch {
+                    if once.trip() { continuation.resume(returning: false) }
+                }
+            }
+            Task {
+                try? await Task.sleep(nanoseconds: UInt64(max(0, timeout) * 1_000_000_000))
+                if once.trip() { continuation.resume(returning: false) }
+            }
+        }
     }
 
     /// Watches BOTH the process (`terminationHandler`) and the connection (`onClosed`) for the

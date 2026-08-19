@@ -82,6 +82,13 @@ final class OfficeWireConnection: @unchecked Sendable {
         try await transport.send(frame.encodedLine())
     }
 
+    /// Bypasses `OfficeWireFrame` encoding to send arbitrary bytes — test-only (F4's regression
+    /// tests construct a deliberately invalid-UTF-8 line this way; nothing in production code ever
+    /// needs to send bytes that aren't a well-formed frame).
+    func sendRaw(_ data: Data) async throws {
+        try await transport.send(data)
+    }
+
     /// Waits for the next frame this connection hasn't yet delivered. `nil` on timeout OR the
     /// connection closing first — callers that must tell those apart check `isClosed` afterward.
     ///
@@ -158,8 +165,23 @@ final class OfficeWireConnection: @unchecked Sendable {
         while let newlineIndex = buffer.firstIndex(of: 0x0A) {
             let lineData = buffer.subdata(in: buffer.startIndex..<newlineIndex)
             buffer.removeSubrange(buffer.startIndex...newlineIndex)
-            if let line = String(data: lineData, encoding: .utf8), let frame = OfficeWireFrame.decode(line) {
-                frameQueue.append(frame)
+            // F4 (T2 review), client side: an undecodable line is now LOGGED, not silently
+            // dropped — "your call on shape, disclose it." Logging only, not surfaced as a
+            // delivered frame: this client has no reply mechanism (it isn't the one being asked
+            // anything), and forcibly handing an unrelated garbage line to whichever caller is
+            // CURRENTLY awaiting `nextFrame` would misattribute it to that request, which is worse
+            // than the request simply timing out normally. A malformed line from the helper is
+            // also a signal something is more fundamentally wrong (a protocol version mismatch, a
+            // corrupted stream) that a developer should be able to see in the log, not just infer
+            // from a mysteriously timed-out request.
+            if let line = String(data: lineData, encoding: .utf8) {
+                if let frame = OfficeWireFrame.decode(line) {
+                    frameQueue.append(frame)
+                } else {
+                    NSLog("[OfficeWireConnection] dropped an undecodable line from the helper: %@", line)
+                }
+            } else {
+                NSLog("[OfficeWireConnection] dropped a non-UTF-8 line from the helper (%d bytes)", lineData.count)
             }
         }
         if waiter != nil, !frameQueue.isEmpty {

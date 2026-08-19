@@ -1123,7 +1123,14 @@ schemes:
         Norma: all
         NormaHelper: all
         NormaOfficeHelper: all
-        NormaOfficeHelperFixture: all
+        # F7 (T2 review, "if trivial"): [test], not `all` — the fixture is test-only infrastructure
+        # (Tests/OfficeHelperFixtureSources/, never embedded, never touched by any postCompileScript),
+        # so it belongs in the same scheme-action scope as NormaAppTests itself immediately below,
+        # not built as part of a plain `build`/`build-for-testing` action that has no testing intent.
+        # `build-for-testing` still builds it: that action IS "prepare for the test action," which is
+        # exactly what `[test]` scopes this to — the same reasoning that already makes NormaAppTests'
+        # own `[test]` scoping work today.
+        NormaOfficeHelperFixture: [test]
         CEFHelperBase: all
         CEFHelperAlerts: all
         CEFHelperGPU: all
