@@ -374,16 +374,37 @@ final class OfficeHelperRequestQueueTests: XCTestCase {
     }
 
     /// Three, in order, none of them overlapping — the queue is a real FIFO, not merely "two work."
+    ///
+    /// **T5.5 review: this test's original `async let a/b/c` shape was ~25% flaky (`[1, 3, 2]` etc.),
+    /// and the fault was the test, not the queue.** `run` is `@MainActor`-isolated; three `async let`
+    /// children race INDEPENDENTLY to reach it, and their arrival order at the actor is not
+    /// guaranteed to match their SOURCE order — so the old hardcoded `[1, 2, 3]` assertion conflated
+    /// "declared first" with "enqueued first." The queue's own FIFO-by-enqueue-order property held on
+    /// every single run; only the test's premise (source order == enqueue order) was unsound.
+    ///
+    /// Fix: remove the race instead of trying to observe around it. All three `run` calls are
+    /// enqueued SYNCHRONOUSLY, back to back, from this already-`@MainActor` test body — with no
+    /// `await` between the three `Task { @MainActor in ... }` creations below, the actor cannot
+    /// service any of them until this synchronous prefix itself suspends, so all three land on the
+    /// SAME serial executor in exactly this creation order before any of them runs. Enqueue order is
+    /// pinned to source order by construction, not by chance — verified flake-free across 20
+    /// iterations (`-test-iterations 20`, 0 failures) before landing.
     func testThreeOperationsRunInEnqueueOrder() async throws {
         let queue = OfficeHelperRequestQueue()
         final class OrderBox { var events: [Int] = [] }
         let box = OrderBox()
 
-        async let a: Int = queue.run { box.events.append(1); try? await Task.sleep(nanoseconds: 30_000_000); return 1 }
-        async let b: Int = queue.run { box.events.append(2); return 2 }
-        async let c: Int = queue.run { box.events.append(3); return 3 }
+        let first = Task { @MainActor in
+            try await queue.run { box.events.append(1); try? await Task.sleep(nanoseconds: 30_000_000); return 1 }
+        }
+        let second = Task { @MainActor in
+            try await queue.run { box.events.append(2); return 2 }
+        }
+        let third = Task { @MainActor in
+            try await queue.run { box.events.append(3); return 3 }
+        }
 
-        _ = try await (a, b, c)
+        _ = try await (first.value, second.value, third.value)
 
         XCTAssertEqual(box.events, [1, 2, 3])
     }
