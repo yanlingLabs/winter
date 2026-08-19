@@ -63,42 +63,17 @@ Norma isn't one agent with a system prompt swap. Each mode is a genuinely differ
 own toolset, its own permission posture, and its own surface — enforced in the daemon, not suggested
 in a prompt.
 
-| Mode | What it is | Tools | Status |
-| --- | --- | --- | --- |
-| **Chat** | A conversation with a memory. Web search, page reading, a read-only browser — no filesystem, no shell, no repo access. It never asks you for permission because it can't do anything that would need it. | **4** | **Shipped** |
-| **Code** | The full coding agent: your files, your shell, your git, LSP diagnostics, subagents, worktrees, notebooks, screen control. A permission model modelled on Claude Code — six approval policies from `plan` to `bypass`, and rules that remember your answers. | **36** | **Shipped** |
-| **Dispatch** | The orchestrator, and a permanent session that never gets replaced and keeps its own memory. It has real hands — shell, screen control, the browser, read access to your files — but it doesn't edit code itself: it spawns, steers and stops Code sessions that do, in parallel, and reports back. | **17** | **Shipped** |
-| **Cowork** | Working alongside you on a shared surface rather than for you in a transcript. | — | Planned |
-| **Build** | One prompt to a finished, running thing — built end to end and optionally published to a share URL we host (or your own). | — | Planned |
+| Mode | What you get | Status |
+| --- | --- | --- |
+| **Chat** | Ask her anything. She searches the web, reads the pages she finds, and remembers what matters about you from one conversation to the next. She can't reach your files or run anything — which is why she never stops to ask your permission. | **Shipped** |
+| **Code** | Point her at a project and she works in it: reads and writes code, runs your build and your tests, uses git, cleans up what the language server complains about, and splits big jobs across parallel agents in isolated worktrees. You decide how much rope she gets — six settings from *plan only* to *don't ask* — and she remembers the answers you've already given. | **Shipped** |
+| **Dispatch** | Your standing assistant: one session that's always there and never forgets. Hand it something — *find out why the build got slow and fix it*, *tidy my downloads every night* — and it goes away, spins up as many Code sessions as the job needs, keeps an eye on them, and comes back when it's done. Pull any of them out into its own window to watch, or to take over. | **Shipped** |
+| **Cowork** | Working alongside you on a shared surface, rather than for you in a transcript. | Planned |
+| **Build** | One prompt to a finished, running thing — built end to end and optionally published to a share URL we host, or your own. | Planned |
 
-<details>
-<summary>The exact toolset each mode gets</summary>
-
-These sets are pinned by a test that boots the real daemon and reads its registry, so this table
-can't drift from what actually ships.
-
-**Chat (4)** — `Search` · `ReadPage` · `browser` (read verbs only) · `AskQuestion`
-
-**Dispatch (17)** — `session_spawn` · `list_sessions` · `manage_session` · `send_message` ·
-`task_stop` · `bash` · `computer` · `browser` · `read` · `ls` · `glob` · `grep` · `Search` ·
-`ReadPage` · `AskQuestion` · `push_notification` · `ToolSearch`
-
-**Code (36)** — `read` · `ls` · `glob` · `grep` · `write` · `edit` · `notebook_edit` · `bash` ·
-`bash_output` · `lsp` · `computer` · `browser` · `web_fetch` · `web_search` · `spawn_agent` ·
-`send_message` · `agent_list` · `agent_output` · `task_stop` · `enter_worktree` · `exit_worktree` ·
-`Workflow` · `Skill` · `skill_write` · `schedule` · `ask_user` · `enter_plan_mode` ·
-`exit_plan_mode` · `task_create` · `task_update` · `task_list` · `task_get` · `push_notification` ·
-`list_mcp_resources` · `read_mcp_resource` · `ToolSearch`
-
-Plus whatever your MCP servers and add-ons contribute, which are discovered at runtime rather than
-declared here.
-
-</details>
-
-Modes aren't just labels: a tool declares which modes it belongs to at registration time, and a
-session physically cannot call a tool outside its mode — a tool with no declaration is code-only by
-default, so widening one is always a deliberate edit. The mode × surface matrix is enforced too —
-the TUI is code-only, the orb is dispatch-only.
+These aren't prompt presets. The daemon enforces the boundary: a Chat session *physically cannot*
+call something that touches your disk, no matter what it or you or a web page tells it to. The same
+goes for where each mode lives — the terminal is Code's, the orb is Dispatch's.
 
 ## Surfaces: where you talk to her
 
@@ -140,10 +115,10 @@ around. Web *fetching* is entirely local — no third-party reader API sees your
 **She reads what you give her.** PDFs, images, Jupyter notebooks, spreadsheets-as-exports — read
 properly, images and all, straight into the model's context.
 
-**She works in parallel.** Subagents with no wall-clock timeout (a progress-stall watchdog instead),
-git worktree isolation so parallel work can't collide, and `Workflow` — a sandboxed JavaScript
-orchestration runtime where the model *writes the control flow* for fan-out, pipelines and
-adversarial verification, and it runs in a seatbelt-confined subprocess.
+**She works in parallel.** Big jobs get split across helper agents, each in its own isolated copy of
+your repo so they can't tread on each other. For the really large ones she writes her own
+orchestration script — fan out fifty ways, check every answer against a skeptic, keep only what
+survives — and runs it in a sandbox.
 
 **She edits code like an IDE.** Monaco tabs with syntax highlighting and completions, real saves
 that preserve your BOM and line endings, file watchers with conflict banners, dirty-buffer gates on
@@ -271,6 +246,29 @@ apple/
   Norma/          the macOS app — menu bar, chat window, orb, CEF browser, Monaco editor
 examples/       reference plugins (battery-limiter is a real, complete one)
 ```
+
+### The tool surface
+
+Tools declare which modes they belong to at registration; a tool with no declaration is code-only,
+so widening one is always a deliberate edit. `mode-toolset-census.test.ts` boots the real daemon and
+reads its registry, so these three sets can't drift from what ships:
+
+**Chat (4)** — `Search` · `ReadPage` · `browser` (read verbs only) · `AskQuestion`
+
+**Dispatch (17)** — `session_spawn` · `list_sessions` · `manage_session` · `send_message` ·
+`task_stop` · `bash` · `computer` · `browser` · `read` · `ls` · `glob` · `grep` · `Search` ·
+`ReadPage` · `AskQuestion` · `push_notification` · `ToolSearch`
+
+**Code (36)** — `read` · `ls` · `glob` · `grep` · `write` · `edit` · `notebook_edit` · `bash` ·
+`bash_output` · `lsp` · `computer` · `browser` · `web_fetch` · `web_search` · `spawn_agent` ·
+`send_message` · `agent_list` · `agent_output` · `task_stop` · `enter_worktree` · `exit_worktree` ·
+`Workflow` · `Skill` · `skill_write` · `schedule` · `ask_user` · `enter_plan_mode` ·
+`exit_plan_mode` · `task_create` · `task_update` · `task_list` · `task_get` · `push_notification` ·
+`list_mcp_resources` · `read_mcp_resource` · `ToolSearch`
+
+Plus whatever your MCP servers and add-ons contribute — those are discovered at runtime rather than
+declared. Several tools are *deferred*: eligible for their mode, but their schemas load through
+`ToolSearch` on first use, so a large tool surface costs no context until something reaches for it.
 
 ### Quickstart
 
