@@ -65,14 +65,39 @@ in a prompt.
 
 | Mode | What it is | Tools | Status |
 | --- | --- | --- | --- |
-| **Chat** | A conversation with a memory. Web search, page reading and a read-only browser — no filesystem, no shell, no repo access. Never asks you for permission because it can't do anything that needs it. | Search, ReadPage, browser (read-only) | **Shipped** |
-| **Code** | The full coding agent: your files, your shell, your git, LSP diagnostics, subagents, worktrees. A permission model modelled on Claude Code — six approval policies from `plan` to `bypass`, and rules that remember your answers. | ~40 tools | **Shipped** |
-| **Dispatch** | The orchestrator. One permanent session that never gets replaced and keeps its own memory. Hand it a task and it spawns sessions to do the work, in parallel, on your computer. | Orchestration + search | **Shipped** |
+| **Chat** | A conversation with a memory. Web search, page reading, a read-only browser — no filesystem, no shell, no repo access. It never asks you for permission because it can't do anything that would need it. | **4** | **Shipped** |
+| **Code** | The full coding agent: your files, your shell, your git, LSP diagnostics, subagents, worktrees, notebooks, screen control. A permission model modelled on Claude Code — six approval policies from `plan` to `bypass`, and rules that remember your answers. | **36** | **Shipped** |
+| **Dispatch** | The orchestrator, and a permanent session that never gets replaced and keeps its own memory. It has real hands — shell, screen control, the browser, read access to your files — but it doesn't edit code itself: it spawns, steers and stops Code sessions that do, in parallel, and reports back. | **17** | **Shipped** |
 | **Cowork** | Working alongside you on a shared surface rather than for you in a transcript. | — | Planned |
 | **Build** | One prompt to a finished, running thing — built end to end and optionally published to a share URL we host (or your own). | — | Planned |
 
+<details>
+<summary>The exact toolset each mode gets</summary>
+
+These sets are pinned by a test that boots the real daemon and reads its registry, so this table
+can't drift from what actually ships.
+
+**Chat (4)** — `Search` · `ReadPage` · `browser` (read verbs only) · `AskQuestion`
+
+**Dispatch (17)** — `session_spawn` · `list_sessions` · `manage_session` · `send_message` ·
+`task_stop` · `bash` · `computer` · `browser` · `read` · `ls` · `glob` · `grep` · `Search` ·
+`ReadPage` · `AskQuestion` · `push_notification` · `ToolSearch`
+
+**Code (36)** — `read` · `ls` · `glob` · `grep` · `write` · `edit` · `notebook_edit` · `bash` ·
+`bash_output` · `lsp` · `computer` · `browser` · `web_fetch` · `web_search` · `spawn_agent` ·
+`send_message` · `agent_list` · `agent_output` · `task_stop` · `enter_worktree` · `exit_worktree` ·
+`Workflow` · `Skill` · `skill_write` · `schedule` · `ask_user` · `enter_plan_mode` ·
+`exit_plan_mode` · `task_create` · `task_update` · `task_list` · `task_get` · `push_notification` ·
+`list_mcp_resources` · `read_mcp_resource` · `ToolSearch`
+
+Plus whatever your MCP servers and add-ons contribute, which are discovered at runtime rather than
+declared here.
+
+</details>
+
 Modes aren't just labels: a tool declares which modes it belongs to at registration time, and a
-session physically cannot call a tool outside its mode. The mode × surface matrix is enforced too —
+session physically cannot call a tool outside its mode — a tool with no declaration is code-only by
+default, so widening one is always a deliberate edit. The mode × surface matrix is enforced too —
 the TUI is code-only, the orb is dispatch-only.
 
 ## Surfaces: where you talk to her
