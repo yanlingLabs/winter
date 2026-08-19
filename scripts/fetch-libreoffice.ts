@@ -28,7 +28,7 @@
  * upstream distributor of a headless macOS LibreOffice build -- TDF's own dmg doesn't ship one
  * (see the GO header above). The artifact this script fetches was built and packaged by hand
  * (per scripts/build-libreoffice.ts's documented recipe) and uploaded as a release asset on a
- * dedicated, non-app `vendor-libreoffice-20260818` GitHub release in this repo (yanlingLabs/norma)
+ * dedicated, non-app `vendor-libreoffice-20260819` GitHub release in this repo (yanlingLabs/norma)
  * -- deliberately NOT part of the v#.#.### app-release lineage scripts/release.ts manages, and
  * created with --latest=false so it never displaces an app release as the repo's "Latest".
  *
@@ -80,15 +80,21 @@ import { ROOT } from "./version-lib";
 // ---------------------------------------------------------------------------
 // Pinned artifact. Do not float to "latest" -- see header comment.
 // ---------------------------------------------------------------------------
+// RE-CUT (2026-08-19): the original vendor-libreoffice-20260818 release was DELETED after a
+// privacy leak was found by measurement in its product-set (builder account name plaintext in
+// 8/66 dylibs' compiled-in build paths, plus Resources/versionrc and Resources/registry/main.xcd's
+// vendor fields) -- see this replacement release's own page for the scrub applied and the
+// zero-hit re-scan proof. This -r2 asset is a straight re-cut from the same pinned commit/flags,
+// nothing else about the engine changed (six-fixture pixel hashes are identical to the original).
 const GH_REPO = "yanlingLabs/norma";
-const RELEASE_TAG = "vendor-libreoffice-20260818";
-const ASSET_NAME = "libreoffice-headless-macos-arm64-11482c8f.tar.zst";
+const RELEASE_TAG = "vendor-libreoffice-20260819";
+const ASSET_NAME = "libreoffice-headless-macos-arm64-11482c8f-r2.tar.zst";
 const ASSET_URL = buildAssetUrl({ repo: GH_REPO, tag: RELEASE_TAG, assetName: ASSET_NAME });
 // Hand-pinned at package time from an independent `shasum -a 256` of the actual uploaded file,
 // then re-verified against a fresh public download before being transcribed here (see
-// task-1v2-report.md's "asset URL + SHA" section for that verification run). See header comment
+// recut-report.md's "asset URL + SHA" section for that verification run). See header comment
 // for why this single pin (not a belt-and-braces live check) is nonetheless load-bearing here.
-const PINNED_SHA256 = "cf7f29e2babc53d4b772fefae1a00ffe7c9db984cacc79a6aa1287f9a5fd34af";
+const PINNED_SHA256 = "38cc143c1b689a273f38d031a1eb0ecadf1a43d241e1d62b6ebe4bc6d80dcb39";
 if (!isValidSha256Hex(PINNED_SHA256)) {
   throw new Error(`PINNED_SHA256 is not a well-formed 64-char lowercase hex string: ${PINNED_SHA256}`);
 }
