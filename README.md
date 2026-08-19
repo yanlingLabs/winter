@@ -7,6 +7,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/yanlingLabs/norma/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/yanlingLabs/norma/actions/workflows/ci.yml/badge.svg?branch=main"></a>
   <a href="https://github.com/yanlingLabs/norma/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/yanlingLabs/norma?label=release&color=2E9484"></a>
   <a href="LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/license-Apache%202.0-blue.svg"></a>
   <img alt="Platform: macOS 26+" src="https://img.shields.io/badge/platform-macOS%2026%2B-lightgrey.svg">
