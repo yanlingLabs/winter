@@ -469,6 +469,11 @@ final class OfficeRuntime: ObservableObject {
 /// still runs to completion through this queue (nothing here knows or cares that its caller went
 /// away) — `OfficeRuntime`'s own generation guard (`perform(_:)`'s `.helperOpen` case) is what
 /// absorbs a stale resume, not this queue.
+///
+/// **Never call `run` from inside an operation** (T5 review M3): the inner call awaits the outer's
+/// own tail, which is the outer call itself still in flight — a nested call deadlocks all office I/O
+/// permanently, not just the nested pair, since every later `run` also enqueues behind the same
+/// stuck `tail`.
 @MainActor
 final class OfficeHelperRequestQueue {
     private var tail: Task<Void, Never> = Task {}

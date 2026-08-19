@@ -858,14 +858,22 @@ final class ShellSessionHost: ObservableObject {
     }
 
     /// office-plumbing Task 5 — the quit path's process-kill door: walks every session's office
-    /// runtime (closing its documents) THEN stops the shared helper process. **Order matters**: the
-    /// editor precedent's own quit-gate lesson was "pre-warmed [runtimes] must die before the settle
-    /// beat," and here it is also what keeps a runtime's own teardown (a `driver.close` call routed
-    /// through `officeRequestQueue`) from racing the process's own death — every runtime's close is
-    /// fired (fire-and-forget, the same "obligation 5" `AppDelegate.editorQuitGate` documents for a
-    /// save in flight) BEFORE the kill, never after. Tolerates a host that never touched office at
-    /// all: `officeHelperSupervisor == nil` skips the kill outright (nothing was ever spawned), and
-    /// an empty `officeRuntimes` table walks zero times.
+    /// runtime (closing its documents) THEN stops the shared helper process.
+    ///
+    /// **What "order matters" actually buys, corrected after T5 review (M1)**: the loop below only
+    /// CREATES each runtime's close `Task` (fire-and-forget, spawned by `OfficeRuntime.teardown()` ->
+    /// `performTeardown`) — it does not run it. Everything here is `@MainActor`-serial, so `stop()`
+    /// below runs to completion, including nilling `client`, before any of those already-scheduled
+    /// close `Task` bodies get a turn to execute. The guaranteed ordering is Task-CREATION order only.
+    /// The practical consequence: on the quit path, every one of those close bodies later hits
+    /// `officeDriver(for:)`'s `guard let client = supervisor?.client else { return }` and no-ops —
+    /// **no close RPC frame ever reaches the wire here**. The `SIGKILL` inside `stop()` is what
+    /// actually reclaims the process; this is not a clean close handshake racing a kill and winning.
+    /// Any future "flush an edit on quit" door (Stage B) must NOT be built on the assumption this
+    /// comment used to make — it needs its own await-before-kill, not this ordering.
+    ///
+    /// Tolerates a host that never touched office at all: `officeHelperSupervisor == nil` skips the
+    /// kill outright (nothing was ever spawned), and an empty `officeRuntimes` table walks zero times.
     @discardableResult
     func teardownAllOfficeRuntimesAndStopHelper() -> Int {
         let sessionIds = Array(officeRuntimes.keys)

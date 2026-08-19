@@ -66,6 +66,23 @@ final class OfficeRuntimeReducerTests: XCTestCase {
         XCTAssertEqual(effects, [])
     }
 
+    /// T5 review M5(a): distinct from `testOpenRequestedFromFailedRetriesExactlyLikeIdle` (which is
+    /// about a FRESH ask from `.failed`) — this is a `.helperBecameReady` fanned out because some
+    /// OTHER session's demand restarted the shared helper, and it must NOT resurrect this one. A dead
+    /// runtime leaves `.failed` only via its OWN `.openRequested`, never for free on someone else's
+    /// success. This is exactly the behavior T6's re-open story and T9's SIGKILL-recovery drill
+    /// depend on — nothing else in this file fails today if the reducer's `.starting`-only guard were
+    /// relaxed to also admit `.failed`, which is why it needs its own pin.
+    func testHelperBecameReadyWhileFailedStaysFailedNoFreeRecoveryFromAnotherSessionsRestart() {
+        let (failed, _) = reduce(OfficeRuntimeState(), [.helperUnavailable])
+        XCTAssertEqual(failed.phase, .failed)
+
+        let (state, effects) = reduce(failed, [.helperBecameReady])
+        XCTAssertEqual(state, failed, "a dead runtime does not self-recover just because some other "
+                       + "session's demand brought the shared helper back")
+        XCTAssertEqual(effects, [])
+    }
+
     // MARK: - openRequested: ready opens directly, or no-ops on an already-open path
 
     func testAnOpenFromReadyAsksTheHelperDirectly() {
@@ -104,6 +121,18 @@ final class OfficeRuntimeReducerTests: XCTestCase {
     func testOpenedIsIgnoredOutsideReadySoAStaleReplyCannotResurrectATornDownRuntime() {
         let (state, effects) = reduce(OfficeRuntimeState(), [
             .opened(path: "/a.xlsx", docId: "doc-a", metadata: metadata)
+        ])
+        XCTAssertEqual(state, OfficeRuntimeState())
+        XCTAssertEqual(effects, [])
+    }
+
+    /// T5 review M5(b): the asymmetric sibling of `testOpenedIsIgnoredOutsideReadySoAStaleReplyCannot
+    /// ResurrectATornDownRuntime` — `opened`'s outside-`.ready` guard was tested, `openFailed`'s own
+    /// identical guard was not. A stale failure reply must not resurrect a torn-down runtime any more
+    /// than a stale success reply may.
+    func testOpenFailedIsIgnoredOutsideReadyForTheSameReasonOpenedIs() {
+        let (state, effects) = reduce(OfficeRuntimeState(), [
+            .openFailed(path: "/a.xlsx", reason: "corrupt file")
         ])
         XCTAssertEqual(state, OfficeRuntimeState())
         XCTAssertEqual(effects, [])
