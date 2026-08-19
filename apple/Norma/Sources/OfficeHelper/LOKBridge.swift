@@ -356,6 +356,15 @@ final class LOKBridge: OfficeDocumentBridge {
     /// refuse-never-ignore rule, which is about never leaving a REQUEST unanswered — there is no
     /// request here to leave hanging).
     fileprivate func handleCallback(docId: String, type: Int32, payload: String) {
+        // Task 4, debt #1 (T3 concern #8: the callback parsers had NEVER seen a real LOK firing
+        // — this is the log line a live test reads back, via the helper's own captured stderr, to
+        // prove they finally have). Unconditional, not test-only instrumentation: a cheap, one-line
+        // stderr trace of every callback this helper's whole lifetime ever receives, useful for
+        // production debugging too (LOK callback traffic is otherwise entirely invisible). `type`
+        // is the raw LOK integer, not a name — `LOKCallbackType`'s two named constants above are
+        // the only ones this bridge currently interprets; an unrecognized type is still logged
+        // here, just not turned into an OfficeDocumentEvent below.
+        FileHandle.standardError.write(Data("[LOKBridge raw callback] docId=\(docId) type=\(type) payload=\(payload)\n".utf8))
         let event: OfficeDocumentEvent?
         switch type {
         case LOKCallbackType.invalidateTiles:

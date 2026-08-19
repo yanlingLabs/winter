@@ -264,6 +264,15 @@ final class OfficeHelperSupervisor {
 
     private let configuration: Configuration
     private let eventsContinuation: AsyncStream<OfficeHelperEvent>.Continuation
+    /// **Still single-consumer (T2/T3 carry, re-checked by Task 4 — deliberately NOT given a
+    /// multicast wrapper here).** Task 4's own app-side tile plumbing (`OfficeHelperClient`'s
+    /// `onTile`/`onTileFailed`/`onInvalidated`, `OfficeWireConnection`'s matching push callbacks)
+    /// is an entirely SEPARATE notification path — per-connection settable closures proxying
+    /// document/tile pushes off the wire — and never touches or drains THIS stream. Nothing this
+    /// task built needs `events` read from more than one place; the carry's own condition ("if your
+    /// app-side tile plumbing needs supervisor events in more than one place, add the multicast
+    /// wrapper now") was checked and did not fire. Still a real constraint for whichever future
+    /// task (T5's `OfficeRuntime`, most likely) is the first to actually need a second reader.
     let events: AsyncStream<OfficeHelperEvent>
 
     private(set) var state: State = .notStarted

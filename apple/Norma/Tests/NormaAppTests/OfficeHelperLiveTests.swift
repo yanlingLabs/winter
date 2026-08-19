@@ -92,6 +92,35 @@ final class OfficeHelperLiveTests: XCTestCase {
         let client: OfficeHelperClient
         let stateDir: URL
         let lokVersion: String
+        /// Non-nil only when `spawnLiveHelper(captureStderr: true)` — see that parameter's own
+        /// header (Task 4, debt #1).
+        let stderrCapture: StderrCapture?
+    }
+
+    /// Task 4, debt #1 — continuously drains a spawned helper's stderr into a lock-protected line
+    /// buffer via `readabilityHandler` (never a blocking `readDataToEndOfFile()` while the process
+    /// is still alive and doing real work — the SAME subprocess-pipe-deadlock class every other
+    /// stderr/stdout capture in this file avoids by only reading after `waitUntilExit()`, which
+    /// this helper's own long-lived-across-a-test lifetime rules out). `LOKBridge.handleCallback`'s
+    /// own unconditional raw-callback trace (`[LOKBridge raw callback] ...`) is what this exists to
+    /// capture — never test-only instrumentation on the PRODUCTION side, only the capture MECHANISM
+    /// here is test-only.
+    private final class StderrCapture: @unchecked Sendable {
+        private let lock = NSLock()
+        private var buffer = Data()
+        private var lines: [String] = []
+        func ingest(_ data: Data) {
+            guard !data.isEmpty else { return }
+            lock.lock()
+            buffer.append(data)
+            while let newlineIndex = buffer.firstIndex(of: 0x0A) {
+                let lineData = buffer.subdata(in: buffer.startIndex..<newlineIndex)
+                buffer.removeSubrange(buffer.startIndex...newlineIndex)
+                if let line = String(data: lineData, encoding: .utf8) { lines.append(line) }
+            }
+            lock.unlock()
+        }
+        func linesSnapshot() -> [String] { lock.lock(); defer { lock.unlock() }; return lines }
     }
 
     /// Spawns the REAL `NormaOfficeHelper` binary and completes the `hello` handshake, exactly the
@@ -112,7 +141,13 @@ final class OfficeHelperLiveTests: XCTestCase {
     /// proving the sweep, which requires two boots against the literal same `--state-path`.
     private func spawnLiveHelper(
         helperURL: URL? = nil, installRoot: URL? = OfficeHelperLiveTests.vendorProductSetRoot,
-        idleExitSeconds: Int = 30, stateDir: URL? = nil
+        idleExitSeconds: Int = 30, stateDir: URL? = nil,
+        // Task 4, debt #1 — when true, the process's stderr is captured (never inherited) via a
+        // continuously-drained pipe (`StderrCapture`), so a test can read back
+        // `LOKBridge.handleCallback`'s raw-payload trace line for whatever LOK actually fired.
+        // `false` for every existing caller (unchanged behavior: stderr inherited, visible in the
+        // test log directly, nothing programmatically read back).
+        captureStderr: Bool = false
     ) async throws -> LiveHelper {
         let resolvedHelperURL = helperURL ?? Bundle.main.bundleURL.deletingLastPathComponent()
             .appendingPathComponent("NormaOfficeHelper")
@@ -140,6 +175,16 @@ final class OfficeHelperLiveTests: XCTestCase {
                           "--token", token, "--idle-exit-seconds", String(idleExitSeconds)]
         if let installRoot { arguments += ["--lok-root", installRoot.path] }
         process.arguments = arguments
+
+        var stderrCapture: StderrCapture?
+        if captureStderr {
+            let capture = StderrCapture()
+            let pipe = Pipe()
+            pipe.fileHandleForReading.readabilityHandler = { handle in capture.ingest(handle.availableData) }
+            process.standardError = pipe
+            stderrCapture = capture
+        }
+
         try process.run()
         runningProcesses.append(process)
 
@@ -167,7 +212,8 @@ final class OfficeHelperLiveTests: XCTestCase {
             throw XCTSkip("handshake failed")
         }
         let client = OfficeHelperClient(connection: connection, seqAllocator: OfficeWireSeqAllocator(), requestTimeout: 15.0)
-        return LiveHelper(process: process, connection: connection, client: client, stateDir: resolvedStateDir, lokVersion: lokVersion)
+        return LiveHelper(process: process, connection: connection, client: client, stateDir: resolvedStateDir,
+                          lokVersion: lokVersion, stderrCapture: stderrCapture)
     }
 
     // MARK: - Six formats
@@ -658,6 +704,378 @@ final class OfficeHelperLiveTests: XCTestCase {
         let rawData = try Data(contentsOf: URL(fileURLWithPath: rawPath))
         let digest = SHA256.hash(data: rawData)
         return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func sha256Hex(base64: String) -> String {
+        guard let raw = Data(base64Encoded: base64) else { return "<undecodable base64>" }
+        return SHA256.hash(data: raw).map { String(format: "%02x", $0) }.joined()
+    }
+
+    // MARK: - Task 4, debt #1: real-callback-shape proof
+
+    /// Office Stage A Task 4, carried debt #1 (T3's own concern #8: "the callback parsers have
+    /// NEVER executed against a real LOK callback, in any test or any live run in this task"). This
+    /// task's first real `paintTile` call is the first thing in this whole vendored engine's
+    /// history that could change that. Runs a sequence of candidate triggers on an ALREADY-OPEN
+    /// document — open (registration happens before `initializeForRendering`, so anything
+    /// synchronous during load is captured too), a real `paintTile`, `paintTile` again at a
+    /// DIFFERENT, previously-unseen tile, close — and reads back every RAW callback `LOKBridge`
+    /// received via its own unconditional stderr trace (`spawnLiveHelper(captureStderr: true)`).
+    /// Whatever fires (including "nothing") IS the finding, printed in full; see
+    /// task-4-report.md for the interpretation and the two lenient-parser-behavior re-judgment
+    /// this debt also asks for.
+    func testRealLOKCallbackProbeCapturesRawPayloadsAndCrossChecksTheParsers() async throws {
+        try skipUnlessVendorPresent()
+        let helper = try await spawnLiveHelper(captureStderr: true)
+
+        var observedPushes: [(String, OfficeDocumentEvent)] = []
+        let observedLock = NSLock()
+        helper.client.onDocumentEvent = { docId, event in
+            observedLock.lock(); observedPushes.append((docId, event)); observedLock.unlock()
+        }
+
+        let docId = UUID().uuidString
+        let opened = try await helper.client.open(docId: docId, path: Self.fixturesRoot.appendingPathComponent("gate.xlsx").path)
+        print("[callback probe] opened: type=\(opened.type) parts=\(opened.parts) size=\(opened.sizeTwips.widthTwips)x\(opened.sizeTwips.heightTwips)")
+        try? await Task.sleep(nanoseconds: 1_500_000_000) // settle window for anything fired synchronously during load
+
+        try await helper.client.requestTiles(docId: docId, keys: [TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0)])
+        try? await Task.sleep(nanoseconds: 1_500_000_000)
+
+        try await helper.client.requestTiles(docId: docId, keys: [TileKey(part: 0, zoomPPT: 1000, tileX: 3, tileY: 5)]) // previously-unseen region
+        try? await Task.sleep(nanoseconds: 1_500_000_000)
+
+        try await helper.client.close(docId: docId)
+        try? await Task.sleep(nanoseconds: 1_000_000_000)
+
+        let rawLines = (helper.stderrCapture?.linesSnapshot() ?? []).filter { $0.contains("[LOKBridge raw callback]") }
+        print("[callback probe] \(rawLines.count) raw LOK callback(s) observed across open + 2x paintTile + close:")
+        for line in rawLines { print("  " + line) }
+        print("[callback probe] \(observedPushes.count) OfficeDocumentEvent push(es) decoded from those on the wire:")
+        for (pushDocId, event) in observedPushes { print("  docId=\(pushDocId) event=\(event)") }
+
+        // The empirical finding stands regardless of count — this is not pass/fail on "did LOK
+        // fire" (an honesty clause, not a target): it is pass/fail on "did whatever DID fire parse
+        // correctly," vacuously true for zero firings and a REAL cross-check the moment even one
+        // does. Line shape: "[LOKBridge raw callback] docId=<id> type=<n> payload=<...>".
+        var anyInvalidateTilesObserved = false
+        var anyStateChangedObserved = false
+        for line in rawLines {
+            guard let typeRange = line.range(of: "type="), let payloadRange = line.range(of: " payload=") else { continue }
+            guard let type = Int32(line[typeRange.upperBound..<payloadRange.lowerBound]) else { continue }
+            let payload = String(line[payloadRange.upperBound...])
+            if type == 0 { // LOK_CALLBACK_INVALIDATE_TILES
+                anyInvalidateTilesObserved = true
+                let parsed = OfficeDocumentEvent.parseInvalidateTiles(payload)
+                XCTAssertNotNil(parsed, "a REAL invalidate-tiles payload failed to parse: \"\(payload)\"")
+                print("[callback probe] REAL invalidate-tiles payload \"\(payload)\" parsed as: \(String(describing: parsed))")
+            } else if type == 8 { // LOK_CALLBACK_STATE_CHANGED
+                anyStateChangedObserved = true
+                if let parsed = OfficeDocumentEvent.parseModifiedStatus(payload) {
+                    print("[callback probe] REAL state-changed payload \"\(payload)\" parsed as ModifiedStatus: \(parsed)")
+                } else {
+                    print("[callback probe] REAL state-changed payload \"\(payload)\" is not a ModifiedStatus firing "
+                            + "(expected for most .uno: state changes — Stage A's parser only recognizes that one)")
+                }
+            }
+        }
+        print("[callback probe] SUMMARY: invalidate-tiles observed=\(anyInvalidateTilesObserved), "
+                + "state-changed observed=\(anyStateChangedObserved), total raw lines=\(rawLines.count)")
+    }
+
+    // MARK: - Invalidation drill: reload-triggered (Stage A has no edit verbs)
+
+    /// Office Stage A Task 4's own invalidation drill, per the brief's explicit menu (edit-via-UNO
+    /// ruled out: Stage A wires no edit verb at all) and the carried instruction to "pick what LOK
+    /// actually gives you Stage A and document why": reload-triggered invalidation. Close, then
+    /// re-open the SAME `docId` pointed at a MODIFIED copy of a fixture — one cell's fill color
+    /// changed in `gate.fods`'s flat-XML source (a plain text edit with zero zip/binary corruption
+    /// risk, unlike surgically patching `gate.xlsx`'s OOXML zip) — and assert the SAME tile
+    /// coordinates render DIFFERENT pixels.
+    ///
+    /// **What this drill does NOT prove**: a "generation bump" on the SAME, still-open document
+    /// the way a live LOK-fired invalidate-tiles callback would (see the probe test above, which
+    /// checks for exactly that, empirically). Closing and re-opening a docId gets a BRAND NEW
+    /// `LibreOfficeKitDocument` handle and, by this task's own design, a BRAND NEW
+    /// `TileRenderer`/`TileCache` — its generation ledger starts at 0 again, correctly: a document
+    /// nobody has painted yet has no staleness history to have accumulated (`TileCache.recordPaint`'s
+    /// own header). The property this drill DOES prove — end-to-end pixel sensitivity to real
+    /// content change, through the exact product-path `TileRenderer` this task ships — is real and
+    /// is the disclosed Stage-A-honest substitute for what the brief's own text anticipated might
+    /// not be available.
+    func testReloadOfAModifiedFixtureCopyProducesADifferentTileHashAtTheSameCoordinates() async throws {
+        try skipUnlessVendorPresent()
+        let helper = try await spawnLiveHelper()
+
+        let scratchDir = makeScratchDirectory()
+        let originalFods = try String(contentsOf: Self.spikeDirectory.appendingPathComponent("seeds/gate.fods"), encoding: .utf8)
+        XCTAssertTrue(originalFods.contains("#ff6600"), "setup: gate.fods must still contain the fill color this drill flips")
+        let modifiedFods = originalFods.replacingOccurrences(of: "#ff6600", with: "#0000ff")
+        let originalPath = scratchDir.appendingPathComponent("gate-original.fods")
+        let modifiedPath = scratchDir.appendingPathComponent("gate-modified.fods")
+        try originalFods.write(to: originalPath, atomically: true, encoding: .utf8)
+        try modifiedFods.write(to: modifiedPath, atomically: true, encoding: .utf8)
+
+        let docId = UUID().uuidString
+        let key = TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0)
+
+        final class TileCollector: @unchecked Sendable {
+            private let lock = NSLock()
+            private var pushes: [(generation: Int, pixelsBase64: String)] = []
+            func record(generation: Int, pixelsBase64: String) {
+                lock.lock(); pushes.append((generation, pixelsBase64)); lock.unlock()
+            }
+            func snapshot() -> [(generation: Int, pixelsBase64: String)] {
+                lock.lock(); defer { lock.unlock() }; return pushes
+            }
+        }
+        let collector = TileCollector()
+        helper.client.onTile = { _, _, _, generation, _, _, pixelsBase64 in collector.record(generation: generation, pixelsBase64: pixelsBase64) }
+
+        _ = try await helper.client.open(docId: docId, path: originalPath.path)
+        try await helper.client.requestTiles(docId: docId, keys: [key])
+        let firstArrived = await waitUntil(timeout: 5.0) { collector.snapshot().count >= 1 }
+        XCTAssertTrue(firstArrived, "expected a .tile push for the original fixture")
+        try await helper.client.close(docId: docId)
+
+        _ = try await helper.client.open(docId: docId, path: modifiedPath.path)
+        try await helper.client.requestTiles(docId: docId, keys: [key])
+        let secondArrived = await waitUntil(timeout: 5.0) { collector.snapshot().count >= 2 }
+        XCTAssertTrue(secondArrived, "expected a .tile push for the modified fixture")
+        try await helper.client.close(docId: docId)
+
+        let pushes = collector.snapshot()
+        let beforePush = try XCTUnwrap(pushes.first)
+        let afterPush = pushes[1]
+        print("[reload drill] before (original, orange fill): generation=\(beforePush.generation) sha256=\(Self.sha256Hex(base64: beforePush.pixelsBase64))")
+        print("[reload drill] after  (modified, blue fill):   generation=\(afterPush.generation) sha256=\(Self.sha256Hex(base64: afterPush.pixelsBase64))")
+
+        XCTAssertEqual(beforePush.generation, 0, "a fresh document's first-ever paint of any coordinate starts at generation 0")
+        XCTAssertEqual(afterPush.generation, 0, "the RE-OPENED docId gets a BRAND NEW TileRenderer/TileCache — also starts at 0, "
+                        + "not a continuation of the prior open's generation (see this test's own header)")
+        XCTAssertNotEqual(beforePush.pixelsBase64, afterPush.pixelsBase64,
+                           "the fill-color edit must be visible at tile (0,0) — the edited cell is the very first content in the sheet")
+    }
+
+    // MARK: - Live tile drill: subscribeTiles over the real doc
+
+    /// The brief's own live tile drill, literally: `subscribeTiles` (not merely `tileRequest`)
+    /// against the REAL helper — asserts the returned key set matches `TileMath.viewportTileKeys`
+    /// computed independently by the test (client and server must never disagree), then fetches
+    /// the tiles that subscription named and re-subscribes with the IDENTICAL viewport a second
+    /// time, asserting the reported key set — and, after fetching, the pixel hash — are STABLE
+    /// across both subscribes.
+    func testSubscribeTilesOverTheRealDocumentThenHashIsStableAcrossTwoSubscribes() async throws {
+        try skipUnlessVendorPresent()
+        let helper = try await spawnLiveHelper()
+        let docId = UUID().uuidString
+        _ = try await helper.client.open(docId: docId, path: Self.fixturesRoot.appendingPathComponent("gate.xlsx").path)
+
+        let viewport = OfficeTwipsRect(x: 0, y: 0, width: 10240, height: 10240) // 2x2 tiles at zoomPPT 1000
+        let expectedKeys = Set(TileMath.viewportTileKeys(part: 0, zoomPPT: 1000, viewportTwips: viewport))
+        XCTAssertEqual(expectedKeys.count, 4, "setup: this viewport should cover exactly a 2x2 tile grid")
+
+        let firstSubscribed = Set(try await helper.client.subscribeTiles(docId: docId, part: 0, zoomPPT: 1000, viewportTwips: viewport))
+        XCTAssertEqual(firstSubscribed, expectedKeys, "server-computed viewport key set must match TileMath's own, independently computed")
+
+        final class Box: @unchecked Sendable {
+            let lock = NSLock(); var base64ByKey: [TileKey: String] = [:]
+            func record(_ key: TileKey, _ base64: String) { lock.lock(); base64ByKey[key] = base64; lock.unlock() }
+            func snapshot() -> [TileKey: String] { lock.lock(); defer { lock.unlock() }; return base64ByKey }
+        }
+        let box = Box()
+        helper.client.onTile = { _, _, key, _, _, _, base64 in box.record(key, base64) }
+        try await helper.client.requestTiles(docId: docId, keys: Array(firstSubscribed))
+        let allArrived = await waitUntil(timeout: 10.0) { box.snapshot().count >= firstSubscribed.count }
+        XCTAssertTrue(allArrived, "expected a .tile push for every key in the first subscribe's own reported set")
+
+        let firstPixels = box.snapshot()
+        for (key, base64) in firstPixels {
+            guard let raw = Data(base64Encoded: base64) else { return XCTFail("undecodable base64 for \(key)") }
+            XCTAssertEqual(raw.count, TileMath.bytesPerTile, "\(key): tile byte count")
+        }
+        // At least the origin tile (which the six-format matrix already knows carries real
+        // "NORMA GATE" content) must be non-blank; edge tiles at this viewport's far corners may
+        // legitimately be blank if gate.xlsx's content doesn't reach that far — asserting non-blank
+        // on the ORIGIN tile specifically is the honest, content-aware version of "non-blank."
+        let originKey = TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0)
+        let originPixels = try XCTUnwrap(Data(base64Encoded: try XCTUnwrap(firstPixels[originKey])))
+        XCTAssertGreaterThan(Set(originPixels).count, 1, "origin tile appears blank")
+
+        // Second subscribe, SAME viewport — the key set must be identical, and (since nothing
+        // invalidated in between) the already-cached pixels must be BYTE-IDENTICAL on re-request.
+        let secondSubscribed = Set(try await helper.client.subscribeTiles(docId: docId, part: 0, zoomPPT: 1000, viewportTwips: viewport))
+        XCTAssertEqual(secondSubscribed, expectedKeys, "re-subscribing the SAME viewport must report the SAME key set")
+
+        try await helper.client.requestTiles(docId: docId, keys: Array(secondSubscribed))
+        let secondArrived = await waitUntil(timeout: 10.0) { box.snapshot().count >= firstSubscribed.count } // same count, values may update
+        XCTAssertTrue(secondArrived)
+        let secondPixels = box.snapshot()
+        for key in expectedKeys {
+            XCTAssertEqual(firstPixels[key], secondPixels[key], "\(key): pixel hash must be STABLE across two subscribes")
+        }
+
+        try await helper.client.close(docId: docId)
+    }
+
+    // MARK: - Task 4, debt #2: product-path pixel hash table (the NEW regression tripwire)
+
+    /// Office Stage A Task 4, carried debt #2: "the gate table is unreachable from LOKBridge
+    /// (FONTCONFIG_FILE always set)" — T3's own finding that carry #5's ALWAYS-ON fontconfig
+    /// override changes rendering versus the gate table's no-override baseline, for every fixture
+    /// whose layout or glyph selection is font-sensitive (live testing showed this includes
+    /// `gate.xlsx` itself, not just `gate.ods`'s already-disclosed width delta). This establishes
+    /// SIX product-path pins, for the FIRST time, through this task's own real
+    /// `TileRenderer`/`LOKBridge`, under the real production fontconfig config (part 0, zoomPPT
+    /// 1000, tile (0,0), 512x512 canvas, 5120-twip span — this task's own canonical geometry).
+    ///
+    /// **The split, stated once, for both pins**: `testGateXlsxRawTileHashMatchesTheGateTablePin`
+    /// (unchanged, spike-path) is the VENDOR-INTEGRITY tripwire — did the vendored dylib itself
+    /// change — deliberately run WITHOUT `FONTCONFIG_FILE`, matching how the gate table was
+    /// originally pinned. THIS test is the REGRESSION tripwire for this task's own rendering
+    /// pipeline going forward, through the real production config. Different jobs, both live.
+    ///
+    /// **Machine-relative, disclosed** (same class of caveat `testSixFormatsOpenWithSaneTypePartsAndSize`'s
+    /// own `gate.ods` width tolerance already established): `LOKBridge.configureFontconfig`
+    /// includes `~/Library/Fonts`, a per-account directory, so these six hashes are pinned to THIS
+    /// machine's font landscape, not a universal constant. A mismatch on a different machine/account
+    /// should be read as environment-dependent, not necessarily a rendering regression.
+    func testProductPathPixelHashesForAllSixFixturesAndHashStabilityAcrossTwoRequests() async throws {
+        try skipUnlessVendorPresent()
+        let helper = try await spawnLiveHelper()
+        let key = TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0)
+
+        // Pinned from this test's own first observed run on this machine (printed below either
+        // way) — re-verified reproducible across a second full run before landing, per this
+        // repo's own gate-table precedent.
+        // Observed on this machine (2 consecutive full runs, byte-identical both times — see
+        // task-4-report.md for the reproduction log). gate.docx/gate.odt share a hash: same text
+        // content across formats, consistent with the six-format matrix's own dimension pins
+        // already showing that pair as identical (12474x17406 both). gate.ods's hash also matches
+        // this task's OWN reload-drill test's "before" (orange-fill) hash — `.ods` (zipped) and the
+        // spike seed's `.fods` (flat XML) are two serializations of the same original content, a
+        // cross-check this task did not have to engineer, just happened to fall out of using both.
+        let expectedHashes: [String: String] = [
+            "gate.xlsx": "e4d47906b6b6dcac9ba88d5953210ff991c9368e61cb4374f0e21ae1c41740e4",
+            "gate.ods": "56a6a81096e4f405e73ec17c6135dac89e240227d74daac2aef0710816939170",
+            "gate.pptx": "6fc7cb68f3392996d71ed6031121c580832195c575f81e80d689127b7e0fbd46",
+            "gate.odp": "1aaaad70b4d1ab2069bcb2b8f707f7288d4eddd97b4199a1f99403e922fdedb3",
+            "gate.docx": "143fe7f3332527d3f4feaa488ab47061b78af1ed2a1504de16c433a5617f1ac9",
+            "gate.odt": "143fe7f3332527d3f4feaa488ab47061b78af1ed2a1504de16c433a5617f1ac9",
+        ]
+
+        for fixture in ["gate.xlsx", "gate.ods", "gate.pptx", "gate.odp", "gate.docx", "gate.odt"] {
+            let docId = UUID().uuidString
+            _ = try await helper.client.open(docId: docId, path: Self.fixturesRoot.appendingPathComponent(fixture).path)
+
+            final class Box: @unchecked Sendable {
+                let lock = NSLock()
+                var pushes: [String] = []
+                func record(_ base64: String) { lock.lock(); pushes.append(base64); lock.unlock() }
+                func snapshot() -> [String] { lock.lock(); defer { lock.unlock() }; return pushes }
+            }
+            let box = Box()
+            helper.client.onTile = { _, _, _, _, _, _, base64 in box.record(base64) }
+
+            // First request: real paint. Second, IDENTICAL request: a TileCache hit (stability).
+            try await helper.client.requestTiles(docId: docId, keys: [key])
+            let firstArrived = await waitUntil(timeout: 10.0) { box.snapshot().count >= 1 }
+            XCTAssertTrue(firstArrived, "\(fixture): expected a .tile push")
+            try await helper.client.requestTiles(docId: docId, keys: [key])
+            let secondArrived = await waitUntil(timeout: 5.0) { box.snapshot().count >= 2 }
+            XCTAssertTrue(secondArrived, "\(fixture): expected a SECOND .tile push (cache hit)")
+
+            let pushes = box.snapshot()
+            let base64First = pushes[0]
+            let base64Second = pushes[1]
+            XCTAssertEqual(base64First, base64Second, "\(fixture): pixel hash must be STABLE across two subscribes/requests")
+
+            let raw = try XCTUnwrap(Data(base64Encoded: base64First), "\(fixture): pixelsBase64 did not decode")
+            XCTAssertEqual(raw.count, TileMath.bytesPerTile, "\(fixture): tile byte count")
+            XCTAssertGreaterThan(Set(raw).count, 1, "\(fixture): tile appears blank (all one byte value) — NON-BLANK requirement")
+
+            let hash = SHA256.hash(data: raw).map { String(format: "%02x", $0) }.joined()
+            print("[product-path pin] \(fixture) part=0 zoomPPT=1000 tile=(0,0) 512x512 RGBA sha256=\(hash)")
+            if let expected = expectedHashes[fixture] {
+                XCTAssertEqual(hash, expected, "\(fixture): product-path tile hash drifted — see this test's own "
+                                + "machine-relative disclosure before assuming a rendering regression")
+            }
+
+            try await helper.client.close(docId: docId)
+        }
+    }
+
+    // MARK: - Transport decision: scroll-storm measurement
+
+    /// Office Stage A Task 4's own surface-transport decision, the empirical half: realistic tile
+    /// traffic, measured END-TO-END through the REAL wire (real helper, real socket, real
+    /// `OfficeWireConnection` — not a microbenchmark of base64/JSON in isolation, which would miss
+    /// the client-side buffer-scan cost this very task's own review caught and fixed).
+    ///
+    /// Two passes over the SAME 18 distinct tile keys (a 6x3 grid at zoomPPT 1000 — chosen to
+    /// COVER `gate.xlsx`'s real content bounds, 26593x13005 twips, so paint cost is representative
+    /// rather than measuring mostly-blank out-of-content tiles): pass 1 is COLD (every key a
+    /// genuine LOK `paintPartTile` call); pass 2 re-requests the IDENTICAL keys, every one now a
+    /// `TileCache` HIT (no `paintPartTile` call at all) — isolating transport+socket+decode cost
+    /// from LOK's own render cost, with no new instrumentation beyond what this task already ships.
+    func testScrollStormMeasurement() async throws {
+        try skipUnlessVendorPresent()
+        let helper = try await spawnLiveHelper()
+        let docId = UUID().uuidString
+        _ = try await helper.client.open(docId: docId, path: Self.fixturesRoot.appendingPathComponent("gate.xlsx").path)
+
+        var keys: [TileKey] = []
+        for y in 0..<3 {
+            for x in 0..<6 {
+                keys.append(TileKey(part: 0, zoomPPT: 1000, tileX: x, tileY: y))
+            }
+        }
+        XCTAssertEqual(keys.count, 18)
+
+        final class ArrivalCounter: @unchecked Sendable {
+            private let lock = NSLock()
+            private var count = 0
+            private var totalBytes = 0
+            func record(byteCount: Int) { lock.lock(); count += 1; totalBytes += byteCount; lock.unlock() }
+            func snapshot() -> (count: Int, totalBytes: Int) { lock.lock(); defer { lock.unlock() }; return (count, totalBytes) }
+        }
+        let counter = ArrivalCounter()
+        helper.client.onTile = { _, _, _, _, _, _, base64 in counter.record(byteCount: base64.utf8.count) }
+
+        let coldStart = Date()
+        try await helper.client.requestTiles(docId: docId, keys: keys)
+        let coldArrived = await waitUntil(timeout: 30.0) { counter.snapshot().count >= keys.count }
+        let coldElapsed = Date().timeIntervalSince(coldStart)
+        XCTAssertTrue(coldArrived, "cold pass: not all \(keys.count) tiles arrived within 30s")
+        let coldStats = counter.snapshot()
+
+        let warmStart = Date()
+        try await helper.client.requestTiles(docId: docId, keys: keys)
+        let warmArrived = await waitUntil(timeout: 10.0) { counter.snapshot().count >= keys.count * 2 }
+        let warmElapsed = Date().timeIntervalSince(warmStart)
+        XCTAssertTrue(warmArrived, "warm pass: not all \(keys.count) cache-hit tiles arrived within 10s")
+
+        try await helper.client.close(docId: docId)
+
+        let coldPerTileMs = coldElapsed / Double(keys.count) * 1000
+        let warmPerTileMs = warmElapsed / Double(keys.count) * 1000
+        let paintAttributableMs = max(0, coldPerTileMs - warmPerTileMs)
+        let avgPayloadBytes = coldStats.totalBytes / max(1, coldStats.count)
+
+        print("""
+        [scroll-storm measurement] \(keys.count) distinct tiles, 512x512 RGBA (\(TileMath.bytesPerTile) bytes/tile raw)
+          COLD (real LOK paint x\(keys.count)): \(String(format: "%.1f", coldElapsed * 1000))ms total, \(String(format: "%.2f", coldPerTileMs))ms/tile, \(String(format: "%.1f", Double(keys.count) / coldElapsed)) tiles/sec
+          WARM (cache hit x\(keys.count), transport-only): \(String(format: "%.1f", warmElapsed * 1000))ms total, \(String(format: "%.2f", warmPerTileMs))ms/tile, \(String(format: "%.1f", Double(keys.count) / warmElapsed)) tiles/sec
+          Paint-attributable cost: ~\(String(format: "%.2f", paintAttributableMs))ms/tile (cold - warm)
+          Average wire payload: \(avgPayloadBytes) bytes/tile (base64 text; 1 MiB raw -> ~1.4x as base64 text)
+        """)
+
+        // The bar (per this task's own transport-decision framing): tile arrival is ASYNC over a
+        // placeholder, not a 16ms-per-frame budget — comfortably clearing "tens of ms" is the bar,
+        // not CEF's video-frame cadence. A generous ceiling, not a tight pin — the PRINTED numbers
+        // above are the real evidence this task's report cites; this just fails the suite outright
+        // on a severe regression.
+        XCTAssertLessThan(warmPerTileMs, 200, "transport-only per-tile cost ballooned past a generous 200ms ceiling")
     }
 }
 
