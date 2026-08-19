@@ -191,6 +191,66 @@ final class OfficeWireCodecTests: XCTestCase {
         XCTAssertEqual(OfficeWireCodec.unreadableSeqSentinel, 0)
     }
 
+    // MARK: - LOK raw callback payload parsing (OfficeDocumentEvent.parseInvalidateTiles/parseModifiedStatus)
+    //
+    // These two parsers translate LibreOfficeKit's raw callback payload strings into
+    // `OfficeDocumentEvent`. They live on `OfficeDocumentEvent` (not `LOKBridge`, their one real
+    // caller) specifically so this table can reach them: `LOKBridge` is a `type: tool` Xcode
+    // target no test bundle can import, and no Stage-A wire verb provokes a real LOK callback
+    // (Stage A never paints a tile or edits a document), so this table is — as of Task 3 — the
+    // ONLY exercise of this parsing logic anywhere. Every case below was read directly off the
+    // implementation, not off a live LOK firing.
+
+    func testParseInvalidateTilesRecognizedShapes() {
+        let size4 = OfficeDocumentEvent.parseInvalidateTiles("10, 20, 300, 400")
+        XCTAssertEqual(size4, .invalidated(rectsTwips: [OfficeTwipsRect(x: 10, y: 20, width: 300, height: 400)], part: 0),
+                       "4-value payload: no part field means part defaults to 0")
+
+        let size5 = OfficeDocumentEvent.parseInvalidateTiles("10, 20, 300, 400, 2")
+        XCTAssertEqual(size5, .invalidated(rectsTwips: [OfficeTwipsRect(x: 10, y: 20, width: 300, height: 400)], part: 2),
+                       "5-value payload: 5th field is the part")
+
+        let tight = OfficeDocumentEvent.parseInvalidateTiles("10,20,300,400,2")
+        XCTAssertEqual(tight, size5, "no space after commas parses identically to the spaced form")
+
+        XCTAssertEqual(OfficeDocumentEvent.parseInvalidateTiles("EMPTY"), .invalidated(rectsTwips: [], part: 0),
+                       "EMPTY means the whole document; part defaults to 0 — LOK's own EMPTY firing carries no part")
+        XCTAssertEqual(OfficeDocumentEvent.parseInvalidateTiles("  EMPTY  "), .invalidated(rectsTwips: [], part: 0),
+                       "surrounding whitespace is trimmed before the EMPTY comparison")
+    }
+
+    func testParseInvalidateTilesMalformedPayloadsAreRejected() {
+        let malformed = ["", "10, 20, 300", "a, b, c, d", "not a payload at all"]
+        for payload in malformed {
+            XCTAssertNil(OfficeDocumentEvent.parseInvalidateTiles(payload), "expected nil for: \"\(payload)\"")
+        }
+    }
+
+    func testParseInvalidateTilesUnparsablePartFallsBackToZeroRatherThanRejecting() {
+        // Documents existing behavior precisely: `Int(fields[4]) ?? 0` — a 5th field present but
+        // not itself a valid Int does NOT reject the whole payload, it silently defaults part to 0.
+        let result = OfficeDocumentEvent.parseInvalidateTiles("10, 20, 300, 400, notanumber")
+        XCTAssertEqual(result, .invalidated(rectsTwips: [OfficeTwipsRect(x: 10, y: 20, width: 300, height: 400)], part: 0))
+    }
+
+    func testParseModifiedStatusRecognizedShapes() {
+        XCTAssertEqual(OfficeDocumentEvent.parseModifiedStatus(".uno:ModifiedStatus=true"), .modifiedChanged(true))
+        XCTAssertEqual(OfficeDocumentEvent.parseModifiedStatus(".uno:ModifiedStatus=false"), .modifiedChanged(false))
+    }
+
+    func testParseModifiedStatusUnrecognizedUnoCommandIsRejected() {
+        XCTAssertNil(OfficeDocumentEvent.parseModifiedStatus(".uno:Bold=true"), "a different .uno: state change is out of Stage A's vocabulary")
+        XCTAssertNil(OfficeDocumentEvent.parseModifiedStatus(""), "empty payload has no prefix to match")
+        XCTAssertNil(OfficeDocumentEvent.parseModifiedStatus("ModifiedStatus=true"), "missing the leading \".uno:\" does not match")
+    }
+
+    func testParseModifiedStatusAnyNonTrueSuffixIsTreatedAsFalseNotRejected() {
+        // Documents existing behavior precisely: the suffix is compared with `== "true"`, so any
+        // non-"true" suffix on an otherwise-matching prefix (including garbage, not just "false")
+        // yields `.modifiedChanged(false)` rather than nil.
+        XCTAssertEqual(OfficeDocumentEvent.parseModifiedStatus(".uno:ModifiedStatus=garbage"), .modifiedChanged(false))
+    }
+
     // MARK: - Shared CLI arg parser (both main.swifts)
 
     func testArgsParserReadsFlagValuePairsAndIgnoresBareFlags() {

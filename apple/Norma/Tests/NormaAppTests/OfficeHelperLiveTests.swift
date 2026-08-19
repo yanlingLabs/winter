@@ -176,6 +176,14 @@ final class OfficeHelperLiveTests: XCTestCase {
     /// landscape LOK sees versus the stock, no-override config the original gate table was measured
     /// under. Not treated as a regression to chase: carry #5 is binding (fontconfig must be set),
     /// and this is the one, isolated, explained consequence of honoring it for real.
+    ///
+    /// Machine-relative caveat: `configureFontconfig` includes `~/Library/Fonts` (a per-user
+    /// directory), so `26775` is this pin's value on the machine/account it was measured on, not a
+    /// value fontconfig's own spec guarantees elsewhere. This whole test is already
+    /// vendor-gated (`skipUnlessVendorPresent`), which keeps its blast radius to "machines with the
+    /// LO product-set fetched" — stable there in practice — but a future mismatch on a different
+    /// machine or after installing a font that shifts ODF's default-font resolution should be read
+    /// as environment-dependent, not necessarily a regression.
     func testSixFormatsOpenWithSaneTypePartsAndSize() async throws {
         try skipUnlessVendorPresent()
         let helper = try await spawnLiveHelper()

@@ -366,6 +366,12 @@ final class OfficeHelperSupervisor {
 
         self.process = process
         self.connection = connection
+        // Reusing `handshakeTimeout` here means every steady-state request this client ever sends
+        // (ping/open/close, not just the boot handshake above) also rides the 5.0s -> 30.0s Task 3
+        // change — a deliberate choice, not an unnoticed side effect of the boot-sequencing fix: a
+        // large document's `open` plausibly needs more than 5s too, and death detection is a
+        // SEPARATE path (`armDeathDetection`'s `onClosed`/termination handler below), so a slow-but-
+        // alive helper is not mistaken for a dead one just because one request runs long.
         self.client = OfficeHelperClient(connection: connection, seqAllocator: OfficeWireSeqAllocator(),
                                           requestTimeout: configuration.handshakeTimeout)
         self.state = .ready

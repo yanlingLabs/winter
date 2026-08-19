@@ -332,9 +332,9 @@ final class LOKBridge: OfficeDocumentBridge {
         let event: OfficeDocumentEvent?
         switch type {
         case LOKCallbackType.invalidateTiles:
-            event = Self.parseInvalidateTiles(payload)
+            event = OfficeDocumentEvent.parseInvalidateTiles(payload)
         case LOKCallbackType.stateChanged:
-            event = Self.parseModifiedStatus(payload)
+            event = OfficeDocumentEvent.parseModifiedStatus(payload)
         default:
             event = nil
         }
@@ -342,38 +342,12 @@ final class LOKBridge: OfficeDocumentBridge {
         onEvent?(docId, event)
     }
 
-    /// LOK_CALLBACK_INVALIDATE_TILES payload: `"x, y, width, height"` in twips, `"x, y, width,
-    /// height, part"` with `LOK_FEATURE_PART_IN_INVALIDATION_CALLBACK` set (always, in this
-    /// bridge), or the literal string `"EMPTY"` meaning "the whole document" —
-    /// `LibreOfficeKitEnums.h:120-129`. `"EMPTY"` maps to an EMPTY `rectsTwips` array (documented
-    /// on `OfficeDocumentEvent.invalidated` itself); `part` for that case defaults to `0` — LOK's
-    /// own "EMPTY" firing carries no part number to parse, and "whole document" is not
-    /// meaningfully scoped to one part anyway.
-    private static func parseInvalidateTiles(_ payload: String) -> OfficeDocumentEvent? {
-        let trimmed = payload.trimmingCharacters(in: .whitespaces)
-        if trimmed == "EMPTY" {
-            return .invalidated(rectsTwips: [], part: 0)
-        }
-        let fields = trimmed.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
-        guard fields.count >= 4,
-              let x = Int64(fields[0]), let y = Int64(fields[1]),
-              let width = Int64(fields[2]), let height = Int64(fields[3]) else {
-            return nil
-        }
-        let part = fields.count >= 5 ? (Int(fields[4]) ?? 0) : 0
-        return .invalidated(rectsTwips: [OfficeTwipsRect(x: x, y: y, width: width, height: height)], part: part)
-    }
-
-    /// LOK_CALLBACK_STATE_CHANGED fires for many `.uno:*` state changes (Bold, Italic, ...) —
-    /// `LibreOfficeKitEnums.h:224-229`'s own doc comment gives `.uno:Bold=true` as its example.
-    /// Stage A only cares about `.uno:ModifiedStatus` (dirty tracking); every other state-changed
-    /// payload is ignored (returns `nil`, folded into "not a callback type this vocabulary covers"
-    /// by the caller).
-    private static func parseModifiedStatus(_ payload: String) -> OfficeDocumentEvent? {
-        let prefix = ".uno:ModifiedStatus="
-        guard payload.hasPrefix(prefix) else { return nil }
-        return .modifiedChanged(payload.dropFirst(prefix.count) == "true")
-    }
+    // The two raw-payload parsers formerly lived here as `private static func`s. Moved to
+    // `OfficeDocumentEvent.parseInvalidateTiles`/`.parseModifiedStatus` (`OfficeWire.swift`) —
+    // this type (`type: tool`) is not importable by any test bundle, so a parser kept here would
+    // have zero test coverage, permanently, no matter how the rest of the wire surface is
+    // exercised. See that file for the full doc comments (carried over verbatim) and
+    // `OfficeWireCodecTests` for the table test covering both.
 
     private static func extractBuildId(fromVersionJSON json: String) -> String? {
         guard let data = json.data(using: .utf8),
