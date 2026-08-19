@@ -346,6 +346,12 @@ final class OfficeRuntimeLiveTests: XCTestCase {
                            + "\(runtime.stateSnapshot.openFailures[openPath] ?? "no reason recorded")")
         }
         let originalDocId = doc.docId
+        // T8 fix-round review I2: captured HERE, right after the first open settles and before any
+        // reload runs, so step (6) below can compare against it rather than re-deriving a pid that
+        // would only prove liveness, not identity — see that step's own comment.
+        guard let originalHelperPID = host.officeHelperSupervisor?.process?.processIdentifier else {
+            return XCTFail("supervisor has no live process right after the first open")
+        }
 
         // --- Fresh-tile proof, at a FIXED zoom driven straight through the runtime — kept
         // independent of the canvas below so a canvas left at a different zoom by the view-state
@@ -443,11 +449,20 @@ final class OfficeRuntimeLiveTests: XCTestCase {
                        + "so the re-clamp obligation 3 requires is a true no-op here")
 
         // --- (6) the same helper PROCESS throughout — this was a close+reopen, never a restart. ---
-        guard let helperPID = host.officeHelperSupervisor?.process?.processIdentifier else {
+        // T8 fix-round review I2: capturing a pid HERE, after the reload, and merely asserting it is
+        // ALIVE proves liveness, not identity — a supervisor restart would hand back a live pid too,
+        // just a different one, and this check would have passed either way. `originalHelperPID` was
+        // captured once, right after the FIRST open settled, before any reload ran; comparing against
+        // it (never re-deriving "the answer" from the post-reload state) is what actually proves this
+        // was a close+reopen against the SAME process, never a restart.
+        guard let helperPIDAfterReload = host.officeHelperSupervisor?.process?.processIdentifier else {
             return XCTFail("supervisor has no live process to check")
         }
-        XCTAssertTrue(isProcessAlive(helperPID), "the reload must not have gone through a supervisor "
-                      + "restart — the helper process identity itself must be unchanged")
+        XCTAssertTrue(isProcessAlive(helperPIDAfterReload), "the helper process must still be "
+                      + "running after the reload")
+        XCTAssertEqual(helperPIDAfterReload, originalHelperPID, "the reload must not have gone "
+                       + "through a supervisor restart — the helper process identity itself must be "
+                       + "unchanged, not merely some process being alive")
 
         // --- (7) deletion: a persistent banner, and NOTHING else changes. ---
         try FileManager.default.removeItem(at: scratchDoc)

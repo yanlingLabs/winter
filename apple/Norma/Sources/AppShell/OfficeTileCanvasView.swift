@@ -299,6 +299,11 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
         // entirely if `activePart` happens to already equal `part`, leaving the stale docId's layers
         // in place. Assigned directly instead; `clearVisibleTiles()` below is what actually matters.
         part = max(0, activePart)
+        // N1 (T8 fix-round review, disclosed, one sentence): when a shrunken reload's clamped-down
+        // `activePart` (the reducer's own clamp, upstream of this call) lands `part` on a DIFFERENT
+        // part than the one last shown, `scrollOrigin` below is still only re-clamped, never reset —
+        // deliberate, since preserving scroll is this task's own requirement, but it can leave the
+        // view sitting at an arbitrary offset on a sheet the user was never looking at.
         // The old docId's tile-store entries are already gone — `OfficeRuntime`'s `.reloadDocument`
         // effect performer evicts them (`tileStore.evictAll(docId:)`) before the new open even
         // starts — so every currently-laid-out layer would otherwise keep showing the LAST FRAME of

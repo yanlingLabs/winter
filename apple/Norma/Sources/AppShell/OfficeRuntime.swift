@@ -135,9 +135,21 @@ struct OfficeRuntimeState: Equatable {
     /// still holds the pre-delete entry; if an ALREADY-in-flight reload for that same path then
     /// succeeds (`.opened` lands after the delete), its arm clears this banner along with everything
     /// else `.opened` resets, leaving the tab showing freshly-reloaded content for a file that is, at
-    /// that instant, actually gone — no banner, and no further watcher event will re-fire (the
-    /// baseline was already replaced by the reload's own re-arm). Bounded: the NEXT external write or
-    /// delete of that path fires normally and the state resynchronizes: nothing here can wedge.
+    /// that instant, actually gone — no banner. **Mechanism, corrected — T8 fix-round review M1**:
+    /// this is NOT because the watch "re-arms" (`startWatching`'s own guard early-returns whenever a
+    /// watcher for `path` already exists — a reload's own `.watchFile` re-emission touches nothing)
+    /// and NOT because a baseline gets "replaced" (a `.deleted` verdict REMOVES the baseline,
+    /// `diskBaselines.removeValue(forKey:)`, and `officeDiskChange` never consults the baseline for a
+    /// `.deleted` verdict in the first place — it returns `.deleted` purely from `stat` coming back
+    /// nil). What actually happens: the FILE itself generates no further events once it is gone, but
+    /// the watcher's DIRECTORY source stays live (`DispatchSourceFileWatcher`'s own doc) — it fires on
+    /// ANY entry change in the parent, and every fire re-stats `path` and re-evaluates from scratch,
+    /// so the path's own recreation is still caught (a reload, clearing the banner) and so is a
+    /// sibling merely churning while `path` stays gone (another `.deleted` verdict, the same banner
+    /// reasserted — a harmless no-op re-write of the same string). Only on a genuinely QUIESCENT
+    /// directory — nothing at all changes in it after this — does the missing banner simply persist,
+    /// unresolved, until the tab closes (`.closeRequested` clears it) or teardown. Stage B inherits
+    /// this comment verbatim; keep it true.
     var documentBanners: [String: String] = [:]
 }
 

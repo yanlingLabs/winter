@@ -212,6 +212,12 @@ final class OfficeTileStoreTests: XCTestCase {
         XCTAssertTrue(accepted, "the disclosed residual: a reply already in flight when the "
                       + "invalidation fired still lands — see OfficeTileStore's own header")
         XCTAssertNotNil(store.tile(docId: "d1", key: key(0, 0)))
+        // T8 fix-round review I1: the DEFAULT ordering (late reply lands before any viewport pass
+        // re-requests the key — see the header's corrected claim) leaves the key excluded here, not
+        // askable — the stale frame the assertions above just proved landed is not "superseded by the
+        // next pass," it PERSISTS on a static viewport. This is the documented reality, not a gap.
+        XCTAssertEqual(store.keysNeedingRequest(docId: "d1", candidates: [key(0, 0)]), [],
+                       "the late-cached reply now reads as fresh, not stale — nothing re-asks for it")
     }
 
     /// office-plumbing Task 8 (F5, the reload story): the OTHER half of the store header's

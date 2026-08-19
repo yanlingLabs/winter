@@ -36,12 +36,29 @@ import Foundation
 /// is accepted as if it were current. Clearing the in-flight marker too (below) does not erase that
 /// ONE stale frame — the reply that was already in flight still lands and still paints, once — but it
 /// closes the WORSE half: without it, `keysNeedingRequest` also believes a fresh ask is still
-/// outstanding and refuses to issue one, so nothing EVER corrects that one stale frame. With it, the
-/// very next viewport pass re-requests the key and the stale frame is superseded. A full per-key
-/// ledger (reject any arrival at or below an invalidated generation, closing even the one stale
-/// frame) was considered and set aside: Stage A never calls `invalidate` at all, so there is no live
-/// call site to justify the extra bookkeeping against yet — this is deliberately the cheaper half of
-/// the review's own either/or.
+/// outstanding and refuses to issue one, so nothing EVER corrects that one stale frame.
+///
+/// **What "with it" actually buys — corrected, T8 fix-round review I1**: NOT "the very next viewport
+/// pass re-requests the key and the stale frame is superseded," this header's own prior claim, true
+/// only in the ordering where a fresh ask is already back in flight before the late reply lands. The
+/// DEFAULT ordering is the other one: the late reply is typically milliseconds away, while a fresh
+/// viewport pass may never come at all — a static, non-scrolling view issues no further `.subscribe`
+/// for these same candidates. When the late reply lands FIRST, `ingest` has no per-key generation
+/// floor to reject it against (the entry `invalidate` removed is simply gone, not remembered as
+/// stale), so it is cached exactly as if it were fresh; `keysNeedingRequest` then excludes the key
+/// again — it now reads as cached, not stale — and no further pass is ever triggered to re-ask for
+/// it. On a static viewport the stale frame is not superseded by "the next pass"; it PERSISTS until
+/// something else independently touches that key: another `invalidate` covering it, LRU pressure
+/// evicting it, or the whole docId being evicted (`evictAll`).
+///
+/// A full per-key ledger (reject any arrival at or below an invalidated generation, closing even the
+/// one stale frame) was considered and set aside: Stage A never calls `invalidate` at all, so there is
+/// no live call site to justify the extra bookkeeping against yet — this is deliberately the cheaper
+/// half of the review's own either/or. Whenever that ledger is built (Stage B), mind `ingest`'s own
+/// unconditional `inFlight.remove(k)` above: a rejected arrival would still clear the in-flight marker
+/// regardless of whether it is accepted, handing `keysNeedingRequest` a key that reads as immediately
+/// re-askable — `markRequested`'s own header closes this same duplicate-request window on the SEND
+/// side; a naive reject-and-return-false rule here would reopen its receive-side mirror.
 ///
 /// The RELOAD path's own version of "a reply arrives for something this store has moved on from" is
 /// closed differently, and completely, by construction rather than by a ledger: a reload always mints
