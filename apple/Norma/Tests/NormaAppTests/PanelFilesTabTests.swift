@@ -205,6 +205,81 @@ final class PanelFilesTabTests: XCTestCase {
         model.openFile("/repo/engine.ts")
     }
 
+    // MARK: - office-plumbing Task 7: the tree door routes office extensions to a document tab
+
+    /// The SAME door, an office-extension path — mints a `.document` tab instead of `.code`, through
+    /// the router (`ShellSessionHost.openFileOrDocumentTab`), not a second tree-only mechanism.
+    func testOpenFileRoutesAnOfficeExtensionThroughTheHostsDocumentDoor() async {
+        let rows = [dirRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+        let (host, mgmt) = await makeHostWithManagement(rows: rows)
+        await host.directory.refresh()
+
+        let model = PanelFilesTabModel(tabId: "t1", tree: FileTreeModel())
+        model.bind(host: host, sessionId: "S1")
+
+        model.openFile("/repo/gate.xlsx")
+
+        await feedWaitUntil { mgmt.methods.contains("panel.openTab") }
+        guard let open = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.openTab" }) else {
+            return XCTFail("an office path clicked in the tree must reach the wire: \(mgmt.methods)")
+        }
+        let params = open["params"] as? [String: Any]
+        XCTAssertEqual(params?["kind"] as? String, "document")
+        XCTAssertEqual(params?["url"] as? String, "/repo/gate.xlsx")
+        XCTAssertEqual(params?["title"] as? String, "gate.xlsx")
+    }
+
+    /// **Dedupe/activate through the REAL tree door**: a second click on the same office path must
+    /// activate the tab the first click minted, never open a second. `panelDocumentTabAction`'s own
+    /// table is already pinned in `PanelDocumentTabTests`; this proves the TREE actually reaches it,
+    /// mirroring `testAFileDoorClickWithNoExistingTabMintsACodeTabWith...`'s sibling proof for `.code`
+    /// (`ShellSessionHostTests`) at this tab's own smaller scale.
+    func testClickingTheSameOfficePathTwiceInTheTreeActivatesInsteadOfMintingASecondTab() async {
+        let rows = [dirRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+        let (host, mgmt) = await makeHostWithManagement(rows: rows)
+        await host.directory.refresh()
+
+        let model = PanelFilesTabModel(tabId: "t1", tree: FileTreeModel())
+        model.bind(host: host, sessionId: "S1")
+
+        model.openFile("/repo/gate.xlsx")
+        await feedWaitUntil { mgmt.methods.contains("panel.openTab") }
+
+        // The first click's mint folds into the session's tab list — a real second click only ever
+        // sees a tab that has already folded, so the harness folds it explicitly here too.
+        host.panelStore.applyFetchedSnapshot(
+            sessionId: "S1",
+            tabs: [PanelTab(tabId: "d1", kind: .document, url: "/repo/gate.xlsx", title: "gate.xlsx")],
+            activeTabId: nil)
+
+        model.openFile("/repo/gate.xlsx")
+        await feedWaitUntil { mgmt.methods.contains("panel.activateTab") }
+        guard let activate = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.activateTab" }) else {
+            return XCTFail("the second click must activate the existing document tab: \(mgmt.methods)")
+        }
+        XCTAssertEqual((activate["params"] as? [String: Any])?["tabId"] as? String, "d1")
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertEqual(mgmt.methods.filter { $0 == "panel.openTab" }.count, 1,
+                       "one tab per office file — the second click must never mint a second")
+    }
+
+    /// The router's fire-time belt covers the tree "for free" too — even though the tree shows no
+    /// rows at all for a dirless session (so this path is not reachable through real UI), a direct
+    /// call proves the router itself, not the tree's own absence of rows, is what refuses it.
+    func testOpenFileForAnOfficePathIsANoOpWhenTheSessionHasNoWorkingDirectory() async {
+        let rows = [dirRow("S1", dirs: [])]
+        let (host, mgmt) = await makeHostWithManagement(rows: rows)
+        await host.directory.refresh()
+
+        let model = PanelFilesTabModel(tabId: "t1", tree: FileTreeModel())
+        model.bind(host: host, sessionId: "S1")
+
+        model.openFile("/repo/gate.xlsx")
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertFalse(mgmt.methods.contains("panel.openTab"),
+                       "a dirless session must never mint an office document tab: \(mgmt.methods)")
+    }
+
     // MARK: - The registry
 
     func testTheRegistryCachesBySameTabIdAndAFreshModelReplacesADiscardedOne() {

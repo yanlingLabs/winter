@@ -1417,6 +1417,44 @@ final class ShellSessionHost: ObservableObject {
         revealPanel()
     }
 
+    /// office-plumbing Task 7: **the ONE router both UI doors call — never `openFileTab`/
+    /// `openDocumentTab` directly.** `panelTabKind(forFilePath:)` (`PanelEditorTab.swift`) decides
+    /// `.code` vs `.document` off the extension alone; this method is nothing more than that decision
+    /// plus a call to whichever door already exists for it. Both underlying doors keep their own full
+    /// contract unchanged (dedupe/activate, the retry obligation, the panel reveal) — this adds no
+    /// behavior of its own beyond the gate immediately below, which is deliberate: a router that ALSO
+    /// reimplemented dedupe or retry would be exactly the "second spelling" `panelTabKind`'s own doc
+    /// warns against, one layer up.
+    ///
+    /// **Callers**: `PanelFilesTabModel.openFile` (the tree) and the `onOpenFile` closure wired to
+    /// `WindowContentView` below (the transcript). Neither calls `openFileTab`/`openDocumentTab`
+    /// itself any more — `ToolRowTests.testChatContentNeverReachesForTheShellHost`'s banned-name list
+    /// is extended this task to also name this method and `openDocumentTab`, so `ChatContent/` could
+    /// not reach for either even by accident.
+    ///
+    /// **The fire-time belt** (`EditorTabTests.testShellPanelGatesTheFilesDoorAndWiresItToTheHosts
+    /// RealDoor`'s own "render time AND fire time" precedent, restated here for a second door): the
+    /// transcript's clickability render (`toolDetailIsClickablePath`) can go stale between paint and
+    /// click — a session hop lands in the gap — so the `.document` branch re-checks the SAME
+    /// `editorTabSessionRoots == .present` predicate the render-time gate used, against the CURRENT
+    /// rows, immediately before acting, and silently refuses rather than falling back to `.code`:
+    /// opening a binary office file as text would violate the policy `toolDetailIsClickablePath`'s
+    /// own doc states ("office rides working directories" — gate 4), not honor a degraded version of
+    /// it. The tree door is already gated structurally (its rows only exist at `.present`), so this
+    /// belt costs it nothing and covers it — and any future caller — for free, rather than needing
+    /// its own copy.
+    func openFileOrDocumentTab(_ path: String, sessionId: String) {
+        switch panelTabKind(forFilePath: path) {
+        case .document:
+            guard editorTabSessionRoots(sessionId: sessionId, rows: directory.rows) == .present else {
+                return
+            }
+            openDocumentTab(path, sessionId: sessionId)
+        default:
+            openFileTab(path, sessionId: sessionId)
+        }
+    }
+
     /// editor-product Task 7: **the Files tab's door — dedupe by KIND alone, one per session.**
     /// Mirrors `openFileTab`/`openDiffTab` wherever the two-branch shape allows: dedupe-then-
     /// activate-or-mint through the SAME two RPCs (`activatePanelTab`/`openPanelTab`), the panel
@@ -3079,9 +3117,15 @@ struct ShellSessionView: View {
                         // immediately above — same three-homes opt-in, same read-fresh-at-click-time
                         // rule (a hop between the click and this call must not file the tab into a
                         // session the user has left).
+                        //
+                        // office-plumbing Task 7: routes through `openFileOrDocumentTab`, not
+                        // `openFileTab` directly — an office-extension path now opens a `.document`
+                        // tab instead of trying to render binary bytes as code. See that method's own
+                        // doc for why this is the ONE router, called by both UI doors, and for the
+                        // fire-time dirs re-check it applies before minting a document tab.
                         onOpenFile: { path in
                             guard let sessionId = host.attachedSessionId else { return }
-                            host.openFileTab(path, sessionId: sessionId)
+                            host.openFileOrDocumentTab(path, sessionId: sessionId)
                         },
                         // editor-product Task 6: the row-level clickability gate's one dynamic
                         // input — see `WindowContentView.sessionHasWorkingDirectory`'s own doc.

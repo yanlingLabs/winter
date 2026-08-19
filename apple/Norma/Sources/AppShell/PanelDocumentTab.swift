@@ -395,12 +395,34 @@ struct PanelDocumentTab: PanelTabContent {
     func makeContent() -> AnyView { AnyView(PanelDocumentContent(model: model)) }
 }
 
+// MARK: - office-plumbing Task 7: the open-with escape hatch
+
+/// The chrome button's label AND tooltip — "Open in Numbers", never a bundle id or a raw path. A
+/// LIVE LaunchServices read (the same class `NSWorkspace.shared.frontmostApplication` already is
+/// elsewhere in this app, e.g. `ExternalFocusSnapshot.swift`) rather than a cached fact, so a newly
+/// installed app is reflected the very next time this renders, with nothing to invalidate.
+///
+/// Falls back to a generic sentence when LaunchServices names nothing (no app installed claims the
+/// type) — the button still fires `NSWorkspace.shared.open` either way; macOS owns what happens next
+/// (its own "choose an application" affordance) when nothing claims the type. `nil`/empty path
+/// (unreachable through any shipped door, per `PanelDocumentTabModel.path`'s own doc) reads the same
+/// as "no app found" rather than constructing an empty `URL`.
+func officeOpenWithLabel(forFileAt path: String?) -> String {
+    guard let path, !path.isEmpty,
+          let appURL = NSWorkspace.shared.urlForApplication(toOpen: URL(fileURLWithPath: path))
+    else {
+        return "Open in Default App"
+    }
+    return "Open in \(FileManager.default.displayName(atPath: appURL.path))"
+}
+
 // MARK: - The chrome row
 
-/// Path only — no save button, no dirty dot: Stage A documents are view-only, so neither concept
-/// applies (`PanelEditorChrome`'s own two extras are both about an editable buffer). Reuses
-/// `editorTabDisplayPath` verbatim — despite its name, the function is generic path-shortening, and
-/// a second copy of "last two path components" would drift the moment one of them learned about `~`.
+/// Path, plus the open-with escape hatch. No save button, no dirty dot: Stage A documents are
+/// view-only, so neither concept applies (`PanelEditorChrome`'s own two extras are both about an
+/// editable buffer). Reuses `editorTabDisplayPath` verbatim — despite its name, the function is
+/// generic path-shortening, and a second copy of "last two path components" would drift the moment
+/// one of them learned about `~`.
 struct PanelDocumentChrome: View {
     @ObservedObject var model: PanelDocumentTabModel
     let tab: PanelTab
@@ -413,6 +435,22 @@ struct PanelDocumentChrome: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer(minLength: panelEditorChromeGap)
+
+            // office-plumbing Task 7: the open-with escape hatch — Stage A documents are view-only,
+            // so this is the ONE trailing action a document tab offers. `ShellTitlebarButton`, the
+            // SAME "one chrome-button treatment" every other chrome row's trailing action already
+            // wears (`PanelEditorChrome`'s Save, `PanelFilesChrome`'s Refresh) — ONE visible button,
+            // not a ⌘-click on the tab title (considered and rejected: an undiscoverable gesture is
+            // not an affordance, and Stage A has nothing else competing for ⌘-click on this tab
+            // anyway). Closes no tab and pre-warms nothing — it only ever launches a SEPARATE app via
+            // NSWorkspace, so it cannot go stale the way a close door reaching a bound-but-unattached
+            // session's runtime could (the T6 review's N5 note, never a shipped door here).
+            ShellTitlebarButton(systemImage: "arrow.up.forward.app",
+                                label: officeOpenWithLabel(forFileAt: model.path),
+                                size: panelChromeButtonSize) {
+                guard let path = model.path, !path.isEmpty else { return }
+                NSWorkspace.shared.open(URL(fileURLWithPath: path))
+            }
         }
         .padding(.horizontal, panelTabPillInset)
         .frame(maxWidth: .infinity, maxHeight: .infinity)

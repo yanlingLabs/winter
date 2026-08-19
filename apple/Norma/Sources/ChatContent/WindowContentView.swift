@@ -57,11 +57,12 @@ struct WindowContentView<Accessory: View>: View {
     ///
     /// A clickable path on a read/edit/write/notebook_edit row calls it with the path exactly as
     /// the row would draw it; the SHELL decides what that means
-    /// (`ShellSessionHost.openFileTab` — dedupe by absolute path, else mint a `.code` tab, reveal
-    /// the panel either way). Nothing in `ChatContent/` imports, names or knows about
-    /// `ShellSessionHost`, `PanelStore` or the panel — the SAME source-scan pin `onOpenDiff` is
-    /// covered by (`ToolRowTests.testChatContentNeverReachesForTheShellHost`) is extended to name
-    /// this door's own producer too.
+    /// (`ShellSessionHost.openFileOrDocumentTab` since office-plumbing Task 7 — dedupe by absolute
+    /// path, mint a `.document` tab for an office extension or `.code` otherwise, reveal the panel
+    /// either way). Nothing in `ChatContent/` imports, names or knows about `ShellSessionHost`,
+    /// `PanelStore` or the panel — the SAME source-scan pin `onOpenDiff` is covered by
+    /// (`ToolRowTests.testChatContentNeverReachesForTheShellHost`) is extended to name this door's
+    /// own producer too.
     ///
     /// Same opt-in as `onOpenDiff`, for the same reason: `nil` on the orb's morph window and every
     /// detached window, where a clickable path would be a click that does nothing.
@@ -69,8 +70,13 @@ struct WindowContentView<Accessory: View>: View {
     /// editor-product Task 6: **the row-level clickability gate's one dynamic input** — whether the
     /// ATTACHED session currently carries a working directory to resolve a RELATIVE path against
     /// (`ToolRunCallDetailText`/`toolDetailIsClickablePath`). An ABSOLUTE path is clickable
-    /// regardless of this flag (reads carry no path fence), so this only ever WIDENS what a
-    /// relative path may do, never narrows an absolute one.
+    /// regardless of this flag for a CODE extension (reads carry no path fence), so for those paths
+    /// this only ever WIDENS what a relative path may do, never narrows an absolute one.
+    ///
+    /// **office-plumbing Task 7 correction: an office extension is the one exception.** It needs
+    /// this flag `true` even when absolute — `toolDetailIsClickablePath`'s own doc, gate 4. Product
+    /// policy, not a path-fence question: office rides working directories, so this flag NARROWS an
+    /// absolute office path the way it always narrowed a relative one.
     ///
     /// A plain value, not a closure — like `composerCardMode` above and unlike `onOpenDiff`/
     /// `onOpenFile`: this answers a DISPLAY-time question ("what should this render as right now"),

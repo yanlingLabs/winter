@@ -1,3 +1,4 @@
+import AppKit
 import NormaKit
 import XCTest
 @testable import Norma
@@ -160,6 +161,27 @@ final class PanelDocumentTabTests: XCTestCase {
         let tabs = [PanelTab(tabId: "t1", kind: .code, url: "/repo/gate.xlsx", title: "gate.xlsx")]
         XCTAssertEqual(panelDocumentTabAction(tabs: tabs, path: "/repo/gate.xlsx", openFailures: []),
                        .mint(title: "gate.xlsx"))
+    }
+
+    // MARK: - office-plumbing Task 7: the open-with escape hatch — `officeOpenWithLabel` reads live
+    // LaunchServices state, so only its deterministic branch is asserted here; which app it names on
+    // a machine that DOES have one is the live gate's own judgment call, matching this house's
+    // standing posture toward anything resting on installed-app state.
+
+    /// The one branch that cannot depend on what apps happen to be installed on the machine running
+    /// this test: no path at all reads the same as "no app found," rather than constructing an empty
+    /// `URL` or crashing.
+    func testOfficeOpenWithLabelFallsBackToAGenericSentenceForANilOrEmptyPath() {
+        XCTAssertEqual(officeOpenWithLabel(forFileAt: nil), "Open in Default App")
+        XCTAssertEqual(officeOpenWithLabel(forFileAt: ""), "Open in Default App")
+    }
+
+    /// The SF Symbol the chrome button draws is spelled correctly — an invalid name renders BLANK,
+    /// not a compile error, so this converts what would otherwise be a live-gate surprise into a
+    /// test failure.
+    func testTheOpenWithButtonsSymbolNameIsValid() {
+        XCTAssertNotNil(NSImage(systemSymbolName: "arrow.up.forward.app", accessibilityDescription: nil),
+                        "arrow.up.forward.app must be a real SF Symbol on this OS")
     }
 
     // MARK: - The model's own copy of the Driver recorder (a per-file copy, mirroring

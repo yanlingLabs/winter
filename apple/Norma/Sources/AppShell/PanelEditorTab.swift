@@ -86,6 +86,32 @@ func panelFilesDoorShown(sessionId: String?, rows: [SessionSummary]) -> Bool {
     editorTabSessionRoots(sessionId: sessionId, rows: rows) == .present
 }
 
+// MARK: - office-plumbing Task 7: the file-open router (PURE)
+
+/// The extensions that make a file an OFFICE document rather than something the code editor should
+/// try to render as text — spreadsheets (`xlsx`/`ods`), presentations (`pptx`/`odp`), documents
+/// (`docx`/`odt`). Stage A's fixture set (`gate.*`, Task 1's own manifest) names exactly these six.
+/// One set — `panelTabKind(forFilePath:)`'s own doc names the drift a second copy of it would be.
+let officeFileExtensions: Set<String> = ["xlsx", "ods", "pptx", "odp", "docx", "odt"]
+
+/// PURE: **the ONE router every file-open door calls** — office-plumbing Task 7's answer to the
+/// predicate-unify lesson `editorTabSessionRoots`'s own doc already paid for once (wave-8 item 2): a
+/// second hand-copy of "is this path an office extension" at the tree's door and a THIRD at the
+/// transcript's would be the identical shape of drift, just one call deeper. Every UI door that opens
+/// a file — the Files tree (`PanelFilesTabModel.openFile`) and the transcript's clickable path
+/// (`WindowContentView.onOpenFile`, and its own clickability gate, `toolDetailIsClickablePath`) —
+/// calls this function or `ShellSessionHost.openFileOrDocumentTab` (which calls nothing else to make
+/// the SAME decision a second way).
+///
+/// Case-insensitive off `NSString.pathExtension` (`PanelDiffTab.swift`'s own language-detection read
+/// of the identical API) — `.XLSX` and `.xlsx` must not open two different tab kinds. No extension,
+/// or any extension outside `officeFileExtensions`, reads as `.code` — the editor's own established
+/// fallback for a file it does not specifically recognize (unchanged from every path opened before
+/// this task existed).
+func panelTabKind(forFilePath path: String) -> PanelTabKind {
+    officeFileExtensions.contains((path as NSString).pathExtension.lowercased()) ? .document : .code
+}
+
 /// What a code tab draws when it is NOT drawing the editor. Every case is a calm, centred sentence
 /// (or a spinner); none of them is an error the user can act on by pressing something, which is why
 /// there is no retry anywhere here — the doors that retry are the file tree and the transcript, and

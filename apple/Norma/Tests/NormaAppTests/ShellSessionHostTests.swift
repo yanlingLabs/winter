@@ -4551,4 +4551,122 @@ final class ShellSessionHostTests: XCTestCase {
         await officeWaitUntil(timeout: 2) { office.recorder.closeCalls.count == 1 }
         host.deselect()
     }
+
+    // MARK: - office-plumbing Task 7: the ONE router both UI doors call
+
+    /// **Mint, office extension → `.document`.** Mirrors `testADocumentDoorClickWithNoExistingTab
+    /// MintsADocumentTabAndRevealsThePanel`, through the router instead of `openDocumentTab` directly
+    /// — proves the router's OWN dispatch decision, not merely that the underlying door still works.
+    func testTheRouterMintsADocumentTabForAnOfficeExtensionAndRevealsThePanel() async {
+        let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+        let (host, factory, mgmt) = await makeHostWithManagement(rows: rows)
+        defer { host.deselect() }
+        await host.directory.refresh()
+        host.setShellVisible(true)
+        host.select("S1")
+        await waitUntilMade(factory, 1)
+        await answerHandshake(factory.made[0], sessionId: "S1")
+
+        var revealed = 0
+        host.onRevealPanel = { revealed += 1 }
+
+        host.openFileOrDocumentTab("/repo/gate.xlsx", sessionId: "S1")
+        await feedWaitUntil { mgmt.methods.contains("panel.openTab") }
+        guard let open = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.openTab" }) else {
+            return XCTFail("the router must reach the wire for an office extension: \(mgmt.methods)")
+        }
+        let params = open["params"] as? [String: Any]
+        XCTAssertEqual(params?["kind"] as? String, "document")
+        XCTAssertEqual(params?["url"] as? String, "/repo/gate.xlsx")
+        XCTAssertEqual(revealed, 1)
+    }
+
+    /// **Mint, code extension → `.code`.** The router's negative case: an ordinary source file must
+    /// keep opening exactly as it did before this task existed.
+    func testTheRouterMintsACodeTabForACodeExtension() async {
+        let (host, factory, mgmt) = await makeHostWithManagement()
+        defer { host.deselect() }
+        host.setShellVisible(true)
+        host.select("S1")
+        await waitUntilMade(factory, 1)
+        await answerHandshake(factory.made[0], sessionId: "S1")
+
+        host.openFileOrDocumentTab("/repo/src/engine.ts", sessionId: "S1")
+        await feedWaitUntil { mgmt.methods.contains("panel.openTab") }
+        guard let open = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.openTab" }) else {
+            return XCTFail("the router must reach the wire for a code extension: \(mgmt.methods)")
+        }
+        XCTAssertEqual((open["params"] as? [String: Any])?["kind"] as? String, "code")
+    }
+
+    /// **Mint, unrecognized extension → `.code`.** The editor's own established fallback — a file
+    /// this router does not specifically recognize as office still opens exactly as before.
+    func testTheRouterMintsACodeTabForAnUnrecognizedExtension() async {
+        let (host, factory, mgmt) = await makeHostWithManagement()
+        defer { host.deselect() }
+        host.setShellVisible(true)
+        host.select("S1")
+        await waitUntilMade(factory, 1)
+        await answerHandshake(factory.made[0], sessionId: "S1")
+
+        host.openFileOrDocumentTab("/repo/whatever.foo", sessionId: "S1")
+        await feedWaitUntil { mgmt.methods.contains("panel.openTab") }
+        guard let open = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.openTab" }) else {
+            return XCTFail("the router must reach the wire for an unrecognized extension: \(mgmt.methods)")
+        }
+        XCTAssertEqual((open["params"] as? [String: Any])?["kind"] as? String, "code")
+    }
+
+    /// **The fire-time belt, at the wire**: a dirless session's office click through the router must
+    /// mint NOTHING — the belt refuses before `openDocumentTab` (and therefore `openPanelTab`) is
+    /// ever reached. `openFileOrDocumentTab`'s own doc names the race this guards: a session hop
+    /// landing between the transcript's render-time gate and an in-flight click.
+    func testTheRouterRefusesToMintADocumentTabWhenTheSessionHasNoWorkingDirectory() async {
+        let rows = [codeRow("S1", dirs: [])]
+        let (host, _, mgmt) = await makeHostWithManagement(rows: rows)
+        await host.directory.refresh()
+
+        host.openFileOrDocumentTab("/repo/gate.xlsx", sessionId: "S1")
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertFalse(mgmt.methods.contains("panel.openTab"),
+                       "a dirless session must never mint an office document tab: \(mgmt.methods)")
+    }
+
+    /// **The retry obligation survives the router**: an existing document tab whose path currently
+    /// sits in the runtime's `openFailures` still gets a fresh `open()` alongside the activate when
+    /// reached through `openFileOrDocumentTab` — proves the router's `.document` branch delegates to
+    /// the real door rather than reimplementing a thinner version of it. Hygiene mirrors
+    /// `testActivatingATabWhosePathIsInOpenFailuresAlsoRetriesTheOpen` exactly (that test's own doc
+    /// explains why: this retry SUCCEEDS, leaving a genuinely open document, so `select`/`deselect`
+    /// would spawn an unawaited close `Task` — no attach is needed here either, `openPanelTab`'s
+    /// explicit `sessionId:` door).
+    func testTheRouterRetriesAFailedOfficeOpenOnActivateThroughTheSameDoorOpenDocumentTabUses() async {
+        let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+        let (host, _, mgmt) = await makeHostWithManagement(rows: rows)
+        await host.directory.refresh()
+        let office = officeFactory()
+        host.makeOfficeRuntime = office.make
+
+        let runtime = host.officeRuntime(for: "S1")
+        office.recorder.openFailures["/repo/bad.xlsx"] = "garbage file"
+        runtime.open("/repo/bad.xlsx")
+        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.openFailures["/repo/bad.xlsx"] != nil }
+        office.recorder.openFailures.removeValue(forKey: "/repo/bad.xlsx") // "the file got fixed"
+
+        host.panelStore.applyFetchedSnapshot(
+            sessionId: "S1",
+            tabs: [PanelTab(tabId: "t9", kind: .document, url: "/repo/bad.xlsx", title: "bad.xlsx")],
+            activeTabId: nil)
+
+        host.openFileOrDocumentTab("/repo/bad.xlsx", sessionId: "S1")
+        await feedWaitUntil { mgmt.methods.contains("panel.activateTab") }
+        await officeWaitUntil(timeout: 2) { office.recorder.openCalls.filter { $0.path == "/repo/bad.xlsx" }.count == 2 }
+        XCTAssertEqual(office.recorder.openCalls.filter { $0.path == "/repo/bad.xlsx" }.count, 2,
+                       "the first (failed) open plus the retry from re-clicking through the router")
+
+        // Hygiene, not an assertion: the retry SUCCEEDS, so this runtime now holds a genuinely open
+        // document — release it explicitly and wait for the resulting close to settle.
+        host.teardownOfficeRuntime(for: "S1")
+        await officeWaitUntil(timeout: 2) { office.recorder.closeCalls.count == 1 }
+    }
 }
