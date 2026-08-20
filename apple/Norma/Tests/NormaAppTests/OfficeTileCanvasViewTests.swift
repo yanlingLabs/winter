@@ -265,11 +265,18 @@ final class OfficeTileCanvasViewTests: XCTestCase {
         var subscribeCalls: [(docId: String, part: Int, zoomPPT: Int, viewportTwips: OfficeTwipsRect)] {
             lock.lock(); defer { lock.unlock() }; return _subscribeCalls
         }
+        /// office live-gate fix #4, FIX 2: `OfficeTileCanvasView.isSpreadsheet` reads this back via
+        /// `runtime.stateSnapshot.documents[path]?.type` — every OTHER test in this file relies on
+        /// the pre-existing `.text` default (the infinite-grid margin must stay INERT for them), so
+        /// this is a constructor default, never a hardcoded literal inside `driver` below.
+        private let documentType: OfficeDocumentKind
+        init(documentType: OfficeDocumentKind = .text) { self.documentType = documentType }
         var driver: OfficeRuntime.Driver {
             OfficeRuntime.Driver(
                 helperState: { .ready }, startHelper: { },
-                open: { docId, _ in OfficeDocumentMetadata(type: .text, parts: 1,
-                                                            sizeTwips: OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)) },
+                open: { [documentType] docId, _ in OfficeDocumentMetadata(
+                    type: documentType, parts: 1,
+                    sizeTwips: OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)) },
                 close: { _ in },
                 subscribeTiles: { [unowned self] docId, part, zoomPPT, viewportTwips in
                     self.lock.lock(); self._subscribeCalls.append((docId, part, zoomPPT, viewportTwips)); self.lock.unlock()
@@ -294,9 +301,9 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// != nil`; a `subscribeTiles` call against a runtime that never opened anything is a pure no-op
     /// (`(next, [])`, no effect at all), which is exactly what `PanelDocumentTabModel
     /// .requestOpenIfNeeded` would have already done for a real tab before its canvas ever mounts.
-    private func makeOpenedRuntime(path: String = "/gate.xlsx") async
+    private func makeOpenedRuntime(path: String = "/gate.xlsx", documentType: OfficeDocumentKind = .text) async
         -> (runtime: OfficeRuntime, recorder: SubscribeCapturingDriverRecorder) {
-        let recorder = SubscribeCapturingDriverRecorder()
+        let recorder = SubscribeCapturingDriverRecorder(documentType: documentType)
         let runtime = OfficeRuntime(sessionId: "S1", driver: recorder.driver)
         runtime.open(path)
         _ = await waitUntil { runtime.stateSnapshot.documents[path] != nil }
@@ -774,6 +781,21 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// `ShellSessionHostTests.testASecondSubscribeSkipsKeysAlreadyCachedOrStillInFlight` already uses
     /// for a real `onTile` push), a subsequent scroll issues ZERO further wire calls — "after the
     /// initial fill, scrolling issues zero requests," the live-gate brief's own bar.
+    ///
+    /// **Amended under office live-gate fix #4, FIX 2 — the boundary this proves moved, deliberately.**
+    /// That "zero further requests" bar assumed past-`sizeTwips` tiles could NEVER be painted — true
+    /// before the infinite grid, false for a spreadsheet now (this recorder's own `driver.open`
+    /// reports `.spreadsheet`; `effectiveExtentTwips`'s own header has the mechanism). The FIXED
+    /// `Self.subscribeMarginPoints` overscan the throttled skip-check always pads by genuinely
+    /// reaches past this document's small 3x3 edge into real, never-prefetched margin territory —
+    /// `evaluateResidencyIfNeeded`'s own sweep deliberately never covers it (extending the eager
+    /// whole-document prefetch into the margin would blow the residency cap's budget for every
+    /// spreadsheet). The new, honest boundary, proven in two phases below rather than asserted in
+    /// one: PHASE 1, the margin's first touch costs exactly ONE subscribe (not the old zero, and not
+    /// unbounded either); PHASE 2, once that touched slice is ALSO cached, a further scroll is back
+    /// to genuinely zero chatter. The invariant's SPIRIT — no chatter for zero benefit — still holds;
+    /// only its letter moved from "past `sizeTwips`" to "past `sizeTwips` AND the margin's leading
+    /// edge already warmed."
     func testResidentDocumentIsPrefetchedWholeInVisibleFirstChunksAndPostFillScrollingIssuesNoFurtherRequests() async {
         let (runtime, recorder, docId) = await makeOpenedResidencyRuntime()
         let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
@@ -813,14 +835,46 @@ final class OfficeTileCanvasViewTests: XCTestCase {
                            "every tile is genuinely cached, not merely requested")
         }
 
-        // office live-gate fix #3 (churn audit): now that the doc is fully resident, a scroll must
-        // issue ZERO further subscribeTiles/requestTiles calls.
+        // office live-gate fix #3 (churn audit) + fix #4 amendment (this test's own header): a
+        // scroll near a resident spreadsheet's edge now costs exactly ONE margin-warming subscribe,
+        // not zero — proven in two phases below.
         let subscribeCountBeforeScroll = recorder.subscribeCalls.count
         let requestCountBeforeScroll = recorder.requestCalls.count
         view.applyScrollDelta(dx: -20, dy: -20)
         try? await Task.sleep(nanoseconds: 60_000_000) // well past the 1/60s throttle interval
-        XCTAssertEqual(recorder.subscribeCalls.count, subscribeCountBeforeScroll, "resident scrolling must not re-subscribe")
-        XCTAssertEqual(recorder.requestCalls.count, requestCountBeforeScroll, "resident scrolling must not re-request")
+
+        // PHASE 1: the one-time margin warm. Hand-built against the SAME pure functions
+        // `performSubscribe`'s own skip-check uses — scrollOrigin (20,20) pads (by the fixed 256pt
+        // `Self.subscribeMarginPoints`) to origin (0,0), size 812x812 (the 20pt scroll is entirely
+        // swallowed by the margin) — the L-shaped slice of never-prefetched tiles that padded
+        // viewport now genuinely touches, past this document's own 3x3 edge.
+        let paddedViewport = officeViewportTwips(scrollOrigin: .zero,
+                                                 visibleSize: CGSize(width: 300 + 512, height: 300 + 512), zoomPPT: 1000)
+        let touchedKeys = Set(TileMath.viewportTileKeys(part: 0, zoomPPT: 1000, viewportTwips: paddedViewport))
+        let marginKeys = touchedKeys.subtracting(Set(allKeys))
+        XCTAssertFalse(marginKeys.isEmpty, "sanity: the padded viewport must genuinely reach past "
+                       + "the document's own 3x3 edge for this test to mean anything")
+        XCTAssertEqual(recorder.subscribeCalls.count, subscribeCountBeforeScroll + 1, "the margin's "
+                       + "first touch must cost exactly ONE subscribe — not zero (the pre-fix-#4 "
+                       + "invariant this test amends), and not perpetual chatter either")
+        XCTAssertEqual(recorder.requestCalls.count, requestCountBeforeScroll, "requestTiles is the "
+                       + "whole-document prefetch sweep's own door, never the throttled scroll path's")
+
+        // PHASE 2: once the touched margin slice is ALSO cached (simulating the helper's reply, the
+        // same technique the whole-document fill above already used), a further scroll must be back
+        // to genuinely zero further chatter — proving this is a ONE-TIME warm, not a standing leak.
+        for key in marginKeys {
+            runtime.tileStore.ingest(docId: docId, key: key, generation: 0,
+                                     pixels: Data(repeating: 1, count: TileMath.bytesPerTile))
+        }
+        let subscribeCountAfterMarginWarm = recorder.subscribeCalls.count
+        let requestCountAfterMarginWarm = recorder.requestCalls.count
+        view.applyScrollDelta(dx: -1, dy: -1) // a further tick, comfortably inside the same margin
+        try? await Task.sleep(nanoseconds: 60_000_000)
+        XCTAssertEqual(recorder.subscribeCalls.count, subscribeCountAfterMarginWarm, "once the "
+                       + "touched margin slice is ALSO resident, scrolling must settle back to zero "
+                       + "further subscribes — the warm was one-time, not a standing leak")
+        XCTAssertEqual(recorder.requestCalls.count, requestCountAfterMarginWarm, "and zero further requests")
 
         view.unmount()
         try? await Task.sleep(nanoseconds: 30_000_000) // hygiene — settle before recorder deallocates
@@ -1152,6 +1206,112 @@ final class OfficeTileCanvasViewTests: XCTestCase {
                              + "100ms after input stopped (presentation=\(presentationPosition), "
                              + "model=\(modelPositionRightAfter)) — exactly the reported drift/glide")
         }
+
+        view.unmount()
+    }
+
+    // MARK: - office live-gate fix #4, FIX 2: the infinite grid (spreadsheets only)
+    //
+    // The empirical finding this section encodes: `paintPartTile` genuinely renders empty, gridded
+    // cells for twips rects past `sizeTwips` (`OfficeHelperLiveTests.testGateXlsxTilesPastTheUsedRange
+    // EmpiricalInfiniteGridProbe`'s own PNG dump against gate.xlsx, on our real vendored LOK pin — a
+    // clean gridded canvas, not blank and not garbage, unchanged all the way out to ~4x the
+    // document's own span beyond its edge) — so the canvas no longer needs to stop dead exactly at
+    // the used range, FOR SPREADSHEETS. These three tests pin the shape that makes extending it safe:
+    // scoped to `.spreadsheet` only (never probed for presentations/documents, which have genuine
+    // fixed page bounds), and the subscribe skip-check's own clamp widens in EXACT lockstep with the
+    // scroll clamp — both read the same `effectiveExtentTwips`, so they cannot disagree; see that
+    // property's own header for the "placeholders forever, just moved past the margin instead of
+    // past `sizeTwips`" trap a disagreement between the two would silently reintroduce.
+
+    /// The scroll bound itself, hand-built against the SAME pure `TileMath` conversions production
+    /// uses (`effectiveExtentTwips`'s own arithmetic, independently reconstructed here rather than
+    /// reached into) — the exact margin `Self.infiniteGridExtraScreens` (2) adds for a 300x300
+    /// viewport at 100% zoom.
+    func testSpreadsheetScrollExtendsPastTheUsedRangeByTheDocumentedMargin() async {
+        let (runtime, _) = await makeOpenedRuntime(documentType: .spreadsheet)
+        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
+
+        let marginWidthPixels = Int(2 * 300 * officeFixedDeviceScale)
+        let marginWidthTwips = TileMath.pixelsToTwips(marginWidthPixels, zoomPPT: 1000)
+        let extendedWidthPixels = TileMath.twipsToPixels(sizeTwips.widthTwips + marginWidthTwips, zoomPPT: 1000)
+        let expectedMaxOriginX = CGFloat(extendedWidthPixels) / officeFixedDeviceScale - 300
+
+        let oldWidthPixels = TileMath.twipsToPixels(sizeTwips.widthTwips, zoomPPT: 1000)
+        let oldMaxOriginX = CGFloat(oldWidthPixels) / officeFixedDeviceScale - 300
+        XCTAssertGreaterThan(expectedMaxOriginX, oldMaxOriginX, "sanity: the margin must genuinely "
+                             + "extend the old, un-widened bound — otherwise this test cannot tell "
+                             + "the fix apart from no fix at all")
+
+        view.applyScrollDelta(dx: -1_000_000, dy: 0) // wildly overshoots even the EXTENDED far edge
+        XCTAssertEqual(view.scrollOriginForTesting.x, expectedMaxOriginX, accuracy: 0.01,
+                       "a spreadsheet must be scrollable exactly `infiniteGridExtraScreens` screens "
+                         + "past its own used range, not the bare used range alone")
+
+        view.unmount()
+    }
+
+    /// The mirror case — the SAME setup, a non-spreadsheet type — must land at EXACTLY the old,
+    /// un-widened bound. Protects the `.spreadsheet`-only scoping: nothing here was ever probed for
+    /// presentations/documents (`isSpreadsheet`'s own header), so they must keep the pre-fix#2
+    /// behavior byte-for-byte.
+    func testNonSpreadsheetScrollStaysClampedExactlyAtTheUsedRangeUnextended() async {
+        let (runtime, _) = await makeOpenedRuntime(documentType: .text)
+        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
+
+        let oldWidthPixels = TileMath.twipsToPixels(sizeTwips.widthTwips, zoomPPT: 1000)
+        let oldMaxOriginX = CGFloat(oldWidthPixels) / officeFixedDeviceScale - 300
+
+        view.applyScrollDelta(dx: -1_000_000, dy: 0) // wildly overshoots the (un-widened) far edge
+        XCTAssertEqual(view.scrollOriginForTesting.x, oldMaxOriginX, accuracy: 0.01,
+                       "a non-spreadsheet document must NOT gain the infinite-grid margin — its "
+                         + "clamp is untouched by office live-gate fix #4's FIX 2")
+
+        view.unmount()
+    }
+
+    /// **The clamp-trap regression pin.** Scrolling a spreadsheet PAST its old used-range edge but
+    /// still INSIDE the new margin must still genuinely ask the store for tiles there — proving the
+    /// subscribe skip-check's own clamp widened in lockstep with the scroll clamp, not left behind
+    /// at the bare `sizeTwips` bound (which would zero out the clamped viewport for every key out
+    /// there, read as "nothing needs requesting," and skip forever — see `effectiveExtentTwips`'s
+    /// own header for the full mechanism this pins against).
+    func testScrollingIntoTheInfiniteGridMarginStillAsksForTilesNotSkippedForever() async {
+        let (runtime, recorder) = await makeOpenedRuntime(documentType: .spreadsheet)
+        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        // Large enough to stay residency-INELIGIBLE — no eager whole-document prefetch sweep to
+        // interfere with this test's own subscribe-call counting (the same size several sibling
+        // "large document" tests in this file already use for the identical reason).
+        let sizeTwips = OfficeDocumentSize(widthTwips: 2_000_000, heightTwips: 2_000_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
+        view.mount()
+        let mounted = await waitUntil { recorder.subscribeCalls.count >= 1 }
+        XCTAssertTrue(mounted)
+        let countAfterMount = recorder.subscribeCalls.count
+
+        let oldWidthPixels = TileMath.twipsToPixels(sizeTwips.widthTwips, zoomPPT: 1000)
+        let oldMaxOriginX = CGFloat(oldWidthPixels) / officeFixedDeviceScale - view.bounds.width
+        view.setScrollOriginForTesting(CGPoint(x: oldMaxOriginX, y: 0)) // establish at the OLD edge
+        view.applyScrollDelta(dx: -300, dy: 0) // push 300pt further — past the old edge, inside the
+                                                // 600pt margin (2 screens x 300pt), comfortably clear
+                                                // of its own outer boundary too
+
+        let resubscribedIntoMargin = await waitUntil { recorder.subscribeCalls.count > countAfterMount }
+        XCTAssertTrue(resubscribedIntoMargin, "scrolling into the new infinite-grid margin must "
+                      + "still genuinely ask for tiles there — the skip-check's own clamp must "
+                      + "widen in lockstep with the scroll clamp, or this margin would be "
+                      + "scrollable but its tiles would never be requested (placeholders forever, "
+                      + "just moved)")
 
         view.unmount()
     }

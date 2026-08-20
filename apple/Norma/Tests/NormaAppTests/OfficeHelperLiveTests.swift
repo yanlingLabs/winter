@@ -1,5 +1,6 @@
 import XCTest
 import CryptoKit
+import AppKit
 @testable import Norma
 
 /// Office Stage A Task 3 — LOK boots for real. Spawns the REAL, compiled `NormaOfficeHelper`
@@ -1242,6 +1243,111 @@ final class OfficeHelperLiveTests: XCTestCase {
         XCTAssertLessThan(warmPerTileMs, 80, "transport-only per-tile cost ballooned past rung 2's own ceiling "
                             + "(measured ~26ms/tile under rung 1's base64-in-NDJSON; expect roughly raw-socket-plus-paint "
                             + "territory now, comfortably under this bar — see this test's own report entry for the real number)")
+    }
+
+    // MARK: - USER LIVE-GATE FIX #4, FIX 2 research: does LOK paint an infinite grid past documentSize?
+
+    /// **Empirical, not documentary.** Today the canvas clamps its scrollable extent to
+    /// `sizeTwips` (LOK's `getDocumentSize()` at open — the USED range), so a spreadsheet's grid
+    /// stops where the content stops instead of continuing like Excel's own infinite empty grid. The
+    /// only question that matters for whether extending the scrollable extent is even legitimate:
+    /// does `paintPartTile` render something real (empty gridlines) for twips coordinates PAST
+    /// `sizeTwips`, or blank/garbage? `TileRenderer.renderRaw` passes whatever bounds a key resolves
+    /// to STRAIGHT to `paintPartTile` with no clamp against document size (only against
+    /// `TileMath`'s own overflow-sanity bounds) — so this probe reaches real, unmodified LOK
+    /// behavior, on OUR exact vendored pin, for OUR exact fixture. Requests three keys directly (no
+    /// `subscribeTiles` viewport involved — that RPC's own viewport math is not what is being tested
+    /// here): the ORIGIN tile (known non-blank content, the sanity baseline), one tile JUST past the
+    /// used range (gate.xlsx is 26593x13005 twips at zoomPPT 1000 == 5120 twips/tile, so tile
+    /// (5,2) is the last tile touching real content and (6,3) is the first tile entirely beyond it),
+    /// and one FAR past it (tile (25,15), ~4x the document's own span beyond its edge). Dumps each as
+    /// a PNG to a scratch directory (logged) for a direct visual read, and prints the raw distinct-
+    /// color count each tile carries — a uniform single-color tile is unambiguous "blank"; more than
+    /// a small handful of distinct colors in a regular pattern is the empirical signature of rendered
+    /// gridlines. No assertion on the OUTCOME either way (this is `officeHarness`-style disclosure,
+    /// the same posture `testFontconfigOverridePixelEffect...` already takes above) — only that the
+    /// probe itself ran and produced real pixel data for every key.
+    func testGateXlsxTilesPastTheUsedRangeEmpiricalInfiniteGridProbe() async throws {
+        try skipUnlessVendorPresent()
+        let helper = try await spawnLiveHelper()
+        let docId = UUID().uuidString
+        let metadata = try await helper.client.open(docId: docId, path: Self.fixturesRoot.appendingPathComponent("gate.xlsx").path)
+        print("[infinite-grid probe] gate.xlsx sizeTwips = \(metadata.sizeTwips.widthTwips) x \(metadata.sizeTwips.heightTwips)")
+
+        final class Box: @unchecked Sendable {
+            let lock = NSLock(); var pixelsByKey: [TileKey: Data] = [:]
+            func record(_ key: TileKey, _ pixels: Data) { lock.lock(); pixelsByKey[key] = pixels; lock.unlock() }
+            func snapshot() -> [TileKey: Data] { lock.lock(); defer { lock.unlock() }; return pixelsByKey }
+        }
+        let box = Box()
+        helper.client.onTile = { _, _, key, _, _, _, pixels in box.record(key, pixels) }
+
+        let originKey = TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0)
+        let justPastKey = TileKey(part: 0, zoomPPT: 1000, tileX: 6, tileY: 3)
+        let farPastKey = TileKey(part: 0, zoomPPT: 1000, tileX: 25, tileY: 15)
+        let probeKeys = [originKey, justPastKey, farPastKey]
+
+        try await helper.client.requestTiles(docId: docId, keys: probeKeys)
+        let arrived = await waitUntil(timeout: 15.0) { box.snapshot().count >= probeKeys.count }
+        XCTAssertTrue(arrived, "expected a .tile push for every probe key")
+        guard arrived else { try await helper.client.close(docId: docId); return }
+
+        let pixelsByKey = box.snapshot()
+        // Deliberately NOT `makeScratchDirectory()` — this run's whole point is a human (or an
+        // agent's own Read-tool image view) looking at the PNGs AFTER the test finishes, and
+        // `tearDown()` deletes every `scratchDirs` entry the moment this test method returns.
+        let dumpDir = URL(fileURLWithPath: "/tmp/norma-livegate4-fix2-probe-pngs", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dumpDir, withIntermediateDirectories: true)
+        for (label, key) in [("origin-baseline", originKey), ("just-past-edge", justPastKey), ("far-past-edge", farPastKey)] {
+            guard let pixels = pixelsByKey[key] else {
+                XCTFail("\(label) tile (\(key.tileX),\(key.tileY)): no pixels arrived")
+                continue
+            }
+            XCTAssertEqual(pixels.count, TileMath.bytesPerTile, "\(label): wrong byte count")
+            let uniqueColors = Self.distinctRGBAColorCount(pixels)
+            print("[infinite-grid probe] \(label) tile(\(key.tileX),\(key.tileY)): "
+                    + "\(pixels.count) bytes, \(uniqueColors) distinct RGBA color(s)")
+            if let png = Self.pngData(fromRGBARaw: pixels, side: TileMath.tilePixelSize) {
+                let path = dumpDir.appendingPathComponent("gate-xlsx-tile-\(label)-\(key.tileX)x\(key.tileY).png")
+                do {
+                    try png.write(to: path)
+                    print("[infinite-grid probe] wrote \(path.path)")
+                } catch {
+                    print("[infinite-grid probe] could not write PNG for \(label): \(error)")
+                }
+            } else {
+                print("[infinite-grid probe] could not build a CGImage for \(label)")
+            }
+        }
+
+        try await helper.client.close(docId: docId)
+    }
+
+    /// Distinct RGBA 32-bit color count across a raw pixel buffer — cheap, no image decode needed.
+    private static func distinctRGBAColorCount(_ pixels: Data) -> Int {
+        var colors = Set<UInt32>()
+        var index = pixels.startIndex
+        while index + 3 < pixels.endIndex {
+            let value = (UInt32(pixels[index]) << 24) | (UInt32(pixels[index + 1]) << 16)
+                        | (UInt32(pixels[index + 2]) << 8) | UInt32(pixels[index + 3])
+            colors.insert(value)
+            index += 4
+        }
+        return colors.count
+    }
+
+    /// Raw RGBA `Data` -> PNG `Data`, for a direct visual read of a probe tile — the same
+    /// premultipliedLast/DeviceRGB construction `OfficeTileCanvasView.makeImage`/`TileRenderer` use
+    /// for the real pixel path, re-wrapped through `NSBitmapImageRep` (test-only; production never
+    /// needs a PNG, only the raw bytes straight into a `CGImage`).
+    private static func pngData(fromRGBARaw pixels: Data, side: Int) -> Data? {
+        guard pixels.count == side * side * 4, let provider = CGDataProvider(data: pixels as CFData) else { return nil }
+        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
+        guard let image = CGImage(width: side, height: side, bitsPerComponent: 8, bitsPerPixel: 32,
+                                  bytesPerRow: side * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: bitmapInfo,
+                                  provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent) else { return nil }
+        let rep = NSBitmapImageRep(cgImage: image)
+        return rep.representation(using: .png, properties: [:])
     }
 }
 

@@ -120,22 +120,27 @@ func officeResidencyPrefetchOrder(part: Int, zoomPPT: Int, fullExtentTwips: Offi
     return visible + rest
 }
 
-/// Clips `viewportTwips` to a document's own real extent, `[0, sizeTwips.widthTwips) x [0,
-/// sizeTwips.heightTwips)`. Used ONLY by `performSubscribe`'s churn-audit skip-check (office live-
-/// gate fix #3) — the padded/margin viewport (`OfficeTileCanvasView.subscribeMarginPoints`)
-/// deliberately overscans PAST a document's true edge by design (fix #2's own "ask slightly wider,
-/// harmlessly" reasoning, `performSubscribe`'s own comment). A document small enough to be fully
-/// resident is exactly the case where that overscan reaches past its far edge on almost every scroll
-/// near it — and those phantom past-the-edge tiles will NEVER be cached (there is nothing there to
-/// paint), so without this clip the skip-check would see them as perpetually "needing request" and
-/// never actually skip for a resident document scrolled anywhere near an edge, which defeats the
-/// whole point. Deliberately narrow: only the SKIP-CHECK's own key computation is clamped — the
-/// ORIGINAL unconditional ask (every discrete call, and the throttled leading-edge call once
-/// something genuinely is missing) still asks the full, un-clamped padded viewport, exactly as fix
-/// #2 left it, so a document NOT yet fully resident keeps prefetching its own true edge tiles at the
-/// same margin it always has. A degenerate (zero- or negative-area) intersection collapses to a
-/// zero-size rect at the clamped origin, not a negative width/height — `TileMath.viewportTileKeys`
-/// already reads a zero-area rect as "touches nothing," so this never needs its own empty check.
+/// Clips `viewportTwips` to `[0, sizeTwips.widthTwips) x [0, sizeTwips.heightTwips)` — generic over
+/// whatever `sizeTwips` its caller passes; it has no opinion on what that extent MEANS. Used ONLY by
+/// `performSubscribe`'s churn-audit skip-check (office live-gate fix #3) — the padded/margin
+/// viewport (`OfficeTileCanvasView.subscribeMarginPoints`) deliberately overscans PAST a document's
+/// true edge by design (fix #2's own "ask slightly wider, harmlessly" reasoning, `performSubscribe`'s
+/// own comment). A document small enough to be fully resident is exactly the case where that
+/// overscan reaches past its far edge on almost every scroll near it — and, for a NON-spreadsheet,
+/// those phantom past-the-edge tiles will NEVER be cached (there is nothing there to paint), so
+/// without this clip the skip-check would see them as perpetually "needing request" and never
+/// actually skip for a resident document scrolled anywhere near an edge, which defeats the whole
+/// point. **As of office live-gate fix #4, its spreadsheet caller passes an ALREADY-WIDENED
+/// `effectiveExtentTwips`, not the bare used range** — genuinely paintable infinite-grid margin
+/// tiles are deliberately left un-clipped by this same call, so the skip-check can still find real
+/// work there (see that property's own header). Deliberately narrow: only the SKIP-CHECK's own key
+/// computation is clamped — the ORIGINAL unconditional ask (every discrete call, and the throttled
+/// leading-edge call once something genuinely is missing) still asks the full, un-clamped padded
+/// viewport, exactly as fix #2 left it, so a document NOT yet fully resident keeps prefetching its
+/// own true edge tiles at the same margin it always has. A degenerate (zero- or negative-area)
+/// intersection collapses to a zero-size rect at the clamped origin, not a negative width/height —
+/// `TileMath.viewportTileKeys` already reads a zero-area rect as "touches nothing," so this never
+/// needs its own empty check.
 func officeClampViewportToDocumentExtent(_ viewportTwips: OfficeTwipsRect, sizeTwips: OfficeDocumentSize) -> OfficeTwipsRect {
     let minX = max(viewportTwips.x, 0)
     let minY = max(viewportTwips.y, 0)
@@ -271,16 +276,31 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
     /// clearing must be explicit rather than trusted to weak zeroing (which does not run `didSet`
     /// and, here, could not reach the model's stored property from outside it anyway).
     private weak var model: PanelDocumentTabModel?
-    /// The size to clamp scrolling against. Captured at open time (`OfficeRuntimeState
+    /// The document's own USED range — captured at open time (`OfficeRuntimeState
     /// .DocumentEntry.sizeTwips`, itself LOK's `getDocumentSize()` at open) — **disclosed
     /// imprecision, unchanged by Task 8**: a multi-sheet spreadsheet's sheets can have different used
     /// ranges, and Stage A has no per-part size to clamp against instead (`OfficeRuntimeState`
-    /// carries exactly one `sizeTwips` per document, not per part). A soft UX bound, not a
-    /// correctness one: scrolling past real content simply shows placeholders forever (the store has
-    /// nothing to serve there), nothing breaks. **Mutable as of Task 8**: a reload's fresh `opened{}`
-    /// carries its own `sizeTwips` — see `syncDocumentIdentity`'s own header for why this must be
-    /// re-applied, and re-clamped against, rather than left at whatever the document held before.
+    /// carries exactly one `sizeTwips` per document, not per part). NOT the bound scrolling itself
+    /// clamps against for a spreadsheet as of office live-gate fix #4, FIX 2 — see
+    /// `effectiveExtentTwips`'s own header for that, and why "scrolling past real content simply
+    /// shows placeholders forever" (this comment's own pre-fix-#4 claim) is FALSE for spreadsheets
+    /// now: `paintPartTile` genuinely renders empty gridded cells there, and the canvas actively
+    /// requests them once scrolled near. Still exactly true for presentations/documents, and for
+    /// this raw `sizeTwips` value's every OTHER reader in this file (the residency prefetch, in
+    /// particular, deliberately stays scoped to the real content — see `evaluateResidencyIfNeeded`'s
+    /// own `fullExtent`). **Mutable as of Task 8**: a reload's fresh `opened{}` carries its own
+    /// `sizeTwips` — see `syncDocumentIdentity`'s own header for why this must be re-applied, and
+    /// re-clamped against, rather than left at whatever the document held before.
     private var sizeTwips: OfficeDocumentSize
+
+    /// office live-gate fix #4, FIX 2: gates the infinite-grid scroll margin (`effectiveExtentTwips`)
+    /// to spreadsheets only. Captured once at open time and re-captured in `syncDocumentIdentity`,
+    /// mirroring `sizeTwips`'s own capture pattern — a live `runtime.stateSnapshot.documents[path]?
+    /// .type` dictionary lookup on every scroll tick (`clampedOriginX/Y` run at up to ~120Hz) would
+    /// work but costs more than reading a bool the same way every other per-tick geometry input here
+    /// already is read. `false` (never extend) if the lookup ever comes up empty — the safe direction,
+    /// matching this file's own "refuse gracefully, never trap" posture throughout.
+    private var isSpreadsheet: Bool
 
     private(set) var part: Int
     private(set) var zoomPPT: Int = 1000
@@ -408,6 +428,7 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
         self.path = path
         self.docId = docId
         self.sizeTwips = sizeTwips
+        self.isSpreadsheet = runtime.stateSnapshot.documents[path]?.type == .spreadsheet
         self.part = max(0, initialPart)
         self.model = model
         super.init(frame: .zero)
@@ -553,6 +574,11 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
         }
         docId = newDocId
         sizeTwips = newSizeTwips
+        // office live-gate fix #4, FIX 2: re-captured alongside `sizeTwips` on the same reasoning —
+        // a reload cannot actually change a document's KIND, but re-reading costs nothing and keeps
+        // this from being the one place `isSpreadsheet` silently drifts from `sizeTwips`'s own
+        // freshness guarantee.
+        isSpreadsheet = runtime.stateSnapshot.documents[path]?.type == .spreadsheet
         // Never `setActivePart` here — that method zeroes `scrollOrigin` (correct for a discrete
         // part-strip click, wrong for a reload, which must PRESERVE scroll) and would also skip
         // entirely if `activePart` happens to already equal `part`, leaving the stale docId's layers
@@ -646,14 +672,60 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
         scheduleThrottledSubscribe()
     }
 
+    // MARK: - office live-gate fix #4, FIX 2: the infinite grid (spreadsheets only)
+
+    /// Excel-style "the grid keeps going" — empirically justified, not assumed. `paintPartTile`
+    /// genuinely renders empty, gridded cells for twips rects past `sizeTwips` (probed directly
+    /// against gate.xlsx on our own vendored LOK pin, well past the used range —
+    /// `OfficeHelperLiveTests.testGateXlsxTilesPastTheUsedRangeEmpiricalInfiniteGridProbe`'s own PNG
+    /// dump: a clean gridded canvas, not blank white and not garbage, unchanged all the way out to
+    /// ~4x the document's own span beyond its edge). Screens, not a fixed twips constant, so the
+    /// extra room scales with whatever the panel's own current size/zoom happens to be. A FIXED
+    /// margin, not Collabora's own grow-on-approach — the simpler of the two shapes the live-gate
+    /// brief names, and sufficient: nothing here claims a TRUE infinite grid, only that the canvas
+    /// no longer stops dead exactly at the used range.
+    private static let infiniteGridExtraScreens: CGFloat = 2
+
+    /// The extent scrolling AND the subscribe skip-check actually reach — `sizeTwips` (the used
+    /// range) plus `Self.infiniteGridExtraScreens` extra screens on each axis, for spreadsheets only
+    /// (`isSpreadsheet`'s own header: presentations/documents have genuine fixed page bounds, never
+    /// probed for this behavior, and are not assumed to share it). ONE computed property feeding
+    /// BOTH `clampedOriginX/Y` (how far scrolling itself may go) AND `performSubscribe`'s skip-check
+    /// clamp (`officeClampViewportToDocumentExtent`'s own call site) — a single source of truth so
+    /// the two can never disagree. A disagreement in that direction is a real, reachable bug this
+    /// property exists to foreclose: if scrolling reached further than the skip-check's own clamp,
+    /// the margin would be scrollable but its tiles would never actually get REQUESTED — the
+    /// skip-check would see nothing out there as ever "needing" a request and skip forever,
+    /// placeholders forever, past the fix's own margin this time rather than past `sizeTwips` the
+    /// way an un-widened skip-check would have reintroduced.
+    ///
+    /// **Interacts with office live-gate fix #3's whole-document residency** at exactly the edge of
+    /// a small, fully-resident spreadsheet: the fixed `Self.subscribeMarginPoints` overscan the
+    /// throttled skip-check always pads by can now genuinely reach past a small document's own
+    /// `sizeTwips` edge into REAL, never-prefetched margin territory (the residency sweep's own
+    /// `fullExtent` deliberately stays scoped to `sizeTwips`, never this wider extent — eagerly
+    /// prefetching the whole margin would blow the residency cap's own budget for every spreadsheet).
+    /// The result is a ONE-TIME warm the first time a resident document's edge is approached, not a
+    /// standing chatter leak — proven, not merely asserted, by
+    /// `testResidentDocumentIsPrefetchedWholeInVisibleFirstChunksAndPostFillScrollingIssuesNoFurther
+    /// Requests`'s own two-phase amendment (office live-gate fix #4's own report has the measurement).
+    private var effectiveExtentTwips: OfficeDocumentSize {
+        guard isSpreadsheet else { return sizeTwips }
+        let marginWidthPixels = Int(Self.infiniteGridExtraScreens * bounds.width * officeFixedDeviceScale)
+        let marginHeightPixels = Int(Self.infiniteGridExtraScreens * bounds.height * officeFixedDeviceScale)
+        return OfficeDocumentSize(
+            widthTwips: sizeTwips.widthTwips + TileMath.pixelsToTwips(marginWidthPixels, zoomPPT: zoomPPT),
+            heightTwips: sizeTwips.heightTwips + TileMath.pixelsToTwips(marginHeightPixels, zoomPPT: zoomPPT))
+    }
+
     private func clampedOriginX(_ x: CGFloat) -> CGFloat {
-        let widthPixels = TileMath.twipsToPixels(sizeTwips.widthTwips, zoomPPT: zoomPPT)
+        let widthPixels = TileMath.twipsToPixels(effectiveExtentTwips.widthTwips, zoomPPT: zoomPPT)
         let maxOrigin = max(0, CGFloat(widthPixels) / officeFixedDeviceScale - bounds.width)
         return min(max(0, x), maxOrigin)
     }
 
     private func clampedOriginY(_ y: CGFloat) -> CGFloat {
-        let heightPixels = TileMath.twipsToPixels(sizeTwips.heightTwips, zoomPPT: zoomPPT)
+        let heightPixels = TileMath.twipsToPixels(effectiveExtentTwips.heightTwips, zoomPPT: zoomPPT)
         let maxOrigin = max(0, CGFloat(heightPixels) / officeFixedDeviceScale - bounds.height)
         return min(max(0, y), maxOrigin)
     }
@@ -868,8 +940,12 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
         // `Self.subscribeMarginPoints`'s own comment for why. Clamped to >= 0 only on the near edge
         // (never a NEGATIVE-twips ask); the far edge is left to extend past real content when
         // `scrollOrigin` is already near 0 — TileMath simply returns tile keys the store has nothing
-        // to serve for yet, the same "placeholders forever past real content" case this file already
-        // accepts everywhere else (`sizeTwips`'s own doc), so a slightly wider ask there is harmless.
+        // to serve for yet for a NON-spreadsheet (the "placeholders forever past real content" case
+        // `sizeTwips`'s own doc still accepts there), so a slightly wider ask there is harmless. For
+        // a SPREADSHEET, as of office live-gate fix #4, this overscan can genuinely reach real,
+        // paintable infinite-grid tiles just past the used range — no longer merely harmless padding,
+        // an active (bounded) prefetch of the margin's own leading edge; see `effectiveExtentTwips`'s
+        // own header for the full mechanism and its interaction with fix #3's residency sweep.
         let margin = Self.subscribeMarginPoints
         let paddedOrigin = CGPoint(x: max(0, scrollOrigin.x - margin), y: max(0, scrollOrigin.y - margin))
         let paddedSize = CGSize(width: bounds.width + margin * 2, height: bounds.height + margin * 2)
@@ -878,7 +954,13 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
             // office live-gate fix #3: clamp to the document's real extent for THIS check only — see
             // `officeClampViewportToDocumentExtent`'s own header for why the un-clamped margin would
             // otherwise never let a resident document's near-edge scrolling skip at all.
-            let clamped = officeClampViewportToDocumentExtent(viewport, sizeTwips: sizeTwips)
+            //
+            // office live-gate fix #4, FIX 2: clamped to `effectiveExtentTwips`, NOT the bare
+            // `sizeTwips` — the SAME extent `clampedOriginX/Y` scroll against (that property's own
+            // header spells out why passing the un-widened `sizeTwips` here specifically would have
+            // silently reintroduced "placeholders forever," now inside the new infinite-grid margin
+            // instead of past the old hard edge.
+            let clamped = officeClampViewportToDocumentExtent(viewport, sizeTwips: effectiveExtentTwips)
             let keys = TileMath.viewportTileKeys(part: part, zoomPPT: zoomPPT, viewportTwips: clamped)
             guard !runtime.tileStore.keysNeedingRequest(docId: docId, candidates: keys).isEmpty else {
                 return
