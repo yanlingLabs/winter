@@ -1266,11 +1266,18 @@ final class OfficeRuntimeWatcherTests: XCTestCase {
     /// **The genuine `.ours` race, provoked directly** (bypassing `performSave`'s own async round
     /// trip, which — per the test above — usually wins the race against a fire): note a write is
     /// about to happen, put NEW bytes on disk exactly as a landed rename would, then fire the
-    /// watcher's callback BEFORE anything re-seeds the baseline. This is the ONE window
-    /// `performSave`'s own comment names ("the rename has landed and this continuation has not run
-    /// yet") — proving the bag itself does the right thing when it, rather than the re-seed, is
-    /// what has to catch the fire.
-    func testAGenuineOursRaceIsConsumedWhenTheFireArrivesBeforeTheBaselineReSeeds() async throws {
+    /// watcher's callback BEFORE anything re-seeds the baseline OR records the note's own identity.
+    /// This is the ONE window `performSave`'s own comment names ("the rename has landed and this
+    /// continuation has not run yet") — proving the bag stays SILENTLY suppressed, not reloading and
+    /// not guessing, when it is asked to classify a fire it cannot yet definitively attribute.
+    ///
+    /// **Fix round 2 changes what this test proves**: pre-round-2, the fire alone drove the bag to
+    /// 0 (FIFO consumed the one pending token on sight). Post-round-2, a fire can only retire a note
+    /// whose identity it can CONFIRM — and nothing has recorded an identity yet at this point, so
+    /// the fire must leave the bag untouched. The save's own later catch-up
+    /// (`recordLandedIdentity` + `withdrawExpectedWrite`, `performSave`'s own real sequence) is what
+    /// actually retires it — proven here by driving that sequence explicitly afterward.
+    func testAGenuineOursRaceStaysSuppressedButUntouchedUntilTheOwningSaveCatchesUp() async throws {
         let path = try scratchFile(contents: "one")
         let runtime = OfficeRuntime(sessionId: "S1", driver: makeDriver())
         runtimes.append(runtime)
@@ -1278,36 +1285,33 @@ final class OfficeRuntimeWatcherTests: XCTestCase {
         _ = await waitUntil { runtime.stateSnapshot.documents[path] != nil }
         let originalDocId = try XCTUnwrap(runtime.stateSnapshot.documents[path]?.docId)
 
-        runtime.noteExpectedWrite(path: path) // "a write is about to happen" — performSave's own first act
+        let token = runtime.noteExpectedWrite(path: path) // "a write is about to happen" — performSave's own first act
         try "the rename already landed".write(toFile: path, atomically: true, encoding: .utf8)
-        runtime.fileChangedOnDisk(path) // the fire arrives before performSave's own re-seed would have
+        runtime.fileChangedOnDisk(path) // the fire arrives before performSave's own catch-up would have
 
         XCTAssertEqual(runtime.stateSnapshot.documents[path]?.docId, originalDocId, "classified "
-                       + ".ours — must not reload")
+                       + ".ours — must not reload, even though nothing could be confirmed yet")
         XCTAssertNil(runtime.stateSnapshot.documentBanners[path])
-        XCTAssertEqual(runtime.expectedWriteCount(for: path), 0, "the fire consumed the note; "
-                       + "performSave's own later `withdrawExpectedWrite(path:token:)` (a no-op once "
-                       + "its own token is already gone) must not double-decrement or crash")
+        XCTAssertEqual(runtime.expectedWriteCount(for: path), 1, "THE CORE CLAIM: an unmatched fire "
+                       + "must NOT touch the bag — guessing which pending note it belongs to is "
+                       + "exactly what round 1's FIFO design got wrong")
+
+        // `performSave`'s own real catch-up, driven explicitly: record what actually landed, then
+        // withdraw — unconditional, by token, and correct regardless of what the fire above did.
+        let landedStat = officeFileStat(atPath: path)
+        runtime.recordLandedIdentity(path: path, token: token, stat: landedStat)
+        runtime.withdrawExpectedWrite(path: path, token: token)
+        XCTAssertEqual(runtime.expectedWriteCount(for: path), 0, "the owning save's own catch-up "
+                       + "retires its note whether or not any fire ever matched it")
     }
 
-    /// **Task review fix round 1 (IMPORTANT-2) — the reviewer's own scenario, driven directly.**
-    /// Two saves are in flight on the SAME path (two independent `.save` effects, exactly as a
-    /// second ⌘S while the first is still saving would produce); a watcher fire lands between them,
-    /// causally attributable to the FIRST save's own rename; the first save's own continuation then
-    /// withdraws, exactly per `performSave`'s own sequence.
-    ///
-    /// **Before the fix** this test would have failed at the THIRD assertion below: `withdrawExpected
-    /// Write` took a bare path and decremented an anonymous per-path COUNT — the fire's own consume
-    /// and the first save's own withdraw both decremented the SAME integer, over-consuming by one
-    /// and stealing the SECOND save's still-genuinely-outstanding note. That save's own later fire
-    /// would then find the bag empty, read `.external` in `officeDiskChange`, and dispatch a
-    /// spurious reload — the exact "its own rename reads external" failure the review named.
-    ///
-    /// **After the fix**, each note has its own identity (`ExpectedWriteToken`): a fire consumes the
-    /// OLDEST still-pending token (FIFO — see the bag's own header on `pendingExpectedWrites` for
-    /// why), and a save's own withdraw removes ONLY the exact token it was handed, a no-op once that
-    /// token is already gone. The second save's own note survives the first save's redundant
-    /// withdraw untouched, and the second save's own later fire correctly classifies `.ours`.
+    /// **Task review fix round 1 (IMPORTANT-2) — the reviewer's own original scenario, re-proven
+    /// under the round-2 identity-matching design.** Two saves are in flight on the SAME path; the
+    /// FIRST save's own rename lands and is fully confirmed (recorded identity) before its own
+    /// watcher fire is simulated — matching `performSave`'s real sequence (record, then the fire
+    /// COULD arrive any time after, then withdraw). The claim: a fire that definitively matches the
+    /// FIRST save's own identity must consume ONLY that note, never touching the SECOND save's still
+    /// entirely unconfirmed one.
     func testASecondSavesNoteSurvivesAFireLandingBetweenTwoOverlappingSaves() async throws {
         let path = try scratchFile(contents: "one")
         let runtime = OfficeRuntime(sessionId: "S1", driver: makeDriver())
@@ -1322,28 +1326,31 @@ final class OfficeRuntimeWatcherTests: XCTestCase {
         let secondSaveToken = runtime.noteExpectedWrite(path: path)
         XCTAssertEqual(runtime.expectedWriteCount(for: path), 2, "setup: two notes genuinely outstanding")
 
-        // The FIRST save's own rename lands, and its own watcher fire arrives BEFORE its own
-        // continuation gets to withdraw — `testAGenuineOursRaceIsConsumedWhenTheFireArrivesBefore
-        // TheBaselineReSeeds`'s own race, now with a SECOND save's note also outstanding.
+        // The FIRST save's own rename lands, and its own continuation records what it produced —
+        // `performSave`'s own real ordering (record BEFORE withdraw).
         try "the first save's own rendered content".write(toFile: path, atomically: true, encoding: .utf8)
+        let firstLandedStat = officeFileStat(atPath: path)
+        runtime.recordLandedIdentity(path: path, token: firstSaveToken, stat: firstLandedStat)
+
+        // Its own fire arrives — now matchable with CERTAINTY against the identity just recorded.
         runtime.fileChangedOnDisk(path)
         XCTAssertEqual(runtime.stateSnapshot.documents[path]?.docId, originalDocId, "the first save's "
                        + "own fire must classify .ours — no reload")
-        XCTAssertEqual(runtime.expectedWriteCount(for: path), 1, "the fire consumed exactly ONE note "
-                       + "(FIFO: the OLDEST, i.e. the first save's own) — the second save's own note "
-                       + "must still be outstanding")
+        XCTAssertEqual(runtime.expectedWriteCount(for: path), 1, "the fire consumed EXACTLY the note "
+                       + "whose recorded identity it matched (the first save's) — the second save's "
+                       + "own, still entirely unconfirmed note must remain untouched")
 
-        // The FIRST save's own continuation now runs its withdraw, exactly as `performSave` always
-        // does regardless of whether a fire already got there first.
+        // The FIRST save's own continuation now runs its (now redundant) withdraw.
         runtime.withdrawExpectedWrite(path: path, token: firstSaveToken)
         XCTAssertEqual(runtime.expectedWriteCount(for: path), 1, "THE CORE CLAIM: the first save's "
-                       + "own (now redundant) withdraw must be a no-op — the second save's own note "
-                       + "must survive it untouched, not get stolen")
+                       + "own redundant withdraw must be a no-op — the second save's own note must "
+                       + "survive it untouched, not get stolen")
 
         // The SECOND save's own rename lands later; its own fire must still correctly classify
-        // `.ours` and consume the SURVIVING note — the reviewer's own "its own rename reads "
-        // "`.external`" failure, proven NOT to happen.
+        // `.ours` and consume the SURVIVING note once ITS OWN identity is recorded too.
         try "the second save's own rendered content".write(toFile: path, atomically: true, encoding: .utf8)
+        let secondLandedStat = officeFileStat(atPath: path)
+        runtime.recordLandedIdentity(path: path, token: secondSaveToken, stat: secondLandedStat)
         runtime.fileChangedOnDisk(path)
         XCTAssertEqual(runtime.stateSnapshot.documents[path]?.docId, originalDocId, "the second "
                        + "save's own fire must ALSO classify .ours — a spurious reload here IS the "
@@ -1354,6 +1361,109 @@ final class OfficeRuntimeWatcherTests: XCTestCase {
 
         // The second save's own (also now redundant) withdraw must likewise be a safe no-op.
         runtime.withdrawExpectedWrite(path: path, token: secondSaveToken)
+        XCTAssertEqual(runtime.expectedWriteCount(for: path), 0)
+    }
+
+    /// **Task review fix round 2 (IMPORTANT-2, re-review) — the reviewer's own counter-example to
+    /// round 1's FIFO design, driven directly.** `placeAtomically` runs in an independent
+    /// `Task.detached` PER save, so nothing guarantees the FIRST-noted save's rename lands first:
+    /// here the SECOND save's rename lands and fires FIRST — the exact inverted-completion-order
+    /// scenario the re-review named as breaking FIFO consumption ("FIFO consumeExpectedWrite
+    /// retires tokenA (not really B's)"). Under identity matching, position is irrelevant: B's fire
+    /// can only match B's own recorded identity, so A's note is untouched regardless of which save
+    /// finishes first.
+    func testASecondSavesNoteSurvivesEvenWhenTheSecondSaveLandsAndFiresFirst() async throws {
+        let path = try scratchFile(contents: "one")
+        let runtime = OfficeRuntime(sessionId: "S1", driver: makeDriver())
+        runtimes.append(runtime)
+        runtime.open(path)
+        _ = await waitUntil { runtime.stateSnapshot.documents[path] != nil }
+        let originalDocId = try XCTUnwrap(runtime.stateSnapshot.documents[path]?.docId)
+
+        // A noted FIRST, B noted SECOND — but nothing about note ORDER predicts landing order.
+        let tokenA = runtime.noteExpectedWrite(path: path)
+        let tokenB = runtime.noteExpectedWrite(path: path)
+        XCTAssertEqual(runtime.expectedWriteCount(for: path), 2)
+
+        // B's own rename lands and is confirmed FIRST, despite being noted second — the inverted
+        // order a fast, small save can produce against a slow, large one noted moments earlier.
+        try "B's own rendered content".write(toFile: path, atomically: true, encoding: .utf8)
+        let bLandedStat = officeFileStat(atPath: path)
+        runtime.recordLandedIdentity(path: path, token: tokenB, stat: bLandedStat)
+
+        // B's own fire arrives first too.
+        runtime.fileChangedOnDisk(path)
+        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.docId, originalDocId, "B's own fire "
+                       + "must classify .ours — no reload")
+        XCTAssertEqual(runtime.expectedWriteCount(for: path), 1, "THE CORE CLAIM: B's fire must "
+                       + "match and consume EXACTLY tokenB by its recorded identity — under round "
+                       + "1's FIFO design this would instead have removed tokenA, the OLDEST pending "
+                       + "token, misattributing B's landing to A")
+        runtime.withdrawExpectedWrite(path: path, token: tokenB) // B's own, now-redundant catch-up
+        XCTAssertEqual(runtime.expectedWriteCount(for: path), 1, "tokenA must still be the ONE "
+                       + "remaining note — not already gone via a stolen FIFO removal")
+
+        // A's own rename lands SECOND (despite being noted first) and is confirmed.
+        try "A's own rendered content".write(toFile: path, atomically: true, encoding: .utf8)
+        let aLandedStat = officeFileStat(atPath: path)
+        runtime.recordLandedIdentity(path: path, token: tokenA, stat: aLandedStat)
+        runtime.fileChangedOnDisk(path)
+        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.docId, originalDocId, "A's own real, "
+                       + "later rename must ALSO classify .ours — reading `.external` here (a fresh "
+                       + "docId, a spurious reload of A's own just-saved content) is precisely the "
+                       + "failure mode the re-review caught surviving round 1's FIFO fix")
+        XCTAssertNil(runtime.stateSnapshot.documentBanners[path])
+        XCTAssertEqual(runtime.expectedWriteCount(for: path), 0)
+        runtime.withdrawExpectedWrite(path: path, token: tokenA)
+        XCTAssertEqual(runtime.expectedWriteCount(for: path), 0)
+    }
+
+    /// `consumeExpectedWrite`'s own matching semantics, proven directly, no `OfficeRuntime` document
+    /// lifecycle involved — mirrors `OfficePlaceAtomicallyTests`' own posture of testing a stateful
+    /// primitive in isolation. Three claims: an EXACT match consumes precisely that note and no
+    /// other, even with a second, different note also pending; a near-miss (one field of the
+    /// inode/size/mtime-ns triple different) matches nothing and leaves both notes untouched; and a
+    /// path with no pending notes at all returns `nil` without side effects — `officeDiskChange`'s
+    /// own `expectedWrites == 0` check is what actually routes that last case to `.external`, but
+    /// `consumeExpectedWrite` itself must still be inert against it (a defensive property, not
+    /// merely an emergent one — `fileChangedOnDisk` calls it unconditionally inside `.ours`, which
+    /// `officeDiskChange` already guarantees `expectedWrites > 0` for, but the primitive itself
+    /// should not silently depend on that caller discipline to stay safe).
+    func testConsumeExpectedWriteMatchesByIdentityNotPositionOrArrivalOrder() {
+        let watchers = OfficeWatcherRecorder()
+        let runtime = OfficeRuntime(sessionId: "S1", driver: makeDriver(), makeWatcher: watchers.factory)
+        runtimes.append(runtime)
+        let path = "/never-opened-identity-probe.xlsx"
+
+        // No pending notes at all: inert.
+        XCTAssertNil(runtime.consumeExpectedWrite(path: path, matching: nil))
+        let someStat = OfficeFileStat(inode: 1, size: 10, modifiedSeconds: 100, modifiedNanoseconds: 0)
+        XCTAssertNil(runtime.consumeExpectedWrite(path: path, matching: someStat))
+
+        let tokenX = runtime.noteExpectedWrite(path: path)
+        let tokenY = runtime.noteExpectedWrite(path: path)
+        let identityX = OfficeFileStat(inode: 111, size: 2048, modifiedSeconds: 1_700_000_000, modifiedNanoseconds: 123)
+        let identityY = OfficeFileStat(inode: 222, size: 4096, modifiedSeconds: 1_700_000_100, modifiedNanoseconds: 456)
+        runtime.recordLandedIdentity(path: path, token: tokenX, stat: identityX)
+        runtime.recordLandedIdentity(path: path, token: tokenY, stat: identityY)
+        XCTAssertEqual(runtime.expectedWriteCount(for: path), 2)
+
+        // A near-miss — one nanosecond off Y's own identity — matches NEITHER note.
+        let nearMissY = OfficeFileStat(inode: 222, size: 4096, modifiedSeconds: 1_700_000_100, modifiedNanoseconds: 457)
+        XCTAssertNil(runtime.consumeExpectedWrite(path: path, matching: nearMissY), "a near-miss must "
+                     + "match nothing — this bag proves attribution by FACT, not by \"close enough\"")
+        XCTAssertEqual(runtime.expectedWriteCount(for: path), 2, "the near-miss must not have touched "
+                       + "either note")
+
+        // An EXACT match for Y consumes precisely tokenY, leaving tokenX untouched — regardless of
+        // X having been noted (and having its identity recorded) FIRST.
+        let consumed = runtime.consumeExpectedWrite(path: path, matching: identityY)
+        XCTAssertEqual(consumed, tokenY, "must return the SPECIFIC token that matched")
+        XCTAssertEqual(runtime.expectedWriteCount(for: path), 1, "exactly one note consumed")
+
+        // X's own identity is unaffected and still matchable.
+        let consumedX = runtime.consumeExpectedWrite(path: path, matching: identityX)
+        XCTAssertEqual(consumedX, tokenX)
         XCTAssertEqual(runtime.expectedWriteCount(for: path), 0)
     }
 
