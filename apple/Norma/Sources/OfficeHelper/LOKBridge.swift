@@ -285,12 +285,6 @@ final class LOKBridge: OfficeDocumentBridge {
         /// outside `OfficeSaveFormat`'s six — see that type's own doc for why a `nil` here fails a
         /// later `saveAs`, never the `open` that produced it.
         let saveFormat: OfficeSaveFormat?
-        /// **Office Stage B Task 2b** — the exact path this document was `documentLoad`ed from.
-        /// Per this task's own contract, that is now ALWAYS a staged, inside-fence path (the app's
-        /// `OfficeRuntime.openAndDispatch` copies the real document in and sends the wire `open`
-        /// this staged path) — this bridge never learns, and never needs to learn, the real one.
-        /// `saveOnDedicatedThread`'s own `.uno:Save` branch saves IN PLACE to exactly this path.
-        let path: String
     }
 
     private let thread: LOKDedicatedThread
@@ -474,8 +468,7 @@ final class LOKBridge: OfficeDocumentBridge {
         // what `OfficeSaveFormat.init?(pathExtension:)` expects.
         let saveFormat = OfficeSaveFormat(pathExtension: (path as NSString).pathExtension)
         documents[docId] = OpenDocument(handle: rawDoc, context: unmanagedContext,
-                                          tileRenderer: TileRenderer(handle: rawDoc), saveFormat: saveFormat,
-                                          path: path)
+                                          tileRenderer: TileRenderer(handle: rawDoc), saveFormat: saveFormat)
         return OfficeDocumentMetadata(
             type: kind, parts: parts,
             sizeTwips: OfficeDocumentSize(widthTwips: Int64(width), heightTwips: Int64(height)))
@@ -494,47 +487,6 @@ final class LOKBridge: OfficeDocumentBridge {
                                 width: TileMath.tilePixelSize, height: TileMath.tilePixelSize)
     }
 
-    /// Office Stage B Task 2b — a LOCAL stat fingerprint, mirroring `AppShell`'s `OfficeFileStat`
-    /// in spirit (size + full-nanosecond mtime — `st_mtimespec` is nanosecond already; a
-    /// `Date`/`FileAttributeKey`-based comparison rounds that away, same reasoning as the AppShell
-    /// original) but redeclared HERE rather than shared: this target (`NormaOfficeHelper`) is a
-    /// separate, sandboxed executable from `AppShell` and does not — and must not — link against
-    /// it. No `inode` field: unlike `AppShell`'s copy, nothing here ever compares across a
-    /// `rename(2)` (this is a same-path before/after check on one dedicated thread), so identity
-    /// across a rename was never this type's problem to solve.
-    private struct LocalFileFingerprint: Equatable {
-        let size: Int64
-        let modifiedSeconds: Int64
-        let modifiedNanoseconds: Int64
-    }
-
-    private func localFileFingerprint(atPath path: String) -> LocalFileFingerprint? {
-        var info = stat()
-        guard stat(path, &info) == 0 else { return nil }
-        return LocalFileFingerprint(size: Int64(info.st_size),
-                                    modifiedSeconds: Int64(info.st_mtimespec.tv_sec),
-                                    modifiedNanoseconds: Int64(info.st_mtimespec.tv_nsec))
-    }
-
-    /// Office Stage B Task 2b — **EMPIRICAL PROBE, temporary**: dispatches `.uno:Save` against the
-    /// staged (writable) document and reports whether the staged file's own bytes visibly changed
-    /// WITHIN this synchronous call, on this dedicated thread, with no hop of any kind between the
-    /// `postUnoCommand` call and the re-stat — the exact ordering guarantee `task-2b-report.md`'s
-    /// save-mechanism decision needs evidence for (does `.uno:Save` complete synchronously in this
-    /// headless embedding, or could `.saved` reply before the write actually lands). Returns `true`
-    /// on a detected change, `false` when the file did not visibly change (`.uno:Save` was a no-op,
-    /// dispatched async, or failed silently) — never throws for a "did not change" outcome, only
-    /// for a docId this bridge has no handle for.
-    private func attemptUnoSaveOnDedicatedThread(docId: String) throws -> Bool {
-        guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
-        let before = localFileFingerprint(atPath: doc.path)
-        ".uno:Save".withCString { commandPtr in
-            doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, nil, false)
-        }
-        let after = localFileFingerprint(atPath: doc.path)
-        return after != before
-    }
-
     /// Office Stage B Task 2 — renders `docId`'s current in-memory state to
     /// `<state-path>/saves/<docId>-<seq>.<ext>`, in the document's OWN format (`OpenDocument
     /// .saveFormat`, captured at open). Returns the temp file's path on success; the APP — not this
@@ -542,18 +494,32 @@ final class LOKBridge: OfficeDocumentBridge {
     /// `OfficeWireFrame.saved`'s own header). Throws, never traps: a bad `docId`, an unsupported
     /// format, or a genuine `saveAs` failure are all reported, and this bridge (and the document
     /// it was asked to save) survive every one of them exactly like a failed `paintTile`/`open`.
+    ///
+    /// **Office Stage B Task 2b — the save-mechanism decision, made empirically, kept here for the
+    /// record.** Two candidates were live-tested against the tripwire
+    /// (`OfficeRuntimeLiveTests.testSaveThroughTheDebugEditDoorThenCloseThenReopenPersistsRealContent
+    /// AcrossTwoFormats`, task-2b-report.md has the full transcript): `.uno:Save` against the staged
+    /// (writable, post-staging) document in place, and this `saveAs`-to-`saves/` + atomic-place
+    /// mechanism, unchanged from Task 2. A stderr discriminator on each branch (since a green
+    /// tripwire alone cannot tell "`.uno:Save` worked" apart from "it silently no-op'd and the
+    /// fallback carried the whole test," and the one filesystem tell — `saves/` staying empty — is
+    /// destroyed by test teardown before anyone could look) recorded, for BOTH `.ods` and `.odt`:
+    /// `.uno:Save` never changed the staged file's own stat at all — a true no-op in this headless
+    /// embedding, not merely slow or async. `saveAs` is therefore the ONLY mechanism that ever
+    /// persisted real bytes, in EVERY save this task's own live testing ever ran, and is what
+    /// PERSISTS the document — the probe machinery built to decide this (`attemptUnoSaveOnDedicated
+    /// Thread`, the local stat-fingerprint pair, the stderr discriminator) was removed entirely once
+    /// the decision was made, no dead machinery kept.
+    ///
+    /// **`.uno:Save` still has ONE job left, discovered by the very next thing this task tried**: a
+    /// live run against the fully-stripped code (probe gone, `saveAs` the only call) found `saveAs`
+    /// alone never clears `ModifiedStatus` — I1's own live post-save dirty-clears wait failed, on
+    /// BOTH formats, the moment `.uno:Save` was removed. Re-added below, unconditionally, AFTER a
+    /// successful `saveAs` — not as a competing persistence mechanism (nothing here trusts its file-
+    /// write effect, confirmed null above), purely for the `ModifiedStatus=false` it is empirically
+    /// the one thing that fires. See the call site's own comment for the full account.
     private func saveAsOnDedicatedThread(docId: String, seq: UInt64) throws -> String {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
-        // Office Stage B Task 2b — try `.uno:Save` first: LOK saves the currently-loaded STAGED
-        // document IN PLACE, exactly the operation a real user's own ⌘S performs, and the door
-        // Collabora Online's own interactive-save path uses. `task-2b-report.md` has the live
-        // evidence this decision rests on. Falls back to the ORIGINAL `saveAs`-to-`saves/`
-        // mechanism below, unchanged, whenever `.uno:Save` does not visibly change the staged file
-        // — never assumed to have worked, always checked (`attemptUnoSaveOnDedicatedThread`'s own
-        // before/after stat comparison).
-        if try attemptUnoSaveOnDedicatedThread(docId: docId) {
-            return doc.path
-        }
         guard let format = doc.saveFormat else {
             throw SaveError.unsupportedFormat("(format not captured at open)")
         }
@@ -578,6 +544,23 @@ final class LOKBridge: OfficeDocumentBridge {
                 reason = "saveAs failed (no error string available)"
             }
             throw SaveError.saveAsFailed(reason)
+        }
+        // Office Stage B Task 2b (I1) — **empirically required, not theoretical**: `saveAs` alone
+        // does not clear LOK's own internal modified flag (confirmed directly: the tripwire's live
+        // post-save dirty-clears wait failed against `saveAs` alone, on both formats, the moment the
+        // separate `.uno:Save` probe this decision's own live testing used was removed). Dispatching
+        // `.uno:Save` here — never as the primary persistence mechanism (that empirical decision,
+        // and why, is this method's own header above) — is what actually flips `ModifiedStatus` to
+        // `false`, confirmed by the SAME raw callback trace `task-2b-report.md` captures: every
+        // observed `.uno:ModifiedStatus=false` in this task's live testing followed a `.uno:Save`
+        // dispatch, never a bare `saveAs` alone. The exact LO-internal reason (SfxObjectShell's own
+        // "document saved" bookkeeping updating on ANY completed `.uno:Save` dispatch, independent
+        // of whether the medium write itself did anything, is the plausible mechanism, not
+        // independently confirmed) is not chased further — fire-and-forget, matching every other
+        // `postUnoCommand` call in this bridge; the tripwire's own live wait is what proves it lands
+        // in practice, not an assumption about ordering.
+        ".uno:Save".withCString { commandPtr in
+            doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, nil, false)
         }
         return destination.path
     }

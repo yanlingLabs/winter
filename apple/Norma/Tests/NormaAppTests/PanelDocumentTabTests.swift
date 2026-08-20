@@ -427,6 +427,81 @@ final class PanelDocumentTabTests: XCTestCase {
         XCTAssertNil(model.banner)
     }
 
+    /// Office Stage B Task 2b — `model.conflict`'s own door, end to end through a REAL runtime (not
+    /// the pure reducer `OfficeRuntimeReducerTests` already covers): a dirty document's external
+    /// change surfaces as `.conflict`, never `.banner` — mirrors
+    /// `testBannerSurfacesFromRuntimeStateThroughTheModelsOwnDoor` immediately above in shape, dirty
+    /// instead of clean.
+    func testConflictSurfacesFromRuntimeStateThroughTheModelsOwnDoorOnADirtyDocument() async throws {
+        let office = DocumentOfficeDriverRecorder(stateDirectory: stateDir)
+        let host = makeHost(office: office)
+        let model = PanelDocumentTabModel(tabId: "t1", path: realAPath)
+        model.bind(host: host, sessionId: "S1")
+        model.activate()
+        _ = await waitUntil { office.openCalls.count == 1 }
+        _ = await waitUntil { model.runtime?.stateSnapshot.documents[realAPath] != nil }
+        XCTAssertNil(model.conflict, "no conflict before anything has happened to the file")
+        let docId = try XCTUnwrap(model.runtime?.stateSnapshot.documents[realAPath]?.docId)
+        model.runtime?.handle(documentEvent: .modifiedChanged(true), docId: docId)
+
+        try? "changed externally".write(toFile: realAPath, atomically: true, encoding: .utf8)
+        model.runtime?.fileChangedOnDisk(realAPath)
+
+        let conflicted = await waitUntil { model.conflict != nil }
+        XCTAssertTrue(conflicted)
+        XCTAssertEqual(model.conflict, .changed)
+        XCTAssertNil(model.banner, "the dirty path routes through conflict, never the plain banner")
+    }
+
+    /// **"Reload from disk"**, through the model's own door: discards the standing conflict and
+    /// re-stages, minting a fresh docId — the visible proof nothing stale survived the choice.
+    func testReloadFromDiskClearsTheConflictAndMintsAFreshDocId() async throws {
+        let office = DocumentOfficeDriverRecorder(stateDirectory: stateDir)
+        let host = makeHost(office: office)
+        let model = PanelDocumentTabModel(tabId: "t1", path: realAPath)
+        model.bind(host: host, sessionId: "S1")
+        model.activate()
+        _ = await waitUntil { office.openCalls.count == 1 }
+        _ = await waitUntil { model.runtime?.stateSnapshot.documents[realAPath] != nil }
+        let originalDocId = try XCTUnwrap(model.runtime?.stateSnapshot.documents[realAPath]?.docId)
+        model.runtime?.handle(documentEvent: .modifiedChanged(true), docId: originalDocId)
+        try? "changed externally".write(toFile: realAPath, atomically: true, encoding: .utf8)
+        model.runtime?.fileChangedOnDisk(realAPath)
+        _ = await waitUntil { model.conflict != nil }
+
+        model.reloadFromDisk()
+
+        let reloaded = await waitUntil {
+            model.conflict == nil && model.runtime?.stateSnapshot.documents[realAPath]?.docId != originalDocId
+        }
+        XCTAssertTrue(reloaded, "reloadFromDisk must clear the conflict and mint a fresh docId, not "
+                      + "merely dismiss the banner")
+    }
+
+    /// **"Keep my version"**, through the model's own door: dismisses the conflict with the document
+    /// entry completely untouched — no reload, same docId, still dirty.
+    func testKeepMyVersionClearsTheConflictWithoutTouchingTheDocument() async throws {
+        let office = DocumentOfficeDriverRecorder(stateDirectory: stateDir)
+        let host = makeHost(office: office)
+        let model = PanelDocumentTabModel(tabId: "t1", path: realAPath)
+        model.bind(host: host, sessionId: "S1")
+        model.activate()
+        _ = await waitUntil { office.openCalls.count == 1 }
+        _ = await waitUntil { model.runtime?.stateSnapshot.documents[realAPath] != nil }
+        let originalDocId = try XCTUnwrap(model.runtime?.stateSnapshot.documents[realAPath]?.docId)
+        model.runtime?.handle(documentEvent: .modifiedChanged(true), docId: originalDocId)
+        try? "changed externally".write(toFile: realAPath, atomically: true, encoding: .utf8)
+        model.runtime?.fileChangedOnDisk(realAPath)
+        _ = await waitUntil { model.conflict != nil }
+
+        model.keepMyVersion()
+
+        let dismissed = await waitUntil { model.conflict == nil }
+        XCTAssertTrue(dismissed)
+        XCTAssertEqual(model.runtime?.stateSnapshot.documents[realAPath]?.docId, originalDocId,
+                       "still the SAME document — keep mine touches nothing else")
+    }
+
     /// The failed-vs-idle gate's own local proof, end to end through the model: `hasRequestedOpen`
     /// flips true only once the deferred open Task has actually fired.
     func testHasRequestedOpenBecomesTrueOnlyAfterTheDeferredOpenFires() async {

@@ -1235,18 +1235,6 @@ final class OfficeRuntime: ObservableObject {
                     try? FileManager.default.removeItem(atPath: tempPath)
                     return
                 }
-                // **Office Stage B Task 2b — the save-mechanism split, resolved by comparison, not
-                // by asking the helper which branch it took.** `tempPath` is EITHER `documents
-                // [path].stagedPath` itself (the `.uno:Save` branch — LOK saved the currently-
-                // loaded staged document IN PLACE, so the fresh bytes live exactly where the NEXT
-                // edit and the NEXT save will also read/write them — this file must survive) or an
-                // EPHEMERAL `saves/<docId>-<seq>.<ext>` render (Task 2's own fallback branch — a
-                // one-shot temp that exists for exactly this one placement and must always be
-                // deleted, precisely as it always was before this task). The app's own recorded
-                // `stagedPath` is already the one place this fact lives — comparing against it is
-                // correct regardless of which mechanism `LOKBridge.saveOnDedicatedThread` actually
-                // used underneath.
-                let isStagedWorkingCopy = (tempPath == self.state.documents[path]?.stagedPath)
                 // **Before the place, always** — mirrors `EditorSaveCoordinator.performSave`'s own
                 // ordering and its own reason: the watcher T8 already installed for `path` must not
                 // mistake this save's own rename for somebody else's edit, and a note filed
@@ -1292,23 +1280,16 @@ final class OfficeRuntime: ObservableObject {
                     // say so) plus `testAGenuineOursRaceStaysSuppressedButUntouchedUntilTheOwning
                     // SaveCatchesUp` (the interleaving that IS reachable).
                     self.withdrawExpectedWrite(path: path, token: expectedWriteToken)
-                    // Task 2b: never for the staged working copy — see `isStagedWorkingCopy`'s own
-                    // doc above.
-                    if !isStagedWorkingCopy {
-                        try? FileManager.default.removeItem(atPath: tempPath)
-                    }
+                    // `tempPath` is `LOKBridge`'s own ephemeral `saves/<docId>-<seq>.<ext>` render —
+                    // a one-shot temp that exists for exactly this one placement (`saveAsOnDedicated
+                    // Thread`'s own doc has the empirical save-mechanism decision this rests on: the
+                    // only mechanism this vendor build's `.uno:Save` ever proved out was this one).
+                    try? FileManager.default.removeItem(atPath: tempPath)
                     self.perform(self.dispatch(.saveSucceeded(path: path, docId: docId)))
                 } catch {
                     // No event will arrive to consume the note now — the rename never happened.
                     self.withdrawExpectedWrite(path: path, token: expectedWriteToken)
-                    // Task 2b: a FAILED place never touched the staged working copy at all (the
-                    // failure is `placeAtomically`'s own — see that method's own doc: it either
-                    // never got past the copy step, or threw before the rename) — still never
-                    // delete it if it IS that copy; a failed place changes nothing about whether
-                    // the document is still open and still needs its own working file.
-                    if !isStagedWorkingCopy {
-                        try? FileManager.default.removeItem(atPath: tempPath)
-                    }
+                    try? FileManager.default.removeItem(atPath: tempPath)
                     self.perform(self.dispatch(.saveFailed(path: path, docId: docId, reason: Self.describe(error))))
                 }
             } catch {

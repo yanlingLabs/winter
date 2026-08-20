@@ -316,18 +316,24 @@ final class OfficeRuntimeLiveTests: XCTestCase {
 
     // MARK: - Office Stage B Task 2: the save round trip, end to end through the real supervisor+helper
 
-    /// **KNOWN, DISCLOSED, CURRENTLY-FAILING (2 of ~9 assertions per fixture) — task-2-report.md's
-    /// NEEDS_CONTEXT finding, not a bug in this test or a regression to chase.** `becameDirty` and
-    /// the post-reopen pixel-difference assertion both fail: every document this XCTest process
-    /// opens is sandboxed AND outside `--state-path` (there is no other way to run it), which live
-    /// root-causing proved is the exact condition under which LOK loads a document read-only —
-    /// `paste()` still reports success (it mutates the in-memory model) but is a silent no-op, so
-    /// the modified flag never flips and the saved bytes are the unedited originals. Everything else
-    /// this test exercises — open, real tile paint, the save wire round trip, EXDEV-safe atomic
-    /// placement, no save-failed banner, close, reopen, format preservation via successful reparse —
-    /// is unaffected and asserted for real. Do not "fix" the two known-failing assertions by loosening
-    /// them; the fix is one of the two decisions named in task-2-report.md, both above this task's
-    /// own authority.
+    /// **Formerly KNOWN, DISCLOSED, CURRENTLY-FAILING (2 of ~9 assertions per fixture) —
+    /// task-2-report.md's NEEDS_CONTEXT finding, resolved by Office Stage B Task 2b.** `becameDirty`
+    /// and the post-reopen pixel-difference assertion used to fail: every document this XCTest
+    /// process opened was sandboxed AND outside `--state-path`, which live root-causing proved is
+    /// the exact condition under which LOK loads a document read-only — `paste()` still reported
+    /// success (it mutates the in-memory model) but was a silent no-op, so the modified flag never
+    /// flipped and the saved bytes were the unedited originals. Task 2b's own resolution (named, not
+    /// yet chosen, by Task 2's report — see `LOKBridge.disableDocumentLockFile`'s own NEEDS_CONTEXT
+    /// block, updated in place, for the full account): the redesign, never the fence. Every document
+    /// is now staged into `--state-path` BEFORE the wire `open`, so it loads genuinely writable —
+    /// `becameDirty` and the pixel-difference assertion both went green the moment staging landed,
+    /// with NO change to what either assertion CHECKS (only the production code that makes them
+    /// true) — the flip itself predates the later, separate, comment-only marker-removal pass that
+    /// trimmed the now-stale "EXPECTED TO FAIL" wording from both messages. Everything else this
+    /// test exercises — open, real tile paint, the save wire round trip, EXDEV-safe atomic
+    /// placement, no save-failed banner, close, reopen, format preservation via successful reparse,
+    /// and now a live post-save dirty-clears wait (Task 2b, I1) — is asserted for real, on the SAME
+    /// open document, across all four original assertions and the new fifth.
     ///
     /// **The task's own exit gate**: save -> close -> reopen -> content matches, format preserved,
     /// across the two minimum formats the brief names. Looped over both fixtures IN ONE test
@@ -440,31 +446,15 @@ final class OfficeRuntimeLiveTests: XCTestCase {
             }
             try await client.debugEdit(docId: originalDocId, text: "T2-EDIT-\(fixtureName)")
 
-            // NEEDS_CONTEXT (task-2-report.md has the full matrix/evidence): every document this
-            // XCTest process opens is sandboxed AND outside `--state-path` — the exact condition
-            // root-caused live to make LOK load the document read-only (SfxMedium's own writability
-            // probe against the document's OWN path is denied by the fence; `office-helper.sb` is
-            // explicitly off-limits to this task). `paste()` still returns success against a
-            // read-only medium — it mutates the in-memory model — but never flips the modified flag,
-            // so this assertion is a KNOWN, disclosed, currently-failing case, not a regression to
-            // chase. `XCTExpectedFailure` keeps the suite meaningfully green while ensuring the day
-            // the fence or open-architecture decision lands, this flips to an UNEXPECTED pass and
-            // gets noticed rather than silently staying skipped.
-            // NEEDS_CONTEXT, EXPECTED TO FAIL (task-2-report.md has the full matrix/evidence): every
-            // document this XCTest process opens is sandboxed AND outside `--state-path` — the exact
-            // condition root-caused live to make LOK load the document read-only (SfxMedium's own
-            // writability probe against the document's OWN path is denied by the fence;
-            // `office-helper.sb` is explicitly off-limits to this task). `paste()` still returns
-            // success against a read-only medium — it mutates the in-memory model — but never flips
-            // the modified flag. This is a KNOWN, disclosed, currently-failing assertion, not a
-            // regression to chase — it should flip to passing the day the parent resolves the fence-
-            // vs-open-architecture decision named in the report, and not before.
+            // Office Stage B Task 2b resolved the NEEDS_CONTEXT finding this assertion used to be
+            // pinned against (this test's own header has the full before/after account): staging
+            // makes every document genuinely writable, so the debug edit's `paste()` is no longer a
+            // silent no-op against a read-only medium.
             let becameDirty = await waitUntil(timeout: 15) { runtime.stateSnapshot.documents[docPath]?.dirty == true }
             XCTAssertTrue(becameDirty, "\(fixtureName): the debug edit's own `.uno:ModifiedStatus=true` "
                           + "callback never reached documents[path].dirty — the dirty-tracking wire "
                           + "(ShellSessionHost.wireOfficeTileCallbacks' onDocumentEvent routing) is "
-                          + "what this assertion actually proves, not merely that the edit happened "
-                          + "— EXPECTED TO FAIL, see task-2-report.md NEEDS_CONTEXT")
+                          + "what this assertion actually proves, not merely that the edit happened")
 
             // Sanity: the debug edit's own target docId must still be `docPath`'s CURRENT docId the
             // instant before save is requested — a guard against a spurious reload racing the edit
@@ -522,20 +512,13 @@ final class OfficeRuntimeLiveTests: XCTestCase {
             let pixelsAfter = try XCTUnwrap(runtime.tileStore.tile(docId: reopenedDoc.docId, key: key),
                                             "\(fixtureName)").pixels
 
-            // Same NEEDS_CONTEXT condition as the `becameDirty` expected failure above: the debug
-            // edit was a silent no-op against a read-only-loaded document, so the save round-trip
-            // (correctly) persisted the UNCHANGED original bytes — this pixel identity is the other
-            // face of the same root cause, not a second bug.
-            // Same NEEDS_CONTEXT root cause as `becameDirty` above, EXPECTED TO FAIL: the debug edit
-            // was a silent no-op against a read-only-loaded document, so the save round-trip
-            // (correctly) persisted the UNCHANGED original bytes — this pixel identity is the other
-            // face of the same root cause, not a second bug.
+            // Same resolved NEEDS_CONTEXT condition as `becameDirty` above — this pixel identity was
+            // the other face of the same root cause, not a second bug, and resolved by the same fix.
             XCTAssertNotEqual(pixelsBefore, pixelsAfter, "\(fixtureName): the reopened document's "
                               + "rendered pixels are identical to before the edit — the save round-"
                               + "trip may have persisted the ORIGINAL bytes rather than the edited "
                               + "ones (docId changing and the file's mtime/size changing are both "
-                              + "consistent with a no-op save that still touched the inode) "
-                              + "— EXPECTED TO FAIL, see task-2-report.md NEEDS_CONTEXT")
+                              + "consistent with a no-op save that still touched the inode)")
 
             runtime.close(docPath)
         }
