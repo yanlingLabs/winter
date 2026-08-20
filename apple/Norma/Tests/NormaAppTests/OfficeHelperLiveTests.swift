@@ -1420,6 +1420,82 @@ final class OfficeHelperLiveTests: XCTestCase {
         let rep = NSBitmapImageRep(cgImage: image)
         return rep.representation(using: .png, properties: [:])
     }
+
+    // MARK: - Office Stage B Task 2: a vendor-build limitation, found and pinned
+
+    /// **Found while building Task 2's own live round-trip test, isolated by direct bisection
+    /// (task-2-report.md has the full transcript): this vendored, from-source LibreOffice build's
+    /// OOXML EXPORT filter does not work — `saveAs` against an xlsx/docx destination pops a real LOK
+    /// window callback (an "Information" dialog this headless embedding has no way to answer) and
+    /// then the WHOLE HELPER PROCESS exits with LO's own generic "Unspecified Application Error,"
+    /// independent of the seatbelt (reproduced identically with `--no-sandbox`), independent of any
+    /// edit (reproduced on a completely untouched, freshly-opened document — `saveAs` alone is
+    /// enough), and independent of the destination FORMAT STRING tried (`saveAs`'s own `pFormat`,
+    /// both a literal LOK filter name and the bare-extension form `doc_saveAs` actually expects both
+    /// reached this same crash once past the filter-resolution stage). ODF export
+    /// (`calc8`/`writer8`/`impress8` — i.e. `.ods`/`.odt`/`.odp`) is unaffected — a real save,
+    /// through this exact wire dispatch, produces a real, valid archive.
+    ///
+    /// This is a GAP IN THE VENDORED BINARY, not a bug in this task's own code — Stage A's own
+    /// import-side testing (`testSixFormatsOpenWithSaneTypePartsAndSize`) never exercised export at
+    /// all, so nothing before Task 2 had a reason to notice OOXML export specifically was never
+    /// wired into whatever minimal LO module subset this vendor tree's from-source build selected.
+    /// Task 2's own live round-trip test (`OfficeRuntimeLiveTests`) uses `.ods`/`.odt` — the two
+    /// formats this environment can actually prove a save against — and this test is what PINS the
+    /// limitation for the OOXML trio, so a future vendor tree rebuild that adds the missing filter
+    /// module is a test going from skip-worthy-red to green, not a silent, unnoticed fix.
+    ///
+    /// **A pin, not an `XCTExpectFailure`**: this test asserts the CURRENT, real, disclosed behavior
+    /// — ODF saves succeed, OOXML saves crash the helper — as a green test, the same posture this
+    /// suite already takes toward the gate-table pixel hashes and the `gate.ods` width tolerance.
+    /// The day a vendor tree rebuild adds a working OOXML export filter, the OOXML half of this test
+    /// starts failing LOUDLY (the helper stays alive, `save` returns instead of the process dying),
+    /// which is the correct trigger for a human to update this test's own claim, not a silent gap.
+    func testKnownLimitationOOXMLExportIsNotAvailableInThisVendorBuildWhileODFExportWorks() async throws {
+        try skipUnlessVendorPresent()
+
+        // ODF: the real proof this task's own wire dispatch (save -> LOK saveAs -> a real file)
+        // works end to end.
+        for (fixture, format) in [("gate.ods", "ods"), ("gate.odt", "odt")] {
+            let helper = try await spawnLiveHelper()
+            let scratchDir = makeScratchDirectory()
+            let docPath = scratchDir.appendingPathComponent("editable-\(fixture)").path
+            try Data(contentsOf: Self.fixturesRoot.appendingPathComponent(fixture)).write(to: URL(fileURLWithPath: docPath))
+            let docId = "odf-probe"
+            _ = try await helper.client.open(docId: docId, path: docPath)
+            let tempPath = try await helper.client.save(docId: docId)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: tempPath), "\(fixture): saveAs must produce a real file")
+            XCTAssertTrue(tempPath.hasSuffix(".\(format)"), "\(fixture): saved under its own format's extension")
+            let size = (try? FileManager.default.attributesOfItem(atPath: tempPath)[.size] as? Int) ?? nil
+            XCTAssertNotEqual(size, 0, "\(fixture): the saved file must have real content, not an empty stub")
+        }
+
+        // OOXML: the known, accepted gap — the helper process itself dies handling `saveAs`. Fired
+        // as a detached Task (a synchronous `await` here would block on the client's own 15s
+        // per-request timeout) and observed via `process.isRunning` instead, which is both faster
+        // and the more direct claim ("the helper died"), matching this file's OWN established death-
+        // detection idiom (`isProcessAlive`-style `kill(pid, 0)` polling used throughout this suite).
+        //
+        // `gate.xlsx` only — verified reliably (repeatedly, by hand, while isolating this finding:
+        // task-2-report.md) to die within ~2s every time. `gate.docx` was observed inconsistently
+        // (its own `saveAs` sometimes reports a real LOK-level `ERROR` callback rather than dying
+        // outright within this test's own budget) — pinning an unreliable timing claim would make
+        // this regression test itself flaky, which is worse than a narrower, fully-verified pin.
+        for fixture in ["gate.xlsx"] {
+            let helper = try await spawnLiveHelper()
+            let scratchDir = makeScratchDirectory()
+            let docPath = scratchDir.appendingPathComponent("editable-\(fixture)").path
+            try Data(contentsOf: Self.fixturesRoot.appendingPathComponent(fixture)).write(to: URL(fileURLWithPath: docPath))
+            let docId = "ooxml-probe"
+            _ = try await helper.client.open(docId: docId, path: docPath)
+            Task { _ = try? await helper.client.save(docId: docId) }
+            let died = await waitUntil(timeout: 15.0) { !helper.process.isRunning }
+            XCTAssertTrue(died, "\(fixture): expected the KNOWN OOXML-export limitation to reproduce "
+                          + "(the helper process dying) — if this timed out instead, either the "
+                          + "limitation was fixed (update this test to assert success) or something "
+                          + "NEW broke saveAs for OOXML formats specifically")
+        }
+    }
 }
 
 /// `Process.TerminationReason.uncaughtSignal`'s raw value, for the SIGTERM measurement's log line

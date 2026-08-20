@@ -35,9 +35,21 @@ private enum LOKCallbackType {
 enum OfficeSaveFormat: Equatable {
     case odt, docx, ods, xlsx, odp, pptx
 
-    /// The saved file's OWN extension — `saveAs`'s destination filename is built from this, never
-    /// re-derived from the LOK filter name below (the two are related but not textually
-    /// interchangeable — "calc8" does not end in ".ods").
+    /// The saved file's OWN extension — `saveAs`'s destination filename is built from this, AND
+    /// (fix round 1, live-test-caught) it doubles as `saveAs`'s own `pFormat` argument verbatim.
+    ///
+    /// **Corrected, live-test-caught**: this table originally passed LOK's own verbose internal
+    /// filter names (`"Calc MS Excel 2007 XML"`, `"writer8"`, ...) as `pFormat` — verified against
+    /// the vendored registry's own `oor:name` NODES, which was the wrong artifact to check. The
+    /// live round-trip test failed immediately with LOK's own real error, `"no output filter found
+    /// for provided suffix"`: `doc_saveAs` (`desktop/source/lib/init.cxx`) does NOT take a raw
+    /// filter name — it takes a BARE EXTENSION (`"xlsx"`, `"odt"`, `"docx"`, ...) and resolves the
+    /// actual filter itself, via its OWN internal `aWriterExtensionMap`/`aCalcExtensionMap`/
+    /// `aImpressExtensionMap` tables, keyed by the LOADED DOCUMENT'S OWN component type — which is
+    /// also why this is MORE correct than hand-picking a filter name here ever could be: LOK
+    /// already knows whether the open handle is Writer/Calc/Impress, and picks the matching OOXML
+    /// or ODF filter for that type from the SAME extension token, with no risk of this table
+    /// naming a filter that disagrees with the document's own real kind.
     var fileExtension: String {
         switch self {
         case .odt: return "odt"
@@ -46,24 +58,6 @@ enum OfficeSaveFormat: Equatable {
         case .xlsx: return "xlsx"
         case .odp: return "odp"
         case .pptx: return "pptx"
-        }
-    }
-
-    /// LOK's own short filter name — `saveAs`'s `pFormat` argument
-    /// (`LibreOfficeKit.h`: `int (*saveAs) (pThis, pUrl, pFormat, pFilterOptions)`). Verified
-    /// against the vendored `Resources/registry/{writer,calc,impress}.xcd` filter-node names by
-    /// exact string match (task-2-report.md's own methodology note) before being trusted here, not
-    /// recalled from memory alone: `writer8`/`calc8`/`impress8` are the ODF trio's own short names;
-    /// the OOXML trio uses the literal English `oor:name` LO's filter configuration registers for
-    /// them (there is no short-name equivalent for these three in the vendored registry).
-    var lokFilterName: String {
-        switch self {
-        case .odt: return "writer8"
-        case .docx: return "MS Word 2007 XML"
-        case .ods: return "calc8"
-        case .xlsx: return "Calc MS Excel 2007 XML"
-        case .odp: return "impress8"
-        case .pptx: return "Impress MS PowerPoint 2007 XML"
         }
     }
 
@@ -410,10 +404,12 @@ final class LOKBridge: OfficeDocumentBridge {
     }
 
     #if DEBUG
-    /// Office Stage B Task 2 — **DEBUG-only, and REMOVED BY TASK 4.** Posts `.uno:EnterString` —
-    /// see `OfficeWireFrame.debugEdit`'s own header for why this exists and what it stands in for.
-    /// `postUnoCommand` is void (LOK reports no synchronous result) — a docId this bridge has no
-    /// handle for is the only failure this method itself can detect and report.
+    /// Office Stage B Task 2 — **DEBUG-only, and REMOVED BY TASK 4.** Selects a cell then pastes
+    /// `text` into it (`debugEditOnDedicatedThread`'s own header has the corrected mechanism and
+    /// the live-test trace that forced the correction away from `.uno:EnterString`) — see
+    /// `OfficeWireFrame.debugEdit`'s own header for why this exists and what it stands in for.
+    /// Throws on a docId this bridge has no handle for, OR on `paste()` itself reporting failure
+    /// (unlike `postUnoCommand`, `paste` DOES return a synchronous success/failure `bool`).
     func debugEdit(docId: String, text: String) throws {
         try thread.sync { try self.debugEditOnDedicatedThread(docId: docId, text: text) }
     }
@@ -494,9 +490,11 @@ final class LOKBridge: OfficeDocumentBridge {
         // `openOnDedicatedThread` builds its own `fileURLString` this way rather than a naive
         // "file://" + path concatenation (this repo's own checkout path has a space in it).
         let destinationURLString = URL(fileURLWithPath: destination.path).absoluteString
+        // `pFormat` is the bare extension, NOT a filter name — see `OfficeSaveFormat.fileExtension`'s
+        // own doc comment for the live-test-caught correction.
         let succeeded = destinationURLString.withCString { urlPtr -> Bool in
-            format.lokFilterName.withCString { filterPtr in
-                doc.handle.pointee.pClass.pointee.saveAs?(doc.handle, urlPtr, filterPtr, nil) != 0
+            format.fileExtension.withCString { formatPtr in
+                doc.handle.pointee.pClass.pointee.saveAs?(doc.handle, urlPtr, formatPtr, nil) != 0
             }
         }
         guard succeeded else {
@@ -513,25 +511,60 @@ final class LOKBridge: OfficeDocumentBridge {
     }
 
     #if DEBUG
-    /// Office Stage B Task 2 — **DEBUG-only, and REMOVED BY TASK 4.** Encodes LOK's own
-    /// `postUnoCommand` JSON-argument convention — one property per key,
-    /// `{"<Name>":{"type":"<uno-type>","value":<value>}}` — for `.uno:EnterString`'s single
-    /// argument, `StringName` (verified via a documented UNO dispatch reference before being
-    /// trusted here, not recalled from memory alone — task-2-report.md has the citation).
-    /// `DontCommit` is deliberately omitted (defaults false): this task's whole point is a
-    /// COMMITTED content change real enough to survive a save/close/reopen round trip and to fire
-    /// LOK's own `.uno:ModifiedStatus` callback, not an in-progress edit.
+    /// Office Stage B Task 2 — **DEBUG-only, and REMOVED BY TASK 4.**
+    ///
+    /// **Corrected, live-test-caught, twice (task-2-report.md has the full transcript both
+    /// times).** The brief named `.uno:EnterString`; dispatching it (via `postUnoCommand`) against
+    /// this task's own live fixtures popped a real LOK window callback — an "Information" dialog
+    /// this headless door has no way to answer — and the WHOLE HELPER PROCESS then exited with
+    /// "Unspecified Application Error." A first theory (the fixture's own stray
+    /// `<workbookProtection/>` XML) was tested and DISPROVEN empirically: stripping that element
+    /// from a scratch copy and verifying the rebuilt archive genuinely lacked it changed nothing —
+    /// the SAME dialog, the SAME crash. Whatever `.uno:EnterString`'s own dispatch path does in
+    /// this headless LOK embedding (no real window system behind it), it is not safe to call.
+    /// **Plausible (not confirmed) reinterpretation, found later while root-causing the dirty-
+    /// tracking bug this same task hit (`disableDocumentLockFile`'s header)**: every fixture this
+    /// door was ever exercised against was opened sandboxed and outside `--state-path`, exactly the
+    /// condition now shown to make LOK load a document read-only. An "Information" dialog popping
+    /// the instant an edit command dispatches is consistent with a read-only-document refusal
+    /// prompt, not necessarily an `EnterString`-specific defect — not re-tested against a
+    /// known-writable (inside-fence) document to confirm, so this stays a note for the next reader
+    /// rather than a claim; `paste()` remains the right choice regardless, since it never surfaces
+    /// UI either way.
+    ///
+    /// Uses `LibreOfficeKitDocumentClass.paste` instead — a direct C-API data-insertion call, not a
+    /// UNO-dispatch through the SfxDispatcher/UI layer `.uno:EnterString` goes through, and the
+    /// SAME mechanism a real clipboard paste uses. `.uno:GoToCell` still selects the target cell
+    /// first (moves the cursor away from whatever a fixture's own default cursor, e.g. A1, happens
+    /// to hold) — `paste` inserts at the CURRENT selection, exactly like `.uno:EnterString` would
+    /// have.
     private func debugEditOnDedicatedThread(docId: String, text: String) throws {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
-        let argsPayload: [String: Any] = ["StringName": ["type": "string", "value": text]]
-        guard let argsData = try? JSONSerialization.data(withJSONObject: argsPayload),
-              let argsString = String(data: argsData, encoding: .utf8) else {
-            throw SaveError.saveAsFailed("debugEdit: could not encode .uno:EnterString arguments")
-        }
-        ".uno:EnterString".withCString { commandPtr in
-            argsString.withCString { argsPtr in
-                doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, argsPtr, false)
+        // Ruled out as a red herring while root-causing the dirty-tracking bug (task-2-report.md):
+        // disabling GoToCell entirely reproduced the SAME missing-modified-callback failure, which
+        // is what pointed the search away from this dispatch and at the sandboxed document-outside-
+        // fence lock-file EPERM instead (see `disableDocumentLockFile`'s header). GoToCell itself
+        // was never the problem — restored unconditionally.
+        let gotoPayload: [String: Any] = ["ToPoint": ["type": "string", "value": "D10"]]
+        if let gotoData = try? JSONSerialization.data(withJSONObject: gotoPayload),
+           let gotoString = String(data: gotoData, encoding: .utf8) {
+            ".uno:GoToCell".withCString { commandPtr in
+                gotoString.withCString { argsPtr in
+                    doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, argsPtr, false)
+                }
             }
+        }
+        let textBytes = Array(text.utf8)
+        let pasted = "text/plain;charset=utf-8".withCString { mimePtr -> Bool in
+            textBytes.withUnsafeBufferPointer { buffer -> Bool in
+                guard let base = buffer.baseAddress else { return false }
+                return base.withMemoryRebound(to: CChar.self, capacity: buffer.count) { charPtr in
+                    doc.handle.pointee.pClass.pointee.paste?(doc.handle, mimePtr, charPtr, buffer.count) ?? false
+                }
+            }
+        }
+        guard pasted else {
+            throw SaveError.saveAsFailed("debugEdit: paste() reported failure")
         }
     }
     #endif
@@ -606,7 +639,74 @@ final class LOKBridge: OfficeDocumentBridge {
         Self.sweepStaleProfileDirectories(statePath: statePath)
         let profileDir = statePath.appendingPathComponent("lok-profile-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: profileDir, withIntermediateDirectories: true)
+        try Self.disableDocumentLockFile(profileDir: profileDir)
         return URL(fileURLWithPath: profileDir.path, isDirectory: true).absoluteString
+    }
+
+    /// Office Stage B Task 2 (live-gate finding, not a brief line item) — pre-seeds this boot's
+    /// fresh profile with `UseDocumentOOoLockFile=false`, LO's own registry property (under
+    /// `org.openoffice.Office.Common/Misc`) for the `.~lock.<name>#` sidecar marker.
+    ///
+    /// **This does NOT fix Task 2's live dirty-tracking bug — it is kept purely on its own merits**
+    /// (below). The real bug, root-caused live and confirmed by THREE independent methods, is a
+    /// SEPARATE, unresolved finding reported to the dispatcher as NEEDS_CONTEXT (task-2-report.md
+    /// has the full writeup): a raw wire probe (`open` -> `tileRequest` -> `debugEdit`, direct
+    /// against `NormaOfficeHelper`, one variable moved at a time) isolates the break to
+    /// **sandboxed + document-path-outside-`--state-path`** — every combination of unsandboxed, or
+    /// sandboxed-with-the-document-copied-inside-the-fence, fires `.uno:ModifiedStatus=true`
+    /// correctly; sandboxed-and-outside (how every real document is ever opened — the fence is
+    /// `--state-path` only, by T1's own invariant) never does. Two locking-knob theories were tried
+    /// against that broken cell and BOTH disproven (`UseDocumentOOoLockFile=false` alone: no
+    /// change; adding `UseDocumentSystemFileLocking=false` too: still no change — reverted, see
+    /// below). The type=8 `STATE_CHANGED` cascade diffed clean between a working and the broken
+    /// capture: `.uno:EditDoc` — LO's own "switch to edit mode" toggle — fires `true` in the
+    /// working cell and never does in the broken one, alongside `.uno:Paste`/`.uno:Undo`/a large
+    /// block of insert-verb commands present ONLY when working. An independent `chmod 444` probe
+    /// (zero sandboxing, zero `--state-path` involved at all) reproduces the identical signature
+    /// (`ModifiedStatus` only ever `false`, `EditDoc` only ever `false`) — proving the mechanism is
+    /// general "LO opened this document read-only," not sandbox-specific: `paste()` still reports
+    /// success (it mutates the in-memory model) but is a silent no-op against a read-only medium,
+    /// so the modified flag can never flip. Likely mechanism: LO's `SfxMedium` decides writability
+    /// by attempting a write-classed open on the document's OWN path at load time (separate from
+    /// this helper's own `saveAs`, which always targets `<state-path>/saves/` and is unaffected);
+    /// under the sandbox that open is denied for any path outside `--state-path`, so every real
+    /// document loads read-only. The fix is one of two decisions above this task's authority — widen
+    /// `office-helper.sb`'s fence (explicitly forbidden to this task: report NEEDS_CONTEXT instead
+    /// of touching it) or redesign the open path to copy into `--state-path` and place back out
+    /// (`saveAs` already does exactly this shape for the WRITE side) — named, not chosen, in the
+    /// report.
+    ///
+    /// **Why `UseDocumentOOoLockFile=false` stays despite not being the fix**: independently
+    /// justified — no sidecar-file litter beside the user's real documents; T3's own
+    /// `testOpeningADocumentInAWritableDirectoryLeavesNoLockFileBeside` now holds for a stronger
+    /// reason (LO no longer attempts the file, rather than merely "hasn't yet"); and Norma's own
+    /// architecture is single-writer per document (one helper, one dedicated LOK thread, no
+    /// multi-process contention LO's own advisory lock is protecting against here). Its sibling
+    /// `UseDocumentSystemFileLocking=false` was tried and reverted — no independent justification
+    /// once it failed to explain the bug, and disabling OS-level advisory locking is a real behavior
+    /// change not worth carrying without one.
+    ///
+    /// Property name and its enclosing `Misc` group path confirmed empirically against the vendored
+    /// tree's own schema (`Resources/registry/main.xcd`, component `org.openoffice.Office.Common`)
+    /// and against a live-booted helper's own `user/registrymodifications.xcu` (same path, same
+    /// `oor:items`/`item`/`prop` shape reproduced below) — not guessed from generic LO docs.
+    ///
+    /// Written directly to `<profileDir>/user/registrymodifications.xcu` BEFORE `lok_init_2` reads
+    /// this profile for the first time — LO treats this file as its own persisted overlay and folds
+    /// it in on boot, the same file it would otherwise create itself on first run (verified: a
+    /// normal boot's own `user/registrymodifications.xcu` already carries other `Misc`-group
+    /// entries in this exact shape, e.g. `FirstRun`).
+    private static func disableDocumentLockFile(profileDir: URL) throws {
+        let userDir = profileDir.appendingPathComponent("user", isDirectory: true)
+        try FileManager.default.createDirectory(at: userDir, withIntermediateDirectories: true)
+        let xcu = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <oor:items xmlns:oor="http://openoffice.org/2001/registry" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+        <item oor:path="/org.openoffice.Office.Common/Misc"><prop oor:name="UseDocumentOOoLockFile" oor:op="fuse"><value>false</value></prop></item>
+        </oor:items>
+        """
+        try xcu.write(
+            to: userDir.appendingPathComponent("registrymodifications.xcu"), atomically: true, encoding: .utf8)
     }
 
     /// Best-effort — a sweep failure (permissions, a concurrent deletion, an unreadable entry, ...)

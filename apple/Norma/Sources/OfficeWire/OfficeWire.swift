@@ -81,9 +81,11 @@ public enum OfficeWireFrame: Equatable, Sendable {
     #if DEBUG
     /// Office Stage B Task 2 — **DEBUG-only, and REMOVED BY TASK 4** (which lands real edit verbs).
     /// The one wire door this task's own live round-trip test uses to prove a save persists a REAL
-    /// content change, in the absence of any shipped input verb yet: posts LOK's `.uno:EnterString`
-    /// command (LibreOffice's own "type this into the current cell/selection and commit" dispatch,
-    /// argument name `StringName`) on the LOK dedicated thread, via `postUnoCommand`. `#if DEBUG` at
+    /// content change, in the absence of any shipped input verb yet: selects a cell (`.uno:GoToCell`)
+    /// then pastes `text` into it (`LibreOfficeKitDocumentClass.paste`) on the LOK dedicated thread —
+    /// see `LOKBridge.debugEditOnDedicatedThread`'s own header for why `paste`, not the brief's own
+    /// suggested `.uno:EnterString` (a live-test-caught correction: that UNO dispatch popped a real
+    /// LOK window callback this headless door cannot answer, and crashed the helper). `#if DEBUG` at
     /// the CASE level, not merely at a call site — this frame cannot be constructed, encoded, or
     /// decoded at all outside a DEBUG build, so a Release helper has no way to reach it: it is
     /// simply absent from `wireTypes` in that configuration, and an attempt to send it is refused
