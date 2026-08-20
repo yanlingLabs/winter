@@ -543,8 +543,9 @@ final class LOKBridge: OfficeDocumentBridge {
         // Ruled out as a red herring while root-causing the dirty-tracking bug (task-2-report.md):
         // disabling GoToCell entirely reproduced the SAME missing-modified-callback failure, which
         // is what pointed the search away from this dispatch and at the sandboxed document-outside-
-        // fence lock-file EPERM instead (see `disableDocumentLockFile`'s header). GoToCell itself
-        // was never the problem — restored unconditionally.
+        // fence condition instead (see `disableDocumentLockFile`'s header for the read-only-medium
+        // finding that condition actually root-caused to). GoToCell itself was never the problem —
+        // restored unconditionally.
         let gotoPayload: [String: Any] = ["ToPoint": ["type": "string", "value": "D10"]]
         if let gotoData = try? JSONSerialization.data(withJSONObject: gotoPayload),
            let gotoString = String(data: gotoData, encoding: .utf8) {
