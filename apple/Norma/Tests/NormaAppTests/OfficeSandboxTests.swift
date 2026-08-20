@@ -1,5 +1,8 @@
 import XCTest
 @testable import Norma
+#if canImport(Darwin)
+import Darwin
+#endif
 
 /// Office Stage B Task 1 — the seatbelt. Spawns the REAL, compiled `NormaOfficeHelper` binary
 /// directly (same "drive the real process, not a double" posture `OfficeHelperLiveTests` already
@@ -146,9 +149,22 @@ final class OfficeSandboxTests: XCTestCase {
 
     // MARK: - Network fence
 
+    /// Fix round 1 (task review, Important): asserting only `rc != 0` (any failure counts as
+    /// "denied") is not the same claim as "the SANDBOX denied this" — an offline machine (no route
+    /// to 1.1.1.1) can fail `connect()` with `ENETDOWN`/`EHOSTUNREACH` from the network stack
+    /// itself, before the sandbox's own check ever runs, and the probe's "ok"/"denied" label would
+    /// still read "denied" either way. This repo runs Wi-Fi-off drills routinely (CLAUDE.md's own
+    /// "never launch the dist app" hard-rule neighbors several test-isolation notes in this same
+    /// vein) — a green run here must mean "the fence denied it," not "the network happened to be
+    /// unreachable for an unrelated reason," or this test could stay green with a completely broken
+    /// `(deny network*)` rule. `EPERM` is the specific errno a real sandbox denial produces here —
+    /// measured directly (main.swift's own header / task-1-report.md: a standalone C harness under
+    /// this exact profile shape) — so asserting the FULL `"denied errno=\(EPERM)"` string, not just
+    /// `"denied"`, is what makes this test fail on a broken fence even on a machine where the
+    /// underlying network happens to be down for an unrelated reason too.
     func testOutboundConnectIsDenied() async throws {
         let (output, _) = try await runProbe(kind: "connect-outbound")
-        XCTAssertTrue(output.contains("PROBE_RESULT: connect-outbound denied"), "got: \(output)")
+        XCTAssertTrue(output.contains("PROBE_RESULT: connect-outbound denied errno=\(EPERM)"), "got: \(output)")
     }
 
     // MARK: - Fail-closed: a missing/unreadable profile refuses to serve, in EITHER config
