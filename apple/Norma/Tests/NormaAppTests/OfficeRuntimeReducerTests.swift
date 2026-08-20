@@ -224,6 +224,139 @@ final class OfficeRuntimeReducerTests: XCTestCase {
         XCTAssertEqual(effects, [])
     }
 
+    // MARK: - Office Stage B Task 2: saveRequested / saveSucceeded / saveFailed / modifiedStatusChanged
+
+    /// An open document at `.ready`, for the save tests below — mirrors `ready()`'s own shape one
+    /// level up but LEAVES the document open (`ready()` itself opens then closes `/warm.xlsx`, so
+    /// it is never useful here).
+    private func readyWithOpenDocument(path: String = "/a.xlsx", docId: String = "doc-a") -> OfficeRuntimeState {
+        reduce(OfficeRuntimeState(), [.openRequested(path: path), .helperBecameReady,
+                                       .opened(path: path, docId: docId, metadata: metadata)]).0
+    }
+
+    func testSaveRequestedFromIdleIsANoOp() {
+        let (state, effects) = reduce(OfficeRuntimeState(), [.saveRequested(path: "/a.xlsx")])
+        XCTAssertEqual(state, OfficeRuntimeState())
+        XCTAssertEqual(effects, [])
+    }
+
+    func testSaveRequestedFromStartingIsANoOp() {
+        let (starting, _) = reduce(OfficeRuntimeState(), [.openRequested(path: "/a.xlsx")])
+        let (state, effects) = reduce(starting, [.saveRequested(path: "/a.xlsx")])
+        XCTAssertEqual(state, starting)
+        XCTAssertEqual(effects, [])
+    }
+
+    func testSaveRequestedFromFailedIsANoOp() {
+        let (failed, _) = reduce(OfficeRuntimeState(), [.helperUnavailable])
+        let (state, effects) = reduce(failed, [.saveRequested(path: "/a.xlsx")])
+        XCTAssertEqual(state, failed)
+        XCTAssertEqual(effects, [])
+    }
+
+    func testSaveRequestedFromReadyWithNoOpenDocumentIsANoOp() {
+        let (state, effects) = reduce(ready(), [.saveRequested(path: "/never-opened.xlsx")])
+        XCTAssertEqual(state, ready())
+        XCTAssertEqual(effects, [])
+    }
+
+    func testSaveRequestedFromReadyWithAnOpenDocumentEmitsSaveWithItsDocId() {
+        let open = readyWithOpenDocument(path: "/a.xlsx", docId: "doc-a")
+        let (state, effects) = reduce(open, [.saveRequested(path: "/a.xlsx")])
+        XCTAssertEqual(state, open, "saveRequested alone touches no state — only the imperative half's own round trip does")
+        XCTAssertEqual(effects, [.save(path: "/a.xlsx", docId: "doc-a")])
+    }
+
+    func testSaveSucceededClearsAStandingDeletedBanner() {
+        var open = readyWithOpenDocument(path: "/a.xlsx", docId: "doc-a")
+        open.documentBanners["/a.xlsx"] = "File was deleted on disk"
+
+        let (state, effects) = reduce(open, [.saveSucceeded(path: "/a.xlsx", docId: "doc-a")])
+        XCTAssertNil(state.documentBanners["/a.xlsx"], "a file just placed on disk cannot still be "
+                     + "saying it was deleted")
+        XCTAssertEqual(effects, [])
+    }
+
+    func testSaveSucceededForAPathWithNoDocumentIsANoOp() {
+        let (state, effects) = reduce(ready(), [.saveSucceeded(path: "/never-opened.xlsx", docId: "doc-a")])
+        XCTAssertEqual(state, ready())
+        XCTAssertEqual(effects, [])
+    }
+
+    /// The stale-save guard: a RELOAD replaced `/a.xlsx`'s docId while this save's own round trip
+    /// was still in flight (two independent async operations racing the same path) — the OLD
+    /// docId's save landing here must not touch the NEW entry's banner.
+    func testSaveSucceededForADocIdThatHasSinceBeenReplacedByAReloadIsANoOp() {
+        var open = readyWithOpenDocument(path: "/a.xlsx", docId: "doc-old")
+        open.documentBanners["/a.xlsx"] = "File was deleted on disk" // the reload's own banner-clear, simulated
+        let (reloaded, _) = reduce(open, [.opened(path: "/a.xlsx", docId: "doc-new", metadata: metadata)])
+
+        let (state, effects) = reduce(reloaded, [.saveSucceeded(path: "/a.xlsx", docId: "doc-old")])
+        XCTAssertEqual(state, reloaded, "the stale save must not touch the newer entry's state at all")
+        XCTAssertEqual(effects, [])
+    }
+
+    func testSaveSucceededOutsideReadyIsANoOp() {
+        let (failed, _) = reduce(OfficeRuntimeState(), [.helperUnavailable])
+        let (state, effects) = reduce(failed, [.saveSucceeded(path: "/a.xlsx", docId: "doc-a")])
+        XCTAssertEqual(state, failed)
+        XCTAssertEqual(effects, [])
+    }
+
+    func testSaveFailedSetsABannerReusingDocumentBannersAndEmitsIt() {
+        let open = readyWithOpenDocument(path: "/a.xlsx", docId: "doc-a")
+        let (state, effects) = reduce(open, [.saveFailed(path: "/a.xlsx", docId: "doc-a", reason: "disk full")])
+        XCTAssertEqual(state.documentBanners["/a.xlsx"], "Couldn't save a.xlsx: disk full",
+                       "reuses documentBanners verbatim — Task 8's own doc comment foretold this "
+                       + "exact reuse rather than a second banner field")
+        XCTAssertEqual(effects, [.emitBanner(reason: "Couldn't save a.xlsx: disk full")])
+    }
+
+    func testSaveFailedForADocIdThatHasSinceBeenReplacedIsANoOp() {
+        let open = readyWithOpenDocument(path: "/a.xlsx", docId: "doc-old")
+        let (reloaded, _) = reduce(open, [.opened(path: "/a.xlsx", docId: "doc-new", metadata: metadata)])
+
+        let (state, effects) = reduce(reloaded, [.saveFailed(path: "/a.xlsx", docId: "doc-old", reason: "disk full")])
+        XCTAssertEqual(state, reloaded, "a stale save's failure must not bannerize the newer, unrelated entry")
+        XCTAssertEqual(effects, [])
+    }
+
+    func testSaveFailedForAPathWithNoDocumentIsANoOp() {
+        let (state, effects) = reduce(ready(), [.saveFailed(path: "/never-opened.xlsx", docId: "doc-a", reason: "x")])
+        XCTAssertEqual(state, ready())
+        XCTAssertEqual(effects, [])
+    }
+
+    func testModifiedStatusChangedTrueSetsDirtyOnTheMatchingDocumentFoundByDocId() {
+        let open = readyWithOpenDocument(path: "/a.xlsx", docId: "doc-a")
+        let (state, effects) = reduce(open, [.modifiedStatusChanged(docId: "doc-a", modified: true)])
+        XCTAssertEqual(state.documents["/a.xlsx"]?.dirty, true)
+        XCTAssertEqual(effects, [])
+    }
+
+    func testModifiedStatusChangedFalseAfterTrueClearsDirty() {
+        let open = readyWithOpenDocument(path: "/a.xlsx", docId: "doc-a")
+        let (dirty, _) = reduce(open, [.modifiedStatusChanged(docId: "doc-a", modified: true)])
+        XCTAssertEqual(dirty.documents["/a.xlsx"]?.dirty, true, "sanity")
+
+        let (clean, _) = reduce(dirty, [.modifiedStatusChanged(docId: "doc-a", modified: false)])
+        XCTAssertEqual(clean.documents["/a.xlsx"]?.dirty, false)
+    }
+
+    func testModifiedStatusChangedForAnUnknownDocIdIsANoOp() {
+        let open = readyWithOpenDocument(path: "/a.xlsx", docId: "doc-a")
+        let (state, effects) = reduce(open, [.modifiedStatusChanged(docId: "doc-that-does-not-exist", modified: true)])
+        XCTAssertEqual(state, open)
+        XCTAssertEqual(effects, [])
+    }
+
+    func testModifiedStatusChangedOutsideReadyIsANoOp() {
+        let (failed, _) = reduce(OfficeRuntimeState(), [.helperUnavailable])
+        let (state, effects) = reduce(failed, [.modifiedStatusChanged(docId: "doc-a", modified: true)])
+        XCTAssertEqual(state, failed)
+        XCTAssertEqual(effects, [])
+    }
+
     // MARK: - office-plumbing Task 8: externalChangeDetected / externalDeleted / reloadFailed
 
     func testExternalChangeDetectedOnAnOpenDocumentReloadsSilently() {
@@ -1065,5 +1198,212 @@ final class OfficeRuntimeWatcherTests: XCTestCase {
         runtimes.append(runtime)
         runtime.fileChangedOnDisk("/never-opened.xlsx") // must not crash, must not dispatch anything
         XCTAssertEqual(runtime.stateSnapshot, OfficeRuntimeState())
+    }
+
+    // MARK: - Office Stage B Task 2: the save-suppression bag, driven through a real OfficeRuntime
+    //
+    // The bag Task 8's own comment predicted ("Stage B (once save exists) inherits that pattern
+    // KNOWINGLY") arrives here. `officeDiskChange`'s `.ours` arm is not unit-tested on its own — it
+    // never was, even pre-Task-2 (`officeDiskChange`'s two-way version had no dedicated pure test
+    // either, only reducer-level `.externalChangeDetected`/`.externalDeleted` proofs) — the STRONGER
+    // claim this section proves instead: a real save, through a real `OfficeRuntime`, leaves its own
+    // watcher silent when it fires.
+
+    /// **The load-bearing proof**: without the suppression bag, this fire would reload — a genuine
+    /// content change (the temp file's own bytes) landed on `path` between the baseline `open` read
+    /// and this fire, exactly the shape `testFileChangedOnDiskWithAGenuineRewriteReloadsWithANewDocId`
+    /// above proves DOES reload for an unclaimed change. The docId staying put IS the suppression
+    /// working — the tripwire the task's own brief names: "documents[path].docId unchanged across
+    /// the save."
+    ///
+    /// **The bag is already empty by the time this fires** (a real finding, caught by this exact
+    /// test before the fix — see `performSave`'s own `withdrawExpectedWrite` comment): the baseline
+    /// re-seed lands, synchronously, in the SAME continuation, before this test ever calls
+    /// `watcher.fire()`, so the fire below reads `.unchanged` (the baseline already matches),
+    /// never `.ours` — the bag's own job is the narrower race
+    /// `testAGenuineOursRaceIsConsumedWhenTheFireArrivesBeforeTheBaselineReSeeds` below exercises
+    /// directly. Both are "suppressed," just via different arms of `officeDiskChange`.
+    func testASavesOwnWatcherFireIsSuppressedAndDoesNotReload() async throws {
+        let path = try scratchFile(contents: "one")
+        let tempDir = URL(fileURLWithPath: "/tmp/office-watcher-save-temp-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        scratchDirs.append(tempDir)
+        let tempPath = tempDir.appendingPathComponent("rendered.xlsx").path
+        try "the helper's own rendered content".write(toFile: tempPath, atomically: true, encoding: .utf8)
+
+        let watchers = OfficeWatcherRecorder()
+        let runtime = OfficeRuntime(sessionId: "S1", driver: makeDriver(save: { _ in tempPath }),
+                                    makeWatcher: watchers.factory)
+        runtimes.append(runtime)
+        runtime.open(path)
+        _ = await waitUntil { runtime.stateSnapshot.documents[path] != nil }
+        let originalDocId = try XCTUnwrap(runtime.stateSnapshot.documents[path]?.docId)
+
+        runtime.save(path)
+        let saved = await waitUntil {
+            (try? String(contentsOfFile: path, encoding: .utf8)) == "the helper's own rendered content"
+        }
+        XCTAssertTrue(saved, "the real file must hold the helper's rendered content once the save lands")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: tempPath), "the helper's own temp render "
+                       + "must be cleaned up once placed, win or lose")
+        let settled = await waitUntil { runtime.expectedWriteCount(for: path) == 0 }
+        XCTAssertTrue(settled, "the save's own note is withdrawn by its own continuation, not left "
+                      + "for a watcher to find")
+
+        // The watcher's own fire — exactly what a real DispatchSource would deliver for this save's
+        // own rename, simulated directly (the watcher mechanism itself is `OfficeWatcherRecorder`'s
+        // double, unmodified — see this file's own header on why that is never re-tested here).
+        let watcher = try XCTUnwrap(watchers.watchers[path])
+        watcher.fire()
+
+        try? await Task.sleep(nanoseconds: 30_000_000) // give a wrongly-reloading version time to act
+        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.docId, originalDocId, "a real reload "
+                       + "here would mint a fresh docId — the task's own tripwire")
+        XCTAssertNil(runtime.stateSnapshot.documentBanners[path], "no banner — a silent reload was "
+                     + "never even attempted")
+    }
+
+    /// **The genuine `.ours` race, provoked directly** (bypassing `performSave`'s own async round
+    /// trip, which — per the test above — usually wins the race against a fire): note a write is
+    /// about to happen, put NEW bytes on disk exactly as a landed rename would, then fire the
+    /// watcher's callback BEFORE anything re-seeds the baseline. This is the ONE window
+    /// `performSave`'s own comment names ("the rename has landed and this continuation has not run
+    /// yet") — proving the bag itself does the right thing when it, rather than the re-seed, is
+    /// what has to catch the fire.
+    func testAGenuineOursRaceIsConsumedWhenTheFireArrivesBeforeTheBaselineReSeeds() async throws {
+        let path = try scratchFile(contents: "one")
+        let runtime = OfficeRuntime(sessionId: "S1", driver: makeDriver())
+        runtimes.append(runtime)
+        runtime.open(path)
+        _ = await waitUntil { runtime.stateSnapshot.documents[path] != nil }
+        let originalDocId = try XCTUnwrap(runtime.stateSnapshot.documents[path]?.docId)
+
+        runtime.noteExpectedWrite(path: path) // "a write is about to happen" — performSave's own first act
+        try "the rename already landed".write(toFile: path, atomically: true, encoding: .utf8)
+        runtime.fileChangedOnDisk(path) // the fire arrives before performSave's own re-seed would have
+
+        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.docId, originalDocId, "classified "
+                       + ".ours — must not reload")
+        XCTAssertNil(runtime.stateSnapshot.documentBanners[path])
+        XCTAssertEqual(runtime.expectedWriteCount(for: path), 0, "the fire consumed the note; "
+                       + "performSave's own later `withdrawExpectedWrite` (a no-op on an absent key) "
+                       + "must not double-decrement or crash")
+    }
+
+    /// A save that never gets a watcher fire at all (the debounce coalesced it away, or nothing in
+    /// this test triggers one) still leaves the real content correct AND leaves no leaked note —
+    /// `performSave`'s own `withdrawExpectedWrite` runs unconditionally on success, never waiting
+    /// for a fire that may not come (the exact leak this test would have caught pre-fix: the bag
+    /// stuck at 1 forever, ready to misclassify the NEXT genuine external edit as `.ours`).
+    func testASaveWithNoWatcherFireAtAllStillLeavesNoLeakedNote() async throws {
+        let path = try scratchFile(contents: "one")
+        let tempPath = try scratchFile(name: "rendered.xlsx", contents: "rendered")
+        let runtime = OfficeRuntime(sessionId: "S1", driver: makeDriver(save: { _ in tempPath }))
+        runtimes.append(runtime)
+        runtime.open(path)
+        _ = await waitUntil { runtime.stateSnapshot.documents[path] != nil }
+
+        runtime.save(path)
+        let saved = await waitUntil { (try? String(contentsOfFile: path, encoding: .utf8)) == "rendered" }
+        XCTAssertTrue(saved)
+        let settled = await waitUntil { runtime.expectedWriteCount(for: path) == 0 }
+        XCTAssertTrue(settled, "no fire ever arrived, and the note must still not be left standing")
+    }
+}
+
+// MARK: - Office Stage B Task 2: OfficeRuntime.placeAtomically, driven directly
+
+/// The atomic-place primitive on its own — no `OfficeRuntime`, no driver, just real scratch files.
+/// Mirrors `EditorSaveTests`' own `testTheAtomicWrite*` block in spirit (same claims: replaces the
+/// destination, creates one that was not there, keeps the original's permissions, leaves no
+/// leftover temp on failure) — adapted for a source that is already bytes ON DISK rather than an
+/// in-memory `String`.
+final class OfficePlaceAtomicallyTests: XCTestCase {
+    private var scratchDirs: [URL] = []
+
+    override func tearDown() {
+        for dir in scratchDirs { try? FileManager.default.removeItem(at: dir) }
+        scratchDirs.removeAll()
+        super.tearDown()
+    }
+
+    private func makeScratchDirectory() -> URL {
+        let dir = URL(fileURLWithPath: "/tmp/office-place-atomically-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        scratchDirs.append(dir)
+        return dir
+    }
+
+    func testReplacesAnExistingDestinationWithTheTempsContentAndLeavesNoLeftoverTemp() throws {
+        let docDir = makeScratchDirectory()
+        let destination = docDir.appendingPathComponent("gate.xlsx")
+        try "original".write(to: destination, atomically: true, encoding: .utf8)
+        let helperTempDir = makeScratchDirectory() // a DIFFERENT directory — the whole point being proven
+        let helperTemp = helperTempDir.appendingPathComponent("rendered")
+        try "rendered content".write(to: helperTemp, atomically: true, encoding: .utf8)
+
+        try OfficeRuntime.placeAtomically(tempPath: helperTemp.path, at: destination.path)
+
+        XCTAssertEqual(try String(contentsOf: destination, encoding: .utf8), "rendered content")
+        let siblings = try FileManager.default.contentsOfDirectory(atPath: docDir.path)
+        XCTAssertEqual(siblings, ["gate.xlsx"], "no `.norma-save-…` sibling left behind")
+    }
+
+    func testCreatesADestinationThatWasNotThere() throws {
+        let docDir = makeScratchDirectory()
+        let destination = docDir.appendingPathComponent("new.xlsx")
+        let helperTemp = makeScratchDirectory().appendingPathComponent("rendered")
+        try "brand new".write(to: helperTemp, atomically: true, encoding: .utf8)
+
+        try OfficeRuntime.placeAtomically(tempPath: helperTemp.path, at: destination.path)
+
+        XCTAssertEqual(try String(contentsOf: destination, encoding: .utf8), "brand new")
+    }
+
+    func testKeepsTheOriginalsPosixPermissions() throws {
+        let docDir = makeScratchDirectory()
+        let destination = docDir.appendingPathComponent("gate.xlsx")
+        try "original".write(to: destination, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
+        let helperTemp = makeScratchDirectory().appendingPathComponent("rendered")
+        try "rendered".write(to: helperTemp, atomically: true, encoding: .utf8)
+
+        try OfficeRuntime.placeAtomically(tempPath: helperTemp.path, at: destination.path)
+
+        let mode = (try FileManager.default.attributesOfItem(atPath: destination.path))[.posixPermissions] as? Int
+        XCTAssertEqual(mode, 0o600)
+    }
+
+    func testThrowsAndLeavesNoSiblingWhenTheDestinationDirectoryIsNotThere() throws {
+        let missingDir = URL(fileURLWithPath: "/tmp/office-place-atomically-missing-\(UUID().uuidString.prefix(8))")
+        let destination = missingDir.appendingPathComponent("gate.xlsx")
+        let helperTemp = makeScratchDirectory().appendingPathComponent("rendered")
+        try "rendered".write(to: helperTemp, atomically: true, encoding: .utf8)
+
+        XCTAssertThrowsError(try OfficeRuntime.placeAtomically(tempPath: helperTemp.path, at: destination.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: missingDir.path), "never even creates "
+                       + "the missing directory, let alone a leftover sibling in it")
+    }
+
+    /// The EXDEV-safety argument, made concrete rather than only argued in the doc comment: the
+    /// helper's own temp lives in a WHOLLY UNRELATED directory tree from the document's — proving
+    /// the source and the final rename target never need to share a directory, which is what makes
+    /// the design safe against them not sharing a FILESYSTEM either (`FileManager.copyItem` handles
+    /// a cross-volume source; the actual `rename(2)` is always same-directory, by construction, no
+    /// matter where `tempPath` started out — see `placeAtomically`'s own doc for the full argument).
+    func testSourceAndDestinationNeedNoRelationshipAtAll() throws {
+        let unrelatedRoot = makeScratchDirectory()
+        let helperTemp = unrelatedRoot
+            .appendingPathComponent("deeply/nested/state/path/saves", isDirectory: true)
+        try FileManager.default.createDirectory(at: helperTemp, withIntermediateDirectories: true)
+        let renderedFile = helperTemp.appendingPathComponent("doc-1-7.xlsx")
+        try "far away content".write(to: renderedFile, atomically: true, encoding: .utf8)
+
+        let docDir = makeScratchDirectory()
+        let destination = docDir.appendingPathComponent("gate.xlsx")
+        try "original".write(to: destination, atomically: true, encoding: .utf8)
+
+        try OfficeRuntime.placeAtomically(tempPath: renderedFile.path, at: destination.path)
+        XCTAssertEqual(try String(contentsOf: destination, encoding: .utf8), "far away content")
     }
 }

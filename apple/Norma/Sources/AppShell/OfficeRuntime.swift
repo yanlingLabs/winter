@@ -1015,9 +1015,25 @@ final class OfficeRuntime: ObservableObject {
                     // `EditorRuntime.noteWriteLanded`'s identical belt: the next watcher fire,
                     // whenever it arrives (including a debounce-coalesced one that never fires at
                     // all), is compared against bytes this save itself produced, not a stale
-                    // pre-save snapshot — the fix for the ONE window the counted bag alone cannot
-                    // cover (the rename has landed and this continuation has not run yet).
+                    // pre-save snapshot.
                     self.diskBaselines[path] = officeFileStat(atPath: path)
+                    // **Withdraw the ONE note this save's own `noteExpectedWrite` filed above** —
+                    // NOT `EditorRuntime.noteWriteLanded`'s unconditional whole-bag clear, and the
+                    // difference is deliberate: that clear is only safe because
+                    // `EditorSaveCoordinator` coalesces saves per path ("at most one write per path
+                    // is ever in flight" — that method's own doc states this as the precondition),
+                    // and `OfficeRuntime.save` has no equivalent coalescing (a second ⌘S for the
+                    // same path while the first is still in flight is a second, independent
+                    // `.save` effect, a second `noteExpectedWrite`). Withdrawing exactly one
+                    // leaves a genuinely still-outstanding SECOND save's own note untouched, while
+                    // still correctly returning this path to a clean count when this is the only
+                    // one in flight — verified empirically (`OfficeRuntimeWatcherTests
+                    // .testASavesOwnWatcherFireIsSuppressedAsOursAndDoesNotReload` caught the
+                    // leaked-note version of this bug: the re-seed above already makes a fire that
+                    // arrives AFTER this line read `.unchanged`, which never touches the bag at
+                    // all, so a note left uncounted here would sit forever, ready to misclassify
+                    // the NEXT genuine external edit as `.ours`).
+                    self.withdrawExpectedWrite(path: path)
                     try? FileManager.default.removeItem(atPath: tempPath)
                     self.perform(self.dispatch(.saveSucceeded(path: path, docId: docId)))
                 } catch {
