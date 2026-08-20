@@ -4440,6 +4440,73 @@ final class ShellSessionHostTests: XCTestCase {
         XCTAssertEqual(Set(office.recorder.requestCalls[0].keys), Set(keys))
     }
 
+    // MARK: - office live-gate fix #3: whole-document tile residency's own door
+
+    /// `prefetchTilesChunk` bypasses `subscribeTiles` entirely (the canvas already knows exactly
+    /// which keys it wants — see that method's own header) but reaches the SAME `requestTiles` wire
+    /// call and the SAME store filtering/marking as `.subscribe`'s own effect, since both now share
+    /// `requestNeeded` internally.
+    func testPrefetchTilesChunkRequestsExactlyItsGivenKeysBypassingSubscribeTiles() async {
+        let (host, _) = makeHost()
+        let office = officeFactory()
+        host.makeOfficeRuntime = office.make
+        let runtime = host.officeRuntime(for: "S1")
+        runtime.open("/a.xlsx")
+        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.documents["/a.xlsx"] != nil }
+        let docId = runtime.stateSnapshot.documents["/a.xlsx"]!.docId
+        let keys = [tileKey(0, 0), tileKey(1, 0)]
+
+        await runtime.prefetchTilesChunk(path: "/a.xlsx", keys: keys)
+
+        XCTAssertEqual(office.recorder.subscribeCalls.count, 0, "prefetch never calls subscribeTiles")
+        XCTAssertEqual(office.recorder.requestCalls.count, 1)
+        XCTAssertEqual(office.recorder.requestCalls[0].docId, docId)
+        XCTAssertEqual(Set(office.recorder.requestCalls[0].keys), Set(keys))
+        XCTAssertEqual(runtime.tileStore.inFlightCountForTesting, 2)
+    }
+
+    /// The store-filtering half: a key already cached, or already requested by an ordinary
+    /// `subscribeTiles`-driven ask, must not be re-requested by an overlapping prefetch chunk — the
+    /// SAME `requestNeeded`/`keysNeedingRequest` discipline `.subscribe`'s own tests already pin,
+    /// extended to prove the TWO call paths (ordinary subscribe and prefetch) share it correctly.
+    func testPrefetchTilesChunkSkipsKeysAlreadyCachedOrInFlightFromAnOrdinarySubscribe() async {
+        let (host, _) = makeHost()
+        let office = officeFactory()
+        host.makeOfficeRuntime = office.make
+        let runtime = host.officeRuntime(for: "S1")
+        runtime.open("/a.xlsx")
+        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.documents["/a.xlsx"] != nil }
+        let docId = runtime.stateSnapshot.documents["/a.xlsx"]!.docId
+        let (k0, k1, k2) = (tileKey(0, 0), tileKey(1, 0), tileKey(0, 1))
+        office.recorder.subscribeReplies[docId] = [k0]
+
+        runtime.subscribeTiles(path: "/a.xlsx", part: 0, zoomPPT: 1000, viewportTwips: sampleViewport)
+        await officeWaitUntil(timeout: 2) { office.recorder.requestCalls.count == 1 }
+        XCTAssertEqual(Set(office.recorder.requestCalls[0].keys), [k0])
+
+        // A prefetch chunk covering k0 (already in flight from the ordinary subscribe above), k1
+        // (genuinely new) and k2 (genuinely new) must only request the two new ones.
+        await runtime.prefetchTilesChunk(path: "/a.xlsx", keys: [k0, k1, k2])
+
+        XCTAssertEqual(office.recorder.requestCalls.count, 2, "one call from the subscribe, one from the prefetch chunk")
+        XCTAssertEqual(Set(office.recorder.requestCalls[1].keys), [k1, k2],
+                       "k0 is already in flight — the prefetch chunk must not re-request it")
+    }
+
+    /// A prefetch chunk for a path with no open document (closed, or never opened) is a harmless
+    /// no-op — mirrors `.subscribeRequested`'s own `documents[path] != nil` guard, since a reload or
+    /// close can land between a canvas's prefetch chunks (`OfficeRuntime.prefetchTilesChunk`'s own doc).
+    func testPrefetchTilesChunkForAnUnopenedPathIsAHarmlessNoOp() async {
+        let (host, _) = makeHost()
+        let office = officeFactory()
+        host.makeOfficeRuntime = office.make
+        let runtime = host.officeRuntime(for: "S1")
+
+        await runtime.prefetchTilesChunk(path: "/never-opened.xlsx", keys: [tileKey(0, 0)])
+
+        XCTAssertTrue(office.recorder.requestCalls.isEmpty)
+    }
+
     /// The routing half of tile delivery (`ShellSessionHost.officeRuntime(owning:)`) — a linear scan
     /// by docId, deliberately not a maintained reverse index (see that method's own doc). Exercised
     /// directly here since the closures that CALL it (`wireOfficeTileCallbacks`) only ever fire off

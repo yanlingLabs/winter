@@ -303,6 +303,213 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         _ = host.teardownAllOfficeRuntimesAndStopHelper()
     }
 
+    // MARK: - office live-gate fix #3: whole-document tile residency's own live proof
+
+    /// A single-sheet flat ODS whose USED RANGE is forced far larger than `gate.xlsx`'s tiny real
+    /// content, without emitting one `<table:table-cell>` per cell: `table:number-columns-repeated`/
+    /// `table:number-rows-repeated` declare a large block of genuinely empty cells in O(1) XML size
+    /// (the same ODF idiom real LibreOffice-authored spreadsheets already use for sparse content —
+    /// `officeHarnessMultiSheetFodsContent`'s own `table:number-columns-repeated="4"` is the identical
+    /// mechanism at a small scale), and Calc's used-range is the bounding box of every NON-empty cell
+    /// — a value in the very first cell and another in the very last is enough to force the whole
+    /// block into the reported extent.
+    private func officeLiveLargeSheetFodsContent(columns: Int, rows: Int) -> String {
+        """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <office:document xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+            xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"
+            xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0"
+            office:version="1.3"
+            office:mimetype="application/vnd.oasis.opendocument.spreadsheet">
+          <office:body>
+            <office:spreadsheet>
+              <table:table table:name="T3BigSheet">
+                <table:table-column table:number-columns-repeated="\(columns)"/>
+                <table:table-row>
+                  <table:table-cell office:value-type="string"><text:p>NORMA T3 CORNER</text:p></table:table-cell>
+                </table:table-row>
+                <table:table-row table:number-rows-repeated="\(max(0, rows - 2))"/>
+                <table:table-row>
+                  <table:table-cell table:number-columns-repeated="\(max(0, columns - 1))"/>
+                  <table:table-cell office:value-type="float" office:value="1"><text:p>1</text:p></table:table-cell>
+                </table:table-row>
+              </table:table>
+            </office:spreadsheet>
+          </office:body>
+        </office:document>
+        """
+    }
+
+    /// **The central live proof.** `gate.xlsx` becomes FULLY resident through the REAL helper and
+    /// REAL vendored LibreOffice, then a rapid synthetic swipe in every direction — the same
+    /// `applyScrollDelta` sequence a real trackpad tick ultimately drives, mirroring `OfficeHarness
+    /// .performRapidScroll9`'s own technique for synthesizing scroll without a live NSEvent — produces
+    /// ZERO visible-placeholder draws: the live-gate brief's own bar ("zero placeholders during any
+    /// swipe on a resident doc after initial fill"), proven against real pixels and a real connection,
+    /// not a fake driver. Also opens a larger generated sheet and proves whichever regime it actually
+    /// lands in (resident or lazy-fallback) behaves correctly — the brief's own "and a LARGER
+    /// generated sheet" input, adaptive rather than hardcoded to a predicted tile count LOK's own
+    /// column/row default metrics are not something this file controls or has previously measured.
+    func testGateXlsxBecomesFullyResidentAndPostFillSwipingProducesNoPlaceholders() async throws {
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent()
+            .appendingPathComponent("NormaOfficeHelper")
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
+                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                        + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
+        let vendorRoot = Self.vendorProductSetRoot
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
+                      "LibreOffice vendor tree not present at \(vendorRoot.path) — run "
+                        + "`bun run libreoffice:fetch` from the repo root.")
+        let gatePath = Self.fixturesRoot.appendingPathComponent("gate.xlsx").path
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: gatePath), "gate.xlsx fixture missing at \(gatePath)")
+
+        let stateDir = makeScratchDirectory()
+        let directory = SessionDirectory(lister: { [] })
+        let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        host.makeOfficeHelperSupervisor = {
+            OfficeHelperSupervisor(configuration: OfficeHelperSupervisor.Configuration(
+                helperExecutableURL: helperURL,
+                socketDirectory: stateDir,
+                extraArguments: ["--lok-root", vendorRoot.path]))
+        }
+
+        let runtime = host.officeRuntime(for: "S1")
+        runtime.open(gatePath)
+        let settled = await waitUntil(timeout: 90) {
+            runtime.stateSnapshot.documents[gatePath] != nil || runtime.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(settled, "gate.xlsx never settled — phase: \(runtime.stateSnapshot.phase)")
+        guard let doc = runtime.stateSnapshot.documents[gatePath] else {
+            return XCTFail("gate.xlsx did not open: "
+                           + "\(runtime.stateSnapshot.openFailures[gatePath] ?? "no reason recorded")")
+        }
+        let docId = doc.docId
+        let eligibleCount = officeResidencyEligibleTileCount(sizeTwips: doc.sizeTwips, zoomPPT: 1000,
+                                                              cap: OfficeTileStore.residencyCapTiles)
+        XCTAssertNotNil(eligibleCount, "this live proof needs gate.xlsx (\(doc.sizeTwips)) to actually "
+                        + "qualify for residency — if this ever regresses, the fixture or the cap changed")
+
+        let model = PanelDocumentTabModel(tabId: "t3-live", path: gatePath)
+        let canvas = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: docId,
+                                          sizeTwips: doc.sizeTwips, initialPart: 0, model: model)
+        canvas.frame = NSRect(x: 0, y: 0, width: 400, height: 400)
+        let fillStart = Date()
+        canvas.mount()
+
+        let issued = await waitUntil(timeout: 60) { canvas.prefetchSweepIssuedForTesting }
+        XCTAssertTrue(issued, "the whole-document prefetch sweep must complete")
+
+        let fullExtent = OfficeTwipsRect(x: 0, y: 0, width: doc.sizeTwips.widthTwips, height: doc.sizeTwips.heightTwips)
+        let allKeys = TileMath.tileCoordinates(rectTwips: fullExtent, zoomPPT: 1000)
+            .map { TileKey(part: 0, zoomPPT: 1000, tileX: $0.tileX, tileY: $0.tileY) }
+        let resident = await waitUntil(timeout: 30) { allKeys.allSatisfy { runtime.tileStore.tile(docId: docId, key: $0) != nil } }
+        let fillMs = Date().timeIntervalSince(fillStart) * 1000
+        XCTAssertTrue(resident, "every tile in the full extent must actually be cached, not merely "
+                      + "requested (\(allKeys.filter { runtime.tileStore.tile(docId: docId, key: $0) == nil }.count) still missing)")
+        for key in allKeys {
+            guard let entry = runtime.tileStore.tile(docId: docId, key: key) else { continue }
+            XCTAssertEqual(entry.pixels.count, TileMath.bytesPerTile, "\(key): a whole tile's bytes")
+            XCTAssertTrue(entry.pixels.contains { $0 != 0 }, "\(key): real paint, not an untouched buffer")
+        }
+        // Printed, not asserted — the live-gate brief's own "time-to-full-residency" MEASURE number.
+        print("[office live-gate fix #3] gate.xlsx: \(allKeys.count) tile(s) resident in \(Int(fillMs))ms")
+
+        // --- swipe hard in every direction; zero placeholder draws is the brief's own bar. ---
+        let placeholdersBeforeSwipe = canvas.visiblePlaceholderDrawCountForTesting
+        for _ in 0..<10 { canvas.applyScrollDelta(dx: -40, dy: -40) } // toward the far corner
+        for _ in 0..<10 { canvas.applyScrollDelta(dx: 40, dy: 40) }   // back toward the origin
+        for _ in 0..<10 { canvas.applyScrollDelta(dx: 40, dy: -40) }  // the other diagonal
+        for _ in 0..<10 { canvas.applyScrollDelta(dx: -40, dy: 40) }
+        try? await Task.sleep(nanoseconds: 300_000_000) // let a wrongly-issued ask have time to appear
+        XCTAssertEqual(canvas.visiblePlaceholderDrawCountForTesting, placeholdersBeforeSwipe,
+                       "zero placeholder frames during any swipe on a resident doc — the live-gate's own bar")
+
+        canvas.unmount()
+
+        // --- the brief's own "and a LARGER generated sheet": adaptive to whichever regime the
+        // synthesized content actually lands in, since this file has no prior live measurement of
+        // real LOK's default column-width/row-height metrics to predict an exact tile count from. ---
+        let bigPath = makeScratchDirectory().appendingPathComponent("t3-big.fods").path
+        try officeLiveLargeSheetFodsContent(columns: 100, rows: 100).write(toFile: bigPath, atomically: true, encoding: .utf8)
+        runtime.open(bigPath)
+        let bigSettled = await waitUntil(timeout: 60) {
+            runtime.stateSnapshot.documents[bigPath] != nil || runtime.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(bigSettled, "the larger generated sheet never settled — phase: \(runtime.stateSnapshot.phase)")
+        guard let bigDoc = runtime.stateSnapshot.documents[bigPath] else {
+            return XCTFail("the larger generated sheet did not open: "
+                           + "\(runtime.stateSnapshot.openFailures[bigPath] ?? "no reason recorded")")
+        }
+        let bigEligible = officeResidencyEligibleTileCount(sizeTwips: bigDoc.sizeTwips, zoomPPT: 1000,
+                                                            cap: OfficeTileStore.residencyCapTiles)
+        print("[office live-gate fix #3] larger sheet: \(bigDoc.sizeTwips), eligible tile count = "
+              + "\(bigEligible.map(String.init) ?? "nil (ineligible — lazy fallback)")")
+
+        let bigModel = PanelDocumentTabModel(tabId: "t3-live-big", path: bigPath)
+        let bigCanvas = OfficeTileCanvasView(runtime: runtime, path: bigPath, docId: bigDoc.docId,
+                                             sizeTwips: bigDoc.sizeTwips, initialPart: 0, model: bigModel)
+        bigCanvas.frame = NSRect(x: 0, y: 0, width: 400, height: 400)
+        bigCanvas.mount()
+
+        if let bigEligible, bigEligible > 0 {
+            // Eligible: the same whole-extent residency proof as gate.xlsx above. `bigIssued` alone
+            // (measured directly, first attempt: proved genuinely NOT enough — see the git history
+            // around this comment) only means every chunk's REQUEST was sent, not that its pixels have
+            // actually ARRIVED and are cached (`prefetchSweepIssuedForTesting`'s own doc, verbatim);
+            // swiping the instant requests finish, before the last chunk's `onTile` pushes land, can
+            // still draw a handful of genuine placeholders — an honest race in THIS TEST's own
+            // measurement window, not evidence against the feature. Waiting for actual cache
+            // completeness before swiping is what makes the placeholder count below mean what it
+            // claims to mean.
+            let bigIssued = await waitUntil(timeout: 90) { bigCanvas.prefetchSweepIssuedForTesting }
+            XCTAssertTrue(bigIssued, "the larger sheet's own whole-document sweep must complete")
+            let bigFullExtent = OfficeTwipsRect(x: 0, y: 0, width: bigDoc.sizeTwips.widthTwips, height: bigDoc.sizeTwips.heightTwips)
+            let bigAllKeys = TileMath.tileCoordinates(rectTwips: bigFullExtent, zoomPPT: 1000)
+                .map { TileKey(part: 0, zoomPPT: 1000, tileX: $0.tileX, tileY: $0.tileY) }
+            let bigResident = await waitUntil(timeout: 60) {
+                bigAllKeys.allSatisfy { runtime.tileStore.tile(docId: bigDoc.docId, key: $0) != nil }
+            }
+            XCTAssertTrue(bigResident, "every tile in the larger sheet's extent must actually be cached "
+                          + "before the swipe measurement below means anything "
+                          + "(\(bigAllKeys.filter { runtime.tileStore.tile(docId: bigDoc.docId, key: $0) == nil }.count) still missing)")
+        } else {
+            // Ineligible (or LOK reported a genuinely empty sheet, `0` — either way, not "resident
+            // with a real sweep"): the ORIGINAL viewport+margin lazy path must still work, unchanged
+            // — the actual claim this half of the test exists to prove.
+            let bigViewport = officeViewportTwips(scrollOrigin: .zero, visibleSize: CGSize(width: 400, height: 400), zoomPPT: 1000)
+            let bigExpectedKeys = TileMath.viewportTileKeys(part: 0, zoomPPT: 1000, viewportTwips: bigViewport)
+            if !bigExpectedKeys.isEmpty {
+                let bigLazyFilled = await waitUntil(timeout: 30) {
+                    bigExpectedKeys.allSatisfy { runtime.tileStore.tile(docId: bigDoc.docId, key: $0) != nil }
+                }
+                XCTAssertTrue(bigLazyFilled, "an ineligible document must still fill its own viewport "
+                              + "through the unchanged lazy path")
+            }
+            XCTAssertFalse(bigCanvas.prefetchSweepIssuedForTesting, "an ineligible document must never "
+                           + "report a completed whole-document sweep")
+        }
+
+        // --- the churn-audit's own before/after instrument, run regardless of which regime this
+        // document landed in: a FAR, fast swipe (the document is ~6375pt wide at 100% zoom; this
+        // covers most of it in a handful of ticks — deliberately far enough to outrun a single
+        // viewport+margin ask, the exact "fast swipes outrun the requests" report this whole task
+        // answers) — printed, not asserted here, so this same test remains meaningful with
+        // `OfficeTileStore.residencyCapTiles` temporarily forced to 0 for a genuine before/after
+        // comparison against the SAME instrument in the SAME binary (only the swap-and-rebuild is
+        // manual; nothing here hardcodes an expectation tied to one or the other).
+        let bigPlaceholdersBeforeSwipe = bigCanvas.visiblePlaceholderDrawCountForTesting
+        for _ in 0..<20 { bigCanvas.applyScrollDelta(dx: -300, dy: -60) }
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        for _ in 0..<20 { bigCanvas.applyScrollDelta(dx: 300, dy: 60) }
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        let bigPlaceholderDelta = bigCanvas.visiblePlaceholderDrawCountForTesting - bigPlaceholdersBeforeSwipe
+        print("[office live-gate fix #3] larger sheet far/fast swipe: \(bigPlaceholderDelta) placeholder "
+              + "draw(s) (cap=\(OfficeTileStore.residencyCapTiles), eligible=\(bigEligible.map(String.init) ?? "nil"))")
+
+        bigCanvas.unmount()
+        _ = host.teardownAllOfficeRuntimesAndStopHelper()
+    }
+
     // MARK: - office-plumbing Task 8's own live drill (dispatch-ordered into this task, not T9 —
     // see the task report's own note on the brief-vs-dispatch discrepancy)
 

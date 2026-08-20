@@ -134,6 +134,120 @@ final class OfficeTileCanvasViewTests: XCTestCase {
         }
     }
 
+    // MARK: - office live-gate fix #3: whole-document tile residency — pure functions
+
+    /// A document whose full extent is EXACTLY the cap is eligible — `<=`, not `<`.
+    func testResidencyEligibleAtExactlyTheCap() {
+        // 2x2 tiles at zoomPPT 1000 (tileSpanTwips 5120): a 10240x10240 twips document is exactly 4 tiles.
+        let sizeTwips = OfficeDocumentSize(widthTwips: 10240, heightTwips: 10240)
+        XCTAssertEqual(officeResidencyEligibleTileCount(sizeTwips: sizeTwips, zoomPPT: 1000, cap: 4), 4)
+    }
+
+    /// One tile past the cap is refused — the safe direction (never "try anyway").
+    func testResidencyIneligibleOneTilePastTheCap() {
+        // 3x2 = 6 tiles: one axis spans 3 tile widths (15360 twips), the other 2 (10240 twips).
+        let sizeTwips = OfficeDocumentSize(widthTwips: 15360, heightTwips: 10240)
+        XCTAssertNil(officeResidencyEligibleTileCount(sizeTwips: sizeTwips, zoomPPT: 1000, cap: 4))
+    }
+
+    /// A degenerate empty document is trivially eligible — `0`, not `nil`: there is nothing to
+    /// prefetch, which is a valid (instant) answer, not a refusal.
+    func testResidencyEligibleForAZeroSizeDocumentReturnsZero() {
+        let sizeTwips = OfficeDocumentSize(widthTwips: 0, heightTwips: 0)
+        XCTAssertEqual(officeResidencyEligibleTileCount(sizeTwips: sizeTwips, zoomPPT: 1000, cap: 128), 0)
+    }
+
+    /// A document `TileMath.estimatedTileCount` itself refuses to enumerate (past
+    /// `maxTilesPerRectEnumeration`) reads as ineligible too, even against a huge `cap` — this
+    /// function never attempts what TileMath itself would refuse.
+    func testResidencyIneligibleWhenTileMathItselfRefusesToEnumerate() {
+        let sizeTwips = OfficeDocumentSize(widthTwips: 2_000_000, heightTwips: 2_000_000)
+        XCTAssertNil(officeResidencyEligibleTileCount(sizeTwips: sizeTwips, zoomPPT: 1000, cap: 1_000_000))
+    }
+
+    /// A cap of 0 makes every REAL document ineligible — the "before" toggle the live-gate MEASURE
+    /// step uses to compare against "after" from the same instrumented binary (only a genuinely
+    /// empty document, 0 tiles, is `<= 0`).
+    func testResidencyCapZeroForcesEveryRealDocumentIneligible() {
+        let sizeTwips = OfficeDocumentSize(widthTwips: 5120, heightTwips: 5120) // exactly 1 tile
+        XCTAssertNil(officeResidencyEligibleTileCount(sizeTwips: sizeTwips, zoomPPT: 1000, cap: 0))
+    }
+
+    /// The ordering's own named contract: visible keys come first, in `TileMath.viewportTileKeys`'s
+    /// own row-major order, and every OTHER key in the full extent follows — none dropped, none
+    /// duplicated.
+    func testResidencyPrefetchOrderPutsVisibleKeysFirstThenCoversEveryRemainingKeyExactlyOnce() {
+        // A 4x4 tile extent (20480x20480 twips at zoomPPT 1000); the visible viewport is the top-left
+        // 2x2 tiles (10240x10240).
+        let fullExtent = OfficeTwipsRect(x: 0, y: 0, width: 20480, height: 20480)
+        let visibleViewport = OfficeTwipsRect(x: 0, y: 0, width: 10240, height: 10240)
+        let order = officeResidencyPrefetchOrder(part: 0, zoomPPT: 1000, fullExtentTwips: fullExtent,
+                                                 visibleViewportTwips: visibleViewport)
+        let visible = TileMath.viewportTileKeys(part: 0, zoomPPT: 1000, viewportTwips: visibleViewport)
+        XCTAssertEqual(Array(order.prefix(visible.count)), visible, "visible keys lead, in TileMath's own order")
+
+        let expectedAll = Set(TileMath.tileCoordinates(rectTwips: fullExtent, zoomPPT: 1000)
+            .map { TileKey(part: 0, zoomPPT: 1000, tileX: $0.tileX, tileY: $0.tileY) })
+        XCTAssertEqual(Set(order), expectedAll, "every tile in the full extent appears — none dropped")
+        XCTAssertEqual(order.count, Set(order).count, "none duplicated")
+        XCTAssertEqual(order.count, 16, "sanity: a 4x4 extent is 16 tiles")
+    }
+
+    /// The "rest" half is genuinely nearest-to-farthest from the visible viewport's own center —
+    /// proven by hand against a small, fully-enumerable extent where the correct order is obvious by
+    /// inspection.
+    func testResidencyPrefetchOrderOrdersTheRestNearestToFarthestFromTheVisibleCenter() {
+        // A 1x3 row of tiles; the visible viewport is tile (0,0) alone. The center of a single tile's
+        // viewport is that tile's own coordinate, so the rest — (1,0) then (2,0) — must come out in
+        // exactly that order: (1,0) is one step away, (2,0) is two.
+        let fullExtent = OfficeTwipsRect(x: 0, y: 0, width: 5120 * 3, height: 5120)
+        let visibleViewport = OfficeTwipsRect(x: 0, y: 0, width: 5120, height: 5120)
+        let order = officeResidencyPrefetchOrder(part: 0, zoomPPT: 1000, fullExtentTwips: fullExtent,
+                                                 visibleViewportTwips: visibleViewport)
+        XCTAssertEqual(order, [
+            TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0),
+            TileKey(part: 0, zoomPPT: 1000, tileX: 1, tileY: 0),
+            TileKey(part: 0, zoomPPT: 1000, tileX: 2, tileY: 0),
+        ])
+    }
+
+    /// A zero-area visible viewport (a canvas not yet laid out) degenerates gracefully: nothing is
+    /// "visible first," but the full extent is still covered — TileMath itself never traps on this,
+    /// and neither does this function.
+    func testResidencyPrefetchOrderWithAnEmptyVisibleViewportStillCoversTheWholeExtent() {
+        let fullExtent = OfficeTwipsRect(x: 0, y: 0, width: 10240, height: 10240)
+        let order = officeResidencyPrefetchOrder(part: 0, zoomPPT: 1000, fullExtentTwips: fullExtent,
+                                                 visibleViewportTwips: OfficeTwipsRect(x: 0, y: 0, width: 0, height: 0))
+        XCTAssertEqual(order.count, 4, "a 2x2 extent is 4 tiles, all present even with nothing 'visible'")
+    }
+
+    // MARK: - office live-gate fix #3: officeChunked
+
+    func testChunkedSplitsIntoEvenGroupsPreservingOrder() {
+        let keys = (0..<9).map { key($0, 0) }
+        let chunks = officeChunked(keys, size: 3)
+        XCTAssertEqual(chunks, [
+            Array(keys[0..<3]), Array(keys[3..<6]), Array(keys[6..<9]),
+        ])
+    }
+
+    func testChunkedLastGroupCarriesTheRemainder() {
+        let keys = (0..<7).map { key($0, 0) }
+        let chunks = officeChunked(keys, size: 3)
+        XCTAssertEqual(chunks.map(\.count), [3, 3, 1])
+        XCTAssertEqual(chunks.flatMap { $0 }, keys, "no key dropped or reordered")
+    }
+
+    func testChunkedOnEmptyInputProducesNoChunks() {
+        XCTAssertEqual(officeChunked([], size: 6), [])
+    }
+
+    func testChunkedWithNonPositiveSizeDegradesToOneChunkPerKeyRatherThanLoopingForeverOrTrapping() {
+        let keys = [key(0, 0), key(1, 0)]
+        XCTAssertEqual(officeChunked(keys, size: 0), [[key(0, 0)], [key(1, 0)]])
+        XCTAssertEqual(officeChunked(keys, size: -3), [[key(0, 0)], [key(1, 0)]])
+    }
+
     // MARK: - setActivePart resubscribes (driven through the REAL view, no window needed —
     // `bounds`/`frame` answer regardless of window membership, which is all `performSubscribe` reads)
 
@@ -598,6 +712,254 @@ final class OfficeTileCanvasViewTests: XCTestCase {
 
         view.unmount()
         try? await Task.sleep(nanoseconds: 30_000_000) // hygiene — see the sibling test's own comment
+    }
+
+    // MARK: - office live-gate fix #3: whole-document tile residency — integration (a REAL mounted
+    // canvas + a REAL OfficeRuntime, no window needed — same posture as the setActivePart section)
+
+    /// A per-file copy of `SubscribeCapturingDriverRecorder` that ALSO tracks `requestTiles` calls —
+    /// this section's tests need to see WHICH keys were asked for, and in what batches, to prove
+    /// chunking and the visible-first ordering against a real mounted canvas.
+    private final class ResidencyCapturingDriverRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _subscribeCalls: [(docId: String, part: Int, zoomPPT: Int, viewportTwips: OfficeTwipsRect)] = []
+        private var _requestCalls: [(docId: String, keys: [TileKey])] = []
+        var subscribeCalls: [(docId: String, part: Int, zoomPPT: Int, viewportTwips: OfficeTwipsRect)] {
+            lock.lock(); defer { lock.unlock() }; return _subscribeCalls
+        }
+        var requestCalls: [(docId: String, keys: [TileKey])] {
+            lock.lock(); defer { lock.unlock() }; return _requestCalls
+        }
+        var driver: OfficeRuntime.Driver {
+            OfficeRuntime.Driver(
+                helperState: { .ready }, startHelper: { },
+                open: { docId, _ in OfficeDocumentMetadata(type: .spreadsheet, parts: 4,
+                                                            sizeTwips: OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)) },
+                close: { _ in },
+                subscribeTiles: { [unowned self] docId, part, zoomPPT, viewportTwips in
+                    self.lock.lock(); self._subscribeCalls.append((docId, part, zoomPPT, viewportTwips)); self.lock.unlock()
+                    return [] // never relied on here — the canvas computes its own prefetch keys
+                              // directly via TileMath, the same shared authority the server uses
+                },
+                unsubscribeTiles: { _ in },
+                requestTiles: { [unowned self] docId, keys in
+                    self.lock.lock(); self._requestCalls.append((docId, keys)); self.lock.unlock()
+                })
+        }
+    }
+
+    /// **Returns the REAL runtime-assigned docId, not a test placeholder.** Unlike
+    /// `makeOpenedRuntime` above (whose tests only ever check `subscribeCalls`, never actual tile
+    /// CONTENT, so its callers' hardcoded `docId: "doc-1"` canvas constructor argument never has to
+    /// match anything real), this section's tests populate `tileStore` directly (simulating arrival)
+    /// and then read it back through the churn-audit skip-check, which looks up the store under the
+    /// CANVAS's own `docId` property — if that does not match the docId `OfficeRuntime` actually
+    /// minted (`makeDocId`'s default is `UUID().uuidString`, never "doc-1"), every store lookup
+    /// silently misses and the skip-check can never see anything as satisfied. Measured directly,
+    /// mid fix-round: constructing the canvas with a hardcoded `docId: "doc-1"` here produced exactly
+    /// that — a skip-check that never skipped, misread as a residency-logic bug before this mismatch
+    /// was found.
+    private func makeOpenedResidencyRuntime(path: String = "/gate.xlsx") async
+        -> (runtime: OfficeRuntime, recorder: ResidencyCapturingDriverRecorder, docId: String) {
+        let recorder = ResidencyCapturingDriverRecorder()
+        let runtime = OfficeRuntime(sessionId: "S1", driver: recorder.driver)
+        runtime.open(path)
+        _ = await waitUntil { runtime.stateSnapshot.documents[path] != nil }
+        return (runtime, recorder, runtime.stateSnapshot.documents[path]!.docId)
+    }
+
+    /// **The central proof.** A document small enough to qualify (9 tiles, well under the 128 cap) is
+    /// prefetched WHOLE, in chunks of `OfficeTileCanvasView`'s own chunk size (6), visible-first; once
+    /// every requested key is actually cached (simulating the helper's reply — the same technique
+    /// `ShellSessionHostTests.testASecondSubscribeSkipsKeysAlreadyCachedOrStillInFlight` already uses
+    /// for a real `onTile` push), a subsequent scroll issues ZERO further wire calls — "after the
+    /// initial fill, scrolling issues zero requests," the live-gate brief's own bar.
+    func testResidentDocumentIsPrefetchedWholeInVisibleFirstChunksAndPostFillScrollingIssuesNoFurtherRequests() async {
+        let (runtime, recorder, docId) = await makeOpenedResidencyRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        // 3x3 tiles at zoomPPT 1000 (tileSpanTwips 5120): 15360 twips per axis is exactly 3 tile spans.
+        let sizeTwips = OfficeDocumentSize(widthTwips: 15360, heightTwips: 15360)
+        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: docId,
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
+
+        view.mount()
+
+        let issued = await waitUntil(timeout: 3) { view.prefetchSweepIssuedForTesting }
+        XCTAssertTrue(issued, "the whole-document prefetch sweep must complete")
+        XCTAssertEqual(view.prefetchChunksIssuedForTesting, 2, "9 tiles at chunk size 6 is 2 chunks (6 + 3)")
+        XCTAssertEqual(recorder.requestCalls.count, 2, "one wire requestTiles call per chunk")
+
+        let allKeys = (0..<3).flatMap { y in (0..<3).map { x in TileKey(part: 0, zoomPPT: 1000, tileX: x, tileY: y) } }
+        XCTAssertEqual(Set(recorder.requestCalls.flatMap { $0.keys }), Set(allKeys),
+                       "every tile in the extent was asked for, none missed, none duplicated across chunks")
+        XCTAssertEqual(recorder.requestCalls.map { $0.keys.count }.reduce(0, +), allKeys.count,
+                       "no key requested twice across chunks")
+
+        // The visible viewport (300x300pt at zero scroll -> tiles (0,0),(1,0),(0,1),(1,1)) must lead
+        // the FIRST chunk — chunk size 6 comfortably holds all 4 visible keys plus 2 more.
+        let visible = TileMath.viewportTileKeys(part: 0, zoomPPT: 1000,
+                                                viewportTwips: officeViewportTwips(scrollOrigin: .zero, visibleSize: CGSize(width: 300, height: 300), zoomPPT: 1000))
+        XCTAssertTrue(Set(visible).isSubset(of: Set(recorder.requestCalls[0].keys)),
+                     "the visible tiles must all be in the FIRST chunk — the user is looking at them")
+
+        // Simulate the helper's own reply for every requested key.
+        for key in allKeys {
+            runtime.tileStore.ingest(docId: docId, key: key, generation: 0,
+                                     pixels: Data(repeating: 1, count: TileMath.bytesPerTile))
+        }
+        for key in allKeys {
+            XCTAssertNotNil(runtime.tileStore.tile(docId: docId, key: key),
+                           "every tile is genuinely cached, not merely requested")
+        }
+
+        // office live-gate fix #3 (churn audit): now that the doc is fully resident, a scroll must
+        // issue ZERO further subscribeTiles/requestTiles calls.
+        let subscribeCountBeforeScroll = recorder.subscribeCalls.count
+        let requestCountBeforeScroll = recorder.requestCalls.count
+        view.applyScrollDelta(dx: -20, dy: -20)
+        try? await Task.sleep(nanoseconds: 60_000_000) // well past the 1/60s throttle interval
+        XCTAssertEqual(recorder.subscribeCalls.count, subscribeCountBeforeScroll, "resident scrolling must not re-subscribe")
+        XCTAssertEqual(recorder.requestCalls.count, requestCountBeforeScroll, "resident scrolling must not re-request")
+
+        view.unmount()
+        try? await Task.sleep(nanoseconds: 30_000_000) // hygiene — settle before recorder deallocates
+    }
+
+    /// office live-gate fix #3, caught by the pre-commit whole-diff review: a document small enough to be resident is
+    /// routinely SMALLER than the panel showing it — that is the residency cap's whole point (a big
+    /// panel, a small qualifying doc). `clampedOriginX/Y` pin `scrollOrigin` at 0 in that case, but
+    /// the RAW viewport `evaluateResidencyIfNeeded` computes from `bounds.size` still spans the
+    /// panel's full size in twips — bigger than the document's own true extent. Before this fix,
+    /// `officeResidencyPrefetchOrder`'s unclamped `visible` set included tile indices past the real
+    /// 3x3 grid (a panel-driven index 3 on each axis, at this document/zoom pairing), so the sweep
+    /// asked the wire for phantom keys that can never be filled — 16 keys / 3 chunks instead of the
+    /// document's real 9 keys / 2 chunks. This pins the fix: with a panel LARGER than the document,
+    /// the sweep must still ask for exactly the document's own 9 keys, nothing past its true edge.
+    func testResidencyPrefetchClampsToDocumentExtentWhenThePanelIsLargerThanTheDocument() async {
+        let (runtime, recorder, docId) = await makeOpenedResidencyRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        // Same 3x3-at-zoomPPT-1000 document as the central proof, above — but in a panel/frame
+        // LARGER than the document's own extent (900pt is 18000 twips at this zoom, vs. the
+        // document's 15360) — the canonical "small doc, big panel" residency shape.
+        let sizeTwips = OfficeDocumentSize(widthTwips: 15360, heightTwips: 15360)
+        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: docId,
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 900, height: 900)
+
+        view.mount()
+
+        let issued = await waitUntil(timeout: 3) { view.prefetchSweepIssuedForTesting }
+        XCTAssertTrue(issued, "the whole-document prefetch sweep must complete")
+        XCTAssertEqual(view.prefetchChunksIssuedForTesting, 2,
+                       "9 real keys at chunk size 6 is 2 chunks (6 + 3) — a phantom-inflated 16 would be 3")
+
+        let allKeys = (0..<3).flatMap { y in (0..<3).map { x in TileKey(part: 0, zoomPPT: 1000, tileX: x, tileY: y) } }
+        XCTAssertEqual(Set(recorder.requestCalls.flatMap { $0.keys }), Set(allKeys),
+                       "exactly the document's real 9 keys — no tileX/tileY == 3 phantom past the true edge")
+
+        view.unmount()
+        try? await Task.sleep(nanoseconds: 30_000_000) // hygiene — settle before recorder deallocates
+    }
+
+    /// The bounded half: a document past the residency cap never triggers a whole-document prefetch
+    /// at all — it is left in today's viewport+margin lazy mode, unchanged.
+    func testIneligibleDocumentNeverTriggersAWholeDocumentPrefetch() async {
+        let (runtime, recorder, docId) = await makeOpenedResidencyRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        // Comfortably past the residency cap (128 tiles) at zoomPPT 1000.
+        let sizeTwips = OfficeDocumentSize(widthTwips: 2_000_000, heightTwips: 2_000_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: docId,
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
+
+        view.mount()
+        let subscribed = await waitUntil { !recorder.subscribeCalls.isEmpty }
+        XCTAssertTrue(subscribed, "the ordinary margin ask must still fire — lazy mode is unchanged")
+        try? await Task.sleep(nanoseconds: 60_000_000) // give a wrongly-triggered prefetch time to appear
+        XCTAssertTrue(recorder.requestCalls.isEmpty, "an ineligible document must never issue a whole-document prefetch")
+        XCTAssertFalse(view.prefetchSweepIssuedForTesting)
+        XCTAssertEqual(view.prefetchChunksIssuedForTesting, 0)
+
+        view.unmount()
+    }
+
+    /// The churn audit's OTHER half, stated as its own contract: the skip is scoped to the THROTTLED
+    /// (scroll/resize/pinch) path only — a DISCRETE action (zoom, part switch) must resubscribe
+    /// unconditionally even when its own target viewport happens to already be fully cached, because
+    /// `unmount` always unsubscribes and a skipped discrete resubscribe would leave this connection
+    /// unregistered as the helper's tile-push subscriber (`performSubscribe`'s own header, reason a).
+    func testDiscreteZoomResubscribesEvenWhenTheTargetIsAlreadyFullyCachedUnlikeTheThrottledPath() async {
+        let (runtime, recorder, docId) = await makeOpenedResidencyRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let sizeTwips = OfficeDocumentSize(widthTwips: 15360, heightTwips: 15360) // 9 tiles at zoomPPT 1000
+        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: docId,
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
+        view.mount()
+        let issued = await waitUntil(timeout: 3) { view.prefetchSweepIssuedForTesting }
+        XCTAssertTrue(issued)
+        for y in 0..<3 { for x in 0..<3 {
+            runtime.tileStore.ingest(docId: docId, key: TileKey(part: 0, zoomPPT: 1000, tileX: x, tileY: y),
+                                     generation: 0, pixels: Data(repeating: 1, count: TileMath.bytesPerTile))
+        } }
+
+        // Zoom away, then back — the 1000-zoom keys stay fully cached in the store the whole time
+        // (zooming clears only the VIEW's own CALayer pool via `clearVisibleTiles`, never the
+        // store's cached pixels, which are keyed by TileKey — zoomPPT included).
+        XCTAssertTrue(view.setZoomForTesting(1250))
+        // `performSubscribe`'s own `runtime.subscribeTiles` call reaches the recorder from inside an
+        // async Task (`OfficeRuntime.perform`'s `.subscribe` case) — `setZoomForTesting` itself
+        // returns before that Task necessarily runs, so the count must be polled, never read
+        // synchronously right after the call (this file's own established idiom everywhere else).
+        let landedFirstZoom = await waitUntil { recorder.subscribeCalls.count == 2 }
+        XCTAssertTrue(landedFirstZoom, "sanity: the zoom-to-1250 resubscribe must land before this test proceeds")
+        let subscribeCountBeforeReturn = recorder.subscribeCalls.count
+        XCTAssertTrue(view.setZoomForTesting(1000))
+
+        let resubscribed = await waitUntil { recorder.subscribeCalls.count > subscribeCountBeforeReturn }
+        XCTAssertTrue(resubscribed, "a discrete "
+                             + "zoom change must resubscribe even though every key its own padded "
+                             + "viewport touches is already cached — only the THROTTLED path may skip")
+
+        view.unmount()
+        try? await Task.sleep(nanoseconds: 30_000_000) // hygiene — settle before recorder deallocates
+    }
+
+    /// The deferred-evaluation contract (`lastResidencyEvaluation`'s own header): `mount()`'s direct
+    /// call finds zero bounds (mirroring production, where SwiftUI has not sized the view yet at
+    /// `makeNSView` return) and does nothing — it must NOT memoize that as "evaluated," or the throttle
+    /// settle edge below would find `(part, zoomPPT)` unchanged and skip the real evaluation forever.
+    func testResidencyDefersToTheThrottleSettleEdgeWhenBoundsAreStillZeroAtMountTime() async {
+        // `recorder` MUST be kept in scope (never `_`) — its driver closures capture `[unowned
+        // self]`, mirroring `SubscribeCapturingDriverRecorder`'s own precedent (see
+        // `testRelayoutRoutinelyPositionsATileLayerPastTheViewsOwnEdge`'s comment above): this test's
+        // whole point is that `mount()` defers real work to a LATER Task, so `recorder` must survive
+        // at least until that Task actually reaches the driver, or it resumes into a dangling unowned
+        // reference and crashes the whole test host — measured directly, mid fix-round, discarding it
+        // with `_` here is exactly what did that.
+        let (runtime, recorder, docId) = await makeOpenedResidencyRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let sizeTwips = OfficeDocumentSize(widthTwips: 15360, heightTwips: 15360) // 9 tiles, eligible
+        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: docId,
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        // Deliberately mount BEFORE the frame is set — the production ordering, unlike every other
+        // test in this file (which sets `frame` first for convenience).
+        view.mount()
+        view.frame = NSRect(x: 0, y: 0, width: 300, height: 300) // bounds are real now, but nothing has re-evaluated yet
+        XCTAssertEqual(view.prefetchChunksIssuedForTesting, 0, "sanity: a bare frame assignment alone must not trigger a sweep")
+
+        // The scroll throttle's own trailing settle edge is what performs the deferred FIRST
+        // evaluation — the same path a real trackpad tick, a window resize, or a pinch settling all
+        // drive; see `evaluateResidencyIfNeeded`'s own header.
+        view.applyScrollDelta(dx: 0, dy: 0)
+        let issued = await waitUntil(timeout: 3) { view.prefetchSweepIssuedForTesting }
+        XCTAssertTrue(issued, "the throttle's trailing settle edge must perform the residency "
+                     + "evaluation mount() itself deferred at zero bounds")
+        XCTAssertFalse(recorder.requestCalls.isEmpty, "the deferred sweep must have actually reached the wire")
+
+        view.unmount()
+        try? await Task.sleep(nanoseconds: 30_000_000) // hygiene — settle before recorder deallocates
     }
 
     // MARK: - office live-gate fix #2: no redundant repaint on a mere reposition (contributing cause)

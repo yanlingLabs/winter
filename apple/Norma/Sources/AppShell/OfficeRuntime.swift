@@ -644,6 +644,36 @@ final class OfficeRuntime: ObservableObject {
         perform(dispatch(.unsubscribeRequested(path: path)))
     }
 
+    /// office live-gate fix #3 — whole-document tile residency's own door. Unlike every other door
+    /// on this object (deliberately fire-and-forget — see `open`/`close`/`subscribeTiles`'s own
+    /// headers, and `OfficeRuntimeEffect`'s own "never sequence off this call returning" rule), THIS
+    /// one is genuinely awaitable, and deliberately bypasses `dispatch`/`perform` entirely: unlike
+    /// `.subscribe`, a prefetch carries no viewport and touches no reducer state (`activePart`,
+    /// `documents`) — it is pure "go fetch these already-known keys," so there is nothing for the
+    /// reducer to decide, and the value this call needs to provide (knowing when the SEND actually
+    /// landed) has nothing to do with state transitions at all.
+    ///
+    /// **Why awaitable at all**: `OfficeTileCanvasView`'s chunked prefetch loop has to know when one
+    /// chunk's own request has reached the helper (the `tileRequestAccepted` ack `requestNeeded`
+    /// awaits internally) before deciding whether to move on to the next chunk — a synchronous,
+    /// non-paced loop calling a fire-and-forget door N times in a row would enqueue every chunk on
+    /// `officeRequestQueue` back-to-back, leaving no gap for a genuinely urgent viewport/close call
+    /// to slot in ahead of the NEXT chunk (see that view's own `beginPrefetch` for the honest latency
+    /// bound this actually buys, which is NOT preemption).
+    ///
+    /// `docId` is resolved FRESH from `path` on every call, never captured once by the caller, so a
+    /// reload or close landing between two chunks is picked up automatically (a reload's new docId;
+    /// a close's `state.documents[path] == nil` guard below, which simply no-ops). A stale
+    /// PREFETCH SWEEP itself (superseded by a part switch, zoom change, or unmount) is not this
+    /// method's problem to solve — the CALLER's own generation check (`OfficeTileCanvasView
+    /// .prefetchGeneration`) is what stops issuing further chunks; a chunk already in flight when
+    /// that happens is left to complete harmlessly, mirroring `OfficeHelperRequestQueue`'s own "no
+    /// cancellation semantics, and none are needed."
+    func prefetchTilesChunk(path: String, keys: [TileKey]) async {
+        guard state.phase == .ready, let doc = state.documents[path] else { return }
+        await requestNeeded(docId: doc.docId, candidates: keys)
+    }
+
     /// Release everything this runtime holds. Legal from every phase and safe twice.
     /// **Synchronous by contract** — the quit path and the shell's departure policy both need the
     /// STATE reset to have happened when this returns (mirrors `EditorRuntime.teardown`'s own
@@ -727,37 +757,16 @@ final class OfficeRuntime: ObservableObject {
 
             case .subscribe(let docId, let part, let zoomPPT, let viewportTwips):
                 // Task 6: `subscribeTiles` only REGISTERS the subscription and reports which keys
-                // the current viewport needs — this is what actually asks for their bytes. Filtered
-                // through the store first (obligation 3: never re-request a tile already cached or
-                // already in flight — see `OfficeTileStore.keysNeedingRequest`'s own header for the
-                // "big batch pins the connection" amplifier this closes). The two driver calls are
-                // deliberately SEQUENTIAL `await`s, never composed inside one `officeRequestQueue
+                // the current viewport needs — `requestNeeded` (below) is what actually asks for
+                // their bytes, filtered through the store first (obligation 3). The two driver calls
+                // are deliberately SEQUENTIAL `await`s, never composed inside one `officeRequestQueue
                 // .run` — obligation 2, permanent deadlock otherwise.
                 Task { [weak self, driver] in
                     guard let keys = try? await driver.subscribeTiles(docId, part, zoomPPT, viewportTwips) else {
                         return
                     }
                     guard let self else { return }
-                    let needed = self.tileStore.keysNeedingRequest(docId: docId, candidates: keys)
-                    guard !needed.isEmpty else { return }
-                    // T6 review F2, re-reviewed: mark in-flight SYNCHRONOUSLY, in the same
-                    // uninterrupted stretch of MainActor code that decides to send — there is no
-                    // `await` between `needed` being computed and this call, so nothing else on
-                    // MainActor (an overlapping `subscribeTiles` from continuous scroll, most
-                    // obviously) can interleave and see these keys as still unrequested. The first
-                    // cut marked only after `driver.requestTiles` returned, which reopened exactly
-                    // that window — the reviewer measured it empirically (a gated send + two
-                    // overlapping subscribes produced two `requestTiles` calls for the same keys) and
-                    // it collides with `keysNeedingRequest`'s own "big-batch amplifier" warning, one
-                    // call and its retries compounding the shared queue's backlog. `catch` still frees
-                    // the keys the moment a send actually fails — see `markRequested`'s own doc for
-                    // why both halves are required.
-                    self.tileStore.markRequested(docId: docId, keys: needed)
-                    do {
-                        try await driver.requestTiles(docId, needed)
-                    } catch {
-                        for key in needed { self.tileStore.markFailed(docId: docId, key: key) }
-                    }
+                    await self.requestNeeded(docId: docId, candidates: keys)
                 }
 
             case .unsubscribe(let docId):
@@ -773,6 +782,37 @@ final class OfficeRuntime: ObservableObject {
             case .teardown(let docIds):
                 performTeardown(docIds: docIds)
             }
+        }
+    }
+
+    /// Shared by `.subscribe`'s effect performer (server-reported viewport keys) and
+    /// `prefetchTilesChunk` (canvas-computed whole-document prefetch keys, office live-gate fix #3):
+    /// filter `candidates` to what the store doesn't already have or isn't already awaiting, mark
+    /// in-flight SYNCHRONOUSLY, then ask the helper.
+    ///
+    /// **T6 review F2, re-reviewed**: the mark happens in the same uninterrupted stretch of
+    /// MainActor code that decides to send — there is no `await` between `needed` being computed and
+    /// `markRequested`, so nothing else on MainActor (an overlapping `subscribeTiles` from continuous
+    /// scroll, most obviously — or, as of fix #3, an overlapping prefetch chunk) can interleave and
+    /// see these keys as still unrequested. An earlier cut marked only after `driver.requestTiles`
+    /// returned, which reopened exactly that window — the reviewer measured it empirically (a gated
+    /// send + two overlapping subscribes produced two `requestTiles` calls for the same keys), and it
+    /// collides with `keysNeedingRequest`'s own "big-batch amplifier" warning, one call and its
+    /// retries compounding the shared queue's backlog. `catch` still frees the keys the moment a send
+    /// actually fails — see `markRequested`'s own doc for why both halves are required.
+    ///
+    /// Fire-and-forget to its own caller, same as every other Driver call this file makes elsewhere —
+    /// nothing here throws back out; `prefetchTilesChunk` and `.subscribe`'s Task both simply `await`
+    /// this to know the send has been ATTEMPTED (queued and either accepted or failed), not that its
+    /// tiles have arrived (those stream back independently via `onTile`/`tileStore.ingest`).
+    private func requestNeeded(docId: String, candidates: [TileKey]) async {
+        let needed = tileStore.keysNeedingRequest(docId: docId, candidates: candidates)
+        guard !needed.isEmpty else { return }
+        tileStore.markRequested(docId: docId, keys: needed)
+        do {
+            try await driver.requestTiles(docId, needed)
+        } catch {
+            for key in needed { tileStore.markFailed(docId: docId, key: key) }
         }
     }
 

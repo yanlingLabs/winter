@@ -103,12 +103,18 @@ final class OfficeTileStoreTests: XCTestCase {
         XCTAssertNil(store.tile(docId: "d1", key: key(1, 0)), "untouched entry is evicted")
     }
 
-    func testDefaultCapacityIsSixtyFour() {
+    /// office live-gate fix #3: the default capacity moved from a bare 64 to `residencyCapTiles +
+    /// 32` headroom (see that constant's own doc) — this test still pins the DEFAULT's own eviction
+    /// boundary, just against the new number, read from the constant rather than hardcoded a second
+    /// time so it cannot silently drift from production again.
+    func testDefaultCapacityMatchesResidencyCapPlusHeadroom() {
         let store = OfficeTileStore()
-        for i in 0..<64 { store.ingest(docId: "d1", key: key(i, 0), generation: 0, pixels: pixels(0)) }
-        XCTAssertEqual(store.cachedCountForTesting, 64)
-        store.ingest(docId: "d1", key: key(64, 0), generation: 0, pixels: pixels(0))
-        XCTAssertEqual(store.cachedCountForTesting, 64, "the 65th paint evicts, never grows past capacity")
+        let capacity = OfficeTileStore.defaultCapacity
+        XCTAssertEqual(capacity, OfficeTileStore.residencyCapTiles + 32, "sanity: the constant's own documented relationship")
+        for i in 0..<capacity { store.ingest(docId: "d1", key: key(i, 0), generation: 0, pixels: pixels(0)) }
+        XCTAssertEqual(store.cachedCountForTesting, capacity)
+        store.ingest(docId: "d1", key: key(capacity, 0), generation: 0, pixels: pixels(0))
+        XCTAssertEqual(store.cachedCountForTesting, capacity, "one past capacity evicts, never grows past it")
     }
 
     func testCapacityIsClampedToAtLeastOne() {

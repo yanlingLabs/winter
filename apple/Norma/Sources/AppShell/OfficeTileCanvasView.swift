@@ -73,6 +73,98 @@ func officeZoomOut(current: Int) -> Int {
     return officeZoomLadder[max(index - 1, 0)]
 }
 
+// MARK: - Pure: whole-document tile residency (office live-gate fix #3)
+
+/// Is the FULL extent of a document at `zoomPPT` — not merely its current viewport — small enough
+/// to fetch as a whole, ahead of the user scrolling there? Pure and total: `TileMath
+/// .estimatedTileCount` never traps regardless of how extreme `sizeTwips`/`zoomPPT` are, and this
+/// function inherits that. `nil` (from `estimatedTileCount` itself refusing — overflow or past its
+/// own `maxTilesPerRectEnumeration` — OR from exceeding `cap`) reads as "ineligible," the safe
+/// direction: leave this one in today's viewport+margin lazy mode, never attempt a prefetch anyway.
+/// Zero tiles (a degenerate empty document) is trivially eligible — there is nothing to prefetch.
+func officeResidencyEligibleTileCount(sizeTwips: OfficeDocumentSize, zoomPPT: Int, cap: Int) -> Int? {
+    let fullExtent = OfficeTwipsRect(x: 0, y: 0, width: sizeTwips.widthTwips, height: sizeTwips.heightTwips)
+    guard let count = TileMath.estimatedTileCount(rectTwips: fullExtent, zoomPPT: zoomPPT), count <= cap else {
+        return nil
+    }
+    return count
+}
+
+/// The whole-document prefetch's own ordering: every key in `fullExtentTwips`, the CURRENT visible
+/// viewport's keys FIRST (the user is looking at them right now), then the rest ordered nearest-to-
+/// farthest from the visible viewport's own center tile — squared distance in tile-INDEX space
+/// (cheap integer arithmetic; the only place this could even disagree with true Euclidean distance
+/// is tie-breaking, which the deterministic secondary sort below already fixes regardless). Pure and
+/// total: only ever called after `officeResidencyEligibleTileCount` has already proven
+/// `fullExtentTwips` safe to enumerate at `zoomPPT`.
+func officeResidencyPrefetchOrder(part: Int, zoomPPT: Int, fullExtentTwips: OfficeTwipsRect,
+                                   visibleViewportTwips: OfficeTwipsRect) -> [TileKey] {
+    let visible = TileMath.viewportTileKeys(part: part, zoomPPT: zoomPPT, viewportTwips: visibleViewportTwips)
+    let visibleSet = Set(visible)
+    let centerX = TileMath.tileIndex(twip: visibleViewportTwips.x + visibleViewportTwips.width / 2, zoomPPT: zoomPPT)
+    let centerY = TileMath.tileIndex(twip: visibleViewportTwips.y + visibleViewportTwips.height / 2, zoomPPT: zoomPPT)
+
+    let rest = TileMath.tileCoordinates(rectTwips: fullExtentTwips, zoomPPT: zoomPPT)
+        .map { TileKey(part: part, zoomPPT: zoomPPT, tileX: $0.tileX, tileY: $0.tileY) }
+        .filter { !visibleSet.contains($0) }
+        .sorted { lhs, rhs in
+            let lhsDistance = officeSquaredTileDistance(lhs, centerX: centerX, centerY: centerY)
+            let rhsDistance = officeSquaredTileDistance(rhs, centerX: centerX, centerY: centerY)
+            if lhsDistance != rhsDistance { return lhsDistance < rhsDistance }
+            // Deterministic tie-break — `TileMath.tileCoordinates` enumerates each coordinate
+            // exactly once, so this never actually breaks a tie between duplicate keys; it exists so
+            // the ORDER among equidistant tiles is exactly reproducible (a table test can assert one
+            // exact array), not merely "some near-to-far order."
+            return (lhs.tileY, lhs.tileX) < (rhs.tileY, rhs.tileX)
+        }
+    return visible + rest
+}
+
+/// Clips `viewportTwips` to a document's own real extent, `[0, sizeTwips.widthTwips) x [0,
+/// sizeTwips.heightTwips)`. Used ONLY by `performSubscribe`'s churn-audit skip-check (office live-
+/// gate fix #3) — the padded/margin viewport (`OfficeTileCanvasView.subscribeMarginPoints`)
+/// deliberately overscans PAST a document's true edge by design (fix #2's own "ask slightly wider,
+/// harmlessly" reasoning, `performSubscribe`'s own comment). A document small enough to be fully
+/// resident is exactly the case where that overscan reaches past its far edge on almost every scroll
+/// near it — and those phantom past-the-edge tiles will NEVER be cached (there is nothing there to
+/// paint), so without this clip the skip-check would see them as perpetually "needing request" and
+/// never actually skip for a resident document scrolled anywhere near an edge, which defeats the
+/// whole point. Deliberately narrow: only the SKIP-CHECK's own key computation is clamped — the
+/// ORIGINAL unconditional ask (every discrete call, and the throttled leading-edge call once
+/// something genuinely is missing) still asks the full, un-clamped padded viewport, exactly as fix
+/// #2 left it, so a document NOT yet fully resident keeps prefetching its own true edge tiles at the
+/// same margin it always has. A degenerate (zero- or negative-area) intersection collapses to a
+/// zero-size rect at the clamped origin, not a negative width/height — `TileMath.viewportTileKeys`
+/// already reads a zero-area rect as "touches nothing," so this never needs its own empty check.
+func officeClampViewportToDocumentExtent(_ viewportTwips: OfficeTwipsRect, sizeTwips: OfficeDocumentSize) -> OfficeTwipsRect {
+    let minX = max(viewportTwips.x, 0)
+    let minY = max(viewportTwips.y, 0)
+    let maxX = min(viewportTwips.x + viewportTwips.width, sizeTwips.widthTwips)
+    let maxY = min(viewportTwips.y + viewportTwips.height, sizeTwips.heightTwips)
+    return OfficeTwipsRect(x: minX, y: minY, width: max(0, maxX - minX), height: max(0, maxY - minY))
+}
+
+private func officeSquaredTileDistance(_ key: TileKey, centerX: Int, centerY: Int) -> Int {
+    let dx = key.tileX - centerX
+    let dy = key.tileY - centerY
+    return dx * dx + dy * dy
+}
+
+/// Splits `keys` into groups of at most `size`, preserving order — the prefetch's own chunking,
+/// pure and trivially testable. `size <= 0` degrades to one chunk per key rather than dividing by
+/// zero or looping forever (defensive; every production call site passes a positive constant).
+func officeChunked(_ keys: [TileKey], size: Int) -> [[TileKey]] {
+    guard size > 0 else { return keys.map { [$0] } }
+    var result: [[TileKey]] = []
+    var index = 0
+    while index < keys.count {
+        let end = min(index + size, keys.count)
+        result.append(Array(keys[index..<end]))
+        index = end
+    }
+    return result
+}
+
 // MARK: - The representable
 
 /// The SwiftUI seam onto the canvas — mirrors `EditorViewportView`'s posture (a viewport onto a
@@ -203,6 +295,71 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
     /// `relayoutVisibleTiles`'s own comment on its reposition-only branch).
     private(set) var applyContentsCallCountForTesting = 0
 
+    // MARK: - office live-gate fix #3: whole-document tile residency
+
+    /// How many keys one prefetch wire round trip asks for. The helper paints a `tileRequest`'s keys
+    /// SERIALLY on the app's ONE shared connection before it can even read the next line off the
+    /// wire (`OfficeHelperServer.handlePostAuthLine`'s `.tileRequest` case — a straight `for key in
+    /// keys` loop, no concurrency) — a single whole-document request would pin that connection for
+    /// the entire fill (measured ~26-28ms/tile even warm, `Self.subscribeMarginPoints`'s own
+    /// comment), starving every other tab and the user's own next scroll for however long the fill
+    /// takes. Chunking bounds that pin to one chunk's worth at a time; picked at the LOW end of the
+    /// live-gate brief's own "~6-8" range, not the high end, to minimize how long a genuinely urgent
+    /// request can be stuck behind an in-flight chunk — see `beginPrefetch`'s own header for the
+    /// honest latency bound this buys (bounded, not preemptive).
+    private static let prefetchChunkSize = 6
+
+    /// Memoizes the last `(part, zoomPPT)` residency was evaluated for, so `evaluateResidencyIfNeeded`
+    /// — called from every discrete trigger (part switch, zoom) AND from the scroll throttle's own
+    /// trailing settle edge (covers resize and pinch-zoom settling; see `scheduleThrottledSubscribe`)
+    /// — is a cheap two-int comparison on the calls that are NOT actually a part/zoom change (the
+    /// overwhelming majority: every ordinary scroll/resize tick).
+    ///
+    /// **`nil` until the FIRST evaluation that genuinely ran against usable bounds.** `mount()` DOES
+    /// call `evaluateResidencyIfNeeded()` directly (document-open is one of the brief's own
+    /// triggers), but at `makeNSView` return, in ordinary production use, SwiftUI has not sized this
+    /// view yet (`bounds` is still zero) — that call finds nothing to do. The load-bearing property
+    /// is that it must NOT memoize a zero-bounds no-op as if a real evaluation happened: if it did,
+    /// it would permanently suppress the real evaluation once bounds actually arrive (a LIVE-only bug
+    /// no test would catch, since every test in this file sets `frame` BEFORE `mount()`, so `mount`'s
+    /// own call already IS the real evaluation there). This memo is therefore only ever written from
+    /// inside `evaluateResidencyIfNeeded`'s own `bounds > 0` guard, never before it — in production,
+    /// the resize this view receives once AppKit actually lays it out (`resizeSubviews` ->
+    /// `scheduleThrottledSubscribe` -> the settle edge) is what performs the real first evaluation.
+    private var lastResidencyEvaluation: (part: Int, zoomPPT: Int)?
+
+    /// Bumped every time a NEW prefetch sweep starts, and on `unmount()`. The prefetch loop captures
+    /// its own value at start and re-checks it before EVERY chunk — mirrors `OfficeRuntime.generation`'s
+    /// identical role for a stale open: a part switch, zoom change, reload, or unmount that happens
+    /// mid-sweep must stop the OLD sweep from issuing further chunks for a target that is no longer
+    /// current, without needing real cancellation — a chunk already in flight when this bumps is left
+    /// to complete harmlessly (mirrors `OfficeHelperRequestQueue`'s own "no cancellation semantics,
+    /// and none are needed").
+    private var prefetchGeneration = 0
+
+    /// Test/debug visibility only — how many chunks of the current (or most recently completed)
+    /// sweep have been PROCESSED (offered to `OfficeRuntime.prefetchTilesChunk` and returned).
+    /// **Not** a wire-request count: a chunk where every key was already cached or already in
+    /// flight is filtered to zero keys inside `prefetchTilesChunk`'s own `requestNeeded` and still
+    /// counts here, since from this sweep's point of view the chunk was handled either way. Assert
+    /// wire-level traffic on a test double's own `requestCalls`/`subscribeCalls`, never on this.
+    private(set) var prefetchChunksIssuedForTesting = 0
+    /// Test/debug visibility only. **Means "every chunk of the current sweep was ISSUED," never
+    /// "every tile has arrived and is cached."** A chunk's own pixels stream back asynchronously
+    /// (`OfficeTileStore.ingest`, off `tilesArrived`) well after its `requestTiles` ack — a test that
+    /// wants to assert actual residency must poll `runtime.tileStore.tile(docId:key:)` for every
+    /// expected key, the same way every other tile-arrival test in this file already does, not trust
+    /// this flag alone.
+    private(set) var prefetchSweepIssuedForTesting = false
+
+    /// The live-gate MEASURE step's own instrument: how many times a relayout pass found a VISIBLE
+    /// tile with nothing cached for it yet — a placeholder frame the user would actually see
+    /// mid-swipe, the "another page comes on top" report this whole fix exists to close. Counted in
+    /// `relayoutVisibleTiles` for EVERY currently-visible key, whether its layer is new or a
+    /// repositioned survivor — not only at layer creation — so a swipe that re-exposes a key whose
+    /// layer was torn down and rebuilt (scrolled away and back within one throttle window) counts too.
+    private(set) var visiblePlaceholderDrawCountForTesting = 0
+
     init(runtime: OfficeRuntime, path: String, docId: String, sizeTwips: OfficeDocumentSize,
          initialPart: Int, model: PanelDocumentTabModel) {
         self.runtime = runtime
@@ -259,6 +416,15 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
         }
         relayoutVisibleTiles()
         performSubscribe()
+        // office live-gate fix #3: "document open" is one of the brief's own triggers. Safe to call
+        // even when `bounds` is still zero at this exact instant (the ordinary production case —
+        // SwiftUI has not sized this view yet at `makeNSView` return) because
+        // `evaluateResidencyIfNeeded`'s own `bounds > 0` guard makes that a pure no-op that writes
+        // NOTHING to `lastResidencyEvaluation` — see that property's own header for why a memo
+        // written against zero bounds would be the actual bug. This call is what gives "document
+        // open" its own direct, reliably-testable trigger (every test in this file sets `frame`
+        // BEFORE `mount()`) rather than depending solely on the indirect resize path below.
+        evaluateResidencyIfNeeded()
     }
 
     /// SwiftUI is finished with this view. Unsubscribes (a hidden-but-still-open tab's tiles stop
@@ -270,6 +436,11 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
     func unmount() {
         guard isMounted else { return }
         isMounted = false
+        // office live-gate fix #3: stop any in-flight prefetch sweep from issuing further chunks —
+        // belt-and-suspenders alongside `beginPrefetch`'s own `isMounted` check (which `isMounted =
+        // false` right above already satisfies on its own; this makes the "why" independently
+        // greppable at the actual teardown site).
+        prefetchGeneration += 1
         tilesArrivedSink = nil
         runtime.unsubscribeTiles(path: path)
         if model?.canvasHost === self { model?.canvasHost = nil }
@@ -307,6 +478,7 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
         clearVisibleTiles()
         relayoutVisibleTiles()
         performSubscribe()
+        evaluateResidencyIfNeeded() // office live-gate fix #3: a part switch is one of the brief's own triggers
     }
 
     // MARK: - office-plumbing Task 8 (T6 review F4): the reload seam
@@ -361,6 +533,17 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
         scrollOrigin = CGPoint(x: clampedOriginX(scrollOrigin.x), y: clampedOriginY(scrollOrigin.y))
         relayoutVisibleTiles()
         performSubscribe()
+        // office live-gate fix #3: a reload is one of the brief's own triggers, and must be
+        // evaluated even when `part`/`zoomPPT` happen to be unchanged — a reload can still carry a
+        // different `sizeTwips` (a shrunk or grown document), which changes eligibility on its own.
+        // The memo reset forces `evaluateResidencyIfNeeded` past its `(part, zoomPPT)` short-circuit;
+        // the direct generation bump is belt-and-suspenders for the (live-only, not exercised by any
+        // test here) edge case of a reload landing while `bounds` is still zero, which would
+        // otherwise leave a superseded sweep from the OLD document free to keep issuing chunks
+        // against the NEW docId under geometry computed for content that no longer applies.
+        lastResidencyEvaluation = nil
+        prefetchGeneration += 1
+        evaluateResidencyIfNeeded()
     }
 
     // MARK: - Test seams (office-plumbing Task 8)
@@ -384,6 +567,7 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
     func setZoomForTesting(_ zoomPPT: Int) -> Bool {
         guard applyZoom(zoomPPT) else { return false }
         performSubscribe()
+        evaluateResidencyIfNeeded() // mirrors `zoomStep`'s own two-call shape — see that method's doc
         return true
     }
 
@@ -452,6 +636,7 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
     private func zoomStep(_ target: Int) {
         guard applyZoom(target) else { return }
         performSubscribe() // a keypress is discrete, like a part switch — no throttle
+        evaluateResidencyIfNeeded() // office live-gate fix #3: discrete zoom is one of the brief's own triggers
     }
 
     /// Common half of both zoom doors: clamp, apply if changed, clear the (now wrong-sized) visible
@@ -488,6 +673,21 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
         for key in visibleKeys {
             guard let rect = officeTileScreenRect(key: key, zoomPPT: zoomPPT, scrollOrigin: scrollOrigin) else {
                 continue // TileMath refused this key — never trap, simply nothing to draw for it
+            }
+            // office live-gate fix #3 — the placeholder-at-draw instrument: a VISIBLE tile with
+            // nothing cached for it RIGHT NOW is exactly the "another page comes on top" pop-in the
+            // user reported. Checked here, once per relayout pass per such key, regardless of
+            // whether its layer is new or a repositioned survivor — see the counter's own doc. The
+            // counter is always on (cheap, and tests need it); the NSLog is `#if DEBUG`-gated, same
+            // idiom `OfficeHarness.swift`/`EditorBridgeHarness.swift` already use for diagnostics —
+            // a fast lazy-mode swipe over a large document can hit this dozens of times a second, and
+            // a shipped Release build should not pay for that console spam.
+            if runtime.tileStore.tile(docId: docId, key: key) == nil {
+                visiblePlaceholderDrawCountForTesting += 1
+                #if DEBUG
+                NSLog("[OfficeTileCanvasView] placeholder visible at draw time: docId=%@ part=%d tileX=%d tileY=%d",
+                      docId, key.part, key.tileX, key.tileY)
+                #endif
             }
             if let existing = tileLayers[key] {
                 // office live-gate fix #2 (Bug 2's contributing cause, not its root cause — see
@@ -586,7 +786,23 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
 
     // MARK: - The subscribe throttle
 
-    private func performSubscribe() {
+    /// `skipIfViewportSatisfied` — office live-gate fix #3 (the request-churn audit): when `true`
+    /// AND every key the padded viewport touches is already cached or already in flight, this
+    /// returns WITHOUT calling `runtime.subscribeTiles` at all — a resident document's post-fill
+    /// scrolling, or a lazy document's scroll back over already-visited territory, has nothing the
+    /// server could tell it that would change what happens next, so the round trip is skipped rather
+    /// than added to the shared connection's serial paint-loop backlog for zero benefit.
+    ///
+    /// **Deliberately `false` by default, and never passed `true` from a DISCRETE call site**
+    /// (`mount`/`setActivePart`/`zoomStep`/`setZoomForTesting`/`syncDocumentIdentity`) — only from
+    /// `scheduleThrottledSubscribe`'s own leading-edge call. Two reasons a discrete call must stay
+    /// unconditional: (a) `unmount` always calls `runtime.unsubscribeTiles`, so a later remount of a
+    /// STILL-cached document with the skip active would never re-register this connection as the
+    /// helper's tile-push subscriber — invisible in Stage A (nothing invalidates yet), but it would
+    /// silently break Stage B's edit-invalidation multicast; (b) `OfficeTileCanvasViewTests` pins
+    /// "a discrete action resubscribes, unconditionally" as a contract or its own tests would
+    /// become dependent on incidental cache state.
+    private func performSubscribe(skipIfViewportSatisfied: Bool = false) {
         guard isMounted, bounds.width > 0, bounds.height > 0 else { return }
         // office live-gate fix #2: pad by one tile span on every edge before asking — see
         // `Self.subscribeMarginPoints`'s own comment for why. Clamped to >= 0 only on the near edge
@@ -598,6 +814,16 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
         let paddedOrigin = CGPoint(x: max(0, scrollOrigin.x - margin), y: max(0, scrollOrigin.y - margin))
         let paddedSize = CGSize(width: bounds.width + margin * 2, height: bounds.height + margin * 2)
         let viewport = officeViewportTwips(scrollOrigin: paddedOrigin, visibleSize: paddedSize, zoomPPT: zoomPPT)
+        if skipIfViewportSatisfied {
+            // office live-gate fix #3: clamp to the document's real extent for THIS check only — see
+            // `officeClampViewportToDocumentExtent`'s own header for why the un-clamped margin would
+            // otherwise never let a resident document's near-edge scrolling skip at all.
+            let clamped = officeClampViewportToDocumentExtent(viewport, sizeTwips: sizeTwips)
+            let keys = TileMath.viewportTileKeys(part: part, zoomPPT: zoomPPT, viewportTwips: clamped)
+            guard !runtime.tileStore.keysNeedingRequest(docId: docId, candidates: keys).isEmpty else {
+                return
+            }
+        }
         runtime.subscribeTiles(path: path, part: part, zoomPPT: zoomPPT, viewportTwips: viewport)
     }
 
@@ -607,14 +833,113 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
             return
         }
         isSubscribeThrottled = true
-        performSubscribe()
+        // office live-gate fix #3: the churn-audit skip applies HERE — the throttled/continuous path
+        // (scroll, resize, pinch) — never to a discrete call; see `performSubscribe`'s own header.
+        performSubscribe(skipIfViewportSatisfied: true)
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.subscribeThrottleInterval) { [weak self] in
             guard let self else { return }
             self.isSubscribeThrottled = false
             if self.subscribePendingSinceThrottle {
                 self.subscribePendingSinceThrottle = false
                 self.scheduleThrottledSubscribe()
+            } else {
+                // office live-gate fix #3: the trailing settle edge — the one point a CONTINUOUS
+                // sequence (scroll, resize, or a pinch gesture's own continuous zoomPPT ticks) has
+                // actually stopped changing. See `evaluateResidencyIfNeeded`'s own header for why
+                // pinch zoom is deliberately evaluated ONLY here, never from a raw `magnify` tick.
+                self.evaluateResidencyIfNeeded()
             }
+        }
+    }
+
+    // MARK: - office live-gate fix #3: whole-document tile residency
+
+    /// Whole-document tile residency's own trigger: "is the FULL extent of this document, at the
+    /// CURRENT part/zoom, small enough to prefetch as a whole — and if so, start (or restart) that
+    /// sweep." Called at every point the live-gate brief names as a trigger — document open
+    /// (`mount`), part switch (`setActivePart`), discrete zoom (`zoomStep`/`setZoomForTesting`), and
+    /// reload (`syncDocumentIdentity`, which resets `lastResidencyEvaluation` FIRST since a reload
+    /// can carry a new `sizeTwips` even when part/zoom happen to stay the same) — PLUS the scroll
+    /// throttle's own trailing settle edge (`scheduleThrottledSubscribe`), which is what covers
+    /// resize (and, in production, the FIRST real layout after `mount`'s own zero-bounds attempt) and,
+    /// deliberately, PINCH zoom: `magnify(with:)` itself never calls this directly, because a raw
+    /// pinch tick changes `zoomPPT` continuously (dozens of times a second) and each call would bump
+    /// `prefetchGeneration`, discarding whatever the previous tick's sweep had barely started before
+    /// even its first chunk could land — the settle edge fires once, at the FINAL zoom the gesture
+    /// actually lands on.
+    ///
+    /// Memoized on `(part, zoomPPT)` — see `lastResidencyEvaluation`'s own header for why the memo is
+    /// only written from inside the `bounds > 0` guard below, never before it.
+    private func evaluateResidencyIfNeeded() {
+        guard bounds.width > 0, bounds.height > 0 else { return }
+        if let last = lastResidencyEvaluation, last.part == part, last.zoomPPT == zoomPPT { return }
+        lastResidencyEvaluation = (part: part, zoomPPT: zoomPPT)
+        prefetchGeneration += 1
+        let generation = prefetchGeneration
+        prefetchChunksIssuedForTesting = 0
+        prefetchSweepIssuedForTesting = false
+
+        guard let tileCount = officeResidencyEligibleTileCount(
+            sizeTwips: sizeTwips, zoomPPT: zoomPPT, cap: OfficeTileStore.residencyCapTiles) else {
+            return // too big (or unrepresentable) — stays in today's viewport+margin lazy mode, unchanged
+        }
+        guard tileCount > 0 else {
+            prefetchSweepIssuedForTesting = true // an empty document is trivially, instantly "resident"
+            return
+        }
+        let fullExtent = OfficeTwipsRect(x: 0, y: 0, width: sizeTwips.widthTwips, height: sizeTwips.heightTwips)
+        // Clamped to the document's real extent, same as `performSubscribe`'s skip-check
+        // (`officeClampViewportToDocumentExtent`'s own header) — a resident-eligible document is
+        // routinely SMALLER than the panel showing it (that's the residency cap's whole point:
+        // small docs qualify), so `clampedOriginX/Y` pin `scrollOrigin` at 0 and this raw
+        // `bounds.size`-derived viewport extends past the doc's true edge on every axis where that
+        // holds. Unclamped, `officeResidencyPrefetchOrder`'s `visible` set would include tile
+        // indices outside `fullExtentTwips` — keys that can never be painted (nothing there to
+        // request) — contradicting its own "every key in fullExtentTwips" doc and wasting a wire
+        // round trip on a phantom ask every time this sweep runs. The skip-check's own clamped
+        // computation is unaffected by this (separate call, already correct); this clamp only
+        // fixes what the SWEEP itself asks for.
+        let visibleViewport = officeClampViewportToDocumentExtent(
+            officeViewportTwips(scrollOrigin: scrollOrigin, visibleSize: bounds.size, zoomPPT: zoomPPT),
+            sizeTwips: sizeTwips)
+        let ordered = officeResidencyPrefetchOrder(part: part, zoomPPT: zoomPPT, fullExtentTwips: fullExtent,
+                                                   visibleViewportTwips: visibleViewport)
+        beginPrefetch(keys: ordered, generation: generation)
+    }
+
+    /// Issues `keys` to the helper in small chunks (`Self.prefetchChunkSize`), visible-first (the
+    /// order `officeResidencyPrefetchOrder` already produced), pacing each chunk on the PREVIOUS
+    /// one's own wire round trip (`await runtime.prefetchTilesChunk`) rather than firing all chunks
+    /// back-to-back — see `OfficeRuntime.prefetchTilesChunk`'s own header for why a synchronous loop
+    /// would defeat chunking entirely (every chunk would enqueue on `officeRequestQueue` back-to-
+    /// back, with no gap for anything else to slot in).
+    ///
+    /// **Honest bound, not preemption.** The helper writes a chunk's `tileRequestAccepted` ack BEFORE
+    /// it starts painting that chunk's keys (`OfficeHelperServer`'s own handler order), so THIS
+    /// loop's pacing keeps it at most one chunk ahead of the wire — but the helper cannot interrupt a
+    /// paint loop already in progress, so a genuinely urgent request queued mid-sweep still waits for
+    /// the CURRENTLY-PAINTING chunk to finish, on the order of that chunk's own paint time (roughly
+    /// `Self.prefetchChunkSize` x ~26-28ms — see that constant's own doc), not zero.
+    private func beginPrefetch(keys: [TileKey], generation: Int) {
+        guard !keys.isEmpty else { prefetchSweepIssuedForTesting = true; return }
+        let chunks = officeChunked(keys, size: Self.prefetchChunkSize)
+        Task { [weak self] in
+            guard let self else { return }
+            for chunk in chunks {
+                guard self.isMounted, self.prefetchGeneration == generation else { return }
+                await self.runtime.prefetchTilesChunk(path: self.path, keys: chunk)
+                // Re-checked, not just checked before the `await` above: a generation bump (a
+                // close/part-switch/zoom racing this in-flight chunk) can land WHILE this call is
+                // suspended, and `evaluateResidencyIfNeeded` resets `prefetchChunksIssuedForTesting`
+                // to 0 the instant it bumps the generation to start the new sweep — without this
+                // second guard, a superseded sweep's stale continuation would still bump that
+                // freshly-reset counter by 1, corrupting the NEW sweep's own count with a phantom
+                // chunk that was never really its own.
+                guard self.isMounted, self.prefetchGeneration == generation else { return }
+                self.prefetchChunksIssuedForTesting += 1
+            }
+            guard self.isMounted, self.prefetchGeneration == generation else { return }
+            self.prefetchSweepIssuedForTesting = true
         }
     }
 }

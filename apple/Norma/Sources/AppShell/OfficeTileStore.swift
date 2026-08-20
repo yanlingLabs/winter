@@ -85,6 +85,35 @@ final class OfficeTileStore {
         var pixels: Data
     }
 
+    /// office live-gate fix #3 — whole-document tile residency's own eligibility ceiling: the most
+    /// tiles `OfficeTileCanvasView`'s prefetch will ever treat one open document as small enough to
+    /// hold WHOLLY resident. Lives here, not on the view, so `defaultCapacity` right below (and
+    /// `OfficeRuntime`'s construction of this store, which just takes the default) can reference the
+    /// SAME number without a reverse dependency from this type onto the view layer.
+    ///
+    /// **Memory argument**: `TileMath.bytesPerTile` is exactly 1&nbsp;MiB (512x512 RGBA). The T6
+    /// review's own ledger (`task-6-report.md`) sized this store's ORIGINAL default at 64 tiles
+    /// (64&nbsp;MiB) as enough for a single scrolling viewport — it does not derive that number from
+    /// a stated RAM percentage, only from this same per-tile unit cost. 128 continues that identical
+    /// order-of-magnitude reasoning (double, still a small, fixed footprint for one open document in
+    /// a native Mac app) rather than inventing an unrelated budget; picked at the upper end of the
+    /// live-gate brief's own suggested 96-128 range so the widest range of real documents qualify.
+    static let residencyCapTiles = 128
+    /// office live-gate fix #3 — this store's own default capacity, raised from the original 64 to
+    /// `residencyCapTiles` PLUS headroom. **Disclosed, not eliminated, limitation**: this store is
+    /// SHARED across every open document in one `OfficeRuntime` (this type's own header, above,
+    /// unchanged by this task) — sizing it to EXACTLY the residency cap would let a second tab's
+    /// ordinary lazy viewport fetches immediately start evicting a first tab's freshly-resident set
+    /// through the same LRU the moment the user switches tabs. The headroom softens the common case
+    /// (one other tab's own visible+margin viewport, a handful of tiles, coexisting without
+    /// immediately cannibalizing a resident document) but is not enough for a SECOND fully-resident
+    /// document at the same time — a bounded-scope limitation, not a bug. Nothing re-triggers a
+    /// displaced document's own prefetch merely because the store quietly evicted some of its tiles
+    /// later (`OfficeTileCanvasView.evaluateResidencyIfNeeded`'s own memoization) — a document
+    /// evicted this way silently degrades to viewport+margin lazy mode until its part/zoom next
+    /// changes, self-healing via the ordinary margin ask rather than via a fresh whole-doc sweep.
+    static let defaultCapacity = residencyCapTiles + 32
+
     let capacity: Int
 
     private var entries: [Key: Entry] = [:]
@@ -111,7 +140,7 @@ final class OfficeTileStore {
     private var pendingArrivals: [String: Set<TileKey>] = [:]
     private var flushScheduled = false
 
-    init(capacity: Int = 64) {
+    init(capacity: Int = OfficeTileStore.defaultCapacity) {
         self.capacity = max(1, capacity)
     }
 
