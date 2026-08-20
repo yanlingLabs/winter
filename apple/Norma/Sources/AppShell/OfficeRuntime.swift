@@ -1021,20 +1021,26 @@ final class OfficeRuntime: ObservableObject {
                     let landedStat = officeFileStat(atPath: path)
                     self.diskBaselines[path] = landedStat
                     // Task review fix round 2 (IMPORTANT-2, re-review): records what THIS save's
-                    // token should look like on disk BEFORE withdrawing it — see this bag's own
-                    // header (`pendingExpectedWrites`) for why a fire needs this to attribute
-                    // itself correctly instead of guessing by position. Synchronous, no `await`
-                    // between this line and the withdraw below — `OfficeRuntime` is `@MainActor`,
-                    // so nothing (no fire) can observe an in-between state.
+                    // token produced on disk. **NOT called so a fire can attribute itself against
+                    // it** (fix round 3 correction: this line and the withdraw immediately below run
+                    // in the SAME `@MainActor` turn with no `await` between them, so no fire ever
+                    // gets a chance to observe this identity before it is withdrawn again — see this
+                    // bag's own header, `pendingExpectedWrites`, for the full account). Kept as a
+                    // defensive record regardless — correct and harmless if a future refactor ever
+                    // did put an `await` between this line and the next.
                     self.recordLandedIdentity(path: path, token: expectedWriteToken, stat: landedStat)
                     // Withdraw exactly the ONE token this save's own `noteExpectedWrite` minted
-                    // above — unconditional BY TOKEN, which is what makes this always correct
-                    // regardless of what any fire did or did not do: a no-op if a fire already
-                    // matched and removed this exact token, a real removal if none did (the
+                    // above — unconditional BY TOKEN, which is the ACTUAL mechanism that makes this
+                    // always correct: every note is retired by exactly the save that minted it,
+                    // regardless of what any fire did (in practice, nothing — see above). The
                     // debounced-away case `testASaveWithNoWatcherFireAtAllStillLeavesNoLeakedNote`
-                    // covers). Never touches any OTHER save's still-pending token either way — see
+                    // covers a fire never arriving at all. Never touches any OTHER save's still-
+                    // pending token either way — see
                     // `testASecondSavesNoteSurvivesAFireLandingBetweenTwoOverlappingSaves` and
-                    // `testASecondSavesNoteSurvivesEvenWhenTheSecondSaveLandsAndFiresFIRST`.
+                    // `testASecondSavesNoteSurvivesEvenWhenTheSecondSaveLandsAndFiresFirst` (both
+                    // primitive-in-isolation pins, not production-race proofs — their own headers
+                    // say so) plus `testAGenuineOursRaceStaysSuppressedButUntouchedUntilTheOwning
+                    // SaveCatchesUp` (the interleaving that IS reachable).
                     self.withdrawExpectedWrite(path: path, token: expectedWriteToken)
                     try? FileManager.default.removeItem(atPath: tempPath)
                     self.perform(self.dispatch(.saveSucceeded(path: path, docId: docId)))
@@ -1078,39 +1084,58 @@ final class OfficeRuntime: ObservableObject {
     // `identity: OfficeFileStat?`, `nil` until its OWN rename actually lands. `recordLandedIdentity`
     // is called by the OWNING save's own continuation the instant `placeAtomically` returns
     // (`performSave`'s own sequence, immediately before its own withdraw, with no `await` between
-    // the two — `OfficeRuntime` is `@MainActor`, a serial executor, so nothing can observe a state
-    // between two `await`-free statements; only ANOTHER main-actor work item queued to run between
-    // this Task's own suspension points could interleave, which is exactly the race being closed).
-    // `consumeExpectedWrite(path:matching:)` — the watcher fire's door — matches the fire's OWN
-    // observed stat against every pending note's recorded identity: an EXACT match (inode + size +
-    // nanosecond mtime, the same triple `officeFileStat` already computes for the baseline) can only
-    // ever correspond to the ONE save whose rename actually produced those exact bytes — two
-    // DIFFERENT renames cannot produce an identical inode (rename(2) carries the SOURCE temp file's
-    // own inode onto the destination, and each save's temp file is freshly, uniquely named), so this
-    // is a proof, not a guess, whenever it fires.
+    // the two).
     //
-    // **The genuinely-ambiguous residual**: a fire CAN still arrive in the brief window after a
-    // save's rename lands but before that save's OWN continuation resumes to call
-    // `recordLandedIdentity` (the `Task.detached` boundary — crossing it means giving up the main
-    // actor, and Swift gives no ordering guarantee for which queued main-actor work runs next).
-    // In that window, `consumeExpectedWrite` finds no matching identity (nothing has been recorded
-    // yet) and returns `nil` — `fileChangedOnDisk`'s own `.ours` arm treats "no match, but notes are
-    // still pending" as ONE MORE indeterminate reason to suppress the reload, WITHOUT touching the
-    // bag or the baseline. Nothing is guessed and nothing is stolen: the responsible save's own
-    // later, unconditional, BY-TOKEN `withdrawExpectedWrite` (never keyed to any other save's token,
-    // never dependent on a fire having found it first) is what actually retires its note, whether or
-    // not a fire ever matched it. This is what makes the guarantee total rather than "usually": a
-    // token is removed EITHER by an exact-identity match (proven correct) OR by its own owner (always
-    // correct, by construction) — never by a guess, and never by anything touching a DIFFERENT save's
-    // token.
+    // **Fix round 3 (re-review) — the comment above claimed the WRONG mechanism for WHY this is
+    // safe; corrected here.** It is not "a fire matches a recorded identity, which is a proof
+    // whenever it fires" — in production, that branch never fires at all. `recordLandedIdentity` is
+    // ALWAYS immediately followed, same `@MainActor` turn, no `await` between the two calls, by
+    // `withdrawExpectedWrite`. `OfficeRuntime` being `@MainActor` — a serial executor — means NOTHING
+    // can run between two `await`-free statements in the same turn; the only thing that can ever
+    // interleave is another main-actor work item (a fire) queued to run at one of THIS task's own
+    // suspension points (there is exactly one: the `Task.detached` place itself). A fire can
+    // therefore NEVER observe a note whose identity has been recorded but not yet withdrawn — by the
+    // time any fire's closure gets a turn on the main actor, that note is either still `nil` (the
+    // owning save hasn't reached this point yet) or already gone (withdrawn, same turn as recorded).
+    // The actual, simpler safety property is: **nil-never-matches** (`consumeExpectedWrite`'s
+    // `$0.identity == observedStat` can never be true against a `nil` identity, so a fire's match
+    // attempt is, in real usage, always an inert no-op) **plus unconditional by-token owner-
+    // withdraw** (every note is retired by exactly the save that minted it, keyed to a token no
+    // other save can produce, regardless of what any fire did or didn't do). Together these mean a
+    // note is NEVER removed except by its own owner — total, not probabilistic, and for a plainer
+    // reason than "matching proves attribution."
     //
-    // `testASecondSavesNoteSurvivesAFireLandingBetweenTwoOverlappingSaves` (round 1's own scenario,
-    // still green) and `testASecondSavesNoteSurvivesEvenWhenTheSecondSaveLandsAndFiresFirst` (round
-    // 2's own inverted-order scenario — the exact counter-example the re-review gave) both drive
-    // this bag directly; `testConsumeExpectedWriteMatchesByIdentityNotPositionOrArrivalOrder` proves
-    // the matching primitive itself: an exact match consumes precisely that note and nothing else, a
-    // near-miss (one field of the triple different) matches nothing, and a fire with no pending notes
-    // at all still classifies external.
+    // The exact-match branch in `consumeExpectedWrite` is kept anyway, deliberately: it IS correct
+    // whenever it fires (an exact `(inode, size, mtime-ns)` match can only ever correspond to the
+    // ONE save whose rename actually produced those bytes — `rename(2)` carries the SOURCE temp
+    // file's own inode onto the destination, and each save's temp file is a freshly, independently
+    // created file; filesystem semantics guarantee a fresh file's inode is unique among all
+    // currently-live files on that volume — that uniqueness comes from independent creation, NOT
+    // from the temp files happening to have distinct names), so it is a safe backstop rather than
+    // dead weight to delete. **But this is a backstop for a branch that cannot currently execute, not
+    // the load-bearing guarantee** — `testConsumeExpectedWriteMatchesByIdentityNotPositionOrArrival
+    // Order`, `testASecondSavesNoteSurvivesAFireLandingBetweenTwoOverlappingSaves`, and
+    // `testASecondSavesNoteSurvivesEvenWhenTheSecondSaveLandsAndFiresFirst` all drive it directly by
+    // manually sequencing `recordLandedIdentity` before a simulated fire — an interleaving
+    // `performSave` structurally cannot produce today, since record and withdraw are atomic. They
+    // prove the matching PRIMITIVE is correct in isolation (worth keeping: it is what a future
+    // refactor would lean on if the atomicity below ever changed), not that this exact race happens
+    // in production. `testAGenuineOursRaceStaysSuppressedButUntouchedUntilTheOwningSaveCatchesUp` is
+    // the one that drives the interleaving `performSave` CAN actually produce: a fire arriving before
+    // ANY identity is recorded, which correctly finds no match and leaves the bag untouched.
+    //
+    // **The atomicity above — no `await` between `recordLandedIdentity` and `withdrawExpectedWrite`
+    // in `performSave` — is the single load-bearing invariant this entire guarantee rests on. Any
+    // future refactor inserting an `await` between record and withdraw would silently break both
+    // guarantees at once**: nil-never-matches (a fire could now observe a real recorded identity and
+    // take the exact-match branch for the first time in production) and, with it, the comment above's
+    // own claim that owner-withdraw alone accounts for every removal. The exact-match branch would
+    // remain individually correct if this happened (see the paragraph above), so nothing would
+    // actually misbehave — but the INVARIANT this comment and its tests currently document would have
+    // silently shifted, unannounced by any test failure. Keep `recordLandedIdentity` and
+    // `withdrawExpectedWrite` adjacent, synchronous, and `await`-free in `performSave` — if a future
+    // change needs an `await` between them, this whole comment block needs re-reading first, not just
+    // re-running the tests.
     struct ExpectedWriteToken: Hashable {
         private let id = UUID()
     }
@@ -1161,13 +1186,16 @@ final class OfficeRuntime: ObservableObject {
     }
 
     /// The watcher's door: does `observedStat` DEFINITIVELY match one of `path`'s own outstanding
-    /// writes? Exact identity, never position — see this bag's own header for why that is a proof
-    /// and not a heuristic. Returns the consumed token on a match (the caller adopts `observedStat`
-    /// as the new baseline); `nil` when no note's recorded identity matches — which the caller must
-    /// still treat as "possibly ours, do not reload" as long as `expectedWriteCount(for:) > 0`, since
-    /// a `nil` here can mean "no note explains this" OR "the note that will is still mid-flight and
-    /// has not recorded itself yet" — this door cannot tell those apart, and does not try to; it
-    /// touches nothing when it cannot be certain.
+    /// writes? Exact identity, never position — a match, if one is ever found, is a proof rather
+    /// than a heuristic (this bag's own header has the argument). **In today's actual production
+    /// flow this method always returns `nil`** — see the header's fix-round-3 correction for why —
+    /// so treat this as a defensive backstop, not the mechanism doing the day-to-day work; that is
+    /// unconditional by-token owner-withdraw, elsewhere in this bag. Returns the consumed token on a
+    /// match (the caller adopts `observedStat` as the new baseline); `nil` when no note's recorded
+    /// identity matches — which the caller must still treat as "possibly ours, do not reload" as
+    /// long as `expectedWriteCount(for:) > 0`, since a `nil` here can mean "no note explains this"
+    /// OR "the note that will is still mid-flight and has not recorded itself yet" — this door
+    /// cannot tell those apart, and does not try to; it touches nothing when it cannot be certain.
     @discardableResult
     func consumeExpectedWrite(path: String, matching observedStat: OfficeFileStat?) -> ExpectedWriteToken? {
         guard let observedStat, var writes = pendingExpectedWrites[path],

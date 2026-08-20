@@ -1277,6 +1277,16 @@ final class OfficeRuntimeWatcherTests: XCTestCase {
     /// the fire must leave the bag untouched. The save's own later catch-up
     /// (`recordLandedIdentity` + `withdrawExpectedWrite`, `performSave`'s own real sequence) is what
     /// actually retires it — proven here by driving that sequence explicitly afterward.
+    ///
+    /// **Fix round 3 (re-review) note — THIS is the reachable-in-production interleaving**, unlike
+    /// `testASecondSavesNoteSurvivesAFireLandingBetweenTwoOverlappingSaves` and
+    /// `...EvenWhenTheSecondSaveLandsAndFiresFirst` below (both manually sequence
+    /// `recordLandedIdentity` BEFORE a simulated fire — an ordering `performSave` cannot actually
+    /// produce, since record and withdraw run atomically, `await`-free, in the same `@MainActor`
+    /// turn; see `pendingExpectedWrites`'s own header for the full account). A fire arriving with
+    /// nothing recorded yet — exactly what this test drives — is the ONLY `.ours`-eligible ordering
+    /// that can genuinely happen: `consumeExpectedWrite` cannot match (nil never matches), so this
+    /// is where "nil-never-matches plus unconditional by-token owner-withdraw" is proven end to end.
     func testAGenuineOursRaceStaysSuppressedButUntouchedUntilTheOwningSaveCatchesUp() async throws {
         let path = try scratchFile(contents: "one")
         let runtime = OfficeRuntime(sessionId: "S1", driver: makeDriver())
@@ -1308,10 +1318,19 @@ final class OfficeRuntimeWatcherTests: XCTestCase {
     /// **Task review fix round 1 (IMPORTANT-2) — the reviewer's own original scenario, re-proven
     /// under the round-2 identity-matching design.** Two saves are in flight on the SAME path; the
     /// FIRST save's own rename lands and is fully confirmed (recorded identity) before its own
-    /// watcher fire is simulated — matching `performSave`'s real sequence (record, then the fire
-    /// COULD arrive any time after, then withdraw). The claim: a fire that definitively matches the
-    /// FIRST save's own identity must consume ONLY that note, never touching the SECOND save's still
-    /// entirely unconfirmed one.
+    /// watcher fire is simulated. The claim: a fire that definitively matches the FIRST save's own
+    /// identity must consume ONLY that note, never touching the SECOND save's still entirely
+    /// unconfirmed one.
+    ///
+    /// **Fix round 3 (re-review) honesty note**: this manually calls `recordLandedIdentity` BEFORE
+    /// simulating the fire — `performSave` itself can never produce this ordering, because it always
+    /// calls `recordLandedIdentity` immediately followed by `withdrawExpectedWrite`, `await`-free, in
+    /// the same `@MainActor` turn, so no fire ever gets a turn to observe a recorded-but-unwithdrawn
+    /// identity in real usage (`pendingExpectedWrites`'s own header has the full account). This test
+    /// proves the MATCHING PRIMITIVE is correct in isolation — a defensive backstop worth keeping —
+    /// not that this exact race happens in production.
+    /// `testAGenuineOursRaceStaysSuppressedButUntouchedUntilTheOwningSaveCatchesUp` is the one that
+    /// drives the interleaving `performSave` can actually produce.
     func testASecondSavesNoteSurvivesAFireLandingBetweenTwoOverlappingSaves() async throws {
         let path = try scratchFile(contents: "one")
         let runtime = OfficeRuntime(sessionId: "S1", driver: makeDriver())
@@ -1372,6 +1391,14 @@ final class OfficeRuntimeWatcherTests: XCTestCase {
     /// retires tokenA (not really B's)"). Under identity matching, position is irrelevant: B's fire
     /// can only match B's own recorded identity, so A's note is untouched regardless of which save
     /// finishes first.
+    ///
+    /// **Fix round 3 (re-review) honesty note**: like the test above, this manually calls
+    /// `recordLandedIdentity` before each simulated fire — an ordering `performSave` itself cannot
+    /// produce in real usage (record and withdraw are atomic and `await`-free within one save's own
+    /// continuation; see `pendingExpectedWrites`'s own header). This proves the MATCHING PRIMITIVE
+    /// correctly rejects position as a signal, in isolation — the FIFO counter-example the re-review
+    /// gave is exactly what this pins against ever regressing — not that this specific interleaving
+    /// is what happens today.
     func testASecondSavesNoteSurvivesEvenWhenTheSecondSaveLandsAndFiresFirst() async throws {
         let path = try scratchFile(contents: "one")
         let runtime = OfficeRuntime(sessionId: "S1", driver: makeDriver())
@@ -1420,7 +1447,10 @@ final class OfficeRuntimeWatcherTests: XCTestCase {
 
     /// `consumeExpectedWrite`'s own matching semantics, proven directly, no `OfficeRuntime` document
     /// lifecycle involved — mirrors `OfficePlaceAtomicallyTests`' own posture of testing a stateful
-    /// primitive in isolation. Three claims: an EXACT match consumes precisely that note and no
+    /// primitive in isolation. Explicitly a backstop pin, not a production-race proof (fix round 3,
+    /// re-review): `recordLandedIdentity` calls here are driven directly, an access `performSave`
+    /// itself never exposes a fire to in real usage — see `pendingExpectedWrites`'s own header for
+    /// why. Three claims: an EXACT match consumes precisely that note and no
     /// other, even with a second, different note also pending; a near-miss (one field of the
     /// inode/size/mtime-ns triple different) matches nothing and leaves both notes untouched; and a
     /// path with no pending notes at all returns `nil` without side effects — `officeDiskChange`'s
