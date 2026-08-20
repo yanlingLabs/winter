@@ -61,6 +61,17 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     private static var fixturesRoot: URL {
         repoRoot.appendingPathComponent("apple/Norma/Tests/NormaAppTests/Fixtures/office", isDirectory: true)
     }
+    /// Office Stage B Task 1 — the checked-in seatbelt profile SOURCE. Every test below spawns the
+    /// STANDALONE `BUILT_PRODUCTS_DIR` build product via `OfficeHelperSupervisor.Configuration`'s
+    /// own `extraArguments` seam (never the app-embedded copy), which has no
+    /// `Contents/Resources/office-helper.sb` sibling of its own — exactly the same reason each of
+    /// those `extraArguments` arrays already carries `--lok-root`. Found via a deliberate sweep of
+    /// every real-helper spawn site in this test bundle (this file's own `--lok-root` calls are a
+    /// second, independent spawn path from `OfficeHelperLiveTests.spawnLiveHelper`, easy to miss —
+    /// see task-1-report.md), not by any of these tests failing first.
+    private static var sandboxProfilePath: URL {
+        repoRoot.appendingPathComponent("apple/Norma/Sources/OfficeHelper/office-helper.sb", isDirectory: false)
+    }
 
     /// **The Task 5 exit gate**: one runtime opens `gate.xlsx` through the REAL supervisor+helper
     /// and reaches `.ready` with parts/size populated, then the quit-shaped teardown
@@ -95,7 +106,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
             OfficeHelperSupervisor(configuration: OfficeHelperSupervisor.Configuration(
                 helperExecutableURL: helperURL,
                 socketDirectory: stateDir,
-                extraArguments: ["--lok-root", vendorRoot.path]))
+                extraArguments: ["--lok-root", vendorRoot.path, "--sandbox-profile", Self.sandboxProfilePath.path]))
         }
 
         let runtime = host.officeRuntime(for: "S1")
@@ -178,7 +189,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
             OfficeHelperSupervisor(configuration: OfficeHelperSupervisor.Configuration(
                 helperExecutableURL: helperURL,
                 socketDirectory: stateDir,
-                extraArguments: ["--lok-root", vendorRoot.path]))
+                extraArguments: ["--lok-root", vendorRoot.path, "--sandbox-profile", Self.sandboxProfilePath.path]))
         }
 
         let runtime = host.officeRuntime(for: "S1")
@@ -370,7 +381,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
             OfficeHelperSupervisor(configuration: OfficeHelperSupervisor.Configuration(
                 helperExecutableURL: helperURL,
                 socketDirectory: stateDir,
-                extraArguments: ["--lok-root", vendorRoot.path]))
+                extraArguments: ["--lok-root", vendorRoot.path, "--sandbox-profile", Self.sandboxProfilePath.path]))
         }
 
         let runtime = host.officeRuntime(for: "S1")
@@ -589,7 +600,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
             OfficeHelperSupervisor(configuration: OfficeHelperSupervisor.Configuration(
                 helperExecutableURL: helperURL,
                 socketDirectory: stateDir,
-                extraArguments: ["--lok-root", vendorRoot.path]))
+                extraArguments: ["--lok-root", vendorRoot.path, "--sandbox-profile", Self.sandboxProfilePath.path]))
         }
 
         // **The second-copy dance, doubled**: the OPEN itself is against a scratch COPY of

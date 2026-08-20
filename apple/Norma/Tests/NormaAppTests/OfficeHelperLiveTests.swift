@@ -382,9 +382,12 @@ final class OfficeHelperLiveTests: XCTestCase {
     //
     // This test asserts the END-STATE invariant that must hold EITHER way: after opening a document
     // that lives in an ordinary writable directory (never `--state-path`), no `.~lock.*#` sibling
-    // exists, and the open itself still succeeded. Run once against THIS (still unsandboxed) helper
-    // before any fence exists, purely as an empirical observation — see task-1-report.md for what
-    // was actually seen and which branch (tolerate-the-denial vs. disable-at-source) it drove.
+    // exists, and the open itself still succeeded. A pre-fence run against the then-unsandboxed
+    // helper (this test's own first run, before `office-helper.sb`/main.swift's sandbox wiring
+    // existed) confirmed the assertion was genuinely RED — LOK really does write the lock file when
+    // nothing stops it — and this test now runs sandboxed BY DEFAULT (`spawnLiveHelper`'s own
+    // `sandboxProfilePath` default), where it is GREEN: the warn-and-continue branch fired, not the
+    // disable-at-source one — see task-1-report.md for both runs' evidence in full.
     func testOpeningADocumentInAWritableDirectoryLeavesNoLockFileBeside() async throws {
         try skipUnlessVendorPresent()
         let helper = try await spawnLiveHelper()
