@@ -996,4 +996,163 @@ final class OfficeTileCanvasViewTests: XCTestCase {
         view.unmount()
         try? await Task.sleep(nanoseconds: 30_000_000) // hygiene — see the earlier sibling test's own comment
     }
+
+    // MARK: - office live-gate fix #4: tile layers must never implicitly animate
+    //
+    // USER LIVE-GATE FIX #4's own diagnostic-grade report: "the table is rendered in columns and
+    // when I swipe each moves INDIVIDUALLY and has a lot of SMOOTHING... vertically it sticks to
+    // checkpoints." That is a textbook implicit CALayer animation firing on every reposition — and
+    // it directly contradicts fix #2's own comment further up this file ("repositioning a tile's
+    // CALayer was never implicitly animated by CoreAnimation either... measured directly via
+    // animationKeys()... AppKit disables implicit layer actions by default outside an explicit
+    // animation context"). That claim is FALSE for these particular layers, re-verified honestly
+    // below rather than trusted a second time — and it was never backed by a committed test in this
+    // file to begin with (searched; absent), only a narrative comment.
+    //
+    // The true mechanism: AppKit's implicit-action suppression is a `CALayerDelegate` relationship
+    // (`-actionForLayer:forKey:`) AppKit establishes ONLY between an `NSView` and its OWN backing
+    // layer (`view.layer`) — it is never propagated to a sublayer the app mints and adds by hand
+    // (`hostLayer.addSublayer(tileLayer)`, `relayoutVisibleTiles`'s own `else` branch, below). A
+    // tile layer's `delegate` was always `nil`, so `action(forKey:)` fell through to bare CALayer's
+    // own default action table — which DOES supply an implicit ~0.25s `CABasicAnimation` for
+    // "position"/"bounds" (exactly what `existing.frame = rect` touches on every reposition), the
+    // same behavior "bare Core Animation" gives ANY unguarded layer, view-hosted or not.
+    //
+    // **CORRECTED A SECOND TIME, empirically, mid this very fix round.** The first draft of this
+    // section pinned `action(forKey:)` as "deterministic — true regardless of window/presentation
+    // state" and asserted `nil` was an ACCEPTABLE result alongside `NSNull`. Measured directly
+    // (pre-fix, on a view never added to any window): every key returned `nil` — the pin PASSED,
+    // on the totally unfixed code. `action(forKey:)`'s bare-CALayer default-action fallback has
+    // nothing to offer a layer that has never been part of a genuinely PRESENTED tree (there is no
+    // "from" value to animate from before a layer's first commit) — so a never-windowed layer reads
+    // "safe" whether or not it actually is. This is almost certainly what happened to the ORIGINAL
+    // "empty both times" claim too: not a wrong layer, but no presented window either time.
+    //
+    // The real behavior only shows up live: `testRepositioningInARealPresentedWindowLeavesNoSettle
+    // GlideAfterInputStops`, below, in a real `NSWindow`, failed PRE-FIX with `animationKeys ==
+    // ["position"]` still present 100ms after the last input — the honest, corrected re-verification,
+    // and the direct confirmation of the user's own "sticks to checkpoints" report.
+    //
+    // Two tests, two tiers, kept for different reasons — NOT "mechanism is deterministic, behavior is
+    // not": `action(forKey:)` pinned below now asserts `is NSNull` ONLY (`nil` is a FAILURE) — the
+    // one answer only `OfficeTileLayer`'s own unconditional override can produce, in ANY context,
+    // presented or not; that override is what makes the mechanism check finally presentation-
+    // independent, by construction, not by accident of an unwindowed default. The behavior test stays
+    // too: it is what actually caught this bug, it encodes the user's literal symptom, and post-fix it
+    // is deterministic in the green direction (no animation is ever added, so there is nothing to race).
+
+    /// **The pin.** A tile layer minted through the PRODUCTION path (`mount()` ->
+    /// `relayoutVisibleTiles` -> `tileLayerForTesting`) must resolve every animatable key this file's
+    /// mutation sites actually touch (`applyContents`'s "contents"/"backgroundColor",
+    /// `relayoutVisibleTiles`'s "position"/"bounds" via `.frame`, plus "hidden"/"opacity" per the
+    /// live-gate brief's own named set) to `NSNull` — NOT merely `nil`; see this section's own header
+    /// for why accepting `nil` as a pass was the exact mistake that let this pin go green pre-fix.
+    /// Deliberately checks `action(forKey:)` directly, not `animationKeys()`: this way the SAME
+    /// assertion is meaningful whether or not the layer has ever had a presentation, because
+    /// `OfficeTileLayer`'s override answers identically either way.
+    func testTileLayerNeverResolvesAnAnimatableActionForAnyKeyThisFileTouches() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
+        view.mount() // relayoutVisibleTiles runs synchronously inside mount() — the layer itself needs no wait
+        // `mount()` also fires `performSubscribe()`'s detached Task into `driver.subscribeTiles` —
+        // `recorder`'s closures capture it `[unowned self]`, so this MUST stay alive until that Task
+        // has genuinely landed (`testRelayoutRoutinelyPositionsATileLayerPastTheViewsOwnEdge`'s own
+        // header, above, documents this exact race and why a bare `_ = recorder` does not close it).
+        let subscribed = await waitUntil { recorder.subscribeCalls.count >= 1 }
+        XCTAssertTrue(subscribed)
+
+        let originKey = TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0)
+        guard let tileLayer = view.tileLayerForTesting(originKey) else {
+            XCTFail("mount() must have minted a layer for the origin tile in a 300x300 viewport")
+            view.unmount()
+            return
+        }
+
+        for actionKey in ["position", "bounds", "contents", "backgroundColor", "hidden", "opacity"] {
+            let action = tileLayer.action(forKey: actionKey)
+            XCTAssertTrue(action is NSNull,
+                          "\(actionKey): expected NSNull (the override), got "
+                            + "\(String(describing: action)) instead — `nil` is ALSO a failure here, "
+                            + "not just a live CAAction: nil is what an UNGUARDED layer returns too, "
+                            + "whenever it has never been part of a presented window — see this "
+                            + "section's own header for why that used to pass on the unfixed code")
+        }
+
+        view.unmount()
+    }
+
+    /// **The honest re-verification of the prior "measured un-animated" claim — corrected
+    /// methodology.** A real `NSWindow`, `makeKeyAndOrderFront` (a genuinely PRESENTED layer tree —
+    /// the prior claim's own "real on-screen window" half, actually done and actually pinned this
+    /// time), one run-loop turn after mount so the initial layers actually HAVE a presentation (an
+    /// implicit action fired before a layer's first commit animates nothing to look at — the trap
+    /// that could otherwise make even an honest measurement read clean by accident), then a
+    /// REPOSITION-ONLY scroll delta (`applyScrollDelta`, same tile set — mirrors
+    /// `testRepositioningAnExistingTileDoesNotReapplyContentsButANewlyExposedTileDoes`'s own 10pt
+    /// delta) through the real free-scroll path. The observable that actually matches what the user
+    /// reported ("a lot of SMOOTHING... sticks to checkpoints"): settle-glide — does the layer's
+    /// PRESENTATION keep moving for a beat AFTER the input already stopped? Checked at t+100ms with
+    /// NO further input, comfortably inside the ~0.25s default implicit-animation duration a real fix
+    /// must never let start.
+    func testRepositioningInARealPresentedWindowLeavesNoSettleGlideAfterInputStops() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let sizeTwips = OfficeDocumentSize(widthTwips: 2_000_000, heightTwips: 2_000_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
+
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 300),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = view
+        window.makeKeyAndOrderFront(nil)
+        defer { window.close() }
+
+        view.mount()
+        // `recorder`'s closures capture it `[unowned self]` — MUST stay alive until `mount()`'s own
+        // detached subscribe Task has genuinely landed, or that Task later dereferences a deallocated
+        // object and crashes the whole test host (see `testTileLayerNeverResolvesAnAnimatableAction
+        // ForAnyKeyThisFileTouches`'s identical guard, immediately above, and
+        // `testRelayoutRoutinelyPositionsATileLayerPastTheViewsOwnEdge`'s own header for the full
+        // mechanism) — genuinely awaiting it here is also what gives the run-loop the turn it needs
+        // below.
+        let subscribed = await waitUntil { recorder.subscribeCalls.count >= 1 }
+        XCTAssertTrue(subscribed)
+        // One further beat so the freshly-minted layers actually have a PRESENTATION before the
+        // measurement below — see this test's own header for why an unpresented layer's first
+        // reposition could read clean by accident, not by fix.
+        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        let originKey = TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0)
+        guard let tileLayer = view.tileLayerForTesting(originKey) else {
+            XCTFail("mount() must have minted a layer for the origin tile")
+            view.unmount()
+            return
+        }
+        let modelPositionBefore = tileLayer.position
+
+        view.applyScrollDelta(dx: -30, dy: 0) // reposition-only, well inside a 256pt tile
+        let modelPositionRightAfter = tileLayer.position
+        XCTAssertNotEqual(modelPositionBefore, modelPositionRightAfter,
+                          "sanity: the delta must have actually moved the layer's MODEL position")
+
+        try? await Task.sleep(nanoseconds: 100_000_000) // t+100ms, NO further input — see header
+        let stillAnimating = !(tileLayer.animationKeys()?.isEmpty ?? true)
+        XCTAssertFalse(stillAnimating, "a tile layer is still mid-animation 100ms after the LAST "
+                       + "input, with animationKeys \(tileLayer.animationKeys() ?? []) — this is the "
+                       + "settle-glide the user reported live")
+        if let presentationPosition = tileLayer.presentation()?.position {
+            XCTAssertEqual(presentationPosition, modelPositionRightAfter,
+                           "the layer's PRESENTATION has not caught up to its own model position "
+                             + "100ms after input stopped (presentation=\(presentationPosition), "
+                             + "model=\(modelPositionRightAfter)) — exactly the reported drift/glide")
+        }
+
+        view.unmount()
+    }
 }

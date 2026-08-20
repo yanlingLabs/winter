@@ -212,6 +212,34 @@ struct OfficeTileCanvasRepresentable: NSViewRepresentable {
     }
 }
 
+// MARK: - office live-gate fix #4: a tile layer that never implicitly animates
+
+/// **The house pattern for a hand-minted `CALayer` an app repositions/recontents on every scroll
+/// tick.** `NSView`'s own implicit-action suppression (the reason a layer-backed view's ordinary
+/// property changes never visibly animate) is a `CALayerDelegate` relationship AppKit sets up
+/// ONLY between the view and its OWN backing layer — it is never propagated to a sublayer the app
+/// adds by hand (`relayoutVisibleTiles`'s tile layers, added via `hostLayer.addSublayer`). Such a
+/// layer's `delegate` is `nil`, so it falls back to bare `CALayer`'s own default action table —
+/// which DOES supply an implicit ~0.25s `CABasicAnimation` for "position"/"bounds" (what
+/// `existing.frame = rect` touches on every reposition) once the layer is part of a genuinely
+/// PRESENTED tree. Overriding `action(forKey:)` to unconditionally return `NSNull` is the
+/// catch-all form — robust against every key this file happens to touch today ("position",
+/// "bounds", "contents", "backgroundColor") AND any future one a later change starts touching,
+/// unlike a fixed `.actions` dictionary that would silently miss a key nobody thought to list.
+///
+/// This is what makes `action(forKey:)` genuinely presentation-independent for THIS layer type —
+/// see this file's own `subscribeMarginPoints` comment for the corrected account of why measuring
+/// a layer that was never part of a live window read clean even before this fix existed.
+///
+/// **Kills IMPLICIT actions only.** An explicit `add(_:forKey:)` animation (a future deliberate
+/// tile fade, say) still runs exactly as requested — `action(forKey:)` is Core Animation's
+/// "what would happen automatically" query; it has no say over an animation the app adds by hand.
+private final class OfficeTileLayer: CALayer {
+    override func action(forKey event: String) -> CAAction? {
+        NSNull()
+    }
+}
+
 // MARK: - The canvas
 
 /// office-plumbing Task 6 — **the tile canvas.** Layer-hosted (`wantsLayer = true`): one `CALayer`
@@ -273,11 +301,25 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
     private var subscribePendingSinceThrottle = false
 
     /// office live-gate fix #2 (Bug 2's root cause, and Bug 1's — see this constant's use in
-    /// `performSubscribe` for the full mechanism). Two more obvious-looking causes were investigated
-    /// and falsified by direct measurement first, not by reading alone — `scrollOrigin` quantizing to
-    /// the 256pt tile grid, and a tile's `CALayer` implicitly animating on reposition; see
-    /// `OfficeTileCanvasViewTests`' own header comment on the tests below for both, with the evidence.
-    /// `scrollOrigin`/layer placement were both already exact and un-animated. The actual felt cause:
+    /// `performSubscribe` for the full mechanism). A more obvious-looking cause was investigated and
+    /// falsified by direct measurement first, not by reading alone — `scrollOrigin` quantizing to the
+    /// 256pt tile grid; see `OfficeTileCanvasViewTests`' own header comment on the tests below, with
+    /// the evidence. `scrollOrigin` accumulation was already exact.
+    ///
+    /// **A SECOND hypothesis — a tile's `CALayer` implicitly animating on reposition — was also
+    /// raised here and dismissed at the time ("measured directly via `animationKeys()`... empty both
+    /// times... AppKit disables implicit layer actions by default outside an explicit animation
+    /// context"). That dismissal was WRONG, re-verified honestly under office live-gate fix #4 (the
+    /// user's own live report: "each moves INDIVIDUALLY and has a lot of SMOOTHING"). The true
+    /// mechanism: AppKit's implicit-action suppression is a delegate relationship it sets up ONLY
+    /// between an `NSView` and its own backing layer — never propagated to a hand-minted sublayer
+    /// (`relayoutVisibleTiles`'s tile layers, added via `addSublayer`), which fall back to bare
+    /// CALayer's default action table instead. That table only has something to offer once a layer
+    /// is part of a genuinely PRESENTED tree (a live window) — which is exactly why the original
+    /// "measured... empty" claim read clean: it was never checked inside one. See
+    /// `OfficeTileLayer`'s own header, below, and `OfficeTileCanvasViewTests`' fix-#4 section for the
+    /// corrected measurement (a real, presented `NSWindow`, `animationKeys()` genuinely non-empty
+    /// pre-fix).** The actual felt cause of fix #2 itself, unaffected by any of this:
     /// `performSubscribe` used to ask the store for EXACTLY the on-screen viewport and nothing more,
     /// so every scroll tick that crossed a 256pt tile line exposed a tile nobody had asked for yet,
     /// visible only as `resolvedPlaceholderColor()` until an async subscribe -> helper-render ->
@@ -558,6 +600,12 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
     }
     var scrollOriginForTesting: CGPoint { scrollOrigin }
 
+    /// office live-gate fix #4: the CALayer minted for `key`, if currently in the visible pool — lets
+    /// a test inspect a REAL tile layer's implicit-action behavior (`action(forKey:)`, `animationKeys()`,
+    /// `presentation()`) through the exact production minting/reposition path (`relayoutVisibleTiles`),
+    /// rather than a hand-built `CALayer()` that would only prove the TEST's own layer never animates.
+    func tileLayerForTesting(_ key: TileKey) -> CALayer? { tileLayers[key] }
+
     /// A synthetic `NSEvent(.magnify)` is equally awkward to construct — this reaches the SAME
     /// `applyZoom` a real pinch/⌘± gesture reaches and then subscribes immediately, mirroring
     /// `zoomStep`'s own two-call shape (a test's zoom is a discrete action, like ⌘±, not a continuous
@@ -659,10 +707,22 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
     /// Incremental rather than a full teardown/rebuild each pass: a rebuild would briefly blank an
     /// already-cached, still-visible tile's layer before immediately refilling it — cheap in CPU
     /// terms but a visible flicker on every scroll tick that this reconciliation avoids for free.
+    ///
+    /// office live-gate fix #4: the whole mutation pass below runs inside a `CATransaction` with
+    /// actions disabled — belt-and-suspenders alongside `OfficeTileLayer`'s own unconditional
+    /// `action(forKey:)` override (which alone already covers every tile layer, everywhere it is
+    /// touched, not just here). This transaction is what also covers `hostLayer` itself and any
+    /// FUTURE sublayer type a later change might add here without remembering to mint it as
+    /// `OfficeTileLayer` — see this task's own report for why the override alone was judged
+    /// insufficient to trust permanently.
     private func relayoutVisibleTiles() {
         guard bounds.width > 0, bounds.height > 0, let hostLayer = layer else { return }
         let viewport = officeViewportTwips(scrollOrigin: scrollOrigin, visibleSize: bounds.size, zoomPPT: zoomPPT)
         let visibleKeys = Set(TileMath.viewportTileKeys(part: part, zoomPPT: zoomPPT, viewportTwips: viewport))
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
 
         for (key, tileLayer) in tileLayers where !visibleKeys.contains(key) {
             tileLayer.removeFromSuperlayer()
@@ -705,7 +765,7 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
                 // deliberately its own small loop rather than routed back through this method.)
                 existing.frame = rect
             } else {
-                let tileLayer = CALayer()
+                let tileLayer = OfficeTileLayer()
                 tileLayer.contentsGravity = .resize
                 tileLayer.frame = rect
                 hostLayer.addSublayer(tileLayer)
