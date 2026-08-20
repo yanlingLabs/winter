@@ -456,4 +456,73 @@ final class PanelDocumentTabTests: XCTestCase {
         let model = PanelDocumentTabModel(tabId: "t1", path: "/a.xlsx")
         model.selectPart(2) // must not crash
     }
+
+    // MARK: - Office Stage B Task 2: saving
+
+    /// PURE: ⌘S's document-tab leg saves the tab the user is LOOKING at, and only if it is a
+    /// document — mirrors `EditorSaveTests.testTheMenuTargetIsTheActiveCodeTabAndNothingElse`'s
+    /// exact shape, filtered to `.document` instead of `.code`.
+    func testOfficeSaveMenuTargetIsTheActiveDocumentTabAndNothingElse() {
+        let document = PanelTab(tabId: "t1", kind: .document, url: "/repo/gate.xlsx", title: "gate.xlsx")
+        let code = PanelTab(tabId: "t2", kind: .code, url: "/repo/engine.ts", title: "engine.ts")
+        let pathless = PanelTab(tabId: "t3", kind: .document, url: nil, title: nil)
+
+        XCTAssertEqual(officeSaveMenuTarget(tabs: [document, code], activeTabId: "t1")?.tabId, "t1")
+        XCTAssertNil(officeSaveMenuTarget(tabs: [document, code], activeTabId: "t2"),
+                     "a code tab in front is not a document to save — never reach past it")
+        XCTAssertNil(officeSaveMenuTarget(tabs: [document, pathless], activeTabId: "t3"))
+        XCTAssertNil(officeSaveMenuTarget(tabs: [document], activeTabId: nil))
+        XCTAssertNil(officeSaveMenuTarget(tabs: [], activeTabId: "t1"))
+    }
+
+    /// PURE: the chrome's dirty dot — driven purely from `documents[path].dirty`, mirroring
+    /// `editorTabIsDirty`'s own table of cases exactly (no state, no path, a closed document, a
+    /// clean one, a dirty one).
+    func testOfficeDocumentIsDirtyReadsPurelyFromTheMatchingDocumentEntry() {
+        XCTAssertFalse(officeDocumentIsDirty(state: nil, path: "/a.xlsx"), "no runtime state")
+        XCTAssertFalse(officeDocumentIsDirty(state: OfficeRuntimeState(), path: nil), "no path")
+
+        var clean = documentState(path: "/a.xlsx")
+        XCTAssertFalse(officeDocumentIsDirty(state: clean, path: "/a.xlsx"), "a document defaults clean")
+
+        clean.documents["/a.xlsx"]?.dirty = true
+        XCTAssertTrue(officeDocumentIsDirty(state: clean, path: "/a.xlsx"))
+
+        XCTAssertFalse(officeDocumentIsDirty(state: clean, path: "/never-opened.xlsx"),
+                       "a path with no document entry at all is never dirty")
+    }
+
+    /// The host half of the menu door: it reads the panel it is showing NOW, and it never mints an
+    /// office runtime just to ask whether there is something to save — mirrors `EditorSaveTests
+    /// .testTheHostResolvesTheActiveCodeTabAndSavesThroughTheExistingRuntimeOnly`'s exact shape.
+    func testTheHostResolvesTheActiveDocumentTabAndSavesThroughTheExistingRuntimeOnly() async {
+        let office = DocumentOfficeDriverRecorder()
+        doubles.append(office)
+        let host = makeHost(office: office)
+        host.panelStore.switchSession(to: "S1")
+        host.panelStore.applyFetchedSnapshot(
+            sessionId: "S1",
+            tabs: [PanelTab(tabId: "t1", kind: .document, url: "/repo/gate.xlsx", title: "gate.xlsx")],
+            activeTabId: "t1")
+
+        XCTAssertEqual(host.activeDocumentTabPath, "/repo/gate.xlsx")
+        host.saveActiveDocumentTab()
+        try? await Task.sleep(nanoseconds: 30_000_000) // a wrongly-minting version time to act
+        XCTAssertEqual(office.saveCalls, [], "no runtime exists for this session yet, and a save "
+                       + "must not mint one")
+        XCTAssertEqual(host.officeRuntimes.count, 0)
+
+        // With a runtime actually standing (and the document actually open), the same door saves
+        // through it.
+        let runtime = host.officeRuntime(for: "S1")
+        runtime.open("/repo/gate.xlsx")
+        let opened = await waitUntil { office.openCalls.count == 1 }
+        XCTAssertTrue(opened)
+        _ = await waitUntil { runtime.stateSnapshot.documents["/repo/gate.xlsx"] != nil }
+
+        host.saveActiveDocumentTab()
+        let saved = await waitUntil { office.saveCalls.count == 1 }
+        XCTAssertTrue(saved)
+        XCTAssertEqual(office.saveCalls.first, runtime.stateSnapshot.documents["/repo/gate.xlsx"]?.docId)
+    }
 }
