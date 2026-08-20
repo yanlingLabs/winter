@@ -483,6 +483,19 @@ final class OfficeRuntimeLiveTests: XCTestCase {
                           + "phase=\(runtime.stateSnapshot.phase))")
             XCTAssertNil(runtime.stateSnapshot.documentBanners[docPath], "\(fixtureName): no save-failed banner")
 
+            // **Task 2b (I1) — the dirty dot's own clearing path, live, on THIS SAME open document**
+            // (not merely a freshly reopened one, which starts clean for a trivial reason and would
+            // prove nothing about clearing). The review's own finding: nothing before this task ever
+            // asserted a dirty document's flag actually clears after a successful save — only that
+            // it could BECOME dirty. LOK's real `.uno:ModifiedStatus=false` callback, routed the
+            // identical way `becameDirty` above proved `=true` arrives, is what this waits for.
+            let becameCleanAfterSave = await waitUntil(timeout: 15) { runtime.stateSnapshot.documents[docPath]?.dirty == false }
+            XCTAssertTrue(becameCleanAfterSave, "\(fixtureName): dirty never cleared after a "
+                          + "successful save on the SAME open document — LOK's own "
+                          + "`.uno:ModifiedStatus=false` callback never landed")
+            XCTAssertEqual(runtime.stateSnapshot.documents[docPath]?.docId, originalDocId, "\(fixtureName): "
+                           + "sanity — still the SAME open document, not a reload in disguise")
+
             runtime.close(docPath)
             XCTAssertNil(runtime.stateSnapshot.documents[docPath], "\(fixtureName): close is synchronous "
                          + "in the reducer's own state — see OfficeRuntimeReducer.closeRequested")

@@ -362,6 +362,44 @@ final class PanelDocumentTabModel: ObservableObject {
     /// door onto `editorTabIsDirty` exactly.
     var isDirty: Bool { officeDocumentIsDirty(state: runtimeState, path: path) }
 
+    /// Office Stage B Task 2b — the conflict banner's own source, read directly like `banner` above
+    /// (`OfficeRuntimeState.documentConflicts`, single source). **Deliberately a SEPARATE optional
+    /// from `banner`, not folded into one enum the way `EditorTabBanner` unifies the editor's two
+    /// sources**: `documentBanners`/`documentConflicts` are two different dictionaries on the
+    /// runtime's own state (kept apart there so the protected Stage A tripwire reading
+    /// `documentBanners[path]` never has to change shape) — the VIEW layer is what decides
+    /// precedence between them (`PanelDocumentContent.body`: a conflict, when present, wins).
+    var conflict: OfficeConflictKind? {
+        guard let path else { return nil }
+        return runtimeState?.documentConflicts[path]
+    }
+
+    /// **"Reload from disk"** — discards the in-memory edits and re-stages fresh content under a new
+    /// docId, the SAME machinery a clean document's silent external-change path already uses.
+    func reloadFromDisk() {
+        guard let runtime = resolvedRuntime(), let path else { return }
+        runtime.reloadFromDisk(path)
+    }
+
+    /// **"Keep my version"** — dismisses the conflict with no other effect; the document stays
+    /// exactly as it is, still dirty, still showing its in-memory edits. The brief's own words: "the
+    /// next ⌘S overwrites."
+    func keepMyVersion() {
+        guard let runtime = resolvedRuntime(), let path else { return }
+        runtime.keepMyVersion(path)
+    }
+
+    /// **"Close"** — the dirty-deletion conflict's own second action: this document is gone from
+    /// disk and the user does not want it back, so there is nothing left to reload TO (unlike
+    /// `.changed`, which always offers Reload) — closing the tab is the only other choice. Reuses
+    /// the SAME door the ordinary tab-close control already calls
+    /// (`ShellSessionHost.closePanelTab`), which closes both the panel tab and this runtime's own
+    /// document — no new gating logic: `closePanelTab`'s own header already covers a `.document`
+    /// tab's close policy.
+    func closeTab() {
+        host?.closePanelTab(tabId)
+    }
+
     /// Test seam: drive one refresh cycle synchronously, without a view.
     func refreshForTesting() { refresh() }
 }
@@ -533,7 +571,16 @@ struct PanelDocumentContent: View {
             // `PanelEditorContent.body`'s identical placement and identical reasoning (a file that
             // was deleted while its tab was showing something else still has something to say, and a
             // banner that only rendered over the canvas would be invisible exactly when it matters).
-            if let banner = model.banner {
+            // Office Stage B Task 2b: a conflict, when present, WINS over the plain banner — the two
+            // are mutually exclusive in practice (the reducer never sets both for the same path: a
+            // conflict clears `documentBanners` the instant it is raised, `.opened`/`.saveSucceeded`
+            // clear `documentConflicts` the instant either resolves it), but the view layer's own
+            // precedence is the tie-break of record, matching `PanelDocumentTabModel.conflict`'s own
+            // header.
+            if let conflict = model.conflict {
+                OfficeConflictBannerView(kind: conflict, onReload: { model.reloadFromDisk() },
+                                         onKeepMine: { model.keepMyVersion() }, onClose: { model.closeTab() })
+            } else if let banner = model.banner {
                 OfficeDocumentBannerView(text: banner)
             }
             viewport
@@ -593,6 +640,92 @@ struct OfficeDocumentBannerView: View {
         .overlay(alignment: .bottom) {
             Rectangle().fill(Theme.hairline).frame(height: 1)
         }
+    }
+}
+
+// MARK: - Office Stage B Task 2b: the conflict banner (a dirty document's own, two actions)
+
+/// **The same row, wearing `EditorBannerView`'s exact vocabulary** (`EditorBannerView`'s own header
+/// explains the tokens this reuses verbatim: `Theme.elevatedSurface` + `Theme.hairline`, `.primary`
+/// sentence / `Theme.textMuted` detail, `ShellSidebarRowStyle` text buttons, no danger tone) — unlike
+/// the editor's OWN `.conflict(.deleted)` arm, which offers a single dismiss button because there is
+/// nothing else editor-side to choose, Office's brief names TWO actions for EVERY conflict kind
+/// (`.changed`: Reload from disk / Keep my version; `.deleted`: Keep my version / Close) — there is
+/// no bare-dismiss case here at all, so unlike `EditorBannerView` this view never needs an
+/// `onDismiss`.
+struct OfficeConflictBannerView: View {
+    let kind: OfficeConflictKind
+    let onReload: () -> Void
+    let onKeepMine: () -> Void
+    let onClose: () -> Void
+
+    var body: some View {
+        HStack(spacing: panelEditorBannerGap) {
+            Text(sentence)
+                .font(Typography.caption(.medium))
+                .foregroundStyle(.primary)
+                .lineLimit(2)
+                .truncationMode(.middle)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if let detail {
+                Text(detail)
+                    .font(Typography.caption())
+                    .foregroundStyle(Theme.textMuted)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: panelEditorBannerGap)
+
+            switch kind {
+            case .changed:
+                // Reload first, Keep mine second — the destructive one (discards the in-memory
+                // edits) answers the sentence's own question first; mirrors
+                // `EditorBannerView.body`'s identical ordering and identical reasoning.
+                action(officeConflictReloadTitle, onReload)
+                action(officeConflictKeepTitle, onKeepMine)
+            case .deleted:
+                // No Reload — there is nothing left on disk to reload TO (`officeConflictDeletedDetail`
+                // says as much). Keep mine first (the non-destructive choice, and the one that leaves
+                // the tab open) so Close — the one that ends this tab — reads last.
+                action(officeConflictKeepTitle, onKeepMine)
+                action(officeConflictCloseTitle, onClose)
+            }
+        }
+        .padding(.horizontal, panelTabPillInset)
+        .padding(.vertical, panelEditorBannerVerticalPadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.elevatedSurface)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Theme.hairline).frame(height: 1)
+        }
+    }
+
+    private var sentence: String {
+        switch kind {
+        case .changed: return officeConflictChangedMessage
+        case .deleted: return officeConflictDeletedMessage
+        }
+    }
+
+    private var detail: String? {
+        guard kind == .deleted else { return nil }
+        return officeConflictDeletedDetail
+    }
+
+    /// Identical to `EditorBannerView`'s own private `action` helper — the panel's ONE text-button
+    /// treatment, not reinvented here.
+    private func action(_ title: String, _ perform: @escaping () -> Void) -> some View {
+        Button(action: perform) {
+            Text(title)
+                .font(Typography.caption(.medium))
+                .foregroundStyle(Theme.textMuted)
+                .padding(.horizontal, panelEditorBannerGap)
+                .frame(height: panelChromeButtonSize)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(ShellSidebarRowStyle(isSelected: false))
+        .accessibilityLabel(title)
     }
 }
 

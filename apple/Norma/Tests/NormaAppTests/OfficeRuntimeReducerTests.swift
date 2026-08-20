@@ -406,6 +406,103 @@ final class OfficeRuntimeReducerTests: XCTestCase {
         XCTAssertEqual(effects, [])
     }
 
+    // MARK: - Office Stage B Task 2b: the conflict matrix — dirty supersedes Stage A's "always silent"
+
+    private func openedAndDirty(path: String = "/a.xlsx", docId: String = "doc-a") -> OfficeRuntimeState {
+        let (open, _) = reduce(ready(), [.openRequested(path: path),
+                                         .opened(path: path, docId: docId, stagedPath: "/staged/\(docId)", metadata: metadata)])
+        let (dirty, _) = reduce(open, [.modifiedStatusChanged(docId: docId, modified: true)])
+        return dirty
+    }
+
+    /// The brief's own policy, at the reducer level, isolated from `OfficeRuntimeWatcherTests`' own
+    /// end-to-end classifier proof of the identical claim: a dirty document's unsaved edits are
+    /// never discarded silently — a conflict is raised instead of `.reloadDocument`.
+    func testExternalChangeDetectedOnADirtyDocumentRaisesAConflictInsteadOfReloading() {
+        let dirty = openedAndDirty()
+        let (state, effects) = reduce(dirty, [.externalChangeDetected(path: "/a.xlsx")])
+        XCTAssertEqual(state.documentConflicts["/a.xlsx"], .changed)
+        XCTAssertEqual(effects, [.emitBanner(reason: officeConflictChangedMessage)])
+        XCTAssertNil(state.documentBanners["/a.xlsx"], "the dirty path routes through documentConflicts, "
+                     + "never the plain-text banner dict the clean path uses")
+        XCTAssertEqual(state.documents["/a.xlsx"], dirty.documents["/a.xlsx"], "no silent reload — the "
+                       + "in-memory edits are untouched, exactly as `.reloadDocument` never having "
+                       + "been emitted implies")
+    }
+
+    /// The deletion half of the same fork: `officeConflictDeletedMessage`, never the plain
+    /// "File was deleted on disk" `documentBanners` entry the clean path sets.
+    func testExternalDeletedOnADirtyDocumentRaisesAConflictInsteadOfAPersistentBanner() {
+        let dirty = openedAndDirty()
+        let (state, effects) = reduce(dirty, [.externalDeleted(path: "/a.xlsx")])
+        XCTAssertEqual(state.documentConflicts["/a.xlsx"], .deleted)
+        XCTAssertEqual(effects, [.emitBanner(reason: officeConflictDeletedMessage)])
+        XCTAssertNil(state.documentBanners["/a.xlsx"])
+        XCTAssertEqual(state.documents["/a.xlsx"], dirty.documents["/a.xlsx"], "nothing to lose on "
+                       + "screen either way — deletion never touches the document entry itself")
+    }
+
+    /// **"Reload from disk"**: discards the in-memory edits and re-stages, mirroring the SAME
+    /// `.reloadDocument` effect a clean document's silent path already uses — the conflict banner's
+    /// own left-hand button is not a new reload mechanism, only a gated door to the existing one.
+    func testConflictReloadRequestedClearsTheConflictAndReloads() {
+        let (conflicted, _) = reduce(openedAndDirty(), [.externalChangeDetected(path: "/a.xlsx")])
+        XCTAssertEqual(conflicted.documentConflicts["/a.xlsx"], .changed, "sanity")
+
+        let (state, effects) = reduce(conflicted, [.conflictReloadRequested(path: "/a.xlsx")])
+        XCTAssertNil(state.documentConflicts["/a.xlsx"])
+        XCTAssertNil(state.documentBanners["/a.xlsx"])
+        XCTAssertEqual(effects, [.reloadDocument(path: "/a.xlsx", oldDocId: "doc-a")])
+    }
+
+    /// **"Keep my version"**: dismisses the banner with NO other effect — the document stays exactly
+    /// as it is, still dirty, still showing its in-memory edits; the brief's own words, "the next ⌘S
+    /// overwrites."
+    func testConflictKeepMineRequestedClearsTheConflictWithNoOtherEffect() {
+        let (conflicted, _) = reduce(openedAndDirty(), [.externalChangeDetected(path: "/a.xlsx")])
+        let (state, effects) = reduce(conflicted, [.conflictKeepMineRequested(path: "/a.xlsx")])
+        XCTAssertNil(state.documentConflicts["/a.xlsx"])
+        XCTAssertNil(state.documentBanners["/a.xlsx"])
+        XCTAssertEqual(effects, [])
+        XCTAssertEqual(state.documents["/a.xlsx"], conflicted.documents["/a.xlsx"], "still dirty, "
+                       + "still showing the SAME in-memory edits — dismissing the banner changes "
+                       + "nothing else")
+    }
+
+    func testConflictReloadAndKeepMineRequestedOnAPathThatIsNotOpenAreNoOps() {
+        for event in [OfficeRuntimeEvent.conflictReloadRequested(path: "/never.xlsx"),
+                      .conflictKeepMineRequested(path: "/never.xlsx")] {
+            let (state, effects) = reduce(ready(), [event])
+            XCTAssertEqual(state, ready())
+            XCTAssertEqual(effects, [])
+        }
+    }
+
+    /// **"Conflict, then save"**: pressing ⌘S over a standing conflict banner IS the "mine wins"
+    /// answer — `.saveSucceeded`'s own arm resolves EITHER conflict kind unconditionally, the same
+    /// rule that makes N1's own rare false-positive self-heal (`officeDiskChange`'s own doc has the
+    /// full account).
+    func testSaveSucceededClearsAnyStandingConflict() {
+        let (conflicted, _) = reduce(openedAndDirty(), [.externalChangeDetected(path: "/a.xlsx")])
+        XCTAssertEqual(conflicted.documentConflicts["/a.xlsx"], .changed, "sanity")
+
+        let (state, _) = reduce(conflicted, [.saveSucceeded(path: "/a.xlsx", docId: "doc-a")])
+        XCTAssertNil(state.documentConflicts["/a.xlsx"])
+        XCTAssertEqual(state.documents["/a.xlsx"]?.docId, "doc-a", "sanity: the save's own stale-docId "
+                       + "guard passed")
+    }
+
+    /// **"Conflict, then close"**: closing a tab with a standing conflict must not leave that
+    /// conflict behind for the NEXT document that ever reuses this path's slot — mirrors
+    /// `.closeRequested`'s own identical clear for `documentBanners` immediately above it.
+    func testClosingADocumentWithAStandingConflictClearsIt() {
+        let (conflicted, _) = reduce(openedAndDirty(), [.externalChangeDetected(path: "/a.xlsx")])
+        let (state, effects) = reduce(conflicted, [.closeRequested(path: "/a.xlsx")])
+        XCTAssertNil(state.documentConflicts["/a.xlsx"])
+        XCTAssertEqual(effects, [.helperClose(docId: "doc-a"), .unwatchFile(path: "/a.xlsx"),
+                                 .deleteStagedCopy(docId: "doc-a")])
+    }
+
     /// T8 interface obligation 1 (activePart survives a reload): `.opened` is the SAME event a fresh
     /// open uses, and this is the row that proves it does double duty correctly — a reload's own
     /// `.opened` lands while the OLD entry (part 2 of 3) is still sitting in `documents[path]`
@@ -1243,8 +1340,8 @@ final class OfficeRuntimeWatcherTests: XCTestCase {
     /// test before the fix — see `performSave`'s own `withdrawExpectedWrite` comment): the baseline
     /// re-seed lands, synchronously, in the SAME continuation, before this test ever calls
     /// `watcher.fire()`, so the fire below reads `.unchanged` (the baseline already matches),
-    /// never `.ours` — the bag's own job is the narrower race
-    /// `testAGenuineOursRaceIsConsumedWhenTheFireArrivesBeforeTheBaselineReSeeds` below exercises
+    /// never `.ours` — the bag's own job is the narrower race the two
+    /// `testExternalWriteBetweenNoteExpectedWriteAndTheOwningSavesWithdraw...` tests below exercise
     /// directly. Both are "suppressed," just via different arms of `officeDiskChange`.
     func testASavesOwnWatcherFireIsSuppressedAndDoesNotReload() async throws {
         let path = try scratchFile(contents: "one")
@@ -1286,56 +1383,91 @@ final class OfficeRuntimeWatcherTests: XCTestCase {
                      + "never even attempted")
     }
 
-    /// **The genuine `.ours` race, provoked directly** (bypassing `performSave`'s own async round
-    /// trip, which — per the test above — usually wins the race against a fire): note a write is
-    /// about to happen, put NEW bytes on disk exactly as a landed rename would, then fire the
-    /// watcher's callback BEFORE anything re-seeds the baseline OR records the note's own identity.
-    /// This is the ONE window `performSave`'s own comment names ("the rename has landed and this
-    /// continuation has not run yet") — proving the bag stays SILENTLY suppressed, not reloading and
-    /// not guessing, when it is asked to classify a fire it cannot yet definitively attribute.
+    /// **The genuine race, provoked directly** (bypassing `performSave`'s own async round trip,
+    /// which — per the test above — usually wins the race against a fire): note a write is about to
+    /// happen, put NEW bytes on disk exactly as a landed rename would, then fire the watcher's
+    /// callback BEFORE anything records the note's own identity. This is the ONE window
+    /// `performSave`'s own comment names ("the rename has landed and this continuation has not run
+    /// yet") — and, post-N1, the CLASSIFIER's own header discloses exactly what happens in it: this
+    /// reads `.external`, not `.ours`, because nothing has been CONFIRMED yet (`officeDiskChange`'s
+    /// own doc comment on why "merely pending" stopped being enough). Split into a clean/dirty pair,
+    /// each driven through `fileChangedOnDisk` — the CLASSIFIER — never by dispatching
+    /// `.externalChangeDetected` directly, matching N1's own review wording verbatim.
     ///
-    /// **Fix round 2 changes what this test proves**: pre-round-2, the fire alone drove the bag to
-    /// 0 (FIFO consumed the one pending token on sight). Post-round-2, a fire can only retire a note
-    /// whose identity it can CONFIRM — and nothing has recorded an identity yet at this point, so
-    /// the fire must leave the bag untouched. The save's own later catch-up
-    /// (`recordLandedIdentity` + `withdrawExpectedWrite`, `performSave`'s own real sequence) is what
-    /// actually retires it — proven here by driving that sequence explicitly afterward.
-    ///
-    /// **Fix round 3 (re-review) note — THIS is the reachable-in-production interleaving**, unlike
-    /// `testASecondSavesNoteSurvivesAFireLandingBetweenTwoOverlappingSaves` and
-    /// `...EvenWhenTheSecondSaveLandsAndFiresFirst` below (both manually sequence
-    /// `recordLandedIdentity` BEFORE a simulated fire — an ordering `performSave` cannot actually
-    /// produce, since record and withdraw run atomically, `await`-free, in the same `@MainActor`
-    /// turn; see `pendingExpectedWrites`'s own header for the full account). A fire arriving with
-    /// nothing recorded yet — exactly what this test drives — is the ONLY `.ours`-eligible ordering
-    /// that can genuinely happen: `consumeExpectedWrite` cannot match (nil never matches), so this
-    /// is where "nil-never-matches plus unconditional by-token owner-withdraw" is proven end to end.
-    func testAGenuineOursRaceStaysSuppressedButUntouchedUntilTheOwningSaveCatchesUp() async throws {
+    /// **Superseded name, for anyone still searching for it**:
+    /// `testAGenuineOursRaceStaysSuppressedButUntouchedUntilTheOwningSaveCatchesUp` asserted the
+    /// PRE-N1 behavior (an unmatched fire left the bag untouched and never reloaded) — that claim is
+    /// now FALSE by design; these two tests replace it. The surviving, still-true half of its old
+    /// claim (a redundant `recordLandedIdentity` + `withdrawExpectedWrite` catch-up is always safe,
+    /// whether or not any fire ever preceded it) is folded into each test below rather than kept
+    /// as a separate proof.
+    func testExternalWriteBetweenNoteExpectedWriteAndTheOwningSavesWithdrawOnACleanDocumentReloads() async throws {
         let path = try scratchFile(contents: "one")
         let runtime = OfficeRuntime(sessionId: "S1", driver: makeDriver())
         runtimes.append(runtime)
         runtime.open(path)
         _ = await waitUntil { runtime.stateSnapshot.documents[path] != nil }
         let originalDocId = try XCTUnwrap(runtime.stateSnapshot.documents[path]?.docId)
+        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.dirty, false, "setup: a freshly opened document starts clean")
 
         let token = runtime.noteExpectedWrite(path: path) // "a write is about to happen" — performSave's own first act
-        try "the rename already landed".write(toFile: path, atomically: true, encoding: .utf8)
-        runtime.fileChangedOnDisk(path) // the fire arrives before performSave's own catch-up would have
+        try "new bytes landed before this save's own identity was recorded".write(
+            toFile: path, atomically: true, encoding: .utf8)
+        runtime.fileChangedOnDisk(path) // the CLASSIFIER — the fire arrives before performSave's own catch-up would have
 
-        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.docId, originalDocId, "classified "
-                       + ".ours — must not reload, even though nothing could be confirmed yet")
-        XCTAssertNil(runtime.stateSnapshot.documentBanners[path])
-        XCTAssertEqual(runtime.expectedWriteCount(for: path), 1, "THE CORE CLAIM: an unmatched fire "
-                       + "must NOT touch the bag — guessing which pending note it belongs to is "
-                       + "exactly what round 1's FIFO design got wrong")
+        let reloaded = await waitUntil {
+            runtime.stateSnapshot.documents[path] != nil && runtime.stateSnapshot.documents[path]?.docId != originalDocId
+        }
+        XCTAssertTrue(reloaded, "N1: an unconfirmed fire can no longer be silently swallowed as "
+                      + ".ours — clean means exactly the silent reload an ordinary external change always gets")
+        XCTAssertNil(runtime.stateSnapshot.documentConflicts[path], "clean never conflicts — the reload is the whole answer")
 
-        // `performSave`'s own real catch-up, driven explicitly: record what actually landed, then
-        // withdraw — unconditional, by token, and correct regardless of what the fire above did.
+        // The superseded save's own (now redundant) catch-up must still be safe against the NEW
+        // docId's own bag — a stale token from a save whose document has already been replaced.
         let landedStat = officeFileStat(atPath: path)
         runtime.recordLandedIdentity(path: path, token: token, stat: landedStat)
         runtime.withdrawExpectedWrite(path: path, token: token)
-        XCTAssertEqual(runtime.expectedWriteCount(for: path), 0, "the owning save's own catch-up "
-                       + "retires its note whether or not any fire ever matched it")
+        XCTAssertEqual(runtime.expectedWriteCount(for: path), 0, "a redundant catch-up is always "
+                       + "safe, whether or not any fire preceded it — the surviving half of the "
+                       + "superseded test's own claim")
+    }
+
+    /// The dirty half of the pair immediately above: the SAME unconfirmed-fire race, but on a
+    /// document already carrying unsaved edits — `officeDiskChange`'s own doc comment names this
+    /// exact outcome as the "self-healing false positive" (a conflict banner that flashes up and is
+    /// then immediately resolved by that same save's own `.saveSucceeded`, moments later, since a
+    /// successful save unconditionally clears any standing conflict). This test proves the FIRST
+    /// half only — the banner raised, no silent reload/data-loss — `.saveSucceeded`'s own clearing
+    /// arm is proven separately (`OfficeRuntimeReducerTests`' `.saveSucceeded` rows).
+    func testExternalWriteBetweenNoteExpectedWriteAndTheOwningSavesWithdrawOnADirtyDocumentRaisesAConflict() async throws {
+        let path = try scratchFile(contents: "one")
+        let runtime = OfficeRuntime(sessionId: "S1", driver: makeDriver())
+        runtimes.append(runtime)
+        runtime.open(path)
+        _ = await waitUntil { runtime.stateSnapshot.documents[path] != nil }
+        let originalDocId = try XCTUnwrap(runtime.stateSnapshot.documents[path]?.docId)
+        runtime.handle(documentEvent: .modifiedChanged(true), docId: originalDocId)
+        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.dirty, true, "setup: this document now carries unsaved edits")
+
+        let token = runtime.noteExpectedWrite(path: path)
+        try "new bytes landed before this save's own identity was recorded".write(
+            toFile: path, atomically: true, encoding: .utf8)
+        runtime.fileChangedOnDisk(path)
+
+        let conflicted = await waitUntil { runtime.stateSnapshot.documentConflicts[path] != nil }
+        XCTAssertTrue(conflicted, "N1: an unconfirmed fire on a DIRTY document must not be swallowed "
+                      + "either — a genuine external write racing an in-flight save is exactly what "
+                      + "silently clobbered the next time this runtime saves, pre-fix")
+        XCTAssertEqual(runtime.stateSnapshot.documentConflicts[path], .changed)
+        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.docId, originalDocId, "dirty never "
+                       + "silently reloads — the in-memory edits are never discarded without a "
+                       + "choice, conflict or not")
+
+        let landedStat = officeFileStat(atPath: path)
+        runtime.recordLandedIdentity(path: path, token: token, stat: landedStat)
+        runtime.withdrawExpectedWrite(path: path, token: token)
+        XCTAssertEqual(runtime.expectedWriteCount(for: path), 0, "a redundant catch-up is always "
+                       + "safe, whether or not any fire preceded it")
     }
 
     /// **Task review fix round 1 (IMPORTANT-2) — the reviewer's own original scenario, re-proven
@@ -1351,9 +1483,11 @@ final class OfficeRuntimeWatcherTests: XCTestCase {
     /// the same `@MainActor` turn, so no fire ever gets a turn to observe a recorded-but-unwithdrawn
     /// identity in real usage (`pendingExpectedWrites`'s own header has the full account). This test
     /// proves the MATCHING PRIMITIVE is correct in isolation — a defensive backstop worth keeping —
-    /// not that this exact race happens in production.
-    /// `testAGenuineOursRaceStaysSuppressedButUntouchedUntilTheOwningSaveCatchesUp` is the one that
-    /// drives the interleaving `performSave` can actually produce.
+    /// not that this exact race happens in production. The two
+    /// `testExternalWriteBetweenNoteExpectedWriteAndTheOwningSavesWithdraw...` tests above drive the
+    /// interleaving `performSave` can actually produce — post-N1, that interleaving no longer
+    /// classifies `.ours` at all (see their own doc comments); this test's own claim is narrower and
+    /// still holds unchanged: ONCE an identity is genuinely recorded, matching is exact, not FIFO.
     func testASecondSavesNoteSurvivesAFireLandingBetweenTwoOverlappingSaves() async throws {
         let path = try scratchFile(contents: "one")
         let runtime = OfficeRuntime(sessionId: "S1", driver: makeDriver())
@@ -1635,5 +1769,132 @@ final class OfficePlaceAtomicallyTests: XCTestCase {
 
         try OfficeRuntime.placeAtomically(tempPath: renderedFile.path, at: destination.path)
         XCTAssertEqual(try String(contentsOf: destination, encoding: .utf8), "far away content")
+    }
+
+    /// Office Stage B Task 2b (N1) — the TOCTOU-free identity capture, proven directly: the
+    /// returned stat must describe the file AS IT LANDED (the sibling, stat'd before the rename on
+    /// this same detached thread), not whatever a caller might re-stat moments later. Compared
+    /// against a fresh `officeFileStat` read immediately after — the two must agree, since nothing
+    /// else touches `destination` in between.
+    func testReturnsTheLandedStatOfWhatItJustPlaced() throws {
+        let docDir = makeScratchDirectory()
+        let destination = docDir.appendingPathComponent("gate.xlsx")
+        try "original".write(to: destination, atomically: true, encoding: .utf8)
+        let helperTemp = makeScratchDirectory().appendingPathComponent("rendered")
+        try "rendered content, a different length than the original".write(to: helperTemp, atomically: true, encoding: .utf8)
+
+        let landed = try OfficeRuntime.placeAtomically(tempPath: helperTemp.path, at: destination.path)
+        let rereadAfterward = officeFileStat(atPath: destination.path)
+        XCTAssertNotNil(landed)
+        XCTAssertEqual(landed, rereadAfterward, "the returned stat already describes exactly what a "
+                       + "fresh re-stat finds — nothing was in flight between them")
+    }
+}
+
+// MARK: - Office Stage B Task 2b: stageDocument / deleteStagedCopy — the Collabora-jail staging pair
+
+final class OfficeStageDocumentTests: XCTestCase {
+    private var scratchDirs: [URL] = []
+
+    override func tearDown() {
+        for dir in scratchDirs { try? FileManager.default.removeItem(at: dir) }
+        scratchDirs.removeAll()
+        super.tearDown()
+    }
+
+    private func makeScratchDirectory() -> URL {
+        let dir = URL(fileURLWithPath: "/tmp/office-stage-document-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        scratchDirs.append(dir)
+        return dir
+    }
+
+    /// The ordinary case: a real path's bytes land, byte-for-byte, at the staged path — proving the
+    /// wire `open` this feeds really is a copy, not a symlink or a reference to the original.
+    func testCopiesTheRealPathsContentToTheStagedPath() throws {
+        let realDir = makeScratchDirectory()
+        let realPath = realDir.appendingPathComponent("gate.xlsx")
+        try "the real document's own bytes".write(to: realPath, atomically: true, encoding: .utf8)
+        let docsDir = makeScratchDirectory().appendingPathComponent("docs", isDirectory: true)
+        let stagedPath = docsDir.appendingPathComponent("doc-1.xlsx")
+
+        try OfficeRuntime.stageDocument(realPath: realPath.path, stagedPath: stagedPath.path)
+
+        XCTAssertEqual(try String(contentsOf: stagedPath, encoding: .utf8), "the real document's own bytes")
+        // Independent copies, not the same inode/symlink — editing the staged copy (exactly what
+        // this task's whole point is) must never reach back to the user's real file.
+        try "edited in place".write(to: stagedPath, atomically: true, encoding: .utf8)
+        XCTAssertEqual(try String(contentsOf: realPath, encoding: .utf8), "the real document's own bytes",
+                       "the real file must be untouched by an edit to its staged copy")
+    }
+
+    /// `docs/` does not exist yet the first time ANY document is ever staged under a fresh
+    /// `--state-path` — `withIntermediateDirectories: true` is what makes that the ordinary case
+    /// rather than a special one, mirroring `LOKBridge`'s own `saves/` directory creation.
+    func testCreatesTheDocsDirectoryOnFirstUse() throws {
+        let realDir = makeScratchDirectory()
+        let realPath = realDir.appendingPathComponent("gate.ods")
+        try "content".write(to: realPath, atomically: true, encoding: .utf8)
+        let docsDir = makeScratchDirectory().appendingPathComponent("docs", isDirectory: true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: docsDir.path), "setup: docs/ genuinely does not exist yet")
+        let stagedPath = docsDir.appendingPathComponent("doc-1.ods")
+
+        try OfficeRuntime.stageDocument(realPath: realPath.path, stagedPath: stagedPath.path)
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: stagedPath.path))
+    }
+
+    /// The staging failure this task's own `openAndDispatch` catch block turns into `openFailures` —
+    /// a missing/garbage real path must throw, never silently produce an empty staged file.
+    func testThrowsWhenTheRealPathDoesNotExist() throws {
+        let docsDir = makeScratchDirectory().appendingPathComponent("docs", isDirectory: true)
+        let stagedPath = docsDir.appendingPathComponent("doc-1.xlsx")
+        XCTAssertThrowsError(try OfficeRuntime.stageDocument(
+            realPath: "/tmp/office-stage-document-genuinely-missing-\(UUID().uuidString)",
+            stagedPath: stagedPath.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stagedPath.path), "no half-written stub left behind")
+    }
+
+    /// A reload re-stages the SAME real path under a FRESH docId — never the same staged path twice
+    /// in practice — but the pre-clear (`try? removeItem` ahead of the `copyfile`) must not itself
+    /// throw or misbehave on the degenerate case where something is already sitting there.
+    func testOverwritesWhateverAlreadySatAtTheStagedPath() throws {
+        let realDir = makeScratchDirectory()
+        let realPath = realDir.appendingPathComponent("gate.xlsx")
+        try "fresh content".write(to: realPath, atomically: true, encoding: .utf8)
+        let docsDir = makeScratchDirectory().appendingPathComponent("docs", isDirectory: true)
+        try FileManager.default.createDirectory(at: docsDir, withIntermediateDirectories: true)
+        let stagedPath = docsDir.appendingPathComponent("doc-1.xlsx")
+        try "stale leftover from a previous stage".write(to: stagedPath, atomically: true, encoding: .utf8)
+
+        try OfficeRuntime.stageDocument(realPath: realPath.path, stagedPath: stagedPath.path)
+
+        XCTAssertEqual(try String(contentsOf: stagedPath, encoding: .utf8), "fresh content")
+    }
+
+    /// The sweep's own discrimination, pinned directly: `docId + "."` as the prefix means a docId
+    /// that is a literal PREFIX of another's own name (`"doc-1"` inside `"doc-10"`) must not collide
+    /// — `deleteStagedCopy(docId: "doc-1", ...)` must remove ONLY `doc-1.xlsx`, never `doc-10.xlsx`.
+    func testDeleteStagedCopyRemovesOnlyItsOwnDocIdNeverAPrefixCollision() throws {
+        let docsDir = makeScratchDirectory()
+        let ownFile = docsDir.appendingPathComponent("doc-1.xlsx")
+        let collisionCandidate = docsDir.appendingPathComponent("doc-10.xlsx")
+        try "mine".write(to: ownFile, atomically: true, encoding: .utf8)
+        try "not mine".write(to: collisionCandidate, atomically: true, encoding: .utf8)
+
+        OfficeRuntime.deleteStagedCopy(docId: "doc-1", docsDirectory: docsDir)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: ownFile.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: collisionCandidate.path), "a prefix "
+                      + "collision must never sweep a DIFFERENT docId's own staged copy")
+    }
+
+    /// Best-effort, mirroring every other sweep in this codebase (`sweepStaleProfileDirectories`'s
+    /// own header states the identical posture): nothing here to remove, and no `docs/` directory at
+    /// all, must never throw or crash — every close/teardown/helper-death path calls this
+    /// unconditionally, including for a docId whose staging attempt itself already failed.
+    func testDeleteStagedCopyIsASafeNoOpWhenNothingMatchesOrTheDirectoryDoesNotExistAtAll() {
+        let docsDir = makeScratchDirectory().appendingPathComponent("never-created", isDirectory: true)
+        OfficeRuntime.deleteStagedCopy(docId: "doc-1", docsDirectory: docsDir) // must not throw/crash
     }
 }

@@ -1425,16 +1425,28 @@ final class OfficeHelperLiveTests: XCTestCase {
 
     /// **Found while building Task 2's own live round-trip test, isolated by direct bisection
     /// (task-2-report.md has the full transcript): this vendored, from-source LibreOffice build's
-    /// OOXML EXPORT filter does not work — `saveAs` against an xlsx/docx destination pops a real LOK
-    /// window callback (an "Information" dialog this headless embedding has no way to answer) and
-    /// then the WHOLE HELPER PROCESS exits with LO's own generic "Unspecified Application Error,"
-    /// independent of the seatbelt (reproduced identically with `--no-sandbox`), independent of any
-    /// edit (reproduced on a completely untouched, freshly-opened document — `saveAs` alone is
-    /// enough), and independent of the destination FORMAT STRING tried (`saveAs`'s own `pFormat`,
-    /// both a literal LOK filter name and the bare-extension form `doc_saveAs` actually expects both
-    /// reached this same crash once past the filter-resolution stage). ODF export
-    /// (`calc8`/`writer8`/`impress8` — i.e. `.ods`/`.odt`/`.odp`) is unaffected — a real save,
+    /// XLSX EXPORT filter does not work — `saveAs` against an xlsx destination `abort()`s the WHOLE
+    /// HELPER PROCESS, independent of the seatbelt (reproduced identically with `--no-sandbox`),
+    /// independent of any edit (reproduced on a completely untouched, freshly-opened document —
+    /// `saveAs` alone is enough), and independent of the destination FORMAT STRING tried (`saveAs`'s
+    /// own `pFormat`, both a literal LOK filter name and the bare-extension form `doc_saveAs`
+    /// actually expects both reached this same crash once past the filter-resolution stage). ODF
+    /// export (`calc8`/`writer8`/`impress8` — i.e. `.ods`/`.odt`/`.odp`) is unaffected — a real save,
     /// through this exact wire dispatch, produces a real, valid archive.
+    ///
+    /// **Root cause, corrected post-Task-2b (`ooxml-export-investigation.md` has the full
+    /// backtrace): a missing dylib, not an unanswerable dialog.** The original write-up above
+    /// attributed the crash to a LOK "Information" window callback this headless embedding has no
+    /// way to answer — that theory is FALSIFIED: no window/dialog callback fires before the abort.
+    /// The real mechanism is `product-set/Frameworks/` shipping without `libsal_textenclo.dylib`
+    /// (59 dylibs present, none by that name), reached via a runtime `dlopen()` — not a link-time
+    /// dependency, so it never showed up in a closure-recipe trace — inside the xlsx export path:
+    /// `abort` -> `FullTextEncodingData::FullTextEncodingData()` -> `Impl_getTextEncodingData` ->
+    /// `rtl_getBestWindowsCharsetFromTextEncoding` -> `XclFontData::FillFromVclFont` -> ... ->
+    /// `doc_saveAs`. Also corrected: **`.pptx` export actually works** — confirmed via a different
+    /// code path than xlsx's, never affected by the missing dylib above; only xlsx is pinned as
+    /// reliably reproducing below, and this test's own scope was never "every OOXML format," only
+    /// the ones it could verify (see the docx note ahead of the loop for why docx stays unpinned).
     ///
     /// This is a GAP IN THE VENDORED BINARY, not a bug in this task's own code — Stage A's own
     /// import-side testing (`testSixFormatsOpenWithSaneTypePartsAndSize`) never exercised export at

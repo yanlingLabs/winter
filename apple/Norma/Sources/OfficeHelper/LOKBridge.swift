@@ -326,6 +326,20 @@ final class LOKBridge: OfficeDocumentBridge {
             throw BootError.installPathMissing(frameworksPath)
         }
 
+        // Office Stage B Task 2b (I3) — crash-orphan hygiene for BOTH document-bearing directories
+        // under `--state-path`, on the SAME one-live-helper-at-a-time safety argument
+        // `sweepStaleProfileDirectories`'s own header already makes for `lok-profile-*` (the socket
+        // bind is exclusive, so anything already present the moment a NEW boot reaches this call can
+        // only belong to a now-dead PRIOR instance): `docs/` is the app's own staged-copy directory
+        // (`OfficeRuntime.stageDocument` — this helper never creates it, only ever receives an
+        // already-staged path pointing into it) and `saves/` is this bridge's own rendered-save
+        // directory, immediately below. Every ordinary close/teardown/helper-death already sweeps
+        // its OWN docId's staged copy via `OfficeRuntime.deleteStagedCopy` on the app side — this is
+        // the backstop for the case nothing on the app side ever ran at all (the whole app crashed
+        // or was force-quit, not just the helper), the identical justification carried for
+        // `lok-profile-*` orphans.
+        Self.sweepStaleDocumentDirectories(statePath: statePath)
+
         // Office Stage B Task 2 — `<state-path>/saves/`, ahead of anything that could render into
         // it. `withIntermediateDirectories: true` also tolerates a `--state-path` this bridge is
         // booting into for the first time (mirrors `OfficeHelperServer.start()`'s own
@@ -729,11 +743,18 @@ final class LOKBridge: OfficeDocumentBridge {
     /// by attempting a write-classed open on the document's OWN path at load time (separate from
     /// this helper's own `saveAs`, which always targets `<state-path>/saves/` and is unaffected);
     /// under the sandbox that open is denied for any path outside `--state-path`, so every real
-    /// document loads read-only. The fix is one of two decisions above this task's authority — widen
-    /// `office-helper.sb`'s fence (explicitly forbidden to this task: report NEEDS_CONTEXT instead
-    /// of touching it) or redesign the open path to copy into `--state-path` and place back out
-    /// (`saveAs` already does exactly this shape for the WRITE side) — named, not chosen, in the
-    /// report.
+    /// document loads read-only. Two decisions were named, not chosen, above this task's own
+    /// authority: widen `office-helper.sb`'s fence, or redesign the open path to copy into
+    /// `--state-path` and place back out (`saveAs` already did exactly this shape for the WRITE
+    /// side).
+    ///
+    /// **Resolved by Office Stage B Task 2b: the redesign, never the fence.** `office-helper.sb`'s
+    /// write fence is UNCHANGED (still `--state-path` only) — the app now stages every document
+    /// into it BEFORE the wire `open` this method receives (`OfficeRuntime.stageDocument`, called
+    /// from `openAndDispatch`, a real `copyfile(3)` off the caller's real path). This bridge's own
+    /// `path` field on `OpenDocument` (see `openOnDedicatedThread`) is therefore always an
+    /// already-staged, already-writable path from Task 2b onward — the READ side is now exactly as
+    /// symmetric with the WRITE side (`saveAs`-to-`saves/`) as this paragraph once wished it were.
     ///
     /// **Why `UseDocumentOOoLockFile=false` stays despite not being the fix**: independently
     /// justified — no sidecar-file litter beside the user's real documents; T3's own
@@ -778,6 +799,21 @@ final class LOKBridge: OfficeDocumentBridge {
         for entry in entries where entry.lastPathComponent.hasPrefix("lok-profile-") {
             try? FileManager.default.removeItem(at: entry)
         }
+    }
+
+    /// Office Stage B Task 2b (I3) — same best-effort posture as `sweepStaleProfileDirectories`
+    /// immediately above (a failure here must never fail this boot: `docs/`/`saves/` are both
+    /// lazily recreated by whichever side next needs them — `OfficeRuntime.stageDocument` and this
+    /// bridge's own `saveAsOnDedicatedThread` respectively — so the worst case is one more
+    /// undeleted leftover, never a boot failure). Removes the DIRECTORIES themselves, not just their
+    /// contents — simpler than enumerating and filtering entries the way the profile sweep does,
+    /// since every child of either directory is transient by construction; nothing here needs a
+    /// prefix check the way `lok-profile-*` does (that one shares `statePath` with unrelated
+    /// siblings this sweep must not touch — `docs`/`saves` are exact, known names, not a family of
+    /// UUID-suffixed ones).
+    private static func sweepStaleDocumentDirectories(statePath: URL) {
+        try? FileManager.default.removeItem(at: statePath.appendingPathComponent("docs", isDirectory: true))
+        try? FileManager.default.removeItem(at: statePath.appendingPathComponent("saves", isDirectory: true))
     }
 
     /// Writes a generated `fonts.conf` under `--state-path` and points `FONTCONFIG_FILE` at it —
