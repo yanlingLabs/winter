@@ -41,34 +41,61 @@ func officeFileStat(atPath path: String) -> OfficeFileStat? {
 /// `EditorDiskChange` exactly (minus `.external`'s carried text — Stage A/B documents are binary,
 /// so there is nothing to diff, only whether to reload): a save writes the file this runtime is
 /// watching, so the watcher armed for `path` will see an event for a change it already knows
-/// about, and `expectedWrites` (`OfficeRuntime.expectedWriteCount(for:)`) is how this classifier
-/// tells that apart from a genuine external change.
+/// about, and a MATCHING RECORDED IDENTITY (Task 2b's own fix — see this function's own doc) is
+/// how this classifier tells that apart from a genuine external change.
 enum OfficeDiskChange: Equatable {
     /// The stat is exactly what this runtime already knew — the overwhelmingly common answer: a
     /// sibling file changing in the same watched directory, a LOK lock file churning beside the
     /// document (T3's own disclosed concern), a `touch` with no real content change.
     case unchanged
-    /// Different from the baseline, and one of this runtime's own saves has not been accounted for
-    /// yet — the echo of that save's own rename reaching the watcher before (or instead of) the
-    /// save's own baseline re-seed ran. The caller consumes ONE note
-    /// (`OfficeRuntime.consumeExpectedWrite`) and stays silent — mirrors
+    /// Different from the baseline, and the observed bytes DEFINITIVELY match one of this
+    /// runtime's own outstanding saves' own RECORDED identity — the echo of that save's own rename
+    /// reaching the watcher before (or instead of) the save's own baseline re-seed ran. The caller
+    /// consumes ONE note (`OfficeRuntime.consumeExpectedWrite`) and stays silent — mirrors
     /// `EditorDiskChange.ours`/`editorDiskChange`'s identical reasoning, verbatim.
     case ours
-    /// Different, and nobody claimed it. The agent, another editor, `git checkout` — Stage A/B
-    /// cannot tell which, and a view-only surface has no reason to.
+    /// Different, and NOT proven to be any of this runtime's own outstanding saves. The agent,
+    /// another editor, `git checkout` — Stage A/B cannot tell which, and (Task 2b) a conflict is
+    /// exactly the tool for not knowing which.
     case external
     case deleted
 }
 
-/// Ordered content-first, deliberately, mirroring `editorDiskChange`'s own ordering and its own
-/// stated reason: the baseline is a fact about BYTES and the note bag is a fact about intentions,
-/// and bytes are the stronger evidence — a save whose note was never consumed cannot make a
-/// genuine external change look like ours as long as the baseline says the file has moved
-/// somewhere neither of them predicted.
-func officeDiskChange(stat: OfficeFileStat?, baseline: OfficeFileStat?, expectedWrites: Int) -> OfficeDiskChange {
+/// **Task 2b (N1 fix, round-2 re-review) — a note merely being PENDING is no longer sufficient to
+/// call a fire `.ours`.** Ordered content-first, deliberately, mirroring `editorDiskChange`'s own
+/// ordering and its own stated reason: the baseline is a fact about BYTES and identity is a fact
+/// about a SPECIFIC save's own proven output, and bytes are the stronger evidence.
+///
+/// **The pre-Task-2b version of this function gated on `expectedWrites: Int > 0` alone — blind to
+/// WHICH write, if any, actually explains the observed bytes.** N1 (the round-2 re-review, found
+/// PRE-EXISTING, assigned to this task): "a genuinely external write that lands while any note is
+/// pending is silently swallowed, not classified `.external`... there's no `else` fallback in the
+/// `.ours` case to re-classify a non-matching fire" — a save in flight (its own note noted, its own
+/// identity not yet recorded) made EVERY fire for `path` read `.ours`, including one that had
+/// nothing to do with that save. The fix: `.ours` now requires `matchesPendingIdentity` — TRUE only
+/// when the observed `stat` exactly equals some outstanding note's own RECORDED identity
+/// (`OfficeRuntime.hasPendingIdentity(for:matching:)`, non-mutating). A note whose identity is
+/// still `nil` (its own rename has not yet been confirmed by ITS OWN save's continuation) can never
+/// satisfy this — so a fire arriving in that in-between window now reads `.external`, not `.ours`.
+///
+/// **This can produce a rare, SELF-HEALING false positive**, disclosed rather than chased away: if
+/// the fire genuinely IS that same in-flight save's own rename, arriving on `@MainActor` just
+/// ahead of that save's own continuation (a scheduling race, not a logic bug — the underlying
+/// `rename(2)` already happened; only the BOOKKEEPING has not caught up), this reads `.external`
+/// for one beat. On a clean document that means one redundant re-stage of content that was already
+/// correct (wasteful, not wrong). On a dirty document it means a conflict banner flashes up — and
+/// is then immediately resolved, because that same save's OWN `.saveSucceeded` (moments later)
+/// unconditionally clears any standing conflict for `path` (`OfficeRuntimeReducer`'s own arm,
+/// mirroring `EditorConflictReducer`'s identical "a successful save IS the mine-wins answer" rule).
+/// **The alternative — favoring the old blind-count design — is not a smaller false-positive rate,
+/// it is trading a self-healing flicker for N1's own silent, PERMANENT data loss**: a genuine
+/// external write landing in that same window, misread as `.ours`, is never surfaced at all, and
+/// the next save from Norma's own in-memory copy silently clobbers it. Given that trade, favoring
+/// `.external` on anything less than a proven match is the only defensible default.
+func officeDiskChange(stat: OfficeFileStat?, baseline: OfficeFileStat?, matchesPendingIdentity: Bool) -> OfficeDiskChange {
     guard let stat else { return .deleted }
     if let baseline, stat == baseline { return .unchanged }
-    return expectedWrites > 0 ? .ours : .external
+    return matchesPendingIdentity ? .ours : .external
 }
 
 // MARK: - The state (PURE — `OfficeRuntimeReducerTests` drives every row of this without a helper)
@@ -99,6 +126,14 @@ struct OfficeRuntimeState: Equatable {
     /// by this pure reducer.
     struct DocumentEntry: Equatable {
         var docId: String
+        /// Office Stage B Task 2b — the Collabora jail: where THIS docId is actually loaded from
+        /// inside the helper's own write fence (`<state-path>/docs/<docId>.<ext>`), never the real
+        /// path. Every app-facing surface keeps speaking `path` (the dictionary key, unchanged) —
+        /// this field exists purely so `performSave` knows what to place FROM, and so the sweep
+        /// (close/reload/teardown/death) knows what to delete. Recorded once, at `.opened` time,
+        /// from the same staging copy `OfficeRuntime.openAndDispatch` made before ever sending the
+        /// wire `open` — see `OfficeRuntime.stageDocument`'s own header.
+        var stagedPath: String
         var type: OfficeDocumentKind
         var parts: Int
         /// Which part (sheet/slide/page) a viewport last asked to see — T6's part-navigation strip
@@ -172,7 +207,39 @@ struct OfficeRuntimeState: Equatable {
     /// unresolved, until the tab closes (`.closeRequested` clears it) or teardown. Stage B inherits
     /// this comment verbatim; keep it true.
     var documentBanners: [String: String] = [:]
+    /// **Office Stage B Task 2b — the conflict this task's own brief owns**: a DIRTY document whose
+    /// real file changed or vanished out from under it. Deliberately a SEPARATE dictionary from
+    /// `documentBanners` (not a richer value type unifying the two, the way `EditorTabBanner` does
+    /// for the editor) — `OfficeRuntimeLiveTests`' own protected tripwire reads
+    /// `documentBanners[docPath] ?? "nil"` as a `String?` inside an assertion message, so widening
+    /// that dict's value type would force a code edit to a file this task may only comment-edit.
+    /// The view is what decides precedence (a standing conflict wins over a plain sentence) — see
+    /// `PanelDocumentTabModel.banner`/`.conflict`'s own doc; the reducer never needs to arbitrate
+    /// between the two dicts itself. Cleared by whatever RESOLVES the conflict (`.conflictReload
+    /// Requested`, `.conflictKeepMineRequested`, a successful save — mirrors `EditorConflictReducer`
+    /// .reduce`'s `.reloadChosen`/`.keepChosen`/`.saveSucceeded` trio) and by the ordinary document-
+    /// lifecycle exits every OTHER per-path dictionary here already clears on (`.opened`,
+    /// `.closeRequested`, `.reloadFailed`, `.helperDied`/`.helperUnavailable`, `.teardownRequested`).
+    var documentConflicts: [String: OfficeConflictKind] = [:]
 }
+
+/// Office Stage B Task 2b — mirrors `EditorConflictKind` exactly: two kinds because the ACTIONS
+/// differ, which is the only reason a state ever splits. `.changed` offers Reload/Keep mine;
+/// `.deleted` has nothing to reload TO, so it offers Keep mine/Close instead (the brief's own
+/// wording) — never a Reload button.
+enum OfficeConflictKind: Equatable {
+    case changed
+    case deleted
+}
+
+// MARK: - Office Stage B Task 2b: the conflict banner's copy, in one place
+
+let officeConflictChangedMessage = "Changed on disk"
+let officeConflictDeletedMessage = "Deleted on disk"
+let officeConflictDeletedDetail = "Saving will write it back."
+let officeConflictReloadTitle = "Reload from disk"
+let officeConflictKeepTitle = "Keep my version"
+let officeConflictCloseTitle = "Close"
 
 // MARK: - Events
 
@@ -202,7 +269,10 @@ enum OfficeRuntimeEvent: Equatable {
     /// this state shape remembers the helper's `lokVersion`.
     case helperBecameReady
     /// A `.helperOpen` reached the helper and it answered with the document's metadata.
-    case opened(path: String, docId: String, metadata: OfficeDocumentMetadata)
+    /// **Office Stage B Task 2b** — `stagedPath` is new: where this docId actually lives inside the
+    /// helper's fence, minted and copied to by `OfficeRuntime.openAndDispatch` BEFORE the wire
+    /// `open` this event answers was even sent. See `DocumentEntry.stagedPath`'s own doc.
+    case opened(path: String, docId: String, stagedPath: String, metadata: OfficeDocumentMetadata)
     /// A `.helperOpen` reached the helper and it refused (garbage file, unreadable path, ...) — see
     /// `OfficeHelperClientError.openFailed`, the shape the imperative half classifies this from.
     case openFailed(path: String, reason: String)
@@ -261,6 +331,16 @@ enum OfficeRuntimeEvent: Equatable {
     case helperUnavailable
     /// Release everything. Legal from every phase, and the only route back to a fresh `.idle`.
     case teardownRequested
+
+    // MARK: Office Stage B Task 2b — resolving a standing conflict
+
+    /// The conflict banner's "Reload from disk" — discard my edits, re-stage the current bytes
+    /// under a fresh docId. Legal for either `OfficeConflictKind`, though the UI only ever offers
+    /// this button for `.changed` (there is nothing to reload TO for `.deleted`).
+    case conflictReloadRequested(path: String)
+    /// The conflict banner's "Keep my version" (both kinds) — dismiss; the next ⌘S overwrites
+    /// whatever the real path now holds (or recreates it, for `.deleted`).
+    case conflictKeepMineRequested(path: String)
 }
 
 /// What the imperative half must DO about an event. Named after the effect, never after the wire
@@ -305,6 +385,15 @@ enum OfficeRuntimeEffect: Equatable {
     /// own header for the two stale guards and the suppression-bag wiring this one effect stands
     /// for.
     case save(path: String, docId: String)
+    /// Office Stage B Task 2b — remove `docId`'s own staged copy from `<state-path>/docs/`
+    /// (whatever its extension — `OfficeRuntime.deleteStagedCopy`'s own glob-by-docId-prefix doc
+    /// has why). Emitted by the reducer at every site a `DocumentEntry` is abandoned for good:
+    /// `.closeRequested`, the two-reloads-race compensating close in `.opened`, a reload's own old
+    /// docId (`.externalChangeDetected`/`.conflictReloadRequested`), and every open docId at
+    /// `.helperDied`/`.helperUnavailable`/`.teardownRequested`. Never for the CURRENT docId of an
+    /// still-open document — mirrors `.helperClose`'s own "only ever the docId being abandoned"
+    /// discipline exactly, for the identical reason.
+    case deleteStagedCopy(docId: String)
     /// Task 5: whenever the reducer decides something is worth telling the user, this fires
     /// alongside the state it also writes (`failureReason` for a helper death, `openFailures[path]`
     /// for one document, `documentBanners[path]` since Task 8 for an external change/deletion) — the
@@ -377,7 +466,7 @@ enum OfficeRuntimeReducer {
             next.pendingOpens = []
             return (next, queued.map { .helperOpen(path: $0) })
 
-        case .opened(let path, let docId, let metadata):
+        case .opened(let path, let docId, let stagedPath, let metadata):
             // Gated on `.ready`, like every other arm that records what the helper said: the async
             // reply can land after a teardown or a helper death moved this runtime past `.ready`
             // (the imperative half's own generation guard — `OfficeRuntime.perform`'s `.helperOpen`
@@ -389,6 +478,8 @@ enum OfficeRuntimeReducer {
             // office-plumbing Task 8: a document that just (re)opened cannot still be saying it was
             // deleted — the reload success path is what answers a deleted-then-restored file.
             next.documentBanners.removeValue(forKey: path)
+            // Task 2b: nor still showing a conflict — a fresh (re)open IS the resolution.
+            next.documentConflicts.removeValue(forKey: path)
             // **Task 8: this is ALSO how a reload preserves `activePart` without a second, reload-
             // only version of this event.** `.reloadDocument` never clears `documents[path]` before
             // its own reopen resolves (see that effect's own header), so a RELOAD's `.opened` finds
@@ -400,8 +491,8 @@ enum OfficeRuntimeReducer {
             let previousEntry = state.documents[path]
             let previousActivePart = min(previousEntry?.activePart ?? 0, max(metadata.parts - 1, 0))
             next.documents[path] = OfficeRuntimeState.DocumentEntry(
-                docId: docId, type: metadata.type, parts: metadata.parts, activePart: previousActivePart,
-                sizeTwips: metadata.sizeTwips)
+                docId: docId, stagedPath: stagedPath, type: metadata.type, parts: metadata.parts,
+                activePart: previousActivePart, sizeTwips: metadata.sizeTwips)
             var effects: [OfficeRuntimeEffect] = [.watchFile(path: path)]
             // **Task 8, the overwrite-orphan guard**: two reloads for the same path close enough
             // together (the debounce's own window) each mint and open their own fresh docId
@@ -414,6 +505,8 @@ enum OfficeRuntimeReducer {
             // prevents a real leak when it is.
             if let previousEntry, previousEntry.docId != docId {
                 effects.append(.helperClose(docId: previousEntry.docId))
+                // Task 2b: and ITS OWN staged copy — the superseded entry's, never the fresh one's.
+                effects.append(.deleteStagedCopy(docId: previousEntry.docId))
             }
             return (next, effects)
 
@@ -427,12 +520,14 @@ enum OfficeRuntimeReducer {
             next.pendingOpens.removeAll { $0 == path }
             next.openFailures.removeValue(forKey: path)
             next.documentBanners.removeValue(forKey: path) // Task 8: no path to still be a document about
+            next.documentConflicts.removeValue(forKey: path) // Task 2b: same — no path, no conflict about it
             guard let doc = state.documents[path] else { return (next, []) }
             next.documents.removeValue(forKey: path)
             // Task 8: the watch goes with the document — "a watcher exists exactly while a document
             // does" is an invariant of this reducer, mirroring `EditorRuntimeReducer.closeRequested`'s
-            // identical one for models.
-            return (next, [.helperClose(docId: doc.docId), .unwatchFile(path: path)])
+            // identical one for models. Task 2b: and so does its own staged copy.
+            return (next, [.helperClose(docId: doc.docId), .unwatchFile(path: path),
+                           .deleteStagedCopy(docId: doc.docId)])
 
         case .subscribeRequested(let path, let part, let zoomPPT, let viewportTwips):
             guard state.phase == .ready, let doc = state.documents[path] else { return (next, []) }
@@ -459,6 +554,13 @@ enum OfficeRuntimeReducer {
             // claim `.opened`'s own banner-clear makes, one line up in this same file: a save is not
             // a reopen, but "this path exists and holds what was just written" is exactly as strong.
             next.documentBanners.removeValue(forKey: path)
+            // **Task 2b — mirrors `EditorConflictReducer`'s own `.saveSucceeded` rule verbatim**:
+            // "pressing ⌘S with a 'changed on disk' banner up IS the 'mine wins' answer, and the
+            // file now holds exactly this buffer." Unconditional — resolves EITHER conflict kind,
+            // and is also what makes N1's own rare false-positive (this SAME save's fire winning
+            // the `@MainActor` race and misclassifying as `.external` a beat early) self-heal: the
+            // conflict it spuriously raised is cleared the instant this save's own success lands.
+            next.documentConflicts.removeValue(forKey: path)
             return (next, [])
 
         case .saveFailed(let path, let docId, let reason):
@@ -492,20 +594,39 @@ enum OfficeRuntimeReducer {
             // A file that just proved it still exists (and moved) cannot also be showing "File was
             // deleted on disk."
             next.documentBanners.removeValue(forKey: path)
-            // **Stage A is view-only — there is no dirty buffer to protect, so unlike the editor's
-            // clean/dirty fork this is ALWAYS a silent reload; nothing here ever shows a "keep mine"
-            // choice, because Stage A never has a "mine" to keep** (the brief, verbatim). `next`
-            // deliberately still shows the OLD docId — see `.reloadDocument`'s own header for why.
-            return (next, [.reloadDocument(path: path, oldDocId: doc.docId)])
+            // **Task 2b — the policy this task owns, superseding Stage A's own "always silent"
+            // claim now that editing is real.** Stage A/T8's original words, kept for the
+            // historical record: "Stage A is view-only — there is no dirty buffer to protect, so
+            // unlike the editor's clean/dirty fork this is ALWAYS a silent reload; nothing here
+            // ever shows a 'keep mine' choice, because Stage A never has a 'mine' to keep." That
+            // stopped being true the moment a document could genuinely hold unsaved edits — a
+            // silent reload now would be exactly the silent data loss the brief calls out by name.
+            // CLEAN → unchanged behavior: re-stage (a fresh copy, a fresh docId) exactly as a plain
+            // reload always has. DIRTY → no silent re-stage: raise a conflict instead, mirroring
+            // `EditorConflictReducer.reduce`'s `.externalChange(dirty:)` arm exactly.
+            guard doc.dirty else {
+                return (next, [.reloadDocument(path: path, oldDocId: doc.docId)])
+            }
+            next.documentConflicts[path] = .changed
+            return (next, [.emitBanner(reason: officeConflictChangedMessage)])
 
         case .externalDeleted(let path):
-            // **Deleted → banner that PERSISTS, view-only so nothing to lose** (the brief, verbatim):
-            // the document entry is left completely untouched — the tab keeps showing its last
-            // rendered tiles, exactly as they were, with this sentence overlaid above them.
-            guard state.documents[path] != nil else { return (next, []) }
-            let reason = "File was deleted on disk"
-            next.documentBanners[path] = reason
-            return (next, [.emitBanner(reason: reason)])
+            // Task 2b: the SAME dirty/clean fork as `.externalChangeDetected` above, for deletion.
+            guard let doc = state.documents[path] else { return (next, []) }
+            guard doc.dirty else {
+                // **Deleted → banner that PERSISTS, view-only so nothing to lose** (Stage A/T8's own
+                // words, still true for a CLEAN document): the document entry is left completely
+                // untouched — the tab keeps showing its last rendered tiles, exactly as they were,
+                // with this sentence overlaid above them.
+                let reason = "File was deleted on disk"
+                next.documentBanners[path] = reason
+                return (next, [.emitBanner(reason: reason)])
+            }
+            // DIRTY: same "must not discard silently" rule as `.changed` — the brief's own words:
+            // "for dirty docs it must ALSO not discard silently — same conflict pattern, actions
+            // 'Keep my version' (⌘S will recreate) and 'Close'."
+            next.documentConflicts[path] = .deleted
+            return (next, [.emitBanner(reason: officeConflictDeletedMessage)])
 
         case .reloadFailed(let path, let oldDocId, let reason):
             guard state.phase == .ready else { return (next, []) }
@@ -517,6 +638,9 @@ enum OfficeRuntimeReducer {
             guard state.documents[path]?.docId == oldDocId else { return (next, []) }
             next.documents.removeValue(forKey: path)
             next.openFailures[path] = reason
+            // Task 2b: a reload that failed to even land cannot still be showing a conflict about
+            // whatever it was replacing — mirrors the `documentBanners` clear two lines below.
+            next.documentConflicts.removeValue(forKey: path)
             // Task 8 review: the banner goes with the document, exactly as `.closeRequested` already
             // reasons above. Without this, a delete-during-reload interleaving (external change starts
             // a reload; the file is deleted before the round trip lands; `.externalDeleted` sets the
@@ -571,7 +695,13 @@ enum OfficeRuntimeReducer {
             // happens" entirely inside the reducer. Sorted for deterministic test assertions — a
             // dictionary has no ordering of its own to preserve.
             let unwatchEffects = state.documents.keys.sorted().map { OfficeRuntimeEffect.unwatchFile(path: $0) }
-            return (fresh, [.emitBanner(reason: reason)] + unwatchEffects)
+            // Task 2b (I3): every open document's own staged copy dies with it here too — the SAME
+            // "every open path is its own effect, decided entirely inside the reducer" reasoning the
+            // paragraph above already gives for `.unwatchFile`. Sorted by PATH (not docId — paths are
+            // this reducer's own stable, orderable key) for the identical determinism reason.
+            let staleCopyEffects = state.documents.keys.sorted()
+                .map { OfficeRuntimeEffect.deleteStagedCopy(docId: state.documents[$0]!.docId) }
+            return (fresh, [.emitBanner(reason: reason)] + unwatchEffects + staleCopyEffects)
 
         case .teardownRequested:
             // From every phase, including `.idle` — the effect is emitted unconditionally so the
@@ -580,7 +710,31 @@ enum OfficeRuntimeReducer {
             // docId is handed to the imperative half to close; NEVER the shared helper process
             // itself (see `.teardown`'s own doc).
             let docIds = state.documents.values.map(\.docId)
-            return (OfficeRuntimeState(), [.teardown(docIds: docIds)])
+            // Task 2b (I3): and every one of THOSE docIds' own staged copies — teardown is exactly
+            // as much "release everything this runtime holds" for `docs/` as it already is for the
+            // helper's own open handles. Sorted for the same determinism reason as `docIds` itself
+            // would want if it were ever asserted order-sensitively.
+            let staleCopyEffects = docIds.sorted().map { OfficeRuntimeEffect.deleteStagedCopy(docId: $0) }
+            return (OfficeRuntimeState(), [.teardown(docIds: docIds)] + staleCopyEffects)
+
+        // MARK: Office Stage B Task 2b — resolving a standing conflict
+
+        case .conflictReloadRequested(let path):
+            guard state.phase == .ready, let doc = state.documents[path] else { return (next, []) }
+            next.documentConflicts.removeValue(forKey: path)
+            next.documentBanners.removeValue(forKey: path)
+            // The SAME reload machinery a clean document's silent external-change path already
+            // uses — discard my edits, re-stage the current on-disk bytes under a fresh docId.
+            return (next, [.reloadDocument(path: path, oldDocId: doc.docId)])
+
+        case .conflictKeepMineRequested(let path):
+            guard state.phase == .ready, state.documents[path] != nil else { return (next, []) }
+            // Dismiss — nothing else moves. The document stays exactly as it is (still dirty, still
+            // showing its in-memory edits); the next ⌘S is what actually overwrites/recreates the
+            // real path, exactly as `.saveSucceeded`'s own arm already resolves a conflict.
+            next.documentConflicts.removeValue(forKey: path)
+            next.documentBanners.removeValue(forKey: path)
+            return (next, [])
         }
     }
 }
@@ -650,6 +804,20 @@ final class OfficeRuntime: ObservableObject {
         /// cannot do anything about it: `perform(_:)`'s `.subscribe` case treats a failure here as
         /// fire-and-forget, matching `close`/`unsubscribeTiles`.
         var requestTiles: (_ docId: String, _ keys: [TileKey]) async throws -> Void
+        /// **Office Stage B Task 2b — the shared helper's own `--state-path`.** A plain stored
+        /// value, unlike every sibling above: it is a FACT about the shared supervisor's
+        /// configuration (`OfficeHelperSupervisor.statePath`, exposing `Configuration
+        /// .socketDirectory` — the same directory already handed to the helper as `--state-path`),
+        /// fixed for that supervisor's whole lifetime, not a call that can fail or race a relaunch
+        /// the way `client` does. `openAndDispatch` derives `docsDirectory` from this and stages
+        /// every document INTO it, `<stateDirectory>/docs/<docId>.<ext>`, before ever sending the
+        /// wire `open` — see `OfficeRuntime.stageDocument`'s own header. **Must be the LIVE
+        /// supervisor's own configured directory, never `Configuration.defaultStateDirectory()`
+        /// read fresh** — a live test that points `socketDirectory` at a scratch dir (every one of
+        /// them does) would otherwise stage outside that scratch helper's own write fence, and the
+        /// resulting `open` would fail for a reason that has nothing to do with whatever the test
+        /// itself is trying to prove.
+        var stateDirectory: URL
     }
 
     let sessionId: String
@@ -685,6 +853,11 @@ final class OfficeRuntime: ObservableObject {
     /// documents are binary, so there is nothing to decode, and the only question a view-only surface
     /// needs answered is "did the file move," which a stat already answers.
     private var diskBaselines: [String: OfficeFileStat] = [:]
+
+    /// **Office Stage B Task 2b — where every staged copy this runtime creates actually lives.**
+    /// `docs`, sibling to `saves` (Task 2's) and `lok-profile-*` (LOKBridge's) under the same
+    /// `--state-path` — computed once from `driver.stateDirectory`, never re-derived per open.
+    private var docsDirectory: URL { driver.stateDirectory.appendingPathComponent("docs", isDirectory: true) }
 
     /// **Carry 6's belt: bumped by `teardown()`, checked by every in-flight `.helperOpen` before it
     /// dispatches its result.** Mirrors `OfficeHelperSupervisor.generation`'s own reasoning exactly:
@@ -735,6 +908,19 @@ final class OfficeRuntime: ObservableObject {
     /// with no open document (mirrors `.subscribeRequested`'s own reducer guard).
     func save(_ path: String) {
         perform(dispatch(.saveRequested(path: path)))
+    }
+
+    /// Office Stage B Task 2b — the conflict banner's "Reload from disk": discard my edits, re-stage
+    /// the current on-disk bytes under a fresh docId. A no-op unless `path` currently has an open
+    /// document (mirrors every other door's reducer-level guard).
+    func reloadFromDisk(_ path: String) {
+        perform(dispatch(.conflictReloadRequested(path: path)))
+    }
+
+    /// Office Stage B Task 2b — the conflict banner's "Keep my version" (both kinds: changed and
+    /// deleted): dismiss the conflict; the next ⌘S overwrites or recreates the real path.
+    func keepMyVersion(_ path: String) {
+        perform(dispatch(.conflictKeepMineRequested(path: path)))
     }
 
     /// T6's tile door. Thin here — see `OfficeRuntimeEvent.subscribeRequested`'s own doc.
@@ -860,6 +1046,15 @@ final class OfficeRuntime: ObservableObject {
                 // again — see `OfficeTileStore`'s own header on why a late arrival here is bounded).
                 tileStore.evictAll(docId: oldDocId)
                 Task { [driver] in await driver.close(oldDocId) }
+                // Task 2b — and the old docId's own staged copy, the identical reasoning: grouped
+                // here with the tile/close cleanup above rather than as a second reducer-emitted
+                // effect, since both `.externalChangeDetected`'s silent-reload arm and
+                // `.conflictReloadRequested`'s explicit one already funnel through this ONE
+                // imperative site for the OLD docId's teardown.
+                let docsDirectory = docsDirectory
+                Task.detached(priority: .utility) {
+                    Self.deleteStagedCopy(docId: oldDocId, docsDirectory: docsDirectory)
+                }
                 openAndDispatch(path: path, myGeneration: generation, reloadingDocId: oldDocId)
 
             case .save(let path, let docId):
@@ -903,6 +1098,17 @@ final class OfficeRuntime: ObservableObject {
 
             case .teardown(let docIds):
                 performTeardown(docIds: docIds)
+
+            case .deleteStagedCopy(let docId):
+                // Office Stage B Task 2b — best-effort, off `@MainActor`: a directory listing plus
+                // one removal is cheap, but this must never be what makes a close/reload/teardown
+                // hitch the shell (mirrors `placeAtomically`'s own off-actor reasoning). Fire-and-
+                // forget, like every other cleanup call this file makes elsewhere — nothing here can
+                // fail in a way anything downstream needs to react to.
+                let docsDirectory = docsDirectory
+                Task.detached(priority: .utility) {
+                    Self.deleteStagedCopy(docId: docId, docsDirectory: docsDirectory)
+                }
             }
         }
     }
@@ -949,20 +1155,41 @@ final class OfficeRuntime: ObservableObject {
     /// and an unqualified failure could not tell "genuinely my failure" from "superseded, ignore me").
     private func openAndDispatch(path: String, myGeneration: Int, reloadingDocId: String?) {
         let docId = makeDocId()
+        let stagedPath = Self.stagedPath(forDocId: docId, realPath: path, docsDirectory: docsDirectory)
+        let docsDirectory = docsDirectory
         Task { [weak self, driver] in
             guard let self else { return }
             do {
-                let metadata = try await driver.open(docId, path)
+                // **Office Stage B Task 2b — stage BEFORE the wire open.** The Collabora jail: this
+                // app (unsandboxed, the trust boundary) copies `path` INTO the helper's own
+                // `--state-path` first; the wire `open` below carries the STAGED path, never the
+                // real one — the helper never touches, and never even learns, `path` itself from
+                // here on. Off `@MainActor` — a real copy, mirrors `performSave`'s own
+                // `Task.detached` around `placeAtomically` exactly, for the identical reason (a
+                // large document must not stall the shell).
+                try await Task.detached(priority: .userInitiated) {
+                    try Self.stageDocument(realPath: path, stagedPath: stagedPath)
+                }.value
+                let metadata = try await driver.open(docId, stagedPath)
                 guard myGeneration == self.generation else {
                     // Carry 6: teardown superseded this open while it was in flight. The document is
                     // now open on the shared helper with no owner left to close it — compensate
-                    // rather than orphan it. Never dispatch into the fresh state teardown just
-                    // produced.
+                    // rather than orphan it, INCLUDING the staged copy this attempt made. Never
+                    // dispatch into the fresh state teardown just produced.
                     await driver.close(docId)
+                    Task.detached(priority: .utility) { Self.deleteStagedCopy(docId: docId, docsDirectory: docsDirectory) }
                     return
                 }
-                self.perform(self.dispatch(.opened(path: path, docId: docId, metadata: metadata)))
+                self.perform(self.dispatch(.opened(path: path, docId: docId, stagedPath: stagedPath, metadata: metadata)))
             } catch {
+                // Either the STAGE itself failed (the real path is unreadable, the disk is full —
+                // nothing was ever staged, and `deleteStagedCopy` below is a harmless no-op against
+                // a file that was never created) or the wire `open` did (a staged copy DOES exist
+                // and is now an orphan nothing else will ever find — it was never recorded in
+                // `documents`, so no later close/teardown/death sweep would ever reach it). One
+                // best-effort cleanup call covers both (inert in the first case), off `@MainActor`
+                // like every other staged-copy sweep in this file.
+                Task.detached(priority: .utility) { Self.deleteStagedCopy(docId: docId, docsDirectory: docsDirectory) }
                 guard myGeneration == self.generation else { return } // superseded AND failed: nothing to compensate, nothing to record
                 let reason = Self.describe(error)
                 if let reloadingDocId {
@@ -999,9 +1226,27 @@ final class OfficeRuntime: ObservableObject {
             do {
                 let tempPath = try await driver.save(docId)
                 guard myGeneration == self.generation, self.state.documents[path]?.docId == docId else {
+                    // Task 2b: even if `tempPath` happens to be this (now-superseded) docId's own
+                    // staged working copy, that exact file is independently swept by whatever
+                    // superseded it (a reload's or a close's own `.deleteStagedCopy` effect, keyed
+                    // by docId) — removing it again here is harmless, never a double-delete hazard
+                    // (`try?`), and keeps this guard's shape identical to every other superseded-
+                    // save path in this file.
                     try? FileManager.default.removeItem(atPath: tempPath)
                     return
                 }
+                // **Office Stage B Task 2b — the save-mechanism split, resolved by comparison, not
+                // by asking the helper which branch it took.** `tempPath` is EITHER `documents
+                // [path].stagedPath` itself (the `.uno:Save` branch — LOK saved the currently-
+                // loaded staged document IN PLACE, so the fresh bytes live exactly where the NEXT
+                // edit and the NEXT save will also read/write them — this file must survive) or an
+                // EPHEMERAL `saves/<docId>-<seq>.<ext>` render (Task 2's own fallback branch — a
+                // one-shot temp that exists for exactly this one placement and must always be
+                // deleted, precisely as it always was before this task). The app's own recorded
+                // `stagedPath` is already the one place this fact lives — comparing against it is
+                // correct regardless of which mechanism `LOKBridge.saveOnDedicatedThread` actually
+                // used underneath.
+                let isStagedWorkingCopy = (tempPath == self.state.documents[path]?.stagedPath)
                 // **Before the place, always** — mirrors `EditorSaveCoordinator.performSave`'s own
                 // ordering and its own reason: the watcher T8 already installed for `path` must not
                 // mistake this save's own rename for somebody else's edit, and a note filed
@@ -1010,7 +1255,13 @@ final class OfficeRuntime: ObservableObject {
                 // what it is operating on, never a sibling save's note (fix rounds 1+2, IMPORTANT-2).
                 let expectedWriteToken = self.noteExpectedWrite(path: path)
                 do {
-                    try await Task.detached(priority: .userInitiated) {
+                    // Task 2b: `placeAtomically` now RETURNS the landed identity itself, statted
+                    // from the sibling temp BEFORE the rename (see that method's own doc for why
+                    // this is STRICTLY stronger than a live re-stat of `path` afterward — the other
+                    // half of the N1 fix: a re-stat here could observe bytes a DIFFERENT, later
+                    // write produced instead of this save's own, silently corrupting the very
+                    // identity record `consumeExpectedWrite` depends on to prove attribution).
+                    let landedStat = try await Task.detached(priority: .userInitiated) {
                         try Self.placeAtomically(tempPath: tempPath, at: path)
                     }.value
                     // Re-seed the baseline from what THIS save actually wrote — mirrors
@@ -1018,7 +1269,6 @@ final class OfficeRuntime: ObservableObject {
                     // whenever it arrives (including a debounce-coalesced one that never fires at
                     // all), is compared against bytes this save itself produced, not a stale
                     // pre-save snapshot.
-                    let landedStat = officeFileStat(atPath: path)
                     self.diskBaselines[path] = landedStat
                     // Task review fix round 2 (IMPORTANT-2, re-review): records what THIS save's
                     // token produced on disk. **NOT called so a fire can attribute itself against
@@ -1042,12 +1292,23 @@ final class OfficeRuntime: ObservableObject {
                     // say so) plus `testAGenuineOursRaceStaysSuppressedButUntouchedUntilTheOwning
                     // SaveCatchesUp` (the interleaving that IS reachable).
                     self.withdrawExpectedWrite(path: path, token: expectedWriteToken)
-                    try? FileManager.default.removeItem(atPath: tempPath)
+                    // Task 2b: never for the staged working copy — see `isStagedWorkingCopy`'s own
+                    // doc above.
+                    if !isStagedWorkingCopy {
+                        try? FileManager.default.removeItem(atPath: tempPath)
+                    }
                     self.perform(self.dispatch(.saveSucceeded(path: path, docId: docId)))
                 } catch {
                     // No event will arrive to consume the note now — the rename never happened.
                     self.withdrawExpectedWrite(path: path, token: expectedWriteToken)
-                    try? FileManager.default.removeItem(atPath: tempPath)
+                    // Task 2b: a FAILED place never touched the staged working copy at all (the
+                    // failure is `placeAtomically`'s own — see that method's own doc: it either
+                    // never got past the copy step, or threw before the rename) — still never
+                    // delete it if it IS that copy; a failed place changes nothing about whether
+                    // the document is still open and still needs its own working file.
+                    if !isStagedWorkingCopy {
+                        try? FileManager.default.removeItem(atPath: tempPath)
+                    }
                     self.perform(self.dispatch(.saveFailed(path: path, docId: docId, reason: Self.describe(error))))
                 }
             } catch {
@@ -1120,9 +1381,24 @@ final class OfficeRuntime: ObservableObject {
     // `performSave` structurally cannot produce today, since record and withdraw are atomic. They
     // prove the matching PRIMITIVE is correct in isolation (worth keeping: it is what a future
     // refactor would lean on if the atomicity below ever changed), not that this exact race happens
-    // in production. `testAGenuineOursRaceStaysSuppressedButUntouchedUntilTheOwningSaveCatchesUp` is
-    // the one that drives the interleaving `performSave` CAN actually produce: a fire arriving before
-    // ANY identity is recorded, which correctly finds no match and leaves the bag untouched.
+    // in production.
+    //
+    // **Task 2b (N1 fix) — what happens when NOTHING matches is no longer "stay suppressed."** A
+    // fire arriving before ANY identity is recorded used to leave the bag untouched AND read
+    // `.ours` regardless (the pre-2b `officeDiskChange`'s own blind `expectedWrites > 0` gate) —
+    // the round-2 re-review's own PRE-EXISTING hole (N1): a genuinely external write racing in that
+    // same window was silently swallowed, never classified `.external`, and the next save from
+    // Norma's own in-memory copy would clobber it with no warning. `officeDiskChange` now requires
+    // `matchesPendingIdentity` (`OfficeRuntime.hasPendingIdentity(for:matching:)`, a non-mutating
+    // probe of this SAME bag) before it will ever answer `.ours` — a fire that cannot be matched to
+    // ANY recorded identity now reads `.external` and is routed through the ordinary conflict/
+    // reload machinery, exactly as a fire arriving with no note pending at all always has.
+    // `testExternalWriteBetweenNoteExpectedWriteAndTheOwningSavesWithdrawOnACleanDocumentReloads`/
+    // `...OnADirtyDocumentRaisesAConflict` are what drive the interleaving `performSave` CAN
+    // actually produce (a fire landing before this save's own identity is recorded), through the
+    // CLASSIFIER — `officeDiskChange`'s own header has the full self-healing argument for the rare,
+    // narrow false-positive this can produce when the fire genuinely was this same save's own,
+    // merely early.
     //
     // **The atomicity above — no `await` between `recordLandedIdentity` and `withdrawExpectedWrite`
     // in `performSave` — is the single load-bearing invariant this entire guarantee rests on. Any
@@ -1210,12 +1486,26 @@ final class OfficeRuntime: ObservableObject {
         return token
     }
 
-    /// How many of this runtime's own writes at `path` are still unaccounted for. Test seam and
-    /// `fileChangedOnDisk`'s own reader — the PURE `officeDiskChange`'s `.ours`/`.external` fork
-    /// only ever needs this count, never the identities themselves (those are `consumeExpectedWrite`'s
-    /// own, stateful, concern).
+    /// How many of this runtime's own writes at `path` are still unaccounted for. Test seam only as
+    /// of Task 2b — `officeDiskChange`'s own `.ours`/`.external` fork used to read this count
+    /// directly (N1's own hole: a note merely being PRESENT said nothing about whether it explains
+    /// THIS fire); `fileChangedOnDisk` now feeds the classifier `hasPendingIdentity(for:matching:)`
+    /// instead — see that method's own doc.
     func expectedWriteCount(for path: String) -> Int {
         pendingExpectedWrites[path]?.count ?? 0
+    }
+
+    /// **Office Stage B Task 2b (N1 fix) — the classifier's own non-mutating input.** Does ANY of
+    /// `path`'s own outstanding notes have a RECORDED identity equal to `stat`, without consuming
+    /// it? `fileChangedOnDisk` feeds this straight into `officeDiskChange`'s `matchesPendingIdentity`
+    /// parameter — deliberately a read, not `consumeExpectedWrite` itself: the classifier's own
+    /// verdict must be decidable BEFORE anything mutates the bag (`fileChangedOnDisk`'s `.ours` arm
+    /// is what actually calls `consumeExpectedWrite`, once the classifier has already said `.ours`
+    /// is the right answer). `nil` `stat` (a `.deleted` verdict never reaches this — see
+    /// `officeDiskChange`'s own early return) trivially answers `false`.
+    private func hasPendingIdentity(for path: String, matching stat: OfficeFileStat?) -> Bool {
+        guard let stat else { return false }
+        return pendingExpectedWrites[path]?.contains { $0.identity == stat } ?? false
     }
 
     // MARK: - Office Stage B Task 2: the atomic place
@@ -1244,7 +1534,21 @@ final class OfficeRuntime: ObservableObject {
     /// a detached `Task`. Internal, not `private`, so a test can drive it directly with nothing but
     /// scratch files, the same testability posture every other pure/near-pure helper in this file
     /// keeps (`officeFileStat`/`officeDiskChange`/`fileChangedOnDisk`).
-    nonisolated static func placeAtomically(tempPath: String, at path: String) throws {
+    ///
+    /// **Office Stage B Task 2b (N1 fix, the other half) — returns the LANDED identity, statted from
+    /// the SIBLING before the rename, never a fresh `officeFileStat(atPath:)` call on `path` after
+    /// it.** `rename(2)` is specified to preserve the source inode onto the destination name, and
+    /// touches neither the file's size nor its mtime — so the sibling's own stat, taken the instant
+    /// before this function hands it to `rename`, is ALREADY exactly what a stat of `destination`
+    /// would report the instant after. This is strictly stronger than a post-rename re-stat: there is
+    /// no gap here at all — not even the vanishingly narrow one a re-stat would leave — in which a
+    /// second, independent write to `path` (another save, a genuine external one) could land between
+    /// "the rename happened" and "this function read back what it wrote," and have ITS bytes recorded
+    /// under THIS save's own identity instead. `performSave` uses this return value directly for
+    /// `recordLandedIdentity` — see that call site's own doc for why a corrupted identity record is
+    /// exactly as dangerous as the classifier hole N1 itself named.
+    @discardableResult
+    nonisolated static func placeAtomically(tempPath: String, at path: String) throws -> OfficeFileStat? {
         let destination = URL(fileURLWithPath: path)
         let directory = destination.deletingLastPathComponent()
         let sibling = directory.appendingPathComponent(
@@ -1265,16 +1569,107 @@ final class OfficeRuntime: ObservableObject {
             if let mode = (try? FileManager.default.attributesOfItem(atPath: path))?[.posixPermissions] {
                 try? FileManager.default.setAttributes([.posixPermissions: mode], ofItemAtPath: sibling.path)
             }
+            // Statted HERE — see this function's own doc for why this is the landed identity, not a
+            // guess at one.
+            let landedStat = officeFileStat(atPath: sibling.path)
             guard rename(sibling.path, destination.path) == 0 else {
                 throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno), userInfo: [
                     NSLocalizedDescriptionKey:
                         "The file couldn't be replaced: \(String(cString: strerror(errno)))."
                 ])
             }
+            return landedStat
         } catch {
             // Never leave a `.norma-save-…` beside the user's file, whatever went wrong.
             try? FileManager.default.removeItem(at: sibling)
             throw error
+        }
+    }
+
+    // MARK: - Office Stage B Task 2b: staging into the fence (the Collabora jail's open half)
+
+    /// Where `docId` gets staged: `<docsDirectory>/<docId>.<ext>`, `ext` taken from `realPath`'s OWN
+    /// extension — `LOKBridge`'s `OfficeSaveFormat` capture (at the helper's own `open`) depends on
+    /// this matching exactly, the same reason `saveAsOnDedicatedThread`'s own destination naming
+    /// already does. No extension on `realPath` (unreachable through any shipped door today) stages
+    /// with none either — `OfficeSaveFormat` already treats that as "outside the six formats this
+    /// table covers," same as it always has for `open`. Pure string arithmetic — deliberately not
+    /// `nonisolated`/`static` alongside `stageDocument`/`deleteStagedCopy` below, since it touches no
+    /// disk and `openAndDispatch` needs it synchronously, before the detached staging `Task` even
+    /// starts (the staged path IS the docId's own identity from this point on — `.opened`'s payload,
+    /// `DocumentEntry.stagedPath` — so it must exist before anything async could race it).
+    private static func stagedPath(forDocId docId: String, realPath: String, docsDirectory: URL) -> String {
+        let ext = (realPath as NSString).pathExtension
+        let name = ext.isEmpty ? docId : "\(docId).\(ext)"
+        return docsDirectory.appendingPathComponent(name).path
+    }
+
+    /// **The Collabora jail's OPEN half** — copies `realPath` (read here, unsandboxed: this app IS
+    /// the trust boundary) INTO `stagedPath`, always somewhere under the helper's own `--state-path`,
+    /// which is INSIDE its write fence by construction (`office-helper.sb`'s `(subpath (param
+    /// "STATE_PATH"))` rule — T1's own invariant, untouched by this task). This is what makes the
+    /// helper's own copy genuinely writable: LOK's `SfxMedium` write-classed open probe (the exact
+    /// mechanism `LOKBridge`'s own long NEEDS_CONTEXT comment root-caused Task 2's dirty-tracking
+    /// bug to) succeeds against a path the sandbox permits, for the first time — from this task
+    /// onward, the helper never touches, and never even learns, `realPath` itself; only this staged
+    /// copy's path ever crosses the wire (`documentLoad`'s own input, per the brief).
+    ///
+    /// `copyfile(3)` with `COPYFILE_CLONE` (`man 3 copyfile`, and Apple's own `copyfile.h` header
+    /// comment, checked before choosing this flag over its sibling): "If this flag is set, the copy
+    /// will attempt to use `clonefile(2)`... If the operation is not supported... the copy will
+    /// proceed as if this flag was not set" — an instant, copy-on-write APFS clone when `realPath`
+    /// and `--state-path` share a volume (the common case — no doubled disk usage for an unedited
+    /// multi-hundred-MB document), transparently falling back to an ordinary full byte copy
+    /// otherwise (a different volume, an external drive, a network share, a filesystem without clone
+    /// support). **Deliberately `COPYFILE_CLONE`, never `COPYFILE_CLONE_FORCE`**: the FORCE variant
+    /// fails outright when a clone cannot be made, which is exactly wrong here — staging must
+    /// succeed via a plain copy whenever cloning cannot apply, not refuse to open the document at
+    /// all.
+    ///
+    /// `nonisolated` for the identical reason `placeAtomically` is: real disk I/O must run off
+    /// `@MainActor` so opening a large document never stalls the shell — `openAndDispatch` calls
+    /// this from inside a detached `Task`, mirroring `performSave`'s own placement call exactly.
+    /// Creates `docsDirectory` itself if this is the first stage this boot (mirrors `LOKBridge.init`'s
+    /// own eager `savesDirectory` creation) — safe to call every time,
+    /// `withIntermediateDirectories: true` no-ops when it already exists. Internal, not `private`, so
+    /// `OfficePlaceAtomicallyTests`' own sibling tests can drive it directly with nothing but scratch
+    /// files, the same testability posture `placeAtomically` already keeps.
+    nonisolated static func stageDocument(realPath: String, stagedPath: String) throws {
+        let destination = URL(fileURLWithPath: stagedPath)
+        try FileManager.default.createDirectory(
+            at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        // `copyfile` fails immediately (`EEXIST`) against a destination that already exists — never
+        // reachable in practice (`stagedPath` is always named after a freshly minted docId, per
+        // `stagedPath(forDocId:realPath:docsDirectory:)`'s own doc), but removing any leftover first
+        // is one line of insurance against a future caller that ever reused a name, and costs
+        // nothing when (as always today) there is nothing there to remove.
+        try? FileManager.default.removeItem(atPath: stagedPath)
+        guard copyfile(realPath, stagedPath, nil, copyfile_flags_t(COPYFILE_CLONE)) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno), userInfo: [
+                NSLocalizedDescriptionKey:
+                    "The document couldn't be staged: \(String(cString: strerror(errno)))."
+            ])
+        }
+    }
+
+    /// **Office Stage B Task 2b (I3) — removes `docId`'s own staged copy, whatever its extension.**
+    /// Glob-by-docId-PREFIX (`"<docId>."`) against `docsDirectory`'s own contents, not a remembered
+    /// exact path — mirrors `LOKBridge.sweepStaleProfileDirectories`'s own precedent rather than
+    /// tracking a SECOND, docId-keyed path table that could only ever drift from the one place this
+    /// path is already recorded (`DocumentEntry.stagedPath`, reducer state — this method deliberately
+    /// does not read it, so it works identically for a docId whose `DocumentEntry` is already gone,
+    /// e.g. after `.helperDied` wiped `documents` in the same reducer turn that emitted this sweep).
+    /// Safe as an exact prefix match: `docId` is a full UUID string by default (`makeDocId`'s own
+    /// default), and no other valid UUID string can ever equal this one's own `"<uuid>."` prefix.
+    /// Best-effort — a sweep failure (permissions, already gone, a concurrent second cleanup call
+    /// racing this one) must never propagate; every caller of this is fire-and-forget cleanup, never
+    /// a step anything downstream is waiting on. `nonisolated`, same reasoning as `stageDocument`.
+    nonisolated static func deleteStagedCopy(docId: String, docsDirectory: URL) {
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            at: docsDirectory, includingPropertiesForKeys: nil) else { return }
+        let prefix = "\(docId)."
+        for entry in entries where entry.lastPathComponent.hasPrefix(prefix) {
+            try? FileManager.default.removeItem(at: entry)
         }
     }
 
@@ -1336,9 +1731,9 @@ final class OfficeRuntime: ObservableObject {
     /// `watchGenerations` is.
     ///
     /// **Office Stage B Task 2 — the suppression bag Task 8's own comment (below) predicted arrives
-    /// here now.** `officeDiskChange` is fed `expectedWriteCount(for:)` exactly as
-    /// `EditorRuntime.fileChangedOnDisk` feeds `editorDiskChange` its own `expectedWriteCount` —
-    /// see this method's own `.ours` arm.
+    /// here now.** `officeDiskChange` is fed `hasPendingIdentity(for:matching:)` — Task 2b's own N1
+    /// fix: a note merely being PENDING is no longer enough to call a fire `.ours` (see that
+    /// function's own header for the full argument and its self-healing false-positive).
     ///
     /// Task 8's original words, kept for the historical record — true when written, superseded now:
     /// "No suppression bag: Stage A never writes an office file from the app, so there is no 'was
@@ -1357,18 +1752,17 @@ final class OfficeRuntime: ObservableObject {
         guard state.documents[path] != nil else { return }
         let stat = officeFileStat(atPath: path)
         switch officeDiskChange(stat: stat, baseline: diskBaselines[path],
-                                expectedWrites: expectedWriteCount(for: path)) {
+                                matchesPendingIdentity: hasPendingIdentity(for: path, matching: stat)) {
         case .unchanged:
             return
         case .ours:
-            // Fix round 2 (IMPORTANT-2, re-review) — identity, not position: only adopt `stat` as
-            // the new baseline when a specific note's OWN recorded identity confirms it produced
-            // these exact bytes. When nothing matches yet (the note that will hasn't caught up to
-            // record itself — this bag's own header has the full account of that window), stay
-            // suppressed — `.ours` already means "do not reload" regardless — but touch NEITHER the
-            // bag NOR the baseline: guessing which pending note this belongs to is exactly the
-            // mistake round 1 made. The responsible save's own `withdrawExpectedWrite`, unconditional
-            // and keyed to ITS OWN token, retires it correctly either way.
+            // `officeDiskChange` only ever answers `.ours` when `hasPendingIdentity` already found a
+            // match — `consumeExpectedWrite` below is therefore guaranteed to find (and remove) the
+            // SAME note; kept as an `if let` regardless (never force-unwrapped) so this stays correct
+            // even if a future refactor ever let the two calls observe different bag states between
+            // them. The responsible save's own `withdrawExpectedWrite`, unconditional and keyed to
+            // ITS OWN token, retires the note correctly either way — this consume is what lets the
+            // BASELINE adopt the confirmed bytes; it is not what actually frees the note in practice.
             if consumeExpectedWrite(path: path, matching: stat) != nil {
                 diskBaselines[path] = stat ?? diskBaselines[path]
             }

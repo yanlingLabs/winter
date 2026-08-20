@@ -11,6 +11,36 @@ import XCTest
 /// where things go, how zoom steps, and when it asks for tiles.
 @MainActor
 final class OfficeTileCanvasViewTests: XCTestCase {
+    /// **Office Stage B Task 2b test fallout**: `OfficeRuntime.open` now genuinely STAGES (copies)
+    /// its argument before ever calling into a driver — every test in this file that opens
+    /// `gatePath` needs a real, readable file there, or the copy fails and the document never
+    /// reaches `documents[path]` at all. Content is irrelevant to every test here (each driver
+    /// fabricates its own `OfficeDocumentMetadata`, never touching real bytes) — only existence
+    /// does. `gatePath`'s own last path component is `"gate.xlsx"`, the exact literal every test in
+    /// this file already used to key documents/views by, so nothing else needed to change.
+    private var scratchDir: URL!
+    private var gatePath: String { scratchDir.appendingPathComponent("gate.xlsx").path }
+    /// The driver's own staging destination — a SEPARATE scratch directory, mirroring how a real
+    /// `--state-path` is never the document's own directory.
+    private var stateDir: URL!
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        scratchDir = URL(fileURLWithPath: "/tmp/office-tilecanvas-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        try FileManager.default.createDirectory(at: scratchDir, withIntermediateDirectories: true)
+        try Data().write(to: URL(fileURLWithPath: gatePath))
+        stateDir = URL(fileURLWithPath: "/tmp/office-tilecanvas-state-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        try FileManager.default.createDirectory(at: stateDir, withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: scratchDir)
+        try? FileManager.default.removeItem(at: stateDir)
+        scratchDir = nil
+        stateDir = nil
+        try super.tearDownWithError()
+    }
+
     private func key(_ x: Int, _ y: Int, part: Int = 0, zoomPPT: Int = 1000) -> TileKey {
         TileKey(part: part, zoomPPT: zoomPPT, tileX: x, tileY: y)
     }
@@ -270,7 +300,14 @@ final class OfficeTileCanvasViewTests: XCTestCase {
         /// the pre-existing `.text` default (the infinite-grid margin must stay INERT for them), so
         /// this is a constructor default, never a hardcoded literal inside `driver` below.
         private let documentType: OfficeDocumentKind
-        init(documentType: OfficeDocumentKind = .text) { self.documentType = documentType }
+        /// Office Stage B Task 2b test fallout — `Driver.stateDirectory` is a required field now;
+        /// the caller hands in a real scratch dir (`OfficeTileCanvasViewTests.stateDir`) since
+        /// `OfficeRuntime.openAndDispatch` genuinely stages into it before ever calling `open` below.
+        private let stateDirectory: URL
+        init(documentType: OfficeDocumentKind = .text, stateDirectory: URL) {
+            self.documentType = documentType
+            self.stateDirectory = stateDirectory
+        }
         var driver: OfficeRuntime.Driver {
             OfficeRuntime.Driver(
                 helperState: { .ready }, startHelper: { },
@@ -284,7 +321,8 @@ final class OfficeTileCanvasViewTests: XCTestCase {
                     return []
                 },
                 unsubscribeTiles: { _ in },
-                requestTiles: { _, _ in })
+                requestTiles: { _, _ in },
+                stateDirectory: stateDirectory)
         }
     }
 
@@ -302,12 +340,12 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// != nil`; a `subscribeTiles` call against a runtime that never opened anything is a pure no-op
     /// (`(next, [])`, no effect at all), which is exactly what `PanelDocumentTabModel
     /// .requestOpenIfNeeded` would have already done for a real tab before its canvas ever mounts.
-    private func makeOpenedRuntime(path: String = "/gate.xlsx", documentType: OfficeDocumentKind = .text) async
+    private func makeOpenedRuntime(documentType: OfficeDocumentKind = .text) async
         -> (runtime: OfficeRuntime, recorder: SubscribeCapturingDriverRecorder) {
-        let recorder = SubscribeCapturingDriverRecorder(documentType: documentType)
+        let recorder = SubscribeCapturingDriverRecorder(documentType: documentType, stateDirectory: stateDir)
         let runtime = OfficeRuntime(sessionId: "S1", driver: recorder.driver)
-        runtime.open(path)
-        _ = await waitUntil { runtime.stateSnapshot.documents[path] != nil }
+        runtime.open(gatePath)
+        _ = await waitUntil { runtime.stateSnapshot.documents[gatePath] != nil }
         return (runtime, recorder)
     }
 
@@ -316,9 +354,9 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// a part switch is discrete, not a continuation of a scroll burst), carrying the NEW part.
     func testSettingActivePartOnAMountedCanvasResubscribesImmediatelyWithTheNewPart() async {
         let (runtime, recorder) = await makeOpenedRuntime()
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
 
@@ -355,9 +393,9 @@ final class OfficeTileCanvasViewTests: XCTestCase {
         // (`init` touches neither the driver nor the runtime) — no retention hazard here the way the
         // NEXT test has (see that one's own comment). `_` would be fine; bound anyway for symmetry.
         let (runtime, _) = await makeOpenedRuntime()
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         XCTAssertEqual(view.layer?.masksToBounds, true,
                        "without this, a tile straddling the viewport's edge (routine — see the next "
@@ -375,11 +413,11 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// off `view.layer?.sublayers`, so no new production accessor was needed for either assertion.
     func testRelayoutRoutinelyPositionsATileLayerPastTheViewsOwnEdge() async {
         let (runtime, recorder) = await makeOpenedRuntime()
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         // Large enough that the 300pt viewport below sits nowhere near the DOCUMENT's own far edge —
         // this test is about the TILE GRID straddling the VIEWPORT's edge, not the document's.
         let sizeTwips = OfficeDocumentSize(widthTwips: 1_000_000, heightTwips: 1_000_000)
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
         view.mount() // synchronously calls relayoutVisibleTiles() — see mount()'s own body
@@ -425,9 +463,9 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// for at all. Without either half, every tile after a reload is a permanent placeholder.
     func testSyncDocumentIdentityWithANewDocIdUpdatesTheCanvasAndResubscribes() async {
         let (runtime, recorder) = await makeOpenedRuntime()
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
         view.mount()
@@ -453,9 +491,9 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// the scrolled position established BEFORE the reload, not a reset-to-origin one.
     func testSyncDocumentIdentityWithANewDocIdPreservesTheScrollPosition() async {
         let (runtime, recorder) = await makeOpenedRuntime()
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         let sizeTwips = OfficeDocumentSize(widthTwips: 1_000_000, heightTwips: 1_000_000)
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
         view.mount()
@@ -484,9 +522,9 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// so the claim is not vacuously true of the 100% starting point every other test leaves it at.
     func testSyncDocumentIdentityWithANewDocIdPreservesTheZoomLevel() async {
         let (runtime, recorder) = await makeOpenedRuntime()
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         let sizeTwips = OfficeDocumentSize(widthTwips: 1_000_000, heightTwips: 1_000_000)
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
         view.mount()
@@ -511,9 +549,9 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// clamp is a function of it, so a document that shrank must pull an out-of-bounds scroll back in.
     func testSyncDocumentIdentityReClampsScrollAgainstTheFreshSizeTwips() async {
         let (runtime, recorder) = await makeOpenedRuntime()
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         let largeSize = OfficeDocumentSize(widthTwips: 2_000_000, heightTwips: 2_000_000)
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
                                         sizeTwips: largeSize, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
         view.mount()
@@ -544,9 +582,9 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// re-assert: idempotent, no extra resubscribe.
     func testSyncDocumentIdentityWithTheSameDocIdIsTheOrdinaryDriftReassertNotAReload() async {
         let (runtime, recorder) = await makeOpenedRuntime()
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
         view.mount()
@@ -567,9 +605,9 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// REAL mounted canvas end to end, not just a test double conforming to the protocol.
     func testMountRegistersTheViewAsTheModelsCanvasHostAndUnmountClearsIt() async {
         let (runtime, recorder) = await makeOpenedRuntime()
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
 
@@ -604,11 +642,11 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// every call.
     func testFreeScrollAccumulatesRawDeltasExactlyNeverQuantizedToATileLine() async {
         let (runtime, _) = await makeOpenedRuntime()
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         // Far larger than anything these tiny deltas could reach — this test is about the
         // ACCUMULATION, not the edge clamp (that is the next test's own job).
         let sizeTwips = OfficeDocumentSize(widthTwips: 2_000_000, heightTwips: 2_000_000)
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
 
@@ -635,9 +673,9 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// (a further overshoot would snap to a DIFFERENT, further-along grid line instead).
     func testFreeScrollClampsOnlyAtTheDocumentEdgeIdempotentlyNotAtATileLine() async {
         let (runtime, _) = await makeOpenedRuntime()
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000) // small — an overshoot is cheap to reach
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
 
@@ -659,9 +697,9 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// visible only as the placeholder tone until an async round trip lands.
     func testPerformSubscribePadsTheViewportByOneTileSpanBeyondWhatIsVisible() async {
         let (runtime, recorder) = await makeOpenedRuntime()
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         let sizeTwips = OfficeDocumentSize(widthTwips: 2_000_000, heightTwips: 2_000_000)
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
         // Comfortably clear of the near edge, so the margin below is never itself clamped away —
@@ -703,9 +741,9 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// negative-twips content that cannot exist — `performSubscribe`'s own `max(0, ...)`.
     func testPerformSubscribeClampsTheMarginAtTheNearEdgeRatherThanAskingNegativeTwips() async {
         let (runtime, recorder) = await makeOpenedRuntime()
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         let sizeTwips = OfficeDocumentSize(widthTwips: 2_000_000, heightTwips: 2_000_000)
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300) // scrollOrigin stays .zero — the near edge
 
@@ -738,6 +776,10 @@ final class OfficeTileCanvasViewTests: XCTestCase {
         var requestCalls: [(docId: String, keys: [TileKey])] {
             lock.lock(); defer { lock.unlock() }; return _requestCalls
         }
+        /// Office Stage B Task 2b test fallout — see `SubscribeCapturingDriverRecorder
+        /// .stateDirectory`'s own doc.
+        private let stateDirectory: URL
+        init(stateDirectory: URL) { self.stateDirectory = stateDirectory }
         var driver: OfficeRuntime.Driver {
             OfficeRuntime.Driver(
                 helperState: { .ready }, startHelper: { },
@@ -753,7 +795,8 @@ final class OfficeTileCanvasViewTests: XCTestCase {
                 unsubscribeTiles: { _ in },
                 requestTiles: { [unowned self] docId, keys in
                     self.lock.lock(); self._requestCalls.append((docId, keys)); self.lock.unlock()
-                })
+                },
+                stateDirectory: stateDirectory)
         }
     }
 
@@ -768,13 +811,13 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// mid fix-round: constructing the canvas with a hardcoded `docId: "doc-1"` here produced exactly
     /// that — a skip-check that never skipped, misread as a residency-logic bug before this mismatch
     /// was found.
-    private func makeOpenedResidencyRuntime(path: String = "/gate.xlsx") async
+    private func makeOpenedResidencyRuntime() async
         -> (runtime: OfficeRuntime, recorder: ResidencyCapturingDriverRecorder, docId: String) {
-        let recorder = ResidencyCapturingDriverRecorder()
+        let recorder = ResidencyCapturingDriverRecorder(stateDirectory: stateDir)
         let runtime = OfficeRuntime(sessionId: "S1", driver: recorder.driver)
-        runtime.open(path)
-        _ = await waitUntil { runtime.stateSnapshot.documents[path] != nil }
-        return (runtime, recorder, runtime.stateSnapshot.documents[path]!.docId)
+        runtime.open(gatePath)
+        _ = await waitUntil { runtime.stateSnapshot.documents[gatePath] != nil }
+        return (runtime, recorder, runtime.stateSnapshot.documents[gatePath]!.docId)
     }
 
     /// **The central proof.** A document small enough to qualify (9 tiles, well under the 128 cap) is
@@ -800,10 +843,10 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// edge already warmed."
     func testResidentDocumentIsPrefetchedWholeInVisibleFirstChunksAndPostFillScrollingIssuesNoFurtherRequests() async {
         let (runtime, recorder, docId) = await makeOpenedResidencyRuntime()
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         // 3x3 tiles at zoomPPT 1000 (tileSpanTwips 5120): 15360 twips per axis is exactly 3 tile spans.
         let sizeTwips = OfficeDocumentSize(widthTwips: 15360, heightTwips: 15360)
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: docId,
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: docId,
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
 
@@ -894,12 +937,12 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// the sweep must still ask for exactly the document's own 9 keys, nothing past its true edge.
     func testResidencyPrefetchClampsToDocumentExtentWhenThePanelIsLargerThanTheDocument() async {
         let (runtime, recorder, docId) = await makeOpenedResidencyRuntime()
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         // Same 3x3-at-zoomPPT-1000 document as the central proof, above — but in a panel/frame
         // LARGER than the document's own extent (900pt is 18000 twips at this zoom, vs. the
         // document's 15360) — the canonical "small doc, big panel" residency shape.
         let sizeTwips = OfficeDocumentSize(widthTwips: 15360, heightTwips: 15360)
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: docId,
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: docId,
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 900, height: 900)
 
@@ -922,10 +965,10 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// at all — it is left in today's viewport+margin lazy mode, unchanged.
     func testIneligibleDocumentNeverTriggersAWholeDocumentPrefetch() async {
         let (runtime, recorder, docId) = await makeOpenedResidencyRuntime()
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         // Comfortably past the residency cap (128 tiles) at zoomPPT 1000.
         let sizeTwips = OfficeDocumentSize(widthTwips: 2_000_000, heightTwips: 2_000_000)
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: docId,
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: docId,
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
 
@@ -947,9 +990,9 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// unregistered as the helper's tile-push subscriber (`performSubscribe`'s own header, reason a).
     func testDiscreteZoomResubscribesEvenWhenTheTargetIsAlreadyFullyCachedUnlikeTheThrottledPath() async {
         let (runtime, recorder, docId) = await makeOpenedResidencyRuntime()
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         let sizeTwips = OfficeDocumentSize(widthTwips: 15360, heightTwips: 15360) // 9 tiles at zoomPPT 1000
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: docId,
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: docId,
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
         view.mount()
@@ -995,9 +1038,9 @@ final class OfficeTileCanvasViewTests: XCTestCase {
         // reference and crashes the whole test host — measured directly, mid fix-round, discarding it
         // with `_` here is exactly what did that.
         let (runtime, recorder, docId) = await makeOpenedResidencyRuntime()
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         let sizeTwips = OfficeDocumentSize(widthTwips: 15360, heightTwips: 15360) // 9 tiles, eligible
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: docId,
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: docId,
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         // Deliberately mount BEFORE the frame is set — the production ordering, unlike every other
         // test in this file (which sets `frame` first for convenience).
@@ -1025,9 +1068,9 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// fix, `applyContents` ran unconditionally for every visible tile on every single tick.
     func testRepositioningAnExistingTileDoesNotReapplyContentsButANewlyExposedTileDoes() async {
         let (runtime, recorder) = await makeOpenedRuntime()
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         let sizeTwips = OfficeDocumentSize(widthTwips: 2_000_000, heightTwips: 2_000_000)
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
         view.mount() // the first relayout paints every initially-visible tile once each
@@ -1108,9 +1151,9 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// `OfficeTileLayer`'s override answers identically either way.
     func testTileLayerNeverResolvesAnAnimatableActionForAnyKeyThisFileTouches() async {
         let (runtime, recorder) = await makeOpenedRuntime()
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
         view.mount() // relayoutVisibleTiles runs synchronously inside mount() — the layer itself needs no wait
@@ -1156,9 +1199,9 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// must never let start.
     func testRepositioningInARealPresentedWindowLeavesNoSettleGlideAfterInputStops() async {
         let (runtime, recorder) = await makeOpenedRuntime()
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         let sizeTwips = OfficeDocumentSize(widthTwips: 2_000_000, heightTwips: 2_000_000)
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
 
@@ -1232,9 +1275,9 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// viewport at 100% zoom.
     func testSpreadsheetScrollExtendsPastTheUsedRangeByTheDocumentedMargin() async {
         let (runtime, _) = await makeOpenedRuntime(documentType: .spreadsheet)
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
 
@@ -1263,9 +1306,9 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// behavior byte-for-byte.
     func testNonSpreadsheetScrollStaysClampedExactlyAtTheUsedRangeUnextended() async {
         let (runtime, _) = await makeOpenedRuntime(documentType: .text)
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
 
@@ -1288,12 +1331,12 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// own header for the full mechanism this pins against).
     func testScrollingIntoTheInfiniteGridMarginStillAsksForTilesNotSkippedForever() async {
         let (runtime, recorder) = await makeOpenedRuntime(documentType: .spreadsheet)
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         // Large enough to stay residency-INELIGIBLE — no eager whole-document prefetch sweep to
         // interfere with this test's own subscribe-call counting (the same size several sibling
         // "large document" tests in this file already use for the identical reason).
         let sizeTwips = OfficeDocumentSize(widthTwips: 2_000_000, heightTwips: 2_000_000)
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
         view.mount()

@@ -11,8 +11,36 @@ import XCTest
 /// other viewport in the panel.
 @MainActor
 final class PanelDocumentTabTests: XCTestCase {
+    /// **Office Stage B Task 2b test fallout**: `OfficeRuntime.open` now genuinely STAGES (copies)
+    /// its argument before ever reaching a driver — every test below that opens through a REAL
+    /// `OfficeRuntime` (via `makeHost`) needs a real, readable file, or the copy fails and the
+    /// document never reaches `documents[path]` (the driver's own `open` closure is never even
+    /// called). The many PURE `officeDocumentViewportPlan`/`documentState`-driven tests above never
+    /// touch a runtime at all and are untouched by this — only the small set of tests that actually
+    /// call `model.activate()`/`runtime.open(...)` through `makeHost` use these.
+    private var scratchDir: URL!
+    private var realAPath: String { scratchDir.appendingPathComponent("a.xlsx").path }
+    private var realGatePath: String { scratchDir.appendingPathComponent("gate.xlsx").path }
+    private var stateDir: URL!
+
+    override func setUp() {
+        super.setUp()
+        doubles = []
+        runtimes = []
+        scratchDir = URL(fileURLWithPath: "/tmp/paneldocumenttab-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        try? FileManager.default.createDirectory(at: scratchDir, withIntermediateDirectories: true)
+        try? Data().write(to: URL(fileURLWithPath: realAPath))
+        try? Data().write(to: URL(fileURLWithPath: realGatePath))
+        stateDir = URL(fileURLWithPath: "/tmp/paneldocumenttab-state-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        try? FileManager.default.createDirectory(at: stateDir, withIntermediateDirectories: true)
+    }
+
     override func tearDown() {
         PanelDocumentTabModels.removeAllForTesting()
+        try? FileManager.default.removeItem(at: scratchDir)
+        try? FileManager.default.removeItem(at: stateDir)
+        scratchDir = nil
+        stateDir = nil
         super.tearDown()
     }
 
@@ -29,7 +57,8 @@ final class PanelDocumentTabTests: XCTestCase {
         var state = OfficeRuntimeState()
         state.phase = .ready
         state.documents[path] = OfficeRuntimeState.DocumentEntry(
-            docId: docId, type: type, parts: parts, activePart: activePart, sizeTwips: sizeTwips)
+            docId: docId, stagedPath: "/staged/\(docId)", type: type, parts: parts, activePart: activePart,
+            sizeTwips: sizeTwips)
         return state
     }
 
@@ -138,28 +167,28 @@ final class PanelDocumentTabTests: XCTestCase {
     // MARK: - Pure: panelDocumentTabAction (mirrors panelFileTabAction's own table)
 
     func testNoMatchingTabMintsTitledWithTheBasename() {
-        XCTAssertEqual(panelDocumentTabAction(tabs: [], path: "/repo/gate.xlsx", openFailures: []),
+        XCTAssertEqual(panelDocumentTabAction(tabs: [], path: realGatePath, openFailures: []),
                        .mint(title: "gate.xlsx"))
     }
 
     func testAMatchingDocumentTabActivatesWithNoRetryWhenClean() {
-        let tabs = [PanelTab(tabId: "t1", kind: .document, url: "/repo/gate.xlsx", title: "gate.xlsx")]
-        XCTAssertEqual(panelDocumentTabAction(tabs: tabs, path: "/repo/gate.xlsx", openFailures: []),
+        let tabs = [PanelTab(tabId: "t1", kind: .document, url: realGatePath, title: "gate.xlsx")]
+        XCTAssertEqual(panelDocumentTabAction(tabs: tabs, path: realGatePath, openFailures: []),
                        .activate(tabId: "t1", retryOpen: false))
     }
 
     func testAMatchingDocumentTabActivatesWithRetryWhenItsPathIsInOpenFailures() {
-        let tabs = [PanelTab(tabId: "t1", kind: .document, url: "/repo/gate.xlsx", title: "gate.xlsx")]
-        XCTAssertEqual(panelDocumentTabAction(tabs: tabs, path: "/repo/gate.xlsx",
-                                              openFailures: ["/repo/gate.xlsx"]),
+        let tabs = [PanelTab(tabId: "t1", kind: .document, url: realGatePath, title: "gate.xlsx")]
+        XCTAssertEqual(panelDocumentTabAction(tabs: tabs, path: realGatePath,
+                                              openFailures: [realGatePath]),
                        .activate(tabId: "t1", retryOpen: true))
     }
 
     /// The kind filter is load-bearing — `url` is a field every tab kind carries, so a `.code` tab
     /// pointed at the identical string must never be mistaken for an open document tab.
     func testAMatchingUrlOnANonDocumentTabDoesNotCountAsAMatch() {
-        let tabs = [PanelTab(tabId: "t1", kind: .code, url: "/repo/gate.xlsx", title: "gate.xlsx")]
-        XCTAssertEqual(panelDocumentTabAction(tabs: tabs, path: "/repo/gate.xlsx", openFailures: []),
+        let tabs = [PanelTab(tabId: "t1", kind: .code, url: realGatePath, title: "gate.xlsx")]
+        XCTAssertEqual(panelDocumentTabAction(tabs: tabs, path: realGatePath, openFailures: []),
                        .mint(title: "gate.xlsx"))
     }
 
@@ -223,6 +252,10 @@ final class PanelDocumentTabTests: XCTestCase {
             get { lock.lock(); defer { lock.unlock() }; return _state }
             set { lock.lock(); _state = newValue; lock.unlock() }
         }
+        /// Office Stage B Task 2b test fallout — a real scratch dir `OfficeRuntime.openAndDispatch`
+        /// genuinely stages into before ever calling `open` below.
+        private let stateDirectory: URL
+        init(stateDirectory: URL) { self.stateDirectory = stateDirectory }
 
         var driver: OfficeRuntime.Driver {
             OfficeRuntime.Driver(
@@ -239,18 +272,13 @@ final class PanelDocumentTabTests: XCTestCase {
                 },
                 subscribeTiles: { _, _, _, _ in [] },
                 unsubscribeTiles: { _ in },
-                requestTiles: { _, _ in })
+                requestTiles: { _, _ in },
+                stateDirectory: stateDirectory)
         }
     }
 
     private var doubles: [AnyObject] = []
     private var runtimes: [OfficeRuntime] = []
-
-    override func setUp() {
-        super.setUp()
-        doubles = []
-        runtimes = []
-    }
 
     /// A host whose office runtimes are ALL backed by `office` (one recorder, mirroring
     /// `ShellSessionHostTests.OfficeDriverRecorder`'s own "one recorder per factory, shared across
@@ -312,12 +340,12 @@ final class PanelDocumentTabTests: XCTestCase {
     /// `prunePanelTabModelsOnSessionChange` actually reacts to — proving the JOIN, not merely that
     /// `discardAll` itself works when called directly (already covered above).
     func testASessionHopPrunesADepartedSessionsDocumentModelEvenThoughItsTabStaysOpen() async {
-        let (office1, office2) = (DocumentOfficeDriverRecorder(), DocumentOfficeDriverRecorder())
+        let (office1, office2) = (DocumentOfficeDriverRecorder(stateDirectory: stateDir), DocumentOfficeDriverRecorder(stateDirectory: stateDir))
         doubles.append(contentsOf: [office1, office2])
         let host = makeHost(office: office1, perSession: ["S1": office1, "S2": office2])
 
         host.panelStore.switchSession(to: "S1")
-        let tab = PanelTab(tabId: "t1", kind: .document, url: "/a.xlsx", title: nil)
+        let tab = PanelTab(tabId: "t1", kind: .document, url: realAPath, title: nil)
         let model = PanelDocumentTabModels.model(for: tab, host: host, sessionId: "S1")
         model.activate()
         XCTAssertTrue(model.runtime === host.existingOfficeRuntime(for: "S1"))
@@ -338,15 +366,21 @@ final class PanelDocumentTabTests: XCTestCase {
     // MARK: - Model lifecycle: the lazy open, at most once per (runtime, path)
 
     func testActivatingResolvesTheRuntimeAndOpensThePathExactlyOnce() async {
-        let office = DocumentOfficeDriverRecorder()
+        let office = DocumentOfficeDriverRecorder(stateDirectory: stateDir)
         let host = makeHost(office: office)
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/a.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: realAPath)
         model.bind(host: host, sessionId: "S1")
         model.activate()
 
         let opened = await waitUntil { office.openCalls.count == 1 }
         XCTAssertTrue(opened)
-        XCTAssertEqual(office.openCalls.first?.path, "/a.xlsx")
+        // Office Stage B Task 2b — the wire NEVER sees the real path: `driver.open` receives the
+        // STAGED copy `openAndDispatch` made under the shared helper's own `--state-path`, keeping
+        // the real path's own extension (`OfficeSaveFormat` capture depends on it).
+        let stagedCallPath = try? XCTUnwrap(office.openCalls.first?.path)
+        XCTAssertNotEqual(stagedCallPath, realAPath, "the real path must never cross the wire")
+        XCTAssertEqual((stagedCallPath as NSString?)?.pathExtension, "xlsx")
+        XCTAssertTrue(stagedCallPath?.hasPrefix(stateDir.path) == true, "staged under the driver's own state directory")
 
         // A second refresh must NOT re-open — the guard is per (runtime, path), not per call.
         model.refreshForTesting()
@@ -365,18 +399,21 @@ final class PanelDocumentTabTests: XCTestCase {
     /// the reducer-level proof that the banner CLEARS on a successful reopen — this test's job is
     /// only the model's own door, not re-proving the reducer.
     func testBannerSurfacesFromRuntimeStateThroughTheModelsOwnDoor() async {
-        let office = DocumentOfficeDriverRecorder()
+        let office = DocumentOfficeDriverRecorder(stateDirectory: stateDir)
         let host = makeHost(office: office)
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/a.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: realAPath)
         model.bind(host: host, sessionId: "S1")
         model.activate()
         _ = await waitUntil { office.openCalls.count == 1 }
-        _ = await waitUntil { model.runtime?.stateSnapshot.documents["/a.xlsx"] != nil }
+        _ = await waitUntil { model.runtime?.stateSnapshot.documents[realAPath] != nil }
         XCTAssertNil(model.banner, "no banner before anything has happened to the file")
 
-        // "/a.xlsx" does not really exist on disk — `officeFileStat` reports `nil` for it, which
-        // `fileChangedOnDisk` treats as deleted regardless of what baseline preceded it.
-        model.runtime?.fileChangedOnDisk("/a.xlsx")
+        // Office Stage B Task 2b — `realAPath` is now a genuinely real scratch file (staging needs
+        // one to copy); delete it here instead of relying on it having never existed. Once gone,
+        // `officeFileStat` reports `nil` for it, which `fileChangedOnDisk` treats as deleted
+        // regardless of what baseline preceded it.
+        try? FileManager.default.removeItem(atPath: realAPath)
+        model.runtime?.fileChangedOnDisk(realAPath)
 
         let bannered = await waitUntil { model.banner != nil }
         XCTAssertTrue(bannered)
@@ -393,9 +430,9 @@ final class PanelDocumentTabTests: XCTestCase {
     /// The failed-vs-idle gate's own local proof, end to end through the model: `hasRequestedOpen`
     /// flips true only once the deferred open Task has actually fired.
     func testHasRequestedOpenBecomesTrueOnlyAfterTheDeferredOpenFires() async {
-        let office = DocumentOfficeDriverRecorder()
+        let office = DocumentOfficeDriverRecorder(stateDirectory: stateDir)
         let host = makeHost(office: office)
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/a.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: realAPath)
         model.bind(host: host, sessionId: "S1")
         XCTAssertFalse(model.hasRequestedOpen, "nothing has happened yet — bind alone asks nothing")
 
@@ -418,9 +455,9 @@ final class PanelDocumentTabTests: XCTestCase {
     /// successful open would prove nothing: the interesting case is `phase == .failed`, the ONE
     /// phase carry 4 says retries exactly like `.idle`.
     func testRetryOpenReIssuesOpenOnTheResolvedRuntime() async {
-        let office = DocumentOfficeDriverRecorder()
+        let office = DocumentOfficeDriverRecorder(stateDirectory: stateDir)
         let host = makeHost(office: office)
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/a.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: realAPath)
         model.bind(host: host, sessionId: "S1")
         model.activate()
         _ = await waitUntil { office.openCalls.count == 1 }
@@ -432,7 +469,13 @@ final class PanelDocumentTabTests: XCTestCase {
         model.retryOpen()
         let retried = await waitUntil { office.openCalls.count == 2 }
         XCTAssertTrue(retried)
-        XCTAssertEqual(office.openCalls.map(\.path), ["/a.xlsx", "/a.xlsx"])
+        // Office Stage B Task 2b — both calls carry a STAGED path (never the real one), and — since
+        // each open mints a fresh docId — the two staged paths are themselves distinct even though
+        // both stage the SAME real file.
+        XCTAssertEqual(office.openCalls.count, 2)
+        XCTAssertTrue(office.openCalls.allSatisfy { $0.path != realAPath })
+        XCTAssertNotEqual(office.openCalls[0].path, office.openCalls[1].path,
+                          "a retry is a fresh open under a fresh docId, staged fresh")
     }
 
     // MARK: - The part-strip door
@@ -463,7 +506,7 @@ final class PanelDocumentTabTests: XCTestCase {
     /// document — mirrors `EditorSaveTests.testTheMenuTargetIsTheActiveCodeTabAndNothingElse`'s
     /// exact shape, filtered to `.document` instead of `.code`.
     func testOfficeSaveMenuTargetIsTheActiveDocumentTabAndNothingElse() {
-        let document = PanelTab(tabId: "t1", kind: .document, url: "/repo/gate.xlsx", title: "gate.xlsx")
+        let document = PanelTab(tabId: "t1", kind: .document, url: realGatePath, title: "gate.xlsx")
         let code = PanelTab(tabId: "t2", kind: .code, url: "/repo/engine.ts", title: "engine.ts")
         let pathless = PanelTab(tabId: "t3", kind: .document, url: nil, title: nil)
 
@@ -496,16 +539,16 @@ final class PanelDocumentTabTests: XCTestCase {
     /// office runtime just to ask whether there is something to save — mirrors `EditorSaveTests
     /// .testTheHostResolvesTheActiveCodeTabAndSavesThroughTheExistingRuntimeOnly`'s exact shape.
     func testTheHostResolvesTheActiveDocumentTabAndSavesThroughTheExistingRuntimeOnly() async {
-        let office = DocumentOfficeDriverRecorder()
+        let office = DocumentOfficeDriverRecorder(stateDirectory: stateDir)
         doubles.append(office)
         let host = makeHost(office: office)
         host.panelStore.switchSession(to: "S1")
         host.panelStore.applyFetchedSnapshot(
             sessionId: "S1",
-            tabs: [PanelTab(tabId: "t1", kind: .document, url: "/repo/gate.xlsx", title: "gate.xlsx")],
+            tabs: [PanelTab(tabId: "t1", kind: .document, url: realGatePath, title: "gate.xlsx")],
             activeTabId: "t1")
 
-        XCTAssertEqual(host.activeDocumentTabPath, "/repo/gate.xlsx")
+        XCTAssertEqual(host.activeDocumentTabPath, realGatePath)
         host.saveActiveDocumentTab()
         try? await Task.sleep(nanoseconds: 30_000_000) // a wrongly-minting version time to act
         XCTAssertEqual(office.saveCalls, [], "no runtime exists for this session yet, and a save "
@@ -515,14 +558,14 @@ final class PanelDocumentTabTests: XCTestCase {
         // With a runtime actually standing (and the document actually open), the same door saves
         // through it.
         let runtime = host.officeRuntime(for: "S1")
-        runtime.open("/repo/gate.xlsx")
+        runtime.open(realGatePath)
         let opened = await waitUntil { office.openCalls.count == 1 }
         XCTAssertTrue(opened)
-        _ = await waitUntil { runtime.stateSnapshot.documents["/repo/gate.xlsx"] != nil }
+        _ = await waitUntil { runtime.stateSnapshot.documents[realGatePath] != nil }
 
         host.saveActiveDocumentTab()
         let saved = await waitUntil { office.saveCalls.count == 1 }
         XCTAssertTrue(saved)
-        XCTAssertEqual(office.saveCalls.first, runtime.stateSnapshot.documents["/repo/gate.xlsx"]?.docId)
+        XCTAssertEqual(office.saveCalls.first, runtime.stateSnapshot.documents[realGatePath]?.docId)
     }
 }

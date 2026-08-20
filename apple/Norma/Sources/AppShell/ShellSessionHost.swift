@@ -975,7 +975,16 @@ final class ShellSessionHost: ObservableObject {
                     }
                     try await client.requestTiles(docId: docId, keys: keys)
                 }
-            })
+            },
+            // Office Stage B Task 2b — the LIVE supervisor's own configured directory, never
+            // `OfficeHelperSupervisor.Configuration.defaultStateDirectory()` read fresh: every live
+            // test overrides `socketDirectory` with a scratch dir precisely so its own helper's
+            // write fence and this driver's staging directory are one and the same place. Safe to
+            // read eagerly (not `[weak supervisor]`-gated the way every closure above is) — see
+            // `OfficeHelperSupervisor.statePath`'s own doc: fixed for the supervisor's whole
+            // lifetime, and `supervisor` (a `let` parameter of this very method) already outlives
+            // this call.
+            stateDirectory: supervisor.statePath)
     }
 
     /// Release a session's office runtime outright, closing whatever documents it holds. **Never

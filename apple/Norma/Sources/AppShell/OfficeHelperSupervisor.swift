@@ -305,6 +305,15 @@ final class OfficeHelperSupervisor {
     }
 
     private let configuration: Configuration
+
+    /// **Office Stage B Task 2b** — the shared helper's own `--state-path`, exposed for
+    /// `OfficeRuntime.Driver.stateDirectory` (`ShellSessionHost.officeDriver(for:)` reads this).
+    /// `configuration.socketDirectory` doubles as `--state-path` already (`attemptOnce`'s own
+    /// `arguments` array: `"--state-path", socketDirectory.path`) — this is the SAME directory,
+    /// under its own name, not a second, independently-computed one. Fixed for this supervisor's
+    /// whole lifetime (`configuration` is `let`), so — unlike `client` — safe to read at ANY time,
+    /// including before the first `start()`.
+    var statePath: URL { configuration.socketDirectory }
     private let eventsContinuation: AsyncStream<OfficeHelperEvent>.Continuation
     /// **Still single-consumer (T2/T3 carry, re-checked by Task 4 — deliberately NOT given a
     /// multicast wrapper here).** Task 4's own app-side tile plumbing (`OfficeHelperClient`'s
