@@ -1005,8 +1005,10 @@ final class OfficeRuntime: ObservableObject {
                 // **Before the place, always** — mirrors `EditorSaveCoordinator.performSave`'s own
                 // ordering and its own reason: the watcher T8 already installed for `path` must not
                 // mistake this save's own rename for somebody else's edit, and a note filed
-                // afterward would race the file-system event it exists to explain.
-                self.noteExpectedWrite(path: path)
+                // afterward would race the file-system event it exists to explain. The returned
+                // token is THIS save's own — captured here so the withdraw below can name exactly
+                // what it is retiring, never a sibling save's note (fix round 1, IMPORTANT-2).
+                let expectedWriteToken = self.noteExpectedWrite(path: path)
                 do {
                     try await Task.detached(priority: .userInitiated) {
                         try Self.placeAtomically(tempPath: tempPath, at: path)
@@ -1017,28 +1019,29 @@ final class OfficeRuntime: ObservableObject {
                     // all), is compared against bytes this save itself produced, not a stale
                     // pre-save snapshot.
                     self.diskBaselines[path] = officeFileStat(atPath: path)
-                    // **Withdraw the ONE note this save's own `noteExpectedWrite` filed above** —
-                    // NOT `EditorRuntime.noteWriteLanded`'s unconditional whole-bag clear, and the
-                    // difference is deliberate: that clear is only safe because
-                    // `EditorSaveCoordinator` coalesces saves per path ("at most one write per path
-                    // is ever in flight" — that method's own doc states this as the precondition),
-                    // and `OfficeRuntime.save` has no equivalent coalescing (a second ⌘S for the
-                    // same path while the first is still in flight is a second, independent
-                    // `.save` effect, a second `noteExpectedWrite`). Withdrawing exactly one
-                    // leaves a genuinely still-outstanding SECOND save's own note untouched, while
-                    // still correctly returning this path to a clean count when this is the only
-                    // one in flight — verified empirically (`OfficeRuntimeWatcherTests
-                    // .testASavesOwnWatcherFireIsSuppressedAsOursAndDoesNotReload` caught the
-                    // leaked-note version of this bug: the re-seed above already makes a fire that
-                    // arrives AFTER this line read `.unchanged`, which never touches the bag at
-                    // all, so a note left uncounted here would sit forever, ready to misclassify
-                    // the NEXT genuine external edit as `.ours`).
-                    self.withdrawExpectedWrite(path: path)
+                    // **Withdraw exactly the ONE token this save's own `noteExpectedWrite` minted
+                    // above** — task review fix round 1 (IMPORTANT-2): this used to be
+                    // `EditorRuntime.noteWriteLanded`'s unconditional whole-bag clear, restated as
+                    // "withdraw exactly one" — but a bare COUNT decrement is not actually "exactly
+                    // one of MINE": with two overlapping saves on `path`, a watcher fire landing
+                    // BETWEEN this save's rename and this line ALSO decrements the same shared
+                    // count (`fileChangedOnDisk`'s own `.ours` arm, below), and the two decrements
+                    // together over-consumed — stealing a genuinely still-outstanding SECOND save's
+                    // own note, whose own later rename then read `.external` and dispatched a
+                    // spurious reload. Fixed by giving each note an identity
+                    // (`ExpectedWriteToken`, this bag's own header has the full account and why
+                    // FIFO consumption is what makes the reviewer's own scenario provable): this
+                    // call now withdraws ONLY `expectedWriteToken`, a no-op if a fire already
+                    // consumed it, and — critically — never touches ANY other save's still-pending
+                    // token the way an anonymous count decrement could.
+                    // `testASecondSavesNoteSurvivesAFireLandingBetweenTwoOverlappingSaves` drives
+                    // this exact interleaving.
+                    self.withdrawExpectedWrite(path: path, token: expectedWriteToken)
                     try? FileManager.default.removeItem(atPath: tempPath)
                     self.perform(self.dispatch(.saveSucceeded(path: path, docId: docId)))
                 } catch {
                     // No event will arrive to consume the note now — the rename never happened.
-                    self.withdrawExpectedWrite(path: path)
+                    self.withdrawExpectedWrite(path: path, token: expectedWriteToken)
                     try? FileManager.default.removeItem(atPath: tempPath)
                     self.perform(self.dispatch(.saveFailed(path: path, docId: docId, reason: Self.describe(error))))
                 }
@@ -1052,38 +1055,91 @@ final class OfficeRuntime: ObservableObject {
     // MARK: - Office Stage B Task 2: the watcher-suppression bag
     //
     // Mirrors `EditorRuntime`'s identical bag (`noteExpectedWrite`/`withdrawExpectedWrite`/
-    // `consumeExpectedWrite`/`expectedWriteCount`) exactly — same counted-not-set shape, same
-    // reasoning (that file's own doc comment, restated here for this runtime): a save writes the
-    // file this runtime is watching, so the watcher armed for `path` will see an event for a change
-    // it already knows about. **A counted bag, not a set**: two saves of the same document in quick
-    // succession are two renames and two events, and a set would suppress only the first.
-
-    private var pendingExpectedWrites: [String: Int] = [:]
-
-    func noteExpectedWrite(path: String) {
-        pendingExpectedWrites[path, default: 0] += 1
+    // `consumeExpectedWrite`/`expectedWriteCount`) in SPIRIT — a save writes the file this runtime
+    // is watching, so the watcher armed for `path` will see an event for a change it already knows
+    // about — but NOT in shape: `EditorRuntime`'s bag is a bare per-path COUNT, safe there only
+    // because `EditorSaveCoordinator` coalesces saves per path (at most one write in flight, by that
+    // method's own precondition). `OfficeRuntime.save` has no equivalent coalescing — a second ⌘S
+    // on the same path while the first is still saving is a second, independent `.save` effect, a
+    // second note — so two notes for the SAME path can be genuinely outstanding at once.
+    //
+    // **Task review fix round 1 (IMPORTANT-2)**: a bare count could not tell "a fire already
+    // retired MY note" from "a fire retired a DIFFERENT, still-outstanding save's note" — both just
+    // decrement the same integer. With two overlapping saves, a watcher fire landing between the
+    // first save's rename and its own continuation's withdraw call decremented the count once, and
+    // that continuation's own (then-unconditional) withdraw decremented it AGAIN for the same
+    // landing — net two decrements for one real landing, stealing the SECOND save's still-genuinely-
+    // outstanding note. That save's own later rename then found the bag empty, read `.external` in
+    // `officeDiskChange`, and `fileChangedOnDisk` dispatched a spurious reload — harmless while
+    // Stage A/B has no real edit surface, but a reload replaces in-memory state with disk content,
+    // so post-Task-4 this would silently discard whatever unsaved edit was sitting in memory.
+    //
+    // Fixed with per-note identity: `noteExpectedWrite` mints and returns an `ExpectedWriteToken`;
+    // `withdrawExpectedWrite(path:token:)` — a save's OWN door — removes ONLY that exact token, a
+    // no-op if it is already gone (consumed by a fire, or already withdrawn), and NEVER touches any
+    // other token for the path; `consumeExpectedWrite` — the watcher fire's door, which carries no
+    // identity of its own to match against a specific save — removes the OLDEST still-pending token
+    // (FIFO, not arbitrary): notes are minted in the order each save's queue-serialized helper round
+    // trip completes, so the earliest-noted save is also the one a fire is most likely to belong to.
+    // `testASecondSavesNoteSurvivesAFireLandingBetweenTwoOverlappingSaves` drives the reviewer's own
+    // scenario directly: two notes outstanding, one fire consumes the older one, the first save's
+    // own continuation then finds nothing left to withdraw — and asserts the second note survives
+    // and no spurious reload fires for it.
+    //
+    // **Disclosed, not swept under the rug**: FIFO-oldest-first is a heuristic keyed to the REALISTIC
+    // case, not a proof for every interleaving — `placeAtomically` runs in an independent
+    // `Task.detached` per save, so a SECOND save's local copy+rename could, in principle, finish
+    // before the FIRST's (a large document saved first, a small one saved moments later), which
+    // would make a fire's "oldest token" pick attribute it to the wrong save. This is still a strict
+    // improvement over the prior unconditional count decrement, which stole a note on EVERY overlap
+    // rather than only an adversarially-reordered one, and matches this fix round's own scope (the
+    // task review's own words: "or an equivalent scheme you can prove with tests") — closing the
+    // adversarial-reordering case too would need per-write stat-matching, a larger change than one
+    // fix round.
+    struct ExpectedWriteToken: Hashable {
+        private let id = UUID()
     }
 
-    func withdrawExpectedWrite(path: String) {
-        guard let count = pendingExpectedWrites[path] else { return }
-        if count <= 1 {
+    private var pendingExpectedWrites: [String: [ExpectedWriteToken]] = [:]
+
+    @discardableResult
+    func noteExpectedWrite(path: String) -> ExpectedWriteToken {
+        let token = ExpectedWriteToken()
+        pendingExpectedWrites[path, default: []].append(token)
+        return token
+    }
+
+    /// A save's OWN door — removes ONLY `token`, never any other token for `path`. A no-op if
+    /// `token` is already gone (consumed by an earlier fire via `consumeExpectedWrite`, or already
+    /// withdrawn) — this is what keeps a still-genuinely-outstanding SIBLING save's own note safe.
+    func withdrawExpectedWrite(path: String, token: ExpectedWriteToken) {
+        guard var tokens = pendingExpectedWrites[path], let index = tokens.firstIndex(of: token) else { return }
+        tokens.remove(at: index)
+        if tokens.isEmpty {
             pendingExpectedWrites.removeValue(forKey: path)
         } else {
-            pendingExpectedWrites[path] = count - 1
+            pendingExpectedWrites[path] = tokens
         }
     }
 
-    /// The watcher's door: was the change at `path` one of ours? Consumes ONE note per call.
+    /// The watcher's door: was the change at `path` one of ours? FIFO — consumes the OLDEST still-
+    /// pending token for `path`, if any (this bag's own header above has the full account of why
+    /// oldest-first, not arbitrary).
     func consumeExpectedWrite(path: String) -> Bool {
-        guard pendingExpectedWrites[path] != nil else { return false }
-        withdrawExpectedWrite(path: path)
+        guard var tokens = pendingExpectedWrites[path], !tokens.isEmpty else { return false }
+        tokens.removeFirst()
+        if tokens.isEmpty {
+            pendingExpectedWrites.removeValue(forKey: path)
+        } else {
+            pendingExpectedWrites[path] = tokens
+        }
         return true
     }
 
     /// How many of this runtime's own writes at `path` are still unaccounted for. Test seam and
     /// `fileChangedOnDisk`'s own reader.
     func expectedWriteCount(for path: String) -> Int {
-        pendingExpectedWrites[path] ?? 0
+        pendingExpectedWrites[path]?.count ?? 0
     }
 
     // MARK: - Office Stage B Task 2: the atomic place

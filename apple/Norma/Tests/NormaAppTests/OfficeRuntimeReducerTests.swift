@@ -1286,8 +1286,75 @@ final class OfficeRuntimeWatcherTests: XCTestCase {
                        + ".ours — must not reload")
         XCTAssertNil(runtime.stateSnapshot.documentBanners[path])
         XCTAssertEqual(runtime.expectedWriteCount(for: path), 0, "the fire consumed the note; "
-                       + "performSave's own later `withdrawExpectedWrite` (a no-op on an absent key) "
-                       + "must not double-decrement or crash")
+                       + "performSave's own later `withdrawExpectedWrite(path:token:)` (a no-op once "
+                       + "its own token is already gone) must not double-decrement or crash")
+    }
+
+    /// **Task review fix round 1 (IMPORTANT-2) — the reviewer's own scenario, driven directly.**
+    /// Two saves are in flight on the SAME path (two independent `.save` effects, exactly as a
+    /// second ⌘S while the first is still saving would produce); a watcher fire lands between them,
+    /// causally attributable to the FIRST save's own rename; the first save's own continuation then
+    /// withdraws, exactly per `performSave`'s own sequence.
+    ///
+    /// **Before the fix** this test would have failed at the THIRD assertion below: `withdrawExpected
+    /// Write` took a bare path and decremented an anonymous per-path COUNT — the fire's own consume
+    /// and the first save's own withdraw both decremented the SAME integer, over-consuming by one
+    /// and stealing the SECOND save's still-genuinely-outstanding note. That save's own later fire
+    /// would then find the bag empty, read `.external` in `officeDiskChange`, and dispatch a
+    /// spurious reload — the exact "its own rename reads external" failure the review named.
+    ///
+    /// **After the fix**, each note has its own identity (`ExpectedWriteToken`): a fire consumes the
+    /// OLDEST still-pending token (FIFO — see the bag's own header on `pendingExpectedWrites` for
+    /// why), and a save's own withdraw removes ONLY the exact token it was handed, a no-op once that
+    /// token is already gone. The second save's own note survives the first save's redundant
+    /// withdraw untouched, and the second save's own later fire correctly classifies `.ours`.
+    func testASecondSavesNoteSurvivesAFireLandingBetweenTwoOverlappingSaves() async throws {
+        let path = try scratchFile(contents: "one")
+        let runtime = OfficeRuntime(sessionId: "S1", driver: makeDriver())
+        runtimes.append(runtime)
+        runtime.open(path)
+        _ = await waitUntil { runtime.stateSnapshot.documents[path] != nil }
+        let originalDocId = try XCTUnwrap(runtime.stateSnapshot.documents[path]?.docId)
+
+        // Two saves' own notes, minted in order — `performSave`'s own first act, twice, for two
+        // independent, overlapping `.save` effects on the SAME path.
+        let firstSaveToken = runtime.noteExpectedWrite(path: path)
+        let secondSaveToken = runtime.noteExpectedWrite(path: path)
+        XCTAssertEqual(runtime.expectedWriteCount(for: path), 2, "setup: two notes genuinely outstanding")
+
+        // The FIRST save's own rename lands, and its own watcher fire arrives BEFORE its own
+        // continuation gets to withdraw — `testAGenuineOursRaceIsConsumedWhenTheFireArrivesBefore
+        // TheBaselineReSeeds`'s own race, now with a SECOND save's note also outstanding.
+        try "the first save's own rendered content".write(toFile: path, atomically: true, encoding: .utf8)
+        runtime.fileChangedOnDisk(path)
+        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.docId, originalDocId, "the first save's "
+                       + "own fire must classify .ours — no reload")
+        XCTAssertEqual(runtime.expectedWriteCount(for: path), 1, "the fire consumed exactly ONE note "
+                       + "(FIFO: the OLDEST, i.e. the first save's own) — the second save's own note "
+                       + "must still be outstanding")
+
+        // The FIRST save's own continuation now runs its withdraw, exactly as `performSave` always
+        // does regardless of whether a fire already got there first.
+        runtime.withdrawExpectedWrite(path: path, token: firstSaveToken)
+        XCTAssertEqual(runtime.expectedWriteCount(for: path), 1, "THE CORE CLAIM: the first save's "
+                       + "own (now redundant) withdraw must be a no-op — the second save's own note "
+                       + "must survive it untouched, not get stolen")
+
+        // The SECOND save's own rename lands later; its own fire must still correctly classify
+        // `.ours` and consume the SURVIVING note — the reviewer's own "its own rename reads "
+        // "`.external`" failure, proven NOT to happen.
+        try "the second save's own rendered content".write(toFile: path, atomically: true, encoding: .utf8)
+        runtime.fileChangedOnDisk(path)
+        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.docId, originalDocId, "the second "
+                       + "save's own fire must ALSO classify .ours — a spurious reload here IS the "
+                       + "bug this fix closes")
+        XCTAssertNil(runtime.stateSnapshot.documentBanners[path], "no banner — no reload was attempted")
+        XCTAssertEqual(runtime.expectedWriteCount(for: path), 0, "both notes now correctly retired, "
+                       + "none leaked")
+
+        // The second save's own (also now redundant) withdraw must likewise be a safe no-op.
+        runtime.withdrawExpectedWrite(path: path, token: secondSaveToken)
+        XCTAssertEqual(runtime.expectedWriteCount(for: path), 0)
     }
 
     /// A save that never gets a watcher fire at all (the debounce coalesced it away, or nothing in
