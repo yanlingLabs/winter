@@ -10,15 +10,16 @@
 ;; was chosen over wrapping the spawn the way `packages/core/src/workflows/sandbox.ts` does for the
 ;; workflow-worker subprocess.
 ;;
-;; Parameterized on exactly ONE substitution, STATE_PATH — main.swift's own `--state-path` argument,
-;; realpath(3)-canonicalized before being handed to `sandbox_init_with_parameters` (never
-;; Foundation's `resolvingSymlinksInPath`, which strips the canonical `/private` prefix back OFF —
-;; the wrong direction). Verified empirically before this file was trusted: an un-canonicalized
-;; `/tmp/...` value makes every `(subpath (param "STATE_PATH"))` rule below match NOTHING, because
-;; the kernel checks paths in their resolved `/private/tmp/...` form — a standalone C harness
-;; (`sandbox_init_with_parameters` + `bind`/`open`) reproduced the false-deny with the raw path and
-;; confirmed the fix with the realpath'd one, on this exact macOS build, before any Swift code ran
-;; it. No other absolute path is ever baked into this file.
+;; Parameterized on TWO substitutions — STATE_PATH (main.swift's own `--state-path` argument) and
+;; TMPDIR (this process's own per-user Darwin scratch dir, `NSTemporaryDirectory()` —
+;; `confstr(_CS_DARWIN_USER_TEMP_DIR)` under the hood) — both realpath(3)-canonicalized before being
+;; handed to `sandbox_init_with_parameters`, never Foundation's `resolvingSymlinksInPath` (which
+;; strips the canonical `/private` prefix back OFF — the wrong direction). Verified empirically
+;; before this file was trusted: an un-canonicalized `/tmp/...` value makes every
+;; `(subpath (param "STATE_PATH"))` rule below match NOTHING, because the kernel checks paths in
+;; their resolved `/private/tmp/...` form — a standalone Swift harness reproduced the false-deny
+;; with the raw path and confirmed the fix with the realpath'd one, on this exact macOS build,
+;; before any of this Swift code shipped. No other absolute path is ever baked into this file.
 
 (version 1)
 (deny default)
@@ -38,31 +39,56 @@
 (allow sysctl-read)
 
 ;; --- mach services ---
-;; Discovered empirically, one denial at a time, via `log show --predicate 'sender == "Sandbox"'`
-;; against a real sandboxed boot + the six-format render matrix (task-1-report.md has the
-;; violation-by-violation log). Each entry below is the narrowest service name that resolved the
-;; specific denial observed — never a broader wildcard grant.
+;; NOTE on methodology (disclosed in task-1-report.md): the brief's own suggested
+;; `log show --predicate 'sender == "Sandbox"'`/`log stream` iteration produced ZERO matching lines
+;; on this OS build (Darwin 25.6.0 / macOS 26.4 SDK) even while actively reproducing a real,
+;; confirmed denial seconds apart — tried both `log show --last` and a live `log stream` running
+;; concurrently with the reproduction. Sandbox denials on this build simply do not appear to route
+;; through the unified log's `sender == "Sandbox"` channel the way they historically have on older
+;; releases. Iterated instead via direct empirical bisection: a standalone `swift <file>.swift`
+;; script (seconds per iteration, versus a full Xcode rebuild) for the file-write/TMPDIR finding
+;; below, and — for THIS list — starting from the shared mach-lookup baseline this repo's own two
+;; existing seatbelt profiles already carry (`packages/core/src/agent/sandbox.ts`'s bash tool and
+;; `packages/core/src/workflows/sandbox.ts`'s workflow worker), then PROVING it both sufficient and
+;; not overbroad against this helper specifically: the full six-format matrix + all 22
+;; `OfficeHelperLiveTests` drills + all 5 `OfficeSandboxTests` probes (27 tests) were run TWICE — once
+;; with 4 speculative additions beyond this baseline (`cfprefsd.daemon`/`cfprefsd.agent`/
+;; `distributed_notifications@Uv3`/`com.apple.fonts`, added defensively before ever observing a real
+;; LOK-specific mach-lookup denial) and once WITHOUT them. Both runs passed identically — the 4 extra
+;; entries were never actually load-bearing for anything this task's own test matrix exercises, so
+;; they were removed rather than kept "just in case": a profile that grants an unused capability is
+;; worse than one that has to be revisited if Stage B's editable surface later needs one of them for
+;; real. What remains below is exactly this repo's own already-reviewed baseline, carried over
+;; unchanged, not a fresh guess.
 (allow mach-lookup
   (global-name "com.apple.system.notification_center")
   (global-name "com.apple.system.logger")
   (global-name "com.apple.CoreServices.coreservicesd")
   (global-name "com.apple.bsd.dirhelper")
-  (global-name "com.apple.cfprefsd.daemon")
-  (global-name "com.apple.cfprefsd.agent")
-  (global-name "com.apple.distributed_notifications@Uv3")
-  (global-name "com.apple.fonts")
 )
 
 ;; --- filesystem ---
 ;; Reads stay broad in v1, per the whole-branch ruling restated in this task's own brief: documents
 ;; the app hands this helper can live anywhere in the user's session directories, and this helper
-;; never receives a path it didn't get from a request it must serve. Writes are the fence: ONLY
-;; STATE_PATH — the LOK user profile, the fontconfig conf+cache, and the office.sock socket file all
-;; already live under `--state-path` by Stage A's own design (LOKBridge.swift) — plus the standard
-;; darwin scratch every Foundation process needs.
+;; never receives a path it didn't get from a request it must serve. Writes are the fence: STATE_PATH
+;; — the LOK user profile, the fontconfig conf+cache, and the office.sock socket file all already
+;; live under `--state-path` by Stage A's own design (LOKBridge.swift) — plus TMPDIR, the standard
+;; darwin scratch every Foundation process needs. TMPDIR earned its OWN line, not folded into "the
+;; standard scratch every runtime needs" hand-wave: `LOKBridge.configureFontconfig`'s ATOMIC write of
+;; `fontconfig/fonts.conf` (`String.write(to:atomically:true,...)`) was reproduced, isolated,
+;; DENIED under STATE_PATH-only — then reproduced AGAIN, PASSING, once TMPDIR joined it. Foundation's
+;; atomic-write path stages its temp file under `NSTemporaryDirectory()` (this process's own
+;; `confstr(_CS_DARWIN_USER_TEMP_DIR)`), NOT as a sibling inside the target's own parent directory —
+;; a plain `open()`+`write()` and a NON-atomic Foundation write both landed the temp file beside the
+;; target and needed no such allowance; only the atomic path needed this. Scoped to THIS process's
+;; own per-user temp root (not a static `/private/var/folders` wildcard, which would cover every
+;; other app's scratch on the machine too) — narrower, and machine-portable the same way STATE_PATH
+;; already is.
 (allow file-read*)
 (allow file-write*
   (subpath (param "STATE_PATH")))
+(allow file-write*
+  (subpath (param "TMPDIR")))
 (allow file-write-data (path "/dev/null") (path "/dev/stdout") (path "/dev/stderr") (path "/dev/dtracehelper"))
 
 ;; --- network ---

@@ -136,17 +136,30 @@ if !sandboxDisabledForDebugHarness {
                 + "unsandboxed (the only escape hatch is an explicit DEBUG --no-sandbox)")
     }
     let canonicalStatePath = canonicalPath(statePath)
+    // TMPDIR — this process's own per-user Darwin scratch dir. Earned empirically, not guessed
+    // up front: `LOKBridge.configureFontconfig`'s ATOMIC write of `fontconfig/fonts.conf`
+    // (`String.write(to:atomically:true,...)`) was reproduced denied with STATE_PATH alone (a
+    // standalone Swift harness isolated it before this shipped) — Foundation's atomic-write path
+    // stages its temp file under `NSTemporaryDirectory()`, not as a sibling in the target's own
+    // parent directory, so that root needs its own allow. See office-helper.sb's own header for
+    // the full isolation story (plain open()+write() and non-atomic Foundation writes both needed
+    // no such allowance — only the atomic path did).
+    let canonicalTmpDir = canonicalPath(NSTemporaryDirectory())
     var initError: UnsafeMutablePointer<CChar>?
     // NULL-terminated, alternating key/value C-string array — `sandbox_init_with_parameters`'s own
-    // contract (OfficeHelperBridge.h's own header). Both strings are bridged from Swift `String`s
-    // to `UnsafePointer<CChar>` inside nested `withCString` closures — that bridge is only valid
+    // contract (OfficeHelperBridge.h's own header). Every string is bridged from a Swift `String`
+    // to `UnsafePointer<CChar>` inside a nested `withCString` closure — that bridge is only valid
     // for the duration of the closure it was created in, so the whole array construction AND the
-    // init call itself must happen together, inside both closures, not stored and reused after.
-    let initRC: Int32 = "STATE_PATH".withCString { keyPtr in
-        canonicalStatePath.withCString { valuePtr in
-            var params: [UnsafePointer<CChar>?] = [keyPtr, valuePtr, nil]
-            return params.withUnsafeMutableBufferPointer { paramsBuf in
-                sandbox_init_with_parameters(profileText, 0, paramsBuf.baseAddress, &initError)
+    // init call itself must happen together, inside every closure, not stored and reused after.
+    let initRC: Int32 = "STATE_PATH".withCString { stateKeyPtr in
+        canonicalStatePath.withCString { stateValuePtr in
+            "TMPDIR".withCString { tmpKeyPtr in
+                canonicalTmpDir.withCString { tmpValuePtr in
+                    var params: [UnsafePointer<CChar>?] = [stateKeyPtr, stateValuePtr, tmpKeyPtr, tmpValuePtr, nil]
+                    return params.withUnsafeMutableBufferPointer { paramsBuf in
+                        sandbox_init_with_parameters(profileText, 0, paramsBuf.baseAddress, &initError)
+                    }
+                }
             }
         }
     }
