@@ -706,6 +706,29 @@ final class ShellSessionHost: ObservableObject {
         return await runtime.save(path)
     }
 
+    /// **Office Stage B Task 2 — the document-tab leg beside the pair above.** Same shape,
+    /// same reasoning, for `.document` tabs: the panel's active tab, if it is a document tab with a
+    /// path (`officeSaveMenuTarget`, `PanelDocumentTab.swift`). Read twice per use for the identical
+    /// reason `activeCodeTabPath` is — once to decide whether the menu item's document leg applies,
+    /// once when it fires.
+    var activeDocumentTabPath: String? {
+        return officeSaveMenuTarget(tabs: panelStore.tabs, activeTabId: panelStore.activeTabId)?.url
+    }
+
+    /// Save the active document tab. **`existingOfficeRuntime`, never `officeRuntime(for:)`** — the
+    /// identical reasoning `saveActiveCodeTab` states for its own runtime lookup: a save must not
+    /// MINT a runtime. A session with no office runtime holds no open document by construction, so
+    /// there is nothing to save. Fire-and-forget from the caller's own point of view — `OfficeRuntime
+    /// .save`'s own contract (never sequence off this call returning; observe `state` instead).
+    func saveActiveDocumentTab() {
+        guard let path = activeDocumentTabPath,
+              let sessionId = panelStore.currentSessionId,
+              let runtime = existingOfficeRuntime(for: sessionId) else {
+            return
+        }
+        runtime.save(path)
+    }
+
     /// Release a session's editor outright, whatever it is holding. The door for a session that is
     /// genuinely going away (T10's quit path, an explicit close); the shell's own departures go
     /// through `releaseEditorRuntimeIfClean` below instead.
@@ -822,6 +845,20 @@ final class ShellSessionHost: ObservableObject {
     /// before touching anything: `officeRuntimes`, `OfficeRuntime` and `OfficeTileStore` are all
     /// main-actor-isolated.
     private func wireOfficeTileCallbacks(on supervisor: OfficeHelperSupervisor) {
+        // Office Stage B Task 2 — the dirty-tracking wire: `onDocumentEvent` was declared on
+        // `OfficeHelperClient` since Task 3 (proxying `OfficeWireConnection.onDocumentEvent`) but
+        // had never been pointed at anything — every push it could have delivered went nowhere.
+        // Wired HERE, alongside `onTile`/`onTileFailed`/`onInvalidated`, for the identical reason
+        // those three already are: `OfficeHelperSupervisor.client` is re-minted on every successful
+        // `attemptOnce` (a fresh `OfficeHelperClient` per boot/relaunch), so a wiring done once at
+        // supervisor-creation time would go stale the moment the helper dies and relaunches — this
+        // method already exists specifically to be the ONE re-pointing site, called every time a
+        // fresh client comes up (`.ready` in `ensureOfficeHelperSupervisor`'s fan-out loop).
+        supervisor.client?.onDocumentEvent = { [weak self] docId, event in
+            Task { @MainActor [weak self] in
+                self?.officeRuntime(owning: docId)?.handle(documentEvent: event, docId: docId)
+            }
+        }
         supervisor.client?.onTile = { [weak self] _, docId, key, generation, _, _, pixels in
             // `width`/`height` (the two skipped params) are the wire's own claim, unvalidated by
             // the reader — obligation 8: `TileMath`/the `TileKey` itself are authoritative on
@@ -895,6 +932,17 @@ final class ShellSessionHost: ObservableObject {
                     }
                 } catch {
                     NSLog("[ShellSessionHost] office close(\(docId)) failed: \(error)")
+                }
+            },
+            // Office Stage B Task 2 — throws all the way back to `OfficeRuntime.performSave`
+            // (unlike `close`/`unsubscribeTiles` above, which are fire-and-forget everywhere they're
+            // used): a save's caller needs to know whether it worked, the same reason `open` throws.
+            save: { [weak supervisor] docId in
+                try await queue.run {
+                    guard let client = supervisor?.client else {
+                        throw OfficeHelperClientError.serverError(reason: "helper not connected")
+                    }
+                    return try await client.save(docId: docId)
                 }
             },
             subscribeTiles: { [weak supervisor] docId, part, zoomPPT, viewportTwips in
@@ -1227,10 +1275,19 @@ final class ShellSessionHost: ObservableObject {
         PanelFilesTabModels.discard(tabId: tabId)
         // office-plumbing Task 6: and the document tab's — including the RUNTIME'S OWN open
         // document, closed right HERE rather than behind a gate the way `.code`'s `requestCloseTab`
-        // fronts this same method. Stage A documents are never dirty (view-only — there is no edit
-        // surface yet), so the two-call split editor-product Task 10 built specifically to let a
-        // dirty-close sheet run BEFORE the runtime's model/watcher are released has nothing to
-        // protect here: there is no unsaved state a sheet could ask about. `runtime.close(path)`
+        // fronts this same method.
+        //
+        // **Office Stage B Task 2 — this comment's own Stage-A claim just went stale, disclosed
+        // rather than silently left wrong**: `documents[path].dirty` is now real
+        // (`OfficeRuntime.handle(documentEvent:docId:)`), so a document CAN be genuinely unsaved at
+        // the moment this runs — but Task 2 ships no shipped edit verb that can make it so in
+        // production (only the DEBUG-only `debugEdit` test door can, today), so this gap has no live
+        // path yet. Task 4, which lands real input, is what makes it live and is where the
+        // `.code`-side two-call split (editor-product Task 10: `requestCloseTab` gates BEFORE this
+        // method ever runs, so a dirty-close sheet can intervene) needs its `.document` mirror —
+        // recorded here, at the exact seam, rather than rediscovered under a live bug report, the
+        // same discipline Task 8's own comment (superseded by this task, see `OfficeRuntime
+        // .fileChangedOnDisk`'s header) modeled for the suppression bag. `runtime.close(path)`
         // evicts the doc's own tiles from `OfficeTileStore` too (`OfficeRuntime.perform`'s
         // `.helperClose` case) — closing the tab is what makes that eviction correct: a closed
         // document's cached pixels are dead weight for the rest of the process's life.

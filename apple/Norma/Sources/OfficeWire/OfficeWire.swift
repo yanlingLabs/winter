@@ -69,6 +69,28 @@ public enum OfficeWireFrame: Equatable, Sendable {
     /// destroy or it doesn't; either way "not open anymore" is true after this).
     case close(seq: UInt64, docId: String)
 
+    /// Office Stage B Task 2 — ask the helper to render `docId`'s CURRENT in-memory state to a
+    /// fresh file, in the document's own format, under the helper's own `--state-path` (never at
+    /// the real document path — the seatbelt's write fence only ever allows writes under
+    /// `--state-path`, Task 1's invariant, unchanged and untouched by this task). The APP is what
+    /// places the helper's answer onto the real path afterward (`OfficeRuntime.perform`'s `.save`
+    /// effect) — see `saved`'s own header for the two-step split this shape exists to honor, and
+    /// why the helper is never asked to write to the real path directly.
+    case save(seq: UInt64, docId: String)
+
+    #if DEBUG
+    /// Office Stage B Task 2 — **DEBUG-only, and REMOVED BY TASK 4** (which lands real edit verbs).
+    /// The one wire door this task's own live round-trip test uses to prove a save persists a REAL
+    /// content change, in the absence of any shipped input verb yet: posts LOK's `.uno:EnterString`
+    /// command (LibreOffice's own "type this into the current cell/selection and commit" dispatch,
+    /// argument name `StringName`) on the LOK dedicated thread, via `postUnoCommand`. `#if DEBUG` at
+    /// the CASE level, not merely at a call site — this frame cannot be constructed, encoded, or
+    /// decoded at all outside a DEBUG build, so a Release helper has no way to reach it: it is
+    /// simply absent from `wireTypes` in that configuration, and an attempt to send it is refused
+    /// identically to any other unrecognized type (`error{reason:"unknown"}`).
+    case debugEdit(seq: UInt64, docId: String, text: String)
+    #endif
+
     /// Task 4 — registers this connection as a tile-push subscriber for `docId` (must already be
     /// open — by ANY connection, not necessarily this one; see `OfficeHelperServer`'s multicast
     /// seam) and reports the tile-set the CURRENT viewport needs, computed via
@@ -122,6 +144,25 @@ public enum OfficeWireFrame: Equatable, Sendable {
     case openFailed(seq: UInt64, docId: String, reason: String)
     /// Answers a successful `close`.
     case closed(seq: UInt64, docId: String)
+    /// Office Stage B Task 2 — answers a successful `save`: `tempPath` is where the helper rendered
+    /// the document, ALWAYS under its own `--state-path` (`<state-path>/saves/<docId>-<seq>.<ext>`,
+    /// `<ext>` the document's OWN format captured at open — see `LOKBridge`'s own doc). The helper's
+    /// write fence has no concept of the real document path, and must never be asked to write
+    /// there: placing these bytes onto the real path is entirely the APP's job — fsync+rename,
+    /// cross-volume-safe (`OfficeRuntime.perform`'s `.save` case handles the EXDEV case a
+    /// state-path-to-document-directory copy can hit, since the two need not share a filesystem).
+    case saved(seq: UInt64, docId: String, tempPath: String)
+    /// Office Stage B Task 2 — answers a failed `save`: a `saveAs` failure (a real disk problem
+    /// under the helper's own `--state-path`, or a LOK internal save error). The helper always
+    /// SURVIVES this, the same posture `openFailed` already has for a bad `open`.
+    case saveFailed(seq: UInt64, docId: String, reason: String)
+    #if DEBUG
+    /// Office Stage B Task 2 — **DEBUG-only, and REMOVED BY TASK 4.** Answers `debugEdit`: the UNO
+    /// command was POSTED — not a claim it already took effect (`postUnoCommand` is fire-and-forget
+    /// on LOK's own side, with no synchronous result). This task's live test observes the real
+    /// effect through the `modifiedChanged(true)` push that follows, never through this reply.
+    case debugEditOk(seq: UInt64, docId: String)
+    #endif
     /// Answers anything the helper refuses post-auth: an unknown frame type (`reason:"unknown"`,
     /// the brief's literal pin), a known type whose fields don't decode (`reason:"malformed"`),
     /// or a structurally valid frame that is never legal for a client to SEND (a reply shape —
@@ -203,11 +244,24 @@ public enum OfficeWireFrame: Equatable, Sendable {
     /// `EditorBridgeInbound.wireTypes`'s own test does — one fixture per name, decode, assert the
     /// case names itself the same way — so this array and `decode`/`wireType` cannot drift apart
     /// unnoticed.
-    public static let wireTypes: [String] = [
-        "hello", "ping", "open", "close", "subscribeTiles", "unsubscribe", "tileRequest",
-        "helloOk", "refused", "pong", "opened", "openFailed", "closed", "error", "documentEvent",
-        "subscribed", "unsubscribed", "tileRequestAccepted", "tile", "tileFailed", "invalidated",
-    ]
+    /// Built via a closure, not a bare array literal — verified empirically, not assumed: `#if`
+    /// directly inside `[...]`'s element list does not parse here ("expected expression in
+    /// container literal"), so the DEBUG-only entries are appended as ordinary statements instead,
+    /// which is unambiguously supported. Order still matches frame-declaration order.
+    public static let wireTypes: [String] = {
+        var types = ["hello", "ping", "open", "close", "save"]
+        #if DEBUG
+        types.append("debugEdit")
+        #endif
+        types += ["subscribeTiles", "unsubscribe", "tileRequest",
+                   "helloOk", "refused", "pong", "opened", "openFailed", "closed", "saved", "saveFailed"]
+        #if DEBUG
+        types.append("debugEditOk")
+        #endif
+        types += ["error", "documentEvent",
+                   "subscribed", "unsubscribed", "tileRequestAccepted", "tile", "tileFailed", "invalidated"]
+        return types
+    }()
 
     public var wireType: String {
         switch self {
@@ -215,6 +269,10 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .ping: return "ping"
         case .open: return "open"
         case .close: return "close"
+        case .save: return "save"
+        #if DEBUG
+        case .debugEdit: return "debugEdit"
+        #endif
         case .subscribeTiles: return "subscribeTiles"
         case .unsubscribe: return "unsubscribe"
         case .tileRequest: return "tileRequest"
@@ -224,6 +282,11 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .opened: return "opened"
         case .openFailed: return "openFailed"
         case .closed: return "closed"
+        case .saved: return "saved"
+        case .saveFailed: return "saveFailed"
+        #if DEBUG
+        case .debugEditOk: return "debugEditOk"
+        #endif
         case .error: return "error"
         case .documentEvent: return "documentEvent"
         case .subscribed: return "subscribed"
@@ -241,6 +304,10 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .ping(let seq): return seq
         case .open(let seq, _, _): return seq
         case .close(let seq, _): return seq
+        case .save(let seq, _): return seq
+        #if DEBUG
+        case .debugEdit(let seq, _, _): return seq
+        #endif
         case .subscribeTiles(let seq, _, _, _, _): return seq
         case .unsubscribe(let seq, _): return seq
         case .tileRequest(let seq, _, _): return seq
@@ -250,6 +317,11 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .opened(let seq, _, _, _, _): return seq
         case .openFailed(let seq, _, _): return seq
         case .closed(let seq, _): return seq
+        case .saved(let seq, _, _): return seq
+        case .saveFailed(let seq, _, _): return seq
+        #if DEBUG
+        case .debugEditOk(let seq, _): return seq
+        #endif
         case .error(let seq, _): return seq
         case .documentEvent(let seq, _, _): return seq
         case .subscribed(let seq, _, _): return seq
@@ -275,8 +347,21 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .open(_, let docId, let path):
             payload["docId"] = docId
             payload["path"] = path
-        case .close(_, let docId), .closed(_, let docId):
+        case .close(_, let docId), .closed(_, let docId), .save(_, let docId):
             payload["docId"] = docId
+        #if DEBUG
+        case .debugEdit(_, let docId, let text):
+            payload["docId"] = docId
+            payload["text"] = text
+        case .debugEditOk(_, let docId):
+            payload["docId"] = docId
+        #endif
+        case .saved(_, let docId, let tempPath):
+            payload["docId"] = docId
+            payload["tempPath"] = tempPath
+        case .saveFailed(_, let docId, let reason):
+            payload["docId"] = docId
+            payload["reason"] = reason
         case .opened(_, let docId, let type, let parts, let size):
             payload["docId"] = docId
             payload["docType"] = type.rawValue
@@ -759,6 +844,33 @@ public enum OfficeWireCodec {
                 return .rejected(seq: seq, reason: "malformed")
             }
             return .frame(.close(seq: seq, docId: docId))
+        case "save":
+            guard let docId = object["docId"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.save(seq: seq, docId: docId))
+        #if DEBUG
+        case "debugEdit":
+            guard let docId = object["docId"] as? String, let text = object["text"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.debugEdit(seq: seq, docId: docId, text: text))
+        case "debugEditOk":
+            guard let docId = object["docId"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.debugEditOk(seq: seq, docId: docId))
+        #endif
+        case "saved":
+            guard let docId = object["docId"] as? String, let tempPath = object["tempPath"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.saved(seq: seq, docId: docId, tempPath: tempPath))
+        case "saveFailed":
+            guard let docId = object["docId"] as? String, let reason = object["reason"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.saveFailed(seq: seq, docId: docId, reason: reason))
         case "helloOk":
             guard let lokVersion = object["lokVersion"] as? String else {
                 return .rejected(seq: seq, reason: "malformed")

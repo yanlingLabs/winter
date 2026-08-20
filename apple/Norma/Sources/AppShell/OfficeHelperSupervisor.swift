@@ -17,6 +17,12 @@ enum OfficeHelperClientError: Error, CustomStringConvertible, Equatable {
     /// connection/protocol" without string-matching `reason`. The brief's own garbage-survival test
     /// needs exactly this discrimination: assert THIS case, not merely "open() threw something."
     case openFailed(reason: String)
+    /// Office Stage B Task 2 — a document-shaped `saveAs` failure (an unsupported format, a genuine
+    /// disk problem under the helper's own `--state-path`), kept distinct from `.serverError` for
+    /// the same reason `.openFailed` is: a caller can tell "this save failed for a reason about the
+    /// DOCUMENT" apart from "something is wrong with the connection/protocol" without string-
+    /// matching `reason`.
+    case saveFailed(reason: String)
 
     var description: String {
         switch self {
@@ -24,6 +30,7 @@ enum OfficeHelperClientError: Error, CustomStringConvertible, Equatable {
         case .serverError(let reason): return "office helper refused: \(reason)"
         case .unexpectedReply(let frame): return "office helper sent an unexpected reply: \(frame)"
         case .openFailed(let reason): return "office helper could not open the document: \(reason)"
+        case .saveFailed(let reason): return "office helper could not save the document: \(reason)"
         }
     }
 }
@@ -130,6 +137,41 @@ final class OfficeHelperClient {
         default: throw OfficeHelperClientError.unexpectedReply(reply)
         }
     }
+
+    /// Office Stage B Task 2 — asks the helper to render `docId` to a temp file under ITS OWN
+    /// `--state-path` and returns that path. Placing those bytes onto the real document path is
+    /// entirely the CALLER's job (`OfficeRuntime.perform`'s `.save` effect) — this method's only
+    /// concern is the wire round trip, exactly as `open`'s only concern is the wire round trip for
+    /// loading a document.
+    func save(docId: String) async throws -> String {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.save(seq: seq, docId: docId))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .saved(_, _, let tempPath): return tempPath
+        case .saveFailed(_, _, let reason): throw OfficeHelperClientError.saveFailed(reason: reason)
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    #if DEBUG
+    /// Office Stage B Task 2 — **DEBUG-only, and REMOVED BY TASK 4.** See `OfficeWireFrame
+    /// .debugEdit`'s own header. Used by nothing in production — `OfficeRuntime` never calls this;
+    /// only `OfficeRuntimeLiveTests`' own save round-trip test reaches it directly, through
+    /// `OfficeHelperSupervisor.client`, to provoke a real, committed content change with no shipped
+    /// edit verb to use instead.
+    func debugEdit(docId: String, text: String) async throws {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.debugEdit(seq: seq, docId: docId, text: text))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .debugEditOk: return
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+    #endif
 
     // MARK: - Task 4: tiles
 

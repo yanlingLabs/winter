@@ -70,6 +70,26 @@ public protocol OfficeDocumentBridge: AnyObject {
     /// returns `[]` — never throws (there is no request here whose failure needs reporting; an
     /// invalidation for a document nobody has ever asked to paint has nothing to bump).
     func applyTileInvalidation(docId: String, rectsTwips: [OfficeTwipsRect], part: Int) -> [TileKey]
+
+    /// Office Stage B Task 2 — renders `docId`'s current state to a fresh file UNDER THIS HELPER'S
+    /// OWN `--state-path` (never the real document path — the write fence only ever allows
+    /// `--state-path`; see `OfficeWireFrame.saved`'s own header for the app-places-it split this
+    /// exists to serve), in the document's own format. `seq` is the wire request's own seq, reused
+    /// as the destination filename's disambiguator. Called from a CONNECTION thread, never from
+    /// inside a LOK callback — `LOKBridge`'s implementation marshals onto its dedicated thread, same
+    /// as `open`/`close`/`paintTile`. Throws on any failure (an unopened `docId`, an unsupported
+    /// format, a genuine `saveAs` failure) — the helper always survives, exactly like a failed
+    /// `open`; `OfficeHelperServer` translates this into a `saveFailed` reply.
+    func saveAs(docId: String, seq: UInt64) throws -> String
+
+    #if DEBUG
+    /// Office Stage B Task 2 — **DEBUG-only, and REMOVED BY TASK 4.** See `OfficeWireFrame
+    /// .debugEdit`'s own header for what this stands in for and why. `FakeOfficeDocumentBridge`'s
+    /// own conformance is a no-op (Stage A/B fixture wire tests never need real content to change,
+    /// only the dispatch shape — docNotOpen, seq echo, the reply case) — only `LOKBridge`'s
+    /// conformance does anything real.
+    func debugEdit(docId: String, text: String) throws
+    #endif
 }
 
 /// The result of a successful `OfficeDocumentBridge.paintTile` call — helper-internal (never
@@ -109,8 +129,16 @@ public final class FakeOfficeDocumentBridge: OfficeDocumentBridge {
     public var onEvent: ((String, OfficeDocumentEvent) -> Void)?
     private let lock = NSLock()
     private var caches: [String: TileCache] = [:]
+    /// Office Stage B Task 2 — where this fake's own `saveAs` writes its placeholder output.
+    /// Defaults to a throwaway temp directory so every pre-Task-2 caller of the parameterless
+    /// `init()` (none exist outside this file today, but the default keeps the signature additive)
+    /// keeps working; `Tests/OfficeHelperFixtureSources/main.swift` passes the fixture's own real
+    /// `--state-path` so its `saves/` subdirectory lands in the SAME place the real helper's would.
+    private let statePath: URL
 
-    public init() {}
+    public init(statePath: URL = FileManager.default.temporaryDirectory) {
+        self.statePath = statePath
+    }
     public func open(docId: String, path: String) throws -> OfficeDocumentMetadata {
         lock.lock(); caches[docId] = TileCache(capacity: 32); lock.unlock()
         return OfficeDocumentMetadata(type: .other, parts: 1, sizeTwips: OfficeDocumentSize(widthTwips: 0, heightTwips: 0))
@@ -118,6 +146,31 @@ public final class FakeOfficeDocumentBridge: OfficeDocumentBridge {
     public func close(docId: String) {
         lock.lock(); caches.removeValue(forKey: docId); lock.unlock()
     }
+
+    /// Office Stage B Task 2 — a real (if content-free) `saveAs`: proves the WIRE-LEVEL dispatch
+    /// (docId-not-open, seq-in-filename, `saved`/`saveFailed`) end to end, over a real socket,
+    /// without needing a LOK boot — only pixel/content CORRECTNESS needs the vendor-gated live
+    /// tests against `LOKBridge`, the same split `paintTile` already established for tiles.
+    public func saveAs(docId: String, seq: UInt64) throws -> String {
+        lock.lock()
+        let isOpen = caches[docId] != nil
+        lock.unlock()
+        guard isOpen else {
+            throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)")
+        }
+        let savesDirectory = statePath.appendingPathComponent("saves", isDirectory: true)
+        try FileManager.default.createDirectory(at: savesDirectory, withIntermediateDirectories: true)
+        let destination = savesDirectory.appendingPathComponent("\(docId)-\(seq).fake")
+        try Data("fake saveAs output for \(docId)".utf8).write(to: destination)
+        return destination.path
+    }
+
+    #if DEBUG
+    /// Office Stage B Task 2 — **DEBUG-only, and REMOVED BY TASK 4.** No-op: this fake has no real
+    /// document content for a UNO command to change — see `OfficeDocumentBridge.debugEdit`'s own
+    /// header for why only `LOKBridge`'s conformance does anything real.
+    public func debugEdit(docId: String, text: String) throws {}
+    #endif
 
     /// A small, deterministic, key-dependent pixel pattern (never blank, never identical across
     /// distinct keys) — enough for a wire-level test to tell two tiles apart without needing real
@@ -666,6 +719,38 @@ public final class OfficeHelperServer {
                           to: subscriber)
             }
             writeReply(.closed(seq: seq, docId: docId), writer: writer)
+        case .frame(.save(let seq, let docId)):
+            // Office Stage B Task 2 — mirrors `tileRequest`'s own "must already be open — by ANY
+            // connection" posture (not `close`'s ownership check): Stage A/B has one client at a
+            // time in practice, and there is no destructive "who may save" question the way there
+            // is for "who may destroy the handle" on `close`.
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                // Never called while holding stateQueue (the bridge-call invariant above).
+                let tempPath = try documentBridge.saveAs(docId: docId, seq: seq)
+                writeReply(.saved(seq: seq, docId: docId, tempPath: tempPath), writer: writer)
+            } catch {
+                // The helper SURVIVES a failed save — same posture as a failed open.
+                writeReply(.saveFailed(seq: seq, docId: docId, reason: "\(error)"), writer: writer)
+            }
+        #if DEBUG
+        case .frame(.debugEdit(let seq, let docId, let text)):
+            // Office Stage B Task 2 — **DEBUG-only, and REMOVED BY TASK 4.** Same existence check as
+            // `.save` above (not an ownership check — this is a test-only door, not a destructive one).
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                try documentBridge.debugEdit(docId: docId, text: text)
+                writeReply(.debugEditOk(seq: seq, docId: docId), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        #endif
         case .frame(.subscribeTiles(let seq, let docId, let part, let zoomPPT, let viewportTwips)):
             guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
                 writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)

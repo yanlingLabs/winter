@@ -764,13 +764,17 @@ final class OfficeRuntimeWatcherTests: XCTestCase {
 
     /// Minimal, always-succeeding driver — this class is about the WATCHER, not the helper's own
     /// open/close/subscribe surface (`OfficeRuntimeReducerTests`/`ShellSessionHostTests` own that).
+    /// Office Stage B Task 2 — `save` defaults to an unused stub (nothing in the LIFECYCLE tests
+    /// below calls `runtime.save`); the suppression-bag tests further down override it.
     private func makeDriver(metadata: OfficeDocumentMetadata = OfficeDocumentMetadata(
-        type: .spreadsheet, parts: 1, sizeTwips: OfficeDocumentSize(widthTwips: 100, heightTwips: 100)))
+        type: .spreadsheet, parts: 1, sizeTwips: OfficeDocumentSize(widthTwips: 100, heightTwips: 100)),
+        save: @escaping (String) async throws -> String = { _ in "/tmp/office-watcher-unused-save" })
         -> OfficeRuntime.Driver {
         OfficeRuntime.Driver(
             helperState: { .ready }, startHelper: { },
             open: { _, _ in metadata },
             close: { _ in },
+            save: save,
             subscribeTiles: { _, _, _, _ in [] },
             unsubscribeTiles: { _ in },
             requestTiles: { _, _ in })

@@ -22,6 +22,69 @@ private enum LOKCallbackType {
 // bridge). Task 4 re-adds tile-mode handling for real, reviewed, as part of the actual tile
 // pipeline — not resurrected from here unproven.
 
+/// Office Stage B Task 2 — the document's OWN save format, captured from its path's extension at
+/// OPEN time (never re-derived later: a document opened as `.xlsx` saves as `.xlsx` for its whole
+/// open lifetime in Stage A — there is no "save as a different format" door yet). Six formats: the
+/// same six `gate.*` fixtures every other live-LOK test in this repo already exercises
+/// (`OfficeHelperLiveTests`' own six-format matrix). Task 2 brief, verbatim: "the six +, later,
+/// legacy" — the pre-2007 binary formats (`.doc`/`.xls`/`.ppt`) are deliberately NOT in this table.
+/// Nothing in Stage A's fixture set has ever round-tripped them through `saveAs`, and this repo's
+/// own methodology throughout (every task-N-report.md) refuses to ship a filter name nobody has
+/// proven against real LOK — `later` is this comment's own honest placeholder for that work, not a
+/// promise this task keeps.
+enum OfficeSaveFormat: Equatable {
+    case odt, docx, ods, xlsx, odp, pptx
+
+    /// The saved file's OWN extension — `saveAs`'s destination filename is built from this, never
+    /// re-derived from the LOK filter name below (the two are related but not textually
+    /// interchangeable — "calc8" does not end in ".ods").
+    var fileExtension: String {
+        switch self {
+        case .odt: return "odt"
+        case .docx: return "docx"
+        case .ods: return "ods"
+        case .xlsx: return "xlsx"
+        case .odp: return "odp"
+        case .pptx: return "pptx"
+        }
+    }
+
+    /// LOK's own short filter name — `saveAs`'s `pFormat` argument
+    /// (`LibreOfficeKit.h`: `int (*saveAs) (pThis, pUrl, pFormat, pFilterOptions)`). Verified
+    /// against the vendored `Resources/registry/{writer,calc,impress}.xcd` filter-node names by
+    /// exact string match (task-2-report.md's own methodology note) before being trusted here, not
+    /// recalled from memory alone: `writer8`/`calc8`/`impress8` are the ODF trio's own short names;
+    /// the OOXML trio uses the literal English `oor:name` LO's filter configuration registers for
+    /// them (there is no short-name equivalent for these three in the vendored registry).
+    var lokFilterName: String {
+        switch self {
+        case .odt: return "writer8"
+        case .docx: return "MS Word 2007 XML"
+        case .ods: return "calc8"
+        case .xlsx: return "Calc MS Excel 2007 XML"
+        case .odp: return "impress8"
+        case .pptx: return "Impress MS PowerPoint 2007 XML"
+        }
+    }
+
+    /// `nil` for any extension outside the six this table covers (case-insensitive — a `.XLSX`
+    /// upload is still xlsx). Stage A's own `open` never consulted this at all — LOK's
+    /// `documentLoad` auto-detects format from CONTENT and opens far more than these six kinds for
+    /// VIEWING — so a `nil` here must never fail an `open`; it only ever fails a later `saveAs` of
+    /// that document, honestly, rather than guessing a filter for a format this task never proved.
+    init?(pathExtension: String) {
+        switch pathExtension.lowercased() {
+        case "odt": self = .odt
+        case "docx": self = .docx
+        case "ods": self = .ods
+        case "xlsx": self = .xlsx
+        case "odp": self = .odp
+        case "pptx": self = .pptx
+        default: return nil
+        }
+    }
+}
+
 /// "Request to have the part number as an 5th value in the LOK_CALLBACK_INVALIDATE_TILES payload."
 /// — LibreOfficeKitEnums.h:85-89 (`LOK_FEATURE_PART_IN_INVALIDATION_CALLBACK = 1ULL << 2`). Set at
 /// boot via `setOptionalFeatures` so `OfficeDocumentEvent.invalidated`'s `part` field is real.
@@ -182,6 +245,24 @@ final class LOKBridge: OfficeDocumentBridge {
         }
     }
 
+    /// Office Stage B Task 2 — a `saveAs` (or, DEBUG-only, a `debugEdit`) operation named a `docId`
+    /// this bridge has no open handle for, asked to save a document whose format `OfficeSaveFormat`
+    /// does not cover, or hit a real `saveAs` failure. Never a crash — `OfficeHelperServer`
+    /// translates every case into a `saveFailed` reply, the same "the helper always survives"
+    /// posture `LoadError`/`TileError` already have.
+    enum SaveError: Error, CustomStringConvertible {
+        case docNotOpen(String)
+        case unsupportedFormat(String)
+        case saveAsFailed(String)
+        var description: String {
+            switch self {
+            case .docNotOpen(let docId): return "save requested for a docId that is not open: \(docId)"
+            case .unsupportedFormat(let ext): return "saving is not supported for this document's format (\(ext))"
+            case .saveAsFailed(let reason): return reason
+            }
+        }
+    }
+
     /// Boxed alongside each open document's native handle, `Unmanaged.passRetained` at
     /// `registerCallback` time and `.release()`d at `close` — never before, never twice (both
     /// enforced by `documents` being the single source of truth: a docId's context is retained
@@ -205,11 +286,23 @@ final class LOKBridge: OfficeDocumentBridge {
         /// and reading it once up front keeps `TileRenderer.init` free of its own failure mode to
         /// handle later).
         let tileRenderer: TileRenderer
+        /// Office Stage B Task 2 — this document's own save format, captured from its `path`'s
+        /// extension the ONE time `openOnDedicatedThread` ever looks at it. `nil` for anything
+        /// outside `OfficeSaveFormat`'s six — see that type's own doc for why a `nil` here fails a
+        /// later `saveAs`, never the `open` that produced it.
+        let saveFormat: OfficeSaveFormat?
     }
 
     private let thread: LOKDedicatedThread
     private let kit: UnsafeMutablePointer<LibreOfficeKit>
     let lokVersionString: String
+    /// Office Stage B Task 2 — `<state-path>/saves/`, created once at boot (this bridge's own
+    /// `init`, alongside the fontconfig/user-profile directories it already makes there) — the ONE
+    /// place `saveAs` ever renders to. Always a subpath of `--state-path`, so it is inside the
+    /// seatbelt's write fence BY CONSTRUCTION (`office-helper.sb`'s `(subpath (param "STATE_PATH"))`
+    /// rule) — Task 1's invariant, untouched: this task does not add a line to that profile, and
+    /// does not need to.
+    private let savesDirectory: URL
     /// Set once by `OfficeHelperServer` before any document opens. Fires on `LOKDedicatedThread`
     /// — see that type's header for the re-entrancy rule this must never violate.
     var onEvent: ((String, OfficeDocumentEvent) -> Void)?
@@ -232,6 +325,14 @@ final class LOKBridge: OfficeDocumentBridge {
         guard FileManager.default.fileExists(atPath: frameworksPath, isDirectory: &isDirectory), isDirectory.boolValue else {
             throw BootError.installPathMissing(frameworksPath)
         }
+
+        // Office Stage B Task 2 — `<state-path>/saves/`, ahead of anything that could render into
+        // it. `withIntermediateDirectories: true` also tolerates a `--state-path` this bridge is
+        // booting into for the first time (mirrors `OfficeHelperServer.start()`'s own
+        // `createDirectory` call for `statePath` itself, one level up).
+        let savesDirectory = statePath.appendingPathComponent("saves", isDirectory: true)
+        try FileManager.default.createDirectory(at: savesDirectory, withIntermediateDirectories: true)
+        self.savesDirectory = savesDirectory
 
         // Carry #5 (task-3-brief): FONTCONFIG_FILE must be set BEFORE lok_init_2 — fontconfig
         // resolves its config lazily but the first font lookup happens deep inside LO's own init/
@@ -299,6 +400,25 @@ final class LOKBridge: OfficeDocumentBridge {
         return doc.tileRenderer.applyInvalidation(rectsTwips: rectsTwips, part: part)
     }
 
+    /// Office Stage B Task 2 — called from a CONNECTION thread (`OfficeHelperServer`'s `.save`
+    /// handler), never from inside a LOK callback — marshals onto `thread` exactly like
+    /// `open`/`close`/`paintTile` above. `seq` is the wire request's own seq (never re-minted here):
+    /// reusing it as the destination filename's disambiguator is what keeps two saves of the same
+    /// `docId` from colliding on disk without this bridge needing a save-local counter of its own.
+    func saveAs(docId: String, seq: UInt64) throws -> String {
+        try thread.sync { try self.saveAsOnDedicatedThread(docId: docId, seq: seq) }
+    }
+
+    #if DEBUG
+    /// Office Stage B Task 2 — **DEBUG-only, and REMOVED BY TASK 4.** Posts `.uno:EnterString` —
+    /// see `OfficeWireFrame.debugEdit`'s own header for why this exists and what it stands in for.
+    /// `postUnoCommand` is void (LOK reports no synchronous result) — a docId this bridge has no
+    /// handle for is the only failure this method itself can detect and report.
+    func debugEdit(docId: String, text: String) throws {
+        try thread.sync { try self.debugEditOnDedicatedThread(docId: docId, text: text) }
+    }
+    #endif
+
     // MARK: - Dedicated-thread-only implementation
 
     private func openOnDedicatedThread(docId: String, path: String) throws -> OfficeDocumentMetadata {
@@ -333,8 +453,12 @@ final class LOKBridge: OfficeDocumentBridge {
         var height: Int = 0
         rawDoc.pointee.pClass.pointee.getDocumentSize?(rawDoc, &width, &height)
 
+        // Office Stage B Task 2 — captured once, here, from the path this document was opened
+        // with. `NSString.pathExtension` strips the leading dot ("xlsx", not ".xlsx") — exactly
+        // what `OfficeSaveFormat.init?(pathExtension:)` expects.
+        let saveFormat = OfficeSaveFormat(pathExtension: (path as NSString).pathExtension)
         documents[docId] = OpenDocument(handle: rawDoc, context: unmanagedContext,
-                                          tileRenderer: TileRenderer(handle: rawDoc))
+                                          tileRenderer: TileRenderer(handle: rawDoc), saveFormat: saveFormat)
         return OfficeDocumentMetadata(
             type: kind, parts: parts,
             sizeTwips: OfficeDocumentSize(widthTwips: Int64(width), heightTwips: Int64(height)))
@@ -352,6 +476,65 @@ final class LOKBridge: OfficeDocumentBridge {
         return TilePaintResult(generation: generation, pixels: pixels,
                                 width: TileMath.tilePixelSize, height: TileMath.tilePixelSize)
     }
+
+    /// Office Stage B Task 2 — renders `docId`'s current in-memory state to
+    /// `<state-path>/saves/<docId>-<seq>.<ext>`, in the document's OWN format (`OpenDocument
+    /// .saveFormat`, captured at open). Returns the temp file's path on success; the APP — not this
+    /// bridge, and not `OfficeHelperServer` — is what places it onto the real document path (see
+    /// `OfficeWireFrame.saved`'s own header). Throws, never traps: a bad `docId`, an unsupported
+    /// format, or a genuine `saveAs` failure are all reported, and this bridge (and the document
+    /// it was asked to save) survive every one of them exactly like a failed `paintTile`/`open`.
+    private func saveAsOnDedicatedThread(docId: String, seq: UInt64) throws -> String {
+        guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        guard let format = doc.saveFormat else {
+            throw SaveError.unsupportedFormat("(format not captured at open)")
+        }
+        let destination = savesDirectory.appendingPathComponent("\(docId)-\(seq).\(format.fileExtension)")
+        // `URL(fileURLWithPath:).absoluteString` percent-encodes correctly — the same reason
+        // `openOnDedicatedThread` builds its own `fileURLString` this way rather than a naive
+        // "file://" + path concatenation (this repo's own checkout path has a space in it).
+        let destinationURLString = URL(fileURLWithPath: destination.path).absoluteString
+        let succeeded = destinationURLString.withCString { urlPtr -> Bool in
+            format.lokFilterName.withCString { filterPtr in
+                doc.handle.pointee.pClass.pointee.saveAs?(doc.handle, urlPtr, filterPtr, nil) != 0
+            }
+        }
+        guard succeeded else {
+            let reason: String
+            if let errCStr = kit.pointee.pClass.pointee.getError?(kit) {
+                reason = String(cString: errCStr)
+                kit.pointee.pClass.pointee.freeError?(errCStr)
+            } else {
+                reason = "saveAs failed (no error string available)"
+            }
+            throw SaveError.saveAsFailed(reason)
+        }
+        return destination.path
+    }
+
+    #if DEBUG
+    /// Office Stage B Task 2 — **DEBUG-only, and REMOVED BY TASK 4.** Encodes LOK's own
+    /// `postUnoCommand` JSON-argument convention — one property per key,
+    /// `{"<Name>":{"type":"<uno-type>","value":<value>}}` — for `.uno:EnterString`'s single
+    /// argument, `StringName` (verified via a documented UNO dispatch reference before being
+    /// trusted here, not recalled from memory alone — task-2-report.md has the citation).
+    /// `DontCommit` is deliberately omitted (defaults false): this task's whole point is a
+    /// COMMITTED content change real enough to survive a save/close/reopen round trip and to fire
+    /// LOK's own `.uno:ModifiedStatus` callback, not an in-progress edit.
+    private func debugEditOnDedicatedThread(docId: String, text: String) throws {
+        guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        let argsPayload: [String: Any] = ["StringName": ["type": "string", "value": text]]
+        guard let argsData = try? JSONSerialization.data(withJSONObject: argsPayload),
+              let argsString = String(data: argsData, encoding: .utf8) else {
+            throw SaveError.saveAsFailed("debugEdit: could not encode .uno:EnterString arguments")
+        }
+        ".uno:EnterString".withCString { commandPtr in
+            argsString.withCString { argsPtr in
+                doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, argsPtr, false)
+            }
+        }
+    }
+    #endif
 
     // MARK: - Callback translation
 

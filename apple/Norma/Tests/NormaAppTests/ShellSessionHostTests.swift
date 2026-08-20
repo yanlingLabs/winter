@@ -3902,6 +3902,8 @@ final class ShellSessionHostTests: XCTestCase {
 
         private var _openCalls: [(docId: String, path: String)] = []
         private var _closeCalls: [String] = []
+        /// Office Stage B Task 2 — every `save` call, in order.
+        private var _saveCalls: [String] = []
         private var _subscribeCalls: [String] = []
         private var _unsubscribeCalls: [String] = []
         private var _startHelperCalls = 0
@@ -3914,6 +3916,7 @@ final class ShellSessionHostTests: XCTestCase {
 
         var openCalls: [(docId: String, path: String)] { lock.lock(); defer { lock.unlock() }; return _openCalls }
         var closeCalls: [String] { lock.lock(); defer { lock.unlock() }; return _closeCalls }
+        var saveCalls: [String] { lock.lock(); defer { lock.unlock() }; return _saveCalls }
         var subscribeCalls: [String] { lock.lock(); defer { lock.unlock() }; return _subscribeCalls }
         var unsubscribeCalls: [String] { lock.lock(); defer { lock.unlock() }; return _unsubscribeCalls }
         var startHelperCalls: Int { lock.lock(); defer { lock.unlock() }; return _startHelperCalls }
@@ -3938,6 +3941,20 @@ final class ShellSessionHostTests: XCTestCase {
         var openMetadata: [String: OfficeDocumentMetadata] {
             get { lock.lock(); defer { lock.unlock() }; return _openMetadata }
             set { lock.lock(); _openMetadata = newValue; lock.unlock() }
+        }
+        /// Office Stage B Task 2 — docId -> reason; when set, `save` throws `.saveFailed` instead of
+        /// returning a temp path. Mirrors `openFailures`' own shape exactly.
+        private var _saveFailures: [String: String] = [:]
+        var saveFailures: [String: String] {
+            get { lock.lock(); defer { lock.unlock() }; return _saveFailures }
+            set { lock.lock(); _saveFailures = newValue; lock.unlock() }
+        }
+        /// Office Stage B Task 2 — the temp path `save` reports back for a docId; defaults to a
+        /// deterministic `/tmp` path so most tests never need to set this at all.
+        private var _saveTempPaths: [String: String] = [:]
+        var saveTempPaths: [String: String] {
+            get { lock.lock(); defer { lock.unlock() }; return _saveTempPaths }
+            set { lock.lock(); _saveTempPaths = newValue; lock.unlock() }
         }
         private var _defaultMetadata = OfficeDocumentMetadata(
             type: .spreadsheet, parts: 1, sizeTwips: OfficeDocumentSize(widthTwips: 100, heightTwips: 100))
@@ -4023,6 +4040,13 @@ final class ShellSessionHostTests: XCTestCase {
                 },
                 close: { [unowned self] docId in
                     self.lock.lock(); self._closeCalls.append(docId); self.lock.unlock()
+                },
+                save: { [unowned self] docId in
+                    self.lock.lock(); self._saveCalls.append(docId); self.lock.unlock()
+                    if let reason = self.saveFailures[docId] {
+                        throw OfficeHelperClientError.saveFailed(reason: reason)
+                    }
+                    return self.saveTempPaths[docId] ?? "/tmp/officedriverrecorder-\(docId).saved"
                 },
                 subscribeTiles: { [unowned self] docId, _, _, _ in
                     self.lock.lock(); self._subscribeCalls.append(docId); self.lock.unlock()

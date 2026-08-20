@@ -136,6 +136,27 @@ func panelDocumentTabAction(tabs: [PanelTab], path: String, openFailures: Set<St
     return .mint(title: (path as NSString).lastPathComponent)
 }
 
+// MARK: - Office Stage B Task 2: saving
+
+/// PURE: the app's ⌘S menu item's document-tab leg — mirrors `editorSaveMenuTarget`
+/// (`PanelEditorTab.swift`) exactly, filtered to `.document` instead of `.code`. Lives here, not
+/// there, because THIS file is document-tab territory (`panelDocumentTabAction`'s own precedent one
+/// section up: the `.document`-kind filter is this file's own recurring idiom, never borrowed).
+func officeSaveMenuTarget(tabs: [PanelTab], activeTabId: String?) -> PanelTab? {
+    guard let activeTabId, let tab = tabs.first(where: { $0.tabId == activeTabId }) else { return nil }
+    guard tab.kind == .document, let url = tab.url, !url.isEmpty else { return nil }
+    return tab
+}
+
+/// PURE: does the chrome show the unsaved dot? Mirrors `editorTabIsDirty` exactly — read from the
+/// runtime's state (`documents[path].dirty`, driven purely by LOK's own `.uno:ModifiedStatus`
+/// callback, via `OfficeRuntime.handle(documentEvent:docId:)` — never inferred here). A path with no
+/// open document is not dirty; neither is a session with no runtime.
+func officeDocumentIsDirty(state: OfficeRuntimeState?, path: String?) -> Bool {
+    guard let state, let path else { return false }
+    return state.documents[path]?.dirty == true
+}
+
 // MARK: - The canvas host door
 
 /// **office-plumbing Task 6: how a part-strip click reaches the canvas that owns viewport math.**
@@ -337,6 +358,10 @@ final class PanelDocumentTabModel: ObservableObject {
         return runtimeState?.documentBanners[path]
     }
 
+    /// Office Stage B Task 2 — the chrome's dirty dot, mirroring `PanelEditorTabModel.isDirty`'s own
+    /// door onto `editorTabIsDirty` exactly.
+    var isDirty: Bool { officeDocumentIsDirty(state: runtimeState, path: path) }
+
     /// Test seam: drive one refresh cycle synchronously, without a view.
     func refreshForTesting() { refresh() }
 }
@@ -429,11 +454,15 @@ func officeOpenWithLabel(forFileAt path: String?) -> String {
 
 // MARK: - The chrome row
 
-/// Path, plus the open-with escape hatch. No save button, no dirty dot: Stage A documents are
-/// view-only, so neither concept applies (`PanelEditorChrome`'s own two extras are both about an
-/// editable buffer). Reuses `editorTabDisplayPath` verbatim — despite its name, the function is
-/// generic path-shortening, and a second copy of "last two path components" would drift the moment
-/// one of them learned about `~`.
+/// Path, the dirty dot, plus the open-with escape hatch. **Office Stage B Task 2 narrows this
+/// file's own Stage-A claim**: documents are no longer purely view-only, so the dirty dot now
+/// applies — `PanelEditorChrome`'s own visual precedent, reused directly (`Theme.accent` +
+/// `panelEditorDirtyDotSize`, same as there). Still no SAVE BUTTON, deliberately: unlike the code
+/// tab, a document tab's own chrome row has no obvious second trigger the way `PanelEditorChrome`'s
+/// button is one of three (menu ⌘S, button, the page's own ⌘S) — ⌘S alone is this tab's one save
+/// door for now; a button can follow if a live gate asks for one. Reuses `editorTabDisplayPath`
+/// verbatim — despite its name, the function is generic path-shortening, and a second copy of "last
+/// two path components" would drift the moment one of them learned about `~`.
 struct PanelDocumentChrome: View {
     @ObservedObject var model: PanelDocumentTabModel
     let tab: PanelTab
@@ -457,6 +486,17 @@ struct PanelDocumentChrome: View {
                 .foregroundStyle(Theme.textMuted)
                 .lineLimit(1)
                 .truncationMode(.middle)
+
+            if model.isDirty {
+                // Office Stage B Task 2 — the editor's own visual precedent (`PanelEditorChrome`'s
+                // identical dot), reusing its exact size token and the brand accent rather than a
+                // second literal: this is the one place in the row that is about STATE, not text.
+                Circle()
+                    .fill(Theme.accent)
+                    .frame(width: panelEditorDirtyDotSize, height: panelEditorDirtyDotSize)
+                    .accessibilityLabel("Unsaved changes")
+            }
+
             Spacer(minLength: panelEditorChromeGap)
 
             // office-plumbing Task 7: the open-with escape hatch — Stage A documents are view-only,

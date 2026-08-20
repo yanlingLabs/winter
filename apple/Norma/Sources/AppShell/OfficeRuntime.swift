@@ -36,26 +36,39 @@ func officeFileStat(atPath path: String) -> OfficeFileStat? {
                           modifiedNanoseconds: Int64(info.st_mtimespec.tv_nsec))
 }
 
-/// The classification itself — deliberately a two-way fork, not `EditorDiskChange`'s four-way one:
-/// **no suppression bag, and so no `.ours` case** (the T8 brief, verbatim: "Stage A never writes
-/// office files from the app," so unlike the editor there is no "was this our own save landing"
-/// question to ask; every difference from the baseline is external by construction — see
-/// `OfficeRuntime.fileChangedOnDisk`'s own header, the site Stage B's save work must revisit).
+/// **Office Stage B Task 2 — the suppression bag arrives, and this classifier grows the `.ours`
+/// case Task 8's own header said it did not need yet.** Now a three-way fork mirroring
+/// `EditorDiskChange` exactly (minus `.external`'s carried text — Stage A/B documents are binary,
+/// so there is nothing to diff, only whether to reload): a save writes the file this runtime is
+/// watching, so the watcher armed for `path` will see an event for a change it already knows
+/// about, and `expectedWrites` (`OfficeRuntime.expectedWriteCount(for:)`) is how this classifier
+/// tells that apart from a genuine external change.
 enum OfficeDiskChange: Equatable {
     /// The stat is exactly what this runtime already knew — the overwhelmingly common answer: a
     /// sibling file changing in the same watched directory, a LOK lock file churning beside the
     /// document (T3's own disclosed concern), a `touch` with no real content change.
     case unchanged
-    /// Different from the baseline. The agent, another editor, `git checkout` — Stage A cannot tell
-    /// which, and a view-only surface has no reason to.
+    /// Different from the baseline, and one of this runtime's own saves has not been accounted for
+    /// yet — the echo of that save's own rename reaching the watcher before (or instead of) the
+    /// save's own baseline re-seed ran. The caller consumes ONE note
+    /// (`OfficeRuntime.consumeExpectedWrite`) and stays silent — mirrors
+    /// `EditorDiskChange.ours`/`editorDiskChange`'s identical reasoning, verbatim.
+    case ours
+    /// Different, and nobody claimed it. The agent, another editor, `git checkout` — Stage A/B
+    /// cannot tell which, and a view-only surface has no reason to.
     case external
     case deleted
 }
 
-func officeDiskChange(stat: OfficeFileStat?, baseline: OfficeFileStat?) -> OfficeDiskChange {
+/// Ordered content-first, deliberately, mirroring `editorDiskChange`'s own ordering and its own
+/// stated reason: the baseline is a fact about BYTES and the note bag is a fact about intentions,
+/// and bytes are the stronger evidence — a save whose note was never consumed cannot make a
+/// genuine external change look like ours as long as the baseline says the file has moved
+/// somewhere neither of them predicted.
+func officeDiskChange(stat: OfficeFileStat?, baseline: OfficeFileStat?, expectedWrites: Int) -> OfficeDiskChange {
     guard let stat else { return .deleted }
     if let baseline, stat == baseline { return .unchanged }
-    return .external
+    return expectedWrites > 0 ? .ours : .external
 }
 
 // MARK: - The state (PURE — `OfficeRuntimeReducerTests` drives every row of this without a helper)
@@ -94,6 +107,14 @@ struct OfficeRuntimeState: Equatable {
         /// nothing has asked for anything else yet at open time.
         var activePart: Int = 0
         var sizeTwips: OfficeDocumentSize
+        /// Office Stage B Task 2 — mirrors LOK's own `.uno:ModifiedStatus` truth, and nothing else:
+        /// driven PURELY by the `.modifiedStatusChanged` event this reducer's own arm below applies
+        /// (routed from the real `LOK_CALLBACK_STATE_CHANGED` firing, via `ShellSessionHost
+        /// .wireOfficeTileCallbacks`'s `onDocumentEvent` wiring) — never set optimistically by a
+        /// successful save, the same "nothing here clears a dirty dot" posture
+        /// `EditorSaveCoordinator`'s own header states for the editor's identical dot. Defaults
+        /// `false`: a document that just opened has nothing unsaved yet.
+        var dirty: Bool = false
     }
 
     var phase: Phase = .idle
@@ -192,6 +213,28 @@ enum OfficeRuntimeEvent: Equatable {
     case subscribeRequested(path: String, part: Int, zoomPPT: Int, viewportTwips: OfficeTwipsRect)
     case unsubscribeRequested(path: String)
 
+    // MARK: Office Stage B Task 2 — saving
+
+    /// ⌘S (or any other trigger) asks to save `path`'s current document. A no-op outside `.ready`
+    /// or for a path with no open document — mirrors `.subscribeRequested`'s own guard exactly:
+    /// there is nothing to save if the helper does not currently hold this path open.
+    case saveRequested(path: String)
+    /// The app finished placing the helper's rendered temp file onto the real document path.
+    /// Carries `docId`, not just `path` — the stale-save guard `.reloadFailed` already established:
+    /// a reload or a close can replace or remove this path's docId while the round trip was in
+    /// flight, and this event answers whichever docId's OWN save actually completed, checked
+    /// against whatever `documents[path]` holds NOW (see this reducer's own arm).
+    case saveSucceeded(path: String, docId: String)
+    /// The save failed — either the helper's own `saveAs` failed, or the app's atomic place did.
+    /// Same stale-docId guard as `saveSucceeded`.
+    case saveFailed(path: String, docId: String, reason: String)
+    /// LOK's `.uno:ModifiedStatus` callback fired for `docId` — routed here by docId, never path
+    /// (the push itself carries only `docId`; this reducer already knows the docId->path mapping
+    /// via `documents`, the identical lookup `ShellSessionHost.officeRuntime(owning:)` does one
+    /// level up for tile pushes, moved down into the reducer here because `documents` IS the
+    /// reducer's own state).
+    case modifiedStatusChanged(docId: String, modified: Bool)
+
     // MARK: office-plumbing Task 8 — the world changing underneath an open document
 
     /// **The watcher's verdict for an open document's file: different from what Swift last saw.**
@@ -256,6 +299,12 @@ enum OfficeRuntimeEffect: Equatable {
     /// case, so SwiftUI never dismantles `OfficeTileCanvasView` and the view state living on it
     /// (`scrollOrigin`/`zoomPPT`) survives untouched.
     case reloadDocument(path: String, oldDocId: String)
+    /// Office Stage B Task 2 — render+place `docId` (the path's docId at the moment `.saveRequested`
+    /// was dispatched) onto `path`. The imperative performer is the WHOLE round trip: ask the
+    /// helper (`driver.save`), then atomically place its answer — see `OfficeRuntime.performSave`'s
+    /// own header for the two stale guards and the suppression-bag wiring this one effect stands
+    /// for.
+    case save(path: String, docId: String)
     /// Task 5: whenever the reducer decides something is worth telling the user, this fires
     /// alongside the state it also writes (`failureReason` for a helper death, `openFailures[path]`
     /// for one document, `documentBanners[path]` since Task 8 for an external change/deletion) — the
@@ -393,6 +442,44 @@ enum OfficeRuntimeReducer {
         case .unsubscribeRequested(let path):
             guard state.phase == .ready, let doc = state.documents[path] else { return (next, []) }
             return (next, [.unsubscribe(docId: doc.docId)])
+
+        // MARK: Office Stage B Task 2 — saving
+
+        case .saveRequested(let path):
+            guard state.phase == .ready, let doc = state.documents[path] else { return (next, []) }
+            return (next, [.save(path: path, docId: doc.docId)])
+
+        case .saveSucceeded(let path, let docId):
+            // The stale-save guard: only act if `path` still shows the very docId this save was
+            // FOR. A close (documents[path] == nil) or a reload (a different docId) both fail this
+            // check identically — either way there is nothing left here for a successful save of an
+            // old docId to say anything about.
+            guard state.phase == .ready, state.documents[path]?.docId == docId else { return (next, []) }
+            // A file that was just placed on disk cannot still be saying it was deleted — the exact
+            // claim `.opened`'s own banner-clear makes, one line up in this same file: a save is not
+            // a reopen, but "this path exists and holds what was just written" is exactly as strong.
+            next.documentBanners.removeValue(forKey: path)
+            return (next, [])
+
+        case .saveFailed(let path, let docId, let reason):
+            guard state.phase == .ready, state.documents[path]?.docId == docId else { return (next, []) }
+            let basename = (path as NSString).lastPathComponent
+            let message = "Couldn't save \(basename): \(reason)"
+            // Reuses `documentBanners` verbatim — that field's own Task 8 doc comment foretold
+            // exactly this: "Stage B's first save-conflict banner reuses this field verbatim rather
+            // than inventing a second one." A save failure and a delete-while-open both put ONE
+            // sentence above the canvas that the NEXT successful (re)open/save clears; nothing about
+            // either reason needs its own UI.
+            next.documentBanners[path] = message
+            return (next, [.emitBanner(reason: message)])
+
+        case .modifiedStatusChanged(let docId, let modified):
+            guard state.phase == .ready,
+                  let path = state.documents.first(where: { $0.value.docId == docId })?.key else {
+                return (next, [])
+            }
+            next.documents[path]?.dirty = modified
+            return (next, [])
 
         // MARK: office-plumbing Task 8
 
@@ -545,6 +632,13 @@ final class OfficeRuntime: ObservableObject {
         /// nothing left to roll back to on failure, only something worth logging, which the
         /// production implementation does on its own terms.
         var close: (_ docId: String) async -> Void
+        /// Office Stage B Task 2 — asks the shared helper to render `docId` to a temp file under
+        /// ITS OWN `--state-path`, returning that file's path. Throws exactly like `open` (a
+        /// `saveFailed`/`serverError`/timeout all propagate) — `perform(_:)`'s `.save` case is what
+        /// turns a throw here into `.saveFailed`, never a crash. Routed through
+        /// `ShellSessionHost.officeRequestQueue` in production, on the SAME terms as every other
+        /// Driver call.
+        var save: (_ docId: String) async throws -> String
         var subscribeTiles: (_ docId: String, _ part: Int, _ zoomPPT: Int,
                              _ viewportTwips: OfficeTwipsRect) async throws -> [TileKey]
         var unsubscribeTiles: (_ docId: String) async -> Void
@@ -635,6 +729,14 @@ final class OfficeRuntime: ObservableObject {
         perform(dispatch(.closeRequested(path: path)))
     }
 
+    /// Office Stage B Task 2 — save `path`'s currently open document. Fire-and-forget, exactly like
+    /// `open`/`close`/`subscribeTiles` — never sequence off this call returning; observe
+    /// `state.documents[path].dirty` and `state.documentBanners[path]` instead. A no-op for a path
+    /// with no open document (mirrors `.subscribeRequested`'s own reducer guard).
+    func save(_ path: String) {
+        perform(dispatch(.saveRequested(path: path)))
+    }
+
     /// T6's tile door. Thin here — see `OfficeRuntimeEvent.subscribeRequested`'s own doc.
     func subscribeTiles(path: String, part: Int, zoomPPT: Int, viewportTwips: OfficeTwipsRect) {
         perform(dispatch(.subscribeRequested(path: path, part: part, zoomPPT: zoomPPT, viewportTwips: viewportTwips)))
@@ -706,6 +808,23 @@ final class OfficeRuntime: ObservableObject {
         }
     }
 
+    /// Office Stage B Task 2 — **the dirty-tracking door**: fed by `ShellSessionHost
+    /// .wireOfficeTileCallbacks`'s `onDocumentEvent` routing (that method's own doc explains why it,
+    /// not a second wiring site, is where a fresh client's callbacks are re-pointed on every helper
+    /// relaunch), by docId, the same way `officeRuntime(owning:)` routes tile pushes one level up.
+    ///
+    /// Only `.modifiedChanged` has anything for THIS door to do — `.invalidated` (the only other
+    /// case Stage A/B's `LOKBridge` ever actually constructs, per `OfficeDocumentEvent`'s own
+    /// header) is already routed separately, through `onInvalidated`/`OfficeTileStore.invalidate`;
+    /// `.opened`/`.openFailed`/`.closed` are never sent this way at all in Stage A/B (their own
+    /// direct, seq-correlated reply frames cover `open`/`close`). An unrecognized/irrelevant case
+    /// here is silently ignored, the same "not every callback has Stage A/B meaning" posture
+    /// `LOKBridge.handleCallback` already takes toward LOK's raw callback types one layer down.
+    func handle(documentEvent event: OfficeDocumentEvent, docId: String) {
+        guard case .modifiedChanged(let modified) = event else { return }
+        perform(dispatch(.modifiedStatusChanged(docId: docId, modified: modified)))
+    }
+
     // MARK: The reducer, driven
 
     private func dispatch(_ event: OfficeRuntimeEvent) -> [OfficeRuntimeEffect] {
@@ -742,6 +861,9 @@ final class OfficeRuntime: ObservableObject {
                 tileStore.evictAll(docId: oldDocId)
                 Task { [driver] in await driver.close(oldDocId) }
                 openAndDispatch(path: path, myGeneration: generation, reloadingDocId: oldDocId)
+
+            case .save(let path, let docId):
+                performSave(path: path, docId: docId, myGeneration: generation)
 
             case .watchFile(let path):
                 startWatching(path)
@@ -852,6 +974,162 @@ final class OfficeRuntime: ObservableObject {
         }
     }
 
+    /// Office Stage B Task 2 — **the whole save round trip**: ask the helper to render `docId`,
+    /// then atomically place its answer onto `path`. `myGeneration` and `docId` together guard
+    /// against everything that can move between the ask and the answer:
+    ///
+    ///   * **teardown** (`myGeneration != self.generation`) — carry 6's own guard, unchanged in
+    ///     shape from `openAndDispatch`'s identical check;
+    ///   * **a reload or a close mid-save** (`self.state.documents[path]?.docId != docId`) — this
+    ///     flow's OWN guard, which `openAndDispatch` has no equivalent of: a reload mints a NEW
+    ///     docId for `path` and a close removes it outright, either of which means the render this
+    ///     save is holding describes a docId that is no longer `path`'s own — placing it would
+    ///     silently regress a file a reload has already replaced with something newer, or resurrect
+    ///     a file the user just closed the tab on.
+    ///
+    /// Neither guard treats a supersession as a FAILURE — nothing is logged, no `.saveFailed`
+    /// dispatches, the same "moot, not wrong" posture carry 6's own compensating-close comment
+    /// takes toward an open superseded by teardown. The helper's own temp render is deleted either
+    /// way (best-effort — `saves/` would otherwise grow unboundedly across a long-lived helper's
+    /// whole lifetime, the exact class of leak the `lok-profile-*` sweep in `LOKBridge` was written
+    /// to close for a different directory).
+    private func performSave(path: String, docId: String, myGeneration: Int) {
+        Task { [weak self, driver] in
+            guard let self else { return }
+            do {
+                let tempPath = try await driver.save(docId)
+                guard myGeneration == self.generation, self.state.documents[path]?.docId == docId else {
+                    try? FileManager.default.removeItem(atPath: tempPath)
+                    return
+                }
+                // **Before the place, always** — mirrors `EditorSaveCoordinator.performSave`'s own
+                // ordering and its own reason: the watcher T8 already installed for `path` must not
+                // mistake this save's own rename for somebody else's edit, and a note filed
+                // afterward would race the file-system event it exists to explain.
+                self.noteExpectedWrite(path: path)
+                do {
+                    try await Task.detached(priority: .userInitiated) {
+                        try Self.placeAtomically(tempPath: tempPath, at: path)
+                    }.value
+                    // Re-seed the baseline from what THIS save actually wrote — mirrors
+                    // `EditorRuntime.noteWriteLanded`'s identical belt: the next watcher fire,
+                    // whenever it arrives (including a debounce-coalesced one that never fires at
+                    // all), is compared against bytes this save itself produced, not a stale
+                    // pre-save snapshot — the fix for the ONE window the counted bag alone cannot
+                    // cover (the rename has landed and this continuation has not run yet).
+                    self.diskBaselines[path] = officeFileStat(atPath: path)
+                    try? FileManager.default.removeItem(atPath: tempPath)
+                    self.perform(self.dispatch(.saveSucceeded(path: path, docId: docId)))
+                } catch {
+                    // No event will arrive to consume the note now — the rename never happened.
+                    self.withdrawExpectedWrite(path: path)
+                    try? FileManager.default.removeItem(atPath: tempPath)
+                    self.perform(self.dispatch(.saveFailed(path: path, docId: docId, reason: Self.describe(error))))
+                }
+            } catch {
+                guard myGeneration == self.generation else { return } // superseded AND failed: nothing to compensate, nothing to record
+                self.perform(self.dispatch(.saveFailed(path: path, docId: docId, reason: Self.describe(error))))
+            }
+        }
+    }
+
+    // MARK: - Office Stage B Task 2: the watcher-suppression bag
+    //
+    // Mirrors `EditorRuntime`'s identical bag (`noteExpectedWrite`/`withdrawExpectedWrite`/
+    // `consumeExpectedWrite`/`expectedWriteCount`) exactly — same counted-not-set shape, same
+    // reasoning (that file's own doc comment, restated here for this runtime): a save writes the
+    // file this runtime is watching, so the watcher armed for `path` will see an event for a change
+    // it already knows about. **A counted bag, not a set**: two saves of the same document in quick
+    // succession are two renames and two events, and a set would suppress only the first.
+
+    private var pendingExpectedWrites: [String: Int] = [:]
+
+    func noteExpectedWrite(path: String) {
+        pendingExpectedWrites[path, default: 0] += 1
+    }
+
+    func withdrawExpectedWrite(path: String) {
+        guard let count = pendingExpectedWrites[path] else { return }
+        if count <= 1 {
+            pendingExpectedWrites.removeValue(forKey: path)
+        } else {
+            pendingExpectedWrites[path] = count - 1
+        }
+    }
+
+    /// The watcher's door: was the change at `path` one of ours? Consumes ONE note per call.
+    func consumeExpectedWrite(path: String) -> Bool {
+        guard pendingExpectedWrites[path] != nil else { return false }
+        withdrawExpectedWrite(path: path)
+        return true
+    }
+
+    /// How many of this runtime's own writes at `path` are still unaccounted for. Test seam and
+    /// `fileChangedOnDisk`'s own reader.
+    func expectedWriteCount(for path: String) -> Int {
+        pendingExpectedWrites[path] ?? 0
+    }
+
+    // MARK: - Office Stage B Task 2: the atomic place
+
+    /// **The APP's own half of the save split** (see `OfficeWireFrame.saved`'s own header): the
+    /// helper's render always lands under ITS OWN `--state-path` — a directory that may not share a
+    /// filesystem with `path`'s own directory (a state-path under `~/Library/Application Support`
+    /// versus a document on an external volume, a network share, a different APFS container). A
+    /// direct `rename(2)` from `tempPath` straight onto `path` would therefore be free to fail with
+    /// `EXDEV` — the plan's own pre-flight finding. This is `EditorSaveCoordinator.writeAtomically`'s
+    /// SAME tmp+rename discipline, adapted for a source that already exists as BYTES ON DISK rather
+    /// than an in-memory `String`: `tempPath` is COPIED to a sibling temp file IN THE DOCUMENT'S OWN
+    /// DIRECTORY first — `FileManager.copyItem` handles a cross-volume source natively, no EXDEV
+    /// risk there — and the actual `rename(2)` that replaces `path` is then ALWAYS same-directory,
+    /// same-filesystem, by construction, regardless of where `tempPath` started out.
+    ///
+    /// The sibling's name carries a LEADING DOT, matching `EditorSaveCoordinator.writeAtomically`'s
+    /// own `.{name}.norma-save-{uuid}` convention exactly — not merely cosmetic parity: `FileTreeModel
+    /// .listTreeEntries` reads with `.skipsHiddenFiles`, so this transient file can never flash into
+    /// an open Files tab's tree even on an unlucky watcher fire mid-save (the "Files-tree sibling
+    /// watcher" this task's own brief calls out — see this method's callers for the OTHER half,
+    /// `noteExpectedWrite`, which is what keeps THIS runtime's own watcher silent about it).
+    ///
+    /// `nonisolated` for the identical reason `writeAtomically` is: it must run off the main actor so
+    /// a save never stalls the shell on a slow or network volume — `performSave` calls it from inside
+    /// a detached `Task`. Internal, not `private`, so a test can drive it directly with nothing but
+    /// scratch files, the same testability posture every other pure/near-pure helper in this file
+    /// keeps (`officeFileStat`/`officeDiskChange`/`fileChangedOnDisk`).
+    nonisolated static func placeAtomically(tempPath: String, at path: String) throws {
+        let destination = URL(fileURLWithPath: path)
+        let directory = destination.deletingLastPathComponent()
+        let sibling = directory.appendingPathComponent(
+            ".\(destination.lastPathComponent).norma-save-\(UUID().uuidString)")
+        do {
+            try FileManager.default.copyItem(atPath: tempPath, toPath: sibling.path)
+            // Flushed before the rename — same reasoning `writeAtomically` states at length: without
+            // it the rename can reach the disk before the bytes do, and a power loss leaves the
+            // destination NAME pointing at a file whose contents were never written. Best effort.
+            if let handle = try? FileHandle(forWritingTo: sibling) {
+                try? handle.synchronize()
+                try? handle.close()
+            }
+            // The original's POSIX permissions are carried over when there is an original — a save
+            // must not silently turn an executable-adjacent file's mode into whatever `copyItem`
+            // happened to preserve from the helper's OWN scratch file (owned by the sandboxed helper
+            // process, not this document's real owner/mode).
+            if let mode = (try? FileManager.default.attributesOfItem(atPath: path))?[.posixPermissions] {
+                try? FileManager.default.setAttributes([.posixPermissions: mode], ofItemAtPath: sibling.path)
+            }
+            guard rename(sibling.path, destination.path) == 0 else {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno), userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "The file couldn't be replaced: \(String(cString: strerror(errno)))."
+                ])
+            }
+        } catch {
+            // Never leave a `.norma-save-…` beside the user's file, whatever went wrong.
+            try? FileManager.default.removeItem(at: sibling)
+            throw error
+        }
+    }
+
     private func performTeardown(docIds: [String]) {
         generation += 1
         for docId in docIds {
@@ -867,6 +1145,9 @@ final class OfficeRuntime: ObservableObject {
         for (_, watcher) in watchers { watcher.stop() }
         watchers.removeAll()
         diskBaselines.removeAll()
+        // Office Stage B Task 2 — the save-suppression bag goes with everything else this runtime
+        // holds; mirrors `EditorRuntime`'s own teardown treatment of its identical bag.
+        pendingExpectedWrites.removeAll()
     }
 
     // MARK: - office-plumbing Task 8: the world changing underneath an open document
@@ -906,11 +1187,16 @@ final class OfficeRuntime: ObservableObject {
     /// could move again before this finishes — no generation counter is needed the way the editor's
     /// `watchGenerations` is.
     ///
-    /// **No suppression bag** (T8 brief, verbatim): Stage A never writes an office file from the app,
-    /// so there is no "was this our own save landing" question to ask — the editor's
-    /// `noteExpectedWrite`/`consumeExpectedWrite`/`editorDiskChange`-with-`expectedWrites` machinery
-    /// has nothing to filter here yet. Recorded at this exact seam so Stage B (once save exists)
-    /// inherits that pattern KNOWINGLY rather than rediscovering it under a live bug report.
+    /// **Office Stage B Task 2 — the suppression bag Task 8's own comment (below) predicted arrives
+    /// here now.** `officeDiskChange` is fed `expectedWriteCount(for:)` exactly as
+    /// `EditorRuntime.fileChangedOnDisk` feeds `editorDiskChange` its own `expectedWriteCount` —
+    /// see this method's own `.ours` arm.
+    ///
+    /// Task 8's original words, kept for the historical record — true when written, superseded now:
+    /// "No suppression bag: Stage A never writes an office file from the app, so there is no 'was
+    /// this our own save landing' question to ask... Recorded at this exact seam so Stage B (once
+    /// save exists) inherits that pattern KNOWINGLY rather than rediscovering it under a live bug
+    /// report." This task is that inheritance.
     ///
     /// **Still filters NOISE, though — this is not "any fire reloads."** The directory source this
     /// watcher includes (`DispatchSourceFileWatcher`'s own doc) fires for ANY entry changing in the
@@ -922,9 +1208,17 @@ final class OfficeRuntime: ObservableObject {
     func fileChangedOnDisk(_ path: String) {
         guard state.documents[path] != nil else { return }
         let stat = officeFileStat(atPath: path)
-        switch officeDiskChange(stat: stat, baseline: diskBaselines[path]) {
+        switch officeDiskChange(stat: stat, baseline: diskBaselines[path],
+                                expectedWrites: expectedWriteCount(for: path)) {
         case .unchanged:
             return
+        case .ours:
+            // Office Stage B Task 2 — the narrow window `performSave`'s own baseline re-seed already
+            // covers in the common case: the rename landed and this fire arrived before (or instead
+            // of) that re-seed running. Consume ONE note and adopt the bytes as known — mirrors
+            // `EditorRuntime.fileChangedOnDisk`'s own `.ours` arm exactly.
+            _ = consumeExpectedWrite(path: path)
+            diskBaselines[path] = stat ?? diskBaselines[path]
         case .external:
             // Recorded BEFORE the dispatch, exactly like `EditorRuntime.fileChangedOnDisk`'s own
             // ordering and for the identical reason: whatever the reducer (and, downstream, the
@@ -948,8 +1242,11 @@ final class OfficeRuntime: ObservableObject {
     /// text; everything else (a timeout, a protocol-level refusal, an unexpected reply shape) is
     /// this runtime's own connection trouble, not a fact about the document.
     private static func describe(_ error: Error) -> String {
-        if let clientError = error as? OfficeHelperClientError, case .openFailed(let reason) = clientError {
-            return reason
+        if let clientError = error as? OfficeHelperClientError {
+            switch clientError {
+            case .openFailed(let reason), .saveFailed(let reason): return reason
+            default: break
+            }
         }
         return (error as? CustomStringConvertible)?.description ?? "the office helper request failed"
     }

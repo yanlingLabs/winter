@@ -198,6 +198,14 @@ final class PanelDocumentTabTests: XCTestCase {
         private let lock = NSLock()
         private var _openCalls: [(docId: String, path: String)] = []
         var openCalls: [(docId: String, path: String)] { lock.lock(); defer { lock.unlock() }; return _openCalls }
+        /// Office Stage B Task 2 — every `save` call, in order.
+        private var _saveCalls: [String] = []
+        var saveCalls: [String] { lock.lock(); defer { lock.unlock() }; return _saveCalls }
+        private var _saveTempPaths: [String: String] = [:]
+        var saveTempPaths: [String: String] {
+            get { lock.lock(); defer { lock.unlock() }; return _saveTempPaths }
+            set { lock.lock(); _saveTempPaths = newValue; lock.unlock() }
+        }
 
         private var _openMetadata: [String: OfficeDocumentMetadata] = [:]
         var openMetadata: [String: OfficeDocumentMetadata] {
@@ -225,6 +233,10 @@ final class PanelDocumentTabTests: XCTestCase {
                     return self.openMetadata[path] ?? self.defaultMetadata
                 },
                 close: { _ in },
+                save: { [unowned self] docId in
+                    self.lock.lock(); self._saveCalls.append(docId); self.lock.unlock()
+                    return self.saveTempPaths[docId] ?? "/tmp/paneldocumenttabtests-\(docId).saved"
+                },
                 subscribeTiles: { _, _, _, _ in [] },
                 unsubscribeTiles: { _ in },
                 requestTiles: { _, _ in })

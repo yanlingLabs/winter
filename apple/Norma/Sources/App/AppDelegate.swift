@@ -546,12 +546,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // items whose target is ITSELF before adding its own, so a second command object would leave
         // the first one's item standing — two menu items sharing ⌘S, and the wrong one winning. Safe
         // to reuse because the app window (and therefore its host) is a process-lifetime singleton.
+        // Office Stage B Task 2 — the document-tab leg beside the code-tab one, both through the
+        // SAME menu item (there is exactly one ⌘S in the File menu; two triggers share it by
+        // trying the code tab FIRST, falling to the document tab only when there is none — the
+        // panel's active tab is one of the two kinds or neither, never both, so this ordering never
+        // hides a document tab behind a code tab that isn't actually front).
         let command = editorSaveMenuCommand ?? EditorSaveMenuCommand(
-            activePath: { [weak host] in host?.activeCodeTabPath },
+            activePath: { [weak host] in host?.activeCodeTabPath ?? host?.activeDocumentTabPath },
             performSave: { [weak host] _ in
                 // The path is re-resolved by the host at fire time; passing the validated one back
-                // in would be a second, staler answer to the same question.
-                Task { @MainActor in _ = await host?.saveActiveCodeTab() }
+                // in would be a second, staler answer to the same question. Same code-then-document
+                // order as `activePath` above — whichever one actually resolved a path is the one
+                // that fires; `saveActiveCodeTab`'s own `.noModel` fallback costs nothing when it is
+                // the document tab that is actually active, since it never asks the office runtime
+                // for anything in that case.
+                Task { @MainActor in
+                    guard let host else { return }
+                    if host.activeCodeTabPath != nil {
+                        _ = await host.saveActiveCodeTab()
+                    } else {
+                        host.saveActiveDocumentTab()
+                    }
+                }
             })
         editorSaveMenuCommand = command
         guard !Self.isRunningUnitTests else { return }
