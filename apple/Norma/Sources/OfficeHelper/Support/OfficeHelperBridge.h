@@ -24,3 +24,36 @@
 #define LOK_USE_UNSTABLE_API
 #include "LibreOfficeKit.h"
 #include "LibreOfficeKitInit.h"
+
+// Office Stage B Task 1 — the seatbelt. These three functions are macOS's PRIVATE
+// (Apple-System-Private-Interface, undocumented) sandboxing API — not declared in the public SDK's
+// deprecated <sandbox.h>, which exposes only `sandbox_init(profile, flags, errorbuf)` gated to
+// `flags == SANDBOX_NAMED` (one of the canned `kSBXProfile*` string constants) — unusable for a
+// custom SBPL text profile. Declared here by hand, the same posture this header already takes
+// toward LibreOfficeKitEnums.h's own C++-only landmines: verified against a real linked-and-run
+// binary before being trusted, not assumed from memory (see main.swift's own header and
+// task-1-report.md for the standalone-C-harness proof these exact signatures/return-value
+// contracts hold on this SDK/OS, checked before any Swift code called them).
+#include <stdint.h>
+#include <sys/types.h>
+
+// Applies `profile` (raw SBPL text — `flags` MUST be 0 here, never SANDBOX_NAMED, which would
+// instead treat `profile` as a canned-name constant) to the CURRENT process. `parameters` is a
+// NULL-terminated, alternating key/value C-string array, substituted into the profile text
+// everywhere it references `(param "KEY")` — verified empirically to handle a space-containing
+// value correctly with no caller-side escaping (production's real `--state-path` lives under
+// `~/Library/Application Support/...`, which always contains a space). Returns 0 on success; -1
+// with `*errorbuf` set to a human-readable reason otherwise (free with `sandbox_free_error`).
+int sandbox_init_with_parameters(const char *profile, uint64_t flags, const char *const parameters[], char **errorbuf);
+void sandbox_free_error(char *errorbuf);
+
+// Fixed 3-argument form, DELIBERATELY not the real symbol's true variadic signature — Swift cannot
+// import a true C variadic, and this call site never passes one. AAPCS64 passes a variadic
+// function's own NAMED leading parameters identically to a fixed-arity declaration of the same
+// leading parameters (only the trailing `...` tail's marshaling differs), so this is ABI-safe on
+// this project's arm64-only target — confirmed directly (a standalone harness declaring BOTH the
+// fully variadic and this exact fixed-arity form observed identical return values against the same
+// real symbol, sandboxed and not). `sandbox_check(getpid(), NULL, 0)` — `operation` NULL, `type`
+// 0 — is the verified-empirically "is this process sandboxed AT ALL" idiom: measured directly, a
+// real unsandboxed run returns 0 and a real `sandbox-exec (deny default)` child returns 1.
+int sandbox_check(pid_t pid, const char *operation, int type);

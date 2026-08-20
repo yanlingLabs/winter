@@ -55,6 +55,15 @@ final class OfficeHelperLiveTests: XCTestCase {
     private static var vendorProductSetRoot: URL {
         repoRoot.appendingPathComponent("apple/Norma/vendor/libreoffice/product-set", isDirectory: true)
     }
+    /// Office Stage B Task 1 — the checked-in seatbelt profile SOURCE, passed via `--sandbox-profile`
+    /// (DEBUG-only override, mirrors `--lok-root` exactly) so the standalone `BUILT_PRODUCTS_DIR`
+    /// helper this file mostly spawns can find it without a full app embed. Never used by
+    /// `testEmbeddedRootBootsAgainstTheRealBuiltAppAndBundleStaysUntouched`, which passes `nil`
+    /// deliberately — that test's whole point is exercising `resolveSandboxProfilePath()`'s own
+    /// DEFAULT (no-override) resolution against the real embedded `Contents/Resources/office-helper.sb`.
+    private static var repoSandboxProfilePath: URL {
+        repoRoot.appendingPathComponent("apple/Norma/Sources/OfficeHelper/office-helper.sb", isDirectory: false)
+    }
     private static var fixturesRoot: URL {
         repoRoot.appendingPathComponent("apple/Norma/Tests/NormaAppTests/Fixtures/office", isDirectory: true)
     }
@@ -148,7 +157,15 @@ final class OfficeHelperLiveTests: XCTestCase {
         // `LOKBridge.handleCallback`'s raw-payload trace line for whatever LOK actually fired.
         // `false` for every existing caller (unchanged behavior: stderr inherited, visible in the
         // test log directly, nothing programmatically read back).
-        captureStderr: Bool = false
+        captureStderr: Bool = false,
+        // Office Stage B Task 1 — defaults ON (the repo-checked-in profile source), same
+        // always-pass-unless-embedded-root posture `installRoot` already has: EVERY test in this
+        // file that does not explicitly override this spawns a FULLY SANDBOXED helper, with no
+        // per-test change needed — "default sandboxed everywhere, including all live tests" is true
+        // by construction, not by each test opting in. `nil` is reserved for
+        // `testEmbeddedRootBootsAgainstTheRealBuiltAppAndBundleStaysUntouched`, which needs
+        // main.swift's own DEFAULT (no `--sandbox-profile` override) resolution exercised for real.
+        sandboxProfilePath: URL? = OfficeHelperLiveTests.repoSandboxProfilePath
     ) async throws -> LiveHelper {
         let resolvedHelperURL = helperURL ?? Bundle.main.bundleURL.deletingLastPathComponent()
             .appendingPathComponent("NormaOfficeHelper")
@@ -175,6 +192,7 @@ final class OfficeHelperLiveTests: XCTestCase {
         var arguments = ["--socket-path", socketPath, "--state-path", resolvedStateDir.path,
                           "--token", token, "--idle-exit-seconds", String(idleExitSeconds)]
         if let installRoot { arguments += ["--lok-root", installRoot.path] }
+        if let sandboxProfilePath { arguments += ["--sandbox-profile", sandboxProfilePath.path] }
         process.arguments = arguments
 
         var stderrCapture: StderrCapture?
@@ -352,6 +370,56 @@ final class OfficeHelperLiveTests: XCTestCase {
         try await helper.client.close(docId: docId)
     }
 
+    // MARK: - Office Stage B Task 1: lock-file probe (the seatbelt's own carried branch)
+    //
+    // Task 1 brief's own decision point: LOK's convention for a document opened for editing is to
+    // write a sibling `.~lock.<name>#` marker beside it. Pre-seatbelt (this helper, today) that
+    // write succeeds silently — nothing in Stage A ever noticed because nothing was watching for
+    // it. Once the write fence denies anything outside `--state-path` (this task's own job), the
+    // brief's own ruling is explicit: LOK must be observed to WARN-AND-CONTINUE (never widen the
+    // fence to cover document directories) — and if it does not, the fix is a LOK-side knob that
+    // stops the write from being attempted at all, not a wider fence.
+    //
+    // This test asserts the END-STATE invariant that must hold EITHER way: after opening a document
+    // that lives in an ordinary writable directory (never `--state-path`), no `.~lock.*#` sibling
+    // exists, and the open itself still succeeded. Run once against THIS (still unsandboxed) helper
+    // before any fence exists, purely as an empirical observation — see task-1-report.md for what
+    // was actually seen and which branch (tolerate-the-denial vs. disable-at-source) it drove.
+    func testOpeningADocumentInAWritableDirectoryLeavesNoLockFileBeside() async throws {
+        try skipUnlessVendorPresent()
+        let helper = try await spawnLiveHelper()
+
+        let scratchDir = makeScratchDirectory()
+        let fixtureData = try Data(contentsOf: Self.fixturesRoot.appendingPathComponent("gate.docx"))
+        let docPath = scratchDir.appendingPathComponent("editable-gate.docx")
+        try fixtureData.write(to: docPath)
+        let lockPath = scratchDir.appendingPathComponent(".~lock.editable-gate.docx#")
+
+        let docId = UUID().uuidString
+        let metadata = try await helper.client.open(docId: docId, path: docPath.path)
+        XCTAssertEqual(metadata.type, .text, "setup: gate.docx must still open as a text document")
+
+        // A generous settle window — LOK's own lock-file write (if it happens at all) is
+        // synchronous with `documentLoad`/`initializeForRendering` in every LO embedding this repo
+        // has observed, but this gives any deferred-write implementation a fair chance to have
+        // acted before this test reads the directory.
+        try? await Task.sleep(nanoseconds: 500_000_000)
+
+        let lockExistsWhileOpen = FileManager.default.fileExists(atPath: lockPath.path)
+        let siblingsWhileOpen = (try? FileManager.default.contentsOfDirectory(atPath: scratchDir.path)) ?? []
+        print("[lock-file probe] while open: lockExists=\(lockExistsWhileOpen) siblings=\(siblingsWhileOpen)")
+
+        try await helper.client.close(docId: docId)
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        let lockExistsAfterClose = FileManager.default.fileExists(atPath: lockPath.path)
+        print("[lock-file probe] after close: lockExists=\(lockExistsAfterClose)")
+
+        XCTAssertFalse(lockExistsWhileOpen, "no .~lock.*# sibling may exist while the document is open under the "
+                        + "seatbelt — either LOK warn-and-continues past a denied write (fence stays narrow) or "
+                        + "lock-file creation is disabled at the source (see LOKBridge's user-profile config)")
+        XCTAssertFalse(lockExistsAfterClose, "no .~lock.*# sibling may exist after close either")
+    }
+
     // MARK: - Version pin (carry T3-c)
 
     func testHelloOkLokVersionMatchesVersionPinBuildId() async throws {
@@ -448,7 +516,7 @@ final class OfficeHelperLiveTests: XCTestCase {
         // check above — this is the tree whose seal actually matters).
         let before = try Self.snapshotTree(embeddedLOKRoot)
 
-        let helper = try await spawnLiveHelper(helperURL: embeddedHelperURL, installRoot: nil)
+        let helper = try await spawnLiveHelper(helperURL: embeddedHelperURL, installRoot: nil, sandboxProfilePath: nil)
         let docId = UUID().uuidString
         let metadata = try await helper.client.open(docId: docId, path: Self.fixturesRoot.appendingPathComponent("gate.xlsx").path)
         XCTAssertEqual(metadata.type, .spreadsheet)
