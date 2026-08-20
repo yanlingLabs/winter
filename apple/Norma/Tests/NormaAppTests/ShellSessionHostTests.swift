@@ -72,6 +72,40 @@ final class ShellSessionHostTests: XCTestCase {
                                    mode: .pinned(sessionId: sessionId), session: session)
             return (feed, session)
         }, outputsWatcher: outputsWatcher)
+        // office live-gate Bug 2 fix-round (caught by the touched-class run, not designed up front):
+        // `panelDidReveal` now mints an `officeRuntime(for:)` for EVERY dirs-session reveal, not only
+        // the office-specific tests that opt into `officeFactory()`. Left at its class default
+        // (`OfficeRuntime(sessionId:driver:)` closing over a REAL, freshly-minted `OfficeHelperSupervisor
+        // .production()`), the dozens of unrelated tests in this file that reveal the panel on a dirs
+        // row (chat/new-session/dispatch flows with nothing to do with office) would each spawn a REAL
+        // `NormaOfficeHelper` subprocess — measured directly: two such tests raced for the same
+        // machine-global `com.norma.app.dev` office socket (one "listening", the other "bind() failed:
+        // File exists"), and a real LibreOfficeKit instance later crashed with an uncaught
+        // `com::sun::star::lang::WrappedTargetRuntimeException`, which is what turned `xcodebuild test`'s
+        // overall verdict into `** TEST FAILED **` even though every individual `XCTAssert` in the run
+        // still reported 0 failures. `EditorRuntime`'s equivalent default is harmless only because
+        // nothing in a bare XCTest process ever calls `CefInitialize` — Office's default driver has no
+        // such guard: `OfficeHelperSupervisor.start()` unconditionally `Process().run()`s the real
+        // bundled binary the moment ANY runtime's `.ensureHelperReady` effect fires. `OfficeDriverRecorder`
+        // (below) defaults its own `state` to `.ready`, so the late-joiner branch in
+        // `OfficeRuntime.perform`'s `.ensureHelperReady` case folds synchronously and never even
+        // schedules a `startHelper` `Task` — the safe, fully inert default every test gets for free
+        // unless it explicitly installs its own recorder via `officeFactory()` afterward (last write
+        // wins — `host.makeOfficeRuntime = office.make` below simply overwrites this).
+        // NOT `OfficeDriverRecorder()` inline inside the closure: the recorder's OWN driver closures
+        // capture it `[unowned self]` (mirroring every other production Driver, which assumes ITS
+        // owner outlives it) — a recorder built and read in the same expression has no strong
+        // reference anywhere and is deallocated the instant `.driver` returns, so the FIRST actual
+        // call (`helperState()`, from `.ensureHelperReady`) reads a dangling `unowned self` and
+        // crashes the whole test host with "Attempted to read an unowned reference but object was
+        // already destroyed" — measured directly, mid fix-round, on `testRequestCloseTabOnADirtyTab
+        // SaveChoiceThatFailsKeepsTheTabOpen`. `officeDefault` here is captured STRONGLY by the
+        // `makeOfficeRuntime` closure (default Swift capture semantics for a `let` reference), and
+        // that closure is itself retained by `host` for the test's whole lifetime — the same
+        // retain-via-`officeDoubles.append` job `officeFactory()` does explicitly, done implicitly
+        // here through the closure capture instead.
+        let officeDefault = OfficeDriverRecorder()
+        host.makeOfficeRuntime = { sessionId, _ in OfficeRuntime(sessionId: sessionId, driver: officeDefault.driver) }
         return (host, factory)
     }
 
@@ -983,6 +1017,24 @@ final class ShellSessionHostTests: XCTestCase {
                                    mode: .pinned(sessionId: sessionId), session: session)
             return (feed, session)
         }, managementClient: client)
+        // office live-gate Bug 2 fix-round: same reason as `makeHost`'s identical line — this is the
+        // heavier-used of the two host factories (the panel-tab/file-door/diff-door door tests all
+        // need a management client), so it is the bigger share of the real-spawn exposure `panelDidReveal`
+        // now carries. See `makeHost`'s own comment for the measured crash this closes.
+        // NOT `OfficeDriverRecorder()` inline inside the closure: the recorder's OWN driver closures
+        // capture it `[unowned self]` (mirroring every other production Driver, which assumes ITS
+        // owner outlives it) — a recorder built and read in the same expression has no strong
+        // reference anywhere and is deallocated the instant `.driver` returns, so the FIRST actual
+        // call (`helperState()`, from `.ensureHelperReady`) reads a dangling `unowned self` and
+        // crashes the whole test host with "Attempted to read an unowned reference but object was
+        // already destroyed" — measured directly, mid fix-round, on `testRequestCloseTabOnADirtyTab
+        // SaveChoiceThatFailsKeepsTheTabOpen`. `officeDefault` here is captured STRONGLY by the
+        // `makeOfficeRuntime` closure (default Swift capture semantics for a `let` reference), and
+        // that closure is itself retained by `host` for the test's whole lifetime — the same
+        // retain-via-`officeDoubles.append` job `officeFactory()` does explicitly, done implicitly
+        // here through the closure capture instead.
+        let officeDefault = OfficeDriverRecorder()
+        host.makeOfficeRuntime = { sessionId, _ in OfficeRuntime(sessionId: sessionId, driver: officeDefault.driver) }
         return (host, factory, transport)
     }
 
@@ -2912,6 +2964,72 @@ final class ShellSessionHostTests: XCTestCase {
         }
     }
 
+    // MARK: - office live-gate Bug 2: office joins the same pre-warm door
+
+    /// **The fix itself, driven through the real `panelDidReveal` door** (mirrors
+    /// `testAPanelRevealPreWarmsExactlyOneEditorForASessionWithDirectories` exactly, one level over).
+    /// `office.recorder.state` is forced to `.notStarted` — the recorder defaults to `.ready`
+    /// (`OfficeDriverRecorder`'s own default), which would fold `.ensureHelperReady` synchronously via
+    /// the late-joiner branch and never touch `startHelper` at all, proving nothing about THIS ask.
+    func testAPanelRevealAlsoBootsTheOfficeHelperForASessionWithDirectories() async {
+        let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+        let (host, factory) = makeHost(rows: rows)
+        defer { host.deselect() }
+        let editor = editorFactory()
+        host.makeEditorRuntime = editor.make
+        let office = officeFactory()
+        office.recorder.state = .notStarted
+        host.makeOfficeRuntime = office.make
+        await host.directory.refresh()
+        host.setShellVisible(true)
+        host.select("S1")
+        await waitUntilMade(factory, 1)
+        await answerHandshake(factory.made[0], sessionId: "S1")
+
+        host.panelDidReveal()
+        host.panelDidReveal()
+
+        await officeWaitUntil(timeout: 2) { office.recorder.startHelperCalls >= 1 }
+        XCTAssertEqual(host.officeRuntimes.count, 1)
+        XCTAssertEqual(office.recorder.startHelperCalls, 1,
+                       "a second reveal finds the runtime already past `.idle` — idempotent, the same "
+                       + "'prewarm is idempotent' claim the editor's own test makes one door over")
+        XCTAssertEqual(office.recorder.openCalls.count, 0,
+                       "the pre-warm must NEVER open a document — only ask the shared helper to be "
+                       + "ready (Bug 2's own 'NOT opening any document')")
+    }
+
+    /// **The guard rail**: dirless/chat sessions must never spawn the office helper either — the
+    /// STRONGER pin, not merely "no runtime in the table" but "the shared supervisor itself was never
+    /// even minted," since `officeRuntime(for:)` is the one call that reaches for it at all and
+    /// `panelDidReveal`'s guard must return before ever calling it.
+    func testAPanelRevealNeverBootsTheOfficeHelperForADirlessOrChatSession() async {
+        for row in [codeRow("S1", dirs: []),
+                    SessionSummary(sessionId: "S1", title: nil, createdAt: 1, scope: "global",
+                                   cwd: nil, mode: "chat")] {
+            let (host, factory) = makeHost(rows: [row])
+            let editor = editorFactory()
+            host.makeEditorRuntime = editor.make
+            let office = officeFactory()
+            office.recorder.state = .notStarted
+            host.makeOfficeRuntime = office.make
+            await host.directory.refresh()
+            host.setShellVisible(true)
+            host.select("S1")
+            await waitUntilMade(factory, 1)
+            await answerHandshake(factory.made[0], sessionId: "S1")
+
+            host.panelDidReveal()
+
+            XCTAssertEqual(host.officeRuntimes.count, 0, "row: \(row.mode ?? "?") dirs=\(String(describing: row.dirs))")
+            XCTAssertNil(host.officeHelperSupervisor,
+                        "never minted at all for a dirless/chat session — not just \"no runtime,\" the "
+                        + "shared supervisor was never even reached for")
+            XCTAssertEqual(office.recorder.startHelperCalls, 0)
+            host.deselect()
+        }
+    }
+
     /// The departure policy, driven through the REAL door the shell uses when its window hides.
     func testHidingTheShellReleasesACleanEditorAndKeepsOneWithUnsavedWork() async {
         let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
@@ -3279,6 +3397,24 @@ final class ShellSessionHostTests: XCTestCase {
         defer { host.deselect() }
         let editor = editorFactory(files: ["/repo/a.ts": "x"])
         host.makeEditorRuntime = editor.make
+        // office live-gate Bug 2 fix-round: this test's own raw host construction (not `makeHost`)
+        // predates office's pre-warm entirely — S1 has real dirs and the `panelDidReveal()` below now
+        // also reaches for `officeRuntime(for:)`. Without this, left at the class default, this test
+        // is the exact one MEASURED spawning a real `NormaOfficeHelper` (see `makeHost`'s own comment).
+        // NOT `OfficeDriverRecorder()` inline inside the closure: the recorder's OWN driver closures
+        // capture it `[unowned self]` (mirroring every other production Driver, which assumes ITS
+        // owner outlives it) — a recorder built and read in the same expression has no strong
+        // reference anywhere and is deallocated the instant `.driver` returns, so the FIRST actual
+        // call (`helperState()`, from `.ensureHelperReady`) reads a dangling `unowned self` and
+        // crashes the whole test host with "Attempted to read an unowned reference but object was
+        // already destroyed" — measured directly, mid fix-round, on `testRequestCloseTabOnADirtyTab
+        // SaveChoiceThatFailsKeepsTheTabOpen`. `officeDefault` here is captured STRONGLY by the
+        // `makeOfficeRuntime` closure (default Swift capture semantics for a `let` reference), and
+        // that closure is itself retained by `host` for the test's whole lifetime — the same
+        // retain-via-`officeDoubles.append` job `officeFactory()` does explicitly, done implicitly
+        // here through the closure capture instead.
+        let officeDefault = OfficeDriverRecorder()
+        host.makeOfficeRuntime = { sessionId, _ in OfficeRuntime(sessionId: sessionId, driver: officeDefault.driver) }
         await directory.refresh()
         host.setShellVisible(true)
         host.select("S1")

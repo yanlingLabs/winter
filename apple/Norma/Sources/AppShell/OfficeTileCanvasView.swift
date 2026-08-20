@@ -190,6 +190,28 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
         self.model = model
         super.init(frame: .zero)
         wantsLayer = true
+        // USER LIVE-GATE FIX (tile overdraw): this view manages its OWN pool of raw `CALayer`s
+        // (`tileLayers`, added straight onto `hostLayer` in `relayoutVisibleTiles`) rather than
+        // hosting a child `NSView` the way `PanelCEFContainerView`/`EditorViewportHostView` do —
+        // checked both for precedent, and neither needed this: CEF's own view is always resized to
+        // exactly `bounds` (`PanelCEFContainerView.resizeSubviews`: `subview.frame = bounds`), so it
+        // has nothing to overflow. A tile grid is different by construction: `relayoutVisibleTiles`
+        // asks `TileMath.viewportTileKeys` for every tile the current viewport TOUCHES, and a
+        // viewport edge almost never lands on an exact 256pt tile boundary — the tile straddling that
+        // edge is legitimately positioned partially outside `bounds` (needed for the sliver of it that
+        // IS visible). A freshly-vended `CALayer` (including AppKit's own auto-backing layer) has
+        // `masksToBounds == false` by default, so nothing cropped that overflow — it kept compositing
+        // into whatever the panel stacks beyond this view's own frame, which is exactly the "leaks
+        // outside the sidebar border on scroll" symptom. `true` here crops every sublayer to this
+        // view's own bounds at the COMPOSITING level, independent of whatever any ancestor view does
+        // or does not clip — the narrowest fix, since it stops the leak at its source rather than
+        // hoping something upstream catches it. Safe for the strip/banner overlays
+        // (`OfficeSheetTabStrip`/`OfficeSlideRail`/`OfficeDocumentBannerView`): those are separate
+        // SwiftUI siblings composed around `OfficeTileCanvasRepresentable` in `OfficeDocumentSurface`/
+        // `PanelDocumentContent`, never sublayers of THIS view's own `hostLayer` — masksToBounds here
+        // has no reach into them at all. Pinned: `OfficeTileCanvasViewTests
+        // .testHostingLayerMasksSublayersToBounds` (Bug 1 of the office live gate).
+        layer?.masksToBounds = true
         layer?.backgroundColor = resolvedPlaceholderColor() // obligation 4: never white, from frame 1
     }
 

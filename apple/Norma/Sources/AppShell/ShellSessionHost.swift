@@ -568,10 +568,35 @@ final class ShellSessionHost: ObservableObject {
     /// `EditorRuntime.prewarm()` is itself a no-op past `idle`. Nothing happens at all for a session
     /// with no working directories (see `editorPrewarmTarget`), which includes every chat session and
     /// the new-chat page's own.
+    ///
+    /// **office live-gate Bug 2 (REVIEWED-DECISION OVERRIDE): office now joins this exact door.**
+    /// T7 shipped office with no pre-warm of its own ("an open is its own pre-warm" — see
+    /// `officeRuntime(for:)`'s and `openDocumentTab`'s own notes for the two sites this reverses) —
+    /// the human live gate overruled that after measuring the first office click pay helper-spawn-
+    /// plus-LOK-init cold, in full, synchronously with the click. `officeRuntime(for:)` reuses the
+    /// SAME `sessionId` `editorPrewarmTarget` already gated above — a dirless/chat session returned
+    /// `nil` and this function is already back out by the guard, so a document helper never boots for
+    /// either, for free, with no second gate to maintain. Minting the table entry here is cheap (no
+    /// process, no socket — `officeRuntime(for:)`'s own doc); `OfficeRuntime.prewarm()` is what
+    /// actually asks the shared, app-wide helper process to boot, and is idempotent the same way the
+    /// editor's own call is. **Resource note, disclosed**: unlike the editor's per-session CEF
+    /// browser, the office helper is ONE process shared app-wide — the first dirs-session reveal in
+    /// the app's lifetime boots it, and (per `OfficeHelperSupervisor`'s own persistent-connection
+    /// design) it then stays resident until quit, whether or not that session — or any other — ever
+    /// actually opens a document. The helper's OWN 120s idle-exit (`OfficeHelperServer
+    /// .refreshIdleStateLocked`: zero documents AND zero connections) does not reclaim this: the
+    /// supervisor holds its one connection open for the app's whole session once established (closed
+    /// only by `.stop()`/a helper death — see that type's own F3 comment on why an open connection
+    /// "permanently pins its connectionCount above zero"), so idle-exit was already unreachable during
+    /// a live, connected session before this change too — it is the ORPHAN reaper for an unclean app
+    /// exit, not a live-session memory reclaimer. Pre-warm does not change that lifecycle, only WHEN
+    /// it begins; the pre-existing "stays hot once touched" cost simply now starts at reveal instead
+    /// of at first real open, for every dirs session, not only ones that end up using office.
     func panelDidReveal() {
         guard let sessionId = editorPrewarmTarget(sessionId: panelTargetSessionId,
                                                   rows: directory.rows) else { return }
         editorRuntime(for: sessionId).prewarm()
+        officeRuntime(for: sessionId).prewarm()
     }
 
     /// The session's runtime, minted on first use. Reached by the pre-warm above and (from T5) by
@@ -704,11 +729,13 @@ final class ShellSessionHost: ObservableObject {
     /// **One office runtime per session that has one.** Unlike `editorRuntimes` — where each entry
     /// owns its own CEF browser — the underlying resource here (`OfficeHelperSupervisor`) is
     /// APP-WIDE and shared across every entry in this table; see `officeHelperSupervisor`'s own doc
-    /// for the fan-out this implies. Sessions are ADDED on first `officeRuntime(for:)` (there is no
-    /// pre-warm door yet — T6/T7 own the file-tree/transcript doors that will call `open` directly,
-    /// which is its own pre-warm, the same "an open is its own prewarm" shape `editorRuntimeForCodeTab`
-    /// already establishes) and REMOVED by a departure (`releaseOfficeRuntimeIfClean` — ALWAYS, see
-    /// its own doc) or an explicit `teardownOfficeRuntime`.
+    /// for the fan-out this implies. Sessions are ADDED on first `officeRuntime(for:)` — called both
+    /// by a document door's own `open` (still its own pre-warm for a session that mints a runtime
+    /// this way first, the same "an open is its own prewarm" shape `editorRuntimeForCodeTab` already
+    /// establishes) **and, as of the office live-gate's Bug 2, by `panelDidReveal`** for every
+    /// dirs-having session, ahead of any click (see that method's own note — T7's original "office has
+    /// no pre-warm door of its own" ruling is the one this overrides) — and REMOVED by a departure
+    /// (`releaseOfficeRuntimeIfClean` — ALWAYS, see its own doc) or an explicit `teardownOfficeRuntime`.
     private(set) var officeRuntimes: [String: OfficeRuntime] = [:]
 
     /// The ONE app-wide helper supervisor, minted lazily on the FIRST `officeRuntime(for:)` call —
@@ -1410,10 +1437,19 @@ final class ShellSessionHost: ObservableObject {
             openPanelTab(kind: .document, url: absolutePath, title: title, sessionId: sessionId)
         }
         // Reveal the panel on both branches — an activate behind a hidden panel is a click that
-        // visibly does nothing, mirroring `openFileTab`/`openDiffTab`'s identical calls. Unlike
-        // theirs, this carries no office-specific pre-warm: `panelDidReveal` only pre-warms the
-        // EDITOR (`editorPrewarmTarget`) — office has no pre-warm door of its own (`officeRuntime
-        // (for:)`'s own doc: "an open is its own pre-warm"), so this call is purely "show the panel."
+        // visibly does nothing, mirroring `openFileTab`/`openDiffTab`'s identical calls.
+        //
+        // **REVIEWED-DECISION OVERRIDE (office live-gate Bug 2), superseding the paragraph this
+        // replaced**: that paragraph used to say this call carries no office-specific pre-warm because
+        // `panelDidReveal` only pre-warmed the EDITOR — T7's own ruling, "office has no pre-warm door
+        // of its own" (`officeRuntime(for:)`'s doc, pre-this-task). The human live gate overruled it:
+        // the FIRST office click measurably paid helper-spawn-plus-LOK-init cold, in full, on this
+        // exact click, because nothing had ever asked the shared helper to be ready before now.
+        // `panelDidReveal` now ALSO pre-warms office (`OfficeRuntime.prewarm()`, gated on the same
+        // `editorPrewarmTarget` dirs check the editor's own pre-warm already used) — so by the time a
+        // REPEAT click lands here, the helper is very likely already booting or ready; this call site
+        // itself is unchanged, purely "show the panel," because the pre-warm lives one level up, at
+        // the shared door every tab-opening call already goes through.
         revealPanel()
     }
 

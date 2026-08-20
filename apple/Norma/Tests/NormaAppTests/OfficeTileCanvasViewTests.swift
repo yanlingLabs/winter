@@ -221,6 +221,80 @@ final class OfficeTileCanvasViewTests: XCTestCase {
         view.unmount() // hygiene — see the other files' identical comment on settling before teardown
     }
 
+    // MARK: - the hosting layer clips (Bug 1, office live gate: tile overdraw outside the sidebar)
+
+    /// **The fix itself.** Unconditional and set once, in `init`, before any tile is ever laid out —
+    /// no window where a first relayout could paint before the clip is armed. A freshly-vended
+    /// `CALayer` (including AppKit's own auto-backing layer for `wantsLayer = true`) defaults
+    /// `masksToBounds` to `false` — see `init`'s own comment for why this view, unlike
+    /// `PanelCEFContainerView`/`EditorViewportHostView`, actually needs it set explicitly.
+    func testHostingLayerMasksSublayersToBounds() async {
+        // Never mounts, so `recorder`'s `[unowned self]` driver closures are never actually called
+        // (`init` touches neither the driver nor the runtime) — no retention hazard here the way the
+        // NEXT test has (see that one's own comment). `_` would be fine; bound anyway for symmetry.
+        let (runtime, _) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        XCTAssertEqual(view.layer?.masksToBounds, true,
+                       "without this, a tile straddling the viewport's edge (routine — see the next "
+                       + "test) paints past this view's own frame into whatever the panel stacks "
+                       + "beyond it, which is the live-gate's own \"leaks outside the sidebar border\" "
+                       + "report")
+    }
+
+    /// **Proves the clip is load-bearing, not defensive-but-unreachable.** A 300pt-square viewport
+    /// against the fixed 256pt tile grid, at zero scroll, ALWAYS needs a tile whose screen rect
+    /// extends to 512pt on at least one axis — `TileMath.viewportTileKeys` has to ask for the tile
+    /// covering screen-space [256,512) to paint the sliver of it inside [0,300), and nothing about
+    /// that tile's own rect knows to stop at 300. Also pins the weaker, always-true invariant
+    /// (`relayoutVisibleTiles` never keeps a layer the viewport doesn't even touch) — reads straight
+    /// off `view.layer?.sublayers`, so no new production accessor was needed for either assertion.
+    func testRelayoutRoutinelyPositionsATileLayerPastTheViewsOwnEdge() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        // Large enough that the 300pt viewport below sits nowhere near the DOCUMENT's own far edge —
+        // this test is about the TILE GRID straddling the VIEWPORT's edge, not the document's.
+        let sizeTwips = OfficeDocumentSize(widthTwips: 1_000_000, heightTwips: 1_000_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
+        view.mount() // synchronously calls relayoutVisibleTiles() — see mount()'s own body
+
+        // **Load-bearing, not hygiene**: `mount()` also fires `performSubscribe()`, which dispatches
+        // a `.subscribe` effect that reaches `driver.subscribeTiles` from inside a detached `Task`
+        // (`OfficeRuntime.perform`'s own `.subscribe` case) — fire-and-forget from `mount()`'s own
+        // perspective. `SubscribeCapturingDriverRecorder`'s closures capture the recorder
+        // `[unowned self]` (mirroring every production Driver's own assumption that ITS owner
+        // outlives it), so if this function returned (and `recorder` fell out of scope) before that
+        // Task actually ran, the Task would later read a DANGLING `unowned self` and crash the whole
+        // test host — measured directly, mid fix-round: a dummy `_ = recorder` placed right after the
+        // `let` above does NOT fix this (it is itself `recorder`'s last syntactic use at that point,
+        // so ARC is free to deallocate immediately, no later than end of scope — and the Task can
+        // easily still be pending past that). Awaiting the subscribe here, the same way
+        // `testSettingActivePartOnAMountedCanvasResubscribesImmediatelyWithTheNewPart` (above) already
+        // does, is what actually closes the race: `recorder` stays alive for as long as this polling
+        // closure keeps reading it, which is until the async call has genuinely landed.
+        let subscribed = await waitUntil { recorder.subscribeCalls.count >= 1 }
+        XCTAssertTrue(subscribed, "mount() must still ask for tiles — this test is about geometry, "
+                      + "not about breaking the subscribe path")
+
+        let sublayers = view.layer?.sublayers ?? []
+        XCTAssertFalse(sublayers.isEmpty, "a 300x300 viewport over a large document must have tiles")
+        for sublayer in sublayers {
+            XCTAssertTrue(sublayer.frame.intersects(view.bounds),
+                          "relayout must never keep a layer for a tile the viewport does not even "
+                          + "touch — \(sublayer.frame) vs bounds \(view.bounds)")
+        }
+        XCTAssertTrue(sublayers.contains { !view.bounds.contains($0.frame) },
+                      "at least one tile must genuinely extend past bounds — a 300pt viewport over a "
+                      + "256pt tile grid always has one at zero scroll; if this ever stops being true "
+                      + "the masksToBounds fix above would have nothing left to prove")
+
+        view.unmount() // hygiene — see the other files' identical comment on settling before teardown
+    }
+
     // MARK: - syncDocumentIdentity: the reload seam (office-plumbing Task 8, T6 review F4)
 
     /// **The F4 pin.** A docId change must (a) actually update `docId` — the property `applyContents`

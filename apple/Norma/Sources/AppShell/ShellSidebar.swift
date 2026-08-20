@@ -442,10 +442,11 @@ struct ShellRootView: View {
                                 }
                                 // editor-product T3: the panel becoming visible is the editor's
                                 // pre-warm trigger (`ShellSessionHost.panelDidReveal`, dirs-only and
-                                // idempotent). It is told from HERE because the requested mode is
-                                // this view's own `@State` — the host has no way to observe it (see
-                                // `onRevealPanel`'s doc for the same one-directional wall). The
-                                // host's own doors carry it themselves via `revealPanel`.
+                                // idempotent) — office live-gate Bug 2 joined the SAME call, so this
+                                // one line now pre-warms both. It is told from HERE because the
+                                // requested mode is this view's own `@State` — the host has no way to
+                                // observe it (see `onRevealPanel`'s doc for the same one-directional
+                                // wall). The host's own doors carry it themselves via `revealPanel`.
                                 if wasHidden { host?.panelDidReveal() }
                             }
                             .disabled(!fits)

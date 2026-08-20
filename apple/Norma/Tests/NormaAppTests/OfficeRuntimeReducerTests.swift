@@ -495,6 +495,52 @@ final class OfficeRuntimeReducerTests: XCTestCase {
         XCTAssertEqual(effects, [.ensureHelperReady])
     }
 
+    // MARK: - prewarmRequested — office live-gate Bug 2: "have the helper ready," never an open
+
+    /// The mirror of `testAnOpenFromIdleMovesToStartingQueuesThePathAndAsksForTheHelper` one door
+    /// over: SAME effect (`.ensureHelperReady` — Bug 2's own "via the existing ensure path"), but
+    /// `pendingOpens` stays EMPTY — nothing is ever opened by a pre-warm alone.
+    func testPrewarmFromIdleMovesToStartingAndAsksForTheHelperWithNothingQueued() {
+        let (state, effects) = reduce(OfficeRuntimeState(), [.prewarmRequested])
+        XCTAssertEqual(state.phase, .starting)
+        XCTAssertEqual(state.pendingOpens, [], "a pre-warm queues no document — only a real open does")
+        XCTAssertEqual(effects, [.ensureHelperReady])
+    }
+
+    /// Prewarm-once: a second call while already `.starting` (another pre-warm, or a real open in
+    /// flight) or already `.ready` changes nothing — mirrors `EditorRuntimeReducer.prewarmRequested`'s
+    /// own "deliberately nothing at all, not a second [boot]" contract.
+    func testPrewarmWhileStartingOrReadyIsANoOp() {
+        let (starting, _) = reduce(OfficeRuntimeState(), [.prewarmRequested])
+        let (stillStarting, startingEffects) = reduce(starting, [.prewarmRequested])
+        XCTAssertEqual(stillStarting, starting)
+        XCTAssertEqual(startingEffects, [])
+
+        let (stillReady, readyEffects) = reduce(ready(), [.prewarmRequested])
+        XCTAssertEqual(stillReady, ready())
+        XCTAssertEqual(readyEffects, [])
+    }
+
+    /// **The deliberate divergence from `.openRequested`, pinned directly against the test just
+    /// above.** `.openRequested` retries from `.failed` exactly like `.idle` (carry 4: the shared
+    /// helper's contract is "relaunch on next demand," and a real open IS a demand). A pre-warm is
+    /// NOT a demand — every tab-opening door reaches `panelDidReveal` on every click
+    /// (`ShellSessionHost.panelDidReveal`'s own doc), so retrying a full supervisor boot cycle from
+    /// `.failed` on a mere reveal would re-fight the crashy helper on every click into the session
+    /// until a real open eventually does the same job anyway. `.failed` stays `.failed`, untouched,
+    /// exactly like `EditorRuntimeReducer.prewarmRequested`'s own guard (`state.phase == .idle` only)
+    /// — Office's pre-warm is narrower than its own `.openRequested`, on purpose, for this one phase.
+    func testPrewarmFromFailedIsDeliberatelyANoOpUnlikeOpenRequested() {
+        let (failed, _) = reduce(OfficeRuntimeState(), [.helperUnavailable])
+        XCTAssertEqual(failed.phase, .failed)
+
+        let (state, effects) = reduce(failed, [.prewarmRequested])
+        XCTAssertEqual(state, failed, "no retry, no cleared failureReason — untouched, unlike a real "
+                       + "openRequested's identical starting point")
+        XCTAssertEqual(effects, [], "a pre-warm must never re-fight a crashy shared helper on every "
+                       + "panel reveal — only a genuine open (a real demand) retries from .failed")
+    }
+
     // MARK: - teardownRequested — legal from every phase, always returns to a fresh idle state
 
     func testTeardownIsLegalFromEveryPhaseAndAlwaysReturnsToAFreshIdleState() {

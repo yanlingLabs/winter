@@ -158,6 +158,21 @@ struct OfficeRuntimeState: Equatable {
 /// Everything that can happen to a runtime. The imperative half feeds these; the reducer is the
 /// only thing that decides what they mean.
 enum OfficeRuntimeEvent: Equatable {
+    /// **office live-gate Bug 2 (REVIEWED-DECISION OVERRIDE) — "have the shared helper ready" without
+    /// opening anything.** T7 ruled office needed no pre-warm door of its own ("an open is its own
+    /// pre-warm" — see `openDocumentTab`'s own note, `ShellSessionHost.swift`, for the site this
+    /// overrides): the human live gate overruled that, measuring the FIRST office click paying
+    /// helper-spawn-plus-LOK-init cold, in full, on the click itself. Mirrors
+    /// `EditorRuntimeEvent.prewarmRequested`'s shape (idempotent, acts from `.idle` only) rather than
+    /// `.openRequested`'s own `.idle, .failed` retry pair below — a DELIBERATE, narrower divergence:
+    /// every tab-opening door (`openFileTab`/`openDiffTab`/`openDocumentTab`) already funnels through
+    /// `ShellSessionHost.revealPanel` -> `panelDidReveal` on EVERY click, so retrying from `.failed`
+    /// here would turn every reveal of a session whose shared helper is currently down into a fresh
+    /// supervisor 3-attempt boot cycle (up to 30s handshake budget each) — the exact "hot loop...
+    /// competing with the user's machine" `OfficeHelperSupervisor`'s own header forbids for a crashy
+    /// helper. A genuine ASK (a real document open) still retries from `.failed` exactly as it always
+    /// has — `.openRequested`'s own arm, unchanged by this case.
+    case prewarmRequested
     /// "Open this file." Queued while starting; self-starting from `.idle` AND from `.failed` (carry
     /// 4 — see `OfficeRuntimeState.Phase`'s own doc).
     case openRequested(path: String)
@@ -267,6 +282,16 @@ enum OfficeRuntimeReducer {
         var next = state
 
         switch event {
+
+        case .prewarmRequested:
+            // Prewarm-once, `.idle`-only — see the event's own doc for why `.failed` is deliberately
+            // excluded here (unlike `.openRequested`'s `.idle, .failed` pair just below). `pendingOpens`
+            // stays EMPTY: this asks the shared helper to be ready and nothing else.
+            // `.ensureHelperReady` is the IDENTICAL effect `.openRequested` already emits from `.idle`
+            // — Bug 2's own "via the existing ensure path" — simply never paired with an open this time.
+            guard state.phase == .idle else { return (next, []) }
+            next.phase = .starting
+            return (next, [.ensureHelperReady])
 
         case .openRequested(let path):
             // A new ask supersedes the last failure for that path, before any phase decides
@@ -587,6 +612,14 @@ final class OfficeRuntime: ObservableObject {
     }
 
     // MARK: The doors
+
+    /// **office live-gate Bug 2: the pre-warm door.** Idempotent (the reducer's own `.idle`-only
+    /// guard) and safe to call on every panel reveal — mirrors `EditorRuntime.prewarm()`'s contract
+    /// exactly, including "safe to call redundantly." See `OfficeRuntimeEvent.prewarmRequested`'s own
+    /// doc for the one deliberate divergence from that mirror (`.failed` does not retry here).
+    func prewarm() {
+        perform(dispatch(.prewarmRequested))
+    }
 
     /// Open a file. Synchronous — unlike `EditorRuntime.openFile` (which awaits a DISK READ this
     /// object does itself), nothing here needs to happen before the reducer can decide what to do;
