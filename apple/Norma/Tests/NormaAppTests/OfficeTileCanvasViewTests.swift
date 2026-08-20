@@ -461,4 +461,177 @@ final class OfficeTileCanvasViewTests: XCTestCase {
         view.unmount()
         XCTAssertNil(model.canvasHost, "unmount clears the registration")
     }
+
+    // MARK: - office live-gate fix #2: free-scroll accumulation (Bug 2)
+    //
+    // Two hypotheses were investigated and falsified by direct measurement, not merely by reading,
+    // before this fix was written: `scrollOrigin` never had any quantization to the 256pt tile grid
+    // (the controller's own lead — `clampedOriginX/Y` clamp only, they never round), and
+    // repositioning a tile's `CALayer` was never implicitly animated by CoreAnimation either (a
+    // second, self-generated hypothesis — measured directly via `animationKeys()`, headless AND in
+    // a real on-screen window: empty both times, because AppKit disables implicit layer actions by
+    // default outside an explicit animation context, unlike bare Core Animation/UIKit — before being
+    // discarded). The tests below pin the two claims that survive: accumulation is exact, and the
+    // REAL fix (async tile-content latency, addressed by `performSubscribe`'s margin below) is what
+    // a human live gate should now judge.
+
+    /// **The task's own named pin**: a sequence of small, fractional deltas accumulates into
+    /// `scrollOrigin` EXACTLY — no rounding, no snapping to the 256pt tile grid. Deltas are negative
+    /// (see `applyScrollDelta`'s own `origin -= delta` convention) so the origin moves AWAY from the
+    /// zero-clamp at the document's near edge, leaving room to accumulate instead of clamping away
+    /// every call.
+    func testFreeScrollAccumulatesRawDeltasExactlyNeverQuantizedToATileLine() async {
+        let (runtime, _) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        // Far larger than anything these tiny deltas could reach — this test is about the
+        // ACCUMULATION, not the edge clamp (that is the next test's own job).
+        let sizeTwips = OfficeDocumentSize(widthTwips: 2_000_000, heightTwips: 2_000_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
+
+        let deltas: [(dx: CGFloat, dy: CGFloat)] = [
+            (-1.3, -0.7), (-2.9, -5.1), (-0.4, -1.1), (-7.0, -3.3), (-0.05, -0.02)
+        ]
+        var expectedX: CGFloat = 0
+        var expectedY: CGFloat = 0
+        for delta in deltas {
+            view.applyScrollDelta(dx: delta.dx, dy: delta.dy)
+            expectedX -= delta.dx
+            expectedY -= delta.dy
+        }
+
+        XCTAssertEqual(view.scrollOriginForTesting.x, expectedX, accuracy: 0.0001, "free scroll must "
+                       + "accumulate the exact raw deltas — a snap to the 256pt tile grid would have "
+                       + "landed on a multiple of 256, not \(expectedX)")
+        XCTAssertEqual(view.scrollOriginForTesting.y, expectedY, accuracy: 0.0001)
+    }
+
+    /// The other half of the task's own pin: the ONLY thing that may stop free accumulation is the
+    /// document edge — proven by showing the clamp is idempotent (a second, even larger overshoot
+    /// lands at the exact same place as the first), which a tile-line snap could never produce
+    /// (a further overshoot would snap to a DIFFERENT, further-along grid line instead).
+    func testFreeScrollClampsOnlyAtTheDocumentEdgeIdempotentlyNotAtATileLine() async {
+        let (runtime, _) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000) // small — an overshoot is cheap to reach
+        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
+
+        view.applyScrollDelta(dx: -1_000_000, dy: -1_000_000) // wildly overshoots the far edge
+        let firstOvershoot = view.scrollOriginForTesting
+        XCTAssertGreaterThan(firstOvershoot.x, 0, "sanity: actually moved, not stuck at the near edge")
+
+        view.applyScrollDelta(dx: -1_000_000, dy: -1_000_000) // an even larger overshoot
+        XCTAssertEqual(view.scrollOriginForTesting, firstOvershoot, "clamped at the SAME document "
+                       + "edge both times — a tile-line snap would instead have landed on a further, "
+                       + "different grid line for the larger overshoot")
+    }
+
+    // MARK: - office live-gate fix #2: the actual root cause — tile-content latency (Bugs 1 & 2)
+
+    /// **The real fix.** `performSubscribe` must ask the store for a viewport padded by one tile
+    /// span beyond what is actually on screen — the mechanism traced to both bugs: with no margin,
+    /// every scroll tick that crosses a 256pt tile line exposes a tile nobody has asked for yet,
+    /// visible only as the placeholder tone until an async round trip lands.
+    func testPerformSubscribePadsTheViewportByOneTileSpanBeyondWhatIsVisible() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let sizeTwips = OfficeDocumentSize(widthTwips: 2_000_000, heightTwips: 2_000_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
+        // Comfortably clear of the near edge, so the margin below is never itself clamped away —
+        // this test is about the padding amount, not the edge case (the next test owns that).
+        view.setScrollOriginForTesting(CGPoint(x: 1000, y: 1000))
+
+        view.mount()
+        let subscribed = await waitUntil { recorder.subscribeCalls.count >= 1 }
+        XCTAssertTrue(subscribed)
+        guard subscribed else { return }
+
+        // Hand-built against the SAME pure `officeViewportTwips` production uses, padded by hand —
+        // pins the CONTRACT (exactly one tile span on every edge) without reaching into the view's
+        // own private margin constant. One tile span in POINTS is 256 — `TileMath.tilePixelSize` is
+        // in PIXELS (512), and `officeTileScreenRect`'s own `sidePoints` comment already states the
+        // /2x-device-scale result directly: "256pt, fixed regardless of zoom".
+        let margin: CGFloat = 256
+        let tightViewport = officeViewportTwips(scrollOrigin: CGPoint(x: 1000, y: 1000),
+                                                 visibleSize: CGSize(width: 300, height: 300), zoomPPT: 1000)
+        let expectedPadded = officeViewportTwips(
+            scrollOrigin: CGPoint(x: 1000 - margin, y: 1000 - margin),
+            visibleSize: CGSize(width: 300 + margin * 2, height: 300 + margin * 2), zoomPPT: 1000)
+
+        XCTAssertEqual(recorder.subscribeCalls[0].viewportTwips, expectedPadded, "the subscribe ask "
+                       + "must be padded by a tile span beyond the visible area, so the next tile out "
+                       + "is already warm before the user actually scrolls onto it")
+        XCTAssertGreaterThan(expectedPadded.width, tightViewport.width, "sanity: the padding must "
+                             + "actually widen the ask relative to the tight, exactly-visible viewport")
+        XCTAssertGreaterThan(expectedPadded.height, tightViewport.height)
+
+        view.unmount()
+        // Hygiene, not an assertion (this file's own recipe note, repeated by every sibling test):
+        // settle any still-in-flight subscribe Task before `recorder` deallocates at return, or its
+        // `[unowned self]` driver closure crashes the whole test host the moment it resumes.
+        try? await Task.sleep(nanoseconds: 30_000_000)
+    }
+
+    /// Near the document's own near edge, the margin must clamp toward the edge rather than ask for
+    /// negative-twips content that cannot exist — `performSubscribe`'s own `max(0, ...)`.
+    func testPerformSubscribeClampsTheMarginAtTheNearEdgeRatherThanAskingNegativeTwips() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let sizeTwips = OfficeDocumentSize(widthTwips: 2_000_000, heightTwips: 2_000_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 300, height: 300) // scrollOrigin stays .zero — the near edge
+
+        view.mount()
+        let subscribed = await waitUntil { recorder.subscribeCalls.count >= 1 }
+        XCTAssertTrue(subscribed)
+        guard subscribed else { return }
+
+        XCTAssertEqual(recorder.subscribeCalls[0].viewportTwips.x, 0, "at the near edge the padded "
+                       + "origin must clamp to 0, never go negative")
+        XCTAssertEqual(recorder.subscribeCalls[0].viewportTwips.y, 0)
+
+        view.unmount()
+        try? await Task.sleep(nanoseconds: 30_000_000) // hygiene — see the sibling test's own comment
+    }
+
+    // MARK: - office live-gate fix #2: no redundant repaint on a mere reposition (contributing cause)
+
+    /// A scroll tick that keeps the SAME tile set visible (small delta, no tile line crossed) must
+    /// reposition every layer WITHOUT re-touching its `contents`/`backgroundColor` — before this
+    /// fix, `applyContents` ran unconditionally for every visible tile on every single tick.
+    func testRepositioningAnExistingTileDoesNotReapplyContentsButANewlyExposedTileDoes() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let sizeTwips = OfficeDocumentSize(widthTwips: 2_000_000, heightTwips: 2_000_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
+        view.mount() // the first relayout paints every initially-visible tile once each
+        let subscribed = await waitUntil { recorder.subscribeCalls.count >= 1 }
+        XCTAssertTrue(subscribed)
+        guard subscribed else { return }
+        let countAfterMount = view.applyContentsCallCountForTesting
+        XCTAssertGreaterThan(countAfterMount, 0, "sanity: mount painted something")
+
+        // 10pt, well inside a 256pt tile — the visible tile-key SET cannot change.
+        view.applyScrollDelta(dx: -10, dy: 0)
+        XCTAssertEqual(view.applyContentsCallCountForTesting, countAfterMount, "repositioning "
+                       + "already-visible tiles must not re-touch contents/backgroundColor — that "
+                       + "was the per-scroll-tick waste this fix removes (up to ~120x/sec/tile before)")
+
+        // 400pt — comfortably crosses a 256pt tile line, so at least one genuinely new key enters
+        // the visible set and its brand-new layer must still be painted once.
+        view.applyScrollDelta(dx: -400, dy: 0)
+        XCTAssertGreaterThan(view.applyContentsCallCountForTesting, countAfterMount, "a newly-exposed "
+                             + "tile's layer must still be painted once, at creation")
+
+        view.unmount()
+        try? await Task.sleep(nanoseconds: 30_000_000) // hygiene — see the earlier sibling test's own comment
+    }
 }

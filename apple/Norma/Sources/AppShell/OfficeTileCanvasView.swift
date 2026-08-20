@@ -180,6 +180,29 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
     private var isSubscribeThrottled = false
     private var subscribePendingSinceThrottle = false
 
+    /// office live-gate fix #2 (Bug 2's root cause, and Bug 1's — see this constant's use in
+    /// `performSubscribe` for the full mechanism). Two more obvious-looking causes were investigated
+    /// and falsified by direct measurement first, not by reading alone — `scrollOrigin` quantizing to
+    /// the 256pt tile grid, and a tile's `CALayer` implicitly animating on reposition; see
+    /// `OfficeTileCanvasViewTests`' own header comment on the tests below for both, with the evidence.
+    /// `scrollOrigin`/layer placement were both already exact and un-animated. The actual felt cause:
+    /// `performSubscribe` used to ask the store for EXACTLY the on-screen viewport and nothing more,
+    /// so every scroll tick that crossed a 256pt tile line exposed a tile nobody had asked for yet,
+    /// visible only as `resolvedPlaceholderColor()` until an async subscribe -> helper-render ->
+    /// arrival round trip landed (measured ~26-28ms/tile even warm — `OfficeHarness.performTileCold3`'s
+    /// own PERF NOTE — and often longer once queued behind the leading-edge subscribe throttle). One
+    /// tile span of overscan on every edge means the next tile out is asked for BEFORE the user
+    /// actually scrolls onto it, so ordinary-speed scrolling much more often arrives to already-warm
+    /// data. This pads the SUBSCRIBE request only — `relayoutVisibleTiles` keeps rendering exactly the
+    /// tight visible rect; nothing renders early, only fetches early.
+    private static let subscribeMarginPoints: CGFloat = CGFloat(TileMath.tilePixelSize) / officeFixedDeviceScale
+
+    /// office live-gate fix #2: counts every `applyContents` call — the pin that a mere reposition
+    /// (an existing, still-visible tile whose layer is just moving) no longer re-touches
+    /// `contents`/`backgroundColor` on every scroll tick the way it did before this fix (see
+    /// `relayoutVisibleTiles`'s own comment on its reposition-only branch).
+    private(set) var applyContentsCallCountForTesting = 0
+
     init(runtime: OfficeRuntime, path: String, docId: String, sizeTwips: OfficeDocumentSize,
          initialPart: Int, model: PanelDocumentTabModel) {
         self.runtime = runtime
@@ -268,7 +291,7 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         layer?.backgroundColor = resolvedPlaceholderColor()
-        relayoutVisibleTiles() // repaints every currently-placeholder tile in the new appearance's tone
+        repaintAllVisibleTiles() // repaints every currently-placeholder tile in the new appearance's tone
     }
 
     // MARK: - OfficeDocumentCanvasHost (the part-strip's own door)
@@ -375,8 +398,17 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
         // canceled the OS's own inversion, so the canvas scrolled backwards vs. the chat
         // transcript/sidebar/editor in the same window for every default-setting (Natural Scrolling
         // ON) user. `origin -= delta` alone is correct for this view's flipped, top-down origin.
-        let dx = event.scrollingDeltaX
-        let dy = event.scrollingDeltaY
+        applyScrollDelta(dx: event.scrollingDeltaX, dy: event.scrollingDeltaY)
+    }
+
+    /// office live-gate fix #2 (Bug 2, vertical "glue points"): the real path's own body, split out
+    /// of `scrollWheel(with:)` as a thin NSEvent-unwrapping shim over this — a headless test can
+    /// drive the EXACT accumulate/clamp/relayout sequence a real trackpad tick drives without
+    /// constructing a synthetic `NSEvent(.scrollWheel)` (no public AppKit initializer exists for one
+    /// — see `setScrollOriginForTesting`'s own note, immediately below). Unlike that method, THIS one
+    /// goes through `relayoutVisibleTiles()`/`scheduleThrottledSubscribe()` exactly as production
+    /// scrolling does — it is the free-scroll accumulation itself, not a test-only shortcut around it.
+    func applyScrollDelta(dx: CGFloat, dy: CGFloat) {
         scrollOrigin = CGPoint(x: clampedOriginX(scrollOrigin.x - dx), y: clampedOriginY(scrollOrigin.y - dy))
         relayoutVisibleTiles()
         scheduleThrottledSubscribe()
@@ -457,17 +489,29 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
             guard let rect = officeTileScreenRect(key: key, zoomPPT: zoomPPT, scrollOrigin: scrollOrigin) else {
                 continue // TileMath refused this key — never trap, simply nothing to draw for it
             }
-            let tileLayer: CALayer
             if let existing = tileLayers[key] {
-                tileLayer = existing
+                // office live-gate fix #2 (Bug 2's contributing cause, not its root cause — see
+                // `Self.subscribeMarginPoints`' own comment for that): REPOSITION ONLY. This branch
+                // runs on every scroll tick — `relayoutVisibleTiles` has no throttle of its own, by
+                // design (free scrolling must track every event) — so before this fix, the
+                // unconditional `applyContents` call below used to rebuild a fresh `CGImage` from the
+                // SAME bytes and re-hand it to the compositor for every already-correct, unchanged
+                // tile, up to ~120x/sec each: nothing about a tile's PIXELS changes just because the
+                // viewport moved past it. Content now gets (re)applied only where it can actually be
+                // new: once, immediately below, when a layer is first created for a key never seen
+                // before; and from `handleTilesArrived`, when the store genuinely receives new bytes
+                // for a key already on screen. (`viewDidChangeEffectiveAppearance` needs an honest
+                // full repaint too, on every visible tile — that is `repaintAllVisibleTiles()`,
+                // deliberately its own small loop rather than routed back through this method.)
+                existing.frame = rect
             } else {
-                tileLayer = CALayer()
+                let tileLayer = CALayer()
                 tileLayer.contentsGravity = .resize
+                tileLayer.frame = rect
                 hostLayer.addSublayer(tileLayer)
                 tileLayers[key] = tileLayer
+                applyContents(to: tileLayer, key: key, placeholder: placeholder)
             }
-            tileLayer.frame = rect
-            applyContents(to: tileLayer, key: key, placeholder: placeholder)
         }
     }
 
@@ -487,7 +531,22 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
         }
     }
 
+    /// `viewDidChangeEffectiveAppearance`'s own repaint, and its only caller — deliberately NOT
+    /// `relayoutVisibleTiles()`, which (as of office live-gate fix #2) paints a tile's content only
+    /// ONCE, at layer creation, precisely to stay cheap on every scroll tick. An appearance change is
+    /// the opposite shape: rare (a light/dark toggle, never a scroll), and needs EVERY currently
+    /// visible tile repainted in the new tone regardless of whether its layer is old or new — a
+    /// content-bearing tile gets the same image reassigned (harmless; nothing worth optimizing for an
+    /// event this infrequent), a placeholder-toned one gets the tone that actually changed.
+    private func repaintAllVisibleTiles() {
+        let placeholder = resolvedPlaceholderColor()
+        for (key, tileLayer) in tileLayers {
+            applyContents(to: tileLayer, key: key, placeholder: placeholder)
+        }
+    }
+
     private func applyContents(to tileLayer: CALayer, key: TileKey, placeholder: CGColor) {
+        applyContentsCallCountForTesting += 1
         if let entry = runtime.tileStore.tile(docId: docId, key: key), let image = Self.makeImage(pixels: entry.pixels) {
             tileLayer.contents = image
             tileLayer.backgroundColor = nil
@@ -529,7 +588,16 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
 
     private func performSubscribe() {
         guard isMounted, bounds.width > 0, bounds.height > 0 else { return }
-        let viewport = officeViewportTwips(scrollOrigin: scrollOrigin, visibleSize: bounds.size, zoomPPT: zoomPPT)
+        // office live-gate fix #2: pad by one tile span on every edge before asking — see
+        // `Self.subscribeMarginPoints`'s own comment for why. Clamped to >= 0 only on the near edge
+        // (never a NEGATIVE-twips ask); the far edge is left to extend past real content when
+        // `scrollOrigin` is already near 0 — TileMath simply returns tile keys the store has nothing
+        // to serve for yet, the same "placeholders forever past real content" case this file already
+        // accepts everywhere else (`sizeTwips`'s own doc), so a slightly wider ask there is harmless.
+        let margin = Self.subscribeMarginPoints
+        let paddedOrigin = CGPoint(x: max(0, scrollOrigin.x - margin), y: max(0, scrollOrigin.y - margin))
+        let paddedSize = CGSize(width: bounds.width + margin * 2, height: bounds.height + margin * 2)
+        let viewport = officeViewportTwips(scrollOrigin: paddedOrigin, visibleSize: paddedSize, zoomPPT: zoomPPT)
         runtime.subscribeTiles(path: path, part: part, zoomPPT: zoomPPT, viewportTwips: viewport)
     }
 
