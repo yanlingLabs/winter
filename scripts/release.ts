@@ -378,6 +378,43 @@ assertSigned(
   join(app, "Contents", "Resources", "LibreOffice", "Frameworks", "libmergedlo.dylib"),
   "LibreOffice (libmergedlo.dylib, team-ID probe only)",
 );
+// office-editable Task 1's dispatch note, discharged here: the helper's own sandbox profile,
+// verified as its own pin — the release blocker's enforcement point. `office-helper.sb` is a bare
+// SBPL text file, never a Mach-O (assertSigned's TeamIdentifier/Timestamp probe does not apply to
+// it), embedded by project.yml's "Embed NormaOfficeHelper" postCompileScript at
+// Contents/Resources/office-helper.sb — a SIBLING of Contents/Resources/LibreOffice, never inside
+// NormaOfficeHelper's own bundle (it is a bare `type: tool` product with no Resources directory of
+// its own). This is the EXACT path `main.swift`'s `resolveSandboxProfilePath()` reads by default —
+// the only resolution production ever takes (no `--sandbox-profile` override outside DEBUG) — and
+// the helper is fail-closed on a missing/unreadable profile (that file's own `fail(...)` call at
+// boot, verified live by `OfficeSandboxTests.testHelperRefusesToBootWhenSandboxProfileIsMissing`):
+// a release that ships without it does not ship a less-safe office feature, it ships NO office
+// feature at all, silently, since the helper refuses to serve any document. Two things a release
+// must be able to trust here, both asserted:
+//   1. PRESENT — existsSync, deliberately NOT folded into assertSigned's own check above: codesign
+//      --verify --deep --strict (already run, unconditionally, earlier in this section) validates
+//      that everything the signed manifest RECORDS matches its hash — it has no opinion about a
+//      file that was simply never embedded in the first place (an absent postCompileScript step
+//      leaves no trace in that manifest to fail against), which is exactly the failure mode this
+//      existence check exists to catch and that check cannot.
+//   2. VERIFIED — already covered: the same "codesign --verify --deep --strict" a few lines above
+//      this walks the FULL Resources tree (this file included, once present) against the signed
+//      manifest's own recorded hashes and would already have failed this script closed had that
+//      check found office-helper.sb tampered or corrupted — re-running it here would only repeat
+//      an identical, already-passed check at real pipeline cost, not add coverage.
+const officeSandboxProfile = join(app, "Contents", "Resources", "office-helper.sb");
+if (!existsSync(officeSandboxProfile)) {
+  fail(
+    `office-helper.sb not found at ${officeSandboxProfile} — the office helper's own sandbox profile ` +
+      `was not embedded into this build. resolveSandboxProfilePath() resolves exactly this path by ` +
+      `default in production (no --sandbox-profile override outside DEBUG); NormaOfficeHelper refuses ` +
+      `to boot without it (fail-closed, main.swift). A release built this way does not ship a weaker ` +
+      `office feature — it ships NO office feature: every open silently fails. Check project.yml's ` +
+      `"Embed NormaOfficeHelper" postCompileScript actually ran for this configuration.`,
+  );
+}
+console.log(`office-helper.sb present at ${officeSandboxProfile} (integrity already covered by the ` +
+  `codesign --verify --deep --strict run above, over the app's full Resources tree).`);
 
 // --- CEF (panel-cef Task 5) -------------------------------------------------
 // The framework, its five dlopen'd dylibs, and the five helper bundles. `--deep --strict` above
