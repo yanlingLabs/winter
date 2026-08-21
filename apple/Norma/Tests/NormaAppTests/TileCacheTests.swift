@@ -97,6 +97,33 @@ final class TileCacheTests: XCTestCase {
         XCTAssertNotNil(cache.lookup(key: key(0, 0, part: 1)), "other-part key untouched despite same coords")
     }
 
+    /// Office Stage B Task 4, criterion 5 — DECIDED and pinned here, at the exact call site
+    /// (`invalidate`'s own `rectsTwips.contains { $0.intersects(bounds) }`), not merely as a
+    /// consequence of `OfficeTwipsRect.intersects`'s own unit tests: a genuinely DEGENERATE rect
+    /// (zero width/height) INSIDE a non-empty `rectsTwips` array — distinct from the EMPTY-ARRAY
+    /// "bump everything" sentinel this same file's own header explains at length, covered by the
+    /// test right above via `testEmptyInvalidationBumpsEveryCachedKeyAcrossEveryPart` elsewhere in
+    /// this file — must bump NOTHING. This is the semantically correct reading (a zero-area rect
+    /// covers no pixels to invalidate), fails CLOSED, and is exercised here with a REAL cached key
+    /// that a non-degenerate rect at the identical origin WOULD have bumped (proven by the second
+    /// assertion), so this test cannot pass by vacuously matching nothing regardless of the rect.
+    func testADegenerateZeroAreaRectInsideANonEmptyArrayBumpsNothing() throws {
+        var cache = TileCache(capacity: 32)
+        cache.recordPaint(key: key(0, 0), pixels: pixels(1))
+
+        let zeroArea = OfficeTwipsRect(x: 0, y: 0, width: 0, height: 0)
+        let bumpedByZeroArea = cache.invalidate(rectsTwips: [zeroArea], part: 0)
+        XCTAssertEqual(bumpedByZeroArea, [], "a degenerate rect inside a non-empty array must bump nothing")
+        XCTAssertNotNil(cache.lookup(key: key(0, 0)), "the cached entry must survive untouched")
+
+        // Sanity, same origin: a REAL (non-degenerate) rect at (0,0) DOES bump this key — proves
+        // the assertion above is discriminating on area, not merely on this cache never bumping
+        // anything for this key at all.
+        let realRect = try XCTUnwrap(TileMath.tileBoundsTwips(tileX: 0, tileY: 0, zoomPPT: 1000))
+        let bumpedByRealRect = cache.invalidate(rectsTwips: [realRect], part: 0)
+        XCTAssertEqual(bumpedByRealRect, [key(0, 0)], "setup check: a real rect at the same origin does bump this key")
+    }
+
     /// Fix round 1, I1 trap #3's "poisoned cached key" half: `recordPaint` is a PURE, unvalidated
     /// API (by design — validation belongs at the wire boundary, `OfficeHelperServer`'s handlers;
     /// see `TileMath.swift`'s own "wire-input safety bounds" header) that accepts any `TileKey`,

@@ -221,6 +221,31 @@ final class TileMathTests: XCTestCase {
         XCTAssertEqual(a.intersects(b), b.intersects(a))
     }
 
+    /// Office Stage B Task 4, criterion 6 (N5, T3-whole-branch review): `other.x + other.width`
+    /// used to be unchecked `Int64` arithmetic — a callback-derived rect (real `INVALIDATE_TILES`
+    /// data, no magnitude bound of its own past `OfficeDocumentEvent.parseInvalidateTiles`) sitting
+    /// near `Int64.max` would SIGTRAP the helper the same way the pre-fix-round-1 `indexRange`/
+    /// `tileBoundsTwips` traps this same file already regression-tests below. Fails CLOSED (`false`)
+    /// on overflow, on EITHER side of the call (both `self` and `other`) — never a crash, never a
+    /// guess.
+    func testIntersectsChecksArithmeticOverflowOnBothSidesAndFailsClosed() {
+        let ordinary = OfficeTwipsRect(x: 0, y: 0, width: 100, height: 100)
+        let overflowingX = OfficeTwipsRect(x: Int64.max - 5, y: 0, width: 10, height: 10)
+        let overflowingY = OfficeTwipsRect(x: 0, y: Int64.max - 5, width: 10, height: 10)
+
+        // `other` overflows.
+        XCTAssertFalse(ordinary.intersects(overflowingX), "must not trap; must fail closed")
+        XCTAssertFalse(ordinary.intersects(overflowingY))
+        // `self` overflows — the checked arithmetic applies symmetrically, not only to the
+        // argument; `self` is always TileMath-derived in production (never actually this extreme),
+        // but this function's own contract is total regardless of which side a caller passes what.
+        XCTAssertFalse(overflowingX.intersects(ordinary))
+        XCTAssertFalse(overflowingY.intersects(ordinary))
+        // Sanity: two rects that both individually overflow but would (if checked naively with
+        // wraparound) appear to "intersect" via wrapped-negative coordinates must still refuse.
+        XCTAssertFalse(overflowingX.intersects(overflowingX))
+    }
+
     // MARK: - TileKey wire round trip
 
     func testTileKeyJSONRoundTrips() throws {
