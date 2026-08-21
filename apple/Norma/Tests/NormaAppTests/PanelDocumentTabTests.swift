@@ -591,7 +591,9 @@ final class PanelDocumentTabTests: XCTestCase {
 
     private final class RecordingCanvasHost: OfficeDocumentCanvasHost {
         private(set) var requestedParts: [Int] = []
+        private(set) var focusCount = 0
         func setActivePart(_ part: Int) { requestedParts.append(part) }
+        func focusCanvas() { focusCount += 1 }
     }
 
     func testSelectPartRoutesToTheRegisteredCanvasHost() {
@@ -607,6 +609,26 @@ final class PanelDocumentTabTests: XCTestCase {
     func testSelectPartIsAHarmlessNoOpWithNoCanvasMounted() {
         let model = PanelDocumentTabModel(tabId: "t1", path: "/a.xlsx")
         model.selectPart(2) // must not crash
+    }
+
+    // MARK: - Task 8: the formula bar's own "focus-the-cell-on-click" door
+
+    /// Mirrors `testSelectPartRoutesToTheRegisteredCanvasHost` exactly — the formula bar's click
+    /// target is not editable (v1's own scope: in-cell editing on the canvas IS the edit path), so
+    /// a click routes focus back to whichever canvas is mounted instead.
+    func testFocusCanvasRoutesToTheRegisteredCanvasHost() {
+        let model = PanelDocumentTabModel(tabId: "t1", path: "/a.xlsx")
+        let canvasHost = RecordingCanvasHost()
+        model.canvasHost = canvasHost
+
+        model.focusCanvas()
+
+        XCTAssertEqual(canvasHost.focusCount, 1)
+    }
+
+    func testFocusCanvasIsAHarmlessNoOpWithNoCanvasMounted() {
+        let model = PanelDocumentTabModel(tabId: "t1", path: "/a.xlsx")
+        model.focusCanvas() // must not crash
     }
 
     // MARK: - Office Stage B Task 2: saving

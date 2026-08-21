@@ -647,6 +647,13 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost, NSTextInputC
         evaluateResidencyIfNeeded() // office live-gate fix #3: a part switch is one of the brief's own triggers
     }
 
+    /// Office Stage B Task 8 — the formula bar's own door: identical to what a real click on this
+    /// canvas already does (`mouseDown`'s own `window?.makeFirstResponder(self)`), reachable from a
+    /// SwiftUI sibling row that draws no `NSView` of its own to click ON directly.
+    func focusCanvas() {
+        window?.makeFirstResponder(self)
+    }
+
     // MARK: - office-plumbing Task 8 (T6 review F4): the reload seam
 
     /// **Runs on EVERY `updateNSView`, not only when a reload happened** — this SUBSUMES the old

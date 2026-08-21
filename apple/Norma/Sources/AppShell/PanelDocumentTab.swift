@@ -11,6 +11,13 @@ let officePartStripBottomHeight: CGFloat = 32
 let officePartStripRailWidth: CGFloat = 40
 let officePartStripItemSpacing: CGFloat = 2
 
+/// Office Stage B Task 8 — the formula bar's own row height (matches `officePartStripBottomHeight`
+/// for the same "reads as part of the same system" reasoning) and the cell-reference column's
+/// fixed leading width (wide enough for "AA100"-shaped references without the divider jumping
+/// around as the ref's own digit count changes cell to cell).
+let officeFormulaBarHeight: CGFloat = 32
+let officeFormulaBarReferenceWidth: CGFloat = 56
+
 // MARK: - Pure: the failure sentence
 
 /// Should never render — `OfficeRuntimeState.Phase.failed` is always accompanied by a
@@ -206,6 +213,12 @@ func officeDocumentIsDirty(state: OfficeRuntimeState?, path: String?) -> Bool {
 @MainActor
 protocol OfficeDocumentCanvasHost: AnyObject {
     func setActivePart(_ part: Int)
+    /// Office Stage B Task 8 — the formula bar's own door. The bar is DISPLAY ONLY (v1's own
+    /// scope: in-cell editing on the canvas IS the edit path — see `OfficeFormulaBar`'s own
+    /// header), so a click on it does not open an editable field; it hands keyboard focus back to
+    /// the canvas instead, the same `window?.makeFirstResponder(self)` a real click on the canvas
+    /// itself already performs (`OfficeTileCanvasView.mouseDown`).
+    func focusCanvas()
 }
 
 // MARK: - The per-tab model
@@ -356,6 +369,12 @@ final class PanelDocumentTabModel: ObservableObject {
     /// is defensive, not a real path).
     func selectPart(_ part: Int) {
         canvasHost?.setActivePart(part)
+    }
+
+    /// The formula bar's own door — see `OfficeDocumentCanvasHost.focusCanvas`'s own header. A
+    /// no-op with no canvas mounted, mirroring `selectPart`'s identical defensive posture.
+    func focusCanvas() {
+        canvasHost?.focusCanvas()
     }
 
     /// Resolved through the host at fire time, never through a remembered runtime — mirrors
@@ -904,6 +923,14 @@ struct OfficeDocumentSurface: View {
                 OfficeSlideRail(parts: parts, activePart: activePart, onSelect: model.selectPart)
             }
             VStack(spacing: 0) {
+                // Office Stage B Task 8 — spreadsheets only, above the canvas: the formula bar
+                // reads CELL_CURSOR/CELL_FORMULA, both Calc-only LOK callbacks (their own doc
+                // comments on `OfficeDocumentEvent`) — a text/drawing/presentation document has no
+                // cell concept for it to show.
+                if type == .spreadsheet {
+                    OfficeFormulaBar(runtime: runtime, docId: docId, activePart: activePart,
+                                     onFocusCanvas: model.focusCanvas)
+                }
                 OfficeTileCanvasRepresentable(model: model, runtime: runtime, path: path, docId: docId,
                                               sizeTwips: sizeTwips, activePart: activePart)
                 if stripKind == .bottomSheetTabs {
@@ -978,6 +1005,146 @@ struct OfficeSlideRail: View {
         .overlay(alignment: .trailing) { Rectangle().fill(Theme.hairline).frame(width: 1) }
     }
 }
+
+// MARK: - The formula bar (Office Stage B Task 8)
+
+/// The formula bar's own tiny observable slice of `OfficeCursorStore`, scoped to exactly the two
+/// field pairs `OfficeFormulaBar` draws (`cellCursor`/`cellCursorPart`,
+/// `cellFormulaText`/`cellFormulaPart`). Mirrors the canvas's own `cursorChanged`-sink-then-re-read
+/// discipline (`OfficeTileCanvasView.layoutOverlays`) rather than widening `OfficeCursorStore`
+/// itself onto `@Published OfficeRuntimeState` — that store's own header is explicit that
+/// caret/selection/cell-cursor state "must never ride" that graph, and this task's own live probe
+/// found `CELL_FORMULA` fires at up-to-per-keystroke frequency during in-cell edit, the same
+/// keystroke-frequency concern that header already names for the sibling caret/selection fields.
+///
+/// Filters its own re-publish to genuine field changes — `cursorChanged` fires for EVERY
+/// caret/selection/cell field a docId's store folds (five independent LOK callback types, now six
+/// with this task's `CELL_FORMULA`, share the one signal), and a `@Published` reassignment sends on
+/// every call regardless of equality; without the guard, this model would re-publish (and this
+/// small view would re-diff) on every plain-text keystroke in a Writer tab sharing the same
+/// runtime, not just on a Calc cell/content change.
+@MainActor
+final class OfficeFormulaBarModel: ObservableObject {
+    @Published private(set) var cellCursor: OfficeCellCursor?
+    @Published private(set) var cellCursorPart: Int?
+    @Published private(set) var cellFormulaText: String?
+    @Published private(set) var cellFormulaPart: Int?
+
+    private weak var runtime: OfficeRuntime?
+    private var docId: String?
+    private var sink: AnyCancellable?
+
+    /// Idempotent — safe to call on every `(runtime, docId)` SwiftUI hands it (mirrors
+    /// `PanelDocumentTabModel.bind`'s own idempotence rule): only re-subscribes when the pair
+    /// actually changed.
+    func bind(runtime: OfficeRuntime, docId: String) {
+        guard self.runtime !== runtime || self.docId != docId else { return }
+        self.runtime = runtime
+        self.docId = docId
+        sink = runtime.cursorStore.cursorChanged.sink { [weak self] changedDocId in
+            guard let self, changedDocId == docId else { return }
+            self.refresh()
+        }
+        refresh()
+    }
+
+    private func refresh() {
+        guard let runtime, let docId else { return }
+        let state = runtime.cursorStore.state(docId: docId)
+        if state.cellCursor != cellCursor { cellCursor = state.cellCursor }
+        if state.cellCursorPart != cellCursorPart { cellCursorPart = state.cellCursorPart }
+        if state.cellFormulaText != cellFormulaText { cellFormulaText = state.cellFormulaText }
+        if state.cellFormulaPart != cellFormulaPart { cellFormulaPart = state.cellFormulaPart }
+    }
+}
+
+/// Spreadsheets only: the current cell's own A1-style reference plus its content, both DISPLAY
+/// ONLY — v1's own scope, this task's brief: in-cell editing on the canvas IS the edit path; a
+/// fully editable formula bar (typing directly into THIS row to commit a new value) is a disclosed
+/// follow-up, never attempted here. Sits above the canvas, sized against `officePartStripBottomHeight`
+/// (via `officeFormulaBarHeight`, the same value) for the same visual rhythm the sheet strip below
+/// the canvas already establishes.
+struct OfficeFormulaBar: View {
+    let runtime: OfficeRuntime
+    let docId: String
+    let activePart: Int
+    /// Routes to `PanelDocumentTabModel.focusCanvas()` — see `OfficeDocumentCanvasHost.focusCanvas`'s
+    /// own header for why a click here does not open an editable field: the bar LOOKS like an
+    /// input row every spreadsheet app trains a user to expect, so a click still needs to DO
+    /// something rather than silently swallow the gesture — it hands keyboard focus back to the
+    /// canvas, where in-cell editing actually happens.
+    let onFocusCanvas: () -> Void
+
+    @StateObject private var cursorModel = OfficeFormulaBarModel()
+
+    var body: some View {
+        HStack(spacing: panelEditorChromeGap) {
+            Text(referenceText)
+                .font(Typography.captionMono(.medium))
+                .foregroundStyle(Color.primary)
+                .lineLimit(1)
+                .frame(minWidth: officeFormulaBarReferenceWidth, alignment: .leading)
+
+            Rectangle()
+                .fill(Theme.hairline)
+                .frame(width: 1)
+                .padding(.vertical, officePartStripItemSpacing * 3)
+
+            Text(contentText.isEmpty ? officeFormulaBarEmptyPlaceholder : contentText)
+                .font(Typography.controlMono())
+                .foregroundStyle(contentText.isEmpty ? Theme.textMuted : Color.primary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, panelTabPillInset)
+        .frame(height: officeFormulaBarHeight)
+        .contentShape(Rectangle())
+        .onTapGesture { onFocusCanvas() }
+        .background(Theme.elevatedSurface)
+        .overlay(alignment: .bottom) { Rectangle().fill(Theme.hairline).frame(height: 1) }
+        .onChange(of: docId, initial: true) { _, newDocId in cursorModel.bind(runtime: runtime, docId: newDocId) }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(referenceText.isEmpty ? "Formula bar" : "\(referenceText): \(contentText.isEmpty ? "empty" : contentText)")
+    }
+
+    /// Blank while the cell cursor's own stamped part disagrees with the canvas's current part —
+    /// mirrors `OfficeTileCanvasView.layoutOverlays`'s identical "hides every overlay whose
+    /// STAMPED part disagrees" rule for the cell-cursor RECT (this bar's text-only sibling of that
+    /// same overlay): a ref computed against a sheet the user has since switched away from must
+    /// never display as though it were the sheet on screen right now.
+    ///
+    /// **Also blank during in-cell EDIT** (`CELL_CURSOR`'s own `"EMPTY"` sentinel, Task 5's
+    /// finding) — a disclosed choice (this task's own report): the canvas's cell-cursor RECT
+    /// already disappears the instant edit mode starts, and this keeps the bar's ref consistent
+    /// with that established visual language rather than inventing a SECOND rule (retaining the
+    /// last known ref) that would read the ref and the canvas's own overlay disagreeing about
+    /// whether "which cell" is still a well-defined question right now.
+    private var referenceText: String {
+        guard cursorModel.cellCursorPart == activePart, case .at(_, let column, let row) = cursorModel.cellCursor else {
+            return ""
+        }
+        return officeCellReference(column: column, row: row)
+    }
+
+    /// Gated on the SAME part check as `referenceText` — content from a part the user has since
+    /// switched away from must never display as current. **UNLIKE the ref, this does NOT blank
+    /// during in-cell edit**: this task's own live probe found `CELL_FORMULA` keeps firing per
+    /// keystroke while `CELL_CURSOR` itself sits at `.empty`, so the bar can keep showing the real,
+    /// live, uncommitted edit-buffer text even while the ref goes quiet — the same thing a real
+    /// spreadsheet's own formula bar does while you type.
+    private var contentText: String {
+        guard cursorModel.cellFormulaPart == activePart else { return "" }
+        return cursorModel.cellFormulaText ?? ""
+    }
+}
+
+/// The content row's own empty-cell placeholder — distinguishes "this cell has no content" (a
+/// real, observed shape — this task's own live probe: an empty cell sends the empty string, not
+/// silence) from "nothing is known yet" (`cellFormulaText == nil`, before the first firing);
+/// both currently render the SAME muted dash, a disclosed v1 simplification — see task-8-report.md.
+let officeFormulaBarEmptyPlaceholder = "\u{2014}" // em dash
 
 // MARK: - The calm states
 
