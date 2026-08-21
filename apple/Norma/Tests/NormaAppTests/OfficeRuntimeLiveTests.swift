@@ -2357,6 +2357,127 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         _ = host.teardownAllOfficeRuntimesAndStopHelper()
     }
 
+    /// Office Stage B Task 5 — **the brief's own named acceptance drill: compose é, through the REAL
+    /// `OfficeTileCanvasView`'s `NSTextInputClient` conformance, against real LOK, with save+reopen
+    /// PLACEMENT assertions** ("the T4 lesson" — assert WHERE text landed, never merely that
+    /// something became dirty or that pixels changed).
+    ///
+    /// **Procedural, not a captured real option-e keystroke** — deliberate, per this task's own
+    /// review: a genuine dead-key resolution (`NSEvent`'s own Option-e-then-e sequence) depends on
+    /// the MACHINE's active keyboard layout/input source, which a CI runner cannot be guaranteed to
+    /// have set to US/ABC. Calling `view.setMarkedText`/`view.insertText` directly exercises the
+    /// EXACT SAME code path a real dead-key sequence would drive AppKit into (macOS's own Option-e
+    /// composition marks the accent, then commits "é" through these same two `NSTextInputClient`
+    /// entry points — this is not a simplification of the mechanism, it IS the mechanism), without
+    /// depending on layout. The underline-decoration half of the brief's own "marked-text underline
+    /// showed" criterion is already proven, empirically, by `testExtTextInputMarksCommitsAnd
+    /// CancelsAgainstRealLOKThroughSaveAndReopen`'s own `pixelsMarked != pixelsCommitted` assertion
+    /// (generic "xyz", the SAME `.input`/`.end` mechanism `setMarkedText`/`insertText` themselves
+    /// call) — this drill's own job is different: prove the CANVAS's conformance reaches that SAME
+    /// mechanism correctly when driven the way a real input method actually drives it, and that
+    /// EXACTLY one é lands, never a stray plain "e" alongside it (the double-delivery failure mode
+    /// this task's whole `interpretKeyEvents` seam exists to prevent — see `keyDown`'s own header).
+    func testComposedEAcuteLandsExactlyOnceThroughTheRealCanvasWithNoStrayPlainE() async throws {
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
+                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                        + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
+        let vendorRoot = Self.vendorProductSetRoot
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
+                      "LibreOffice vendor tree not present at \(vendorRoot.path) — run "
+                        + "`bun run libreoffice:fetch` from the repo root.")
+        let fixturePath = Self.fixturesRoot.appendingPathComponent("gate.odt").path
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: fixturePath), "gate.odt fixture missing")
+
+        let stateDir = makeScratchDirectory()
+        let directory = SessionDirectory(lister: { [] })
+        let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        host.makeOfficeHelperSupervisor = {
+            OfficeHelperSupervisor(configuration: OfficeHelperSupervisor.Configuration(
+                helperExecutableURL: helperURL,
+                socketDirectory: stateDir,
+                extraArguments: ["--lok-root", vendorRoot.path, "--sandbox-profile", Self.sandboxProfilePath.path]))
+        }
+        let runtime = host.officeRuntime(for: "S1")
+
+        let scratchDir = makeScratchDirectory()
+        let docPath = scratchDir.appendingPathComponent("composed-eacute-drill.odt").path
+        try Data(contentsOf: URL(fileURLWithPath: fixturePath)).write(to: URL(fileURLWithPath: docPath))
+
+        runtime.open(docPath)
+        let settled = await waitUntil(timeout: 90) {
+            runtime.stateSnapshot.documents[docPath] != nil || runtime.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(settled, "never settled — phase: \(runtime.stateSnapshot.phase)")
+        guard let doc = runtime.stateSnapshot.documents[docPath] else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("did not open: \(runtime.stateSnapshot.openFailures[docPath] ?? "no reason recorded")")
+        }
+        XCTAssertEqual(doc.type, .text, "setup: this drill is about the text-document gate")
+
+        let model = PanelDocumentTabModel(tabId: "composed-eacute-drill", path: docPath)
+        let view = OfficeTileCanvasView(runtime: runtime, path: docPath, docId: doc.docId,
+                                        sizeTwips: doc.sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 512, height: 512)
+        view.mount()
+
+        // A real, invisible window — `NSTextInputClient`'s own `interpretKeyEvents`/`firstRect`
+        // machinery is AppKit responder-chain infrastructure, the same real-window requirement
+        // `testTypingOnSheetTwoLandsOnSheetTwoNotSheetOneThroughSaveAndReopen`'s own header already
+        // established for `keyDown`/`mouseDown` (a window-less `NSView.convert(_:to:nil)` silently
+        // produces wrong coordinates rather than crashing — not something to re-risk here).
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 512, height: 512),
+                              styleMask: [.borderless], backing: .buffered, defer: true)
+        window.contentView = view
+        _ = window.makeFirstResponder(view)
+
+        // `postRealEdit`'s own proven-safe click position — the start of a text document's own body
+        // — driven through the REAL view, not the raw client, so the caret this drill composes
+        // against is the SAME caret `firstRect(forCharacterRange:)` would report mid-composition.
+        let clickPoint = NSPoint(x: 2, y: 2) // view-bounds space, well inside the origin tile
+        let windowClickPoint = view.convert(clickPoint, to: nil)
+        func makeMouseEvent(_ type: NSEvent.EventType) -> NSEvent {
+            try! XCTUnwrap(NSEvent.mouseEvent(with: type, location: windowClickPoint, modifierFlags: [],
+                                              timestamp: 0, windowNumber: window.windowNumber, context: nil,
+                                              eventNumber: 0, clickCount: 1, pressure: 1))
+        }
+        view.mouseDown(with: makeMouseEvent(.leftMouseDown))
+        view.mouseUp(with: makeMouseEvent(.leftMouseUp))
+        await runtime.drainInputChainForTesting()
+
+        // The composition itself — two `NSTextInputClient` calls, the exact pair a real Option-e
+        // (marks the pending accent) then e (resolves and commits "é") sequence drives AppKit into.
+        XCTAssertFalse(view.hasMarkedText(), "setup: nothing composing before this drill starts")
+        view.setMarkedText("´", selectedRange: NSRange(location: 1, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
+        XCTAssertTrue(view.hasMarkedText(), "setMarkedText must register composition as active")
+        view.insertText("é", replacementRange: NSRange(location: NSNotFound, length: 0))
+        XCTAssertFalse(view.hasMarkedText(), "insertText must end composition on commit")
+        await runtime.drainInputChainForTesting()
+
+        let becameDirty = await waitUntil(timeout: 15) { runtime.stateSnapshot.documents[docPath]?.dirty == true }
+        XCTAssertTrue(becameDirty, "composing and committing é never marked the document dirty")
+
+        let beforeSaveStat = officeFileStat(atPath: docPath)
+        runtime.save(docPath)
+        let saveLanded = await waitUntil(timeout: 30) { officeFileStat(atPath: docPath) != beforeSaveStat }
+        XCTAssertTrue(saveLanded, "the save never landed on disk")
+        XCTAssertNil(runtime.stateSnapshot.documentBanners[docPath], "no save-failed banner")
+
+        // The direct, off-disk placement proof — not the in-memory model, not merely "dirty" or
+        // "pixels changed." `hasPrefix`, not `contains`: the click landed at the very start of the
+        // body (this fixture's own seed text, "NORMA GATE...", follows it), so the ONLY way this
+        // could read anything OTHER than "é" first is a stray character landing ahead of it — the
+        // precise, disk-level version of "no stray e" the brief's own acceptance criterion names.
+        let body = strippedODFBodyText(try readODFContentXML(atPath: docPath))
+        XCTAssertTrue(body.hasPrefix("é"), "expected the body to start with exactly one é, got: \"\(body)\"")
+        XCTAssertFalse(body.hasPrefix("eé"), "a stray plain \"e\" landed BEFORE the composed é — the "
+                      + "double-delivery failure mode this task's whole seam exists to prevent")
+        XCTAssertFalse(body.hasPrefix("ée"), "a stray plain \"e\" landed AFTER the composed é")
+
+        view.unmount()
+        _ = host.teardownAllOfficeRuntimesAndStopHelper()
+    }
+
     /// **Task 2b fix round 1 (review IMPORTANT-1), live proof, minimal by design** — the unit tests
     /// in `OfficeStageDocumentTests` already prove the STAGED FILE's own permissions/flags are
     /// normalized; this is the one live check that LOK itself treats the result as genuinely
