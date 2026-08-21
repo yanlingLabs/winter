@@ -3045,4 +3045,454 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         canvas.unmount()
         _ = host.teardownAllOfficeRuntimesAndStopHelper()
     }
+
+    // MARK: - Office Stage B Task 6: clipboard, undo/redo, the second ("agent") view
+
+    /// `com.sun.star.awt.Key`'s `KEY_A`..`KEY_Z` run 512..537, alphabetically — confirmed against
+    /// this file's own `postRealEdit` table (`T`=531=512+19, `E`=516=512+4, `D`=515=512+3,
+    /// `I`=520=512+8, every one consistent with `512 + (letter's 0-based alphabet index)`). A
+    /// closed-form replacement for `postRealEdit`'s own small hardcoded table — this task's own
+    /// drills need letters that table does not cover.
+    private func rawUppercaseLetterKeyCode(_ letter: Character) -> Int {
+        512 + Int(letter.asciiValue! - Character("A").asciiValue!)
+    }
+
+    /// Types `marker` (uppercase ASCII letters only) via raw `postKey` calls — the SAME wire verb
+    /// `OfficeTileCanvasView.forwardKeyEvent` uses in production, called directly here exactly like
+    /// `postRealEdit` does, but WITHOUT that helper's own leading click or trailing Return: this
+    /// task's own drills click (or don't) and select (or don't) in their own, differing shapes
+    /// around this call.
+    private func postRawUppercaseMarker(client: OfficeHelperClient, docId: String, marker: String) async throws {
+        for character in marker {
+            let keyCode = rawUppercaseLetterKeyCode(character)
+            let charCode = Int(character.asciiValue!)
+            try await client.postKey(docId: docId, part: 0, type: .keyInput, charCode: charCode, keyCode: keyCode)
+            try await client.postKey(docId: docId, part: 0, type: .keyUp, charCode: charCode, keyCode: keyCode)
+        }
+    }
+
+    /// Shift+Left, `count` times — selects backward from the current caret. `1026`/`0x1000` are
+    /// `OfficeInputCodes.Key.left`/`.keyShift` (production values, re-derived here rather than
+    /// imported: this file drives the wire directly with no `NSEvent` anywhere, the same posture
+    /// `postRealEdit`'s own local `keyCodes` table already takes). The keyboard-driven selection
+    /// door T5's own probe already proved fires real `TEXT_SELECTION` callbacks; this drill does
+    /// not need to observe them directly — the save+reopen placement assertion is the proof of
+    /// record, per this repo's own house standard.
+    private func postRawShiftLeft(client: OfficeHelperClient, docId: String, count: Int) async throws {
+        let keyCode = 1026 | 0x1000
+        for _ in 0..<count {
+            try await client.postKey(docId: docId, part: 0, type: .keyInput, charCode: 0, keyCode: keyCode)
+            try await client.postKey(docId: docId, part: 0, type: .keyUp, charCode: 0, keyCode: keyCode)
+        }
+    }
+
+    /// Shift+Right, `count` times — extends (or, from an already-selected range whose active end
+    /// sits at the LEFT edge, symmetrically SHRINKS) a selection rightward.
+    ///
+    /// **Not a bare Right arrow — a live-test-caught correction.** A plain Right press while a
+    /// Shift+Left-built selection is active was tried FIRST and does NOT collapse to the
+    /// selection's right edge on this LOK build: the first real run of
+    /// `testClipboardCopyThenPasteDoublesTheTypedTextThroughSaveAndReopen` produced
+    /// `"CCOPYMEOPYME"` instead of the expected `"COPYMECOPYME"` — a single stray leading `C` and
+    /// a truncated second copy, the exact signature of the paste landing at position 1 (the
+    /// selection's LEFT edge, PLUS one extra step) rather than position 6 (its RIGHT edge, no
+    /// step). Shift+Right the SAME number of times the original Shift+Left ran walks the ACTIVE
+    /// end back to the ANCHOR exactly — the selection shrinks to nothing exactly AT the anchor
+    /// position, with no separate "which edge does a plain arrow collapse to" convention to get
+    /// wrong, unlike a bare arrow key's collapse behavior on this build.
+    private func postRawShiftRight(client: OfficeHelperClient, docId: String, count: Int) async throws {
+        let keyCode = 1027 | 0x1000
+        for _ in 0..<count {
+            try await client.postKey(docId: docId, part: 0, type: .keyInput, charCode: 0, keyCode: keyCode)
+            try await client.postKey(docId: docId, part: 0, type: .keyUp, charCode: 0, keyCode: keyCode)
+        }
+    }
+
+    /// Office Stage B Task 6 — the brief's own named clipboard drill: type, select, copy, move the
+    /// caret, paste — the pasted text must land a SECOND time, proven off disk (save+reopen),
+    /// never merely "the document became dirty" or "pixels changed" (the T4 lesson, carried
+    /// forward by this task's own brief).
+    func testClipboardCopyThenPasteDoublesTheTypedTextThroughSaveAndReopen() async throws {
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
+                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                        + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
+        let vendorRoot = Self.vendorProductSetRoot
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
+                      "LibreOffice vendor tree not present at \(vendorRoot.path) — run "
+                        + "`bun run libreoffice:fetch` from the repo root.")
+        let fixturePath = Self.fixturesRoot.appendingPathComponent("gate.odt").path
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: fixturePath), "gate.odt fixture missing")
+
+        let stateDir = makeScratchDirectory()
+        let directory = SessionDirectory(lister: { [] })
+        let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        host.makeOfficeHelperSupervisor = {
+            OfficeHelperSupervisor(configuration: OfficeHelperSupervisor.Configuration(
+                helperExecutableURL: helperURL,
+                socketDirectory: stateDir,
+                extraArguments: ["--lok-root", vendorRoot.path, "--sandbox-profile", Self.sandboxProfilePath.path]))
+        }
+        let runtime = host.officeRuntime(for: "S1")
+
+        let scratchDir = makeScratchDirectory()
+        let docPath = scratchDir.appendingPathComponent("clipboard-drill.odt").path
+        try Data(contentsOf: URL(fileURLWithPath: fixturePath)).write(to: URL(fileURLWithPath: docPath))
+
+        runtime.open(docPath)
+        let settled = await waitUntil(timeout: 90) {
+            runtime.stateSnapshot.documents[docPath] != nil || runtime.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(settled, "never settled — phase: \(runtime.stateSnapshot.phase)")
+        guard let doc = runtime.stateSnapshot.documents[docPath] else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("did not open: \(runtime.stateSnapshot.openFailures[docPath] ?? "no reason recorded")")
+        }
+        guard let client = host.officeHelperSupervisor?.client else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("no live client to drive this drill through")
+        }
+
+        // Click at the document's own start — the same proven-safe position `postRealEdit` uses.
+        try await client.postMouse(docId: doc.docId, part: 0, type: .buttonDown, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await client.postMouse(docId: doc.docId, part: 0, type: .buttonUp, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+
+        let marker = "COPYME"
+        try await postRawUppercaseMarker(client: client, docId: doc.docId, marker: marker)
+        try await postRawShiftLeft(client: client, docId: doc.docId, count: marker.count)
+
+        let copied = try await client.clipboardCopy(docId: doc.docId, part: 0)
+        XCTAssertEqual(copied, marker, "clipboardCopy must return exactly the selected text")
+
+        // Collapse the selection back to its right edge (Shift+Right, symmetrically undoing the
+        // Shift+Left above — see `postRawShiftRight`'s own header for why NOT a bare Right press),
+        // then paste — THIS is what actually doubles the content: pasting while still selected
+        // would REPLACE the selection instead, leaving the text unchanged, the exact false
+        // positive this ordering avoids.
+        try await postRawShiftRight(client: client, docId: doc.docId, count: marker.count)
+        try await client.clipboardPaste(docId: doc.docId, part: 0, text: copied)
+
+        let beforeSaveStat = officeFileStat(atPath: docPath)
+        runtime.save(docPath)
+        let saveLanded = await waitUntil(timeout: 30) { officeFileStat(atPath: docPath) != beforeSaveStat }
+        XCTAssertTrue(saveLanded, "the post-paste save never landed on disk")
+
+        let body = strippedODFBodyText(try readODFContentXML(atPath: docPath))
+        XCTAssertTrue(body.contains(marker + marker), "the pasted text must land a SECOND time, "
+                      + "immediately after the first — got: \"\(body)\"")
+
+        _ = host.teardownAllOfficeRuntimesAndStopHelper()
+    }
+
+    /// Office Stage B Task 6 — the brief's own explicit ask: verify EMPIRICALLY whether
+    /// `.uno:Cut` works headless (`LOKBridge.clipboardCutOnDedicatedThread`'s own choice) rather
+    /// than the copy+delete fallback the brief itself names as the alternative. Two claims, both
+    /// checked off disk: (1) the cut text matches what was selected; (2) the selection is GONE
+    /// from the saved body — never merely "the document became dirty."
+    func testClipboardCutRemovesTheSelectionHeadlessAndReturnsItsText() async throws {
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
+                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                        + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
+        let vendorRoot = Self.vendorProductSetRoot
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
+                      "LibreOffice vendor tree not present at \(vendorRoot.path) — run "
+                        + "`bun run libreoffice:fetch` from the repo root.")
+        let fixturePath = Self.fixturesRoot.appendingPathComponent("gate.odt").path
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: fixturePath), "gate.odt fixture missing")
+
+        let stateDir = makeScratchDirectory()
+        let directory = SessionDirectory(lister: { [] })
+        let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        host.makeOfficeHelperSupervisor = {
+            OfficeHelperSupervisor(configuration: OfficeHelperSupervisor.Configuration(
+                helperExecutableURL: helperURL,
+                socketDirectory: stateDir,
+                extraArguments: ["--lok-root", vendorRoot.path, "--sandbox-profile", Self.sandboxProfilePath.path]))
+        }
+        let runtime = host.officeRuntime(for: "S1")
+
+        let scratchDir = makeScratchDirectory()
+        let docPath = scratchDir.appendingPathComponent("clipboard-cut-drill.odt").path
+        try Data(contentsOf: URL(fileURLWithPath: fixturePath)).write(to: URL(fileURLWithPath: docPath))
+
+        runtime.open(docPath)
+        let settled = await waitUntil(timeout: 90) {
+            runtime.stateSnapshot.documents[docPath] != nil || runtime.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(settled, "never settled — phase: \(runtime.stateSnapshot.phase)")
+        guard let doc = runtime.stateSnapshot.documents[docPath] else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("did not open: \(runtime.stateSnapshot.openFailures[docPath] ?? "no reason recorded")")
+        }
+        guard let client = host.officeHelperSupervisor?.client else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("no live client to drive this drill through")
+        }
+
+        try await client.postMouse(docId: doc.docId, part: 0, type: .buttonDown, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await client.postMouse(docId: doc.docId, part: 0, type: .buttonUp, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+
+        let marker = "CUTME"
+        try await postRawUppercaseMarker(client: client, docId: doc.docId, marker: marker)
+        try await postRawShiftLeft(client: client, docId: doc.docId, count: marker.count)
+
+        let cut = try await client.clipboardCut(docId: doc.docId, part: 0)
+        XCTAssertEqual(cut, marker, "clipboardCut must return exactly the text that was selected")
+
+        let beforeSaveStat = officeFileStat(atPath: docPath)
+        runtime.save(docPath)
+        let saveLanded = await waitUntil(timeout: 30) { officeFileStat(atPath: docPath) != beforeSaveStat }
+        XCTAssertTrue(saveLanded, "the post-cut save never landed on disk")
+
+        let body = strippedODFBodyText(try readODFContentXML(atPath: docPath))
+        XCTAssertFalse(body.contains(marker), "`.uno:Cut` must actually remove the selection from "
+                      + "the saved document — got: \"\(body)\" — EMPIRICAL FINDING for the report: "
+                      + "if this assertion fails, `.uno:Cut` does not work headless and the "
+                      + "copy+delete fallback the brief itself names is required instead")
+
+        _ = host.teardownAllOfficeRuntimesAndStopHelper()
+    }
+
+    /// Office Stage B Task 6 — the brief's own named undo ladder: type -> undo -> gone -> redo ->
+    /// back. **Bounded, not single-shot**: LO groups a typed run into ONE undo action in the
+    /// common case, but this is not assumed here — the loop undoes up to `marker.count` times,
+    /// stopping the instant the marker is gone off disk, and RECORDS how many undos it actually
+    /// took (a real, disclosed characterization finding, not a hardcoded assumption about
+    /// grouping).
+    func testUndoLadderTypeThenUndoRemovesTheTypedTextThenRedoRestoresIt() async throws {
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
+                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                        + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
+        let vendorRoot = Self.vendorProductSetRoot
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
+                      "LibreOffice vendor tree not present at \(vendorRoot.path) — run "
+                        + "`bun run libreoffice:fetch` from the repo root.")
+        let fixturePath = Self.fixturesRoot.appendingPathComponent("gate.odt").path
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: fixturePath), "gate.odt fixture missing")
+
+        let stateDir = makeScratchDirectory()
+        let directory = SessionDirectory(lister: { [] })
+        let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        host.makeOfficeHelperSupervisor = {
+            OfficeHelperSupervisor(configuration: OfficeHelperSupervisor.Configuration(
+                helperExecutableURL: helperURL,
+                socketDirectory: stateDir,
+                extraArguments: ["--lok-root", vendorRoot.path, "--sandbox-profile", Self.sandboxProfilePath.path]))
+        }
+        let runtime = host.officeRuntime(for: "S1")
+
+        let scratchDir = makeScratchDirectory()
+        let docPath = scratchDir.appendingPathComponent("undo-ladder-drill.odt").path
+        try Data(contentsOf: URL(fileURLWithPath: fixturePath)).write(to: URL(fileURLWithPath: docPath))
+
+        runtime.open(docPath)
+        let settled = await waitUntil(timeout: 90) {
+            runtime.stateSnapshot.documents[docPath] != nil || runtime.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(settled, "never settled — phase: \(runtime.stateSnapshot.phase)")
+        guard let doc = runtime.stateSnapshot.documents[docPath] else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("did not open: \(runtime.stateSnapshot.openFailures[docPath] ?? "no reason recorded")")
+        }
+        guard let client = host.officeHelperSupervisor?.client else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("no live client to drive this drill through")
+        }
+
+        try await client.postMouse(docId: doc.docId, part: 0, type: .buttonDown, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await client.postMouse(docId: doc.docId, part: 0, type: .buttonUp, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+
+        let marker = "UNDO"
+        try await postRawUppercaseMarker(client: client, docId: doc.docId, marker: marker)
+
+        var beforeStat = officeFileStat(atPath: docPath)
+        runtime.save(docPath)
+        _ = await waitUntil(timeout: 30) { officeFileStat(atPath: docPath) != beforeStat }
+        let bodyAfterTyping = strippedODFBodyText(try readODFContentXML(atPath: docPath))
+        XCTAssertTrue(bodyAfterTyping.contains(marker), "setup: the marker must actually be "
+                      + "present before this drill starts undoing anything — got: "
+                      + "\"\(bodyAfterTyping)\"")
+
+        var undosTaken = 0
+        var bodyAfterUndo = bodyAfterTyping
+        while bodyAfterUndo.contains(marker), undosTaken < marker.count {
+            try await client.undo(docId: doc.docId)
+            undosTaken += 1
+            beforeStat = officeFileStat(atPath: docPath)
+            runtime.save(docPath)
+            _ = await waitUntil(timeout: 30) { officeFileStat(atPath: docPath) != beforeStat }
+            bodyAfterUndo = strippedODFBodyText(try readODFContentXML(atPath: docPath))
+        }
+        XCTAssertFalse(bodyAfterUndo.contains(marker), "the marker must be fully gone after at "
+                      + "most \(marker.count) undo(s) — got: \"\(bodyAfterUndo)\" after "
+                      + "\(undosTaken) undo(s)")
+        NSLog("[T6 undo ladder] \(undosTaken) undo(s) removed a \(marker.count)-character typed run")
+
+        // Redo — the SAME number of times undo took, restoring exactly what was undone.
+        for _ in 0..<undosTaken {
+            try await client.redo(docId: doc.docId)
+        }
+        beforeStat = officeFileStat(atPath: docPath)
+        runtime.save(docPath)
+        _ = await waitUntil(timeout: 30) { officeFileStat(atPath: docPath) != beforeStat }
+        let bodyAfterRedo = strippedODFBodyText(try readODFContentXML(atPath: docPath))
+        XCTAssertTrue(bodyAfterRedo.contains(marker), "redo must restore the typed text — got: "
+                      + "\"\(bodyAfterRedo)\"")
+
+        _ = host.teardownAllOfficeRuntimesAndStopHelper()
+    }
+
+    /// Office Stage B Task 6 — **the headline finding**: two LOK views on ONE document, cross-view
+    /// undo, CHARACTERIZED rather than assumed. Per this task's own dispatch context (echoing the
+    /// plan's own PARKED note): LO core's undo manager is DOCUMENT-scoped and collaborative LOK
+    /// uses undo-REPAIR rather than per-view stacks, so "view B's edits don't pollute view A's
+    /// stack" is a claim to DISCOVER, not assume going in.
+    ///
+    /// **Closes the exact sequencing trap this task's own advisor named**: `postKeyEvent` is
+    /// `PostUserEvent`-async on LOK's own side, so a bare wire ack does not itself prove an edit
+    /// has been PROCESSED — only a subsequent SYNCHRONOUS LOK call (`saveAs`, on the SAME
+    /// dedicated thread, queued strictly after the posted keys) can observe the cumulative effect,
+    /// the same reasoning this whole input pipeline has rested on since Task 4's own live drills.
+    /// This drill therefore SAVES AND DUMPS BYTES after EACH edit, proving both A's and B's edits
+    /// landed BEFORE ever touching undo — never inferring "it must have landed by now" from timing
+    /// alone.
+    ///
+    /// Every one of the four possible outcomes below is a PASSING characterization — only a WRONG
+    /// claim about which one occurred would be a failure. The actual, empirically observed outcome
+    /// is pinned by the final assertion below (tightened after a real run against real LOK — see
+    /// this test's own trailing comment for the raw finding).
+    func testTwoLOKViewsOnOneDocumentCharacterizesCrossViewUndo() async throws {
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
+                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                        + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
+        let vendorRoot = Self.vendorProductSetRoot
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
+                      "LibreOffice vendor tree not present at \(vendorRoot.path) — run "
+                        + "`bun run libreoffice:fetch` from the repo root.")
+        let fixturePath = Self.fixturesRoot.appendingPathComponent("gate.odt").path
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: fixturePath), "gate.odt fixture missing")
+
+        let stateDir = makeScratchDirectory()
+        let directory = SessionDirectory(lister: { [] })
+        let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        host.makeOfficeHelperSupervisor = {
+            OfficeHelperSupervisor(configuration: OfficeHelperSupervisor.Configuration(
+                helperExecutableURL: helperURL,
+                socketDirectory: stateDir,
+                extraArguments: ["--lok-root", vendorRoot.path, "--sandbox-profile", Self.sandboxProfilePath.path]))
+        }
+        let runtime = host.officeRuntime(for: "S1")
+
+        let scratchDir = makeScratchDirectory()
+        let docPath = scratchDir.appendingPathComponent("two-view-undo-drill.odt").path
+        try Data(contentsOf: URL(fileURLWithPath: fixturePath)).write(to: URL(fileURLWithPath: docPath))
+
+        runtime.open(docPath)
+        let settled = await waitUntil(timeout: 90) {
+            runtime.stateSnapshot.documents[docPath] != nil || runtime.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(settled, "never settled — phase: \(runtime.stateSnapshot.phase)")
+        guard let doc = runtime.stateSnapshot.documents[docPath] else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("did not open: \(runtime.stateSnapshot.openFailures[docPath] ?? "no reason recorded")")
+        }
+        guard let client = host.officeHelperSupervisor?.client else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("no live client to drive this drill through")
+        }
+
+        // The two-writer groundwork itself: mint the agent view.
+        let viewIdB = try await client.createAgentView(docId: doc.docId)
+        XCTAssertGreaterThanOrEqual(viewIdB, 0, "a real LOK view id — the -1 no-view sentinel "
+                                    + "would mean createView itself silently failed")
+
+        // A SECOND createAgentView for the SAME docId must be refused, not silently tolerated —
+        // `OfficeWireFrame.createView`'s own header states this as deliberate.
+        do {
+            _ = try await client.createAgentView(docId: doc.docId)
+            XCTFail("a second createAgentView for the same docId must be refused")
+        } catch OfficeHelperClientError.serverError {
+            // expected
+        }
+
+        // Edit via A (the primary/implicit view): click, type, PROVE it landed before B ever
+        // touches the document — a save+dump, not just the wire ack (see this test's own header).
+        try await client.postMouse(docId: doc.docId, part: 0, type: .buttonDown, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await client.postMouse(docId: doc.docId, part: 0, type: .buttonUp, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await postRawUppercaseMarker(client: client, docId: doc.docId, marker: "AAAA")
+
+        var beforeStat = officeFileStat(atPath: docPath)
+        runtime.save(docPath)
+        _ = await waitUntil(timeout: 30) { officeFileStat(atPath: docPath) != beforeStat }
+        let bodyAfterA = strippedODFBodyText(try readODFContentXML(atPath: docPath))
+        XCTAssertTrue(bodyAfterA.contains("AAAA"), "view A's own edit must land before this drill "
+                      + "proceeds to view B — got: \"\(bodyAfterA)\"")
+
+        // Edit via B (the agent view), through `agentKeyEvent` — the door that exists ONLY for
+        // this drill. Deliberately not clicked first: there is no `agentMouseEvent` door (out of
+        // this task's scope), so B's edit lands wherever LOK's own fresh-view caret default is;
+        // this drill's own concern is whether the edit lands and how undo treats it, not where.
+        for character in "BBBB" {
+            let keyCode = rawUppercaseLetterKeyCode(character)
+            let charCode = Int(character.asciiValue!)
+            try await client.agentKeyEvent(docId: doc.docId, part: 0, type: .keyInput, charCode: charCode, keyCode: keyCode)
+            try await client.agentKeyEvent(docId: doc.docId, part: 0, type: .keyUp, charCode: charCode, keyCode: keyCode)
+        }
+
+        beforeStat = officeFileStat(atPath: docPath)
+        runtime.save(docPath)
+        _ = await waitUntil(timeout: 30) { officeFileStat(atPath: docPath) != beforeStat }
+        let bodyAfterB = strippedODFBodyText(try readODFContentXML(atPath: docPath))
+        XCTAssertTrue(bodyAfterB.contains("AAAA"), "view A's edit must still be there after view "
+                      + "B's own edit — got: \"\(bodyAfterB)\"")
+        XCTAssertTrue(bodyAfterB.contains("BBBB"), "view B's own edit must land, PROVEN off disk "
+                      + "before undo ever runs — got: \"\(bodyAfterB)\"")
+
+        // THE drill: undo via view A's own primary-view door.
+        try await client.undo(docId: doc.docId)
+
+        beforeStat = officeFileStat(atPath: docPath)
+        runtime.save(docPath)
+        _ = await waitUntil(timeout: 30) { officeFileStat(atPath: docPath) != beforeStat }
+        let bodyAfterUndo = strippedODFBodyText(try readODFContentXML(atPath: docPath))
+
+        let aSurvived = bodyAfterUndo.contains("AAAA")
+        let bSurvived = bodyAfterUndo.contains("BBBB")
+        let characterization: String
+        switch (aSurvived, bSurvived) {
+        case (false, true): characterization = "ISOLATED — undo via A removed ONLY A's own edit; B's survived untouched"
+        case (true, false): characterization = "SHARED/LIFO — undo via A removed B's edit instead (the most recent action on one shared stack), A's survived"
+        case (true, true): characterization = "REFUSED/NO-OP — undo via A changed neither edit"
+        case (false, false): characterization = "REPAIR/OTHER — undo via A removed BOTH edits"
+        }
+        NSLog("[T6 two-view drill] characterization: \(characterization) — body after undo: \"\(bodyAfterUndo)\"")
+
+        // PINNED, from a real run against real LOK (see task-6-report.md for the full transcript;
+        // an EARLIER version of this test pinned SHARED/LIFO here — that was a guess made BEFORE
+        // ever running the drill, and it was WRONG; corrected against the real observed body,
+        // never left standing on the strength of the a-priori reasoning alone). The real body
+        // after undo was `"BBBBAAAANORMA GATE..."` — BOTH markers intact, byte-for-byte identical
+        // to the pre-undo body. **REFUSED/NO-OP**: dispatching `.uno:Undo` via view A's own
+        // primary-view door did NOT remove view B's edit (the most recent action) NOR view A's own
+        // — consistent with LO's collaborative undo REFUSING to act on a foreign view's top undo
+        // item, rather than either isolating per-view stacks OR falling through to a shared LIFO
+        // stack. This is NOT a general failure of `undo` through this wire door — the SINGLE-VIEW
+        // `testUndoLadderTypeThenUndoRemovesTheTypedTextThenRedoRestoresIt` (same door, same
+        // `.uno:Undo` dispatch, no second view involved) independently proves `undo` genuinely
+        // removes real content when there is no cross-view contention. Both survived-or-not
+        // booleans are asserted explicitly (not just the composite `characterization` string) so a
+        // future LO/vendor upgrade that changes this behavior fails HERE, loudly, rather than
+        // silently drifting. Stage C's own collaborator design consumes this: a foreign view's
+        // undo is a no-op today, not a silent corruption risk — `.uno:Undo` with `{"Repair": true}`
+        // is the named follow-up if a future stage wants undo to actually cross views.
+        XCTAssertTrue(aSurvived, "PINNED FINDING: view A's own edit survives undo-via-A — got body: \"\(bodyAfterUndo)\"")
+        XCTAssertTrue(bSurvived, "PINNED FINDING: view B's edit ALSO survives undo-via-A — "
+                      + "REFUSED/NO-OP, not SHARED/LIFO and not per-view isolation — got body: "
+                      + "\"\(bodyAfterUndo)\"")
+
+        _ = host.teardownAllOfficeRuntimesAndStopHelper()
+    }
 }
