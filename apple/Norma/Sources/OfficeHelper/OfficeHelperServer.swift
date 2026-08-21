@@ -111,6 +111,32 @@ public protocol OfficeDocumentBridge: AnyObject {
     /// what `type`/`text` mean, and `LOKBridge.postExtTextInputOnDedicatedThread`'s own header for
     /// the real conformance's `setView`/`setPart` prefix.
     func postExtTextInput(docId: String, part: Int, type: OfficeExtTextInputType, text: String) throws
+
+    // MARK: - Office Stage B Task 6: clipboard, undo/redo, the second ("agent") view
+
+    /// Reads the current text selection — `""` for LOK's own `nullptr` "no selection" answer,
+    /// never a distinct case. Throws only on a `docId` this bridge has no handle for, matching
+    /// `postKey`/`postMouse`'s own posture.
+    func clipboardCopy(docId: String, part: Int) throws -> String
+    /// Same read as `clipboardCopy`, but ALSO deletes the selection (`.uno:Cut`) — the text
+    /// returned is what was selected just BEFORE the cut.
+    func clipboardCut(docId: String, part: Int) throws -> String
+    /// Writes `text` at the current caret via LOK's own `paste()`. Throws on a `docId` this bridge
+    /// has no handle for, OR when `paste()` itself reports failure (`SaveError.pasteFailed`) — the
+    /// one clipboard door LOK gives a real synchronous success/failure answer for.
+    func clipboardPaste(docId: String, part: Int, text: String) throws
+    /// `.uno:Undo` against the document's own primary view. Fire-and-forget on LOK's own side —
+    /// throws only on a `docId` this bridge has no handle for.
+    func undo(docId: String) throws
+    /// `.uno:Redo`, same posture as `undo` above.
+    func redo(docId: String) throws
+    /// Mints a second ("agent") LOK view for `docId`, returning its view id — `createView()`'s own
+    /// return value, never re-derived. Throws `SaveError.agentViewAlreadyExists` if this docId
+    /// already has one (a deliberate refusal, not a silent "return the existing id").
+    func createAgentView(docId: String) throws -> Int32
+    /// Posts a key event through the agent view specifically. Throws `SaveError.noAgentView` if
+    /// `createAgentView` was never called for this docId.
+    func agentKeyEvent(docId: String, part: Int, type: OfficeKeyEventType, charCode: Int, keyCode: Int) throws
 }
 
 /// The result of a successful `OfficeDocumentBridge.paintTile` call — helper-internal (never
@@ -212,6 +238,58 @@ public final class FakeOfficeDocumentBridge: OfficeDocumentBridge {
         lock.unlock()
         guard isOpen else {
             throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)")
+        }
+    }
+
+    /// Office Stage B Task 6 — existence-checked no-ops, same reasoning as `postKey`/`postMouse`
+    /// above: this fake has no real LOK document, only wire-level dispatch is exercised against
+    /// it. `clipboardCopy`/`clipboardCut` answer a fixed, deterministic (never real-selection)
+    /// string — enough for a wire-level round-trip test to assert on, never content correctness
+    /// (that is `LOKBridge`'s own live-tested job, the same split every other verb here already
+    /// has).
+    private var agentViewIds: [String: Int32] = [:]
+
+    public func clipboardCopy(docId: String, part: Int) throws -> String {
+        lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
+        guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
+        return "fake selection for \(docId)"
+    }
+    public func clipboardCut(docId: String, part: Int) throws -> String {
+        lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
+        guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
+        return "fake selection for \(docId)"
+    }
+    public func clipboardPaste(docId: String, part: Int, text: String) throws {
+        lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
+        guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
+    }
+    public func undo(docId: String) throws {
+        lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
+        guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
+    }
+    public func redo(docId: String) throws {
+        lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
+        guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
+    }
+    public func createAgentView(docId: String) throws -> Int32 {
+        lock.lock()
+        defer { lock.unlock() }
+        guard caches[docId] != nil else {
+            throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)")
+        }
+        guard agentViewIds[docId] == nil else {
+            throw OfficeHelperServerError.posix("fake bridge: docId already has an agent view: \(docId)")
+        }
+        let viewId = Int32(agentViewIds.count + 1000) // arbitrary, distinct from a real primary view's id
+        agentViewIds[docId] = viewId
+        return viewId
+    }
+    public func agentKeyEvent(docId: String, part: Int, type: OfficeKeyEventType, charCode: Int, keyCode: Int) throws {
+        lock.lock()
+        let hasAgentView = agentViewIds[docId] != nil
+        lock.unlock()
+        guard hasAgentView else {
+            throw OfficeHelperServerError.posix("fake bridge: docId has no agent view: \(docId)")
         }
     }
 
@@ -865,6 +943,85 @@ public final class OfficeHelperServer {
             do {
                 try documentBridge.postExtTextInput(docId: docId, part: part, type: type, text: text)
                 writeReply(.extTextInputEventOk(seq: seq, docId: docId), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.clipboardCopy(let seq, let docId, let part)):
+            // Office Stage B Task 6 — same existence-check posture as `.keyEvent`/`.mouseEvent`
+            // above (any connection touching an already-open doc may read its selection).
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                let text = try documentBridge.clipboardCopy(docId: docId, part: part)
+                writeReply(.clipboardCopyOk(seq: seq, docId: docId, text: text), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.clipboardCut(let seq, let docId, let part)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                let text = try documentBridge.clipboardCut(docId: docId, part: part)
+                writeReply(.clipboardCutOk(seq: seq, docId: docId, text: text), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.clipboardPaste(let seq, let docId, let part, let text)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                try documentBridge.clipboardPaste(docId: docId, part: part, text: text)
+                writeReply(.clipboardPasteOk(seq: seq, docId: docId), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.undo(let seq, let docId)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                try documentBridge.undo(docId: docId)
+                writeReply(.undoOk(seq: seq, docId: docId), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.redo(let seq, let docId)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                try documentBridge.redo(docId: docId)
+                writeReply(.redoOk(seq: seq, docId: docId), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.createView(let seq, let docId)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                let viewId = try documentBridge.createAgentView(docId: docId)
+                writeReply(.agentViewReady(seq: seq, docId: docId, viewId: viewId), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.agentKeyEvent(let seq, let docId, let part, let type, let charCode, let keyCode)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                try documentBridge.agentKeyEvent(docId: docId, part: part, type: type, charCode: charCode, keyCode: keyCode)
+                writeReply(.agentKeyEventOk(seq: seq, docId: docId), writer: writer)
             } catch {
                 writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
             }

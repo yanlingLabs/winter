@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#endif
 
 // Office Stage A Task 3 — dlopen + lok_init_2, real documentLoad/close, callbacks pumped to the
 // wire. Only `NormaOfficeHelper` compiles this file (excluded from `NormaOfficeHelperFixture` in
@@ -258,11 +261,24 @@ final class LOKBridge: OfficeDocumentBridge {
         case docNotOpen(String)
         case unsupportedFormat(String)
         case saveAsFailed(String)
+        /// Office Stage B Task 6 — `paste()` returned `false`. The one clipboard door LOK gives a
+        /// real synchronous success/failure answer for (`postKeyEvent`'s `void` return is why
+        /// `keyEventOk` can never distinguish "posted" from "took effect" — `paste()` can).
+        case pasteFailed(String)
+        /// Office Stage B Task 6 — `createAgentView` called twice for the same docId. Deliberate
+        /// refusal, not "return the existing id" — see `OfficeWireFrame.createView`'s own header.
+        case agentViewAlreadyExists(String)
+        /// Office Stage B Task 6 — `agentKeyEvent` requested for a docId `createAgentView` was
+        /// never called for.
+        case noAgentView(String)
         var description: String {
             switch self {
             case .docNotOpen(let docId): return "save requested for a docId that is not open: \(docId)"
             case .unsupportedFormat(let ext): return "saving is not supported for this document's format (\(ext))"
             case .saveAsFailed(let reason): return reason
+            case .pasteFailed(let docId): return "paste() failed for docId: \(docId)"
+            case .agentViewAlreadyExists(let docId): return "docId already has an agent view: \(docId)"
+            case .noAgentView(let docId): return "docId has no agent view: \(docId)"
             }
         }
     }
@@ -356,6 +372,17 @@ final class LOKBridge: OfficeDocumentBridge {
         /// exactly rather than inventing a broader rule of this bridge's own (`.drawing` shares
         /// `SdXImpressDocument::setPart` with `.presentation`, and LOK does not exempt it).
         let kind: OfficeDocumentKind
+        /// Office Stage B Task 6 — the two-writer groundwork's second LOK view, minted on demand by
+        /// `createAgentViewOnDedicatedThread` (`nil` until then, `var` so that ONE call site can set
+        /// it after `OpenDocument` is already stored in `documents`). Holds `createView()`'s OWN
+        /// return value verbatim — never re-derived via `getView()`, which becomes ambiguous the
+        /// instant a second view exists (confirmed by reading `doc_getView`'s
+        /// `SfxLokHelper::getViewId(mnDocumentId)` at the vendored pin: a DocId-filtered SCAN, whose
+        /// answer is order-dependent once more than one view shares that docId — safe today only
+        /// because `openOnDedicatedThread`'s own `getView()` read happens before any second view
+        /// can exist). Torn down explicitly in `closeOnDedicatedThread` — see that method's own
+        /// header for why `doc_destroy` alone is not enough.
+        var agentViewId: Int32? = nil
     }
 
     private let thread: LOKDedicatedThread
@@ -516,6 +543,32 @@ final class LOKBridge: OfficeDocumentBridge {
         }
     }
 
+    // MARK: - Office Stage B Task 6: clipboard, undo/redo, the second ("agent") view
+
+    func clipboardCopy(docId: String, part: Int) throws -> String {
+        try thread.sync { try self.clipboardCopyOnDedicatedThread(docId: docId, part: part) }
+    }
+    func clipboardCut(docId: String, part: Int) throws -> String {
+        try thread.sync { try self.clipboardCutOnDedicatedThread(docId: docId, part: part) }
+    }
+    func clipboardPaste(docId: String, part: Int, text: String) throws {
+        try thread.sync { try self.clipboardPasteOnDedicatedThread(docId: docId, part: part, text: text) }
+    }
+    func undo(docId: String) throws {
+        try thread.sync { try self.undoOnDedicatedThread(docId: docId) }
+    }
+    func redo(docId: String) throws {
+        try thread.sync { try self.redoOnDedicatedThread(docId: docId) }
+    }
+    func createAgentView(docId: String) throws -> Int32 {
+        try thread.sync { try self.createAgentViewOnDedicatedThread(docId: docId) }
+    }
+    func agentKeyEvent(docId: String, part: Int, type: OfficeKeyEventType, charCode: Int, keyCode: Int) throws {
+        try thread.sync {
+            try self.agentKeyEventOnDedicatedThread(docId: docId, part: part, type: type, charCode: charCode, keyCode: keyCode)
+        }
+    }
+
     // MARK: - Dedicated-thread-only implementation
 
     private func openOnDedicatedThread(docId: String, path: String) throws -> OfficeDocumentMetadata {
@@ -583,6 +636,19 @@ final class LOKBridge: OfficeDocumentBridge {
 
     private func closeOnDedicatedThread(docId: String) {
         guard let doc = documents.removeValue(forKey: docId) else { return }
+        // Office Stage B Task 6 — explicit destroyView for the agent view BEFORE `destroy`. Cited
+        // at the vendored pin: `doc_destroyView` calls `LOKClipboardFactory::
+        // releaseClipboardForView(nId)` (a SPECIFIC view id), while `doc_destroy` only ever calls
+        // `releaseClipboardForView(-1)` — the factory is a static, view-id-keyed registry that
+        // outlives any one document in this long-lived helper, so skipping this leaks one
+        // clipboard object per agent view per open/close cycle, forever. The PRIMARY view needs no
+        // matching call: T4's own report already established `doc_destroy` disposes every view the
+        // document itself owns via its `mxComponent` teardown cascade — this is ONLY about the
+        // clipboard factory's OWN separate, view-id-keyed bookkeeping for a view minted OUTSIDE
+        // `documentLoad`'s own view.
+        if let agentViewId = doc.agentViewId {
+            doc.handle.pointee.pClass.pointee.destroyView?(doc.handle, agentViewId)
+        }
         doc.handle.pointee.pClass.pointee.destroy?(doc.handle)
         doc.context.release()
     }
@@ -927,6 +993,180 @@ final class LOKBridge: OfficeDocumentBridge {
             doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(truncatingIfNeeded: part))
         }
         doc.handle.pointee.pClass.pointee.postWindowExtTextInputEvent?(doc.handle, 0, Int32(type.rawValue), text)
+    }
+
+    // MARK: - Office Stage B Task 6: clipboard, undo/redo, the second ("agent") view
+
+    /// `getTextSelection(pMimeType, pUsedMimeType)`. `pUsedMimeType` is passed `nil` — LOK's own
+    /// `doc_getTextSelection` (`desktop/source/lib/init.cxx`, this repo's vendored pin) marks that
+    /// out-parameter "legacy" and only touches it `if (pUsedMimeType)`; skipping it avoids an
+    /// extra `strdup`+`free` pair for a value this bridge always already knows (it asks for
+    /// `"text/plain;charset=utf-8"` and gets back exactly that format or nothing). The returned
+    /// `char*`, when non-null, is `convertOString`'s own `malloc`+`memcpy` (confirmed by reading it
+    /// at the pin) — this bridge owns it and must `free()` it, unlike `getVersionInfo`'s
+    /// deliberately-unfreed one-time boot read (see that call site's own header for why THAT one
+    /// stays unfreed; this call runs on every Copy/Cut, so a leak here would be real and growing).
+    /// `nullptr` — LOK's own "no selection available" answer (`getFromTransferable` failing, or no
+    /// `XTransferable` at all) — is NOT an error: this method returns `""`, the "empty means
+    /// nothing to copy" convention `OfficeWireFrame.clipboardCopyOk`'s own header states.
+    ///
+    /// `setView` unconditional, `setPart` type-gated — the SAME prefix `save`/`postKey`/
+    /// `postMouse` already carry, for the SAME reason: `getTextSelection`'s own
+    /// `ITiledRenderable::getSelection()` is genuinely view-dependent — LOK's own `doc_createView`
+    /// calls `forceSetClipboardForCurrentView` (confirmed at the pin) — so a stale current-view/
+    /// part left over from unrelated paint traffic could answer with the WRONG selection.
+    private func clipboardCopyOnDedicatedThread(docId: String, part: Int) throws -> String {
+        guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        if doc.kind != .text {
+            doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(truncatingIfNeeded: part))
+        }
+        guard let cString = "text/plain;charset=utf-8".withCString({ mimePtr in
+            doc.handle.pointee.pClass.pointee.getTextSelection?(doc.handle, mimePtr, nil)
+        }) else {
+            return ""
+        }
+        defer { free(cString) }
+        return String(cString: cString)
+    }
+
+    /// The read half is IDENTICAL to `clipboardCopyOnDedicatedThread` above — get the selection
+    /// FIRST, before mutating anything; after `.uno:Cut` there is nothing left to read. The
+    /// mutation half — `.uno:Cut` via `postUnoCommand`, fire-and-forget
+    /// (`bNotifyWhenFinished: false`) — mirrors `.uno:Save`'s own follow-up in
+    /// `saveAsOnDedicatedThread` exactly: `doc_postUnoCommand`'s dispatch resolves through the
+    /// process-global "active frame," which the SAME `setView` prefix above (asserted once,
+    /// covering BOTH the read and the cut) already makes correct.
+    private func clipboardCutOnDedicatedThread(docId: String, part: Int) throws -> String {
+        guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        if doc.kind != .text {
+            doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(truncatingIfNeeded: part))
+        }
+        let text: String
+        if let cString = "text/plain;charset=utf-8".withCString({ mimePtr in
+            doc.handle.pointee.pClass.pointee.getTextSelection?(doc.handle, mimePtr, nil)
+        }) {
+            defer { free(cString) }
+            text = String(cString: cString)
+        } else {
+            text = ""
+        }
+        ".uno:Cut".withCString { commandPtr in
+            doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, nil, false)
+        }
+        return text
+    }
+
+    /// `paste(pMimeType, pData, nSize)`. `text.utf8` bytes, never `text`'s native UTF-16/Swift
+    /// storage — LOK's own C API takes a raw byte buffer tagged by MIME type
+    /// (`"text/plain;charset=utf-8"`), which is exactly what `withCString`'s null-terminated buffer
+    /// already is for a UTF-8 Swift string. `nSize` is measured independently
+    /// (`text.utf8.count`), never inferred from the C buffer's own `strlen` at the far end — a
+    /// pasted string containing an embedded NUL would otherwise truncate silently.
+    ///
+    /// `setView`/`setPart` prefix for the identical reason `clipboardCopy` carries it — confirmed
+    /// DOUBLY here: `doc_paste` (the vendored pin) internally dispatches `.uno:Paste` through the
+    /// SAME `comphelper::dispatchCommand` mechanism `.uno:Save`'s own fix-round-2 citation already
+    /// found, which is unambiguously process-global-current-frame, not merely "possibly view
+    /// dependent" the way `getTextSelection`'s own `ITiledRenderable::getSelection()` is.
+    ///
+    /// `paste()` is the ONE clipboard door LOK gives a real synchronous success/failure answer for
+    /// — `false` throws `SaveError.pasteFailed`, surfaced to the caller as a genuine failure rather
+    /// than silently swallowed the way `postKeyEvent`'s `void` return forces `keyEventOk` to be.
+    private func clipboardPasteOnDedicatedThread(docId: String, part: Int, text: String) throws {
+        guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        if doc.kind != .text {
+            doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(truncatingIfNeeded: part))
+        }
+        let byteCount = text.utf8.count
+        let succeeded = "text/plain;charset=utf-8".withCString { mimePtr in
+            text.withCString { textPtr in
+                doc.handle.pointee.pClass.pointee.paste?(doc.handle, mimePtr, textPtr, byteCount) ?? false
+            }
+        }
+        guard succeeded else {
+            throw SaveError.pasteFailed(docId)
+        }
+    }
+
+    /// `.uno:Undo` via `postUnoCommand`, fire-and-forget (`bNotifyWhenFinished: false`), against
+    /// the document's OWN primary view (`doc.viewId` — never the agent view). `setView`
+    /// unconditional, matching `.uno:Save`'s own follow-up in `saveAsOnDedicatedThread` —
+    /// `doc_postUnoCommand`'s dispatch resolves through the process-global "active frame"
+    /// (confirmed at the pin, cited at length there). No `setPart`: the brief's own words for this
+    /// door are "view-scoped (setView prefix)" — `postUnoCommand` is not a part-scoped call the way
+    /// `postKeyEvent`/`paintPartTile` are, and adding one speculatively is exactly the kind of
+    /// untested claim this file's own history (fix rounds 1-4) warns against.
+    ///
+    /// **Deliberately does not attempt to distinguish "changed something" from "no-op / refused."**
+    /// LOK's own `.uno:Undo` dispatches cleanly whether the undo stack is empty, whether the top
+    /// item belongs to a DIFFERENT view (collaborative undo-repair may refuse or repair per-view —
+    /// the two-writer characterization drill in `OfficeRuntimeLiveTests` exists to DISCOVER which,
+    /// not assume it going in), or whether it genuinely undoes an edit — `postUnoCommand`'s own
+    /// fire-and-forget contract gives this bridge no synchronous signal to tell those apart. LOK's
+    /// C API DOES offer one (`bNotifyWhenFinished: true` plus a `LOK_CALLBACK_UNO_COMMAND_RESULT`
+    /// callback) — deliberately NOT used here: consuming a brand-new callback type/vocabulary is a
+    /// bigger surface than "wire Undo/Redo" asks for, and the drill's own save+reopen PLACEMENT
+    /// assertions already answer the characterization question without it (they can distinguish
+    /// isolated / shared-LIFO / no-op / multi-revert outcomes directly from what landed on disk).
+    private func undoOnDedicatedThread(docId: String) throws {
+        guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        ".uno:Undo".withCString { commandPtr in
+            doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, nil, false)
+        }
+    }
+
+    /// `.uno:Redo`, same posture as `undoOnDedicatedThread` above.
+    private func redoOnDedicatedThread(docId: String) throws {
+        guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        ".uno:Redo".withCString { commandPtr in
+            doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, nil, false)
+        }
+    }
+
+    /// `createView()`, LOK's own C signature (`int (*)(LibreOfficeKitDocument*)`) — confirmed
+    /// INSTANCE-scoped at the vendored pin: `SfxLokHelper::createView(pDocument->mnDocumentId)`,
+    /// keyed by THIS document's own id, never a process-global call. No `setView` prefix — nothing
+    /// about minting a NEW view depends on which view is currently active; `doc_createView` reads
+    /// `pDocument` directly. (It DOES, as an observed side effect, make the new view "current" —
+    /// see `forceSetClipboardForCurrentView(pThis)` at the tail of `doc_createViewWithOptions` at
+    /// the pin — but every OTHER current-view-dependent call in this bridge already asserts
+    /// `setView` on entry, so that side effect is harmless by construction, never something this
+    /// method needs to guard against or undo.)
+    ///
+    /// Refuses a SECOND mint for the same docId (`SaveError.agentViewAlreadyExists`) rather than
+    /// silently returning the existing id — deliberate, per `OfficeWireFrame.createView`'s own
+    /// header. The returned id is `createView()`'s OWN return value, verbatim — never re-derived
+    /// via `getView()`, which becomes ambiguous the instant a second view exists (`doc_getView`'s
+    /// `SfxLokHelper::getViewId(mnDocumentId)` is a DocId-filtered SCAN over every open view,
+    /// order-dependent once more than one view shares a docId).
+    private func createAgentViewOnDedicatedThread(docId: String) throws -> Int32 {
+        guard var doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        guard doc.agentViewId == nil else { throw SaveError.agentViewAlreadyExists(docId) }
+        let viewId = doc.handle.pointee.pClass.pointee.createView?(doc.handle) ?? -1
+        doc.agentViewId = viewId
+        documents[docId] = doc
+        return viewId
+    }
+
+    /// `postKeyEvent`, IDENTICAL shape to `postKeyOnDedicatedThread`, except the `setView` prefix
+    /// targets `doc.agentViewId` (the second view) instead of `doc.viewId` (the primary one) — the
+    /// only way to actually PRODUCE an edit "as" the agent view, needed to drive the two-writer
+    /// characterization drill. Throws `SaveError.noAgentView` if `createAgentView` was never
+    /// called for this docId — never silently falls back to the primary view.
+    private func agentKeyEventOnDedicatedThread(docId: String, part: Int, type: OfficeKeyEventType, charCode: Int, keyCode: Int) throws {
+        guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        guard let agentViewId = doc.agentViewId else { throw SaveError.noAgentView(docId) }
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
+        if doc.kind != .text {
+            doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(truncatingIfNeeded: part))
+        }
+        doc.handle.pointee.pClass.pointee.postKeyEvent?(
+            doc.handle, Int32(type.rawValue), Int32(truncatingIfNeeded: charCode), Int32(truncatingIfNeeded: keyCode))
     }
 
     // MARK: - Callback translation

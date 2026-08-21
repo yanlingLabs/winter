@@ -208,6 +208,97 @@ final class OfficeHelperClient {
         }
     }
 
+    // MARK: - Office Stage B Task 6: clipboard, undo/redo, the second ("agent") view
+
+    /// Reads the current text selection. `""` for "nothing selected" — never a distinct thrown
+    /// case; the caller decides whether an empty answer is worth writing to the system pasteboard.
+    func clipboardCopy(docId: String, part: Int) async throws -> String {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.clipboardCopy(seq: seq, docId: docId, part: part))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .clipboardCopyOk(_, _, let text): return text
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    /// Same read as `clipboardCopy`, but the selection is also deleted on the far side.
+    func clipboardCut(docId: String, part: Int) async throws -> String {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.clipboardCut(seq: seq, docId: docId, part: part))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .clipboardCutOk(_, _, let text): return text
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    func clipboardPaste(docId: String, part: Int, text: String) async throws {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.clipboardPaste(seq: seq, docId: docId, part: part, text: text))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .clipboardPasteOk: return
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    /// `.uno:Undo` against the document's own primary view. Answers once the command was
+    /// DISPATCHED, never a claim it changed anything — see `OfficeWireFrame.undoOk`'s own header.
+    func undo(docId: String) async throws {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.undo(seq: seq, docId: docId))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .undoOk: return
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    func redo(docId: String) async throws {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.redo(seq: seq, docId: docId))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .redoOk: return
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    /// The two-writer groundwork — mints a second ("agent") LOK view for `docId`, returning its
+    /// view id. Deliberately NOT reachable from `OfficeRuntime`/`Driver` — the brief's own words
+    /// are "unused by the app but drilled"; only the live characterization drill
+    /// (`OfficeRuntimeLiveTests`) ever calls this, talking directly to this client, the same
+    /// raw-probe precedent Task 5's ext-text-input investigation already set.
+    func createAgentView(docId: String) async throws -> Int32 {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.createView(seq: seq, docId: docId))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .agentViewReady(_, _, let viewId): return viewId
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    /// Posts a key event through the agent view specifically — same drill-only reachability as
+    /// `createAgentView` above.
+    func agentKeyEvent(docId: String, part: Int, type: OfficeKeyEventType, charCode: Int, keyCode: Int) async throws {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.agentKeyEvent(seq: seq, docId: docId, part: part, type: type, charCode: charCode, keyCode: keyCode))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .agentKeyEventOk: return
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
     // MARK: - Task 4: tiles
 
     /// Registers this connection as a tile-push subscriber for `docId` (which must already be open
