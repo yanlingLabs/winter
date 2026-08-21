@@ -76,7 +76,20 @@ public enum OfficeWireFrame: Equatable, Sendable {
     /// places the helper's answer onto the real path afterward (`OfficeRuntime.perform`'s `.save`
     /// effect) — see `saved`'s own header for the two-step split this shape exists to honor, and
     /// why the helper is never asked to write to the real path directly.
-    case save(seq: UInt64, docId: String)
+    ///
+    /// **Fix round 4 (NEW-2) — `part` added, and it means something different here than on the
+    /// input verbs.** On `keyEvent`/`mouseEvent`, `part` says "where this event is aimed." Here it
+    /// says "which part the USER is actually on," and its only job is to be asserted onto LOK
+    /// immediately before the write, so that the saved view state records the user's own active
+    /// part rather than whatever the last tile paint happened to leave current. That is not the
+    /// same thing: LOK's current part is process state that ordinary PAINT traffic moves, and a
+    /// prefetch chunk cut by a part switch is still delivered afterward — so a paint carrying the
+    /// OLD part can re-park LOK there after the switch, with no corrective paint to follow if the
+    /// new part's tiles are already cached. Before this field, `saveAs` asserted no part at all and
+    /// simply inherited that race. Resolved from the SAME `DocumentEntry.activePart` the input
+    /// verbs read (`OfficeRuntimeReducer`'s `.saveRequested`), so "the user's part" has exactly one
+    /// definition across this wire.
+    case save(seq: UInt64, docId: String, part: Int)
 
     /// Office Stage B Task 4 — **the real edit verb.** LOK's `postKeyEvent(nType, nCharCode,
     /// nKeyCode)` (`LibreOfficeKit.h`), unchanged parameter-for-parameter across the wire.
@@ -333,7 +346,7 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .ping(let seq): return seq
         case .open(let seq, _, _): return seq
         case .close(let seq, _): return seq
-        case .save(let seq, _): return seq
+        case .save(let seq, _, _): return seq
         case .keyEvent(let seq, _, _, _, _, _): return seq
         case .mouseEvent(let seq, _, _, _, _, _, _, _, _): return seq
         case .subscribeTiles(let seq, _, _, _, _): return seq
@@ -374,8 +387,11 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .open(_, let docId, let path):
             payload["docId"] = docId
             payload["path"] = path
-        case .close(_, let docId), .closed(_, let docId), .save(_, let docId):
+        case .close(_, let docId), .closed(_, let docId):
             payload["docId"] = docId
+        case .save(_, let docId, let part):
+            payload["docId"] = docId
+            payload["part"] = part
         case .keyEvent(_, let docId, let part, let type, let charCode, let keyCode):
             payload["docId"] = docId
             payload["part"] = part
@@ -942,10 +958,17 @@ public enum OfficeWireCodec {
             }
             return .frame(.close(seq: seq, docId: docId))
         case "save":
-            guard let docId = object["docId"] as? String else {
+            // Fix round 4 (NEW-2) — `part` is REQUIRED, exactly like `keyEvent`/`mouseEvent`'s own.
+            // Deliberately not defaulted to 0 on a missing field: a `save` frame with no part is a
+            // sender that predates this field, and silently substituting sheet 1 for "whatever the
+            // user is on" is the precise failure this field exists to prevent. Both ends of this
+            // wire ship in the SAME app bundle (the helper is embedded), so there is no mixed-version
+            // case to be lenient for — the same reasoning `keyEvent`'s own required `part` already
+            // rests on.
+            guard let docId = object["docId"] as? String, let part = intValue(object["part"]) else {
                 return .rejected(seq: seq, reason: "malformed")
             }
-            return .frame(.save(seq: seq, docId: docId))
+            return .frame(.save(seq: seq, docId: docId, part: part))
         case "keyEvent":
             guard let docId = object["docId"] as? String, let part = intValue(object["part"]),
                   let typeRaw = intValue(object["eventType"]), let type = OfficeKeyEventType(rawValue: typeRaw),

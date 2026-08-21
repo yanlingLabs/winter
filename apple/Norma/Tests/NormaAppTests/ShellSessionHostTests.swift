@@ -4078,7 +4078,7 @@ final class ShellSessionHostTests: XCTestCase {
                 close: { [unowned self] docId in
                     self.lock.lock(); self._closeCalls.append(docId); self.lock.unlock()
                 },
-                save: { [unowned self] docId in
+                save: { [unowned self] docId, _ in
                     self.lock.lock(); self._saveCalls.append(docId); self.lock.unlock()
                     if let reason = self.saveFailures[docId] {
                         throw OfficeHelperClientError.saveFailed(reason: reason)

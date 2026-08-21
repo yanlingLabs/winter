@@ -268,7 +268,24 @@ final class OfficeRuntimeReducerTests: XCTestCase {
         let open = readyWithOpenDocument(path: "/a.xlsx", docId: "doc-a")
         let (state, effects) = reduce(open, [.saveRequested(path: "/a.xlsx")])
         XCTAssertEqual(state, open, "saveRequested alone touches no state — only the imperative half's own round trip does")
-        XCTAssertEqual(effects, [.save(path: "/a.xlsx", docId: "doc-a")])
+        XCTAssertEqual(effects, [.save(path: "/a.xlsx", docId: "doc-a", part: 0)])
+    }
+
+    /// Fix round 4 (NEW-2) — the save effect carries the USER's own active part, not a hardcoded 0.
+    /// Discriminating on purpose: `readyWithOpenDocument` alone leaves `activePart` at its 0
+    /// default, which would pass the assertion above no matter what the reducer read. Here a real
+    /// `.subscribeRequested` moves the document to part 2 first (the same reducer-owned write the
+    /// input verbs' own `part` is resolved from), so the save's part can only be right by actually
+    /// reading it.
+    func testSaveRequestedCarriesTheDocumentsOwnActivePartNotZero() {
+        let open = readyWithOpenDocument(path: "/a.xlsx", docId: "doc-a")
+        let (onPart2, _) = reduce(open, [.subscribeRequested(path: "/a.xlsx", part: 2, zoomPPT: 1000,
+                                                              viewportTwips: OfficeTwipsRect(x: 0, y: 0, width: 1, height: 1))])
+        XCTAssertEqual(onPart2.documents["/a.xlsx"]?.activePart, 2, "setup: the document is on part 2")
+        let (_, effects) = reduce(onPart2, [.saveRequested(path: "/a.xlsx")])
+        XCTAssertEqual(effects, [.save(path: "/a.xlsx", docId: "doc-a", part: 2)],
+                       "a save must record where the USER is, not whatever part a tile paint last "
+                        + "left LOK parked at — see LOKBridge.saveAsOnDedicatedThread's own header")
     }
 
     func testSaveSucceededClearsAStandingDeletedBanner() {
@@ -1015,7 +1032,7 @@ final class OfficeRuntimeWatcherTests: XCTestCase {
     /// below calls `runtime.save`); the suppression-bag tests further down override it.
     private func makeDriver(metadata: OfficeDocumentMetadata = OfficeDocumentMetadata(
         type: .spreadsheet, parts: 1, sizeTwips: OfficeDocumentSize(widthTwips: 100, heightTwips: 100)),
-        save: @escaping (String) async throws -> String = { _ in "/tmp/office-watcher-unused-save" })
+        save: @escaping (String, Int) async throws -> String = { _, _ in "/tmp/office-watcher-unused-save" })
         -> OfficeRuntime.Driver {
         // Office Stage B Task 2b: every test in this class opens a REAL `scratchFile()` (the
         // watcher itself needs a real path to watch), so staging now genuinely runs for each of
@@ -1356,7 +1373,7 @@ final class OfficeRuntimeWatcherTests: XCTestCase {
         try "the helper's own rendered content".write(toFile: tempPath, atomically: true, encoding: .utf8)
 
         let watchers = OfficeWatcherRecorder()
-        let runtime = OfficeRuntime(sessionId: "S1", driver: makeDriver(save: { _ in tempPath }),
+        let runtime = OfficeRuntime(sessionId: "S1", driver: makeDriver(save: { _, _ in tempPath }),
                                     makeWatcher: watchers.factory)
         runtimes.append(runtime)
         runtime.open(path)
@@ -1666,7 +1683,7 @@ final class OfficeRuntimeWatcherTests: XCTestCase {
     func testASaveWithNoWatcherFireAtAllStillLeavesNoLeakedNote() async throws {
         let path = try scratchFile(contents: "one")
         let tempPath = try scratchFile(name: "rendered.xlsx", contents: "rendered")
-        let runtime = OfficeRuntime(sessionId: "S1", driver: makeDriver(save: { _ in tempPath }))
+        let runtime = OfficeRuntime(sessionId: "S1", driver: makeDriver(save: { _, _ in tempPath }))
         runtimes.append(runtime)
         runtime.open(path)
         _ = await waitUntil { runtime.stateSnapshot.documents[path] != nil }
@@ -1689,7 +1706,7 @@ final class OfficeRuntimeWatcherTests: XCTestCase {
     func testSaveAndAwaitOutcomeReturnsSavedOnceTheRealFileIsWritten() async throws {
         let path = try scratchFile(contents: "one")
         let tempPath = try scratchFile(name: "rendered.xlsx", contents: "rendered")
-        let runtime = OfficeRuntime(sessionId: "S1", driver: makeDriver(save: { _ in tempPath }))
+        let runtime = OfficeRuntime(sessionId: "S1", driver: makeDriver(save: { _, _ in tempPath }))
         runtimes.append(runtime)
         runtime.open(path)
         _ = await waitUntil { runtime.stateSnapshot.documents[path] != nil }
@@ -1705,7 +1722,7 @@ final class OfficeRuntimeWatcherTests: XCTestCase {
     /// OUTER catch in `performSave` (the driver's own `try await driver.save(docId)` never returns).
     func testSaveAndAwaitOutcomeReturnsFailedWhenTheDriversSaveThrows() async throws {
         let path = try scratchFile(contents: "one")
-        let runtime = OfficeRuntime(sessionId: "S1", driver: makeDriver(save: { _ in
+        let runtime = OfficeRuntime(sessionId: "S1", driver: makeDriver(save: { _, _ in
             throw OfficeHelperClientError.saveFailed(reason: "disk full")
         }))
         runtimes.append(runtime)
@@ -1730,7 +1747,7 @@ final class OfficeRuntimeWatcherTests: XCTestCase {
     func testSaveAndAwaitOutcomeReturnsFailedWhenThePlaceCannotFindTheHelpersTempFile() async throws {
         let path = try scratchFile(contents: "one")
         let runtime = OfficeRuntime(sessionId: "S1", driver: makeDriver(
-            save: { _ in "/tmp/office-save-await-nonexistent-\(UUID().uuidString)" }))
+            save: { _, _ in "/tmp/office-save-await-nonexistent-\(UUID().uuidString)" }))
         runtimes.append(runtime)
         runtime.open(path)
         _ = await waitUntil { runtime.stateSnapshot.documents[path] != nil }
@@ -1772,7 +1789,7 @@ final class OfficeRuntimeWatcherTests: XCTestCase {
         let tempPath = try scratchFile(name: "rendered.xlsx", contents: "rendered")
         final class RuntimeBox { weak var runtime: OfficeRuntime? }
         let box = RuntimeBox()
-        let runtime = OfficeRuntime(sessionId: "S1", driver: makeDriver(save: { [box] _ in
+        let runtime = OfficeRuntime(sessionId: "S1", driver: makeDriver(save: { [box] _, _ in
             box.runtime?.close(path)
             return tempPath
         }))

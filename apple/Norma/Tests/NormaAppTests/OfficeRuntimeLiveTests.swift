@@ -1757,6 +1757,139 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         _ = host.teardownAllOfficeRuntimesAndStopHelper()
     }
 
+    /// Fix round 4 (NEW-2) — **a save records the USER's own active sheet, not whichever part a
+    /// tile paint last left LOK parked at.**
+    ///
+    /// `saveAsOnDedicatedThread` used to be the one current-view-dependent job in `LOKBridge` with
+    /// no `setPart` prefix at all: it simply inherited whatever part the last paint had set. That is
+    /// a real window, not a theoretical one — a residency-prefetch chunk cut mid-flight by a part
+    /// switch is still delivered, so a paint carrying the OLD part can re-park LOK there after the
+    /// user has already moved on, and if the new part's tiles are already cached no corrective paint
+    /// follows to move it back. Round 3's own paint-prefix comment argued this could not happen
+    /// ("there is no path where a paint's own `key.part` could differ from what the user is actually
+    /// looking at"); that was true of how every `TileKey` is CONSTRUCTED and false of when one is
+    /// PAINTED. Rather than police paint ordering, the save now asserts the answer itself.
+    ///
+    /// The stale chunk is modelled exactly, and deliberately at the wire: `runtime.subscribeTiles`
+    /// moves the reducer's own `activePart` to 1 (sheet 2 — this is the user), and then a RAW
+    /// `client.requestTiles` for a part-0 key re-parks LOK at sheet 1 behind the runtime's back.
+    /// A raw request is the only faithful model here: an in-flight chunk was enqueued before the
+    /// switch, so by definition it does not carry the new `activePart` — routing it through
+    /// `runtime` would re-derive the part and model nothing.
+    ///
+    /// Pre-fix signature, measured with the `setPart` line deleted from `saveAsOnDedicatedThread`
+    /// (restored immediately after): the saved `settings.xml` records `ActiveTable` = `Sheet1`.
+    func testASaveRecordsTheUsersOwnActiveSheetNotWhereAStalePaintLeftLOK() async throws {
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
+                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                        + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
+        let vendorRoot = Self.vendorProductSetRoot
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
+                      "LibreOffice vendor tree not present at \(vendorRoot.path) — run "
+                        + "`bun run libreoffice:fetch` from the repo root.")
+        let fixturePath = Self.fixturesRoot.appendingPathComponent("two-sheet.ods").path
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: fixturePath), "two-sheet.ods fixture missing")
+
+        let stateDir = makeScratchDirectory()
+        let directory = SessionDirectory(lister: { [] })
+        let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        host.makeOfficeHelperSupervisor = {
+            OfficeHelperSupervisor(configuration: OfficeHelperSupervisor.Configuration(
+                helperExecutableURL: helperURL,
+                socketDirectory: stateDir,
+                extraArguments: ["--lok-root", vendorRoot.path, "--sandbox-profile", Self.sandboxProfilePath.path]))
+        }
+        let runtime = host.officeRuntime(for: "S1")
+
+        let scratchDir = makeScratchDirectory()
+        let path = scratchDir.appendingPathComponent("stale-part-save.ods").path
+        try Data(contentsOf: URL(fileURLWithPath: fixturePath)).write(to: URL(fileURLWithPath: path))
+
+        runtime.open(path)
+        let settled = await waitUntil(timeout: 90) {
+            runtime.stateSnapshot.documents[path] != nil || runtime.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(settled, "the document never settled — phase: \(runtime.stateSnapshot.phase)")
+        guard let doc = runtime.stateSnapshot.documents[path] else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("open failed: \(runtime.stateSnapshot.openFailures[path] ?? "no reason recorded")")
+        }
+        XCTAssertEqual(doc.parts, 2, "setup: the two-sheet fixture really has two sheets")
+
+        guard let rawClient = host.officeHelperSupervisor?.client else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("no live client to drive this drill through")
+        }
+
+        // The USER moves to sheet 2 — through the runtime, so the reducer's own `activePart` moves
+        // with them. This is the value the save must honour.
+        let zoomPPT = 1000
+        let part1Key = TileKey(part: 1, zoomPPT: zoomPPT, tileX: 0, tileY: 0)
+        let viewport = officeViewportTwips(scrollOrigin: .zero, visibleSize: CGSize(width: 256, height: 256), zoomPPT: zoomPPT)
+        runtime.subscribeTiles(path: path, part: 1, zoomPPT: zoomPPT, viewportTwips: viewport)
+        let part1Arrived = await waitUntil(timeout: 30) { runtime.tileStore.tile(docId: doc.docId, key: part1Key) != nil }
+        XCTAssertTrue(part1Arrived, "the sheet-2 tile never arrived — setup")
+        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.activePart, 1,
+                       "setup: the reducer records the user on sheet 2")
+
+        // THE STALE CHUNK — a part-0 paint completing after the switch, raw, behind the runtime's
+        // back. LOK is now parked at sheet 1 while the user is on sheet 2, with the sheet-2 tiles
+        // already cached so nothing will paint them again to correct it.
+        let part0Key = TileKey(part: 0, zoomPPT: zoomPPT, tileX: 0, tileY: 0)
+        try await rawClient.requestTiles(docId: doc.docId, keys: [part0Key])
+        let part0Arrived = await waitUntil(timeout: 30) { runtime.tileStore.tile(docId: doc.docId, key: part0Key) != nil }
+        XCTAssertTrue(part0Arrived, "the stale part-0 paint never landed — this drill's whole point "
+                      + "is that a paint re-parked LOK before the save")
+        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.activePart, 1,
+                       "the stale paint must NOT have moved the runtime's own idea of the active "
+                        + "part — a raw wire request bypasses the reducer entirely, which is exactly "
+                        + "what makes it a faithful model of an in-flight chunk")
+
+        let beforeSaveStat = officeFileStat(atPath: path)
+        runtime.save(path)
+        let fileChanged = await waitUntil(timeout: 30) { officeFileStat(atPath: path) != beforeSaveStat }
+        XCTAssertTrue(fileChanged, "the save never landed on disk")
+
+        let settings = try readODFEntry(atPath: path, entry: "settings.xml")
+        let activeTable = activeTableName(in: settings)
+        XCTAssertEqual(activeTable, "Sheet2", "the saved view state must record the sheet the USER "
+                       + "was on, not the one a stale prefetch paint left LOK parked at — see "
+                        + "LOKBridge.saveAsOnDedicatedThread's own header (fix round 4, NEW-2)")
+
+        runtime.close(path)
+        _ = host.teardownAllOfficeRuntimesAndStopHelper()
+    }
+
+    /// `unzip -p` for any single entry — `readODFContentXML` above, generalised, so a drill that
+    /// needs `settings.xml` (the saved VIEW state, as opposed to the saved content) does not need a
+    /// second copy of the same four lines.
+    private func readODFEntry(atPath path: String, entry: String) throws -> String {
+        let unzip = Process()
+        unzip.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+        unzip.arguments = ["-p", path, entry]
+        let pipe = Pipe()
+        unzip.standardOutput = pipe
+        try unzip.run()
+        unzip.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        return try XCTUnwrap(String(data: data, encoding: .utf8), "\(entry) was not valid UTF-8")
+    }
+
+    /// The `ActiveTable` config item's value out of an ODF `settings.xml` — ODF's own name for
+    /// "which sheet this document opens on." `nil` if the item is absent, which the caller must
+    /// treat as a failure rather than as "no opinion": a spreadsheet saved with no recorded active
+    /// sheet would mean this drill's whole mechanism had gone missing.
+    private func activeTableName(in settings: String) -> String? {
+        let marker = "config:name=\"ActiveTable\""
+        guard let name = settings.range(of: marker),
+              let open = settings.range(of: ">", range: name.upperBound..<settings.endIndex),
+              let close = settings.range(of: "<", range: open.upperBound..<settings.endIndex) else {
+            return nil
+        }
+        return String(settings[open.upperBound..<close.lowerBound])
+    }
+
     /// Types `marker`'s own ASCII characters through the raw wire client, one `keyInput`/`keyUp`
     /// pair each. Same test-local table convention as `postRealEdit` above (uppercase letters OR'd
     /// with `KEY_SHIFT`, matching how a real user actually holds Shift to type them) — deliberately

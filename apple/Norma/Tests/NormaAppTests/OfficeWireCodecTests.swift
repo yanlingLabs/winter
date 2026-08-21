@@ -29,7 +29,10 @@ final class OfficeWireCodecTests: XCTestCase {
             .open(seq: 4, docId: "doc-1", path: "/tmp/a spaced name.docx"),
             .close(seq: 5, docId: "doc-1"),
             // Office Stage B Task 2 — the save round trip.
-            .save(seq: 30, docId: "doc-1"),
+            // Fix round 4 (NEW-2) — a NON-ZERO part, deliberately: a `save` sample pinned at
+            // part 0 would round-trip identically whether the field were carried or silently
+            // defaulted, which is exactly the drift this table exists to catch.
+            .save(seq: 30, docId: "doc-1", part: 2),
             .saved(seq: 31, docId: "doc-1", tempPath: "/tmp/state/saves/doc-1-30.xlsx"),
             .saveFailed(seq: 32, docId: "doc-1", reason: "disk full"),
             .helloOk(seq: 6, lokVersion: officeWireStageALOKVersionPlaceholder),
@@ -122,7 +125,7 @@ final class OfficeWireCodecTests: XCTestCase {
             "ping": #"{"type":"ping","seq":1}"#,
             "open": #"{"type":"open","seq":1,"docId":"d","path":"/p"}"#,
             "close": #"{"type":"close","seq":1,"docId":"d"}"#,
-            "save": #"{"type":"save","seq":1,"docId":"d"}"#,
+            "save": #"{"type":"save","seq":1,"docId":"d","part":0}"#,
             "helloOk": #"{"type":"helloOk","seq":1,"lokVersion":"v"}"#,
             "refused": #"{"type":"refused","seq":1,"reason":"r"}"#,
             "pong": #"{"type":"pong","seq":1}"#,
@@ -178,7 +181,7 @@ final class OfficeWireCodecTests: XCTestCase {
         XCTAssertEqual(OfficeWireFrame.ping(seq: 101).seq, 101)
         XCTAssertEqual(OfficeWireFrame.open(seq: 102, docId: "d", path: "/p").seq, 102)
         XCTAssertEqual(OfficeWireFrame.close(seq: 103, docId: "d").seq, 103)
-        XCTAssertEqual(OfficeWireFrame.save(seq: 121, docId: "d").seq, 121)
+        XCTAssertEqual(OfficeWireFrame.save(seq: 121, docId: "d", part: 1).seq, 121)
         XCTAssertEqual(OfficeWireFrame.saved(seq: 122, docId: "d", tempPath: "/p").seq, 122)
         XCTAssertEqual(OfficeWireFrame.saveFailed(seq: 123, docId: "d", reason: "r").seq, 123)
         XCTAssertEqual(OfficeWireFrame.keyEvent(seq: 126, docId: "d", part: 0, type: .keyInput, charCode: 65, keyCode: 512).seq, 126)

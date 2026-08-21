@@ -143,9 +143,14 @@ final class OfficeHelperClient {
     /// entirely the CALLER's job (`OfficeRuntime.perform`'s `.save` effect) — this method's only
     /// concern is the wire round trip, exactly as `open`'s only concern is the wire round trip for
     /// loading a document.
-    func save(docId: String) async throws -> String {
+    ///
+    /// **Fix round 4 (NEW-2) — `part` added**, threaded straight onto the wire frame; see
+    /// `OfficeWireFrame.save`'s own header for what it means here (the USER's active part, asserted
+    /// onto LOK before the write) and `OfficeRuntimeReducer`'s `.saveRequested` for where it is
+    /// resolved.
+    func save(docId: String, part: Int) async throws -> String {
         let seq = seqAllocator.nextSeq()
-        try await connection.send(.save(seq: seq, docId: docId))
+        try await connection.send(.save(seq: seq, docId: docId, part: part))
         let reply = try await expectReply(seq: seq)
         switch reply {
         case .saved(_, _, let tempPath): return tempPath

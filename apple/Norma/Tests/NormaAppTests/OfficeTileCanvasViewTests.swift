@@ -352,7 +352,7 @@ final class OfficeTileCanvasViewTests: XCTestCase {
                     type: documentType, parts: 1,
                     sizeTwips: OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)) },
                 close: { _ in },
-                save: { _ in "/tmp/officetilecanvasviewtests-unused-save" },
+                save: { _, _ in "/tmp/officetilecanvasviewtests-unused-save" },
                 subscribeTiles: { [unowned self] docId, part, zoomPPT, viewportTwips in
                     self.lock.lock(); self._subscribeCalls.append((docId, part, zoomPPT, viewportTwips)); self.lock.unlock()
                     return []
@@ -824,7 +824,7 @@ final class OfficeTileCanvasViewTests: XCTestCase {
                 open: { docId, _ in OfficeDocumentMetadata(type: .spreadsheet, parts: 4,
                                                             sizeTwips: OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)) },
                 close: { _ in },
-                save: { _ in "/tmp/officetilecanvasviewtests-unused-save" },
+                save: { _, _ in "/tmp/officetilecanvasviewtests-unused-save" },
                 subscribeTiles: { [unowned self] docId, part, zoomPPT, viewportTwips in
                     self.lock.lock(); self._subscribeCalls.append((docId, part, zoomPPT, viewportTwips)); self.lock.unlock()
                     return [] // never relied on here — the canvas computes its own prefetch keys

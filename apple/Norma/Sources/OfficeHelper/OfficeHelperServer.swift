@@ -80,7 +80,12 @@ public protocol OfficeDocumentBridge: AnyObject {
     /// as `open`/`close`/`paintTile`. Throws on any failure (an unopened `docId`, an unsupported
     /// format, a genuine `saveAs` failure) — the helper always survives, exactly like a failed
     /// `open`; `OfficeHelperServer` translates this into a `saveFailed` reply.
-    func saveAs(docId: String, seq: UInt64) throws -> String
+    ///
+    /// **Fix round 4 (NEW-2) — `part` added**: the part the USER is on, which the real
+    /// (`LOKBridge`) conformance asserts onto LOK immediately before writing, so ordinary paint
+    /// traffic cannot decide which part the saved view state records. See `OfficeWireFrame.save`'s
+    /// own header for why a save needs this even though painting already carries a part of its own.
+    func saveAs(docId: String, seq: UInt64, part: Int) throws -> String
 
     /// Office Stage B Task 4 — LOK's `postKeyEvent`, unchanged parameter shape. Throws only on a
     /// `docId` this bridge has no handle for — `postKeyEvent` itself is `void` on LOK's own side
@@ -158,7 +163,7 @@ public final class FakeOfficeDocumentBridge: OfficeDocumentBridge {
     /// (docId-not-open, seq-in-filename, `saved`/`saveFailed`) end to end, over a real socket,
     /// without needing a LOK boot — only pixel/content CORRECTNESS needs the vendor-gated live
     /// tests against `LOKBridge`, the same split `paintTile` already established for tiles.
-    public func saveAs(docId: String, seq: UInt64) throws -> String {
+    public func saveAs(docId: String, seq: UInt64, part: Int) throws -> String {
         lock.lock()
         let isOpen = caches[docId] != nil
         lock.unlock()
@@ -788,7 +793,7 @@ public final class OfficeHelperServer {
                           to: subscriber)
             }
             writeReply(.closed(seq: seq, docId: docId), writer: writer)
-        case .frame(.save(let seq, let docId)):
+        case .frame(.save(let seq, let docId, let part)):
             // Office Stage B Task 2 — mirrors `tileRequest`'s own "must already be open — by ANY
             // connection" posture (not `close`'s ownership check): Stage A/B has one client at a
             // time in practice, and there is no destructive "who may save" question the way there
@@ -799,7 +804,7 @@ public final class OfficeHelperServer {
             }
             do {
                 // Never called while holding stateQueue (the bridge-call invariant above).
-                let tempPath = try documentBridge.saveAs(docId: docId, seq: seq)
+                let tempPath = try documentBridge.saveAs(docId: docId, seq: seq, part: part)
                 writeReply(.saved(seq: seq, docId: docId, tempPath: tempPath), writer: writer)
             } catch {
                 // The helper SURVIVES a failed save — same posture as a failed open.

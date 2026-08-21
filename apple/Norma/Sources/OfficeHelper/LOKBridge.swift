@@ -474,8 +474,8 @@ final class LOKBridge: OfficeDocumentBridge {
     /// `open`/`close`/`paintTile` above. `seq` is the wire request's own seq (never re-minted here):
     /// reusing it as the destination filename's disambiguator is what keeps two saves of the same
     /// `docId` from colliding on disk without this bridge needing a save-local counter of its own.
-    func saveAs(docId: String, seq: UInt64) throws -> String {
-        try thread.sync { try self.saveAsOnDedicatedThread(docId: docId, seq: seq) }
+    func saveAs(docId: String, seq: UInt64, part: Int) throws -> String {
+        try thread.sync { try self.saveAsOnDedicatedThread(docId: docId, seq: seq, part: part) }
     }
 
     /// Office Stage B Task 4 — called from a CONNECTION thread (`OfficeHelperServer`'s `.keyEvent`
@@ -697,9 +697,31 @@ final class LOKBridge: OfficeDocumentBridge {
     /// theoretical) by the two-document live drills in `OfficeRuntimeLiveTests.swift`: RED at this
     /// exact dirty-clear wait once each drill's own "save interleave" (a real tile request against
     /// the OTHER document, immediately before save) reasserted it as current — GREEN with this line.
-    private func saveAsOnDedicatedThread(docId: String, seq: UInt64) throws -> String {
+    ///
+    /// **Fix round 4 (NEW-2) — the save asserts the USER's own active part, first.** Until this
+    /// round, this was the ONE current-view-dependent job in this bridge with no `setPart` prefix at
+    /// all: it inherited whatever part the last tile paint happened to leave LOK parked at. That is
+    /// not merely untidy, it is a stale-window bug with a real trigger — a residency-prefetch chunk
+    /// cut mid-flight by a part switch is still delivered, so a paint carrying the OLD part can
+    /// re-park LOK there AFTER the user has switched, and if the new part's tiles are already cached
+    /// no corrective paint follows to move it back. A save landing in that window records the stale
+    /// sheet as the document's active one. Asserting `part` here — the SAME
+    /// `DocumentEntry.activePart` the input verbs read, carried on the wire's own `save` frame —
+    /// makes the answer independent of paint ordering entirely: whatever the paint traffic did, the
+    /// bytes this method writes record where the USER is. Placed with the `setView` prefix at the
+    /// top, unconditionally, matching every other job's "assert the invariant on entry" shape, and
+    /// covering BOTH the `saveAs` write and the `.uno:Save` follow-up below.
+    ///
+    /// Type-gated for the same reason every other `setPart` in this file now is (fix round 4,
+    /// NEW-1): for a text document `setPart` is `GotoPage`, a caret move, and saving must not move
+    /// the user's caret. Nothing is lost — a text document has exactly one part here, so there is no
+    /// stale-part window for it to be in.
+    private func saveAsOnDedicatedThread(docId: String, seq: UInt64, part: Int) throws -> String {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
         doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        if doc.kind != .text {
+            doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(truncatingIfNeeded: part))
+        }
         guard let format = doc.saveFormat else {
             throw SaveError.unsupportedFormat("(format not captured at open)")
         }

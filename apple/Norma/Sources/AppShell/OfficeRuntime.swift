@@ -384,7 +384,12 @@ enum OfficeRuntimeEffect: Equatable {
     /// helper (`driver.save`), then atomically place its answer — see `OfficeRuntime.performSave`'s
     /// own header for the two stale guards and the suppression-bag wiring this one effect stands
     /// for.
-    case save(path: String, docId: String)
+    ///
+    /// **Fix round 4 (NEW-2) — `part` added**: `path`'s own `activePart` AT DISPATCH TIME, resolved
+    /// from the same `DocumentEntry` read that already resolves `docId` here, and for the same
+    /// reason — a save describes the document as the user had it when they asked, not as whatever
+    /// has happened since. See `OfficeWireFrame.save`'s own header for what the helper does with it.
+    case save(path: String, docId: String, part: Int)
     /// Office Stage B Task 2b — remove `docId`'s own staged copy from `<state-path>/docs/`
     /// (whatever its extension — `OfficeRuntime.deleteStagedCopy`'s own glob-by-docId-prefix doc
     /// has why). Emitted by the reducer at every site a `DocumentEntry` is abandoned for good:
@@ -542,7 +547,7 @@ enum OfficeRuntimeReducer {
 
         case .saveRequested(let path):
             guard state.phase == .ready, let doc = state.documents[path] else { return (next, []) }
-            return (next, [.save(path: path, docId: doc.docId)])
+            return (next, [.save(path: path, docId: doc.docId, part: doc.activePart)])
 
         case .saveSucceeded(let path, let docId):
             // The stale-save guard: only act if `path` still shows the very docId this save was
@@ -792,7 +797,11 @@ final class OfficeRuntime: ObservableObject {
         /// turns a throw here into `.saveFailed`, never a crash. Routed through
         /// `ShellSessionHost.officeRequestQueue` in production, on the SAME terms as every other
         /// Driver call.
-        var save: (_ docId: String) async throws -> String
+        /// Fix round 4 (NEW-2) — `part` added: the USER's own active part, which the helper asserts
+        /// onto LOK immediately before writing so that ordinary paint traffic cannot decide which
+        /// part the saved view state records. Resolved by the reducer (`.saveRequested`), from the
+        /// same `DocumentEntry.activePart` the input verbs read.
+        var save: (_ docId: String, _ part: Int) async throws -> String
         var subscribeTiles: (_ docId: String, _ part: Int, _ zoomPPT: Int,
                              _ viewportTwips: OfficeTwipsRect) async throws -> [TileKey]
         var unsubscribeTiles: (_ docId: String) async -> Void
@@ -963,7 +972,7 @@ final class OfficeRuntime: ObservableObject {
     func saveAndAwaitOutcome(_ path: String) async -> SaveOutcome {
         await withCheckedContinuation { continuation in
             let effects = dispatch(.saveRequested(path: path))
-            guard case .save(_, let docId)? = effects.first else {
+            guard case .save(_, let docId, _)? = effects.first else {
                 perform(effects) // always `[]` here, but keeps the dispatch/perform pairing uniform
                 continuation.resume(returning: .noModel)
                 return
@@ -1254,8 +1263,8 @@ final class OfficeRuntime: ObservableObject {
                 }
                 openAndDispatch(path: path, myGeneration: generation, reloadingDocId: oldDocId)
 
-            case .save(let path, let docId):
-                performSave(path: path, docId: docId, myGeneration: generation)
+            case .save(let path, let docId, let part):
+                performSave(path: path, docId: docId, part: part, myGeneration: generation)
 
             case .watchFile(let path):
                 startWatching(path)
@@ -1417,11 +1426,11 @@ final class OfficeRuntime: ObservableObject {
     /// way (best-effort — `saves/` would otherwise grow unboundedly across a long-lived helper's
     /// whole lifetime, the exact class of leak the `lok-profile-*` sweep in `LOKBridge` was written
     /// to close for a different directory).
-    private func performSave(path: String, docId: String, myGeneration: Int) {
+    private func performSave(path: String, docId: String, part: Int, myGeneration: Int) {
         Task { [weak self, driver] in
             guard let self else { return }
             do {
-                let tempPath = try await driver.save(docId)
+                let tempPath = try await driver.save(docId, part)
                 guard myGeneration == self.generation, self.state.documents[path]?.docId == docId else {
                     // Task 2b: even if `tempPath` happens to be this (now-superseded) docId's own
                     // staged working copy, that exact file is independently swept by whatever

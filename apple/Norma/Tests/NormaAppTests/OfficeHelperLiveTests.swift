@@ -1832,7 +1832,7 @@ final class OfficeHelperLiveTests: XCTestCase {
             try Data(contentsOf: Self.fixturesRoot.appendingPathComponent(fixture)).write(to: URL(fileURLWithPath: docPath))
             let docId = "odf-probe"
             _ = try await helper.client.open(docId: docId, path: docPath)
-            let tempPath = try await helper.client.save(docId: docId)
+            let tempPath = try await helper.client.save(docId: docId, part: 0)
             XCTAssertTrue(FileManager.default.fileExists(atPath: tempPath), "\(fixture): saveAs must produce a real file")
             XCTAssertTrue(tempPath.hasSuffix(".\(format)"), "\(fixture): saved under its own format's extension")
             let size = (try? FileManager.default.attributesOfItem(atPath: tempPath)[.size] as? Int) ?? nil
@@ -1857,7 +1857,7 @@ final class OfficeHelperLiveTests: XCTestCase {
             try Data(contentsOf: Self.fixturesRoot.appendingPathComponent(fixture)).write(to: URL(fileURLWithPath: docPath))
             let docId = "ooxml-probe"
             _ = try await helper.client.open(docId: docId, path: docPath)
-            Task { _ = try? await helper.client.save(docId: docId) }
+            Task { _ = try? await helper.client.save(docId: docId, part: 0) }
             let died = await waitUntil(timeout: 15.0) { !helper.process.isRunning }
             XCTAssertTrue(died, "\(fixture): expected the KNOWN OOXML-export limitation to reproduce "
                           + "(the helper process dying) — if this timed out instead, either the "

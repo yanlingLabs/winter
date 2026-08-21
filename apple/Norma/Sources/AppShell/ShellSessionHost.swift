@@ -952,12 +952,12 @@ final class ShellSessionHost: ObservableObject {
             // Office Stage B Task 2 — throws all the way back to `OfficeRuntime.performSave`
             // (unlike `close`/`unsubscribeTiles` above, which are fire-and-forget everywhere they're
             // used): a save's caller needs to know whether it worked, the same reason `open` throws.
-            save: { [weak supervisor] docId in
+            save: { [weak supervisor] docId, part in
                 try await queue.run {
                     guard let client = supervisor?.client else {
                         throw OfficeHelperClientError.serverError(reason: "helper not connected")
                     }
-                    return try await client.save(docId: docId)
+                    return try await client.save(docId: docId, part: part)
                 }
             },
             subscribeTiles: { [weak supervisor] docId, part, zoomPPT, viewportTwips in

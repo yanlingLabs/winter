@@ -266,7 +266,7 @@ final class PanelDocumentTabTests: XCTestCase {
                     return self.openMetadata[path] ?? self.defaultMetadata
                 },
                 close: { _ in },
-                save: { [unowned self] docId in
+                save: { [unowned self] docId, _ in
                     self.lock.lock(); self._saveCalls.append(docId); self.lock.unlock()
                     return self.saveTempPaths[docId] ?? "/tmp/paneldocumenttabtests-\(docId).saved"
                 },
