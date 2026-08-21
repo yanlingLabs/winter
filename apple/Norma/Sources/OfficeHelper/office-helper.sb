@@ -60,11 +60,57 @@
 ;; worse than one that has to be revisited if Stage B's editable surface later needs one of them for
 ;; real. What remains below is exactly this repo's own already-reviewed baseline, carried over
 ;; unchanged, not a fresh guess.
+;;
+;; Task 10 addendum — the four entries below were each MISSING, not merely undocumented: T1's own
+;; "full six-format matrix" above never actually exercised Impress/Writer through the EMBEDDED
+;; install root (spawnLiveHelper's own default `installRoot` is the STANDALONE vendor tree, not the
+;; embedded one) — the gap only became visible once Task 10's harness opened pptx/odp/docx/odt via
+;; the real `<app>/Contents/Resources/LibreOffice` resolution `resolveInstallRoot()` uses in
+;; production. Root-caused by capturing `/usr/bin/log stream --predicate 'eventMessage contains
+;; "deny"'` (NOT `sender == "Sandbox"` — T1's own predicate produces zero lines on this OS build;
+;; `deny` matches both the terse `kernel[...] (Sandbox)` lines AND the full
+;; `sandboxd[...][com.apple.sandbox.reporting:violation]` reports, and only the latter carries a
+;; per-thread backtrace) around a live reproduction. The captured violation's `office-helper.lok`
+;; thread was blocked inside:
+;;   LOKBridge.openOnDedicatedThread → lo_documentLoadWithOptions → ... →
+;;   SvxShapeText::setString → LinguServiceManager::create → LngSvcMgr::GetAvailableSpellSvcs_Impl →
+;;   MacSpellChecker::MacSpellChecker() → NSApplicationLoad() → +[NSApplication initialize] →
+;;   { CFPasteboardCreate, then in turn TCC / WindowServer / LaunchServices connection attempts }
+;; i.e. the VENDORED, unmodified LOK always probes macOS's native spellchecker's *availability* the
+;; first time a document's editable text/shape model is built — Impress shapes and Writer text
+;; frames both reach `SvxShapeText::setString`; Calc's pure grid-cell path never does, which is
+;; exactly why Calc opened cleanly through this same seatbelt while Impress/Writer did not. That
+;; probe calls `NSApplicationLoad()` unconditionally — this is LOK's own one-time linguistic-service
+;; enumeration, not anything this helper's own Swift code invokes — and a HEADLESS, no-Aqua-session
+;; process denied WindowServer during that Cocoa bootstrap does not fail fast; it stalls, which is
+;; the actual mechanism behind the "office helper request timed out" symptom this task's harness
+;; first exposed (a hang inside AppKit init, not a crash and not the CFB defect — the CFB guard sits
+;; earlier, before any of this LOK-internal code runs).
+;;
+;; Granting these four is a real, if narrow, capability expansion — worth naming plainly rather than
+;; waving off as "obviously harmless": once `com.apple.pasteboard.1`'s mach-lookup succeeds, nothing
+;; else in this profile stops the process from calling `NSPasteboard.general` for real reads/writes.
+;; Accepted because Norma's own clipboard feature (`OfficeHelperClient.clipboardCopy/Cut/Paste`)
+;; deliberately never routes through here — it moves bytes via LOK's own in-process clipboard API,
+;; with the UNSANDBOXED app process as the one that ever touches the real system pasteboard — so this
+;; grant only closes the gap between "what a headless LOK worker's own internal spellchecker probe
+;; needs to complete" and "what it can reach," not a feature this helper intentionally uses.
+;;
+;; Bisected, not guessed: a follow-up build granting ONLY `com.apple.pasteboard.1` reproduced the
+;; SAME failure (all four formats) — `+[NSApplication initialize]`'s later steps are unconditional,
+;; not merely a fallback chain triggered by pasteboard's own failure, so all four are independently
+;; load-bearing. The pin test (`testImpressAndWriterDocumentsNowOpenSuccessfullyViaTheEmbeddedInstall
+;; RootMatchingCalcAndTheStandaloneLokRoot`, `OfficeHelperLiveTests.swift`) flipped from failing to
+;; passing only with all four present.
 (allow mach-lookup
   (global-name "com.apple.system.notification_center")
   (global-name "com.apple.system.logger")
   (global-name "com.apple.CoreServices.coreservicesd")
   (global-name "com.apple.bsd.dirhelper")
+  (global-name "com.apple.pasteboard.1")
+  (global-name "com.apple.tccd.system")
+  (global-name "com.apple.windowserver.active")
+  (global-name "com.apple.coreservices.launchservicesd")
 )
 
 ;; --- filesystem ---
