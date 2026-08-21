@@ -99,9 +99,11 @@
 ;; Bisected, not guessed: a follow-up build granting ONLY `com.apple.pasteboard.1` reproduced the
 ;; SAME failure (all four formats) — `+[NSApplication initialize]`'s later steps are unconditional,
 ;; not merely a fallback chain triggered by pasteboard's own failure, so all four are independently
-;; load-bearing. The pin test (`testImpressAndWriterDocumentsNowOpenSuccessfullyViaTheEmbeddedInstall
-;; RootMatchingCalcAndTheStandaloneLokRoot`, `OfficeHelperLiveTests.swift`) flipped from failing to
-;; passing only with all four present.
+;; load-bearing. Precisely: the pasteboard-only build was checked against the PRE-INVERSION
+;; known-limitation pin (which asserted the OLD failure and reported zero XCTFails, i.e. all four
+;; formats still failed to open) — the pin was only rewritten to its current, passing shape
+;; (`testImpressAndWriterDocumentsOpenSuccessfullyViaTheEmbeddedInstallRootMatchingCalcAndThe
+;; StandaloneLokRoot`, `OfficeHelperLiveTests.swift`) afterward, once all four grants were restored.
 (allow mach-lookup
   (global-name "com.apple.system.notification_center")
   (global-name "com.apple.system.logger")
