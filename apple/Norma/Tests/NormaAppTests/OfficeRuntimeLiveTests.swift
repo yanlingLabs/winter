@@ -3708,4 +3708,253 @@ final class OfficeRuntimeLiveTests: XCTestCase {
 
         _ = host.teardownAllOfficeRuntimesAndStopHelper()
     }
+
+    // MARK: - Office Stage B Task 7 — autosave sidecars + crash recovery: THE live drill
+
+    /// **THE brief's own named live drill, and this task's whole reason to exist**: open, type (real
+    /// input, through the real client — `postRealEdit`'s own established discipline), wait for a
+    /// REAL autosave sidecar (a shortened `--autosave-interval-seconds`, never a real 60s wait),
+    /// SIGKILL the helper by PID (bypassing `OfficeHelperSupervisor.stop()`/`forceKill` entirely —
+    /// an EXTERNAL, unprompted kill is what actually proves `.helperDied` fires the way a genuine
+    /// crash would; a supervisor-INITIATED stop bumps `generation` first specifically so death
+    /// detection stays silent for it, which is the wrong shape to drill), reopen the SAME path
+    /// (this mints a fresh `OfficeHelperSupervisor` boot — `.failed` retries exactly like `.idle`),
+    /// see the recovery banner's own state, Restore, and prove the TYPED CONTENT is there — "the T4
+    /// standard": read the SAVED bytes back off disk via `readODFContentXML`/`strippedODFBodyText`,
+    /// never the in-memory model, never a pixel-only proxy. Then ⌘S, and prove the REAL path (not
+    /// just the recovered buffer) now carries it, and that the sidecar + its manifest are gone.
+    ///
+    /// **ODF fixture (`gate.odt`), deliberately** — the parked OOXML vendor limitation
+    /// (`ooxml-export-investigation.md`) makes `⌘S -> real file carries it` categorically impossible
+    /// for xlsx/docx regardless of anything THIS task builds; proving that leg needs a format real
+    /// saves actually work for. The OOXML sidecar-format DECISION (fall back to ODF rather than
+    /// crash) gets its own, separate empirical proof immediately below this test — together the two
+    /// cover both halves of "does recovery work" and "does the fallback keep the helper alive."
+    func testCrashDuringAutosaveRecoversTheTypedContentThenSaveLandsOnTheRealPath() async throws {
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
+                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                        + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
+        let vendorRoot = Self.vendorProductSetRoot
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
+                      "LibreOffice vendor tree not present at \(vendorRoot.path) — run "
+                        + "`bun run libreoffice:fetch` from the repo root.")
+        let fixturePath = Self.fixturesRoot.appendingPathComponent("gate.odt").path
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: fixturePath), "gate.odt fixture missing")
+
+        let stateDir = makeScratchDirectory()
+        let directory = SessionDirectory(lister: { [] })
+        let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        // The one deliberate deviation from every other live test's own Configuration: a SHORT
+        // autosave interval, mirroring `idleExitSeconds`'s identical override pattern — see
+        // `OfficeHelperSupervisor.Configuration.autosaveIntervalSeconds`'s own header. 2s keeps this
+        // drill fast without shaving the real cadence mechanism down to something that would no
+        // longer exercise the REAL DispatchSourceTimer machinery.
+        host.makeOfficeHelperSupervisor = {
+            OfficeHelperSupervisor(configuration: OfficeHelperSupervisor.Configuration(
+                helperExecutableURL: helperURL, socketDirectory: stateDir, autosaveIntervalSeconds: 2.0,
+                extraArguments: ["--lok-root", vendorRoot.path, "--sandbox-profile", Self.sandboxProfilePath.path]))
+        }
+        let runtime = host.officeRuntime(for: "S1")
+
+        let scratchDir = makeScratchDirectory()
+        let docPath = scratchDir.appendingPathComponent("crash-drill.odt").path
+        try Data(contentsOf: URL(fileURLWithPath: fixturePath)).write(to: URL(fileURLWithPath: docPath))
+
+        // MARK: 1. Open, type, dirty.
+        runtime.open(docPath)
+        let opened = await waitUntil(timeout: 90) {
+            runtime.stateSnapshot.documents[docPath] != nil || runtime.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(opened, "never opened — phase: \(runtime.stateSnapshot.phase)")
+        guard let originalDocId = runtime.stateSnapshot.documents[docPath]?.docId else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("gate.odt did not open: \(runtime.stateSnapshot.openFailures[docPath] ?? "no reason recorded")")
+        }
+        guard let client = host.officeHelperSupervisor?.client else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("no live client to type through")
+        }
+        let marker = "SIGKILLPROOF"
+        try await client.postMouse(docId: originalDocId, part: 0, type: .buttonDown, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await client.postMouse(docId: originalDocId, part: 0, type: .buttonUp, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await postRawUppercaseMarker(client: client, docId: originalDocId, marker: marker)
+
+        let becameDirty = await waitUntil(timeout: 15) { runtime.stateSnapshot.documents[docPath]?.dirty == true }
+        XCTAssertTrue(becameDirty, "the typed edit's own ModifiedStatus=true never reached documents[path].dirty")
+
+        // MARK: 2. Wait for a REAL sidecar the helper's own timer wrote.
+        guard let helperPID = host.officeHelperSupervisor?.process?.processIdentifier else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("no live helper process to check/kill")
+        }
+        let sidecarPath = stateDir.appendingPathComponent("autosave", isDirectory: true)
+            .appendingPathComponent("\(originalDocId).odt").path
+        let sidecarAppeared = await waitUntil(timeout: 30) { FileManager.default.fileExists(atPath: sidecarPath) }
+        XCTAssertTrue(sidecarAppeared, "the 2s autosave timer never wrote a sidecar at \(sidecarPath)")
+        XCTAssertTrue(isProcessAlive(helperPID), "the helper must still be alive after writing its own sidecar")
+
+        // MARK: 3. The crash — an EXTERNAL, unprompted SIGKILL (never `forceKill`/`stop()`, which
+        // deliberately suppress `.helperDied` for a kill THIS process initiated — see this test's
+        // own header).
+        kill(helperPID, SIGKILL)
+        let diedExternally = await waitUntil(timeout: 10) { !self.isProcessAlive(helperPID) }
+        XCTAssertTrue(diedExternally, "SIGKILL did not actually end the helper process")
+        let phaseFailed = await waitUntil(timeout: 10) { runtime.stateSnapshot.phase == .failed }
+        XCTAssertTrue(phaseFailed, "the supervisor's own death detection never reached .helperDied "
+                      + "— phase: \(runtime.stateSnapshot.phase)")
+        XCTAssertNil(runtime.stateSnapshot.documents[docPath], ".helperDied wipes every open document")
+
+        // MARK: 4. Reopen — a fresh supervisor boot (`.failed` retries exactly like `.idle`).
+        runtime.open(docPath)
+        let reopened = await waitUntil(timeout: 90) {
+            runtime.stateSnapshot.documents[docPath] != nil || runtime.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(reopened, "never reopened after the crash — phase: \(runtime.stateSnapshot.phase)")
+        guard let reopenedDocId = runtime.stateSnapshot.documents[docPath]?.docId else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("reopen after the crash failed: \(runtime.stateSnapshot.openFailures[docPath] ?? "no reason recorded")")
+        }
+        XCTAssertNotEqual(reopenedDocId, originalDocId, "sanity: a reopen always mints a fresh docId")
+        XCTAssertEqual(runtime.stateSnapshot.documents[docPath]?.dirty, false, "the reopened document "
+                       + "is its own fresh, unedited load — clean until Restore forces it")
+
+        // MARK: 5. The recovery banner's own state — found, offered.
+        let candidateFound = await waitUntil(timeout: 15) { runtime.stateSnapshot.documentRecoveryCandidates[docPath] != nil }
+        XCTAssertTrue(candidateFound, "the post-open recovery check never found the sidecar the crash left behind")
+        guard let candidate = runtime.stateSnapshot.documentRecoveryCandidates[docPath] else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("candidate vanished between the wait and the read")
+        }
+        XCTAssertEqual(candidate.docId, originalDocId, "the offer must point at the CRASHED session's own sidecar")
+        XCTAssertFalse(candidate.isODFFallback, "gate.odt is already ODF — no fallback should have applied")
+
+        // MARK: 6. Restore.
+        runtime.restoreFromRecovery(docPath)
+        let restored = await waitUntil(timeout: 30) {
+            runtime.stateSnapshot.documents[docPath]?.docId != reopenedDocId
+                && runtime.stateSnapshot.documents[docPath]?.dirty == true
+        }
+        XCTAssertTrue(restored, "the restore-flavored reopen never landed with dirty forced true")
+        XCTAssertNil(runtime.stateSnapshot.documentRecoveryCandidates[docPath], "the offer is consumed once acted on")
+        guard let restoredDocId = runtime.stateSnapshot.documents[docPath]?.docId else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("no document after restore")
+        }
+
+        // MARK: 7. ⌘S — the real path must carry the RECOVERED content, on disk, not the in-memory
+        // model ("the T4 standard").
+        let beforeSaveStat = officeFileStat(atPath: docPath)
+        runtime.save(docPath)
+        let fileChanged = await waitUntil(timeout: 30) { officeFileStat(atPath: docPath) != beforeSaveStat }
+        XCTAssertTrue(fileChanged, "the post-restore save never landed on the real path — "
+                      + "banner=\(runtime.stateSnapshot.documentBanners[docPath] ?? "nil")")
+        XCTAssertNil(runtime.stateSnapshot.documentBanners[docPath], "no save-failed banner")
+
+        let becameCleanAfterSave = await waitUntil(timeout: 15) { runtime.stateSnapshot.documents[docPath]?.dirty == false }
+        XCTAssertTrue(becameCleanAfterSave, "restoredPendingSave's own forced-clear never landed — "
+                      + "the dot would be stuck forever otherwise (LOK never saw this content as "
+                      + "'modified' in the first place)")
+        XCTAssertEqual(runtime.stateSnapshot.documents[docPath]?.docId, restoredDocId, "sanity — still "
+                       + "the SAME restored document, not a reload in disguise")
+
+        let content = try readODFContentXML(atPath: docPath)
+        let body = strippedODFBodyText(content)
+        XCTAssertTrue(body.contains(marker), "the typed marker \"\(marker)\" is missing from the "
+                      + "SAVED real file's own body text — the recovered content never actually "
+                      + "landed on disk. Body: \(body)")
+
+        // MARK: 8. The sidecar and its manifest are cleared once the real path carries the content.
+        let sidecarCleared = await waitUntil(timeout: 15) { !FileManager.default.fileExists(atPath: sidecarPath) }
+        XCTAssertTrue(sidecarCleared, "a successful save must clear the now-redundant sidecar — "
+                      + "the ownership rule (.saveSucceeded -> .clearAutosave) failed to fire")
+
+        _ = host.teardownAllOfficeRuntimesAndStopHelper()
+    }
+
+    // MARK: - Office Stage B Task 7 — the OOXML-fallback decision's own empirical proof
+
+    /// **The single most valuable proof of the ODF-fallback decision** (advisor review): opens a
+    /// REAL xlsx, dirties it, lets the (shortened) autosave timer fire against REAL LOK, and asserts
+    /// two things directly — the sidecar lands at `.ods`, never `.xlsx` (the fallback actually
+    /// applied), and the helper process is STILL ALIVE afterward. Without this test, "xlsx autosave
+    /// falls back to ODF" is a claim resting entirely on `OfficeSaveFormat.autosaveFormat`'s own
+    /// (pure, LOK-free) unit coverage — which proves the TABLE maps xlsx->ods, never that saving
+    /// actually AVOIDS the real crash the table exists to dodge. This is that proof: if the fallback
+    /// table were ever reverted to native xlsx, this test would SIGABRT the whole test process the
+    /// same way `OfficeHelperLiveTests`' own permanent xlsx-export-crash regression pin already does.
+    func testXlsxAutosaveSidecarFallsBackToODFAndTheHelperSurvives() async throws {
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
+                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                        + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
+        let vendorRoot = Self.vendorProductSetRoot
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
+                      "LibreOffice vendor tree not present at \(vendorRoot.path) — run "
+                        + "`bun run libreoffice:fetch` from the repo root.")
+        let fixturePath = Self.fixturesRoot.appendingPathComponent("gate.xlsx").path
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: fixturePath), "gate.xlsx fixture missing")
+
+        let stateDir = makeScratchDirectory()
+        let directory = SessionDirectory(lister: { [] })
+        let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        host.makeOfficeHelperSupervisor = {
+            OfficeHelperSupervisor(configuration: OfficeHelperSupervisor.Configuration(
+                helperExecutableURL: helperURL, socketDirectory: stateDir, autosaveIntervalSeconds: 2.0,
+                extraArguments: ["--lok-root", vendorRoot.path, "--sandbox-profile", Self.sandboxProfilePath.path]))
+        }
+        let runtime = host.officeRuntime(for: "S1")
+
+        let scratchDir = makeScratchDirectory()
+        let docPath = scratchDir.appendingPathComponent("fallback-drill.xlsx").path
+        try Data(contentsOf: URL(fileURLWithPath: fixturePath)).write(to: URL(fileURLWithPath: docPath))
+
+        runtime.open(docPath)
+        let opened = await waitUntil(timeout: 90) {
+            runtime.stateSnapshot.documents[docPath] != nil || runtime.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(opened, "never opened — phase: \(runtime.stateSnapshot.phase)")
+        guard let docId = runtime.stateSnapshot.documents[docPath]?.docId else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("gate.xlsx did not open: \(runtime.stateSnapshot.openFailures[docPath] ?? "no reason recorded")")
+        }
+        guard let client = host.officeHelperSupervisor?.client else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("no live client to type through")
+        }
+        try await client.postMouse(docId: docId, part: 0, type: .buttonDown, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await client.postMouse(docId: docId, part: 0, type: .buttonUp, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await postRawUppercaseMarker(client: client, docId: docId, marker: "FALLBACK")
+        try await client.postKey(docId: docId, part: 0, type: .keyInput, charCode: 0, keyCode: 1280) // Return, commits the Calc cell
+        try await client.postKey(docId: docId, part: 0, type: .keyUp, charCode: 0, keyCode: 1280)
+
+        let becameDirty = await waitUntil(timeout: 15) { runtime.stateSnapshot.documents[docPath]?.dirty == true }
+        XCTAssertTrue(becameDirty, "the typed edit's own ModifiedStatus=true never reached documents[path].dirty")
+
+        guard let helperPID = host.officeHelperSupervisor?.process?.processIdentifier else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("no live helper process to check")
+        }
+        let autosaveDir = stateDir.appendingPathComponent("autosave", isDirectory: true)
+        let odsSidecarPath = autosaveDir.appendingPathComponent("\(docId).ods").path
+        let xlsxSidecarPath = autosaveDir.appendingPathComponent("\(docId).xlsx").path
+
+        let odsSidecarAppeared = await waitUntil(timeout: 30) { FileManager.default.fileExists(atPath: odsSidecarPath) }
+        XCTAssertTrue(odsSidecarAppeared, "the xlsx document's own autosave sidecar never appeared "
+                      + "in ODS format at \(odsSidecarPath)")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: xlsxSidecarPath), "must NEVER write a "
+                       + "native-xlsx sidecar — that is the exact export path proven to crash")
+        XCTAssertTrue(isProcessAlive(helperPID), "the helper must survive writing an xlsx document's "
+                      + "own autosave sidecar — a crash here means the ODF-fallback decision failed "
+                      + "at the one thing it exists to prevent")
+
+        // A SECOND fire, past the first — the brief's own concern is specifically an UNATTENDED,
+        // REPEATING timer; one clean fire alone does not rule out a crash on the next one.
+        let beforeSecondFire = officeFileStat(atPath: odsSidecarPath)
+        let secondFireLanded = await waitUntil(timeout: 15) { officeFileStat(atPath: odsSidecarPath) != beforeSecondFire }
+        XCTAssertTrue(secondFireLanded, "the timer never fired a second time")
+        XCTAssertTrue(isProcessAlive(helperPID), "the helper must survive a SECOND xlsx autosave fire too")
+
+        _ = host.teardownAllOfficeRuntimesAndStopHelper()
+    }
 }

@@ -2416,6 +2416,30 @@ final class OfficeAutosaveManifestTests: XCTestCase {
         XCTAssertEqual(autosaveDirectoryContents(autosaveDir), [], "both the sidecar and the manifest are gone")
     }
 
+    /// **Live-drill-caught regression pin.** After a Restore, the currently-open docId is a FRESH
+    /// one — completely different from the CRASHED session's own docId the manifest still names.
+    /// `clearAutosave` must clear BOTH: the (here, never-created) current docId's own prefix, AND
+    /// the manifest's own recorded docId's sidecar — not just whichever docId happened to be passed
+    /// in literally.
+    func testClearAutosaveAlsoClearsTheManifestsOwnDocIdWhenItDiffersFromTheOneAsked() throws {
+        let autosaveDir = makeScratchDirectory()
+        let realPath = makeScratchDirectory().appendingPathComponent("notes.odt")
+        try "content".write(to: realPath, atomically: true, encoding: .utf8)
+        let crashedSidecar = autosaveDir.appendingPathComponent("crashed-doc.odt")
+        try "recovered content".write(to: crashedSidecar, atomically: true, encoding: .utf8)
+        OfficeRuntime.recordAutosaveManifest(realPath: realPath.path, docId: "crashed-doc", ext: "odt",
+                                             isODFFallback: false, autosaveDirectory: autosaveDir)
+        XCTAssertEqual(autosaveDirectoryContents(autosaveDir).count, 2, "sanity: sidecar + manifest")
+
+        // The currently-open document is a DIFFERENT, freshly-minted docId (the restored one) —
+        // never `crashed-doc` — exactly the post-Restore, no-further-typing shape the drill hit.
+        OfficeRuntime.clearAutosave(realPath: realPath.path, docId: "restored-doc-2", autosaveDirectory: autosaveDir)
+
+        XCTAssertEqual(autosaveDirectoryContents(autosaveDir), [], "the crashed session's own "
+                       + "sidecar must be cleared even though a DIFFERENT docId was asked for — "
+                       + "sourced from the manifest, not the literal parameter alone")
+    }
+
     func testClearAutosaveIsASafeNoOpWhenNothingExists() {
         let autosaveDir = makeScratchDirectory()
         OfficeRuntime.clearAutosave(realPath: "/never/opened.odt", docId: "doc-a", autosaveDirectory: autosaveDir) // must not throw/crash

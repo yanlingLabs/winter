@@ -2529,16 +2529,36 @@ final class OfficeRuntime: ObservableObject {
     /// exactly the three sites `.clearAutosave`'s own header enumerates — see that effect's doc for
     /// why `.helperDied`/`.helperUnavailable`/`.teardownRequested` never reach this. Best-effort,
     /// `nonisolated`, same posture as every other cleanup call in this file.
+    ///
+    /// **Live-drill-caught (not theoretical): also clears the MANIFEST's own recorded docId, not
+    /// only the literal `docId` passed in.** After a Restore, `path`'s currently-open docId is a
+    /// FRESH one (`openAndDispatch` always mints a new docId, restore included) — completely
+    /// different from the CRASHED session's own docId the sidecar on disk is actually named after
+    /// (`OfficeRecoveryCandidate.docId`, threaded into the manifest at `recordAutosaveManifest` time
+    /// and never re-derived from the currently-open document anywhere). A save landing right after
+    /// a Restore-with-no-further-typing calls this with the RESTORED docId, which never had a
+    /// sidecar of its own — clearing only that docId's prefix silently leaves the crashed session's
+    /// real sidecar behind forever. Reading the manifest FIRST (before deleting it) and unioning its
+    /// own `docId` into the sweep fixes this for every caller uniformly, without threading a second
+    /// "which docId did this content actually come from" fact through the reducer/effects layer —
+    /// the manifest already IS that fact, sitting right here about to be read anyway.
     nonisolated static func clearAutosave(realPath: String, docId: String, autosaveDirectory: URL) {
+        let manifestPath = Self.autosaveManifestPath(forRealPath: realPath, autosaveDirectory: autosaveDirectory)
+        var docIdsToClear: Set<String> = [docId]
+        if let data = try? Data(contentsOf: manifestPath),
+           let entry = try? JSONDecoder().decode(OfficeAutosaveManifestEntry.self, from: data) {
+            docIdsToClear.insert(entry.docId)
+        }
         if let entries = try? FileManager.default.contentsOfDirectory(
             at: autosaveDirectory, includingPropertiesForKeys: nil) {
-            let prefix = "\(docId)."
-            for entry in entries where entry.lastPathComponent.hasPrefix(prefix) {
-                try? FileManager.default.removeItem(at: entry)
+            for candidateDocId in docIdsToClear {
+                let prefix = "\(candidateDocId)."
+                for entry in entries where entry.lastPathComponent.hasPrefix(prefix) {
+                    try? FileManager.default.removeItem(at: entry)
+                }
             }
         }
-        try? FileManager.default.removeItem(
-            at: Self.autosaveManifestPath(forRealPath: realPath, autosaveDirectory: autosaveDirectory))
+        try? FileManager.default.removeItem(at: manifestPath)
     }
 
     /// **The boot-hygiene sweep's autosave-specific half — MANIFEST-AWARE, never wholesale.**
