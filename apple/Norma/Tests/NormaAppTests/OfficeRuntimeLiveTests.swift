@@ -2276,32 +2276,50 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         try await client.postMouse(docId: doc.docId, part: 0, type: .buttonDown, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
         try await client.postMouse(docId: doc.docId, part: 0, type: .buttonUp, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
 
+        // Helper — this drill's own repeated shape: post an ext-text-input event, then EXPLICITLY
+        // re-request the origin tile and wait for fresh pixels. **Investigation finding (this task):
+        // marking genuinely DOES fire a real `INVALIDATE_TILES` callback, exactly like an ordinary
+        // keystroke** — an in-process `Entry.generation` check (never a log-text read: two separate
+        // processes' output streams interleaved by xcodebuild's own capture proved unreliable to
+        // reason about ordering from) confirmed the generation bumps on every phase below. The
+        // client-side `OfficeTileStore` entry is evicted (`onInvalidated` -> `tileStore.invalidate`)
+        // exactly like any other edit — nothing repaints it without an explicit re-request, because
+        // `refetchInvalidatedTiles` (`OfficeRuntime.swift`) is ONLY EVER called from a MOUNTED
+        // `OfficeTileCanvasView`'s own `tilesArrived` handling, never automatically by a bare
+        // `OfficeRuntime`. This drill has no canvas by design (the advisor's own sequencing
+        // directive — prove the wire mechanism before touching the canvas), so it stands in for the
+        // canvas here; in production the SAME `.invalidated` push this helper waits on already
+        // reaches a mounted canvas's existing, already-proven repaint path — no ext-text-input-
+        // specific forcing logic is needed anywhere in `OfficeRuntime`/`OfficeTileCanvasView`.
+        func repaintAndCapture(after previous: Data, timeout: TimeInterval = 30) async throws -> Data {
+            try await client.requestTiles(docId: doc.docId, keys: [originKey])
+            let arrived = await waitUntil(timeout: timeout) {
+                guard let entry = runtime.tileStore.tile(docId: doc.docId, key: originKey) else { return false }
+                return entry.pixels != previous
+            }
+            XCTAssertTrue(arrived, "an explicit re-request never produced a different tile hash")
+            return try XCTUnwrap(runtime.tileStore.tile(docId: doc.docId, key: originKey), "repaint").pixels
+        }
+
         // Phase 1 — mark "xyz".
         try await client.postExtTextInput(docId: doc.docId, part: 0, type: .input, text: "xyz")
-        let markedArrived = await waitUntil(timeout: 10) {
-            guard let entry = runtime.tileStore.tile(docId: doc.docId, key: originKey) else { return false }
-            return entry.pixels != pixelsBaseline
-        }
-        // DIAGNOSTIC (Stage 4a investigation) — marking alone produced no unprompted invalidation
-        // push in the first empirical run. Force an EXPLICIT re-paint request (bypassing the
-        // push-driven refetch) to tell apart "LOK renders marked text but never proactively says so"
-        // from "LOK genuinely does not render marked text any differently in this build."
-        try await client.requestTiles(docId: doc.docId, keys: [originKey])
-        let markedArrivedAfterExplicitRequest = await waitUntil(timeout: 10) {
-            guard let entry = runtime.tileStore.tile(docId: doc.docId, key: originKey) else { return false }
-            return entry.pixels != pixelsBaseline
-        }
-        NSLog("[T5-DIAGNOSTIC] markedArrived(push)=\(markedArrived) markedArrived(explicit-request)=\(markedArrivedAfterExplicitRequest)")
-        XCTAssertTrue(markedArrived || markedArrivedAfterExplicitRequest, "marking \"xyz\" via "
-                      + "LOK_EXT_TEXTINPUT never produced a different tile hash even after an EXPLICIT "
-                      + "re-paint request — LOK must be rendering SOMETHING for marked/preedit text, "
-                      + "and this is the one-variable-moving proof that it did")
+        let pixelsMarked = try await repaintAndCapture(after: pixelsBaseline)
 
         // Phase 2 — commit. `.end`'s own `text` is always sent empty — see `extTextInputEvent`'s own
         // header for why (LOK ignores it and commits whatever is currently marked instead).
         try await client.postExtTextInput(docId: doc.docId, part: 0, type: .end, text: "")
         let becameDirty = await waitUntil(timeout: 15) { runtime.stateSnapshot.documents[docPath]?.dirty == true }
         XCTAssertTrue(becameDirty, "committing the marked text never marked the document dirty")
+        let pixelsCommitted = try await repaintAndCapture(after: pixelsMarked)
+        // Settles the brief's "marked-text underline showed" criterion empirically, one way or the
+        // other: same glyphs, only the marked/preedit DECORATION should differ between "still
+        // composing" and "just committed" — if this build's headless (svp) renderer draws no such
+        // decoration, `pixelsCommitted` legitimately equals `pixelsMarked` and this assertion (not a
+        // silent pass) is where that gets recorded.
+        XCTAssertNotEqual(pixelsMarked, pixelsCommitted, "committing must repaint WITHOUT the "
+                          + "marked/preedit decoration — if this fails, this LOK build draws no "
+                          + "visible difference between composing and committed text, which the "
+                          + "report must then state as a real, empirically-checked finding")
 
         let beforeFirstSaveStat = officeFileStat(atPath: docPath)
         runtime.save(docPath)
@@ -2315,25 +2333,14 @@ final class OfficeRuntimeLiveTests: XCTestCase {
                       + "SAVED body text — got: \"\(bodyAfterCommit)\"")
 
         // Phase 3 — mark "abc", then CANCEL it (never commit) — must leave no residue at all.
-        // `.end`'s own commit already invalidated this tile (real trace: a genuine `INVALIDATE_TILES`
-        // callback fires on commit, unlike marking) — wait for the auto-refetch to land, mirroring
-        // `pixelsBaseline`/every other tile read in this drill, rather than reading the store's
-        // possibly-just-evicted entry mid-flight.
-        let postCommitRepainted = await waitUntil(timeout: 15) { runtime.tileStore.tile(docId: doc.docId, key: originKey) != nil }
-        XCTAssertTrue(postCommitRepainted, "the post-commit tile never re-arrived after its own invalidation")
-        let pixelsAfterCommit = try XCTUnwrap(runtime.tileStore.tile(docId: doc.docId, key: originKey), "post-commit").pixels
         try await client.postExtTextInput(docId: doc.docId, part: 0, type: .input, text: "abc")
-        let secondMarkArrived = await waitUntil(timeout: 30) {
-            guard let entry = runtime.tileStore.tile(docId: doc.docId, key: originKey) else { return false }
-            return entry.pixels != pixelsAfterCommit
-        }
-        XCTAssertTrue(secondMarkArrived, "marking \"abc\" for the cancel phase never produced a "
-                      + "different tile hash — without this, a no-op cancel below would prove nothing")
+        let pixelsSecondMark = try await repaintAndCapture(after: pixelsCommitted)
 
         // The cancel sequence: empty `.input` (clears whatever is marked) then `.end` (commits — the
         // now-empty marked run, i.e. nothing).
         try await client.postExtTextInput(docId: doc.docId, part: 0, type: .input, text: "")
         try await client.postExtTextInput(docId: doc.docId, part: 0, type: .end, text: "")
+        _ = try await repaintAndCapture(after: pixelsSecondMark)
 
         let beforeSecondSaveStat = officeFileStat(atPath: docPath)
         runtime.save(docPath)
