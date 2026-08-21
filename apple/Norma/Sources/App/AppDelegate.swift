@@ -520,6 +520,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         appWindow = controller
         installEditorSaveMenuItem(host: host)
+        installOfficeZoomMenuItems()
         controller.summon(navigatingTo: destination)
     }
 
@@ -578,6 +579,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         command.install(in: mainMenu)
+    }
+
+    /// Office Stage B Task 6 — the deferred ⌘±/⌘0 menu items, alongside `installEditorSaveMenuItem`
+    /// right above (identical timing/gating reasoning: no menu bar exists until a window promotes
+    /// this `LSUIElement` app to `.regular`, and every summon re-asserts in case SwiftUI rebuilt
+    /// its own main menu underneath). Unlike that method, there is no per-instance command object
+    /// to reuse across calls — `OfficeCanvasMenuInstaller.install` is a pure function of the menu
+    /// tree, idempotent by matching on ACTION SELECTOR (see its own header for why `target === self`,
+    /// `EditorSaveMenuCommand`'s own comparison, does not apply here).
+    private func installOfficeZoomMenuItems() {
+        guard !Self.isRunningUnitTests else { return }
+        guard let mainMenu = NSApp.mainMenu else {
+            OrbDebug.log("office zoom: no main menu to install Zoom In/Out/Actual Size into")
+            return
+        }
+        OfficeCanvasMenuInstaller.install(in: mainMenu)
     }
 
     /// app-shell T9: the floating panel's click-through door — the exact call shape

@@ -899,4 +899,46 @@ final class EditorSaveTests: XCTestCase {
             .appendingPathComponent("Resources/EditorAssets/app/\(name)")
         return [bundled, source].first { FileManager.default.fileExists(atPath: $0.path) }
     }
+
+    // MARK: - Office Stage B Task 6: the deferred zoom menu pass
+
+    /// Installed once, installed twice — one Zoom In/Zoom Out/Actual Size trio either way. Mirrors
+    /// `testInstallingTheMenuItemIsIdempotentAndCreatesTheFileMenuIfThereIsNone` above exactly, one
+    /// menu title over (`View`, not `File`) and matched by action selector rather than `target ===
+    /// self` — `OfficeCanvasMenuInstaller.install`'s own header states why (`target: nil`
+    /// throughout, no shared command object to compare against).
+    func testInstallingTheZoomMenuItemsIsIdempotentAndCreatesTheViewMenuIfThereIsNone() throws {
+        let mainMenu = NSMenu(title: "MainMenu")
+        mainMenu.addItem(withTitle: "Norma", action: nil, keyEquivalent: "").submenu = NSMenu(title: "Norma")
+
+        OfficeCanvasMenuInstaller.install(in: mainMenu)
+        OfficeCanvasMenuInstaller.install(in: mainMenu)
+
+        let view = try XCTUnwrap(mainMenu.items.first(where: { $0.title == "View" })?.submenu)
+        XCTAssertEqual(view.items.map(\.title), ["Zoom In", "Zoom Out", "Actual Size"],
+                       "exactly one of each, no duplicates from the second install")
+        XCTAssertEqual(mainMenu.items.filter { $0.title == "View" }.count, 1)
+        XCTAssertEqual(mainMenu.items.first?.title, "Norma", "the app menu stays first")
+
+        let zoomIn = try XCTUnwrap(view.items.first(where: { $0.title == "Zoom In" }))
+        XCTAssertEqual(zoomIn.keyEquivalent, "+")
+        XCTAssertEqual(zoomIn.keyEquivalentModifierMask, [.command])
+        XCTAssertNil(zoomIn.target, "target: nil — routes through the responder chain, never a command object")
+        let zoomOut = try XCTUnwrap(view.items.first(where: { $0.title == "Zoom Out" }))
+        XCTAssertEqual(zoomOut.keyEquivalent, "-")
+        let actualSize = try XCTUnwrap(view.items.first(where: { $0.title == "Actual Size" }))
+        XCTAssertEqual(actualSize.keyEquivalent, "0")
+
+        // An existing View menu is used rather than a second one being made, and whatever else
+        // lives in it survives untouched.
+        let withView = NSMenu(title: "MainMenu")
+        let viewItem = withView.addItem(withTitle: "View", action: nil, keyEquivalent: "")
+        viewItem.submenu = NSMenu(title: "View")
+        viewItem.submenu?.addItem(withTitle: "Show Sidebar", action: nil, keyEquivalent: "")
+        OfficeCanvasMenuInstaller.install(in: withView)
+        XCTAssertEqual(withView.items.count, 1)
+        XCTAssertEqual(viewItem.submenu?.items.map(\.title), ["Show Sidebar", "Zoom In", "Zoom Out", "Actual Size"])
+
+        OfficeCanvasMenuInstaller.install(in: nil)   // an app with no main menu: nothing to do, and no crash
+    }
 }

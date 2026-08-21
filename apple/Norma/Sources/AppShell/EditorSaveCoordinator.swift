@@ -399,3 +399,71 @@ final class EditorSaveMenuCommand: NSObject, NSMenuItemValidation {
         file.addItem(makeMenuItem())
     }
 }
+
+// MARK: - Office Stage B Task 6: the deferred menu pass — Zoom In/Out/Actual Size
+
+/// The ⌘±/⌘0 menu items the earlier canvas work deferred — canvas zoom via the key equivalents
+/// THEMSELVES has worked since Office Stage B Task 4; this is the DISCOVERABLE, clickable
+/// menu-item half.
+///
+/// **`target: nil` throughout — unlike `EditorSaveMenuCommand` above, deliberately.** ⌘S has no
+/// live `NSView` of its own to route through (the active code/document tab is a fact about the
+/// shell's own state, resolved via closures into `ShellSessionHost`); a focused
+/// `OfficeTileCanvasView` IS a real, live `NSResponder` — already first responder the instant the
+/// user clicks into a document (`OfficeTileCanvasView.mouseDown`'s own `makeFirstResponder` call)
+/// — so these items route through the ORDINARY AppKit responder chain straight to
+/// `OfficeTileCanvasView.zoomIn(_:)`/`.zoomOut(_:)`/`.actualSize(_:)`, enabled exactly when a
+/// canvas is reachable (AppKit's own default menu validation: a `target: nil` item with no
+/// `respondsToSelector:` match anywhere in the chain is disabled, no separate check needed) and
+/// disabled when none is — no command object, no injected closures, unlike `EditorSaveMenuCommand`
+/// above.
+///
+/// A plain `enum` with static members (never instantiated) — there is no per-instance state to
+/// hold; `install(in:)` is a pure function of the menu tree it is handed.
+enum OfficeCanvasMenuInstaller {
+    static let viewMenuTitle = "View"
+
+    /// Put three plain, `target: nil` items in `menu`'s View submenu, creating that submenu if the
+    /// app has none — mirrors `EditorSaveMenuCommand.install`'s own find-or-create shape for
+    /// "File" exactly, one menu title over.
+    ///
+    /// **Idempotent, but matched by ACTION SELECTOR, not by `target === self`** (`EditorSaveMenuCommand
+    /// .install`'s own comparison) — these items share no target object to compare against, `target:
+    /// nil` is the whole point. Removes any prior item whose action is one of these three before
+    /// adding fresh ones, so a second summon (or a menu SwiftUI rebuilt underneath) replaces rather
+    /// than duplicates — two items sharing one key equivalent is a menu where the wrong one wins,
+    /// the identical concern `EditorSaveMenuCommand`'s own header states for ⌘S.
+    ///
+    /// `nil` is a legal argument and does nothing — an app with no main menu has nowhere to put
+    /// these, and the key equivalents (already live since Task 4) still work through the canvas's
+    /// own `keyDown` switch regardless.
+    static func install(in menu: NSMenu?) {
+        guard let menu else { return }
+        let view: NSMenu
+        if let existing = menu.items.first(where: { $0.submenu?.title == viewMenuTitle
+                                                    || $0.title == viewMenuTitle })?.submenu {
+            view = existing
+        } else {
+            let item = NSMenuItem(title: viewMenuTitle, action: nil, keyEquivalent: "")
+            let submenu = NSMenu(title: viewMenuTitle)
+            item.submenu = submenu
+            menu.addItem(item)
+            view = submenu
+        }
+
+        let actions: Set<Selector> = [
+            #selector(OfficeTileCanvasView.zoomIn(_:)),
+            #selector(OfficeTileCanvasView.zoomOut(_:)),
+            #selector(OfficeTileCanvasView.actualSize(_:)),
+        ]
+        view.items.filter { $0.action.map(actions.contains) ?? false }.forEach { view.removeItem($0) }
+
+        let zoomIn = NSMenuItem(title: "Zoom In", action: #selector(OfficeTileCanvasView.zoomIn(_:)), keyEquivalent: "+")
+        zoomIn.keyEquivalentModifierMask = [.command]
+        let zoomOut = NSMenuItem(title: "Zoom Out", action: #selector(OfficeTileCanvasView.zoomOut(_:)), keyEquivalent: "-")
+        zoomOut.keyEquivalentModifierMask = [.command]
+        let actualSize = NSMenuItem(title: "Actual Size", action: #selector(OfficeTileCanvasView.actualSize(_:)), keyEquivalent: "0")
+        actualSize.keyEquivalentModifierMask = [.command]
+        [zoomIn, zoomOut, actualSize].forEach { view.addItem($0) }
+    }
+}
