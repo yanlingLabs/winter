@@ -873,6 +873,19 @@ public enum OfficeDocumentEvent: Equatable, Sendable {
     /// event exists to carry: the app is the only side that can turn `docId` back into a real path
     /// and write the manifest entry this task's recovery flow reads at open time.
     case autosaved(ext: String, isODFFallback: Bool)
+    /// Task 8 — `LOK_CALLBACK_CELL_FORMULA`'s parsed payload (Calc only): "the text content of the
+    /// formula bar" (`LibreOfficeKitEnums.h:345-347`), verbatim. Confirmed live (a probe against
+    /// `two-sheet.ods`'s own real seed content, `OfficeHelperLiveTests
+    /// .testProbeInvestigatesWhetherCellFormulaCallbacksExistForTheFormulaBarsContent`) to fire on
+    /// EVERY cell move — including onto a genuinely empty cell, which sends the empty string, not
+    /// a sentinel and not silence — AND per keystroke while typing an in-cell edit BEFORE it
+    /// commits (live edit-buffer text), all independent of `CELL_CURSOR`'s own `"EMPTY"` window
+    /// during that same edit. A SEPARATE `OfficeCursorStore` field pair from `cellCursor`, never
+    /// folded together — that same probe found the two callbacks' own ORDERING differs by
+    /// scenario (content before ref on a plain navigate; ref-goes-empty before content on entering
+    /// edit mode), so treating one as derived from the other would silently mix two independently
+    /// timed LOK callbacks into one field.
+    case cellFormula(String)
 
     /// This case's own fields, flattened into the SAME single-level JSON object
     /// `OfficeWireFrame.encodedLine()` builds for a `.documentEvent` frame — `kind` is the
@@ -913,6 +926,8 @@ public enum OfficeDocumentEvent: Equatable, Sendable {
                 return ["kind": "cellCursor", "empty": false, "column": column, "row": row]
                     .merging(Self.encodeBareRect(rect)) { _, new in new }
             }
+        case .cellFormula(let text):
+            return ["kind": "cellFormula", "text": text]
         }
     }
 
@@ -996,6 +1011,13 @@ public enum OfficeDocumentEvent: Equatable, Sendable {
                 return nil
             }
             return .cellCursor(.at(rectTwips: rect, column: column, row: row))
+        case "cellFormula":
+            // Wire strictness (house norm): `text` is required — a missing field rejects the
+            // whole frame rather than silently defaulting to "", which would be indistinguishable
+            // from a genuinely empty cell's own real, meaningful payload (see this case's own
+            // header on `OfficeDocumentEvent`).
+            guard let text = object["text"] as? String else { return nil }
+            return .cellFormula(text)
         default:
             return nil
         }
@@ -1244,6 +1266,21 @@ public enum OfficeDocumentEvent: Equatable, Sendable {
             return nil
         }
         return .cellCursor(.at(rectTwips: OfficeTwipsRect(x: x, y: y, width: width, height: height), column: column, row: row))
+    }
+
+    /// Parses `LOK_CALLBACK_CELL_FORMULA`'s raw payload (Calc only) — "the text content of the
+    /// formula bar" (`LibreOfficeKitEnums.h:345-347`). **Never rejects anything** — unlike every
+    /// other parser in this file, there is no structure here to malform: the payload IS the text,
+    /// verbatim, confirmed live (`OfficeHelperLiveTests
+    /// .testProbeInvestigatesWhetherCellFormulaCallbacksExistForTheFormulaBarsContent`'s own real
+    /// capture) to arrive as a plain string in every observed shape — a cell's literal content
+    /// ("NORMA GATE", "42"), the empty string for a genuinely empty cell, and the live,
+    /// uncommitted in-progress edit-buffer text while typing. A bare `""` is therefore NOT an
+    /// error sentinel the way it is for `parseTextSelectionStart`/`parseCellCursor` — it is the
+    /// real, meaningful "this cell has no content" shape, and must fold as such, never as a
+    /// rejected/ignored firing.
+    static func parseCellFormula(_ payload: String) -> OfficeDocumentEvent? {
+        .cellFormula(payload)
     }
 }
 

@@ -45,6 +45,14 @@ final class OfficeCursorStore {
         var selectionEndRectTwips: OfficeTwipsRect?
         var cellCursor: OfficeCellCursor?
         var cellCursorPart: Int?
+        /// Task 8 — the formula bar's own content feed, from `LOK_CALLBACK_CELL_FORMULA`. A
+        /// SEPARATE field pair from `cellCursor`/`cellCursorPart`, deliberately not derived from
+        /// it — see `OfficeDocumentEvent.cellFormula`'s own header for why the two callbacks'
+        /// ordering cannot be assumed to agree. `nil` until the first firing for this docId;
+        /// `""` (once set) is a real, meaningful "this cell has no content," never a sentinel for
+        /// "unknown."
+        var cellFormulaText: String?
+        var cellFormulaPart: Int?
     }
 
     private var states: [String: State] = [:]
@@ -79,6 +87,9 @@ final class OfficeCursorStore {
         case .cellCursor(let cell):
             state.cellCursor = cell
             state.cellCursorPart = activePart
+        case .cellFormula(let text):
+            state.cellFormulaText = text
+            state.cellFormulaPart = activePart
         case .opened, .openFailed, .invalidated, .modifiedChanged, .closed, .autosaved:
             return // not this store's concern — no signal, no mutation
         }

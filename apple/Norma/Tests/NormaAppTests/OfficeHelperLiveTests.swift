@@ -2118,6 +2118,104 @@ final class OfficeHelperLiveTests: XCTestCase {
         // `.textSelection([])` without tripping the XCTFail branch.
         _ = sawSelectionEmpty
     }
+
+    // MARK: - Task 8: the formula-bar content-source investigation (capture REAL payloads first)
+
+    /// **Task 8 — before writing a single line of formula-bar production code**: does
+    /// `LOK_CALLBACK_CELL_FORMULA` (raw type 19, "the text content of the formula bar in Calc" per
+    /// `LibreOfficeKitEnums.h:345-347`) actually fire against this pin's real, TRIMMED vendor
+    /// tree, and if so, in what shape and with what timing relative to `CELL_CURSOR` (type 17)?
+    /// Neither `LOKCallbackType` nor `handleCallback` recognizes type 19 today — this probe reads
+    /// it purely off `LOKBridge.handleCallback`'s own unconditional raw-callback trace (the SAME
+    /// capture mechanism `testRealLOKCallbackProbeCapturesCaretSelectionAndCellCursorRawPayloads`
+    /// one screen up uses), never a parser, since there is no parser yet to call.
+    ///
+    /// Three scenarios, each targeting a specific formula-bar design question (this task's own
+    /// report records what each one actually found and the resulting wiring decision):
+    /// 1. **Full → empty → full** — click A1 ("NORMA GATE", real content) → click B2 (genuinely
+    ///    empty, per `two-sheet.ods`'s own seed) → click B1 (the number 42): does 19 fire on
+    ///    EVERY cell move, including onto an empty cell? If it never fires there, a naive store
+    ///    would leave stale content on screen against a fresh, empty cell's own ref unless the
+    ///    store clears on every `CELL_CURSOR` change too — this is what settles that question
+    ///    empirically rather than by assumption.
+    /// 2. **Ordering** — on the SAME move, does 17 (`CELL_CURSOR`) or 19 arrive first? A design
+    ///    that reads both off one store must know which of the two is the stale one for the one
+    ///    frame between them.
+    /// 3. **Typing without committing** — back on A1, type one character, then Escape rather than
+    ///    Return (abandon the edit — a probe should observe, not leave the fixture copy dirtied
+    ///    for whatever runs after it): does 19 fire per keystroke while `CELL_CURSOR` itself sits
+    ///    at its `"EMPTY"` sentinel (Task 5's own finding for in-cell edit mode)? This is the
+    ///    brief's own "type → content updates" drill leg.
+    ///
+    /// A1's/B1's own distinctive seed content ("NORMA GATE", "42") is the cross-check: whatever
+    /// type=19 sends must contain them verbatim, or this is not really the formula bar's own
+    /// content.
+    func testProbeInvestigatesWhetherCellFormulaCallbacksExistForTheFormulaBarsContent() async throws {
+        try skipUnlessVendorPresent()
+        let helper = try await spawnLiveHelper(captureStderr: true)
+
+        let calcPath = helper.stateDir.appendingPathComponent("docs", isDirectory: true)
+            .appendingPathComponent("t8-formula-probe.ods").path
+        try FileManager.default.createDirectory(
+            at: URL(fileURLWithPath: calcPath).deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(contentsOf: Self.fixturesRoot.appendingPathComponent("two-sheet.ods"))
+            .write(to: URL(fileURLWithPath: calcPath))
+        let docId = UUID().uuidString
+        _ = try await helper.client.open(docId: docId, path: calcPath)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+
+        // --- Scenario 1+2: full (A1, "NORMA GATE") -> empty (B2) -> full (B1, 42). Column width
+        // ~1280 twips (two-sheet.ods's own co1 style, 0.889in), row height ~256 twips (ro1,
+        // 0.178in) — B2 sits in row 2 (y > 256), B1 in row 1 (y < 256), matching the fixture's own
+        // seed content read directly off its content.xml.
+        try await helper.client.postMouse(docId: docId, part: 0, type: .buttonDown, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await helper.client.postMouse(docId: docId, part: 0, type: .buttonUp, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        try await helper.client.postMouse(docId: docId, part: 0, type: .buttonDown, xTwips: 1500, yTwips: 400, count: 1, buttons: 1, modifiers: 0)
+        try await helper.client.postMouse(docId: docId, part: 0, type: .buttonUp, xTwips: 1500, yTwips: 400, count: 1, buttons: 1, modifiers: 0)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        try await helper.client.postMouse(docId: docId, part: 0, type: .buttonDown, xTwips: 1500, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await helper.client.postMouse(docId: docId, part: 0, type: .buttonUp, xTwips: 1500, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+
+        // --- Scenario 3: back to A1, type one character, Escape (abandon — never commits). ---
+        try await helper.client.postMouse(docId: docId, part: 0, type: .buttonDown, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await helper.client.postMouse(docId: docId, part: 0, type: .buttonUp, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        try await helper.client.postKey(docId: docId, part: 0, type: .keyInput, charCode: 88, keyCode: 535) // X (512 + 'X'-'A')
+        try await helper.client.postKey(docId: docId, part: 0, type: .keyUp, charCode: 88, keyCode: 535)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        try await helper.client.postKey(docId: docId, part: 0, type: .keyInput, charCode: 0, keyCode: 1281) // Escape (OfficeInputCodes.swift:193)
+        try await helper.client.postKey(docId: docId, part: 0, type: .keyUp, charCode: 0, keyCode: 1281)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+
+        try await helper.client.close(docId: docId)
+        try? await Task.sleep(nanoseconds: 300_000_000)
+
+        // --- Read back every type=17/19 raw line, in ARRIVAL ORDER — `linesSnapshot()` is an
+        // ordered ingestion log, not a set, so this is also the ordering (question 2) evidence. ---
+        let rawLines = (helper.stderrCapture?.linesSnapshot() ?? []).filter { $0.contains("[LOKBridge raw callback]") }
+        struct Firing { let type: Int32; let payload: String }
+        var firings: [Firing] = []
+        for line in rawLines {
+            guard let typeRange = line.range(of: "type="), let payloadRange = line.range(of: " payload=") else { continue }
+            guard let type = Int32(line[typeRange.upperBound..<payloadRange.lowerBound]) else { continue }
+            guard type == 17 || type == 19 else { continue }
+            let payload = String(line[payloadRange.upperBound...])
+            firings.append(Firing(type: type, payload: payload))
+            print("[formula probe] type=\(type) payload=\"\(payload)\"")
+        }
+        print("[formula probe] SUMMARY: \(firings.count) total firings — type=17 count="
+              + "\(firings.filter { $0.type == 17 }.count), type=19 count=\(firings.filter { $0.type == 19 }.count)")
+
+        // The one load-bearing baseline: CELL_CURSOR (17) firing at all proves the scenario's own
+        // mouse-click choreography actually reached Calc's cell-navigation path — a failure here
+        // means the SETUP is broken, not that type=19 is absent. Deliberately no assertion on
+        // type=19 itself: its presence/shape/timing is exactly what this probe exists to OBSERVE,
+        // never assumed in either direction ahead of the read-back.
+        XCTAssertTrue(firings.contains { $0.type == 17 }, "CELL_CURSOR must fire at all from three "
+                      + "real cell clicks — this probe's own baseline")
+    }
 }
 
 /// `Process.TerminationReason.uncaughtSignal`'s raw value, for the SIGTERM measurement's log line

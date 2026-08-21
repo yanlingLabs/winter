@@ -65,6 +65,13 @@ final class OfficeWireCodecTests: XCTestCase {
             .documentEvent(seq: 46, docId: "doc-1", event: .cellCursor(
                 .at(rectTwips: OfficeTwipsRect(x: 0, y: 0, width: 1265, height: 254), column: 2, row: 7))),
             .documentEvent(seq: 47, docId: "doc-1", event: .cellCursor(.empty)),
+            // Task 8 — the formula bar's own content feed. A formula-shaped string (special
+            // characters `=`, `(`, `)`, `:` — real content, not just a plain literal) and the
+            // empty string (the real captured shape for an empty cell — see `parseCellFormula`'s
+            // own header) — the SAME two-samples-per-case discipline `cellCursor`'s `.at`/`.empty`
+            // pair above already uses.
+            .documentEvent(seq: 66, docId: "doc-1", event: .cellFormula("=SUM(A1:A2)")),
+            .documentEvent(seq: 67, docId: "doc-1", event: .cellFormula("")),
             // Task 7 — the autosave sidecar push. Both `isODFFallback` values, and an `ext` that
             // DIFFERS from what a bare boolean round-trip would still pass with a hardcoded value
             // — a sample pinned at, say, `ext: "odt"` for the fallback row would round-trip
@@ -674,6 +681,22 @@ final class OfficeWireCodecTests: XCTestCase {
         for payload in ["", "0, 0, 1265, 254", "0, 0, 1265, 254, notanumber, 0", "a, b, c, d, e, f"] {
             XCTAssertNil(OfficeDocumentEvent.parseCellCursor(payload), "expected nil for: \"\(payload)\"")
         }
+    }
+
+    /// Task 8 — `LOK_CALLBACK_CELL_FORMULA`'s real captured payloads (live probe against
+    /// `two-sheet.ods`, `OfficeHelperLiveTests
+    /// .testProbeInvestigatesWhetherCellFormulaCallbacksExistForTheFormulaBarsContent`): clicking
+    /// A1 ("NORMA GATE", a string cell) sent the literal string; clicking B2 (genuinely empty)
+    /// sent the EMPTY STRING, not a sentinel and not silence; clicking B1 (the number 42) sent
+    /// "42"; typing "X" without committing sent "X" — the live, in-progress edit-buffer text.
+    /// Unlike `CELL_CURSOR`, there is no structure to malform: this callback's whole payload IS
+    /// the formula-bar text, verbatim, so `parseCellFormula` never rejects anything — see its own
+    /// header.
+    func testParseCellFormulaRealCapturedShapes() {
+        XCTAssertEqual(OfficeDocumentEvent.parseCellFormula("NORMA GATE"), .cellFormula("NORMA GATE"))
+        XCTAssertEqual(OfficeDocumentEvent.parseCellFormula(""), .cellFormula(""), "a genuinely empty cell sends the empty string, not a sentinel")
+        XCTAssertEqual(OfficeDocumentEvent.parseCellFormula("42"), .cellFormula("42"))
+        XCTAssertEqual(OfficeDocumentEvent.parseCellFormula("X"), .cellFormula("X"), "the live, uncommitted in-progress edit-buffer text")
     }
 
     // MARK: - Office Stage B Task 5 — IME wire verb

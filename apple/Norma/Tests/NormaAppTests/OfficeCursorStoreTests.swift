@@ -61,6 +61,31 @@ final class OfficeCursorStoreTests: XCTestCase {
         XCTAssertEqual(store.state(docId: "doc-1").cellCursor, .empty, "entering in-cell edit mode replaces the prior cell rect with .empty")
     }
 
+    /// Task 8 — the formula bar's own content feed. Independent of `cellCursor`'s own fold (a
+    /// SEPARATE field pair, not a derived one): the live probe found `CELL_FORMULA` fires with its
+    /// own ordering relative to `CELL_CURSOR` (content before ref on a plain navigate, ref-goes-
+    /// EMPTY before content on entering in-cell edit — see `OfficeHelperLiveTests
+    /// .testProbeInvestigatesWhetherCellFormulaCallbacksExistForTheFormulaBarsContent`'s own
+    /// header), so folding it into `cellCursor` itself would silently mix two independently-timed
+    /// LOK callbacks into one field.
+    func testCellFormulaFoldsAndStampsThePassedInActivePart() {
+        let store = OfficeCursorStore()
+        var signaled: [String] = []
+        let sink = store.cursorChanged.sink { signaled.append($0) }
+        defer { sink.cancel() }
+
+        store.apply(docId: "doc-1", event: .cellFormula("NORMA GATE"), activePart: 1)
+        var state = store.state(docId: "doc-1")
+        XCTAssertEqual(state.cellFormulaText, "NORMA GATE")
+        XCTAssertEqual(state.cellFormulaPart, 1)
+        XCTAssertEqual(signaled, ["doc-1"])
+
+        // A genuinely empty cell's own real shape — the empty string, not left stale from A1.
+        store.apply(docId: "doc-1", event: .cellFormula(""), activePart: 1)
+        state = store.state(docId: "doc-1")
+        XCTAssertEqual(state.cellFormulaText, "", "an empty cell's own real payload must overwrite the previous cell's text, never linger")
+    }
+
     /// `.opened`/`.openFailed`/`.invalidated`/`.modifiedChanged`/`.closed` are not this store's
     /// concern (the reducer/`tileStore` own them) — `apply` must be a documented no-op for all five,
     /// never a mutation and never a signal.

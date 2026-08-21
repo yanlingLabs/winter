@@ -26,6 +26,11 @@ private enum LOKCallbackType {
     static let stateChanged: Int32 = 8      // LibreOfficeKitEnums.h:229 (LOK_CALLBACK_STATE_CHANGED)
     /// Task 5 — LibreOfficeKitEnums.h:335 (LOK_CALLBACK_CELL_CURSOR, Calc only).
     static let cellCursor: Int32 = 17
+    /// Task 8 — LibreOfficeKitEnums.h:345-347 (LOK_CALLBACK_CELL_FORMULA, Calc only) — "the text
+    /// content of the formula bar." Confirmed live via a raw-callback probe before this constant
+    /// was added (`OfficeHelperLiveTests
+    /// .testProbeInvestigatesWhetherCellFormulaCallbacksExistForTheFormulaBarsContent`).
+    static let cellFormula: Int32 = 19
 }
 
 // LOKTileMode (LOK_TILEMODE_RGBA/BGRA, LibreOfficeKitEnums.h:40-41) lived here for
@@ -1395,6 +1400,8 @@ final class LOKBridge: OfficeDocumentBridge {
             event = OfficeDocumentEvent.parseModifiedStatus(payload)
         case LOKCallbackType.cellCursor:
             event = OfficeDocumentEvent.parseCellCursor(payload)
+        case LOKCallbackType.cellFormula:
+            event = OfficeDocumentEvent.parseCellFormula(payload)
         default:
             event = nil
         }

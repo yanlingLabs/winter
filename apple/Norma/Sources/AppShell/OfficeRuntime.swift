@@ -1662,11 +1662,12 @@ final class OfficeRuntime: ObservableObject {
     /// (`onInvalidated`'s own wiring) — same reasoning, same bypass, same MainActor-hop-already-done
     /// threading contract (`wireOfficeTileCallbacks`'s own `Task { @MainActor ... }`).
     ///
-    /// `activePart` is resolved here, not carried on the wire — none of the three new callback types
-    /// (`INVALIDATE_VISIBLE_CURSOR`/`TEXT_SELECTION`/`CELL_CURSOR`) carry a part number in their own
-    /// LOK payload (unlike `INVALIDATE_TILES`), so "which part was this rect computed against" has to
-    /// come from the SAME `DocumentEntry.activePart` the input verbs themselves read — the identical
-    /// docId->path resolution `.modifiedStatusChanged`'s own reducer arm already uses one door down.
+    /// `activePart` is resolved here, not carried on the wire — none of these callback types
+    /// (`INVALIDATE_VISIBLE_CURSOR`/`TEXT_SELECTION`(`_START`/`_END`)/`CELL_CURSOR`, and Task 8's
+    /// own `CELL_FORMULA`) carry a part number in their own LOK payload (unlike `INVALIDATE_TILES`),
+    /// so "which part was this rect/text computed against" has to come from the SAME
+    /// `DocumentEntry.activePart` the input verbs themselves read — the identical docId->path
+    /// resolution `.modifiedStatusChanged`'s own reducer arm already uses one door down.
     ///
     /// `.opened`/`.openFailed`/`.closed` are never sent this way at all in Stage A/B (their own
     /// direct, seq-correlated reply frames cover `open`/`close`) — the two remaining cases
@@ -1677,7 +1678,7 @@ final class OfficeRuntime: ObservableObject {
         switch event {
         case .modifiedChanged(let modified):
             perform(dispatch(.modifiedStatusChanged(docId: docId, modified: modified)))
-        case .caretRect, .textSelection, .textSelectionStart, .textSelectionEnd, .cellCursor:
+        case .caretRect, .textSelection, .textSelectionStart, .textSelectionEnd, .cellCursor, .cellFormula:
             let activePart = state.documents.first(where: { $0.value.docId == docId })?.value.activePart ?? 0
             cursorStore.apply(docId: docId, event: event, activePart: activePart)
         case .autosaved(let ext, let isODFFallback):
