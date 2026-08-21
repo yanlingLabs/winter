@@ -76,8 +76,23 @@ final class OfficeAutosaveScheduler {
     /// OTHER stored property on this type is a `let`.
     var onFire: (String) -> Void
 
+    /// **`armed` is reached from two different threads and needs its own lock — this is NOT the
+    /// same hazard `OfficeHelperServer`'s own doc comment discusses (that one is about lock
+    /// ORDERING/deadlock across types; this one is about a plain `Dictionary` having no thread
+    /// safety of its own).** `markDirty`/`markClean` are called synchronously from
+    /// `OfficeHelperServer.routeDocumentEvent`, which a real `.modifiedChanged` reaches from
+    /// LOK's OWN dedicated thread (`LOKDedicatedThread`/`handleCallback`'s documented calling
+    /// convention) — while `remove` is called from an accepted connection's own thread, at both
+    /// the `.close` frame handler and the connection-teardown loop, deliberately outside
+    /// `stateQueue`. Two threads mutating one `Dictionary` concurrently is a real data race
+    /// (corruption or a crash) in the exact process this whole feature exists to survive a crash
+    /// of — so every access below holds `lock`. Same precedent, same stated reason, as
+    /// `FakeOfficeDocumentBridge`'s own lock in this file.
+    private let lock = NSLock()
+
     /// docId -> its live timer's own cancel closure. A docId's presence here IS "a timer is
-    /// currently armed for it" — no separate boolean to drift from this.
+    /// currently armed for it" — no separate boolean to drift from this. **Only ever touched
+    /// while holding `lock`** — see `lock`'s own doc comment for why.
     private var armed: [String: () -> Void] = [:]
 
     /// `interval` — production always 60 (the brief's own number); tests use whatever their fake
@@ -94,7 +109,13 @@ final class OfficeAutosaveScheduler {
     /// never a second, orphaned timer silently doubling that document's own fire rate. LOK does not
     /// refire an unchanged boolean in practice, so the ordinary path never exercises this guard —
     /// kept anyway because nothing about this type's own contract should depend on that being true.
+    /// **The whole check-then-insert runs under `lock`** — without that, two racing callers could
+    /// both observe "not armed" and both schedule, doubling the fire rate for real (not just in
+    /// theory) since `markDirty`/`markClean` land on LOK's own thread, never serialized by anything
+    /// else upstream of this type.
     func markDirty(docId: String) {
+        lock.lock()
+        defer { lock.unlock() }
         guard armed[docId] == nil else { return }
         armed[docId] = scheduling.scheduleRepeating(interval) { [weak self] in self?.onFire(docId) }
     }
@@ -102,18 +123,31 @@ final class OfficeAutosaveScheduler {
     /// Dirty just became false — a genuine `.modifiedChanged(false)` (a real save's own `.uno:Save`
     /// follow-up, or LOK's own back-to-saved-state undo tracking). Cancels the timer ONLY. Never
     /// touches any sidecar file already on disk — this type's own header states why: the helper
-    /// writes, it never deletes.
+    /// writes, it never deletes. The cancel closure itself runs AFTER `unlock()` — never call
+    /// arbitrary code while holding `lock`, even though today's cancel (`DispatchSourceTimer.cancel`
+    /// or a test fake) is known not to call back into this type.
     func markClean(docId: String) {
-        armed.removeValue(forKey: docId)?()
+        lock.lock()
+        let cancel = armed.removeValue(forKey: docId)
+        lock.unlock()
+        cancel?()
     }
 
     /// The document closed, for any reason (a clean close, a reload, a supersession). Same cancel
     /// as `markClean` — a distinct name purely so a call site reads its own intent; there is no
-    /// behavioral difference between the two today.
+    /// behavioral difference between the two today. Called from an accepted connection's own
+    /// thread — never LOK's — which is exactly why `lock` exists at all.
     func remove(docId: String) {
-        armed.removeValue(forKey: docId)?()
+        lock.lock()
+        let cancel = armed.removeValue(forKey: docId)
+        lock.unlock()
+        cancel?()
     }
 
     /// Test-only observation door — never read by production code.
-    func isArmedForTesting(docId: String) -> Bool { armed[docId] != nil }
+    func isArmedForTesting(docId: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return armed[docId] != nil
+    }
 }
