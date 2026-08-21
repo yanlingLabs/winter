@@ -2305,6 +2305,38 @@ final class OfficeRuntimeWatcherTests: XCTestCase {
                        + "learn the outcome, it does not replace the first")
     }
 
+    /// **Fix round 1 (review F1) — this test's own sibling, the HIT branch neither the pinned
+    /// "disk full" test above nor `ShellSessionHostTests`' own error-mapping test (which exercises
+    /// `.openFailed` only) ever covers.** Without this, reverting the F1 fix (routing `.saveFailed`
+    /// back to `default: clientError.description`) leaves every test in this suite green — exactly
+    /// the un-pinned-hit-branch shape F4's own header warns about. A known LOK shape thrown from the
+    /// driver's `save` closure (mirroring the test above's identical seam) must map to house voice in
+    /// BOTH the outcome and the banner, and the raw needle text must NOT survive into either.
+    func testSaveAndAwaitOutcomeMapsAKnownLOKShapeToHouseVoiceInBothTheOutcomeAndTheBanner() async throws {
+        let path = try scratchFile(contents: "one")
+        let runtime = OfficeRuntime(sessionId: "S1", driver: makeDriver(save: { _, _ in
+            throw OfficeHelperClientError.saveFailed(reason: "Unspecified Application Error")
+        }))
+        runtimes.append(runtime)
+        runtime.open(path)
+        _ = await waitUntil { runtime.stateSnapshot.documents[path] != nil }
+
+        let outcome = await runtime.saveAndAwaitOutcome(path)
+
+        guard case .failed(let reason) = outcome else {
+            return XCTFail("expected .failed, got \(outcome)")
+        }
+        XCTAssertTrue(reason.contains("couldn't make sense of this file"), "a known LOK shape must "
+                      + "map to house voice in the outcome too: \(reason)")
+        XCTAssertFalse(reason.contains("Unspecified"), "the raw LOK needle text must never survive "
+                       + "into the outcome: \(reason)")
+        let banner = runtime.stateSnapshot.documentBanners[path]
+        XCTAssertEqual(banner?.contains("couldn't make sense of this file"), true,
+                       "and in the banner — the same mapped sentence, not the raw shape")
+        XCTAssertEqual(banner?.contains("Unspecified"), false, "the raw LOK needle text must never "
+                       + "reach the banner either")
+    }
+
     /// The driver's own `save` succeeds (a real temp path comes back) but the ATOMIC PLACE fails —
     /// the inner catch, `performSave`'s own distinct exit from the driver-throws case above. A
     /// nonexistent temp path is enough: `placeAtomically`'s `copyItem` throws ENOENT before ever
