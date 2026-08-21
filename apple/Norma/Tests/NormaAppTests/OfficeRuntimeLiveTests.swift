@@ -839,14 +839,26 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         // before the click: re-request A's OWN part 0 (the paint detector's own `aPart0Key`) — this
         // paint carries its OWN correct `setView(A)`+`setPart(A, 0)` prefix (unaffected by any bug in
         // the INPUT path) and genuinely moves A's real state to part 0 — THEN touch B, which moves
-        // "current" to B without touching A's part again. At that exact moment: A's own state is
-        // genuinely at part 0 (wrong for what's about to be typed), and B, not A, is current — so
-        // ONLY the input path's own correct `setView`-then-`setPart` can put A back at part 1 before
-        // the keystroke lands. Without it, the keystroke's own `postKeyEvent` (LOK's own stateful
-        // notion of "whichever part is currently active" — no part parameter in its own C API) lands
-        // on whatever part A is ACTUALLY still sitting at — part 0, sheet 1 — an already-asserted,
-        // directly observable failure via this drill's own save+reread below (the marker would appear
-        // on sheet 1, not sheet 2).
+        // "current" to B without touching A's part again.
+        //
+        // (iii) Even with (i) and (ii) both applied, this drill STILL measured green with `setView`
+        // deleted — a THIRD reason, found only after removing the click entirely (see
+        // `testDirectlyProvesTheInputPathsOwnSetViewPrefixIsLoadBearingBelowTheCanvasLayer`'s own
+        // header for the full mechanism): `view.mouseDown`'s own posted LOK mouse-down is itself a
+        // VCL/SFX activation gesture that makes A's frame current as a side effect, independent of
+        // this fix — so by the time the first keystroke's own `setPart` ran, A was already current by
+        // accident. No amount of displacing A's own state beforehand survives a click that reasserts
+        // it. Closed by dropping the click below — Calc needs none to start editing the current cell.
+        //
+        // **The actual observed disabled-build signature, corrected from an earlier, wrong
+        // prediction**: with `setView` deleted and the click removed, the marker lands on NEITHER of
+        // A's own sheets — B (a second Calc document here) accepts the misdirected `setPart`/
+        // `postKeyEvent` instead (`dynamic_cast<ScTabViewShell*>` succeeds on a Calc sibling), so B's
+        // OWN dirty flag flips and the edit leaks onto B's current cell, not A's sheet 1. Confirmed
+        // live: 3 failing assertions (B's dirty flag before AND after A's save, plus the sheet-2
+        // miss below) — contrast the Writer-B sibling drill and the raw drill, where the identical
+        // misdirected call is a silent no-op (`dynamic_cast` fails) and the edit is simply lost
+        // rather than leaked.
         let sweepDrained = await waitUntil(timeout: 30) { view.prefetchSweepIssuedForTesting }
         XCTAssertTrue(sweepDrained, "A's own background residency-prefetch sweep never finished issuing "
                       + "its chunks — the input interleave below cannot discriminate anything while it's "
