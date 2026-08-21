@@ -1105,6 +1105,238 @@ final class OfficeRuntimeReducerTests: XCTestCase {
                        + "preserve, with no prompt (the current session is clean, so T3's dirty-close "
                        + "sheet never fires) and no way to see the banner again to undo it")
     }
+
+    // MARK: - Office Stage B Task 9: per-path generation counter — in-flight-open cancellation
+    //
+    // The resurrection race, verbatim from the Stage A T8 wave note this task closes: "close-during-
+    // reload can resurrect a closed document — a `.opened` landing for a superseded open re-creates
+    // the entry and re-arms the watcher." Every row below is one named interleaving, driven with
+    // nothing but the reducer — no helper process, no async scheduling, no timing to get lucky on.
+
+    func testACloseRacingAnInFlightOpenDropsTheLateOpenedWithACompensatingClose() {
+        // Open A never lands before the close: dispatch `.openRequested` (captures ticket 0 for
+        // "/a.xlsx", a path `ready()` never touches) then `.closeRequested` for the SAME path —
+        // T8's own resurrection shape, narrowed to its simplest form. Nothing was ever recorded in
+        // `documents`, so `.closeRequested`'s own guard has nothing to actually close — but it still
+        // bumps the ticket, which is this task's whole point.
+        let (racedClose, _) = reduce(ready(), [.openRequested(path: "/a.xlsx"), .closeRequested(path: "/a.xlsx")])
+        XCTAssertEqual(racedClose.pathGenerations["/a.xlsx"], 1, "sanity — the close bumped it")
+
+        // The STALE open's own `.opened` now lands, carrying the ticket it captured BEFORE the
+        // close (0 — `.openRequested`'s own `.ready` arm reads the current value, never bumps it).
+        let (state, effects) = reduce(racedClose, [
+            .opened(path: "/a.xlsx", docId: "doc-a", stagedPath: "/staged/doc-a", metadata: metadata, pathGeneration: 0)
+        ])
+        XCTAssertNil(state.documents["/a.xlsx"], "the resurrection this task exists to prevent — a "
+                     + "closed path must stay closed")
+        XCTAssertEqual(state, racedClose, "mutation-free drop: nothing else in state moved")
+        XCTAssertEqual(effects, [.helperClose(docId: "doc-a"), .deleteStagedCopy(docId: "doc-a")],
+                       "the helper-side document this attempt actually opened is compensated, not "
+                       + "leaked — and NO `.watchFile`: a dropped attempt never reaches the "
+                       + "watch-arming branch, so there is nothing standing to re-arm")
+    }
+
+    func testTwoRapidOpenCloseOpenCyclesTheSecondOpensOpenedIsNotDropped() {
+        // First open (ticket 0) never lands. Close (bumps to 1). Second open (reads current, 1).
+        let (afterSecondOpenRequested, _) = reduce(ready(), [
+            .openRequested(path: "/a.xlsx"), .closeRequested(path: "/a.xlsx"), .openRequested(path: "/a.xlsx")
+        ])
+        XCTAssertEqual(afterSecondOpenRequested.pathGenerations["/a.xlsx"], 1, "still 1 — a fresh open "
+                       + "reads the ticket, it never bumps it")
+
+        // The FIRST (now-stale) attempt's `.opened` lands first, carrying the ticket it captured, 0.
+        let (afterStaleLands, staleEffects) = reduce(afterSecondOpenRequested, [
+            .opened(path: "/a.xlsx", docId: "doc-a-first", stagedPath: "/staged/doc-a-first", metadata: metadata, pathGeneration: 0)
+        ])
+        XCTAssertNil(afterStaleLands.documents["/a.xlsx"], "the first attempt's own opened is stale and dropped")
+        XCTAssertEqual(staleEffects, [.helperClose(docId: "doc-a-first"), .deleteStagedCopy(docId: "doc-a-first")])
+
+        // The SECOND attempt's own `.opened` lands next, carrying ITS OWN captured ticket, 1 —
+        // matches the CURRENT generation, so it is NOT dropped: the discriminating case the brief's
+        // own "two rapid open/close/open cycles" interleaving names by name.
+        let (state, effects) = reduce(afterStaleLands, [
+            .opened(path: "/a.xlsx", docId: "doc-a-second", stagedPath: "/staged/doc-a-second", metadata: metadata, pathGeneration: 1)
+        ])
+        XCTAssertEqual(state.documents["/a.xlsx"]?.docId, "doc-a-second", "the second, legitimate open "
+                       + "lands normally")
+        XCTAssertEqual(effects, [.watchFile(path: "/a.xlsx")], "an ordinary fresh-open effect list — "
+                       + "no compensating close: nothing else was ever recorded for this path to replace")
+    }
+
+    /// **The reordered arrival — the shape that actually resurrects a document without this task's
+    /// fix.** Identical setup to the test above, but the FRESH attempt's `.opened` lands FIRST and
+    /// the STALE one arrives LATE — proving the fix holds regardless of wire/scheduling order, not
+    /// only in the "stale always arrives first" case every OTHER row in this file happens to use.
+    func testAStaleOpenedArrivingAfterTheFreshOneNeverOverwritesIt() {
+        let (afterSecondOpenRequested, _) = reduce(ready(), [
+            .openRequested(path: "/a.xlsx"), .closeRequested(path: "/a.xlsx"), .openRequested(path: "/a.xlsx")
+        ])
+        let (afterFreshLands, freshEffects) = reduce(afterSecondOpenRequested, [
+            .opened(path: "/a.xlsx", docId: "doc-a-second", stagedPath: "/staged/doc-a-second", metadata: metadata, pathGeneration: 1)
+        ])
+        XCTAssertEqual(afterFreshLands.documents["/a.xlsx"]?.docId, "doc-a-second")
+        XCTAssertEqual(freshEffects, [.watchFile(path: "/a.xlsx")])
+
+        // The FIRST (stale) attempt's own `.opened` lands LATE, after the fresh one already won the
+        // slot. Without this task's fix, this would silently OVERWRITE `doc-a-second` with the
+        // stale `doc-a-first` — the exact resurrection shape T8's own wave note named, and the one
+        // an unguarded `phase == .ready` check cannot tell apart from a legitimate write.
+        let (state, effects) = reduce(afterFreshLands, [
+            .opened(path: "/a.xlsx", docId: "doc-a-first", stagedPath: "/staged/doc-a-first", metadata: metadata, pathGeneration: 0)
+        ])
+        XCTAssertEqual(state.documents["/a.xlsx"]?.docId, "doc-a-second", "the fresh entry survives untouched")
+        XCTAssertEqual(effects, [.helperClose(docId: "doc-a-first"), .deleteStagedCopy(docId: "doc-a-first")],
+                       "the late-arriving stale attempt is compensated, not allowed to clobber")
+    }
+
+    /// **"open → reload → old .opened lands"** — the brief's own named interleaving: two external
+    /// changes close enough together that BOTH mint their own reload before either's own reopen
+    /// lands. `.externalChangeDetected` reads `doc.docId` from `documents[path]`, which NEITHER
+    /// reload's own (still in-flight) `.opened` has touched yet, so both read the SAME `oldDocId`
+    /// AND both bump the ticket once each.
+    func testASecondReloadForTheSamePathDropsTheFirstsLateOpenedWithACompensatingClose() {
+        let open = readyWithOpenDocument(path: "/a.xlsx", docId: "doc-a")
+        let (afterFirstReload, firstEffects) = reduce(open, [.externalChangeDetected(path: "/a.xlsx")])
+        guard case .reloadDocument(_, _, let firstTicket)? = firstEffects.first else {
+            return XCTFail("expected a .reloadDocument effect, got \(firstEffects)")
+        }
+        XCTAssertEqual(firstTicket, 1)
+        let (afterSecondReload, secondEffects) = reduce(afterFirstReload, [.externalChangeDetected(path: "/a.xlsx")])
+        guard case .reloadDocument(_, _, let secondTicket)? = secondEffects.first else {
+            return XCTFail("expected a .reloadDocument effect, got \(secondEffects)")
+        }
+        XCTAssertEqual(secondTicket, 2)
+
+        // The FIRST reload's own `.opened` lands — stale, dropped, compensated.
+        // `documents["/a.xlsx"]` is UNTOUCHED (still the ORIGINAL "doc-a" — neither racing reload
+        // has landed yet, exactly like the ordinary open case one test up).
+        let (state, effects) = reduce(afterSecondReload, [
+            .opened(path: "/a.xlsx", docId: "doc-a-reload-1", stagedPath: "/staged/doc-a-reload-1", metadata: metadata,
+                    pathGeneration: firstTicket)
+        ])
+        XCTAssertEqual(state.documents["/a.xlsx"]?.docId, "doc-a", "the original document is untouched "
+                       + "— neither racing reload has landed yet")
+        XCTAssertEqual(effects, [.helperClose(docId: "doc-a-reload-1"), .deleteStagedCopy(docId: "doc-a-reload-1")])
+    }
+
+    func testAStaleOpenFailedNeverOverwritesAFresherSuccess() {
+        let (afterSecondOpenRequested, _) = reduce(ready(), [
+            .openRequested(path: "/a.xlsx"), .closeRequested(path: "/a.xlsx"), .openRequested(path: "/a.xlsx")
+        ])
+        let (afterFreshLands, _) = reduce(afterSecondOpenRequested, [
+            .opened(path: "/a.xlsx", docId: "doc-a-second", stagedPath: "/staged/doc-a-second", metadata: metadata, pathGeneration: 1)
+        ])
+        // The FIRST (stale) attempt failed instead of succeeding, and its failure lands LATE —
+        // after the second attempt already opened the document successfully.
+        let (state, effects) = reduce(afterFreshLands, [
+            .openFailed(path: "/a.xlsx", reason: "corrupt file", pathGeneration: 0)
+        ])
+        XCTAssertEqual(state, afterFreshLands, "a stale failure has nothing left to say — the fresh "
+                       + "success stands untouched, never clobbered by a phantom failure banner")
+        XCTAssertEqual(effects, [])
+    }
+
+    /// **Why `.reloadFailed` needs BOTH guards, proven rather than merely asserted in a comment**:
+    /// two racing reloads share the SAME `oldDocId` (neither's reopen has landed, so
+    /// `documents[path]` never moved) — the PRE-EXISTING guard alone cannot distinguish them, and
+    /// would destroy the still-standing entry the second, still-in-flight reload is about to
+    /// legitimately replace. The per-path ticket is the ONLY thing that tells them apart here.
+    func testTwoRacingReloadsTheFirstToFailIsDroppedByTheTicketNotTheOldDocIdGuard() {
+        let open = readyWithOpenDocument(path: "/a.xlsx", docId: "doc-a")
+        let (afterFirstReload, _) = reduce(open, [.externalChangeDetected(path: "/a.xlsx")]) // ticket -> 1
+        let (afterSecondReload, _) = reduce(afterFirstReload, [.externalChangeDetected(path: "/a.xlsx")]) // ticket -> 2
+        XCTAssertEqual(afterSecondReload.documents["/a.xlsx"]?.docId, "doc-a", "sanity — neither "
+                       + "reopen has landed, so the entry is still the pre-reload original")
+
+        // The FIRST reload's own failure lands, still carrying oldDocId "doc-a" (MATCHES the
+        // pre-existing guard!) but its OWN stale ticket, 1 — current is now 2, the second reload's
+        // own initiation having moved it.
+        let (state, effects) = reduce(afterSecondReload, [
+            .reloadFailed(path: "/a.xlsx", oldDocId: "doc-a", reason: "transient error", pathGeneration: 1)
+        ])
+        XCTAssertEqual(state, afterSecondReload, "the entry survives untouched — the OLD oldDocId "
+                       + "guard alone would have destroyed it here (it still matches), which is "
+                       + "exactly why the ticket check is a SECOND, independent guard, not a "
+                       + "replacement for it")
+        XCTAssertEqual(effects, [], "no failure banner, no unwatch — the second reload is still "
+                       + "legitimately in flight and must be left alone")
+    }
+
+    func testClosingOnePathNeverBumpsAnothersTicket() {
+        let (state, _) = reduce(ready(), [.closeRequested(path: "/a.xlsx")])
+        XCTAssertEqual(state.pathGenerations["/a.xlsx"], 1)
+        XCTAssertNil(state.pathGenerations["/b.xlsx"], "an unrelated path's ticket is untouched — "
+                     + "this dict is keyed by PATH, never a single runtime-wide counter (docIds are "
+                     + "always fresh UUIDs, so a per-docId key could never even collide in the first "
+                     + "place — the race this task closes is about WHICH ATTEMPT for a given PATH is "
+                     + "still authoritative)")
+    }
+
+    func testHelperBecameReadyFlushUsesEachQueuedPathsOwnCurrentTicketNotAStaleOneFromQueueTime() {
+        // "/a.xlsx" queues, is closed (bumping its ticket to 1) while still `.starting`, then
+        // re-queues — legal: `.closeRequested`'s own `pendingOpens.removeAll` lets a fresh
+        // `.openRequested` re-append it (that arm's own `if !next.pendingOpens.contains(path)` guard).
+        let (starting, _) = reduce(OfficeRuntimeState(), [
+            .openRequested(path: "/a.xlsx"), .closeRequested(path: "/a.xlsx"), .openRequested(path: "/a.xlsx")
+        ])
+        XCTAssertEqual(starting.pendingOpens, ["/a.xlsx"], "sanity — re-queued after the close")
+        XCTAssertEqual(starting.pathGenerations["/a.xlsx"], 1)
+
+        let (_, effects) = reduce(starting, [.helperBecameReady])
+        XCTAssertEqual(effects, [.helperOpen(path: "/a.xlsx", pathGeneration: 1)], "the flush reads "
+                       + "each path's CURRENT ticket (1, post-close) — a hand-copied 0 from queue "
+                       + "time would let the eventual `.opened` be misjudged as stale against itself")
+    }
+
+    func testHelperDiedCarriesPathGenerationsForwardRatherThanResettingThem() {
+        let (afterClose, _) = reduce(ready(), [.closeRequested(path: "/a.xlsx")])
+        XCTAssertEqual(afterClose.pathGenerations["/a.xlsx"], 1)
+        let (state, _) = reduce(afterClose, [.helperDied])
+        XCTAssertEqual(state.pathGenerations, afterClose.pathGenerations, "carried forward, not reset "
+                       + "— see `OfficeRuntimeState.pathGenerations`'s own header for why a reset "
+                       + "would reopen a ticket-collision question a monotonic counter avoids by "
+                       + "construction")
+        XCTAssertEqual(state.phase, .failed)
+    }
+
+    /// **The T7 closure this task's own dispatch note names**: "a stale open must NOT have consumed
+    /// the recovery candidate... the fresh open must still find it." Proven directly: a dropped
+    /// (stale-generation) open's own best-effort `checkRecoveryCandidate` follow-up still RUNS
+    /// (`openAndDispatch` never gates that call on the generation — it is read-only and races
+    /// nothing, see that function's own header) and still DISPATCHES `.recoveryCandidateFound`
+    /// carrying the stale docId — this test shows that landing is rejected by the PRE-EXISTING
+    /// docId-match guard `.recoveryCandidateFound` already carried before this task, needing no new
+    /// guard of its own: nothing was ever "consumed" by the check in the first place, since
+    /// `checkRecoveryCandidate` only ever reads.
+    func testAStaleGenerationOpensRecoveryCandidateFoundNeverStealsTheOfferFromTheFreshOpen() {
+        let (afterSecondOpenRequested, _) = reduce(ready(), [
+            .openRequested(path: "/a.odt"), .closeRequested(path: "/a.odt"), .openRequested(path: "/a.odt")
+        ])
+        let (afterStaleDropped, _) = reduce(afterSecondOpenRequested, [
+            .opened(path: "/a.odt", docId: "doc-a-first", stagedPath: "/staged/doc-a-first", metadata: metadata, pathGeneration: 0)
+        ])
+        let (afterFreshOpened, _) = reduce(afterStaleDropped, [
+            .opened(path: "/a.odt", docId: "doc-a-second", stagedPath: "/staged/doc-a-second", metadata: metadata, pathGeneration: 1)
+        ])
+
+        // The fresh attempt's own recovery check found a candidate — the offer this test protects.
+        let freshCandidate = OfficeRecoveryCandidate(docId: "crashed-fresh", sidecarPath: "/state/autosave/crashed-fresh.odt",
+                                                     capturedAt: Date(timeIntervalSince1970: 2_000_000), isODFFallback: false)
+        let (withOffer, _) = reduce(afterFreshOpened, [
+            .recoveryCandidateFound(path: "/a.odt", docId: "doc-a-second", candidate: freshCandidate)
+        ])
+        XCTAssertEqual(withOffer.documentRecoveryCandidates["/a.odt"], freshCandidate, "sanity")
+
+        // The STALE (dropped) attempt's OWN disk check lands too, carrying the stale docId.
+        let staleCandidate = OfficeRecoveryCandidate(docId: "crashed-stale", sidecarPath: "/state/autosave/crashed-stale.odt",
+                                                     capturedAt: Date(timeIntervalSince1970: 1_000_000), isODFFallback: false)
+        let (state, effects) = reduce(withOffer, [
+            .recoveryCandidateFound(path: "/a.odt", docId: "doc-a-first", candidate: staleCandidate)
+        ])
+        XCTAssertEqual(state.documentRecoveryCandidates["/a.odt"], freshCandidate, "the fresh offer "
+                       + "stands, untouched by the stale attempt's own late-arriving check")
+        XCTAssertEqual(effects, [])
+    }
 }
 
 // MARK: - OfficeHelperRequestQueue: the shared client's request funnel
@@ -2773,4 +3005,5 @@ final class OfficeAutosaveManifestTests: XCTestCase {
         XCTAssertTrue(remaining.contains("live-doc.odt"))
         XCTAssertNotNil(OfficeRuntime.checkRecoveryCandidate(realPath: liveRealPath.path, autosaveDirectory: autosaveDir))
     }
+
 }
