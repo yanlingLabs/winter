@@ -877,6 +877,109 @@ final class OfficeHelperLiveTests: XCTestCase {
                 + "state-changed observed=\(anyStateChangedObserved), total raw lines=\(rawLines.count)")
     }
 
+    // MARK: - Task 4 PROBE: does postKeyEvent's effect apply synchronously, or does it need a pump?
+
+    /// **Office Stage B Task 4 — empirical pre-flight, before any of the six criteria are built.**
+    /// `SfxLokHelper::postKeyEventAsync` (`sfx2/source/view/lokhelper.cxx`, read against the actual
+    /// LibreOffice core source) branches on `vcl::lok::isUnipoll()`: in unipoll mode the event
+    /// dispatches DIRECTLY and synchronously (`LOKPostAsyncEvent` called inline); otherwise it is
+    /// queued via `Application::PostUserEvent` for VCL's own event loop to drain later — and
+    /// `LOKBridge` never calls `runLoop` (the ONE thing that flips `isUnipoll()` true), so on paper
+    /// this helper should be in the QUEUED branch. Nothing in this codebase's `LOKDedicatedThread`
+    /// runs anything resembling `Application::Yield()`/`Scheduler::ProcessEventsToIdle()`. Whether
+    /// that queued event ever actually applies — immediately, on some later incidental LOK call, or
+    /// never — is NOT something to reason about further from source alone (this repo's own house
+    /// lesson: capture REAL callback payloads before writing parsers, applied here to real EFFECTS
+    /// before writing six tests that assume one). This probe answers it directly.
+    func testPostKeyEventProbeDoesItsEffectApplySynchronouslyOrDoesItNeedAFollowUpLOKCall() async throws {
+        try skipUnlessVendorPresent()
+        let helper = try await spawnLiveHelper(captureStderr: true)
+
+        var observedPushes: [(String, OfficeDocumentEvent)] = []
+        let observedLock = NSLock()
+        helper.client.onDocumentEvent = { docId, event in
+            observedLock.lock(); observedPushes.append((docId, event)); observedLock.unlock()
+        }
+
+        // T2's own root-caused finding (LOKBridge.swift's `disableDocumentLockFile` header): a
+        // document opened from OUTSIDE `--state-path`, under this sandboxed helper (the default —
+        // `spawnLiveHelper`'s own `sandboxProfilePath` default), loads READ-ONLY: the write fence
+        // denies the SfxMedium write-classed open the sandbox itself blocks for any path outside
+        // `--state-path`, not merely a Unix-permissions question a plain `chmod`/scratch-dir copy
+        // would fix — `paste()` still "succeeds" against the in-memory model but the modified flag
+        // can never flip, T2b's own resolved bug. The copy must land INSIDE this spawned helper's
+        // OWN `--state-path` (`helper.stateDir`), mirroring `OfficeRuntime.stageDocument`'s real
+        // staging directory, or this probe reproduces exactly that trap for an EDIT probe.
+        let stagedPath = helper.stateDir.appendingPathComponent("docs", isDirectory: true)
+            .appendingPathComponent("gate-writable.ods").path
+        try FileManager.default.createDirectory(
+            at: URL(fileURLWithPath: stagedPath).deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(contentsOf: Self.fixturesRoot.appendingPathComponent("gate.ods")).write(to: URL(fileURLWithPath: stagedPath))
+
+        let docId = UUID().uuidString
+        let opened = try await helper.client.open(docId: docId, path: stagedPath)
+        print("[postKey probe] opened a writable gate.ods copy staged inside --state-path: type=\(opened.type) parts=\(opened.parts)")
+
+        // Round 1 (this test's original hypothesis): paint the origin tile FIRST — establishing a
+        // real view/viewport before any input, exactly the order production always has (the canvas
+        // cannot exist, let alone accept a click/keystroke, before it has rendered at least once).
+        try await helper.client.requestTiles(docId: docId, keys: [TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0)])
+        try? await Task.sleep(nanoseconds: 500_000_000)
+
+        // One character, no modifiers: 'A' — charCode 65 (its own Unicode scalar), keyCode 512
+        // (com.sun.star.awt.Key.A, LibreOffice core's offapi/com/sun/star/awt/Key.idl, fetched and
+        // read directly — no modifier bits set). LOK_KEYEVENT_KEYINPUT = 0.
+        try await helper.client.postKey(docId: docId, type: .keyInput, charCode: 65, keyCode: 512)
+        try await helper.client.postKey(docId: docId, type: .keyUp, charCode: 65, keyCode: 512)
+        print("[postKey probe] posted KEYINPUT+KEYUP for 'A' — waiting 2s for anything synchronous")
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
+
+        let linesAfterKeyAlone = (helper.stderrCapture?.linesSnapshot() ?? []).filter { $0.contains("[LOKBridge raw callback]") }
+        print("[postKey probe] \(linesAfterKeyAlone.count) raw callback(s) after postKey alone, 2s settle:")
+        for line in linesAfterKeyAlone { print("  " + line) }
+
+        // The pump hypothesis: does an UNRELATED subsequent LOK call (a tile paint) drain whatever
+        // postKeyEvent queued? `paintTile` is the cheapest real LOK call this wire already exposes.
+        try await helper.client.requestTiles(docId: docId, keys: [TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0)])
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
+
+        let linesAfterPump = (helper.stderrCapture?.linesSnapshot() ?? []).filter { $0.contains("[LOKBridge raw callback]") }
+        print("[postKey probe] \(linesAfterPump.count) raw callback(s) TOTAL after a follow-up tileRequest pump:")
+        for line in linesAfterPump { print("  " + line) }
+
+        print("[postKey probe] documentEvent pushes observed: \(observedPushes.count)")
+        for (pushDocId, event) in observedPushes { print("  docId=\(pushDocId) event=\(event)") }
+
+        // Round 2: a real mouse click (buttonDown+buttonUp) at a point INSIDE cell A1's own
+        // bounding rect — the raw probe above observed a real `LOK_CALLBACK_CELL_CURSOR`-shaped
+        // payload "0, 0, 1265, 254, 0, 0" for A1, so (100, 100) twips is safely inside it — testing
+        // whether Calc's grid needs an actual click (not merely `GrabFocus()`, which the key-alone
+        // round above already proved happens) before a posted key actually inserts.
+        try await helper.client.postMouse(docId: docId, type: .buttonDown, xTwips: 100, yTwips: 100,
+                                          count: 1, buttons: 1 /* MOUSE_LEFT */, modifiers: 0)
+        try await helper.client.postMouse(docId: docId, type: .buttonUp, xTwips: 100, yTwips: 100,
+                                          count: 1, buttons: 1, modifiers: 0)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        try await helper.client.postKey(docId: docId, type: .keyInput, charCode: 66, keyCode: 513) // 'B', KEY_B
+        try await helper.client.postKey(docId: docId, type: .keyUp, charCode: 66, keyCode: 513)
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
+
+        let linesAfterClickThenType = (helper.stderrCapture?.linesSnapshot() ?? []).filter { $0.contains("[LOKBridge raw callback]") }
+        let newLinesFromRound2 = linesAfterClickThenType.count - linesAfterPump.count
+        print("[postKey probe] ROUND 2 (click then type 'B'): \(newLinesFromRound2) new raw callback(s):")
+        for line in linesAfterClickThenType.suffix(newLinesFromRound2) { print("  " + line) }
+        print("[postKey probe] ROUND 2 documentEvent pushes observed: \(observedPushes.count)")
+        for (pushDocId, event) in observedPushes { print("  docId=\(pushDocId) event=\(event)") }
+
+        try await helper.client.close(docId: docId)
+
+        // Deliberately NOT a pass/fail assertion on WHICH of the three outcomes happened (applies
+        // immediately / applies only after a pump / never applies) — this is a probe, not a claim;
+        // task-4-report.md records the interpretation. The one thing asserted: the run itself
+        // completed without the helper dying, so whatever the printed evidence shows is trustworthy.
+        XCTAssertTrue(helper.process.isRunning, "the helper must survive posting a real key event either way")
+    }
+
     // MARK: - Invalidation drill: reload-triggered (Stage A has no edit verbs)
 
     /// Office Stage A Task 4's own invalidation drill, per the brief's explicit menu (edit-via-UNO

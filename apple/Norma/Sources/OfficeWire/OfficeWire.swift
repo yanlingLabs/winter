@@ -78,6 +78,35 @@ public enum OfficeWireFrame: Equatable, Sendable {
     /// why the helper is never asked to write to the real path directly.
     case save(seq: UInt64, docId: String)
 
+    /// Office Stage B Task 4 — **the real edit verb.** LOK's `postKeyEvent(nType, nCharCode,
+    /// nKeyCode)` (`LibreOfficeKit.h`), unchanged parameter-for-parameter across the wire. `charCode`
+    /// is the Unicode scalar the key produces (0 for a non-printing key — arrows, Delete, bare
+    /// modifiers); `keyCode` is a FULL VCL-packed value — `com.sun.star.awt.Key`'s base code (e.g.
+    /// `512` for `A`) OR'd with SHIFTED modifier bits (`0x1000`/`0x2000`/`0x4000`/`0x8000` for
+    /// Shift/Mod1/Mod2/Mod3), never the bare, unshifted `KeyModifier` group's `1/2/4/8`. This is not
+    /// a guess: `SfxLokHelper::postKeyEventAsync` (`sfx2/source/view/lokhelper.cxx`) constructs
+    /// `KeyEvent(nCharCode, nKeyCode, nRepeat)`, whose second parameter converts via
+    /// `vcl::KeyCode(sal_uInt16 nKey, sal_uInt16 nModifier = 0)` — a SINGLE-argument implicit
+    /// conversion (`nModifier` defaults to 0), so the ENTIRE incoming `int` becomes
+    /// `nKeyCodeAndModifiers` verbatim (`include/vcl/keycod.hxx`). `OfficeInputCodes` is the one
+    /// place that builds this packed value; see its own header for the AppKit-keyCode source and the
+    /// cross-check against this repo's own independent `ComputerCapabilities.cuKeyCode` table.
+    case keyEvent(seq: UInt64, docId: String, type: OfficeKeyEventType, charCode: Int, keyCode: Int)
+    /// Office Stage B Task 4 — LOK's `postMouseEvent(nType, nX, nY, nCount, nButtons, nModifier)`.
+    /// `xTwips`/`yTwips` are DOCUMENT-space twips (LOK's own coordinate system for this call —
+    /// confirmed against `ScModelObj::postMouseEvent`, `sc/source/ui/unoobj/docuno.cxx`, which
+    /// converts them via `GetPPTX()`/`GetPPTY()` the same way every other twips-space input this
+    /// wire already carries is converted). `buttons` is VCL's `MOUSE_LEFT`(1)/`MIDDLE`(2)/`RIGHT`(4)
+    /// bitmask (`include/vcl/event.hxx`) — UNLIKE `keyEvent`'s `keyCode`, this is NOT combined with
+    /// `modifiers`: `MouseEvent`'s own constructor takes `nButtons`/`nModifier` as two SEPARATE
+    /// `sal_uInt16` parameters, packed into the same low/high-bit split internally
+    /// (`GetButtons()`/`IsShift()` etc. mask the identical field two different ways) but never
+    /// combined by a CALLER. `modifiers` uses the SAME shifted encoding `keyEvent.keyCode`'s
+    /// modifier half does (`OfficeInputCodes.modifierMask`) — confirmed by `MouseEvent::IsShift()`
+    /// checking `mnCode & KEY_SHIFT` (`0x1000`), the identical constant `KeyCode::IsShift()` checks.
+    case mouseEvent(seq: UInt64, docId: String, type: OfficeMouseEventType, xTwips: Int64, yTwips: Int64,
+                     count: Int, buttons: Int, modifiers: Int)
+
     #if DEBUG
     /// Office Stage B Task 2 — **DEBUG-only, and REMOVED BY TASK 4** (which lands real edit verbs).
     /// The one wire door this task's own live round-trip test uses to prove a save persists a REAL
@@ -158,6 +187,15 @@ public enum OfficeWireFrame: Equatable, Sendable {
     /// under the helper's own `--state-path`, or a LOK internal save error). The helper always
     /// SURVIVES this, the same posture `openFailed` already has for a bad `open`.
     case saveFailed(seq: UInt64, docId: String, reason: String)
+    /// Office Stage B Task 4 — answers `keyEvent`: the key was POSTED to LOK — not a claim it
+    /// already took effect (`postKeyEvent` is `void` on LOK's own side, exactly as fire-and-forget
+    /// as `postUnoCommand` was for the debug door this replaces — see that case's own retired
+    /// `debugEditOk` reply, whose "posted, not a claim of effect" wording this one deliberately
+    /// repeats). The real effect is observed the same way every other Stage A/B async effect is:
+    /// through the `documentEvent`/`invalidated` pushes that follow.
+    case keyEventOk(seq: UInt64, docId: String)
+    /// Office Stage B Task 4 — answers `mouseEvent`, same posture as `keyEventOk` above.
+    case mouseEventOk(seq: UInt64, docId: String)
     #if DEBUG
     /// Office Stage B Task 2 — **DEBUG-only, and REMOVED BY TASK 4.** Answers `debugEdit`: the UNO
     /// command was POSTED — not a claim it already took effect (`postUnoCommand` is fire-and-forget
@@ -255,8 +293,10 @@ public enum OfficeWireFrame: Equatable, Sendable {
         #if DEBUG
         types.append("debugEdit")
         #endif
-        types += ["subscribeTiles", "unsubscribe", "tileRequest",
-                   "helloOk", "refused", "pong", "opened", "openFailed", "closed", "saved", "saveFailed"]
+        types += ["keyEvent", "mouseEvent",
+                   "subscribeTiles", "unsubscribe", "tileRequest",
+                   "helloOk", "refused", "pong", "opened", "openFailed", "closed", "saved", "saveFailed",
+                   "keyEventOk", "mouseEventOk"]
         #if DEBUG
         types.append("debugEditOk")
         #endif
@@ -275,6 +315,8 @@ public enum OfficeWireFrame: Equatable, Sendable {
         #if DEBUG
         case .debugEdit: return "debugEdit"
         #endif
+        case .keyEvent: return "keyEvent"
+        case .mouseEvent: return "mouseEvent"
         case .subscribeTiles: return "subscribeTiles"
         case .unsubscribe: return "unsubscribe"
         case .tileRequest: return "tileRequest"
@@ -286,6 +328,8 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .closed: return "closed"
         case .saved: return "saved"
         case .saveFailed: return "saveFailed"
+        case .keyEventOk: return "keyEventOk"
+        case .mouseEventOk: return "mouseEventOk"
         #if DEBUG
         case .debugEditOk: return "debugEditOk"
         #endif
@@ -310,6 +354,8 @@ public enum OfficeWireFrame: Equatable, Sendable {
         #if DEBUG
         case .debugEdit(let seq, _, _): return seq
         #endif
+        case .keyEvent(let seq, _, _, _, _): return seq
+        case .mouseEvent(let seq, _, _, _, _, _, _, _): return seq
         case .subscribeTiles(let seq, _, _, _, _): return seq
         case .unsubscribe(let seq, _): return seq
         case .tileRequest(let seq, _, _): return seq
@@ -321,6 +367,8 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .closed(let seq, _): return seq
         case .saved(let seq, _, _): return seq
         case .saveFailed(let seq, _, _): return seq
+        case .keyEventOk(let seq, _): return seq
+        case .mouseEventOk(let seq, _): return seq
         #if DEBUG
         case .debugEditOk(let seq, _): return seq
         #endif
@@ -358,6 +406,21 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .debugEditOk(_, let docId):
             payload["docId"] = docId
         #endif
+        case .keyEvent(_, let docId, let type, let charCode, let keyCode):
+            payload["docId"] = docId
+            payload["eventType"] = type.rawValue
+            payload["charCode"] = charCode
+            payload["keyCode"] = keyCode
+        case .mouseEvent(_, let docId, let type, let xTwips, let yTwips, let count, let buttons, let modifiers):
+            payload["docId"] = docId
+            payload["eventType"] = type.rawValue
+            payload["xTwips"] = xTwips
+            payload["yTwips"] = yTwips
+            payload["count"] = count
+            payload["buttons"] = buttons
+            payload["modifiers"] = modifiers
+        case .keyEventOk(_, let docId), .mouseEventOk(_, let docId):
+            payload["docId"] = docId
         case .saved(_, let docId, let tempPath):
             payload["docId"] = docId
             payload["tempPath"] = tempPath
@@ -470,6 +533,23 @@ public enum OfficeWireFrame: Equatable, Sendable {
 public enum OfficeWireRole: String, Equatable, Sendable {
     case app
     case agent
+}
+
+/// LOK's `LibreOfficeKitKeyEventType` (`LibreOfficeKitEnums.h:1076-1080`) — a direct 1:1 mirror
+/// (`rawValue` IS the wire integer, no translation table needed, unlike `OfficeDocumentKind`):
+/// `LOK_KEYEVENT_KEYINPUT = 0` (implicit first enumerator), `LOK_KEYEVENT_KEYUP = 1`.
+public enum OfficeKeyEventType: Int, Equatable, Sendable {
+    case keyInput = 0
+    case keyUp = 1
+}
+
+/// LOK's `LibreOfficeKitMouseEventType` (`LibreOfficeKitEnums.h:1253-1261`) — same direct 1:1
+/// mirror as `OfficeKeyEventType`: `LOK_MOUSEEVENT_MOUSEBUTTONDOWN = 0`,
+/// `LOK_MOUSEEVENT_MOUSEBUTTONUP = 1`, `LOK_MOUSEEVENT_MOUSEMOVE = 2`.
+public enum OfficeMouseEventType: Int, Equatable, Sendable {
+    case buttonDown = 0
+    case buttonUp = 1
+    case move = 2
 }
 
 /// LOK's `LibreOfficeKitDocumentType` (`LibreOfficeKitEnums.h:22-27`), transcribed rather than
@@ -863,6 +943,33 @@ public enum OfficeWireCodec {
             }
             return .frame(.debugEditOk(seq: seq, docId: docId))
         #endif
+        case "keyEvent":
+            guard let docId = object["docId"] as? String,
+                  let typeRaw = intValue(object["eventType"]), let type = OfficeKeyEventType(rawValue: typeRaw),
+                  let charCode = intValue(object["charCode"]), let keyCode = intValue(object["keyCode"]) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.keyEvent(seq: seq, docId: docId, type: type, charCode: charCode, keyCode: keyCode))
+        case "mouseEvent":
+            guard let docId = object["docId"] as? String,
+                  let typeRaw = intValue(object["eventType"]), let type = OfficeMouseEventType(rawValue: typeRaw),
+                  let xTwips = int64Value(object["xTwips"]), let yTwips = int64Value(object["yTwips"]),
+                  let count = intValue(object["count"]), let buttons = intValue(object["buttons"]),
+                  let modifiers = intValue(object["modifiers"]) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.mouseEvent(seq: seq, docId: docId, type: type, xTwips: xTwips, yTwips: yTwips,
+                                       count: count, buttons: buttons, modifiers: modifiers))
+        case "keyEventOk":
+            guard let docId = object["docId"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.keyEventOk(seq: seq, docId: docId))
+        case "mouseEventOk":
+            guard let docId = object["docId"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.mouseEventOk(seq: seq, docId: docId))
         case "saved":
             guard let docId = object["docId"] as? String, let tempPath = object["tempPath"] as? String else {
                 return .rejected(seq: seq, reason: "malformed")

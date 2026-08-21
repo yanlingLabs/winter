@@ -429,6 +429,22 @@ final class LOKBridge: OfficeDocumentBridge {
     }
     #endif
 
+    /// Office Stage B Task 4 — called from a CONNECTION thread (`OfficeHelperServer`'s `.keyEvent`
+    /// handler), never from inside a LOK callback — marshals onto `thread` exactly like every other
+    /// document-scoped call on this bridge.
+    func postKey(docId: String, type: OfficeKeyEventType, charCode: Int, keyCode: Int) throws {
+        try thread.sync { try self.postKeyOnDedicatedThread(docId: docId, type: type, charCode: charCode, keyCode: keyCode) }
+    }
+
+    /// Office Stage B Task 4 — same threading contract as `postKey` above.
+    func postMouse(docId: String, type: OfficeMouseEventType, xTwips: Int64, yTwips: Int64,
+                   count: Int, buttons: Int, modifiers: Int) throws {
+        try thread.sync {
+            try self.postMouseOnDedicatedThread(docId: docId, type: type, xTwips: xTwips, yTwips: yTwips,
+                                                count: count, buttons: buttons, modifiers: modifiers)
+        }
+    }
+
     // MARK: - Dedicated-thread-only implementation
 
     private func openOnDedicatedThread(docId: String, path: String) throws -> OfficeDocumentMetadata {
@@ -638,6 +654,33 @@ final class LOKBridge: OfficeDocumentBridge {
         }
     }
     #endif
+
+    /// Office Stage B Task 4 — `postKeyEvent(nType, nCharCode, nKeyCode)`, LOK's own C signature,
+    /// unchanged. `SaveError.docNotOpen` reused rather than a fresh error case — the exact same
+    /// existence-check reuse `debugEditOnDedicatedThread` above already established for a
+    /// non-save purpose; a real, dedicated `InputError` was considered and set aside as
+    /// over-structure for one shared case with no other divergent member.
+    private func postKeyOnDedicatedThread(docId: String, type: OfficeKeyEventType, charCode: Int, keyCode: Int) throws {
+        guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        doc.handle.pointee.pClass.pointee.postKeyEvent?(
+            doc.handle, Int32(type.rawValue), Int32(truncatingIfNeeded: charCode), Int32(truncatingIfNeeded: keyCode))
+    }
+
+    /// Office Stage B Task 4 — `postMouseEvent(nType, nX, nY, nCount, nButtons, nModifier)`, LOK's
+    /// own C signature. `nX`/`nY` (twips) truncate to `Int32` defensively — the same posture
+    /// `TileRenderer.renderRaw`'s own `nTilePosX/Y` truncation already takes for a twips value this
+    /// bridge does not itself bound-check (a hostile/extreme wire value is `TileMath`'s job to
+    /// refuse at the SUBSCRIBE/REQUEST layer where it drives allocation; a raw mouse coordinate here
+    /// drives nothing but LOK's own hit-testing, which a truncated-but-still-huge value cannot crash
+    /// — LOK's own coordinate clamping, not this bridge's, is what makes an out-of-document click
+    /// harmless).
+    private func postMouseOnDedicatedThread(docId: String, type: OfficeMouseEventType, xTwips: Int64, yTwips: Int64,
+                                            count: Int, buttons: Int, modifiers: Int) throws {
+        guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        doc.handle.pointee.pClass.pointee.postMouseEvent?(
+            doc.handle, Int32(type.rawValue), Int32(truncatingIfNeeded: xTwips), Int32(truncatingIfNeeded: yTwips),
+            Int32(truncatingIfNeeded: count), Int32(truncatingIfNeeded: buttons), Int32(truncatingIfNeeded: modifiers))
+    }
 
     // MARK: - Callback translation
 

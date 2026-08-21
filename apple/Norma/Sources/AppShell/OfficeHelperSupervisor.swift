@@ -173,6 +173,37 @@ final class OfficeHelperClient {
     }
     #endif
 
+    // MARK: - Task 4: real input
+
+    /// Office Stage B Task 4 — the real edit verb. Awaits only the immediate `keyEventOk` POST
+    /// acknowledgment, same posture `requestTiles` already has toward its own slow, async-pushed
+    /// effect: the actual edit (and whatever it invalidates) is observed later, through
+    /// `onDocumentEvent`/`onInvalidated`, never through this reply.
+    func postKey(docId: String, type: OfficeKeyEventType, charCode: Int, keyCode: Int) async throws {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.keyEvent(seq: seq, docId: docId, type: type, charCode: charCode, keyCode: keyCode))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .keyEventOk: return
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    /// Office Stage B Task 4 — same posture as `postKey` above.
+    func postMouse(docId: String, type: OfficeMouseEventType, xTwips: Int64, yTwips: Int64,
+                   count: Int, buttons: Int, modifiers: Int) async throws {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.mouseEvent(seq: seq, docId: docId, type: type, xTwips: xTwips, yTwips: yTwips,
+                                              count: count, buttons: buttons, modifiers: modifiers))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .mouseEventOk: return
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
     // MARK: - Task 4: tiles
 
     /// Registers this connection as a tile-push subscriber for `docId` (which must already be open

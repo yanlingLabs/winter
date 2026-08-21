@@ -90,6 +90,17 @@ public protocol OfficeDocumentBridge: AnyObject {
     /// conformance does anything real.
     func debugEdit(docId: String, text: String) throws
     #endif
+
+    /// Office Stage B Task 4 — LOK's `postKeyEvent`, unchanged parameter shape. Throws only on a
+    /// `docId` this bridge has no handle for — `postKeyEvent` itself is `void` on LOK's own side
+    /// (fire-and-forget, no synchronous success/failure to report), the identical posture
+    /// `debugEdit` above already had. `FakeOfficeDocumentBridge`'s conformance is a no-op past the
+    /// existence check — same reasoning as its `debugEdit`/`saveAs` stubs: wire-level dispatch is
+    /// what the fixture-backed tests exercise, never real content.
+    func postKey(docId: String, type: OfficeKeyEventType, charCode: Int, keyCode: Int) throws
+    /// Office Stage B Task 4 — LOK's `postMouseEvent`, same posture as `postKey` above.
+    func postMouse(docId: String, type: OfficeMouseEventType, xTwips: Int64, yTwips: Int64,
+                   count: Int, buttons: Int, modifiers: Int) throws
 }
 
 /// The result of a successful `OfficeDocumentBridge.paintTile` call — helper-internal (never
@@ -171,6 +182,27 @@ public final class FakeOfficeDocumentBridge: OfficeDocumentBridge {
     /// header for why only `LOKBridge`'s conformance does anything real.
     public func debugEdit(docId: String, text: String) throws {}
     #endif
+
+    /// Office Stage B Task 4 — existence-checked no-op, same reasoning as `debugEdit`/`saveAs`
+    /// above: this fake has no real LOK document to post an event to, only wire-level dispatch
+    /// (docId-not-open, the `keyEventOk` reply shape) is exercised against it.
+    public func postKey(docId: String, type: OfficeKeyEventType, charCode: Int, keyCode: Int) throws {
+        lock.lock()
+        let isOpen = caches[docId] != nil
+        lock.unlock()
+        guard isOpen else {
+            throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)")
+        }
+    }
+    public func postMouse(docId: String, type: OfficeMouseEventType, xTwips: Int64, yTwips: Int64,
+                          count: Int, buttons: Int, modifiers: Int) throws {
+        lock.lock()
+        let isOpen = caches[docId] != nil
+        lock.unlock()
+        guard isOpen else {
+            throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)")
+        }
+    }
 
     /// A small, deterministic, key-dependent pixel pattern (never blank, never identical across
     /// distinct keys) — enough for a wire-level test to tell two tiles apart without needing real
@@ -751,6 +783,32 @@ public final class OfficeHelperServer {
                 writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
             }
         #endif
+        case .frame(.keyEvent(let seq, let docId, let type, let charCode, let keyCode)):
+            // Office Stage B Task 4 — same existence check as `.save`/`.debugEdit` above (not an
+            // ownership check — any connection touching an already-open doc may post input to it,
+            // matching `tileRequest`'s own posture, not `close`'s).
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                try documentBridge.postKey(docId: docId, type: type, charCode: charCode, keyCode: keyCode)
+                writeReply(.keyEventOk(seq: seq, docId: docId), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.mouseEvent(let seq, let docId, let type, let xTwips, let yTwips, let count, let buttons, let modifiers)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                try documentBridge.postMouse(docId: docId, type: type, xTwips: xTwips, yTwips: yTwips,
+                                             count: count, buttons: buttons, modifiers: modifiers)
+                writeReply(.mouseEventOk(seq: seq, docId: docId), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
         case .frame(.subscribeTiles(let seq, let docId, let part, let zoomPPT, let viewportTwips)):
             guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
                 writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
