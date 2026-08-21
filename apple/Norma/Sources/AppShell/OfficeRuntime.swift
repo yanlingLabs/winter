@@ -3089,16 +3089,27 @@ final class OfficeRuntime: ObservableObject {
     /// PURE: classifies an `OfficeHelperClient` failure into the short sentence
     /// `.openFailed`/`.emitBanner` show.
     ///
-    /// **`.openFailed(reason:)`/`.saveFailed(reason:)` carry LOK's own raw text** — mapped through
+    /// **Only `.openFailed(reason:)` carries LOK's own raw `getError()` text** — mapped through
     /// `houseErrorSentence` rather than surfaced verbatim (`knownLOKErrorShapes`'s own header has
     /// the full account). The raw string is logged here, unconditionally, so nothing is lost for
     /// debugging — only the MAPPED sentence is ever RETURNED, and therefore the only thing that
-    /// ever reaches `openFailures`/a banner.
+    /// ever reaches `openFailures`/a banner for an open failure.
     ///
-    /// **Everything else (a timeout, a protocol-level refusal, an unexpected reply shape) is this
-    /// runtime's own CONNECTION trouble, not a fact about the document** — `OfficeHelperClientError`
-    /// already carries this app's own hand-authored wording for those cases (no LOK text involved,
-    /// nothing to map), so `.description` passes through unchanged.
+    /// **`.saveFailed(reason:)` is deliberately NOT mapped, despite looking like `.openFailed`'s
+    /// twin** — found the hard way, by breaking a pre-existing, pinned test
+    /// (`testSaveAndAwaitOutcomeReturnsFailedWhenTheDriversSaveThrows`, `performSave`'s own OUTER
+    /// catch) that asserts the driver's raw save reason reaches BOTH `saveAndAwaitOutcome`'s
+    /// `.failed(reason:)` outcome AND the ordinary banner verbatim. Unlike `.openFailed`,
+    /// `.saveFailed`'s reason is not LOK's raw C-API `getError()` string — Task 2's own header on
+    /// that case says it is a wire/save-layer reason (an unsupported format, a genuine disk problem
+    /// under the helper's `--state-path`), already plain-English and already the specific contract
+    /// callers of the save path rely on. It falls to the `default` arm below like every other
+    /// non-open `OfficeHelperClientError`.
+    ///
+    /// **Everything else (a timeout, a protocol-level refusal, an unexpected reply shape, a save
+    /// failure) is not LOK-open text this task's brief was about** — `OfficeHelperClientError`
+    /// already carries this app's own hand-authored wording for those cases, so `.description`
+    /// passes through unchanged.
     ///
     /// **Office Stage B Task 9 — the NSError fix, found while building the mapping above.** Every
     /// OTHER error this file's own throw sites produce (`stageDocument`'s Cocoa file-system errors,
@@ -3126,7 +3137,7 @@ final class OfficeRuntime: ObservableObject {
     private static func describe(_ error: Error) -> String {
         if let clientError = error as? OfficeHelperClientError {
             switch clientError {
-            case .openFailed(let reason), .saveFailed(let reason):
+            case .openFailed(let reason):
                 NSLog("[OfficeRuntime] raw office error (mapped for the banner above): \(reason)")
                 return houseErrorSentence(forRawReason: reason)
             default:
