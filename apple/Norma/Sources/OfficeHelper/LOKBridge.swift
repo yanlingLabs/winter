@@ -322,6 +322,30 @@ final class LOKBridge: OfficeDocumentBridge {
         /// for `-1` and no-ops), rather than this bridge inventing a fallback LOK itself does not
         /// provide.
         let viewId: Int32
+        /// **Fix round 4 (NEW-1, CRITICAL) — this document's own LOK document type**, captured at
+        /// `open` from `getDocumentType()` (the same read that already fed `opened`'s wire metadata;
+        /// this field just keeps it instead of throwing it away). Exists for ONE purpose: to
+        /// type-gate every `setPart` call this bridge makes, exactly the way LOK's OWN
+        /// `doc_paintPartTile` does.
+        ///
+        /// LOK deliberately does not change the part for a TEXT document — `desktop/source/lib/
+        /// init.cxx:4458-4461` (this codebase's pinned LO commit `11482c8f`), verbatim:
+        /// `// Text documents have a single coordinate system; don't change part.` … `const bool
+        /// isText = (aType == LOK_DOCTYPE_TEXT);` — and then guards BOTH its own `doc_setPartImpl`
+        /// call (`:4485-4490`) and the matching restore (`:4514-4519`) on `!isText`. The reason
+        /// that guard exists is not cosmetic: for Writer, `setPart` is NOT a viewport switch at all.
+        /// `SwXTextDocument::setPart` (`sw/source/uibase/uno/unotxdoc.cxx:3410-3419`) is
+        /// `pWrtShell->GotoPage(nPart + 1, true)` — a real CARET MOVE, with no same-page early-out
+        /// anywhere below it (`SwWrtShell::GotoPage` → `SwCursorShell::GotoPage` →
+        /// `GetLayout()->SetCurrPage(m_pCurrentCursor, nPage)`, all read at the pin). Norma pins
+        /// every `.odt`/`.docx` at part 0, so an ungated `setPart(handle, 0)` on a Writer document
+        /// is `GotoPage(1)` — "yank the caret to the top of page 1" — on EVERY call.
+        ///
+        /// See `paintTileOnDedicatedThread` and `postKeyOnDedicatedThread` for the two places that
+        /// mattered and why. `.text` is the ONLY kind gated out, mirroring LOK's own `isText` test
+        /// exactly rather than inventing a broader rule of this bridge's own (`.drawing` shares
+        /// `SdXImpressDocument::setPart` with `.presentation`, and LOK does not exempt it).
+        let kind: OfficeDocumentKind
     }
 
     private let thread: LOKDedicatedThread
@@ -532,7 +556,7 @@ final class LOKBridge: OfficeDocumentBridge {
         let saveFormat = OfficeSaveFormat(pathExtension: (path as NSString).pathExtension)
         documents[docId] = OpenDocument(handle: rawDoc, context: unmanagedContext,
                                           tileRenderer: TileRenderer(handle: rawDoc), saveFormat: saveFormat,
-                                          viewId: viewId)
+                                          viewId: viewId, kind: kind)
         return OfficeDocumentMetadata(
             type: kind, parts: parts,
             sizeTwips: OfficeDocumentSize(widthTwips: Int64(width), heightTwips: Int64(height)))
@@ -566,16 +590,40 @@ final class LOKBridge: OfficeDocumentBridge {
         // `key.part` — closes this the same way the input path already does: `doc_paintPartTile`'s
         // own trigger for the search (`nPart != doc_getPart(pThis)`) is the FIRST thing it checks,
         // so by the time it runs, this document is already at the requested part and the mismatch
-        // that summons the unfiltered scan never arises. Checked, not assumed, that this is safe to
-        // call unconditionally on EVERY paint (including prefetch): every `TileKey` this codebase
-        // ever constructs — on-demand or the whole-document residency prefetch
-        // (`officeResidencyPrefetchOrder`) — carries the requesting canvas's own currently active
-        // part, never any other; there is no path where a paint's own `key.part` could differ from
-        // what the user is actually looking at, so this can never steal the document's own active-
-        // sheet state out from under a real user action. Confirmed empirically, not just by source
+        // that summons the unfiltered scan never arises. Confirmed empirically, not just by source
         // reading: `testRequestingPartZeroAfterTypingOnSheetTwoRendersSheetOneNotAStaleBystanderMatch`
         // (`OfficeRuntimeLiveTests.swift`) fails at exactly this mismatch before this line existed.
-        doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(truncatingIfNeeded: key.part))
+        //
+        // **Fix round 4 (NEW-1, CRITICAL) — type-gated, exactly the way LOK gates its own.** Round
+        // 3 shipped this call UNCONDITIONALLY, on the argument that "every `TileKey` this codebase
+        // ever constructs carries the requesting canvas's own currently active part, so a paint can
+        // never steal the document's active-sheet state." That argument was too strong in TWO
+        // independent directions, and the first one is a live caret bug for every Writer document:
+        //
+        //   1. **Type.** `doc_paintPartTile` guards its own `doc_setPartImpl` (and its restore) on
+        //      `!isText` — `init.cxx:4458-4461`/`:4485-4490`/`:4514-4519`, pinned commit `11482c8f`,
+        //      with its own reason in the source: "Text documents have a single coordinate system;
+        //      don't change part." For Writer, `setPart` is a CARET MOVE, not a viewport switch
+        //      (`SwXTextDocument::setPart` = `GotoPage(nPart + 1, true)`, no same-page early-out —
+        //      see `OpenDocument.kind`'s own header for the full citation chain). Norma pins every
+        //      text document at part 0, so an ungated prefix here fired `GotoPage(1)` before EVERY
+        //      Writer tile paint — including helper-cache HITS, since this prefix runs before
+        //      `TileRenderer.paint`'s own cache lookup — yanking the user's caret to the top of page
+        //      1. `postKeyEvent` is `PostUserEvent`-async while this is synchronous, so a repaint
+        //      interleaving between keystrokes could land the rest of a word at page-1 start.
+        //      Proven live: `testTypingIntoAWriterDocumentSurvivesAnInterleavedTileRepaint`.
+        //   2. **Part staleness.** "A paint's `key.part` always equals what the user is looking at"
+        //      is true of the CONSTRUCTION of every key, but not of the moment one is PAINTED: an
+        //      in-flight prefetch chunk cut by a part switch is still delivered, so a paint carrying
+        //      the OLD part can genuinely arrive after `activePart` has moved on and re-park LOK
+        //      there. That window is real and is deliberately left open here (a stale paint must
+        //      still paint the part it was asked for, or it would return the wrong pixels under its
+        //      own key); it is closed where it actually matters instead — `saveAsOnDedicatedThread`
+        //      asserts the USER's active part before writing, so no paint ordering can decide what
+        //      a save records. See fix round 4 (NEW-2) at that method's own header.
+        if doc.kind != .text {
+            doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(truncatingIfNeeded: key.part))
+        }
         let (generation, pixels) = try doc.tileRenderer.paint(key: key)
         return TilePaintResult(generation: generation, pixels: pixels,
                                 width: TileMath.tilePixelSize, height: TileMath.tilePixelSize)
@@ -742,10 +790,24 @@ final class LOKBridge: OfficeDocumentBridge {
     /// own header for how the id is captured, and `paintTileOnDedicatedThread` for the identical
     /// prefix on the paint side — both empirically confirmed necessary by the two-document live
     /// drills in `OfficeRuntimeLiveTests.swift` (RED without this line, GREEN with it).
+    ///
+    /// **Fix round 4 (NEW-1, CRITICAL) — the `setPart` is type-gated; `setView` is not.** For a TEXT
+    /// document `setPart` is not a scoping call at all, it is `GotoPage(nPart + 1)` — a caret move
+    /// (`OpenDocument.kind`'s own header has the citation chain). Norma pins every text document at
+    /// part 0, so the round-1 prefix was firing `GotoPage(1)` immediately before every single
+    /// keystroke in a Writer document: harmless-looking only because a keystroke's own
+    /// `postKeyEventAsync` runs later, but a genuine caret yank the moment anything else on this
+    /// thread (a tile paint, which had the identical ungated prefix) interleaved. Gated exactly the
+    /// way LOK gates its own (`isText`, `init.cxx:4458-4461`), and nothing is lost: a text document
+    /// has one part by construction here, so the call could only ever have been a no-op or a bug.
+    /// `setView` stays UNCONDITIONAL — it is document-scoped, correct for every kind, and it is
+    /// what the whole round-2/round-3 cross-document proof rests on.
     private func postKeyOnDedicatedThread(docId: String, part: Int, type: OfficeKeyEventType, charCode: Int, keyCode: Int) throws {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
         doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
-        doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(truncatingIfNeeded: part))
+        if doc.kind != .text {
+            doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(truncatingIfNeeded: part))
+        }
         doc.handle.pointee.pClass.pointee.postKeyEvent?(
             doc.handle, Int32(type.rawValue), Int32(truncatingIfNeeded: charCode), Int32(truncatingIfNeeded: keyCode))
     }
@@ -767,11 +829,21 @@ final class LOKBridge: OfficeDocumentBridge {
     /// **Fix round 2 (CRITICAL) — same `setView`-first reasoning as `postKeyOnDedicatedThread`
     /// above**, for the identical reason: `setPart` below depends on the process-global current
     /// view, not `doc.handle`.
+    ///
+    /// **Fix round 4 (NEW-1, CRITICAL) — same type gate as `postKeyOnDedicatedThread` above**, for
+    /// the same reason and with one extra consequence worth naming here: for a text document the
+    /// ungated `setPart` moved the caret to page-1 start immediately BEFORE interpreting this
+    /// event's own twips coordinates, so a click landing on page 3 was preceded by a caret jump it
+    /// then silently corrected — invisible in the common case, and exactly the sort of "it looked
+    /// fine" that hid the caret yank on the keyboard path. The coordinate argument above still
+    /// stands for the kinds that keep the call (`nX`/`nY` ARE part-relative for Calc/Impress).
     private func postMouseOnDedicatedThread(docId: String, part: Int, type: OfficeMouseEventType, xTwips: Int64, yTwips: Int64,
                                             count: Int, buttons: Int, modifiers: Int) throws {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
         doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
-        doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(truncatingIfNeeded: part))
+        if doc.kind != .text {
+            doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(truncatingIfNeeded: part))
+        }
         doc.handle.pointee.pClass.pointee.postMouseEvent?(
             doc.handle, Int32(type.rawValue), Int32(truncatingIfNeeded: xTwips), Int32(truncatingIfNeeded: yTwips),
             Int32(truncatingIfNeeded: count), Int32(truncatingIfNeeded: buttons), Int32(truncatingIfNeeded: modifiers))

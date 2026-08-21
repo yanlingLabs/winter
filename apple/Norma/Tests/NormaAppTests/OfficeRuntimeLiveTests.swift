@@ -1587,6 +1587,224 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         _ = host.teardownAllOfficeRuntimesAndStopHelper()
     }
 
+    /// Fix round 4 (NEW-1, CRITICAL) — **the type gate on `setPart`, proven by the caret.**
+    ///
+    /// Until this round `LOKBridge` issued `setPart(handle, part)` unconditionally ahead of every
+    /// tile paint and every key/mouse post. For a Writer document that call is not a viewport
+    /// switch at all: `SwXTextDocument::setPart` (`sw/source/uibase/uno/unotxdoc.cxx:3410-3419`,
+    /// this codebase's pinned LO commit `11482c8f`) is `pWrtShell->GotoPage(nPart + 1, true)`, and
+    /// nothing below it early-outs when the caret is already on that page (`SwWrtShell::GotoPage` →
+    /// `SwCursorShell::GotoPage` → `GetLayout()->SetCurrPage(m_pCurrentCursor, nPage)`, all read at
+    /// the pin). Norma pins every text document at part 0, so the prefix meant `GotoPage(1)` — "put
+    /// the caret at the top of page 1" — before every single tile this document ever painted,
+    /// including helper-cache HITS (the prefix runs before `TileRenderer.paint`'s own cache
+    /// lookup). LOK's own `doc_paintPartTile` never had this bug because it type-gates the same
+    /// call, with the reason written in the source (`desktop/source/lib/init.cxx:4458-4461`): "Text
+    /// documents have a single coordinate system; don't change part."
+    ///
+    /// **The interleave is what makes it user-visible, and it is what this drill reproduces.** A
+    /// keystroke is `PostUserEvent`-async on LOK's side (`SfxLokHelper::postKeyEventAsync`) while
+    /// `setPart` is synchronous, so a repaint arriving between two keystrokes — a scroll, an
+    /// invalidation-driven refetch, a residency-prefetch chunk — moved the caret out from under the
+    /// second half of a word. Here the repaint is a real `requestTiles` round trip through the real
+    /// helper, sequenced deterministically between two real typing bursts by a real save (both
+    /// bursts are confirmed landed through LOK's own `ModifiedStatus` callback before the next step
+    /// runs — no sleeps, and no reliance on the async queue's own timing).
+    ///
+    /// Raw wire client, no canvas: a mounted `OfficeTileCanvasView` would paint on its own schedule
+    /// (residency prefetch, invalidation refetch), which is exactly the traffic under test — it must
+    /// be the DRILL that decides when a paint interleaves, not the view.
+    ///
+    /// **Pre-fix signatures, MEASURED (not predicted) by deleting the gates and re-running, gates
+    /// restored immediately after each run.** Recorded decomposed, because the two halves of the
+    /// finding fail differently and the difference is the point:
+    ///
+    ///   * **Paint gate deleted, input gates intact** — saved body text
+    ///     `EDNORMA GATEoffice stage A embed probeNORMA PAGE TWOT4`. Burst 1 lands correctly at the
+    ///     end of page 2; the interleaved paint yanks the caret to page-1 start; burst 2 lands
+    ///     there. **2 failing assertions** (the marker-appears-once assertion still holds — the
+    ///     burst landed in exactly one, wrong, place).
+    ///   * **All three gates deleted (the real pre-round-4 build)** — saved body text
+    ///     `DE4TNORMA GATEoffice stage A embed probeNORMA PAGE TWO`. **3 failing assertions.** The
+    ///     whole marker is at page-1 start and it is REVERSED, which is the ungated INPUT prefix
+    ///     showing its own hand: `GotoPage(1)` ran before EVERY keystroke, so each character was
+    ///     inserted at page-1 start and pushed its predecessor right. Plain typing into any Writer
+    ///     document — no interleave, no second document, no part switch — was already producing
+    ///     reversed text at the top of page 1 before this round; the existing `.odt` round-trip
+    ///     drill never noticed because it asserts only "dirty" and "the pixels changed," and
+    ///     reversed text at the wrong place satisfies both.
+    func testTypingIntoAWriterDocumentSurvivesAnInterleavedTileRepaint() async throws {
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
+                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                        + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
+        let vendorRoot = Self.vendorProductSetRoot
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
+                      "LibreOffice vendor tree not present at \(vendorRoot.path) — run "
+                        + "`bun run libreoffice:fetch` from the repo root.")
+        let fixturePath = Self.fixturesRoot.appendingPathComponent("two-page.odt").path
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: fixturePath), "two-page.odt fixture missing")
+
+        let stateDir = makeScratchDirectory()
+        let directory = SessionDirectory(lister: { [] })
+        let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        host.makeOfficeHelperSupervisor = {
+            OfficeHelperSupervisor(configuration: OfficeHelperSupervisor.Configuration(
+                helperExecutableURL: helperURL,
+                socketDirectory: stateDir,
+                extraArguments: ["--lok-root", vendorRoot.path, "--sandbox-profile", Self.sandboxProfilePath.path]))
+        }
+        let runtime = host.officeRuntime(for: "S1")
+
+        let scratchDir = makeScratchDirectory()
+        let path = scratchDir.appendingPathComponent("caret-page-two.odt").path
+        try Data(contentsOf: URL(fileURLWithPath: fixturePath)).write(to: URL(fileURLWithPath: path))
+
+        runtime.open(path)
+        let settled = await waitUntil(timeout: 90) {
+            runtime.stateSnapshot.documents[path] != nil || runtime.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(settled, "the document never settled — phase: \(runtime.stateSnapshot.phase)")
+        guard let doc = runtime.stateSnapshot.documents[path] else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("open failed: \(runtime.stateSnapshot.openFailures[path] ?? "no reason recorded")")
+        }
+        XCTAssertEqual(doc.type, .text, "setup: this drill is ABOUT the text-document gate — a "
+                       + "fixture LOK reports as any other kind proves nothing here")
+        XCTAssertGreaterThanOrEqual(doc.parts, 2, "setup: two-page.odt must really lay out as two "
+                                    + "pages — LOK reports a Writer document's page count as its "
+                                    + "part count (SwXTextDocument::getParts = GetPageCnt), so this "
+                                    + "is the fixture's own live validation, not a structural guess")
+
+        guard let rawClient = host.officeHelperSupervisor?.client else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("no live client to drive this drill through")
+        }
+
+        // Ctrl+End — "go to end of document," which in this fixture is the end of PAGE 2's own
+        // paragraph. `KEY_END` (1029, `com.sun.star.awt.Key`) OR'd with the SHIFTED `KEY_MOD1` bit
+        // (0x2000, `vcl/keycodes.hxx`) — the same packed-modifier convention `OfficeInputCodes`'s
+        // own header derives at length. Deliberately keyboard-only: a click would land the caret by
+        // coordinate, which is a second thing that could be wrong, and would also make the drill
+        // depend on this fixture's exact page geometry.
+        let ctrlEnd = 1029 | 0x2000
+        try await rawClient.postKey(docId: doc.docId, part: 0, type: .keyInput, charCode: 0, keyCode: ctrlEnd)
+        try await rawClient.postKey(docId: doc.docId, part: 0, type: .keyUp, charCode: 0, keyCode: ctrlEnd)
+
+        // Burst 1. The dirty wait is the SEQUENCING TOOL, not a sleep: `ModifiedStatus=true` is a
+        // real LOK callback, so seeing it proves LOK actually consumed both the Ctrl+End and these
+        // keystrokes off its own async queue before anything below runs.
+        try await typeASCII("T4", client: rawClient, docId: doc.docId)
+        let becameDirty = await waitUntil(timeout: 30) { runtime.stateSnapshot.documents[path]?.dirty == true }
+        XCTAssertTrue(becameDirty, "the first typing burst never marked the document dirty")
+
+        // A real save, mid-drill — and the second half of the sequencing tool: `.uno:Save` clears
+        // `ModifiedStatus`, which gives burst 2 its own unambiguous dirty edge to wait on below.
+        // (`doc_saveAs` with no filter options takes the `storeToURL` branch — a copy, so the
+        // document's own medium is untouched and a second save later in this drill is ordinary.)
+        runtime.save(path)
+        let cleared = await waitUntil(timeout: 30) { runtime.stateSnapshot.documents[path]?.dirty == false }
+        XCTAssertTrue(cleared, "the mid-drill save never cleared the dirty flag")
+
+        // THE INTERLEAVE — a real tile paint, through the real helper, exactly the traffic a scroll
+        // or a refetch would produce. Pre-fix this is `setPart(handle, 0)` → `GotoPage(1)` → the
+        // caret is yanked to the top of page 1, and burst 2 lands there instead.
+        let zoomPPT = 1000
+        let originKey = TileKey(part: 0, zoomPPT: zoomPPT, tileX: 0, tileY: 0)
+        try await rawClient.requestTiles(docId: doc.docId, keys: [originKey])
+        let painted = await waitUntil(timeout: 30) { runtime.tileStore.tile(docId: doc.docId, key: originKey) != nil }
+        XCTAssertTrue(painted, "the interleaved tile paint never delivered — this drill's whole "
+                      + "point is that a paint ran between the two typing bursts")
+
+        // Burst 2 — the half the pre-fix build misplaces.
+        try await typeASCII("ED", client: rawClient, docId: doc.docId)
+        let dirtyAgain = await waitUntil(timeout: 30) { runtime.stateSnapshot.documents[path]?.dirty == true }
+        XCTAssertTrue(dirtyAgain, "the second typing burst never marked the document dirty again")
+
+        let beforeSaveStat = officeFileStat(atPath: path)
+        runtime.save(path)
+        let fileChanged = await waitUntil(timeout: 30) { officeFileStat(atPath: path) != beforeSaveStat }
+        XCTAssertTrue(fileChanged, "the final save never landed on disk")
+
+        // Read the SAVED bytes back, the standard every other drill in this file holds itself to.
+        let text = strippedODFBodyText(try readODFContentXML(atPath: path))
+        XCTAssertTrue(text.contains("NORMA PAGE TWOT4ED"),
+                      "the whole typed marker must sit where it was typed, at the end of page 2 — "
+                        + "got: \(text)")
+        XCTAssertTrue(text.hasPrefix("NORMA GATE"),
+                      "page 1 must still begin with its own seed text — anything in front of it is "
+                        + "text that was typed on page 2 and landed at page-1 start, which is "
+                        + "exactly what an ungated setPart's GotoPage(1) does to the caret. got: \(text)")
+        XCTAssertEqual(text.components(separatedBy: "ED").count - 1, 1,
+                       "the marker's second burst must appear exactly once — twice would mean it "
+                        + "landed in two places, none would mean it was swallowed. got: \(text)")
+
+        // Reopen: the saved file is still a real, parseable two-page Writer document, not something
+        // that merely happens to contain the right characters.
+        runtime.close(path)
+        let closed = await waitUntil(timeout: 30) { runtime.stateSnapshot.documents[path] == nil }
+        XCTAssertTrue(closed, "the document never closed")
+        runtime.open(path)
+        let reopened = await waitUntil(timeout: 90) {
+            runtime.stateSnapshot.documents[path] != nil || runtime.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(reopened, "the saved document never reopened")
+        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.type, .text, "reopened as a text document")
+        XCTAssertGreaterThanOrEqual(runtime.stateSnapshot.documents[path]?.parts ?? 0, 2,
+                                    "the saved document still lays out as two pages")
+
+        runtime.close(path)
+        _ = host.teardownAllOfficeRuntimesAndStopHelper()
+    }
+
+    /// Types `marker`'s own ASCII characters through the raw wire client, one `keyInput`/`keyUp`
+    /// pair each. Same test-local table convention as `postRealEdit` above (uppercase letters OR'd
+    /// with `KEY_SHIFT`, matching how a real user actually holds Shift to type them) — deliberately
+    /// NOT `OfficeInputCodes`, which is keyed by AppKit PHYSICAL keyCode and has no meaning without
+    /// an `NSEvent`. No Return at the end: for a Writer document a Return is a real paragraph break,
+    /// which would split the very text this drill's caller then asserts is contiguous.
+    private func typeASCII(_ marker: String, client: OfficeHelperClient, docId: String) async throws {
+        let keyCodes: [Character: Int] = [
+            "T": 531 | 0x1000, "E": 516 | 0x1000, "D": 515 | 0x1000, "I": 520 | 0x1000, "4": 260,
+        ]
+        for character in marker {
+            let keyCode = try XCTUnwrap(keyCodes[character], "typeASCII was handed a character with "
+                                        + "no test-local keyCode: \(character)")
+            let charCode = try XCTUnwrap(character.asciiValue.map(Int.init))
+            try await client.postKey(docId: docId, part: 0, type: .keyInput, charCode: charCode, keyCode: keyCode)
+            try await client.postKey(docId: docId, part: 0, type: .keyUp, charCode: charCode, keyCode: keyCode)
+        }
+    }
+
+    /// Everything between `<office:text>` and `</office:text>` with every XML tag removed — the
+    /// paragraph text of a Writer document, in document order, with no markup. Used instead of a
+    /// substring search over raw `content.xml` because LO is free to split a run of typed characters
+    /// across several `<text:span>` elements (it does, whenever formatting or a redline boundary
+    /// falls mid-run), which would make a raw-XML "the marker is contiguous" assertion fail for a
+    /// reason that has nothing to do with where the caret was.
+    private func strippedODFBodyText(_ content: String) -> String {
+        // `<office:text` with no `>` — the OPEN TAG carries attributes on a real LO save
+        // (`text:use-soft-page-breaks="true"` appears the moment a document lays out on more than
+        // one page, which this drill's fixture does by construction). Matching `"<office:text>"`
+        // whole found nothing and silently returned "" — caught by this drill's own first live run,
+        // which failed with an empty `got:` in all three assertion messages rather than a wrong one.
+        guard let start = content.range(of: "<office:text"),
+              let openEnd = content.range(of: ">", range: start.upperBound..<content.endIndex),
+              let end = content.range(of: "</office:text>", range: openEnd.upperBound..<content.endIndex) else {
+            return ""
+        }
+        let body = String(content[openEnd.upperBound..<end.lowerBound])
+        var out = ""
+        var inTag = false
+        for character in body {
+            if character == "<" { inTag = true; continue }
+            if character == ">" { inTag = false; continue }
+            if !inTag { out.append(character) }
+        }
+        return out
+    }
+
+
     /// Office Stage B Task 4 — the shared real-edit helper both migrated tests below use: a real
     /// mouse click (positions LOK's own cursor/selection — twips (100, 100), inside both A1's own
     /// real bounding rect for a spreadsheet AND the very start of a text document's body,
