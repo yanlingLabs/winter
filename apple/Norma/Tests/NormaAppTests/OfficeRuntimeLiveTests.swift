@@ -3958,6 +3958,130 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         _ = host.teardownAllOfficeRuntimesAndStopHelper()
     }
 
+    // MARK: - Office Stage B Task 8: the formula bar's own live drill (ref + content, as the caret moves)
+
+    /// **The brief's own named pin: "the formula bar updates as the caret moves — live."** Mounts a
+    /// REAL `OfficeTileCanvasView` in a real (invisible) `NSWindow` on a scratch copy of
+    /// `two-sheet.ods` and drives REAL AppKit `mouseDown`/`keyDown` events through it — the same
+    /// door a live click/arrow-key actually takes, all the way through `LOKBridge`'s `CELL_FORMULA`
+    /// wiring (this task), the wire, and `OfficeRuntime.handle(documentEvent:)`'s routing — landing
+    /// in `runtime.cursorStore`. Assertions are at the store/pure-function level
+    /// (`officeCellReference`), never SwiftUI rendering — `OfficeFormulaBar` itself is a thin read
+    /// of this same store, proven separately (`PanelDocumentTabTests`) not to matter here.
+    ///
+    /// Window discipline mirrors Task 5 review fix round 1, I-1 (`isReleasedWhenClosed = false` +
+    /// `defer { close() }`) — a further site of the same precedent, not a new bad one.
+    func testFormulaBarRefAndContentUpdateAsTheCellCursorMovesThroughARealClickAndArrowKey() async throws {
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
+                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                        + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
+        let vendorRoot = Self.vendorProductSetRoot
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
+                      "LibreOffice vendor tree not present at \(vendorRoot.path) — run "
+                        + "`bun run libreoffice:fetch` from the repo root.")
+        let fixturePath = Self.fixturesRoot.appendingPathComponent("two-sheet.ods").path
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: fixturePath), "two-sheet.ods fixture missing")
+
+        let stateDir = makeScratchDirectory()
+        let directory = SessionDirectory(lister: { [] })
+        let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        host.makeOfficeHelperSupervisor = {
+            OfficeHelperSupervisor(configuration: OfficeHelperSupervisor.Configuration(
+                helperExecutableURL: helperURL, socketDirectory: stateDir,
+                extraArguments: ["--lok-root", vendorRoot.path, "--sandbox-profile", Self.sandboxProfilePath.path]))
+        }
+        let runtime = host.officeRuntime(for: "S1")
+
+        let scratchDir = makeScratchDirectory()
+        let path = scratchDir.appendingPathComponent("formula-bar-drill.ods").path
+        try Data(contentsOf: URL(fileURLWithPath: fixturePath)).write(to: URL(fileURLWithPath: path))
+
+        runtime.open(path)
+        let settled = await waitUntil(timeout: 90) {
+            runtime.stateSnapshot.documents[path] != nil || runtime.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(settled, "two-sheet.ods never settled — phase: \(runtime.stateSnapshot.phase)")
+        guard let doc = runtime.stateSnapshot.documents[path] else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("two-sheet.ods did not open: \(runtime.stateSnapshot.openFailures[path] ?? "no reason recorded")")
+        }
+        let docId = doc.docId
+
+        let model = PanelDocumentTabModel(tabId: "formula-bar-drill", path: path)
+        let view = OfficeTileCanvasView(runtime: runtime, path: path, docId: docId,
+                                        sizeTwips: doc.sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 512, height: 512)
+        view.mount()
+
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 512, height: 512),
+                              styleMask: [.borderless], backing: .buffered, defer: true)
+        window.isReleasedWhenClosed = false // Task 5 review fix round 1, I-1's own precedent
+        defer { window.close() }
+        window.contentView = view
+        _ = window.makeFirstResponder(view)
+
+        func makeMouseEvent(_ type: NSEvent.EventType, at point: NSPoint) -> NSEvent {
+            let windowPoint = view.convert(point, to: nil)
+            return try! XCTUnwrap(NSEvent.mouseEvent(with: type, location: windowPoint, modifierFlags: [],
+                                                      timestamp: 0, windowNumber: window.windowNumber, context: nil,
+                                                      eventNumber: 0, clickCount: 1, pressure: 1))
+        }
+        func makeKeyEvent(_ type: NSEvent.EventType, characters: String, keyCode: UInt16) -> NSEvent {
+            try! XCTUnwrap(NSEvent.keyEvent(with: type, location: .zero, modifierFlags: [], timestamp: 0,
+                                            windowNumber: window.windowNumber, context: nil, characters: characters,
+                                            charactersIgnoringModifiers: characters, isARepeat: false, keyCode: keyCode))
+        }
+
+        // --- Click B1 (two-sheet.ods's own real seed: the number 42) — a B-COLUMN cell. At
+        // zoomPPT 1000 (100%) `officePointToTwips` is exactly points*20 (officeFixedDeviceScale=2,
+        // TileMath's own pixels<->twips factor 10_000/zoomPPT=10 — 2*10=20, the standard 1440-twips-
+        // per-inch/72-points-per-inch ratio) — 1500 twips / 20 = 75pt, comfortably inside column B
+        // (co1's own ~1280-twip width) and past its left edge; 100 twips / 20 = 5pt, inside row 1. ---
+        let b1Point = NSPoint(x: 75, y: 5)
+        view.mouseDown(with: makeMouseEvent(.leftMouseDown, at: b1Point))
+        view.mouseUp(with: makeMouseEvent(.leftMouseUp, at: b1Point))
+        await runtime.drainInputChainForTesting()
+
+        let b1Arrived = await waitUntil(timeout: 15) {
+            if case .at = runtime.cursorStore.state(docId: docId).cellCursor { return true }
+            return false
+        }
+        XCTAssertTrue(b1Arrived, "clicking B1 never produced a real CELL_CURSOR .at")
+        let b1State = runtime.cursorStore.state(docId: docId)
+        guard case .at(_, let b1Column, let b1Row) = b1State.cellCursor else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("expected .at after clicking B1")
+        }
+        XCTAssertEqual(officeCellReference(column: b1Column, row: b1Row), "B1", "the click landed on B1 — this drill's own setup")
+        XCTAssertEqual(b1State.cellFormulaText, "42", "B1's own real seed content — the formula bar's content leg, "
+                       + "live through this task's own CELL_FORMULA wiring")
+
+        // --- Arrow-key RIGHT — the REF must advance (B1 -> C1) through a KEYBOARD move, not just a
+        // click; C1 is genuinely empty (two-sheet.ods only seeds columns A/B), so the content leg
+        // must follow the ref and clear to "" too — never linger at B1's stale "42". ---
+        view.keyDown(with: makeKeyEvent(.keyDown, characters: "\u{F703}", keyCode: 124)) // NSRightArrowFunctionKey
+        view.keyUp(with: makeKeyEvent(.keyUp, characters: "\u{F703}", keyCode: 124))
+        await runtime.drainInputChainForTesting()
+
+        let movedToC1 = await waitUntil(timeout: 15) {
+            if case .at(_, let column, let row) = runtime.cursorStore.state(docId: docId).cellCursor {
+                return officeCellReference(column: column, row: row) == "C1"
+            }
+            return false
+        }
+        XCTAssertTrue(movedToC1, "arrow-key right never advanced the column — cellCursor: "
+                      + "\(String(describing: runtime.cursorStore.state(docId: docId).cellCursor))")
+        let c1FormulaCleared = await waitUntil(timeout: 15) {
+            runtime.cursorStore.state(docId: docId).cellFormulaText == ""
+        }
+        XCTAssertTrue(c1FormulaCleared, "the formula bar's own content must clear to \"\" on C1 (empty), "
+                      + "not linger at B1's stale \"42\" — actual: "
+                      + "\(String(describing: runtime.cursorStore.state(docId: docId).cellFormulaText))")
+
+        _ = host.teardownAllOfficeRuntimesAndStopHelper()
+    }
+
     // MARK: - Office Stage B Task 8: the multi-slide fixture + rail proof
 
     /// **Smoke, run and read FIRST** — before building the click-switch/tiles-differ drill on top
