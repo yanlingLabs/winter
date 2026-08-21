@@ -537,6 +537,48 @@ final class OfficeHelperLiveTests: XCTestCase {
         try await helper.client.close(docId: goodDocId)
     }
 
+    /// Fix-round finding (I2, whole-branch review of this task): the CFB gate above only ever
+    /// guarded `OfficeSaveFormat`'s six modern read-write extensions — CFB bytes under `.xlsm`/
+    /// `.odg` (T9's WIDENED, read-only-viewer extensions) fell through completely unguarded, hitting
+    /// the identical helper-killing `exit()` path every other CFB-under-a-wrong-extension case hits.
+    /// No legitimate CFB (pre-2007 OLE2 binary) file has ever had an `.xlsm`/`.odg` extension —
+    /// those are XML-zip-based formats introduced years after CFB's own era — so this widening
+    /// excludes nothing real. Same reason string, same liveness bar, same shape as the sibling test
+    /// immediately above — this is that same gate, now closing the two extensions T9 widened.
+    func testCFBBytesUnderTheTwoWidenedExtensionsAlsoRefuseCleanlyAndTheHelperStaysAlive() async throws {
+        try skipUnlessVendorPresent()
+        let helper = try await spawnLiveHelper()
+
+        for (renamedName, goodFixture, expectedGoodType) in [
+            ("renamed-legacy.xlsm", "gate.xlsm", OfficeDocumentKind.spreadsheet),
+            ("renamed-legacy.odg", "gate.odg", OfficeDocumentKind.drawing),
+        ] {
+            let scratch = makeScratchDirectory()
+            let renamed = scratch.appendingPathComponent(renamedName)
+            try FileManager.default.copyItem(
+                at: Self.fixturesRoot.appendingPathComponent("legacy-doc.doc"), to: renamed)
+
+            do {
+                _ = try await helper.client.open(docId: UUID().uuidString, path: renamed.path)
+                XCTFail("\(renamedName): expected the CFB refusal to fire — if this succeeded, "
+                        + "the sniff regressed for this extension")
+            } catch OfficeHelperClientError.openFailed(let reason) {
+                XCTAssertEqual(reason, "refused before documentLoad: legacy OLE2/CFB binary content "
+                                + "under a modern Office extension",
+                                "\(renamedName): unexpected refusal reason — \(reason)")
+            }
+
+            XCTAssertTrue(helper.process.isRunning, "\(renamedName): the CFB refusal must not take "
+                            + "the helper down")
+            let goodDocId = UUID().uuidString
+            let goodPath = Self.fixturesRoot.appendingPathComponent(goodFixture).path
+            let metadata = try await helper.client.open(docId: goodDocId, path: goodPath)
+            XCTAssertEqual(metadata.type, expectedGoodType, "\(goodFixture): must open normally on "
+                            + "the same helper, right after the refusal")
+            try await helper.client.close(docId: goodDocId)
+        }
+    }
+
     // MARK: - Garbage-file survival
 
     /// Task 3 finding, empirical, disclosed in the report — TWO escalating attempts before this

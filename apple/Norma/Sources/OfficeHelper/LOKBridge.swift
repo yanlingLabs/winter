@@ -703,6 +703,20 @@ final class LOKBridge: OfficeDocumentBridge {
     /// today, unless intercepted here, first.
     private static let cfbMagicBytes: [UInt8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]
 
+    /// Fix-round finding (I2, whole-branch review): `OfficeSaveFormat` deliberately excludes T9's
+    /// two WIDENED, read-only-viewer extensions (`xlsm`/`odg` — see `OfficeSaveFormat`'s own header;
+    /// they are not saveable, so they were never added there) — but that same exclusion left CFB
+    /// bytes under either extension completely unguarded below, hitting the identical helper-killing
+    /// `exit()` path this whole gate exists to prevent. Hand-mirrored, same boundary as
+    /// `OfficeSaveFormat` vs. `PanelEditorTab.swift`'s `officeReadWriteExtensions`/`officeFile
+    /// Extensions` (that header's own explanation: the app target cannot import this module) — kept
+    /// as a two-element literal here rather than a shared constant, since no legitimate CFB (pre-2007
+    /// OLE2 binary) file has ever carried an `.xlsm`/`.odg` extension (both are XML-zip formats from
+    /// years after CFB's own era): this list only ever needs to track `PanelEditorTab.swift`'s own
+    /// `officeFileExtensions.subtracting(officeReadWriteExtensions)` by construction, not by an
+    /// enforced tripwire the way the read/write boundary itself is.
+    private static let cfbGuardedWidenedExtensions: Set<String> = ["xlsm", "odg"]
+
     /// **The needle `OfficeRuntime.knownLOKErrorShapes` (app target) matches on.** Hand-mirrored,
     /// never imported — the SAME cross-module boundary `OfficeSaveFormat`'s own header already
     /// documents (`OfficeDocumentBridge`'s header in `OfficeHelperServer.swift`): the app target
@@ -735,16 +749,28 @@ final class LOKBridge: OfficeDocumentBridge {
         // extension maps to one of the six MODERN, read-write formats (`OfficeSaveFormat
         // (pathExtension:)` — the SAME predicate `saveAsOnDedicatedThread` already gates on, so
         // this check and the save-format gate can never drift relative to each other; one Swift
-        // type, one initializer, two call sites). `path` here is already the STAGED copy
+        // type, one initializer, two call sites) OR one of T9's two WIDENED, read-only-viewer
+        // extensions (`cfbGuardedWidenedExtensions` — fix-round I2, whole-branch review: the
+        // original cut left these two unguarded, on the theory that this fix only needed to cover
+        // "the common, modern-format path" — WRONG, because the shared helper dies identically
+        // regardless of which open request triggered it, taking every other open document's unsaved
+        // edits down too; no legitimate CFB file has ever carried either extension, so widening the
+        // guard here excludes nothing real). `path` here is already the STAGED copy
         // (`OfficeRuntime.stagedPath` preserves the real document's own extension — verified before
         // writing this), so the production open path is gated exactly like every direct/live-test
-        // open below is. CFB bytes under `xlsm`/`odg` (Task 9's widened, read-only-viewer formats)
-        // or any other extension fall through to `documentLoad` completely unguarded — Task 9's own
-        // already-characterized behavior for those (clean failure for `.xls`-shaped content, a
-        // helper-killing `exit()` for `.doc`/`.ppt`-shaped content) is left standing on purpose: this
-        // fix targets the common, modern-format path a mislabeled or malicious file is most likely to
-        // be opened through, not a blanket content-type policy.
-        if OfficeSaveFormat(pathExtension: (path as NSString).pathExtension) != nil,
+        // open below is. Any OTHER extension still falls through to `documentLoad` completely
+        // unguarded — Task 9's own already-characterized behavior for those (clean failure for
+        // `.xls`-shaped content, a helper-killing `exit()` for `.doc`/`.ppt`-shaped content) is left
+        // standing: this task's own two release-eligible extensions are now both covered; genuinely
+        // never-widened legacy extensions are a separate, already-disclosed, out-of-scope gap (T9's
+        // own concern #6, xlsb, is the same class).
+        // `.lowercased()` here matches `OfficeSaveFormat.init?(pathExtension:)`'s own internal
+        // lowercasing exactly (its switch is on `pathExtension.lowercased()`) — without it, an
+        // uppercase `.XLSM`/`.ODG` would silently bypass this literal-set membership check while
+        // still correctly matching on the `OfficeSaveFormat` side, an asymmetry with no reason to
+        // exist.
+        let ext = (path as NSString).pathExtension.lowercased()
+        if (OfficeSaveFormat(pathExtension: ext) != nil || Self.cfbGuardedWidenedExtensions.contains(ext)),
            pathBeginsWithCFBMagic(path) {
             throw LoadError.documentLoadFailed(Self.cfbUnderModernExtensionReason)
         }
