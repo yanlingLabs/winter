@@ -102,21 +102,23 @@ enum OfficeInputCodes {
     /// Delete carry their meaning ENTIRELY in `keyCode` for real LO too, never as "a character to
     /// insert." Generalized here past that narrow ASCII ceiling for genuine Unicode TEXT (accented
     /// Latin, non-Latin scripts typed without an active IME composition — plain, non-composed input
-    /// is exactly what raw `keyDown` can see; a composed sequence never reaches this door in the
-    /// first place, since AppKit delivers it via `insertText:`, not `keyDown` — Task 5's own,
-    /// unimplemented route), while STILL excluding two control ranges native LO's own narrower gate
-    /// has no need to separately name because its ceiling already excludes them: C1 controls
-    /// (`0x7F`...`0x9F`, DEL plus its extended-control siblings) and AppKit's own Private-Use-Area
-    /// encoding for arrows/function keys/Home/End/PageUp/PageDown (`0xF700`...`0xF8FF` — `NSEvent`'s
-    /// documented range, e.g. `NSUpArrowFunctionKey`) — without this second exclusion, an arrow
-    /// key's OWN `characters` string (a genuine, non-empty, non-zero scalar in that range) would
-    /// read as "text" and get sent to LOK as if `0xF700` were a real character to insert.
+    /// is exactly what raw `keyDown` can see; a composed sequence never reaches this door at all,
+    /// since AppKit delivers it via `insertText:`/`setMarkedText:`, not `keyDown` — Task 5's
+    /// `NSTextInputClient` route, `OfficeTileCanvasView.insertText`/`.setMarkedText`, which call
+    /// `charCodes(for:)` below and `runtime.postExtTextInput` respectively, never this function),
+    /// while STILL excluding two control ranges native LO's own narrower gate has no need to
+    /// separately name because its ceiling already excludes them: C1 controls (`0x7F`...`0x9F`, DEL
+    /// plus its extended-control siblings) and AppKit's own Private-Use-Area encoding for arrows/
+    /// function keys/Home/End/PageUp/PageDown (`0xF700`...`0xF8FF` — `NSEvent`'s documented range,
+    /// e.g. `NSUpArrowFunctionKey`) — without this second exclusion, an arrow key's OWN `characters`
+    /// string (a genuine, non-empty, non-zero scalar in that range) would read as "text" and get sent
+    /// to LOK as if `0xF700` were a real character to insert.
     ///
-    /// Takes the FIRST Unicode scalar only — every character this table's own live typing drill
-    /// exercises (ASCII letters/digits/punctuation) is a single scalar; a future IME/combining-
-    /// character path is Task 5's `NSTextInputClient` route, never this one (see
-    /// `OfficeTileCanvasView.keyDown`'s own header on why text-generating and navigation keys stay
-    /// structurally separable for that reason).
+    /// Takes the FIRST Unicode scalar only — every character `keyDown`/`keyUp` (this function's own
+    /// two remaining callers post-Task-5: `forwardKeyEvent`'s navigation-keyDown and every-keyUp
+    /// arms, and `keyDown`'s own routing classifier) ever hands it is a single scalar, one real
+    /// physical key at a time; a multi-scalar STRING (a composed IME commit, or any future dictation/
+    /// autocomplete insert) is `charCodes(for:)`'s own door, immediately below.
     static func charCode(for characters: String?) -> Int {
         guard let scalar = characters?.unicodeScalars.first else { return 0 }
         let value = scalar.value
