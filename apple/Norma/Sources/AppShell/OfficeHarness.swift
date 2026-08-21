@@ -1615,8 +1615,26 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
         runtime.postExtTextInput(path: path, type: .input, text: "e")
         runtime.postExtTextInput(path: path, type: .input, text: "é")
         runtime.postExtTextInput(path: path, type: .end, text: "")
-        return (true, "posted a preedit (\"e\") then a composed commit (\"é\") via postExtTextInput — "
-                     + "the same two-frame sequence OfficeTileCanvasView's own setMarkedText/insertText use")
+        // `postExtTextInput` is fire-and-forget over the wire (T5's own `OfficeRuntimeLiveTests`
+        // header: no synchronous ack) — the first recorded live run of this step fired all three
+        // calls with no synchronization whatsoever and lost the commit entirely (downstream:
+        // 0 é found on disk, pristine unmodified body). A genuine race, not a logic bug: `.end`
+        // could reach LOK before the marking `.input`s were even processed. LOK serializes every
+        // request for one document on its own dedicated thread in wire-arrival order (the same
+        // assumption drills 14/22 already rely on for their own invalidation/cursor waits), so
+        // waiting for the LAST event's own observable effect — `dirty` flipping true, mirroring
+        // T5's own exact post-commit check in `testExtTextInputMarksCommitsAndCancelsAgainstReal
+        // LOKThroughSaveAndReopen` — transitively proves every earlier event in this sequence was
+        // ALSO already processed, without standing up a tile subscription just for this one drill.
+        let committed = await waitUntil(timeout: 15) { self.runtime.stateSnapshot.documents[path]?.dirty == true }
+        guard committed else {
+            return (false, "committing the marked text never marked the document dirty — the "
+                          + "composed commit did not reach LOK before this step gave up waiting")
+        }
+        return (true, "posted a preedit (\"e\") then a composed commit (\"é\") via postExtTextInput, "
+                     + "and confirmed it actually landed (documents[path].dirty flipped true) before "
+                     + "returning — the same two-frame sequence OfficeTileCanvasView's own "
+                     + "setMarkedText/insertText use")
     }
 
     /// **The T4 standard, not a tile-hash proxy.** A hash-changed check cannot distinguish "é landed
