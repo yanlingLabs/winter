@@ -370,6 +370,9 @@ final class OfficeWireCodecTests: XCTestCase {
             #"{"type":"documentEvent","seq":1,"docId":"d","kind":"autosaved","isODFFallback":true}"#,  // missing ext
             #"{"type":"documentEvent","seq":1,"docId":"d","kind":"autosaved","ext":"","isODFFallback":false}"#, // empty ext
             #"{"type":"documentEvent","seq":1,"docId":"d","kind":"autosaved","ext":"odt","isODFFallback":1}"#, // NSNumber-boolean trap
+            // Task 8 — cellFormula: "text" required, wire-strictness (a missing field must never
+            // silently default to "" — indistinguishable from a real empty cell's own genuine payload).
+            #"{"type":"documentEvent","seq":1,"docId":"d","kind":"cellFormula"}"#, // missing text
         ]
         for line in lines {
             switch OfficeWireCodec.decodeInbound(line) {

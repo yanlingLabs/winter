@@ -149,6 +149,32 @@ func officeCellReference(column: Int, row: Int) -> String {
     "\(officeColumnLetters(column))\(row + 1)"
 }
 
+/// PURE: the formula bar's own ref-display decision, extracted from `OfficeFormulaBar.referenceText`
+/// (advisor review, this task) so it can be pinned directly, independent of SwiftUI/`@Published`
+/// timing. Blank when `part != activePart` (a stale part — mirrors
+/// `OfficeTileCanvasView.layoutOverlays`'s identical "hides every overlay whose STAMPED part
+/// disagrees" rule for the cell-cursor RECT) OR when `cellCursor` is `.empty`/`nil` (Task 5's own
+/// in-cell-edit sentinel, or nothing known yet) — see `OfficeFormulaBar`'s own header for why
+/// blank-during-edit is the deliberate choice, not an oversight.
+func officeFormulaBarReference(cellCursor: OfficeCellCursor?, part: Int?, activePart: Int) -> String {
+    guard part == activePart, case .at(_, let column, let row) = cellCursor else { return "" }
+    return officeCellReference(column: column, row: row)
+}
+
+/// PURE: the formula bar's own content-display decision, extracted alongside
+/// `officeFormulaBarReference` for the identical reason. Blank when `part != activePart` — the same
+/// stale-part rule — but, UNLIKE the ref, does NOT blank for any OTHER reason: this reads
+/// `cellFormulaText` (a SEPARATE field/part pair from `cellCursor` — `OfficeFormulaBar`'s own
+/// header), which keeps updating live through in-cell edit even while the ref itself goes quiet.
+/// `nil` (nothing known yet) and `""` (a real empty cell, this task's own live probe) both fold to
+/// `""` here — the caller (`OfficeFormulaBar.contentText`, via `officeFormulaBarEmptyPlaceholder`)
+/// owns whatever DISPLAY difference there is between them; this function's own contract is only
+/// the gating.
+func officeFormulaBarContent(text: String?, part: Int?, activePart: Int) -> String {
+    guard part == activePart else { return "" }
+    return text ?? ""
+}
+
 // MARK: - Pure: what a document-door click does
 
 /// The two things a document-door click can ask for — mirrors `PanelFileTabAction` exactly
@@ -1109,34 +1135,16 @@ struct OfficeFormulaBar: View {
         .accessibilityLabel(referenceText.isEmpty ? "Formula bar" : "\(referenceText): \(contentText.isEmpty ? "empty" : contentText)")
     }
 
-    /// Blank while the cell cursor's own stamped part disagrees with the canvas's current part —
-    /// mirrors `OfficeTileCanvasView.layoutOverlays`'s identical "hides every overlay whose
-    /// STAMPED part disagrees" rule for the cell-cursor RECT (this bar's text-only sibling of that
-    /// same overlay): a ref computed against a sheet the user has since switched away from must
-    /// never display as though it were the sheet on screen right now.
-    ///
-    /// **Also blank during in-cell EDIT** (`CELL_CURSOR`'s own `"EMPTY"` sentinel, Task 5's
-    /// finding) — a disclosed choice (this task's own report): the canvas's cell-cursor RECT
-    /// already disappears the instant edit mode starts, and this keeps the bar's ref consistent
-    /// with that established visual language rather than inventing a SECOND rule (retaining the
-    /// last known ref) that would read the ref and the canvas's own overlay disagreeing about
-    /// whether "which cell" is still a well-defined question right now.
+    /// A thin call onto `officeFormulaBarReference` — see that pure function's own header for the
+    /// actual decision (part-mismatch and in-cell-edit both blank) and why it lives there, testable
+    /// independent of SwiftUI/`@Published` timing, rather than inline here.
     private var referenceText: String {
-        guard cursorModel.cellCursorPart == activePart, case .at(_, let column, let row) = cursorModel.cellCursor else {
-            return ""
-        }
-        return officeCellReference(column: column, row: row)
+        officeFormulaBarReference(cellCursor: cursorModel.cellCursor, part: cursorModel.cellCursorPart, activePart: activePart)
     }
 
-    /// Gated on the SAME part check as `referenceText` — content from a part the user has since
-    /// switched away from must never display as current. **UNLIKE the ref, this does NOT blank
-    /// during in-cell edit**: this task's own live probe found `CELL_FORMULA` keeps firing per
-    /// keystroke while `CELL_CURSOR` itself sits at `.empty`, so the bar can keep showing the real,
-    /// live, uncommitted edit-buffer text even while the ref goes quiet — the same thing a real
-    /// spreadsheet's own formula bar does while you type.
+    /// A thin call onto `officeFormulaBarContent` — see that pure function's own header.
     private var contentText: String {
-        guard cursorModel.cellFormulaPart == activePart else { return "" }
-        return cursorModel.cellFormulaText ?? ""
+        officeFormulaBarContent(text: cursorModel.cellFormulaText, part: cursorModel.cellFormulaPart, activePart: activePart)
     }
 }
 

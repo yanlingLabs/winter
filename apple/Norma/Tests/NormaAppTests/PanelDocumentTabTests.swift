@@ -175,6 +175,53 @@ final class PanelDocumentTabTests: XCTestCase {
         XCTAssertEqual(officeCellReference(column: 26, row: 99), "AA100")
     }
 
+    // MARK: - Pure: officeFormulaBarReference / officeFormulaBarContent (advisor review, Task 8:
+    // the bar's own display-gating decisions, extracted out of the SwiftUI view so they can be
+    // pinned directly)
+
+    private let sampleCellRect = OfficeTwipsRect(x: 1275, y: 0, width: 1274, height: 254)
+
+    func testFormulaBarReferenceShowsTheRefWhenPartsAgree() {
+        XCTAssertEqual(officeFormulaBarReference(
+            cellCursor: .at(rectTwips: sampleCellRect, column: 1, row: 0), part: 0, activePart: 0), "B1")
+    }
+
+    func testFormulaBarReferenceBlanksOnPartMismatch() {
+        XCTAssertEqual(officeFormulaBarReference(
+            cellCursor: .at(rectTwips: sampleCellRect, column: 1, row: 0), part: 1, activePart: 0), "",
+            "a ref computed against a part the user has since switched away from must never display as current")
+    }
+
+    /// Task 5's own in-cell-edit sentinel — the deliberate choice (`OfficeFormulaBar.referenceText`'s
+    /// own header): blank, not a retained stale ref, for consistency with the canvas's own
+    /// cell-cursor-rect overlay vanishing at the same moment.
+    func testFormulaBarReferenceBlanksDuringInCellEdit() {
+        XCTAssertEqual(officeFormulaBarReference(cellCursor: .empty, part: 0, activePart: 0), "")
+    }
+
+    func testFormulaBarReferenceBlanksWhenNothingIsKnownYet() {
+        XCTAssertEqual(officeFormulaBarReference(cellCursor: nil, part: nil, activePart: 0), "")
+    }
+
+    func testFormulaBarContentShowsTextWhenPartsAgree() {
+        XCTAssertEqual(officeFormulaBarContent(text: "42", part: 0, activePart: 0), "42")
+    }
+
+    /// A real empty cell's own shape (this task's own live probe) — distinct from "nothing known
+    /// yet" only in the CALLER's rendering (`officeFormulaBarEmptyPlaceholder`), not in this gate.
+    func testFormulaBarContentPassesThroughARealEmptyString() {
+        XCTAssertEqual(officeFormulaBarContent(text: "", part: 0, activePart: 0), "")
+    }
+
+    func testFormulaBarContentBlanksOnPartMismatchEvenWithRealText() {
+        XCTAssertEqual(officeFormulaBarContent(text: "42", part: 1, activePart: 0), "",
+                       "content from a part the user has since switched away from must never display as current")
+    }
+
+    func testFormulaBarContentBlanksWhenNothingIsKnownYet() {
+        XCTAssertEqual(officeFormulaBarContent(text: nil, part: nil, activePart: 0), "")
+    }
+
     // MARK: - Pure: officePartStripKind
 
     func testSpreadsheetsGetTheBottomSheetTabStrip() {
