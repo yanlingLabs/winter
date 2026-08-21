@@ -264,6 +264,68 @@ final class OfficeTileStoreTests: XCTestCase {
         XCTAssertEqual(store.keysNeedingRequest(docId: "d1", candidates: [key(0, 0)]), [key(0, 0)])
     }
 
+    /// Fix round 1, F1 (CRITICAL) — the marker-consumption rejection branch used to clear `inFlight`
+    /// (making the key askable again) WITHOUT ever signaling `tilesArrived` — so nothing downstream
+    /// (`OfficeTileCanvasView.handleTilesArrived` -> `OfficeRuntime.refetchInvalidatedTiles`) ever
+    /// learned the key was worth re-asking for; a static viewport (typing) would show a blank caret
+    /// tile forever. This is the live proof at the store's own public surface: the stale-reply
+    /// rejection itself is what unblocks AND signals, in the same call, which is the fix.
+    func testIngestsMarkerConsumptionRejectionSignalsTilesArrivedSoTheKeyGetsReAsked() async {
+        let store = OfficeTileStore()
+        store.markRequested(docId: "d1", keys: [key(0, 0)])
+        store.invalidate(docId: "d1", keys: [key(0, 0)]) // marks invalidatedWhileInFlight
+
+        var received: [(docId: String, keys: Set<TileKey>)] = []
+        store.tilesArrived.sink { received.append($0) }.store(in: &cancellables)
+
+        let accepted = store.ingest(docId: "d1", key: key(0, 0), generation: 0, pixels: pixels(9))
+        XCTAssertFalse(accepted, "setup: the stale reply is still rejected exactly as before this fix")
+
+        let settled = await waitUntil { !received.isEmpty }
+        XCTAssertTrue(settled, "the rejection itself must signal -- F1 found it silently didn't")
+        XCTAssertEqual(received[0].docId, "d1")
+        XCTAssertEqual(received[0].keys, [key(0, 0)])
+        XCTAssertEqual(store.keysNeedingRequest(docId: "d1", candidates: [key(0, 0)]), [key(0, 0)],
+                       "and the key really is askable again by the time the signal fires")
+    }
+
+    /// Fix round 1, F1 — `markFailed` must ALSO signal when it consumes a marker (a failed
+    /// resolution is still a resolution, treated identically to `ingest`'s rejection branch for
+    /// every OTHER purpose here — consuming the marker, clearing `inFlight`).
+    func testMarkFailedWithAConsumedMarkerSignalsTilesArrived() async {
+        let store = OfficeTileStore()
+        store.markRequested(docId: "d1", keys: [key(0, 0)])
+        store.invalidate(docId: "d1", keys: [key(0, 0)])
+
+        var received: [(docId: String, keys: Set<TileKey>)] = []
+        store.tilesArrived.sink { received.append($0) }.store(in: &cancellables)
+
+        store.markFailed(docId: "d1", key: key(0, 0))
+
+        let settled = await waitUntil { !received.isEmpty }
+        XCTAssertTrue(settled)
+        XCTAssertEqual(received[0].keys, [key(0, 0)])
+    }
+
+    /// Fix round 1, F1 — the storm guard the reviewer explicitly named: an ORDINARY `markFailed`
+    /// (no invalidation racing it — a plain bad key, a transient LOK error) must NOT signal.
+    /// Signaling unconditionally here would mean every ordinary failure re-triggers a re-ask, which
+    /// re-fails, which re-signals, forever, for a key that has nothing to do with an invalidation at
+    /// all. A negative proof — a bounded wait for "nothing arrived," not `waitUntil` for something.
+    func testMarkFailedWithoutAConsumedMarkerDoesNotSignalTheStormGuard() async {
+        let store = OfficeTileStore()
+        store.markRequested(docId: "d1", keys: [key(0, 0)]) // no invalidate -- nothing to consume
+
+        var received: [(docId: String, keys: Set<TileKey>)] = []
+        store.tilesArrived.sink { received.append($0) }.store(in: &cancellables)
+
+        store.markFailed(docId: "d1", key: key(0, 0))
+
+        try? await Task.sleep(nanoseconds: 50_000_000) // give a wrong signal a generous beat to arrive
+        XCTAssertTrue(received.isEmpty, "an ordinary failure with no marker consumed must not signal — "
+                      + "the reviewer's own storm-guard requirement")
+    }
+
     /// Office Stage B Task 4 — invalidating a key that was NEVER in flight (nothing outstanding to
     /// distrust) must not mark it at all; this is the ordinary "evict a cached, settled tile" path
     /// every earlier task's own live-invalidation reasoning already assumed.

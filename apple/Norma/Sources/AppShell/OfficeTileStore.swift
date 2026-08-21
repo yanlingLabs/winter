@@ -252,11 +252,26 @@ final class OfficeTileStore {
     /// task, when `generation` is STALE relative to an already-cached entry — the wire's single
     /// ordered connection should never actually produce that shape (see this type's own header),
     /// but costs nothing to guard: never let an out-of-order arrival regress what is on screen.
+    ///
+    /// **Fix round 1, F1 (CRITICAL — a real bug, found by review, not hardening): the marker-
+    /// consumption branch used to return `false` WITHOUT calling `markDirty`.** Clearing `inFlight`
+    /// makes the key askable again (`keysNeedingRequest` would include it), but nothing downstream
+    /// ever LEARNS that — no `tilesArrived` signal fires, so `OfficeTileCanvasView.handleTilesArrived`
+    /// never runs again for this key, so `OfficeRuntime.refetchInvalidatedTiles` is never called to
+    /// actually re-ask. On a static viewport (typing) the key is left "not cached, not in flight, but
+    /// nobody is asking" — permanently, until an unrelated scroll/zoom/part-switch happens to touch
+    /// it. Near-deterministic under key auto-repeat (~30ms) racing a real paint round trip: keystroke
+    /// N's invalidate fires while keystroke N-1's own re-fetch is still outstanding, marking THAT
+    /// reply stale; when it lands, this branch used to go quiet instead of asking again. Fixed by
+    /// signaling `markDirty` HERE — the caller's own `handleTilesArrived` re-fetch loop is what
+    /// actually issues the next ask; this store only needs to say "something about this key changed
+    /// again," the same shape `invalidate` itself already uses for the identical purpose.
     @discardableResult
     func ingest(docId: String, key: TileKey, generation: Int, pixels: Data) -> Bool {
         let k = Key(docId: docId, tileKey: key)
         if invalidatedWhileInFlight.remove(k) != nil {
             inFlight.remove(k)
+            markDirty(docId: docId, key: key)
             return false
         }
         inFlight.remove(k)
@@ -273,10 +288,25 @@ final class OfficeTileStore {
     /// also consumes `invalidatedWhileInFlight` for the SAME reason `ingest`'s rejection path does
     /// — a failed resolution is still A resolution, and must unblock the key exactly as a
     /// successful-but-rejected one does.
+    ///
+    /// **Fix round 1, F1 — signals `markDirty`, but ONLY when a marker was actually consumed.** The
+    /// SAME gap `ingest`'s rejection branch had (see that method's own doc): clearing `inFlight`
+    /// alone does not tell anything to re-ask. But this must NOT signal unconditionally on every
+    /// ordinary failure — an ordinary `.tileFailed` (a bad key, a transient LOK error, nothing to do
+    /// with an invalidation racing it) is not a case where a fresh, DIFFERENT pixel state is known to
+    /// be waiting; signaling every time would build a request storm on a key that keeps failing for
+    /// its own, unrelated reason (ask, fail, signal, ask again, fail again, ...), which is exactly
+    /// the corner this store's own `keysNeedingRequest` throttle-tick reasoning warns against
+    /// elsewhere. Gated on `wasMarked` — the SAME condition that makes `ingest`'s rejection branch
+    /// fire — because that is the one case where THIS store itself knows something changed (an
+    /// invalidation) independent of the failure, and owes a re-ask; an ordinary failure with no
+    /// marker owes nothing beyond unblocking the key for whatever asks next on its own terms
+    /// (a scroll, a zoom, a retry).
     func markFailed(docId: String, key: TileKey) {
         let k = Key(docId: docId, tileKey: key)
-        invalidatedWhileInFlight.remove(k)
+        let wasMarked = invalidatedWhileInFlight.remove(k) != nil
         inFlight.remove(k)
+        if wasMarked { markDirty(docId: docId, key: key) }
     }
 
     /// Server-pushed invalidation (`OfficeHelperClient.onInvalidated`) — evict the matching entries
