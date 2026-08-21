@@ -114,6 +114,34 @@ func officePartStripKind(for type: OfficeDocumentKind) -> OfficePartStripKind {
     }
 }
 
+// MARK: - Pure: the formula bar's own A1-style cell reference (Office Stage B Task 8)
+
+/// A spreadsheet column index (0-based — `OfficeCellCursor.at`'s own `column`) rendered as the
+/// bijective base-26 letters every spreadsheet UI uses for column headers: A, B, … Z, AA, AB, ….
+/// **Not ordinary base-26** — there is no digit for zero in this system (column 26 is "AA", never
+/// "A0"), which is why each place value subtracts one before dividing (the standard "bijective
+/// numeration" construction) rather than the textbook base-26 remainder/divide loop. Boundary
+/// values (single→double letters at Z/AA, double→triple at ZZ/AAA) are what
+/// `PanelDocumentTabTests` pins — a plain base-26 loop passes the single-letter cases and silently
+/// misnames every multi-letter column.
+func officeColumnLetters(_ column: Int) -> String {
+    var remaining = column + 1
+    var letters = ""
+    while remaining > 0 {
+        let digit = (remaining - 1) % 26
+        letters = String(UnicodeScalar(UInt8(65 + digit))) + letters
+        remaining = (remaining - 1) / 26
+    }
+    return letters
+}
+
+/// The formula bar's own cell reference: CELL_CURSOR's 0-based `(column, row)` rendered A1-style —
+/// both axes read as 1-based from the user's point of view (column through `officeColumnLetters`,
+/// row by a plain `+ 1`), so `(column: 0, row: 0)` — A1 — is the top-left cell.
+func officeCellReference(column: Int, row: Int) -> String {
+    "\(officeColumnLetters(column))\(row + 1)"
+}
+
 // MARK: - Pure: what a document-door click does
 
 /// The two things a document-door click can ask for — mirrors `PanelFileTabAction` exactly

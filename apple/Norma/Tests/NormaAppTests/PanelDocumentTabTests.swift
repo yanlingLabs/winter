@@ -148,6 +148,33 @@ final class PanelDocumentTabTests: XCTestCase {
                        .renderState(.booting))
     }
 
+    // MARK: - Pure: officeColumnLetters / officeCellReference (Task 8: the formula bar's own A1-style ref)
+
+    /// Bijective base-26 — NOT ordinary base-26 (there is no digit for zero: column 26 is "AA",
+    /// never "A0"). Every named boundary: single letters, the Z→AA rollover, the last two-letter
+    /// column, the AZ→BA rollover, and the two-letter→three-letter rollover.
+    func testOfficeColumnLettersCoversSingleDoubleAndTripleLetterBoundaries() {
+        XCTAssertEqual(officeColumnLetters(0), "A")
+        XCTAssertEqual(officeColumnLetters(1), "B")
+        XCTAssertEqual(officeColumnLetters(25), "Z")
+        XCTAssertEqual(officeColumnLetters(26), "AA")
+        XCTAssertEqual(officeColumnLetters(27), "AB")
+        XCTAssertEqual(officeColumnLetters(51), "AZ")
+        XCTAssertEqual(officeColumnLetters(52), "BA")
+        XCTAssertEqual(officeColumnLetters(701), "ZZ")
+        XCTAssertEqual(officeColumnLetters(702), "AAA")
+    }
+
+    /// `officeCellReference` is `officeColumnLetters` plus the row, 1-based from the user's own
+    /// point of view — CELL_CURSOR's `(column, row)` are both 0-based (`OfficeCellCursor.at`'s own
+    /// doc), so A1 is `(column: 0, row: 0)`.
+    func testOfficeCellReferenceJoinsColumnLettersAndOneBasedRow() {
+        XCTAssertEqual(officeCellReference(column: 0, row: 0), "A1")
+        XCTAssertEqual(officeCellReference(column: 1, row: 0), "B1")
+        XCTAssertEqual(officeCellReference(column: 0, row: 9), "A10")
+        XCTAssertEqual(officeCellReference(column: 26, row: 99), "AA100")
+    }
+
     // MARK: - Pure: officePartStripKind
 
     func testSpreadsheetsGetTheBottomSheetTabStrip() {
