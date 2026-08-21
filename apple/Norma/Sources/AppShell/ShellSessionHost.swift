@@ -991,6 +991,31 @@ final class ShellSessionHost: ObservableObject {
                     try await client.requestTiles(docId: docId, keys: keys)
                 }
             },
+            // Office Stage B Task 4 — same `queue.run` routing every other Driver call already has
+            // (the single-outstanding-request funnel), and the SAME fire-and-forget-but-not-silent
+            // posture `close`/`unsubscribeTiles` already established: a post that fails has nothing
+            // for `OfficeRuntime` to roll back, only something worth logging.
+            postKey: { [weak supervisor] docId, type, charCode, keyCode in
+                do {
+                    try await queue.run {
+                        guard let client = supervisor?.client else { return }
+                        try await client.postKey(docId: docId, type: type, charCode: charCode, keyCode: keyCode)
+                    }
+                } catch {
+                    NSLog("[ShellSessionHost] office postKey(\(docId)) failed: \(error)")
+                }
+            },
+            postMouse: { [weak supervisor] docId, type, xTwips, yTwips, count, buttons, modifiers in
+                do {
+                    try await queue.run {
+                        guard let client = supervisor?.client else { return }
+                        try await client.postMouse(docId: docId, type: type, xTwips: xTwips, yTwips: yTwips,
+                                                   count: count, buttons: buttons, modifiers: modifiers)
+                    }
+                } catch {
+                    NSLog("[ShellSessionHost] office postMouse(\(docId)) failed: \(error)")
+                }
+            },
             // Office Stage B Task 2b — the LIVE supervisor's own configured directory, never
             // `OfficeHelperSupervisor.Configuration.defaultStateDirectory()` read fresh: every live
             // test overrides `socketDirectory` with a scratch dir precisely so its own helper's

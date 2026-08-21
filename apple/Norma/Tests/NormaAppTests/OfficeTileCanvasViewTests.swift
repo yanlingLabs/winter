@@ -322,6 +322,7 @@ final class OfficeTileCanvasViewTests: XCTestCase {
                 },
                 unsubscribeTiles: { _ in },
                 requestTiles: { _, _ in },
+                postKey: { _, _, _, _ in }, postMouse: { _, _, _, _, _, _, _ in },
                 stateDirectory: stateDirectory)
         }
     }
@@ -796,6 +797,7 @@ final class OfficeTileCanvasViewTests: XCTestCase {
                 requestTiles: { [unowned self] docId, keys in
                     self.lock.lock(); self._requestCalls.append((docId, keys)); self.lock.unlock()
                 },
+                postKey: { _, _, _, _ in }, postMouse: { _, _, _, _, _, _, _ in },
                 stateDirectory: stateDirectory)
         }
     }

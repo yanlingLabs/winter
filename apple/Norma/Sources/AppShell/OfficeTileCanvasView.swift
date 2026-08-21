@@ -855,11 +855,34 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
     /// Only touches layers ALREADY in the visible pool — a key that arrived while scrolled away
     /// from it is simply not there to update, and the next `relayoutVisibleTiles` (triggered by
     /// whatever scroll/zoom eventually brings it back into view) reads the store fresh regardless.
+    ///
+    /// **Office Stage B Task 4 — also the door that makes a real edit's invalidation actually
+    /// REPAINT, not merely go blank.** `tilesArrived` fires for BOTH a fresh arrival (the store now
+    /// has pixels — `applyContents` below finds them) and an eviction (`OfficeTileStore.invalidate`
+    /// removed the entry — `applyContents` finds nothing and paints the placeholder tone). On a
+    /// STATIC viewport (the typing scenario: nothing scrolled, so `performSubscribe` never fires
+    /// again on its own), an evicted-but-still-visible key would otherwise sit at the placeholder
+    /// tone forever — nothing else in this file's own trigger list (mount/setActivePart/zoomStep/
+    /// the scroll throttle) covers "a push arrived for a key already on screen." Every key this
+    /// loop finds STILL uncached after `applyContents` (i.e. evicted, not filled) is collected and
+    /// handed to `OfficeRuntime.refetchInvalidatedTiles` — that call's own dedup
+    /// (`OfficeTileStore.keysNeedingRequest`) makes this safe to call unconditionally, including for
+    /// the ordinary "genuinely fresh pixels arrived" case, where the set is simply empty and the
+    /// `Task` below does nothing.
     private func handleTilesArrived(_ keys: Set<TileKey>) {
         let placeholder = resolvedPlaceholderColor()
+        var stillUncachedVisibleKeys: [TileKey] = []
         for key in keys {
             guard let tileLayer = tileLayers[key] else { continue }
             applyContents(to: tileLayer, key: key, placeholder: placeholder)
+            if runtime.tileStore.tile(docId: docId, key: key) == nil {
+                stillUncachedVisibleKeys.append(key)
+            }
+        }
+        guard !stillUncachedVisibleKeys.isEmpty else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            await self.runtime.refetchInvalidatedTiles(path: self.path, keys: stillUncachedVisibleKeys)
         }
     }
 

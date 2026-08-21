@@ -804,6 +804,17 @@ final class OfficeRuntime: ObservableObject {
         /// cannot do anything about it: `perform(_:)`'s `.subscribe` case treats a failure here as
         /// fire-and-forget, matching `close`/`unsubscribeTiles`.
         var requestTiles: (_ docId: String, _ keys: [TileKey]) async throws -> Void
+        /// Office Stage B Task 4 — the real edit verbs. Never throws to `OfficeRuntime` — same
+        /// fire-and-forget posture `close`/`unsubscribeTiles` already have (a keystroke that fails
+        /// to post has no recovery action a caller could usefully take; the production
+        /// implementation logs it, matching `close`'s own "fire-and-forget is not the same as
+        /// silent" discipline). Routed through `ShellSessionHost.officeRequestQueue` in production,
+        /// on the SAME terms as every other Driver call — see `OfficeRuntime.postKeyEvent`'s own
+        /// header for why ORDERING across this queue (not merely eventual delivery) is load-bearing
+        /// here in a way none of the other Driver calls need.
+        var postKey: (_ docId: String, _ type: OfficeKeyEventType, _ charCode: Int, _ keyCode: Int) async -> Void
+        var postMouse: (_ docId: String, _ type: OfficeMouseEventType, _ xTwips: Int64, _ yTwips: Int64,
+                        _ count: Int, _ buttons: Int, _ modifiers: Int) async -> Void
         /// **Office Stage B Task 2b — the shared helper's own `--state-path`.** A plain stored
         /// value, unlike every sibling above: it is a FACT about the shared supervisor's
         /// configuration (`OfficeHelperSupervisor.statePath`, exposing `Configuration
@@ -867,6 +878,11 @@ final class OfficeRuntime: ObservableObject {
     /// neither resurrect the torn-down runtime NOR orphan the document it just opened on the shared
     /// helper — see `perform(_:)`'s `.helperOpen` case for both halves.
     private(set) var generation = 0
+
+    /// Office Stage B Task 4 — the input-ordering chain `postKeyEvent`/`postMouseEvent` build on;
+    /// see that method's own header for the full reasoning. `@MainActor`-isolated (this whole class
+    /// is), matching `OfficeHelperRequestQueue.tail`'s identical shape and identical reasoning.
+    private var inputChainTail: Task<Void, Never> = Task {}
 
     init(sessionId: String, driver: Driver, makeDocId: @escaping () -> String = { UUID().uuidString },
          makeWatcher: @escaping EditorFileWatcherFactory = { path, onChange in
@@ -1006,6 +1022,63 @@ final class OfficeRuntime: ObservableObject {
         perform(dispatch(.unsubscribeRequested(path: path)))
     }
 
+    /// Office Stage B Task 4 — **the real edit door.** Synchronous, fire-and-forget, exactly like
+    /// `open`/`close`/`subscribeTiles` above (never sequence off this call returning) — but with a
+    /// STRICTER ordering guarantee none of those siblings need: keystrokes must reach LOK in the
+    /// order the user typed them, or "hello" can arrive as "hlelo". Bypasses `dispatch`/`perform`
+    /// entirely (`prefetchTilesChunk`'s own precedent: an input post touches no reducer state).
+    ///
+    /// **Why a hand-rolled chain here, not simply `Task { await driver.postKey(...) }` per call**:
+    /// two independent unstructured `Task`s created back-to-back from `keyDown`/`keyUp` have NO
+    /// language-level guarantee of running in creation order — Swift's concurrency model guarantees
+    /// actor REENTRANCY safety, never submission-order execution for separately-created `Task`s,
+    /// even from the same synchronous caller. `inputChainTail` closes this the same way
+    /// `OfficeHelperRequestQueue.run` already does for the shared request queue: capture the
+    /// PREVIOUS tail synchronously, build a new `Task` that awaits it before doing its own work,
+    /// reassign the tail — all synchronous, no `await` in between. Since `keyDown` for keystroke
+    /// N+1 cannot even be DISPATCHED by AppKit until keystroke N's own `keyDown` call has fully
+    /// returned (single-threaded, serial event dispatch), and this method's own capture-and-
+    /// reassign prefix is unconditionally synchronous, the chain is correctly ordered by
+    /// CONSTRUCTION — a data dependency, not a scheduling assumption.
+    ///
+    /// One chain covers BOTH key and mouse posts (not two independent ones) — click-then-type
+    /// ordering matters exactly as much as keystroke-to-keystroke ordering (positioning the cursor
+    /// before typing into it is meaningless if the type can race ahead of the click).
+    ///
+    /// `docId` resolved HERE, at enqueue time — mirrors `SaveWaiter`'s own "resolved at dispatch
+    /// time" precedent (`saveAndAwaitOutcome`'s own doc): a stale keystroke against a path whose
+    /// document reloaded or closed between the keystroke and its turn in the chain still targets
+    /// the ORIGINAL docId it was meant for, which the helper answers `docNotOpen` for — logged,
+    /// harmless, never misdirected at whatever NEW docId happens to occupy `path` by the time this
+    /// runs.
+    func postKeyEvent(path: String, type: OfficeKeyEventType, charCode: Int, keyCode: Int) {
+        guard let docId = state.documents[path]?.docId else { return }
+        let previous = inputChainTail
+        inputChainTail = Task { [driver] in
+            _ = await previous.value
+            await driver.postKey(docId, type, charCode, keyCode)
+        }
+    }
+
+    /// Office Stage B Task 4 — same door, same ordering chain, for `postMouseEvent`. See
+    /// `postKeyEvent`'s own header for the full reasoning; this is not independently re-explained.
+    func postMouseEvent(path: String, type: OfficeMouseEventType, xTwips: Int64, yTwips: Int64,
+                        count: Int, buttons: Int, modifiers: Int) {
+        guard let docId = state.documents[path]?.docId else { return }
+        let previous = inputChainTail
+        inputChainTail = Task { [driver] in
+            _ = await previous.value
+            await driver.postMouse(docId, type, xTwips, yTwips, count, buttons, modifiers)
+        }
+    }
+
+    /// Test-only: awaits the current tail of the input-ordering chain, so a test can know a
+    /// `postKeyEvent`/`postMouseEvent` call has actually reached the driver before asserting on its
+    /// effect, without a `waitUntil` poll racing the chain's own scheduling.
+    func drainInputChainForTesting() async {
+        await inputChainTail.value
+    }
+
     /// office live-gate fix #3 — whole-document tile residency's own door. Unlike every other door
     /// on this object (deliberately fire-and-forget — see `open`/`close`/`subscribeTiles`'s own
     /// headers, and `OfficeRuntimeEffect`'s own "never sequence off this call returning" rule), THIS
@@ -1032,6 +1105,34 @@ final class OfficeRuntime: ObservableObject {
     /// that happens is left to complete harmlessly, mirroring `OfficeHelperRequestQueue`'s own "no
     /// cancellation semantics, and none are needed."
     func prefetchTilesChunk(path: String, keys: [TileKey]) async {
+        guard state.phase == .ready, let doc = state.documents[path] else { return }
+        await requestNeeded(docId: doc.docId, candidates: keys)
+    }
+
+    /// Office Stage B Task 4 — **the other half of "a real edit reaches the screen," alongside
+    /// `postKeyEvent`/`postMouseEvent` themselves.** `tileStore.invalidate` (wired from
+    /// `ShellSessionHost.wireOfficeTileCallbacks`'s `onInvalidated`) only EVICTS — it has no wire
+    /// access of its own to ask for a replacement, by design (the store's own header: it is a pure
+    /// pixel pool, not a driver). Without this door, an edit on a STATIC viewport (the exact typing
+    /// scenario — nothing else re-subscribes) leaves the canvas showing the placeholder tone
+    /// forever: `performSubscribe` only fires from a scroll/zoom/part-switch/discrete action, never
+    /// from a push arriving on a viewport that has not moved.
+    ///
+    /// Same shape as `prefetchTilesChunk` (bypasses `dispatch`/`perform` — an invalidation-driven
+    /// re-fetch touches no reducer state, the identical reasoning that method's own header gives)
+    /// and shares its exact dedup: `requestNeeded` is a no-op for a key already re-cached or already
+    /// back in flight, so a caller does not need to pre-filter — the STORE decides what is actually
+    /// worth asking for, including the one-shot `invalidatedWhileInFlight` window
+    /// (`OfficeTileStore`'s own header) that can leave a just-invalidated key still blocked for a
+    /// few more milliseconds after this call, harmlessly (this call's own `keysNeedingRequest` check
+    /// simply excludes it; nothing here needs to know why).
+    ///
+    /// **Deliberately takes `keys` from the CALLER, never re-derives "which keys are visible"
+    /// itself** — visibility is `OfficeTileCanvasView`'s own state (`tileLayers`), not this
+    /// runtime's; see that view's `handleTilesArrived` for the one production call site, which
+    /// narrows `invalidate`'s full key list down to the ones actually on screen before ever
+    /// reaching here.
+    func refetchInvalidatedTiles(path: String, keys: [TileKey]) async {
         guard state.phase == .ready, let doc = state.documents[path] else { return }
         await requestNeeded(docId: doc.docId, candidates: keys)
     }
