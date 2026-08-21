@@ -3957,4 +3957,68 @@ final class OfficeRuntimeLiveTests: XCTestCase {
 
         _ = host.teardownAllOfficeRuntimesAndStopHelper()
     }
+
+    // MARK: - Office Stage B Task 8: the multi-slide fixture + rail proof
+
+    /// **Smoke, run and read FIRST** — before building the click-switch/tiles-differ drill on top
+    /// of it. Proves the committed `two-slide.fodp` fixture (`Fixtures/office/two-slide.fodp`,
+    /// built by extracting gate.odp's own real `content.xml`/`styles.xml` fragments verbatim into
+    /// one flat `<office:document>` — the recipe is recorded in this fixture's own commit message,
+    /// mirroring `two-sheet.ods`'s own "byte-level clone of gate.ods's own proven-working element"
+    /// precedent, adapted to flat-XML packaging per this task's brief) actually opens against THIS
+    /// PIN's real, TRIMMED vendor tree as a two-part presentation.
+    ///
+    /// `.fods` (flat spreadsheet) opening is already proven live (office-plumbing Task 9's own
+    /// templated fixture, `officeHarnessMultiSheetFodsContent`) — `.fodp` (flat presentation)
+    /// never has been anywhere in this codebase, and this branch's own trim has silently dropped a
+    /// never-exercised import PATH before (the xlsx-export dylib —
+    /// `ooxml-export-investigation.md`) even though the sibling xlsx/pptx/odt/ods/docx/odp
+    /// leg all worked. Deliberately its own test, run and read before anything depends on the
+    /// answer — see this file's own task-8-report.md for what it found.
+    func testTwoSlideFodpFixtureOpensAsATwoPartPresentation() async throws {
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
+                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                        + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
+        let vendorRoot = Self.vendorProductSetRoot
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
+                      "LibreOffice vendor tree not present at \(vendorRoot.path) — run "
+                        + "`bun run libreoffice:fetch` from the repo root.")
+        let fixturePath = Self.fixturesRoot.appendingPathComponent("two-slide.fodp").path
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: fixturePath), "two-slide.fodp fixture missing")
+
+        let stateDir = makeScratchDirectory()
+        let directory = SessionDirectory(lister: { [] })
+        let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        host.makeOfficeHelperSupervisor = {
+            OfficeHelperSupervisor(configuration: OfficeHelperSupervisor.Configuration(
+                helperExecutableURL: helperURL, socketDirectory: stateDir,
+                extraArguments: ["--lok-root", vendorRoot.path, "--sandbox-profile", Self.sandboxProfilePath.path]))
+        }
+        let runtime = host.officeRuntime(for: "S1")
+
+        let scratchDir = makeScratchDirectory()
+        let path = scratchDir.appendingPathComponent("two-slide-smoke.fodp").path
+        try Data(contentsOf: URL(fileURLWithPath: fixturePath)).write(to: URL(fileURLWithPath: path))
+
+        runtime.open(path)
+        let settled = await waitUntil(timeout: 90) {
+            runtime.stateSnapshot.documents[path] != nil || runtime.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(settled, "two-slide.fodp never settled — phase: \(runtime.stateSnapshot.phase)")
+        guard let doc = runtime.stateSnapshot.documents[path] else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("two-slide.fodp did not open: "
+                           + "\(runtime.stateSnapshot.openFailures[path] ?? "no reason recorded")")
+        }
+        XCTAssertEqual(doc.type, .presentation, "LOK's own getDocumentType() must classify the flat-XML "
+                       + "presentation the same as a real .odp — a mis-detected type would route it "
+                       + "through the wrong part strip entirely")
+        XCTAssertEqual(doc.parts, 2, "the fixture carries two <draw:page> slides — real LOK must report "
+                       + "two parts for it, or nothing built on top of this fixture proves a real switch")
+        XCTAssertGreaterThan(doc.sizeTwips.widthTwips, 0)
+        XCTAssertGreaterThan(doc.sizeTwips.heightTwips, 0)
+
+        _ = host.teardownAllOfficeRuntimesAndStopHelper()
+    }
 }
