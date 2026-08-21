@@ -917,10 +917,12 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         // Deliberately NO click here (see `testDirectlyProvesTheInputPathsOwnSetViewPrefixIs
         // LoadBearingBelowTheCanvasLayer`'s own header for the full mechanism, found AFTER this
         // drill's own click-first shape measured green with setView deleted): `NSEvent`-driven
-        // `mouseDown` reaches `postMouseOnDedicatedThread`, whose posted LOK event is itself a VCL
-        // activation gesture that makes A current as a side effect, independent of this fix — no
-        // drill that clicks before typing can discriminate it. Typing directly at A1 (Calc's own
-        // no-click-needed edit start) is what actually proves the fix.
+        // `mouseDown` reaches `postMouseOnDedicatedThread`, and ANY posted LOK event's own dispatch
+        // `GrabFocus`es its target window (`LOKPostAsyncEvent`, `lokhelper.cxx:1186-1203`), making A
+        // current as a side effect, independent of this fix — no drill that clicks before typing can
+        // discriminate it. (Fix round 4, NEW-3: this is not click-SPECIFIC, which is why the first
+        // keystroke below is itself damaged rather than the whole marker.) Typing directly at A1
+        // (Calc's own no-click-needed edit start) is what actually proves the fix.
         // "T4EDIZ" — every character's physical keyCode already verified elsewhere in this file
         // (T/4/E/D/I in the single-document drill above, Z in the earlier typing-drill test) — no new
         // keyCode guesses introduced by this drill. Distinct from the single-document drill's own
@@ -1034,12 +1036,24 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// above, with B now a WRITER document (`gate.odt`) — the coordinator's own named "no-op case":
     /// per `docuno.cxx`, `ScModelObj::setPart`'s `ScDocShell::GetViewData()` internally
     /// `dynamic_cast`s the process-global current view down to a Calc view shell; when that current
-    /// view is actually a Writer `SwView` (B, once B is loaded last), the cast fails and the whole
+    /// view is actually a Writer `SwView` (B, once B is loaded last), the cast fails and that FIRST
     /// call is a silent no-op — a DIFFERENT failure mechanism than the spreadsheet-B variant's
-    /// cross-document mutation, but the SAME observable symptom for A: A's own view never moves off
-    /// its load-time part, so a part-1 request renders A's frozen part-0 content. B's own XML/table
-    /// structure has no meaning for a Writer document, so this variant drops those checks — B's own
-    /// dirty flag and B's own file bytes remain the checks that matter.
+    /// cross-document mutation (there the cast succeeds and B's own active sheet is switched under
+    /// it), which is why B never goes dirty here. B's own XML/table structure has no meaning for a
+    /// Writer document, so this variant drops those checks — B's own dirty flag and B's own file
+    /// bytes remain the checks that matter.
+    ///
+    /// **Fix round 4 (NEW-3) — the A-side symptom was recorded imprecisely, in both this header and
+    /// the raw drill's.** Round 2/3 wrote it as "A's own view never moves off its load-time part"
+    /// and (in the raw drill) "the edit is simply lost." Re-measured with the saved bytes dumped:
+    /// only the FIRST keystroke is damaged. A's own view DOES move — just one keystroke too late,
+    /// because the posted key event's dispatch `GrabFocus`es A and makes it current
+    /// (`LOKPostAsyncEvent`, `sfx2/source/view/lokhelper.cxx:1186-1203`, at the pinned LO commit
+    /// `11482c8f`), so the SECOND keystroke's `setPart` succeeds and switches A to sheet 2 —
+    /// discarding the cell edit the first keystroke had opened on sheet 1. The disabled build leaves
+    /// A's Sheet1 untouched and puts the marker MINUS ITS FIRST CHARACTER on sheet 2, one failing
+    /// assertion. See `testDirectlyProvesTheInputPathsOwnSetViewPrefixIsLoadBearingBelowTheCanvas
+    /// Layer`'s own header for the full four-step account and the dumped bytes.
     func testTypingOnDocumentAIsUnaffectedWhenDocumentBIsAWriterDocumentTheDynamicCastNoOpCase() async throws {
         let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
@@ -1593,11 +1607,13 @@ final class OfficeRuntimeLiveTests: XCTestCase {
 
         // THE PROOF — real input, part 1 (sheet 2), with B still current. Only the input path's own
         // setView+setPart can move A from its parked part 0 back to part 1 before the marker lands.
-        // Deliberately NO postMouse here — see this test's own header: a click is itself a VCL
-        // activation gesture that makes A's frame current as a side effect, independent of this fix,
-        // which would make this drill pass regardless of whether setView is present. Calc needs no
-        // click to start editing the current cell (A1, from load), so the keystrokes alone are the
-        // whole proof.
+        // Deliberately NO postMouse here — see this test's own header: any posted LOK event's own
+        // dispatch `GrabFocus`es its target window and makes A's frame current as a side effect,
+        // independent of this fix, and a click placed BEFORE the typing spends that activation for
+        // free — which would make this drill pass regardless of whether setView is present. Calc
+        // needs no click to start editing the current cell (A1, from load), so the keystrokes alone
+        // are the whole proof; the cost of having no click to spend is that the FIRST keystroke is
+        // the one that pays for the activation, which is exactly the damage this drill measures.
         let marker = "T4EDIT"
         let keyCodes: [Character: Int] = [
             "T": 531 | 0x1000, "E": 516 | 0x1000, "D": 515 | 0x1000, "I": 520 | 0x1000, "4": 260,

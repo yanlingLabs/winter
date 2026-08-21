@@ -612,6 +612,20 @@ final class LOKBridge: OfficeDocumentBridge {
         //      1. `postKeyEvent` is `PostUserEvent`-async while this is synchronous, so a repaint
         //      interleaving between keystrokes could land the rest of a word at page-1 start.
         //      Proven live: `testTypingIntoAWriterDocumentSurvivesAnInterleavedTileRepaint`.
+        //
+        //      Checked, not assumed, that gating this out costs a text document NOTHING —
+        //      specifically, that it does not re-open round 3's own IMPORTANT-A hazard for Writer.
+        //      Two independent reasons, both read at the pin: (a) the unfiltered
+        //      `getAlternativeViewForPaint` scan is not merely unlikely for a text document, it is
+        //      UNREACHABLE — `doc_paintPartTile` only summons it when
+        //      `nPart != doc_getPart(pThis) || nMode != pDoc->getEditMode()`, and for Writer BOTH
+        //      sides are structurally zero (`SwXTextDocument::getPart` → `SwView::getPart`, which
+        //      `sw/source/uibase/inc/view.hxx` never overrides, so it is `SfxViewShell::getPart`'s
+        //      own `return 0` at `sfx2/source/view/viewsh.cxx:3563`; `getEditMode` likewise at
+        //      `:3568`) while `TileRenderer.renderRaw` always passes `nPart = key.part` (0 for every
+        //      text document here) and `nMode = 0`. (b) Even if it were reached, the paint itself is
+        //      instance-scoped: `SwXTextDocument::paintTile` (`unotxdoc.cxx:3372-3394`) resolves
+        //      entirely through `m_pDocShell`, never through anything global.
         //   2. **Part staleness.** "A paint's `key.part` always equals what the user is looking at"
         //      is true of the CONSTRUCTION of every key, but not of the moment one is PAINTED: an
         //      in-flight prefetch chunk cut by a part switch is still delivered, so a paint carrying
