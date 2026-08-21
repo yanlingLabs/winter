@@ -523,15 +523,40 @@ enum OfficeRuntimeEffect: Equatable {
     /// **Delete `docId`'s own sidecar (glob by prefix, mirrors `.deleteStagedCopy`) AND `path`'s own
     /// manifest entry.** The ownership rule this task's whole design rests on: the HELPER only ever
     /// WRITES a sidecar (`OfficeAutosaveScheduler`'s own header); this is the app's own half,
-    /// emitted from exactly three places, each a genuine, explicit resolution — never a helper-side
-    /// signal, never an ambient timeout:
+    /// emitted from exactly three places:
     ///   * `.saveSucceeded` — the real path itself now PROVABLY carries the content
     ///     (`placeAtomically` already ran); the sidecar this SAME docId may have been growing is
-    ///     now redundant.
-    ///   * `.closeRequested` — by the time this event reaches the reducer at all, T3's own
-    ///     dirty-close sheet has already made the user choose Save-then-close or Discard-then-close
-    ///     at the app layer; either way there is a deliberate resolution behind it, never a crash.
-    ///   * `.recoveryDiscardRequested` — the user explicitly declined the offer.
+    ///     now redundant. An explicit resolution — `alsoClearManifestOwner: true`.
+    ///   * `.closeRequested` — cleans up any sidecar THIS session's own (literal) docId may have
+    ///     grown. `alsoClearManifestOwner: false` — see that flag's own header just below for why
+    ///     this site specifically must NOT claim it.
+    ///   * `.recoveryDiscardRequested` — the user explicitly declined the offer, via
+    ///     `.discardRecoveryCandidate` (a separate effect case; `perform`'s own handling of it calls
+    ///     the SAME imperative function with `alsoClearManifestOwner: true` hardcoded, since Discard
+    ///     is unconditionally an explicit resolution of whatever the manifest currently names).
+    ///
+    /// **`alsoClearManifestOwner` — fix round 1 (review I-2, at the Critical boundary).** The
+    /// ORIGINAL version of this case (and of `OfficeRuntime.clearAutosave`, its imperative
+    /// performer) had no such flag: EVERY site unconditionally read the manifest, unioned in
+    /// whatever docId it recorded, and deleted the manifest file outright — correct for
+    /// `.saveSucceeded`/Discard, but WRONG for `.closeRequested`. The bug: open a path that has a
+    /// STANDING, never-Restored/never-Discarded recovery candidate (a crashed session's own sidecar,
+    /// recorded under ITS OWN docId — completely different from the fresh, clean docId this new open
+    /// just minted). T3's own dirty-close sheet gates a close ONLY on `dirty == true` for the
+    /// CURRENT session — a fresh, un-restored open is clean by construction (nothing has been typed
+    /// in THIS session yet), so a plain ⌘W proceeds with NO PROMPT AT ALL. The old, unconditional
+    /// version reached into the manifest anyway, deleted the crashed session's own sidecar and the
+    /// manifest naming it, and silently discarded the one thing recovery exists to preserve — one
+    /// click, no confirmation, and the banner could not even be seen again to undo it (a `false`ish
+    /// "no data loss" only relative to the last SAVED state of the real file; relative to what the
+    /// user actually typed before crashing, it is exactly the loss autosave exists to prevent).
+    /// `alsoClearManifestOwner: false` at `.closeRequested` fixes this at BOTH layers this function
+    /// touches — the union-sidecar-sweep AND the manifest-file deletion itself are gated by the SAME
+    /// flag (a manifest recorded under the literal `docId` and pointing at a sidecar this call DID
+    /// delete is harmless to leave standing: `checkRecoveryCandidate`'s own `officeFileStat` guard
+    /// silently refuses a manifest whose sidecar is gone, and the next boot's `sweepAutosaveOrphans`
+    /// clears the dangling manifest file within, at most, one launch — the same bounded-residual
+    /// tolerance this task's own "at most a minute" framing already accepts elsewhere).
     ///
     /// **Deliberately NEVER emitted by `.helperDied`/`.helperUnavailable`/`.teardownRequested`** —
     /// those three ARE the abnormal-ending case ("a SIGKILL costs at most a minute" covers an app
@@ -541,7 +566,7 @@ enum OfficeRuntimeEffect: Equatable {
     /// test alone cannot — a future site-mirroring sweep (the same instinct that correctly adds
     /// `.deleteStagedCopy` to every document-abandoning site) must trip a RED test here, not
     /// silently delete the evidence recovery depends on.
-    case clearAutosave(path: String, docId: String)
+    case clearAutosave(path: String, docId: String, alsoClearManifestOwner: Bool)
 }
 
 /// **The whole lifecycle, as one pure function.** Every claim Task 5 makes about this runtime —
@@ -668,12 +693,22 @@ enum OfficeRuntimeReducer {
             // Task 8: the watch goes with the document — "a watcher exists exactly while a document
             // does" is an invariant of this reducer, mirroring `EditorRuntimeReducer.closeRequested`'s
             // identical one for models. Task 2b: and so does its own staged copy. Task 7: and so does
-            // any autosave sidecar this docId may have been growing — by the time this event reaches
-            // the reducer at all, T3's own dirty-close sheet has already made the user choose
-            // Save-then-close or Discard-then-close at the app layer (see `.clearAutosave`'s own
-            // header for why that is what makes this site safe, unlike `.helperDied`'s).
+            // any autosave sidecar THIS docId (only) may have been growing.
+            //
+            // **Fix round 1 (review I-2) — `alsoClearManifestOwner: false`, NOT `true` the way
+            // `.saveSucceeded`/Discard use it.** The comment this replaced claimed "T3's own
+            // dirty-close sheet has already made the user choose... either way there is a deliberate
+            // resolution behind it" — true of the CURRENT session's own edits, but T3's gate keys
+            // off `dirty`, and a fresh, un-restored open with a STANDING recovery candidate is
+            // clean by construction (nothing has been typed in THIS session). A plain close of THAT
+            // tab reaches here with no prompt at all and no resolution of the candidate whatsoever —
+            // reaching into the manifest here (as the pre-fix code unconditionally did) would delete
+            // a crashed session's own sidecar the user never chose to discard. See
+            // `.clearAutosave`'s own header for the full account and the bounded, accepted cost of
+            // leaving a same-docId manifest standing an extra boot cycle in the ordinary case.
             return (next, [.helperClose(docId: doc.docId), .unwatchFile(path: path),
-                           .deleteStagedCopy(docId: doc.docId), .clearAutosave(path: path, docId: doc.docId)])
+                           .deleteStagedCopy(docId: doc.docId),
+                           .clearAutosave(path: path, docId: doc.docId, alsoClearManifestOwner: false)])
 
         case .subscribeRequested(let path, let part, let zoomPPT, let viewportTwips):
             guard state.phase == .ready, let doc = state.documents[path] else { return (next, []) }
@@ -724,8 +759,11 @@ enum OfficeRuntimeReducer {
             // PROVABLY carries this docId's content (`placeAtomically` already ran, or this dispatch
             // would not exist), so any sidecar it may have been growing is redundant. Unconditional,
             // like `deleteStagedCopy` at every OTHER document-abandoning site — cheap and harmless
-            // when nothing was ever autosaved.
-            return (next, [.clearAutosave(path: path, docId: docId)])
+            // when nothing was ever autosaved. `alsoClearManifestOwner: true` — a successful save IS
+            // the explicit, affirmative resolution `.clearAutosave`'s own header requires for that
+            // (unlike `.closeRequested`'s own `false` — fix round 1, review I-2): whatever the
+            // manifest for this path currently names, this save just made it moot.
+            return (next, [.clearAutosave(path: path, docId: docId, alsoClearManifestOwner: true)])
 
         case .saveFailed(let path, let docId, let reason):
             guard state.phase == .ready, state.documents[path]?.docId == docId else { return (next, []) }
@@ -1772,18 +1810,23 @@ final class OfficeRuntime: ObservableObject {
                                                 isODFFallback: isODFFallback, autosaveDirectory: autosaveDirectory)
                 }
 
-            case .clearAutosave(let path, let docId):
+            case .clearAutosave(let path, let docId, let alsoClearManifestOwner):
                 let autosaveDirectory = autosaveDirectory
                 Task.detached(priority: .utility) {
-                    Self.clearAutosave(realPath: path, docId: docId, autosaveDirectory: autosaveDirectory)
+                    Self.clearAutosave(realPath: path, docId: docId, autosaveDirectory: autosaveDirectory,
+                                       alsoClearManifestOwner: alsoClearManifestOwner)
                 }
 
             case .discardRecoveryCandidate(let path, let docId):
                 // Same imperative call as `.clearAutosave` immediately above — see that effect's own
                 // header for why this stays a separate CASE regardless (test-side distinguishability).
+                // `alsoClearManifestOwner: true` hardcoded, never threaded through this case's own
+                // associated values — Discard is UNCONDITIONALLY an explicit resolution (the user
+                // just said so), the same reasoning `.saveSucceeded`'s own `true` rests on.
                 let autosaveDirectory = autosaveDirectory
                 Task.detached(priority: .utility) {
-                    Self.clearAutosave(realPath: path, docId: docId, autosaveDirectory: autosaveDirectory)
+                    Self.clearAutosave(realPath: path, docId: docId, autosaveDirectory: autosaveDirectory,
+                                       alsoClearManifestOwner: true)
                 }
             }
         }
@@ -2530,22 +2573,39 @@ final class OfficeRuntime: ObservableObject {
     /// why `.helperDied`/`.helperUnavailable`/`.teardownRequested` never reach this. Best-effort,
     /// `nonisolated`, same posture as every other cleanup call in this file.
     ///
-    /// **Live-drill-caught (not theoretical): also clears the MANIFEST's own recorded docId, not
-    /// only the literal `docId` passed in.** After a Restore, `path`'s currently-open docId is a
-    /// FRESH one (`openAndDispatch` always mints a new docId, restore included) — completely
-    /// different from the CRASHED session's own docId the sidecar on disk is actually named after
-    /// (`OfficeRecoveryCandidate.docId`, threaded into the manifest at `recordAutosaveManifest` time
-    /// and never re-derived from the currently-open document anywhere). A save landing right after
-    /// a Restore-with-no-further-typing calls this with the RESTORED docId, which never had a
-    /// sidecar of its own — clearing only that docId's prefix silently leaves the crashed session's
-    /// real sidecar behind forever. Reading the manifest FIRST (before deleting it) and unioning its
-    /// own `docId` into the sweep fixes this for every caller uniformly, without threading a second
-    /// "which docId did this content actually come from" fact through the reducer/effects layer —
-    /// the manifest already IS that fact, sitting right here about to be read anyway.
-    nonisolated static func clearAutosave(realPath: String, docId: String, autosaveDirectory: URL) {
+    /// **Live-drill-caught (not theoretical): when `alsoClearManifestOwner` is true, also clears the
+    /// MANIFEST's own recorded docId, not only the literal `docId` passed in.** After a Restore,
+    /// `path`'s currently-open docId is a FRESH one (`openAndDispatch` always mints a new docId,
+    /// restore included) — completely different from the CRASHED session's own docId the sidecar on
+    /// disk is actually named after (`OfficeRecoveryCandidate.docId`, threaded into the manifest at
+    /// `recordAutosaveManifest` time and never re-derived from the currently-open document
+    /// anywhere). A save landing right after a Restore-with-no-further-typing calls this with the
+    /// RESTORED docId, which never had a sidecar of its own — clearing only that docId's prefix
+    /// would silently leave the crashed session's real sidecar behind forever. Reading the manifest
+    /// FIRST (before deleting it) and unioning its own `docId` into the sweep fixes this for every
+    /// `alsoClearManifestOwner: true` caller uniformly, without threading a second "which docId did
+    /// this content actually come from" fact through the reducer/effects layer — the manifest
+    /// already IS that fact, sitting right here about to be read anyway.
+    ///
+    /// **`alsoClearManifestOwner` — fix round 1 (review I-2, at the Critical boundary).** Gates BOTH
+    /// the union-read-and-sweep above AND the manifest-file deletion at the bottom — not just the
+    /// former. `.clearAutosave`'s own header (`OfficeRuntimeEffect`) has the full account of the bug
+    /// this closes (a plain close of a tab with a STANDING, un-acted-on recovery candidate must
+    /// leave that candidate's sidecar AND its manifest entry alone, so a later reopen finds it
+    /// again) and why gating the manifest deletion too — not just the union — is required: the
+    /// manifest is the ONLY thing `checkRecoveryCandidate` reads to find a sidecar's path at all: if
+    /// this function deleted the manifest unconditionally while only conditionally deleting the
+    /// FILE it points to, `.closeRequested` would still have silently ended the offer even with the
+    /// union-sweep itself correctly suppressed. `false` callers (`.closeRequested` only) still clear
+    /// their OWN literal `docId`'s sidecar unconditionally — cleaning up whatever THIS session may
+    /// have autosaved is always correct; only reaching past it into a DIFFERENT docId's evidence is
+    /// what `false` refuses.
+    nonisolated static func clearAutosave(realPath: String, docId: String, autosaveDirectory: URL,
+                                          alsoClearManifestOwner: Bool) {
         let manifestPath = Self.autosaveManifestPath(forRealPath: realPath, autosaveDirectory: autosaveDirectory)
         var docIdsToClear: Set<String> = [docId]
-        if let data = try? Data(contentsOf: manifestPath),
+        if alsoClearManifestOwner,
+           let data = try? Data(contentsOf: manifestPath),
            let entry = try? JSONDecoder().decode(OfficeAutosaveManifestEntry.self, from: data) {
             docIdsToClear.insert(entry.docId)
         }
@@ -2558,7 +2618,9 @@ final class OfficeRuntime: ObservableObject {
                 }
             }
         }
-        try? FileManager.default.removeItem(at: manifestPath)
+        if alsoClearManifestOwner {
+            try? FileManager.default.removeItem(at: manifestPath)
+        }
     }
 
     /// **The boot-hygiene sweep's autosave-specific half — MANIFEST-AWARE, never wholesale.**

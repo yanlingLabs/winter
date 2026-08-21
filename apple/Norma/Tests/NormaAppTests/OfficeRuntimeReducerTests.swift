@@ -164,9 +164,12 @@ final class OfficeRuntimeReducerTests: XCTestCase {
                                          .opened(path: "/a.xlsx", docId: "doc-a", stagedPath: "/staged/doc-a", metadata: metadata)])
         let (closed, effects) = reduce(open, [.closeRequested(path: "/a.xlsx")])
         XCTAssertEqual(effects, [.helperClose(docId: "doc-a"), .unwatchFile(path: "/a.xlsx"),
-                                 .deleteStagedCopy(docId: "doc-a"), .clearAutosave(path: "/a.xlsx", docId: "doc-a")],
+                                 .deleteStagedCopy(docId: "doc-a"),
+                                 .clearAutosave(path: "/a.xlsx", docId: "doc-a", alsoClearManifestOwner: false)],
                        "office-plumbing Task 8: the watch goes with the document; Task 2b: so does its "
-                       + "staged copy; Task 7: so does any autosave sidecar")
+                       + "staged copy; Task 7: so does any autosave sidecar THIS docId grew — but "
+                       + "never a DIFFERENT, standing candidate's own (fix round 1, review I-2; see "
+                       + "testCloseRequestedWithAStandingRecoveryCandidateNeverClaimsTheManifestOwner)")
         XCTAssertNil(closed.documents["/a.xlsx"])
     }
 
@@ -296,9 +299,11 @@ final class OfficeRuntimeReducerTests: XCTestCase {
         let (state, effects) = reduce(open, [.saveSucceeded(path: "/a.xlsx", docId: "doc-a")])
         XCTAssertNil(state.documentBanners["/a.xlsx"], "a file just placed on disk cannot still be "
                      + "saying it was deleted")
-        XCTAssertEqual(effects, [.clearAutosave(path: "/a.xlsx", docId: "doc-a")],
+        XCTAssertEqual(effects, [.clearAutosave(path: "/a.xlsx", docId: "doc-a", alsoClearManifestOwner: true)],
                        "Task 7: a successful save is the app's own proof the real path now carries "
-                       + "this docId's content — any sidecar it may have been growing is redundant")
+                       + "this docId's content — any sidecar it may have been growing is redundant; "
+                       + "alsoClearManifestOwner: true since a save IS an explicit resolution "
+                       + "(fix round 1, review I-2)")
     }
 
     func testSaveSucceededForAPathWithNoDocumentIsANoOp() {
@@ -523,7 +528,8 @@ final class OfficeRuntimeReducerTests: XCTestCase {
         let (state, effects) = reduce(conflicted, [.closeRequested(path: "/a.xlsx")])
         XCTAssertNil(state.documentConflicts["/a.xlsx"])
         XCTAssertEqual(effects, [.helperClose(docId: "doc-a"), .unwatchFile(path: "/a.xlsx"),
-                                 .deleteStagedCopy(docId: "doc-a"), .clearAutosave(path: "/a.xlsx", docId: "doc-a")])
+                                 .deleteStagedCopy(docId: "doc-a"),
+                                 .clearAutosave(path: "/a.xlsx", docId: "doc-a", alsoClearManifestOwner: false)])
     }
 
     /// T8 interface obligation 1 (activePart survives a reload): `.opened` is the SAME event a fresh
@@ -1004,7 +1010,7 @@ final class OfficeRuntimeReducerTests: XCTestCase {
                        + "restore-pending document must clear the dot directly — LOK will never "
                        + "fire the real transition")
         XCTAssertEqual(state.documents["/a.odt"]?.restoredPendingSave, false)
-        XCTAssertEqual(effects, [.clearAutosave(path: "/a.odt", docId: "doc-a")])
+        XCTAssertEqual(effects, [.clearAutosave(path: "/a.odt", docId: "doc-a", alsoClearManifestOwner: true)])
     }
 
     /// **The regression guard for the ORDINARY save path** — `restoredPendingSave` defaults `false`,
@@ -1034,6 +1040,37 @@ final class OfficeRuntimeReducerTests: XCTestCase {
                            + "case autosave exists to survive; only .saveSucceeded/.closeRequested/"
                            + "explicit Discard may clear a sidecar")
         }
+    }
+
+    // MARK: - Fix round 1 (review I-2, at the Critical boundary) — closing must never claim the
+    // manifest's own docId
+
+    /// **The precise scenario the review names: a plain close of a tab with a STANDING, never-
+    /// Restored/never-Discarded recovery candidate.** The document is fresh and clean (nothing typed
+    /// in THIS session — `readyWithOpenDocument` never dirties it), so T3's own dirty-close sheet
+    /// has nothing to gate on; `.closeRequested` reaches this reducer directly, with the offer still
+    /// standing. The reducer-visible half of the fix: `alsoClearManifestOwner` must be `false`
+    /// regardless — see `OfficeAutosaveManifestTests
+    /// .testClearAutosaveWithAlsoClearManifestOwnerFalseLeavesAStandingCandidatesSidecarAndManifestFindableAfterwards`
+    /// for the disk-level half (the file actually surviving, and being findable again on reopen).
+    func testCloseRequestedWithAStandingRecoveryCandidateNeverClaimsTheManifestOwner() {
+        let open = readyWithOpenDocument(path: "/a.odt", docId: "doc-a")
+        let (withCandidate, _) = reduce(open, [.recoveryCandidateFound(path: "/a.odt", docId: "doc-a", candidate: sampleCandidate)])
+        XCTAssertEqual(withCandidate.documentRecoveryCandidates["/a.odt"], sampleCandidate, "sanity")
+
+        let (_, effects) = reduce(withCandidate, [.closeRequested(path: "/a.odt")])
+
+        guard case .clearAutosave(let path, let docId, let alsoClearManifestOwner) =
+            effects.first(where: { if case .clearAutosave = $0 { return true } else { return false } }) else {
+            return XCTFail("expected a .clearAutosave effect")
+        }
+        XCTAssertEqual(path, "/a.odt")
+        XCTAssertEqual(docId, "doc-a")
+        XCTAssertFalse(alsoClearManifestOwner, "a plain close must never reach past its own literal "
+                       + "docId into whatever a STANDING, untouched recovery candidate's manifest "
+                       + "names — doing so would silently discard the one thing recovery exists to "
+                       + "preserve, with no prompt (the current session is clean, so T3's dirty-close "
+                       + "sheet never fires) and no way to see the banner again to undo it")
     }
 }
 
@@ -2003,6 +2040,65 @@ final class OfficeRuntimeWatcherTests: XCTestCase {
                        "a superseded save must never place its bytes onto a path the runtime no "
                        + "longer considers open")
     }
+
+    // MARK: - Office Stage B Task 7 fix round 1 (review I-2, at the Critical boundary): a plain
+    // close must never end a STANDING recovery offer it was never told to resolve
+
+    /// **The reviewer's own literal pin, driven end to end through a real `OfficeRuntime`'s public
+    /// `open`/`close` doors: "open-with-candidate → close without touching the banner → reopen →
+    /// the banner returns."** Seeds a "crashed" sidecar + manifest directly on disk (the SAME
+    /// `OfficeRuntime.recordAutosaveManifest` static call `OfficeAutosaveManifestTests` uses, real
+    /// files, real `stateDirectory`), opens the real path (finds the candidate — proven), closes it
+    /// WITHOUT ever calling `restoreFromRecovery`/`discardRecovery` (the plain-⌘W shape: the current
+    /// session is clean, so T3's own dirty-close sheet never even appears), then reopens the SAME
+    /// path under a fresh docId and asserts the candidate is found AGAIN. Complements
+    /// `OfficeAutosaveManifestTests
+    /// .testClearAutosaveWithAlsoClearManifestOwnerFalseLeavesAStandingCandidatesSidecarAndManifestFindableAfterwards`,
+    /// which proves the identical claim at the disk-mechanism level directly — this test proves the
+    /// REDUCER's own decision (`alsoClearManifestOwner: false` at `.closeRequested`) and that
+    /// decision's disk-level performer are correctly wired together, through the runtime's real
+    /// public surface, not merely each half in isolation.
+    func testCloseRequestedWithAStandingRecoveryCandidateLeavesItFindableAfterAReopen() async throws {
+        let path = try scratchFile(name: "gate.odt", contents: "the real file's own content")
+        let driver = makeDriver()
+        let autosaveDirectory = driver.stateDirectory.appendingPathComponent("autosave", isDirectory: true)
+        try FileManager.default.createDirectory(at: autosaveDirectory, withIntermediateDirectories: true)
+        try "recovered content from the crashed session".write(
+            to: autosaveDirectory.appendingPathComponent("crashed-doc.odt"), atomically: true, encoding: .utf8)
+        OfficeRuntime.recordAutosaveManifest(realPath: path, docId: "crashed-doc", ext: "odt",
+                                             isODFFallback: false, autosaveDirectory: autosaveDirectory)
+        XCTAssertNotNil(OfficeRuntime.checkRecoveryCandidate(realPath: path, autosaveDirectory: autosaveDirectory),
+                        "sanity: a fresh open right now would find the seeded candidate")
+
+        let runtime = OfficeRuntime(sessionId: "S1", driver: driver)
+        runtimes.append(runtime)
+
+        runtime.open(path)
+        let foundOnFirstOpen = await waitUntil { runtime.stateSnapshot.documentRecoveryCandidates[path] != nil }
+        XCTAssertTrue(foundOnFirstOpen, "setup: the candidate must surface on the first open")
+        XCTAssertEqual(runtime.stateSnapshot.documentRecoveryCandidates[path]?.docId, "crashed-doc")
+        let firstDocId = try XCTUnwrap(runtime.stateSnapshot.documents[path]?.docId)
+
+        // Close WITHOUT touching the banner at all — no restoreFromRecovery, no discardRecovery.
+        runtime.close(path)
+        let closed = await waitUntil { runtime.stateSnapshot.documents[path] == nil }
+        XCTAssertTrue(closed, "setup: the close landed")
+
+        // Reopen the SAME real path — a fresh docId, never `firstDocId`.
+        runtime.open(path)
+        let reopened = await waitUntil { runtime.stateSnapshot.documents[path] != nil }
+        XCTAssertTrue(reopened, "setup: the reopen landed")
+        XCTAssertNotEqual(runtime.stateSnapshot.documents[path]?.docId, firstDocId, "sanity: a fresh "
+                          + "open always mints a new docId, restore included")
+
+        let bannerReturned = await waitUntil { runtime.stateSnapshot.documentRecoveryCandidates[path] != nil }
+        XCTAssertTrue(bannerReturned, "the banner must return on this reopen — a plain close of an "
+                      + "untouched candidate must never have deleted the sidecar or manifest entry "
+                      + "recovery depends on")
+        XCTAssertEqual(runtime.stateSnapshot.documentRecoveryCandidates[path]?.docId, "crashed-doc",
+                       "still the CRASHED session's own docId — the evidence itself, not merely some "
+                       + "candidate")
+    }
 }
 
 // MARK: - Office Stage B Task 2: OfficeRuntime.placeAtomically, driven directly
@@ -2411,16 +2507,18 @@ final class OfficeAutosaveManifestTests: XCTestCase {
                                              isODFFallback: false, autosaveDirectory: autosaveDir)
         XCTAssertEqual(autosaveDirectoryContents(autosaveDir).count, 2, "sanity: sidecar + manifest both exist")
 
-        OfficeRuntime.clearAutosave(realPath: realPath.path, docId: "doc-a", autosaveDirectory: autosaveDir)
+        OfficeRuntime.clearAutosave(realPath: realPath.path, docId: "doc-a", autosaveDirectory: autosaveDir,
+                                    alsoClearManifestOwner: true)
 
         XCTAssertEqual(autosaveDirectoryContents(autosaveDir), [], "both the sidecar and the manifest are gone")
     }
 
-    /// **Live-drill-caught regression pin.** After a Restore, the currently-open docId is a FRESH
-    /// one — completely different from the CRASHED session's own docId the manifest still names.
-    /// `clearAutosave` must clear BOTH: the (here, never-created) current docId's own prefix, AND
-    /// the manifest's own recorded docId's sidecar — not just whichever docId happened to be passed
-    /// in literally.
+    /// **Live-drill-caught regression pin (`alsoClearManifestOwner: true` — `.saveSucceeded`/Discard
+    /// shape).** After a Restore, the currently-open docId is a FRESH one — completely different
+    /// from the CRASHED session's own docId the manifest still names. `clearAutosave`, called the
+    /// way `.saveSucceeded` calls it, must clear BOTH: the (here, never-created) current docId's own
+    /// prefix, AND the manifest's own recorded docId's sidecar — not just whichever docId happened
+    /// to be passed in literally.
     func testClearAutosaveAlsoClearsTheManifestsOwnDocIdWhenItDiffersFromTheOneAsked() throws {
         let autosaveDir = makeScratchDirectory()
         let realPath = makeScratchDirectory().appendingPathComponent("notes.odt")
@@ -2433,16 +2531,57 @@ final class OfficeAutosaveManifestTests: XCTestCase {
 
         // The currently-open document is a DIFFERENT, freshly-minted docId (the restored one) —
         // never `crashed-doc` — exactly the post-Restore, no-further-typing shape the drill hit.
-        OfficeRuntime.clearAutosave(realPath: realPath.path, docId: "restored-doc-2", autosaveDirectory: autosaveDir)
+        OfficeRuntime.clearAutosave(realPath: realPath.path, docId: "restored-doc-2", autosaveDirectory: autosaveDir,
+                                    alsoClearManifestOwner: true)
 
         XCTAssertEqual(autosaveDirectoryContents(autosaveDir), [], "the crashed session's own "
                        + "sidecar must be cleared even though a DIFFERENT docId was asked for — "
                        + "sourced from the manifest, not the literal parameter alone")
     }
 
+    /// **Fix round 1 (review I-2, at the Critical boundary) — the disk-level half of the pin.** The
+    /// EXACT opposite call `.closeRequested` makes when a STANDING, never-Restored/never-Discarded
+    /// recovery candidate exists for this path: a DIFFERENT (fresh, clean) docId is closing, and
+    /// `alsoClearManifestOwner: false` must leave the crashed session's own sidecar AND its manifest
+    /// entry fully intact — not merely "not immediately swept," but genuinely still findable by a
+    /// FRESH `checkRecoveryCandidate` call, exactly as a real reopen would make. This is the
+    /// reviewer's own "open-with-candidate → close without touching the banner → reopen → the
+    /// banner returns" pin, driven directly at the mechanism `.closeRequested` actually calls — see
+    /// `OfficeRuntimeWatcherTests
+    /// .testCloseRequestedWithAStandingRecoveryCandidateLeavesItFindableAfterAReopen` for the SAME
+    /// claim proven through a real `OfficeRuntime`'s own public `open`/`close` doors end to end.
+    func testClearAutosaveWithAlsoClearManifestOwnerFalseLeavesAStandingCandidatesSidecarAndManifestFindableAfterwards() throws {
+        let autosaveDir = makeScratchDirectory()
+        let realPath = makeScratchDirectory().appendingPathComponent("notes.odt")
+        try "content".write(to: realPath, atomically: true, encoding: .utf8)
+        let crashedSidecar = autosaveDir.appendingPathComponent("crashed-doc.odt")
+        try "recovered content".write(to: crashedSidecar, atomically: true, encoding: .utf8)
+        OfficeRuntime.recordAutosaveManifest(realPath: realPath.path, docId: "crashed-doc", ext: "odt",
+                                             isODFFallback: false, autosaveDirectory: autosaveDir)
+        XCTAssertEqual(autosaveDirectoryContents(autosaveDir).count, 2, "sanity: sidecar + manifest")
+        XCTAssertNotNil(OfficeRuntime.checkRecoveryCandidate(realPath: realPath.path, autosaveDirectory: autosaveDir),
+                        "sanity: a fresh open right now WOULD find the candidate")
+
+        // A plain close of the fresh, clean, un-restored tab this path is currently open under —
+        // never `crashed-doc`, and the banner was never Restored or Discarded.
+        OfficeRuntime.clearAutosave(realPath: realPath.path, docId: "fresh-clean-doc", autosaveDirectory: autosaveDir,
+                                    alsoClearManifestOwner: false)
+
+        XCTAssertEqual(autosaveDirectoryContents(autosaveDir).count, 2, "the standing candidate's own "
+                       + "sidecar and manifest must survive a plain close untouched — closing "
+                       + "\"fresh-clean-doc\" (which never had a sidecar of its own) must not reach "
+                       + "into a DIFFERENT, unrelated candidate's evidence")
+        let reopened = OfficeRuntime.checkRecoveryCandidate(realPath: realPath.path, autosaveDirectory: autosaveDir)
+        XCTAssertEqual(reopened?.docId, "crashed-doc", "the banner returns on the next open — this IS "
+                       + "the reviewer's own \"close without touching the banner → reopen → the "
+                       + "banner returns\" claim, at the disk mechanism directly")
+    }
+
     func testClearAutosaveIsASafeNoOpWhenNothingExists() {
         let autosaveDir = makeScratchDirectory()
-        OfficeRuntime.clearAutosave(realPath: "/never/opened.odt", docId: "doc-a", autosaveDirectory: autosaveDir) // must not throw/crash
+        // must not throw/crash — value of `alsoClearManifestOwner` is immaterial when nothing exists
+        OfficeRuntime.clearAutosave(realPath: "/never/opened.odt", docId: "doc-a", autosaveDirectory: autosaveDir,
+                                    alsoClearManifestOwner: true)
     }
 
     /// The identical prefix-collision discrimination `deleteStagedCopy`'s own pin proves for
@@ -2454,7 +2593,8 @@ final class OfficeAutosaveManifestTests: XCTestCase {
         try "mine".write(to: ownFile, atomically: true, encoding: .utf8)
         try "not mine".write(to: collisionCandidate, atomically: true, encoding: .utf8)
 
-        OfficeRuntime.clearAutosave(realPath: "/some/real/path.odt", docId: "doc-1", autosaveDirectory: autosaveDir)
+        OfficeRuntime.clearAutosave(realPath: "/some/real/path.odt", docId: "doc-1", autosaveDirectory: autosaveDir,
+                                    alsoClearManifestOwner: false)
 
         XCTAssertFalse(FileManager.default.fileExists(atPath: ownFile.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: collisionCandidate.path))
