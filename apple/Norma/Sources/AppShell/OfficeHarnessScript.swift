@@ -21,7 +21,8 @@ import Foundation
 /// What stays identical to the editor's own plan: a stable, unique id per step (the harness's action
 /// switch matches on it), a drill number every step names (the transcript groups by it, and the pins
 /// suite asserts the whole list is already in drill order), and a titled group per drill so the
-/// transcript reads as twelve claims rather than fifty lines.
+/// transcript reads as twenty-six claims rather than eighty-eight lines (office-editable Task 10
+/// appended Stage B's own drills 13-25 after Stage A's original thirteen, 0-12).
 struct OfficeHarnessStep: Equatable {
     /// Stable, unique, and the key `OfficeHarness`'s action switch matches on (`"3.cold"`,
     /// `"8.reopen"`, ...).
@@ -52,11 +53,24 @@ enum OfficeHarnessPlan {
         9: "scroll/zoom viewport churn — rapid scroll during a cold fill, zoom-step re-request correctness",
         10: "idle-exit — close all docs on a DEDICATED helper, it exits within the production bound",
         11: "second-copy hygiene — every scratch path this run touched stays under its own root",
-        12: "wire sanity — the document kind's wire shape, pinned; this harness runs daemonless"
+        12: "wire sanity — the document kind's wire shape, pinned; this harness runs daemonless",
+        13: "Stage B: sandbox probes — write-inside/outside-fence, outbound-connect-denied, live against the embedded production helper",
+        14: "Stage B: typing -> invalidation -> a genuinely fresh tile",
+        15: "Stage B: caret/selection overlay presence, off OfficeCursorStore",
+        16: "Stage B: IME composition (the ext-text-input door) -> a fresh tile",
+        17: "Stage B: clipboard round-trip — copy returns exactly the selection, paste doubles it on disk",
+        18: "Stage B: the undo ladder + redo, then the two-view pair's own pinned undo characterization",
+        19: "Stage B: Cmd-S round-trip + the no-self-reload suppression proof",
+        20: "Stage B: autosave crash-recovery — SIGKILL mid-dirty, reopen, Restore, save lands the recovered content",
+        21: "Stage B: dirty-close/quit — the pure gate predicate (the sheet/alert themselves are the human live gate's own item)",
+        22: "Stage B: formula-bar tracking — cell cursor + formula text follow a click and an arrow key",
+        23: "Stage B: multi-slide nav — two-slide.fodp, part 1 pixel-distinct from part 0",
+        24: "Stage B: legacy-format opens — the widened set (xlsm/odg) pass through; a CFB file under a modern extension refuses cleanly",
+        25: "Stage B hygiene re-check — the new drills' own scratch/helper footprint stays inside this run's own root too"
     ]
 
     /// The whole run, in order. Every step names the drill it belongs to so the transcript can be
-    /// read as twelve claims rather than forty-odd lines — the same reason
+    /// read as twenty-six claims rather than eighty-eight lines — the same reason
     /// `EditorHarnessFixtures.steps(_:)` gives for the identical shape.
     static let steps: [OfficeHarnessStep] = [
         step("0.setup", 0, "scratch dirs + a ShellSessionHost wired at a scratch OfficeHelperSupervisor", 30),
@@ -116,7 +130,64 @@ enum OfficeHarnessPlan {
 
         step("12.kindWire", 12, "PanelTabKind.document's raw wire value is \"document\"", 5),
         step("12.router", 12, "panelTabKind(forFilePath:) classifies all six office extensions as .document", 5),
-        step("12.daemonless", 12, "daemonless by construction — the wire shape is pinned via the codec, not a live panel.openTab", 5)
+        step("12.daemonless", 12, "daemonless by construction — the wire shape is pinned via the codec, not a live panel.openTab", 5),
+
+        // MARK: - office-editable Task 10: Stage B's own drills, appended after Stage A's 46
+
+        step("13.writeInFence", 13, "a probe write UNDER --state-path succeeds (sanity control)", 15),
+        step("13.writeOutFence", 13, "a probe write OUTSIDE --state-path is denied, errno EPERM, no file left behind", 15),
+        step("13.networkDeny", 13, "a probe outbound connect() is denied, errno EPERM (anchored, never a bare rc!=0)", 15),
+
+        step("14.open", 14, "open a fresh scratch copy of gate.odt for the typing drill", 35),
+        step("14.coldTile", 14, "cold-fill its viewport, hash a non-blank tile", 25),
+        step("14.type", 14, "click, then type a marker via postKeyEvent (the plain-commit door insertText uses)", 15),
+        step("14.freshTile", 14, "the SAME tile key repaints with a DIFFERENT hash post-invalidation", 25),
+
+        step("15.caretPresent", 15, "OfficeCursorStore reports a caret rect after typing", 10),
+        step("15.select", 15, "Shift+Left selects the just-typed marker", 15),
+        step("15.selectionPresent", 15, "OfficeCursorStore reports non-empty selection rects", 10),
+
+        step("16.open", 16, "open a fresh scratch copy of gate.odt for the IME drill", 35),
+        step("16.composeAndCommit", 16, "postExtTextInput .input (preedit) then .input+.end (composed commit)", 15),
+        step("16.freshTile", 16, "the ext-text-input door's commit produces a real, fresh, non-blank tile", 25),
+
+        step("17.open", 17, "open a fresh scratch copy of gate.odt for the clipboard drill", 35),
+        step("17.typeSelectCopy", 17, "type a marker, select it, clipboardCopy returns exactly the marker", 15),
+        step("17.pasteDoublesOnDisk", 17, "collapse the selection, paste, save — the real file carries the doubled text", 30),
+
+        step("18.typeAndSave", 18, "type a marker, save, confirm it landed on the real path", 30),
+        step("18.undoLadderThenRedo", 18, "undo (bounded by marker length) removes it; redo restores it — both confirmed on disk", 40),
+        step("18.twoViewMintAndEditBoth", 18, "mint agent view B (a second mint is refused); edit via A then via B, both confirmed on disk", 30),
+        step("18.twoViewUndoCharacterization", 18, "undo via A's primary door — PINNED: both edits survive (REFUSED/NO-OP, branch-aware)", 30),
+
+        step("19.saveRoundTrip", 19, "type, saveAndAwaitOutcome succeeds, the real file carries the content", 30),
+        step("19.noSelfReloadSuppression", 19, "Norma's own write does not trigger a spurious reload of itself", 10),
+
+        step("20.setup", 20, "a DEDICATED helper with a 2s autosave interval boots; a fresh doc opens", 40),
+        step("20.typeDirtyWaitSidecar", 20, "type a marker (dirty=true); the real autosave timer writes a sidecar; helper alive", 35),
+        step("20.kill", 20, "an EXTERNAL SIGKILL (never stop()/forceKill) — the crash", 15),
+        step("20.reopenAndRecoveryOffered", 20, "a fresh boot reopens the path; the recovery candidate names the CRASHED docId", 60),
+        step("20.restoreAndSaveLands", 20, "restore forces dirty=true; Cmd-S lands the recovered marker on the real path; sidecar clears", 40),
+
+        step("21.cleanNotGated", 21, "officeDirtyFilePaths is empty for a clean, freshly-opened document", 10),
+        step("21.dirtyIsGated", 21, "officeDirtyFilePaths names a path after a real typed edit", 15),
+        step("21.readOnlyFormatNeverGates", 21, "a forced modifiedChanged(true) on a read-only-format doc never appears in officeDirtyFilePaths (T9 F3)", 20),
+
+        step("22.open", 22, "open a fresh scratch copy of gate.xlsx for the formula-bar drill", 35),
+        step("22.clickCell", 22, "a click lands a cell cursor + formula text in OfficeCursorStore", 15),
+        step("22.moveTracks", 22, "an arrow-key move changes the cell cursor/formula text — it TRACKS, not just appears once", 15),
+
+        step("23.open", 23, "open the committed two-slide.fodp — parts == 2 against real LOK", 35),
+        step("23.slide0Tile", 23, "fill slide 0's tile (0,0)", 25),
+        step("23.slide1Distinct", 23, "subscribeTiles(part: 1) — the rail's own door — fills a tile pixel-DISTINCT from slide 0", 25),
+
+        step("24.xlsmOpens", 24, "gate.xlsm (widened, read-only) opens with sane type/parts/size", 20),
+        step("24.odgOpens", 24, "gate.odg (widened, read-only) opens as .drawing with sane type/parts/size", 20),
+        step("24.cfbRefusal", 24, "legacy-doc.doc's own bytes renamed .docx refuse with the mapped house-voice sentence", 20),
+        step("24.livenessAfterRefusal", 24, "a fresh good document opens normally on the SAME helper right after the refusal", 20),
+
+        step("25.statePaths", 25, "every NEW scratch/helper path Stage B's drills touched still lives under this run's own root", 5),
+        step("25.userCachesUntouched", 25, "the real Application Support Office directory is STILL untouched after Stage B's own drills", 5)
     ]
 
     private static func step(_ id: String, _ drill: Int, _ title: String, _ timeout: TimeInterval) -> OfficeHarnessStep {

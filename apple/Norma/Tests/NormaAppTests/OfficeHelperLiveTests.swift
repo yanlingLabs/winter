@@ -778,6 +778,82 @@ final class OfficeHelperLiveTests: XCTestCase {
 
     // MARK: - Embedded root (carry #1: at least one test against the REAL built app)
 
+    /// **Known limitation, discovered live by office-editable Task 10 (task-10-report.md has the
+    /// full discriminator trail) — pinned the same way `testKnownLimitationLegacyBinaryImportDoes
+    /// NotOpenInThisVendorBuild` already pins ITS OWN vendor gap, so a future vendor/embed-recipe
+    /// fix is caught by a RED test here, not silently missed.**
+    ///
+    /// **Impress (`pptx`/`odp`) and Writer (`docx`/`odt`) documents fail to open — helper-killing,
+    /// "Unspecified Application Error" then a clean `exit()`, LOK's own already-characterized
+    /// legacy-format failure SIGNATURE (no crash report, confirmed: `~/Library/Logs/
+    /// DiagnosticReports/` gets no new `NormaOfficeHelper` entry) — SPECIFICALLY when the helper
+    /// resolves its LibreOffice install root the PRODUCTION way: the embedded, signed copy at
+    /// `<app>/Contents/Resources/LibreOffice` (`resolveInstallRoot()`'s no-`--lok-root`-override
+    /// branch — exactly what every real user's build takes, and what `OfficeHarness`'s own drill 2
+    /// exercises, never what any OTHER test in this file exercises).**
+    ///
+    /// **Four discriminators, each independently confirmed, rule out every other explanation:**
+    /// 1. **Not the CFB sniff** (`LOKBridge`, office-editable Task 10's own adopted release
+    ///    blocker) — reproduces identically with that guard's condition forced `false`.
+    /// 2. **Not "third document in a sequence" / accumulated helper state** — reproduces for
+    ///    `gate.pptx`/`gate.odt` even as the FIRST AND ONLY document opened on a freshly-booted
+    ///    helper (no `gate.xlsx`/`gate.ods` opened first).
+    /// 3. **Not a general vendor/LOK regression** — `testSixFormatsOpenWithSaneTypePartsAndSize`
+    ///    (same six fixtures, same LOK build, the SAME machine/run) passes cleanly via `--lok-root`
+    ///    pointing directly at the vendor tree. Calc (`xlsx`/`ods`) also opens cleanly via the
+    ///    EMBEDDED root — only Impress/Writer are affected, and only via that one resolution path.
+    /// 4. **Not stale/corrupted `DerivedData`** — reproduces identically against a brand-new,
+    ///    never-before-used `-derivedDataPath` (a from-scratch clean build).
+    ///
+    /// **Not something this task's own Swift-side code can fix**: `resolveInstallRoot()`'s path
+    /// arithmetic is verified correct (the embedded `Contents/Resources/LibreOffice` tree is
+    /// byte/file-count-IDENTICAL to the vendor `product-set/` tree — 3244 files each; Calc's own
+    /// successful opens prove the root itself resolves and loads), and `prepareUserProfile`'s
+    /// `--state-path`-rooted `UserInstallation` handling is identical for both resolution paths —
+    /// the divergence is inside vendored LOK's own C++ module registration/initialization for the
+    /// Impress/Writer service factories specifically, unreachable without vendor source access this
+    /// task does not have, and CLAUDE.md's own rule forbids touching the hash-pinned vendor closure
+    /// recipe regardless. Escalated in task-10-report.md as release-relevant (the EMBEDDED path IS
+    /// what ships) rather than silently absorbed.
+    func testKnownLimitationImpressAndWriterDocumentsFailToOpenViaTheEmbeddedInstallRootWhileCalcAndTheStandaloneLokRootBothWork() async throws {
+        let appBundleURL = Bundle.main.bundleURL
+        let embeddedHelperURL = appBundleURL.appendingPathComponent("Contents/MacOS/NormaOfficeHelper")
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: embeddedHelperURL.path),
+                      "NormaOfficeHelper was not embedded into this run's built app — this pin goes "
+                        + "live the moment a Debug build embeds it.")
+
+        // Calc — a FRESH helper's FIRST document, via the embedded root — must keep working. If this
+        // ever goes red too, the finding above is WRONG (broader than "Impress/Writer only") and
+        // this test's own header needs rewriting before anything else here is trusted.
+        do {
+            let helper = try await spawnLiveHelper(helperURL: embeddedHelperURL, installRoot: nil, sandboxProfilePath: nil)
+            let metadata = try await helper.client.open(docId: UUID().uuidString,
+                                                        path: Self.fixturesRoot.appendingPathComponent("gate.xlsx").path)
+            XCTAssertEqual(metadata.type, .spreadsheet, "sanity: Calc via the embedded root must still work")
+        }
+
+        // Impress/Writer — each its own FRESH helper's FIRST document (never a shared one — a dead
+        // helper from a prior fixture in this same loop must never be blamed for the NEXT fixture's
+        // own failure).
+        for fixture in ["gate.pptx", "gate.odp", "gate.docx", "gate.odt"] {
+            let helper = try await spawnLiveHelper(helperURL: embeddedHelperURL, installRoot: nil, sandboxProfilePath: nil)
+            let path = Self.fixturesRoot.appendingPathComponent(fixture).path
+            do {
+                _ = try await helper.client.open(docId: UUID().uuidString, path: path)
+                XCTFail("\(fixture): expected the KNOWN embedded-root limitation to reproduce (an "
+                        + "openFailed/timeout) — if this succeeded instead, the limitation was fixed; "
+                        + "delete this test and its own report section")
+            } catch {
+                // Any failure shape counts (a clean openFailed OR the connection dying under a
+                // timeout, per this file's own OfficeHelperClientError catch precedent elsewhere) —
+                // this pin's claim is "does not open cleanly," not a specific error text, since the
+                // exact failure shape (openFailed vs timedOut) depends on exactly where the helper
+                // dies relative to the reply, which this task's own evidence shows is not perfectly
+                // deterministic in timing (though the OUTCOME — no clean open — is).
+            }
+        }
+    }
+
     func testEmbeddedRootBootsAgainstTheRealBuiltAppAndBundleStaysUntouched() async throws {
         let appBundleURL = Bundle.main.bundleURL
         let embeddedHelperURL = appBundleURL.appendingPathComponent("Contents/MacOS/NormaOfficeHelper")

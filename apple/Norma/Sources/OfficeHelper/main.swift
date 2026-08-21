@@ -224,6 +224,16 @@ if let probeKind = args["sandbox-probe"] {
         let capturedErrno = errno // read IMMEDIATELY — nothing else runs between open() and this
         if fd >= 0 { close(fd) }
         print("PROBE_RESULT: \(probeKind) \(fd >= 0 ? "ok" : "denied") errno=\(capturedErrno)")
+        // office-editable Task 10 fix — `_exit(2)`'s own doc comment above names the reason `_exit`
+        // is used at all ("never running LibreOffice static destructors"), but `_exit` ALSO skips
+        // every atexit-registered stdio flush, unlike `exit(3)`. When stdout is not a TTY (every
+        // caller of this probe mode redirects it to a `Pipe` to capture the line — `OfficeSandboxTests
+        // .runProbe`, and this harness's own `runSandboxProbe`), libc stdio defaults to FULLY
+        // buffered, not line-buffered: confirmed empirically (piped stdout: zero bytes; a `script(1)`
+        // pty: the line prints correctly) — a real, latent bug this probe mode has always carried,
+        // caught live by office-editable Task 10's own harness drill 13 the first time this exact
+        // binary (embedded, no `--sandbox-profile` override) was driven outside an XCTest host.
+        fflush(stdout)
         _exit(0)
     case "connect-outbound":
         let fd = socket(AF_INET, SOCK_STREAM, 0)
@@ -246,6 +256,7 @@ if let probeKind = args["sandbox-probe"] {
         let capturedErrno = errno // read IMMEDIATELY — before close()
         close(fd)
         print("PROBE_RESULT: connect-outbound \(rc == 0 ? "ok" : "denied") errno=\(capturedErrno)")
+        fflush(stdout) // same fix, same reason — see the write-fence probe's own case above
         _exit(0)
     default:
         fail("unknown --sandbox-probe kind: \(probeKind)")
