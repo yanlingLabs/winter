@@ -3078,7 +3078,9 @@ final class OfficeRuntime: ObservableObject {
     /// The mapping itself — a known shape's sentence, or a generic, honest fallback that never
     /// repeats the raw text. `rawReason` is ALWAYS logged verbatim by this function's one caller
     /// (`describe(_:)`, immediately below) before this ever runs; this function's return value is
-    /// the ONLY thing that ever reaches a banner.
+    /// the only thing that ever reaches an OPEN-failure banner. (Not banners in general — `describe`
+    /// only routes `.openFailed`-shaped errors here; a `.saveFailed` banner carries its raw reason
+    /// verbatim, by a pinned pre-existing contract `describe(_:)`'s own header explains.)
     private static func houseErrorSentence(forRawReason rawReason: String) -> String {
         for shape in knownLOKErrorShapes where rawReason.localizedCaseInsensitiveContains(shape.needle) {
             return shape.sentence
