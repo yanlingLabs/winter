@@ -799,13 +799,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 512, height: 512),
                               styleMask: [.borderless], backing: .buffered, defer: true)
         window.contentView = view
-        let clickPoint = NSPoint(x: 10, y: 10)
-        let windowClickPoint = view.convert(clickPoint, to: nil)
-        func makeMouseEvent(_ type: NSEvent.EventType) -> NSEvent {
-            try! XCTUnwrap(NSEvent.mouseEvent(with: type, location: windowClickPoint, modifierFlags: [],
-                                              timestamp: 0, windowNumber: window.windowNumber, context: nil,
-                                              eventNumber: 0, clickCount: 1, pressure: 1))
-        }
+        // No click helper here — see below: this drill's own input proof is deliberately keyboard-only.
         func makeKeyEvent(_ type: NSEvent.EventType, characters: String, keyCode: UInt16) -> NSEvent {
             try! XCTUnwrap(NSEvent.keyEvent(with: type, location: .zero, modifierFlags: [], timestamp: 0,
                                             windowNumber: window.windowNumber, context: nil, characters: characters,
@@ -813,8 +807,98 @@ final class OfficeRuntimeLiveTests: XCTestCase {
                                             keyCode: keyCode))
         }
 
-        view.mouseDown(with: makeMouseEvent(.leftMouseDown))
-        view.mouseUp(with: makeMouseEvent(.leftMouseUp))
+        // **Fix round 3 (IMPORTANT-B) — the input interleave.** Without this, the paint detector
+        // above (and `view.mount()`'s own subscribe, both carrying their OWN `setView(A)` prefix)
+        // is the last thing to touch "current" before the click/typing below — A is ALREADY current
+        // by the time input runs, so deleting JUST `postKeyOnDedicatedThread`/
+        // `postMouseOnDedicatedThread`'s own `setView` lines would still leave this drill green (the
+        // re-review's own finding).
+        //
+        // **Two things this interleave must do, not one — found empirically, not assumed.** A
+        // straight port of the save interleave's own shape (touch ONLY B, right before the click)
+        // measured GREEN even with `postKeyOnDedicatedThread`/`postMouseOnDedicatedThread`'s own
+        // `setView` lines deliberately deleted. Two separate reasons, both traced, not guessed:
+        //
+        // (i) `two-sheet.ods` is well under `OfficeTileStore.residencyCapTiles` (128), so `view
+        // .mount()` (at `initialPart: 1`) kicks off `evaluateResidencyIfNeeded`'s own whole-document
+        // background prefetch sweep for A — an uncontrolled, asynchronous stream of
+        // `paintTileOnDedicatedThread` calls for A's OWN part, each carrying its OWN `setView(A)`
+        // (fix round 2) prefix, still actively repainting A well after a bare B-touch landed, racing
+        // it and winning. Drained first below (`prefetchSweepIssuedForTesting` — "every chunk of the
+        // CURRENT sweep was issued," per that property's own header — means no FURTHER paint call
+        // for A will originate from THIS sweep) so nothing but this interleave's own two touches and
+        // the click can touch "current."
+        //
+        // (ii) Even fully drained, a bare B-touch STILL measured green — a deeper reason, an
+        // interaction with fix round 3's OWN other finding (IMPORTANT-A): `paintTileOnDedicatedThread`
+        // now ALSO issues `setPart` (not just `setView`) on every paint, including the mount-time
+        // paint at `initialPart: 1` above. That paint already left A's OWN actual LOK-level part
+        // correctly at 1 BEFORE input ever runs — so input's own `setPart` call has nothing left to
+        // DO; a misdirected (view-less) `setPart(A.handle, 1)` while B is current is harmless BY
+        // ACCIDENT, since A never needed to move. Closed by making A's own part GENUINELY wrong right
+        // before the click: re-request A's OWN part 0 (the paint detector's own `aPart0Key`) — this
+        // paint carries its OWN correct `setView(A)`+`setPart(A, 0)` prefix (unaffected by any bug in
+        // the INPUT path) and genuinely moves A's real state to part 0 — THEN touch B, which moves
+        // "current" to B without touching A's part again. At that exact moment: A's own state is
+        // genuinely at part 0 (wrong for what's about to be typed), and B, not A, is current — so
+        // ONLY the input path's own correct `setView`-then-`setPart` can put A back at part 1 before
+        // the keystroke lands. Without it, the keystroke's own `postKeyEvent` (LOK's own stateful
+        // notion of "whichever part is currently active" — no part parameter in its own C API) lands
+        // on whatever part A is ACTUALLY still sitting at — part 0, sheet 1 — an already-asserted,
+        // directly observable failure via this drill's own save+reread below (the marker would appear
+        // on sheet 1, not sheet 2).
+        let sweepDrained = await waitUntil(timeout: 30) { view.prefetchSweepIssuedForTesting }
+        XCTAssertTrue(sweepDrained, "A's own background residency-prefetch sweep never finished issuing "
+                      + "its chunks — the input interleave below cannot discriminate anything while it's "
+                      + "still racing to repaint A")
+
+        // A DELIBERATELY FRESH key (`tileX: 3`, never requested anywhere else in this drill) — the
+        // origin tile (`aPart0Key`) is already cached from the paint detector above, and
+        // `requestNeeded`'s own dedup (`OfficeRuntime.swift`, shared by `.subscribe` and prefetch) is
+        // "a no-op for a key already re-cached or already in flight" — re-asking for an already-
+        // cached key is NOT guaranteed to reach the wire (or LOK) a second time. A never-before-seen
+        // key has no cache entry to satisfy, so this is guaranteed to issue a REAL
+        // `paintTileOnDedicatedThread(A, part: 0)` call — the thing that must actually move A's own
+        // LOK-level part to 0, not merely a Swift-level bookkeeping call.
+        //
+        // **Through the RAW client, not `runtime.subscribeTiles` — a second live-caught trap.** A
+        // first attempt used `runtime.subscribeTiles(path: pathA, part: 0, ...)` for this
+        // displacement, exactly like every other tile request in this file — and it broke the drill
+        // even WITH the real fix intact: `.subscribeRequested`'s own reducer case
+        // (`OfficeRuntime.swift`) sets `next.documents[path]?.activePart = part` as a SIDE EFFECT of
+        // any subscribe — so this "just displace LOK's own state" step ALSO silently told the
+        // REDUCER "the user is now looking at part 0," and `OfficeRuntime.postMouseEvent`/
+        // `postKeyEvent` read exactly that value to decide what part to put on the INPUT wire. The
+        // click/type below would then correctly (from the reducer's now-corrupted perspective) target
+        // part 0 — passing or failing regardless of the setView fix, for a reason that has nothing to
+        // do with it. The raw client's own `requestTiles(docId:keys:)` bypasses the reducer entirely
+        // (no `.subscribeRequested` dispatch, no `activePart` write) — a real LOK paint call with
+        // none of the app-level side effects, leaving `state.documents[pathA].activePart` at 1
+        // (whatever `view.mount()` established) throughout, exactly matching what a real user's next
+        // keystroke should target.
+        let aFreshPart0Key = TileKey(part: 0, zoomPPT: zoomPPT, tileX: 3, tileY: 0)
+        guard let rawClient = host.officeHelperSupervisor?.client else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("no live client to drive the displacement through")
+        }
+        try await rawClient.requestTiles(docId: docA.docId, keys: [aFreshPart0Key])
+        let aDisplacedToPart0 = await waitUntil(timeout: 30) { runtime.tileStore.tile(docId: docA.docId, key: aFreshPart0Key) != nil }
+        XCTAssertTrue(aDisplacedToPart0, "A's fresh part 0 tile (the interleave's own displacement) never arrived")
+
+        let bOriginKeyBeforeInput = TileKey(part: 0, zoomPPT: zoomPPT, tileX: 0, tileY: 0)
+        runtime.subscribeTiles(path: pathB, part: 0, zoomPPT: zoomPPT, viewportTwips: viewport)
+        let bTileArrivedBeforeInput = await waitUntil(timeout: 30) {
+            runtime.tileStore.tile(docId: docB.docId, key: bOriginKeyBeforeInput) != nil
+        }
+        XCTAssertTrue(bTileArrivedBeforeInput, "B's own tile request (the input interleave) never arrived")
+
+        // Deliberately NO click here (see `testDirectlyProvesTheInputPathsOwnSetViewPrefixIs
+        // LoadBearingBelowTheCanvasLayer`'s own header for the full mechanism, found AFTER this
+        // drill's own click-first shape measured green with setView deleted): `NSEvent`-driven
+        // `mouseDown` reaches `postMouseOnDedicatedThread`, whose posted LOK event is itself a VCL
+        // activation gesture that makes A current as a side effect, independent of this fix — no
+        // drill that clicks before typing can discriminate it. Typing directly at A1 (Calc's own
+        // no-click-needed edit start) is what actually proves the fix.
         // "T4EDIZ" — every character's physical keyCode already verified elsewhere in this file
         // (T/4/E/D/I in the single-document drill above, Z in the earlier typing-drill test) — no new
         // keyCode guesses introduced by this drill. Distinct from the single-document drill's own
@@ -863,7 +947,8 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         // `setView` prefix `postKeyOnDedicatedThread`/`postMouseOnDedicatedThread`/
         // `paintTileOnDedicatedThread` do, precisely because `.uno:Save` (dispatched via
         // `postUnoCommand`'s fire-and-forget follow-up, after the real `saveAs` C-API call) resolves
-        // its target frame through `comphelper::dispatchCommand`'s 3-argument overload
+        // its target frame through `comphelper::dispatchCommand` called with just (command,
+        // arguments) — the 2-argument call site, relying on a defaulted listener
         // (`comphelper/source/misc/dispatchcommand.cxx`) — `xDesktop->getActiveFrame()`, the SAME
         // process-global "current frame" concept `setPart` was found to misuse, not the document-
         // scoped `SfxLokHelper::getViewId` lookup `doc_postUnoCommand` performs earlier in its own
@@ -1020,13 +1105,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 512, height: 512),
                               styleMask: [.borderless], backing: .buffered, defer: true)
         window.contentView = view
-        let clickPoint = NSPoint(x: 10, y: 10)
-        let windowClickPoint = view.convert(clickPoint, to: nil)
-        func makeMouseEvent(_ type: NSEvent.EventType) -> NSEvent {
-            try! XCTUnwrap(NSEvent.mouseEvent(with: type, location: windowClickPoint, modifierFlags: [],
-                                              timestamp: 0, windowNumber: window.windowNumber, context: nil,
-                                              eventNumber: 0, clickCount: 1, pressure: 1))
-        }
+        // No click helper here — see the spreadsheet-B drill's own header: deliberately keyboard-only.
         func makeKeyEvent(_ type: NSEvent.EventType, characters: String, keyCode: UInt16) -> NSEvent {
             try! XCTUnwrap(NSEvent.keyEvent(with: type, location: .zero, modifierFlags: [], timestamp: 0,
                                             windowNumber: window.windowNumber, context: nil, characters: characters,
@@ -1034,8 +1113,40 @@ final class OfficeRuntimeLiveTests: XCTestCase {
                                             keyCode: keyCode))
         }
 
-        view.mouseDown(with: makeMouseEvent(.leftMouseDown))
-        view.mouseUp(with: makeMouseEvent(.leftMouseUp))
+        // Fix round 3 (IMPORTANT-B) — the input interleave; see the spreadsheet-B drill's own header
+        // for the full account of why this needs THREE steps (drain A's own background residency-
+        // prefetch sweep first, then genuinely displace A's own LOK-level part via a fresh never-
+        // cached key, then touch B) to actually discriminate the input path's own `setView` prefix —
+        // two simpler attempts (a bare B-touch; a bare B-touch after draining the sweep) both
+        // measured green with `postKeyOnDedicatedThread`/`postMouseOnDedicatedThread`'s own `setView`
+        // lines deliberately deleted, for reasons traced there, not guessed.
+        let sweepDrained = await waitUntil(timeout: 30) { view.prefetchSweepIssuedForTesting }
+        XCTAssertTrue(sweepDrained, "A's own background residency-prefetch sweep never finished issuing "
+                      + "its chunks — the input interleave below cannot discriminate anything while it's "
+                      + "still racing to repaint A")
+
+        // Through the RAW client, not `runtime.subscribeTiles` — see the spreadsheet-B drill's own
+        // header for why: `.subscribeRequested`'s reducer case sets `activePart` as a side effect,
+        // which would corrupt what the click/type below puts on the input wire regardless of the
+        // setView fix, for a reason that has nothing to do with it.
+        let aFreshPart0Key = TileKey(part: 0, zoomPPT: zoomPPT, tileX: 3, tileY: 0)
+        guard let rawClient = host.officeHelperSupervisor?.client else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("no live client to drive the displacement through")
+        }
+        try await rawClient.requestTiles(docId: docA.docId, keys: [aFreshPart0Key])
+        let aDisplacedToPart0 = await waitUntil(timeout: 30) { runtime.tileStore.tile(docId: docA.docId, key: aFreshPart0Key) != nil }
+        XCTAssertTrue(aDisplacedToPart0, "A's fresh part 0 tile (the interleave's own displacement) never arrived")
+
+        let bOriginKeyBeforeInput = TileKey(part: 0, zoomPPT: zoomPPT, tileX: 0, tileY: 0)
+        runtime.subscribeTiles(path: pathB, part: 0, zoomPPT: zoomPPT, viewportTwips: viewport)
+        let bTileArrivedBeforeInput = await waitUntil(timeout: 30) {
+            runtime.tileStore.tile(docId: docB.docId, key: bOriginKeyBeforeInput) != nil
+        }
+        XCTAssertTrue(bTileArrivedBeforeInput, "B's own tile request (the input interleave) never arrived")
+
+        // Deliberately NO click — see the spreadsheet-B drill's own header for the mechanism (a click
+        // is a VCL activation side effect independent of this fix).
         let marker = "T4EDIZ"
         let physicalKeyCodes: [Character: UInt16] = ["T": 17, "4": 21, "E": 14, "D": 2, "I": 34, "Z": 6]
         for character in marker {
@@ -1099,6 +1210,368 @@ final class OfficeRuntimeLiveTests: XCTestCase {
                        + "Writer document, never corrupted by anything done to A")
         runtime.close(pathB)
 
+        _ = host.teardownAllOfficeRuntimesAndStopHelper()
+    }
+
+    /// Fix round 3 (IMPORTANT-A) — **the discriminating drill for `getAlternativeViewForPaint`'s own
+    /// unfiltered scan.** Round 2's `setView` prefix closes `doc_paintPartTile`'s "no alternative
+    /// view found" branch (the direct `doc_setPartImpl` call) — but `getAlternativeViewForPaint`
+    /// (`desktop/source/lib/init.cxx:4387-4414`, this codebase's pinned LO commit `11482c8f`) has its
+    /// OWN, separate hazard: it searches every open view-shell for one already sitting at the
+    /// requested part/mode with a matching render-state string, with NO `DocId` filter — a bystander
+    /// document of ANY type can match. On a match, `doc_paintPartTile` skips `setPart` ENTIRELY
+    /// (`nViewId != nOrigViewId`, the "found an alternative" branch) and paints via the REQUESTING
+    /// document's own view, unmoved — `doc_paintTile`/`ScModelObj::paintTile` is instance-scoped, so
+    /// it renders whatever `pThis`'s own view is ACTUALLY sitting at, mislabeled as the requested
+    /// part.
+    ///
+    /// Round 2's own two drills never exercised this branch: both request part 0 THEN part 1 BEFORE
+    /// any typing, while A's view is still at its load-time default (part 0) — the part-1 request is
+    /// the only one with a mismatch to search over, and nothing is sitting at part 1 to match. This
+    /// drill inverts that: type into A's sheet 2 FIRST (moves A's own LOK-level part to 1 via the
+    /// existing input-path `setPart`), so a LATER "part 0" request is the one with a mismatch — with
+    /// B (freshly opened, sitting at LOK's own part-0/mode-0 defaults, never touched again) as
+    /// EXACTLY the kind of no-DocId-filtered false-positive match the finding names. B is a WRITER
+    /// document (`gate.odt`) deliberately — the finding's own most pointed phrasing ("a Writer
+    /// bystander matches every part-0 request unconditionally") is not a coincidence: a Writer
+    /// document's `getPart()`/`getEditMode()` trivially read 0/0 regardless of any real "sheet"
+    /// concept, maximizing the chance its render-state also coincides with a fresh Calc view's own.
+    ///
+    /// Remedy, chosen deliberately: `paintTileOnDedicatedThread` now issues `setPart(doc.handle,
+    /// key.part)` immediately after its existing `setView` prefix, BEFORE calling `paintPartTile`.
+    /// This does not merely narrow the search's blast radius — it prevents the search from ever
+    /// being reached at all: `doc_paintPartTile`'s own trigger condition
+    /// (`nPart != doc_getPart(pThis)`) is the FIRST thing it checks, and by the time it runs, `pThis`
+    /// own document is already sitting at the requested part — the mismatch that summons
+    /// `getAlternativeViewForPaint` never arises.
+    ///
+    /// **The caveat the remedy earns, checked, not assumed**: `setPart` genuinely moves the
+    /// document's own active-sheet state (`ScModelObj::setPart`'s own `pTabView->SelectTabPage`) —
+    /// calling it on every paint would be unsafe if any paint ever carried a part OTHER than the
+    /// canvas's own currently-active one (a background/prefetch paint silently stealing the "active
+    /// sheet" from under the user, corrupting what an ODS save records as selected). Checked directly
+    /// against this codebase, not assumed: `officeResidencyPrefetchOrder` (`OfficeTileCanvasView
+    /// .swift`) takes ONE `part` parameter and stamps every `TileKey` it produces with it; its one
+    /// call site, `evaluateResidencyIfNeeded`, passes `part: part` — the view's own current
+    /// `self.part`, always. There is no code path in this codebase that ever requests a tile for a
+    /// part other than the requesting canvas's own currently active one, so the simpler,
+    /// unconditional prefix (matching input's own established convention) is safe here — the more
+    /// complex tracked-current-part alternative was considered and set aside as solving a risk this
+    /// codebase's own call graph does not have.
+    func testRequestingPartZeroAfterTypingOnSheetTwoRendersSheetOneNotAStaleBystanderMatch() async throws {
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
+                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                        + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
+        let vendorRoot = Self.vendorProductSetRoot
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
+                      "LibreOffice vendor tree not present at \(vendorRoot.path) — run "
+                        + "`bun run libreoffice:fetch` from the repo root.")
+        let fixturePathA = Self.fixturesRoot.appendingPathComponent("two-sheet.ods").path
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: fixturePathA), "two-sheet.ods fixture missing")
+        let fixturePathB = Self.fixturesRoot.appendingPathComponent("gate.odt").path
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: fixturePathB), "gate.odt fixture missing")
+
+        let stateDir = makeScratchDirectory()
+        let directory = SessionDirectory(lister: { [] })
+        let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        host.makeOfficeHelperSupervisor = {
+            OfficeHelperSupervisor(configuration: OfficeHelperSupervisor.Configuration(
+                helperExecutableURL: helperURL,
+                socketDirectory: stateDir,
+                extraArguments: ["--lok-root", vendorRoot.path, "--sandbox-profile", Self.sandboxProfilePath.path]))
+        }
+        let runtime = host.officeRuntime(for: "S1")
+
+        let scratchDir = makeScratchDirectory()
+        let pathA = scratchDir.appendingPathComponent("doc-a-bystander-drill.ods").path
+        let pathB = scratchDir.appendingPathComponent("doc-b-bystander.odt").path
+        try Data(contentsOf: URL(fileURLWithPath: fixturePathA)).write(to: URL(fileURLWithPath: pathA))
+        try Data(contentsOf: URL(fileURLWithPath: fixturePathB)).write(to: URL(fileURLWithPath: pathB))
+
+        runtime.open(pathA)
+        let aSettled = await waitUntil(timeout: 90) {
+            runtime.stateSnapshot.documents[pathA] != nil || runtime.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(aSettled, "A never settled — phase: \(runtime.stateSnapshot.phase)")
+        guard let docA = runtime.stateSnapshot.documents[pathA] else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("A did not open: \(runtime.stateSnapshot.openFailures[pathA] ?? "no reason recorded")")
+        }
+        XCTAssertEqual(docA.parts, 2, "setup: A is the same two-sheet fixture as the other drills")
+
+        // B LAST — freshly opened, sitting at LOK's own part-0/mode-0 defaults, never touched again.
+        runtime.open(pathB)
+        let bSettled = await waitUntil(timeout: 90) {
+            runtime.stateSnapshot.documents[pathB] != nil || runtime.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(bSettled, "B never settled — phase: \(runtime.stateSnapshot.phase)")
+        guard runtime.stateSnapshot.documents[pathB] != nil else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("B did not open: \(runtime.stateSnapshot.openFailures[pathB] ?? "no reason recorded")")
+        }
+
+        // Type into A's sheet 2 FIRST — moves A's own LOK-level part to 1, so the LATER part-0
+        // request below is the one with a mismatch to search over (see this test's own header for
+        // why round 2's own drills never exercised this ordering).
+        let model = PanelDocumentTabModel(tabId: "bystander-drill-a", path: pathA)
+        let view = OfficeTileCanvasView(runtime: runtime, path: pathA, docId: docA.docId,
+                                        sizeTwips: docA.sizeTwips, initialPart: 1, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 512, height: 512)
+        view.mount()
+
+        let zoomPPT = 1000
+        let originKeyPart1 = TileKey(part: 1, zoomPPT: zoomPPT, tileX: 0, tileY: 0)
+        let baselineArrived = await waitUntil(timeout: 30) { runtime.tileStore.tile(docId: docA.docId, key: originKeyPart1) != nil }
+        XCTAssertTrue(baselineArrived, "sheet 2's own baseline tile never arrived — setup")
+
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 512, height: 512),
+                              styleMask: [.borderless], backing: .buffered, defer: true)
+        window.contentView = view
+        let clickPoint = NSPoint(x: 10, y: 10)
+        let windowClickPoint = view.convert(clickPoint, to: nil)
+        func makeMouseEvent(_ type: NSEvent.EventType) -> NSEvent {
+            try! XCTUnwrap(NSEvent.mouseEvent(with: type, location: windowClickPoint, modifierFlags: [],
+                                              timestamp: 0, windowNumber: window.windowNumber, context: nil,
+                                              eventNumber: 0, clickCount: 1, pressure: 1))
+        }
+        func makeKeyEvent(_ type: NSEvent.EventType, characters: String, keyCode: UInt16) -> NSEvent {
+            try! XCTUnwrap(NSEvent.keyEvent(with: type, location: .zero, modifierFlags: [], timestamp: 0,
+                                            windowNumber: window.windowNumber, context: nil, characters: characters,
+                                            charactersIgnoringModifiers: characters, isARepeat: false,
+                                            keyCode: keyCode))
+        }
+
+        view.mouseDown(with: makeMouseEvent(.leftMouseDown))
+        view.mouseUp(with: makeMouseEvent(.leftMouseUp))
+        let marker = "T4EDIZ"
+        let physicalKeyCodes: [Character: UInt16] = ["T": 17, "4": 21, "E": 14, "D": 2, "I": 34, "Z": 6]
+        for character in marker {
+            let keyCode = try XCTUnwrap(physicalKeyCodes[character])
+            let characters = String(character)
+            view.keyDown(with: makeKeyEvent(.keyDown, characters: characters, keyCode: keyCode))
+            view.keyUp(with: makeKeyEvent(.keyUp, characters: characters, keyCode: keyCode))
+        }
+        view.keyDown(with: makeKeyEvent(.keyDown, characters: "\r", keyCode: 36))
+        view.keyUp(with: makeKeyEvent(.keyUp, characters: "\r", keyCode: 36))
+
+        await runtime.drainInputChainForTesting()
+
+        let aBecameDirty = await waitUntil(timeout: 15) { runtime.stateSnapshot.documents[pathA]?.dirty == true }
+        XCTAssertTrue(aBecameDirty, "A's real edit never marked A dirty — setup")
+
+        // THE DISCRIMINATING REQUEST — directly, bypassing the canvas's own (possibly already-
+        // correct) `activePart`, exactly like the paint detector in the other two-document drills:
+        // request A's part 0 AND part 1 tiles and assert they render genuinely different pixels. The
+        // pre-fix bug's signature: with B a matching bystander, the part-0 request finds B via
+        // `getAlternativeViewForPaint`'s unfiltered scan, skips `setPart` entirely, and paints A's
+        // OWN view exactly as-is — still at part 1 — so the "part 0" and "part 1" tiles come back
+        // byte-identical (both showing sheet 2).
+        let originKeyPart0 = TileKey(part: 0, zoomPPT: zoomPPT, tileX: 0, tileY: 0)
+        let viewport = officeViewportTwips(scrollOrigin: .zero, visibleSize: CGSize(width: 256, height: 256), zoomPPT: zoomPPT)
+        runtime.subscribeTiles(path: pathA, part: 0, zoomPPT: zoomPPT, viewportTwips: viewport)
+        let part0Arrived = await waitUntil(timeout: 30) { runtime.tileStore.tile(docId: docA.docId, key: originKeyPart0) != nil }
+        XCTAssertTrue(part0Arrived, "A's part 0 tile never arrived, requested after typing on sheet 2 with B open")
+        let part0Pixels = try XCTUnwrap(runtime.tileStore.tile(docId: docA.docId, key: originKeyPart0), "A part 0").pixels
+
+        runtime.subscribeTiles(path: pathA, part: 1, zoomPPT: zoomPPT, viewportTwips: viewport)
+        let part1Arrived = await waitUntil(timeout: 30) { runtime.tileStore.tile(docId: docA.docId, key: originKeyPart1) != nil }
+        XCTAssertTrue(part1Arrived, "A's part 1 tile never arrived, requested after typing on sheet 2 with B open")
+        let part1Pixels = try XCTUnwrap(runtime.tileStore.tile(docId: docA.docId, key: originKeyPart1), "A part 1").pixels
+
+        XCTAssertNotEqual(part0Pixels, part1Pixels, "A's part 0 and part 1 tiles rendered IDENTICAL pixels "
+                          + "after typing moved A to sheet 2, with a bystander (B) open at part 0 — "
+                          + "getAlternativeViewForPaint's own unfiltered scan found B, skipped setPart "
+                          + "entirely, and painted A's own (still-sheet-2) view mislabeled as part 0")
+
+        // Round-trip proof: the part-0 tile's content must actually BE sheet 1 — not merely different
+        // from part 1's, which a different-but-still-wrong render would also satisfy. Save + read the
+        // real XML back, the same standard every other drill in this file holds itself to.
+        let beforeSaveStat = officeFileStat(atPath: pathA)
+        runtime.save(pathA)
+        let fileChanged = await waitUntil(timeout: 30) { officeFileStat(atPath: pathA) != beforeSaveStat }
+        XCTAssertTrue(fileChanged, "A's save never landed on disk")
+        let content = try readODFContentXML(atPath: pathA)
+        let sheet1XML = try XCTUnwrap(extractTableXML(content, sheetName: "Sheet1"), "Sheet1 must still exist")
+        let sheet2XML = try XCTUnwrap(extractTableXML(content, sheetName: "Sheet2"), "Sheet2 must still exist")
+        XCTAssertTrue(sheet2XML.contains(marker), "the typed marker must appear on SHEET 2")
+        XCTAssertFalse(sheet1XML.contains(marker), "the typed marker must NOT leak onto sheet 1")
+        XCTAssertTrue(sheet1XML.contains("NORMA GATE"), "sheet 1's own seed content must be untouched — "
+                      + "this is the save-side half of the same proof: the saved file's own ACTIVE part "
+                      + "reflects where the user's real typing left it (sheet 2), not wherever a stray "
+                      + "prefetch/paint last painted, since every paint's own part always matches the "
+                      + "requesting canvas's own active part in this codebase (see this test's own header)")
+
+        view.unmount()
+        runtime.close(pathA)
+        runtime.close(pathB)
+        _ = host.teardownAllOfficeRuntimesAndStopHelper()
+    }
+
+    /// Fix round 3 (IMPORTANT-B) — **the deletion-red proof, at the layer where the lines under test
+    /// actually live.** Earlier interleave designs (mounted-canvas, with a real `NSEvent`-driven click
+    /// before typing; this same drill's own first cut, also click-first) all measured GREEN with
+    /// `postKeyOnDedicatedThread`/`postMouseOnDedicatedThread`'s own `setView` lines deliberately
+    /// deleted. The actual confound, found by direct source read rather than by iterating on
+    /// interleave shape, is the CLICK itself, not the canvas: `ScModelObj::postMouseEvent`/
+    /// `::postKeyEvent` (`docuno.cxx:819`/`825`, this codebase's pinned LO commit `11482c8f`) resolve
+    /// their target window through `getDocWindow()` (`docuno.cxx:718-732`) →
+    /// `ScDocShell::GetBestViewShell(false)` (`docsh4.cxx:3085`) — INSTANCE-scoped, and
+    /// self-correcting: it takes `ScTabViewShell::GetActiveViewShell()` first, then explicitly
+    /// REJECTS it if `GetViewData().GetDocShell() != this`, falling back to a by-frame lookup scoped
+    /// to the target document — unlike `setPart`'s own resolution (`ScDocShell::GetViewData()`,
+    /// `docsh4.cxx:3069-3074`), which is the naive `SfxViewShell::Current()` dynamic_cast this whole
+    /// fix round is about. `SfxLokHelper::postKeyEventAsync`/`postMouseEventAsync`
+    /// (`lokhelper.cxx:1294-1375`) then take that already-resolved window directly and post the event
+    /// through VCL's own async queue — they do not re-resolve "current" at dispatch time. A mouse
+    /// button-down delivered to a window is itself a VCL/SFX activation gesture: posting it to A's
+    /// window (correctly resolved via `getDocWindow`'s own self-correction, with or without this
+    /// fix's `setView`) makes A's frame the process-global "current" one as a SIDE EFFECT of the click
+    /// landing — so by the time the FIRST keystroke's own `setPart` runs, A is already current by
+    /// accident, and the fix under test never gets a chance to matter. No drill that clicks before
+    /// typing can discriminate this fix, mounted-canvas or raw — confirmed by disabling `setView` and
+    /// observing GREEN across three independently-designed click-first drills before this was traced.
+    ///
+    /// **The actual proof: remove the click.** Calc's own real UX needs no click to start editing the
+    /// current cell — the cursor is already at A1 from `documentLoad`, and a keystroke alone enters
+    /// edit mode there (confirmed empirically: this drill, keyboard-only, still lands its marker with
+    /// the fix intact). This is also the more production-honest shape: a user who switches sheets via
+    /// the part strip (`setActivePart`) and types immediately never clicks the canvas first — `part`
+    /// riding the input wire on its own is exactly the scenario that needs proving. With the click
+    /// gone: raw `requestTiles` genuinely parks A at part 0 (the paint prefix's own
+    /// `setView`+`setPart`, unaffected by anything under test here); a second raw `requestTiles`
+    /// against B makes B current; a raw `postKey` (no `postMouse` at all) sequence with `part: 1` is
+    /// the ONLY thing left that can move A back to part 1 before the marker lands. Confirmed both
+    /// ways: GREEN with the fix intact, RED — `XCTAssertTrue failed - the typed marker must appear on
+    /// A's SHEET 2` — with `setView` deleted from both dedicated-thread input functions, restored
+    /// immediately after.
+    ///
+    /// **What this proves beyond "the marker lands correctly," matching the finding's own "any
+    /// second doc open" framing**: `ScModelObj::setPart`'s static resolution (re-verified at this
+    /// codebase's pinned LO commit `11482c8f`) means a misdirected `setPart(A.handle, 1)` — without
+    /// this fix — does not merely fail to move A; it ACTS on whichever document is current. B is a
+    /// Writer document here specifically so that action is a silent no-op (the `dynamic_cast`-fails
+    /// case): the marker lands on neither sheet, and B's own dirty flag never flips (confirmed: this
+    /// drill's disabled-build run shows exactly ONE failing assertion, the "must appear on sheet 2"
+    /// one). The sibling drill below, with B as a SECOND Calc document, demonstrates the OTHER half —
+    /// a Calc B accepts the misdirected call, and the marker leaks onto B's own current cell instead
+    /// (confirmed: three failing assertions there — B's dirty flag flips both before and after A's
+    /// save, plus the same "must appear on sheet 2" miss).
+    func testDirectlyProvesTheInputPathsOwnSetViewPrefixIsLoadBearingBelowTheCanvasLayer() async throws {
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
+                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                        + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
+        let vendorRoot = Self.vendorProductSetRoot
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
+                      "LibreOffice vendor tree not present at \(vendorRoot.path) — run "
+                        + "`bun run libreoffice:fetch` from the repo root.")
+        let fixturePathA = Self.fixturesRoot.appendingPathComponent("two-sheet.ods").path
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: fixturePathA), "two-sheet.ods fixture missing")
+        let fixturePathB = Self.fixturesRoot.appendingPathComponent("gate.odt").path
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: fixturePathB), "gate.odt fixture missing")
+
+        let stateDir = makeScratchDirectory()
+        let directory = SessionDirectory(lister: { [] })
+        let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        host.makeOfficeHelperSupervisor = {
+            OfficeHelperSupervisor(configuration: OfficeHelperSupervisor.Configuration(
+                helperExecutableURL: helperURL,
+                socketDirectory: stateDir,
+                extraArguments: ["--lok-root", vendorRoot.path, "--sandbox-profile", Self.sandboxProfilePath.path]))
+        }
+        let runtime = host.officeRuntime(for: "S1")
+
+        let scratchDir = makeScratchDirectory()
+        let pathA = scratchDir.appendingPathComponent("doc-a-raw-proof.ods").path
+        let pathB = scratchDir.appendingPathComponent("doc-b-raw-proof.odt").path
+        try Data(contentsOf: URL(fileURLWithPath: fixturePathA)).write(to: URL(fileURLWithPath: pathA))
+        try Data(contentsOf: URL(fileURLWithPath: fixturePathB)).write(to: URL(fileURLWithPath: pathB))
+
+        runtime.open(pathA)
+        let aSettled = await waitUntil(timeout: 90) {
+            runtime.stateSnapshot.documents[pathA] != nil || runtime.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(aSettled, "A never settled — phase: \(runtime.stateSnapshot.phase)")
+        guard let docA = runtime.stateSnapshot.documents[pathA] else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("A did not open: \(runtime.stateSnapshot.openFailures[pathA] ?? "no reason recorded")")
+        }
+        XCTAssertEqual(docA.parts, 2, "setup: A is the same two-sheet fixture as the other drills")
+
+        // B LAST — B's view becomes the process-global current one at load time.
+        runtime.open(pathB)
+        let bSettled = await waitUntil(timeout: 90) {
+            runtime.stateSnapshot.documents[pathB] != nil || runtime.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(bSettled, "B never settled — phase: \(runtime.stateSnapshot.phase)")
+        guard let docB = runtime.stateSnapshot.documents[pathB] else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("B did not open: \(runtime.stateSnapshot.openFailures[pathB] ?? "no reason recorded")")
+        }
+
+        guard let rawClient = host.officeHelperSupervisor?.client else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("no live client to drive this drill through")
+        }
+
+        // NO canvas view anywhere in this drill — no prefetch sweep, no invalidation-driven refetch,
+        // no healing actor. Genuinely park A at part 0, through a real paint (the paint prefix's own
+        // setView+setPart, unaffected by anything under test here).
+        let zoomPPT = 1000
+        let aPart0Key = TileKey(part: 0, zoomPPT: zoomPPT, tileX: 0, tileY: 0)
+        try await rawClient.requestTiles(docId: docA.docId, keys: [aPart0Key])
+        let aParkedAtPart0 = await waitUntil(timeout: 30) { runtime.tileStore.tile(docId: docA.docId, key: aPart0Key) != nil }
+        XCTAssertTrue(aParkedAtPart0, "A's part 0 tile never arrived — setup")
+
+        // Make B current — nothing left to touch "current" between here and the input below.
+        let bPart0Key = TileKey(part: 0, zoomPPT: zoomPPT, tileX: 0, tileY: 0)
+        try await rawClient.requestTiles(docId: docB.docId, keys: [bPart0Key])
+        let bCurrent = await waitUntil(timeout: 30) { runtime.tileStore.tile(docId: docB.docId, key: bPart0Key) != nil }
+        XCTAssertTrue(bCurrent, "B's part 0 tile never arrived — setup")
+
+        // THE PROOF — real input, part 1 (sheet 2), with B still current. Only the input path's own
+        // setView+setPart can move A from its parked part 0 back to part 1 before the marker lands.
+        // Deliberately NO postMouse here — see this test's own header: a click is itself a VCL
+        // activation gesture that makes A's frame current as a side effect, independent of this fix,
+        // which would make this drill pass regardless of whether setView is present. Calc needs no
+        // click to start editing the current cell (A1, from load), so the keystrokes alone are the
+        // whole proof.
+        let marker = "T4EDIT"
+        let keyCodes: [Character: Int] = [
+            "T": 531 | 0x1000, "E": 516 | 0x1000, "D": 515 | 0x1000, "I": 520 | 0x1000, "4": 260,
+        ]
+        for character in marker {
+            let keyCode = try XCTUnwrap(keyCodes[character])
+            let charCode = try XCTUnwrap(character.asciiValue.map(Int.init))
+            try await rawClient.postKey(docId: docA.docId, part: 1, type: .keyInput, charCode: charCode, keyCode: keyCode)
+            try await rawClient.postKey(docId: docA.docId, part: 1, type: .keyUp, charCode: charCode, keyCode: keyCode)
+        }
+        // Return — commits the pending Calc cell edit.
+        try await rawClient.postKey(docId: docA.docId, part: 1, type: .keyInput, charCode: 0, keyCode: 1280)
+        try await rawClient.postKey(docId: docA.docId, part: 1, type: .keyUp, charCode: 0, keyCode: 1280)
+
+        let becameDirty = await waitUntil(timeout: 15) { runtime.stateSnapshot.documents[pathA]?.dirty == true }
+        XCTAssertTrue(becameDirty, "A's real edit never marked A dirty")
+
+        let beforeSaveStat = officeFileStat(atPath: pathA)
+        runtime.save(pathA)
+        let fileChanged = await waitUntil(timeout: 30) { officeFileStat(atPath: pathA) != beforeSaveStat }
+        XCTAssertTrue(fileChanged, "A's save never landed on disk")
+
+        let content = try readODFContentXML(atPath: pathA)
+        let sheet1XML = try XCTUnwrap(extractTableXML(content, sheetName: "Sheet1"), "Sheet1 must still exist")
+        let sheet2XML = try XCTUnwrap(extractTableXML(content, sheetName: "Sheet2"), "Sheet2 must still exist")
+        XCTAssertTrue(sheet2XML.contains(marker), "the typed marker must appear on A's SHEET 2 — this is "
+                      + "the input path's OWN setView+setPart prefix moving A from its parked part 0 "
+                      + "back to part 1, with nothing else around to do it")
+        XCTAssertFalse(sheet1XML.contains(marker), "the typed marker must NOT leak onto A's sheet 1 — "
+                      + "without the fix, this is exactly where it would land (A stays parked at part "
+                      + "0 because the misdirected setPart acts on B, a Writer document, instead)")
+        XCTAssertTrue(sheet1XML.contains("NORMA GATE"), "A's sheet 1 seed content must be untouched")
+
+        runtime.close(pathA)
+        runtime.close(pathB)
         _ = host.teardownAllOfficeRuntimesAndStopHelper()
     }
 
