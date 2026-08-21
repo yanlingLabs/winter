@@ -858,6 +858,13 @@ final class OfficeRuntime: ObservableObject {
     /// scopes every entry by `docId`).
     let tileStore = OfficeTileStore()
 
+    /// Office Stage B Task 5 — the caret/selection/cell-cursor sibling to `tileStore` above, on the
+    /// identical "heavy/high-frequency, must never ride `@Published state`" reasoning — see
+    /// `OfficeCursorStore`'s own header. Evicted at every site `tileStore` itself is (close, reload,
+    /// teardown, helper death/unavailability) — grep `tileStore.evict` for the exact call sites this
+    /// mirrors, one line below each.
+    let cursorStore = OfficeCursorStore()
+
     private let driver: Driver
     private let makeDocId: () -> String
     /// office-plumbing Task 8: how a watch is made — the SAME seam `EditorRuntime` was already built
@@ -1193,9 +1200,11 @@ final class OfficeRuntime: ObservableObject {
             // .evictEverything`'s own header for why this is the sweep that keeps a dead-connection
             // in-flight marker from wedging a placeholder forever.
             tileStore.evictEverything()
+            cursorStore.evictEverything()
             perform(dispatch(.helperDied))
         case .helperUnavailable:
             tileStore.evictEverything()
+            cursorStore.evictEverything()
             perform(dispatch(.helperUnavailable))
         }
     }
@@ -1205,16 +1214,36 @@ final class OfficeRuntime: ObservableObject {
     /// not a second wiring site, is where a fresh client's callbacks are re-pointed on every helper
     /// relaunch), by docId, the same way `officeRuntime(owning:)` routes tile pushes one level up.
     ///
-    /// Only `.modifiedChanged` has anything for THIS door to do — `.invalidated` (the only other
-    /// case Stage A/B's `LOKBridge` ever actually constructs, per `OfficeDocumentEvent`'s own
-    /// header) is already routed separately, through `onInvalidated`/`OfficeTileStore.invalidate`;
+    /// **Office Stage B Task 5** — gained a SECOND arm, deliberately NOT routed through
+    /// `dispatch`/`perform` the way `.modifiedChanged` is: caret/selection/cell-cursor events fire at
+    /// keystroke/drag frequency, and `dispatch` reassigns the WHOLE `@Published state` value on every
+    /// call — exactly the SwiftUI-invalidation churn `OfficeTileStore`'s own header already forbids
+    /// for tile bytes, now extended to this store too (advisor review, this task). `cursorStore.apply`
+    /// is the direct, `@Published`-free equivalent of `tileStore.invalidate` one door up
+    /// (`onInvalidated`'s own wiring) — same reasoning, same bypass, same MainActor-hop-already-done
+    /// threading contract (`wireOfficeTileCallbacks`'s own `Task { @MainActor ... }`).
+    ///
+    /// `activePart` is resolved here, not carried on the wire — none of the three new callback types
+    /// (`INVALIDATE_VISIBLE_CURSOR`/`TEXT_SELECTION`/`CELL_CURSOR`) carry a part number in their own
+    /// LOK payload (unlike `INVALIDATE_TILES`), so "which part was this rect computed against" has to
+    /// come from the SAME `DocumentEntry.activePart` the input verbs themselves read — the identical
+    /// docId->path resolution `.modifiedStatusChanged`'s own reducer arm already uses one door down.
+    ///
     /// `.opened`/`.openFailed`/`.closed` are never sent this way at all in Stage A/B (their own
-    /// direct, seq-correlated reply frames cover `open`/`close`). An unrecognized/irrelevant case
-    /// here is silently ignored, the same "not every callback has Stage A/B meaning" posture
-    /// `LOKBridge.handleCallback` already takes toward LOK's raw callback types one layer down.
+    /// direct, seq-correlated reply frames cover `open`/`close`) — the two remaining cases
+    /// (`.invalidated`, routed through `onInvalidated`/`OfficeTileStore.invalidate` one door up) fall
+    /// through the `default` arm here, matching `LOKBridge.handleCallback`'s own "not every callback
+    /// has Stage A/B meaning" posture toward LOK's raw callback types one layer down.
     func handle(documentEvent event: OfficeDocumentEvent, docId: String) {
-        guard case .modifiedChanged(let modified) = event else { return }
-        perform(dispatch(.modifiedStatusChanged(docId: docId, modified: modified)))
+        switch event {
+        case .modifiedChanged(let modified):
+            perform(dispatch(.modifiedStatusChanged(docId: docId, modified: modified)))
+        case .caretRect, .textSelection, .textSelectionStart, .textSelectionEnd, .cellCursor:
+            let activePart = state.documents.first(where: { $0.value.docId == docId })?.value.activePart ?? 0
+            cursorStore.apply(docId: docId, event: event, activePart: activePart)
+        case .opened, .openFailed, .invalidated, .closed:
+            return
+        }
     }
 
     // MARK: The reducer, driven
@@ -1251,6 +1280,7 @@ final class OfficeRuntime: ObservableObject {
                 // record of it left to overwrite, and nothing downstream ever asks for that docId
                 // again — see `OfficeTileStore`'s own header on why a late arrival here is bounded).
                 tileStore.evictAll(docId: oldDocId)
+                cursorStore.evict(docId: oldDocId)
                 Task { [driver] in await driver.close(oldDocId) }
                 // Task 2b — and the old docId's own staged copy, the identical reasoning: grouped
                 // here with the tile/close cleanup above rather than as a second reducer-emitted
@@ -1276,6 +1306,7 @@ final class OfficeRuntime: ObservableObject {
                 // Task 6: the store's own docId-scoped entries die with the document — see
                 // `OfficeTileStore.evictAll`'s own header.
                 tileStore.evictAll(docId: docId)
+                cursorStore.evict(docId: docId)
                 Task { [driver] in await driver.close(docId) }
 
             case .subscribe(let docId, let part, let zoomPPT, let viewportTwips):
@@ -1919,6 +1950,7 @@ final class OfficeRuntime: ObservableObject {
             // Task 6: same store hygiene as the single-document close path — see
             // `OfficeTileStore.evictAll`'s own header.
             tileStore.evictAll(docId: docId)
+            cursorStore.evict(docId: docId)
             Task { [driver] in await driver.close(docId) }
         }
         // Task 8: every watch this runtime owns dies HERE, unconditionally — mirrors
