@@ -2159,12 +2159,28 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
         let path = fixturesScratchDir.appendingPathComponent("t10-formulabar-drill.xlsx").path
         runtime.postMouseEvent(path: path, type: .buttonDown, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
         runtime.postMouseEvent(path: path, type: .buttonUp, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
-        let landed = await waitUntil(timeout: 15) { self.runtime.cursorStore.state(docId: self.t22DocId).cellCursor != nil }
-        guard landed else { return (false, "no cellCursor reached OfficeCursorStore after the click") }
+        // Live-run-caught (office-editable Task 10, third recorded run): `LOK_CALLBACK_CELL_CURSOR`
+        // and `LOK_CALLBACK_CELL_FORMULA` are TWO SEPARATE callbacks, not one atomic delivery —
+        // waiting only for `cellCursor` (as this step's own first cut did, and as T8's own live test
+        // does too, immediately asserting `cellFormulaText` with no separate wait right after its
+        // own identical `cellCursor`-only wait) raced a genuinely late formula-text arrival under
+        // this run's own heavier load (many drills' worth of helper churn ahead of this one) and
+        // caught this step reading `nil`. Waiting for BOTH fields is strictly more correct — it
+        // narrows nothing this step already asserted, it only stops reading before both callbacks
+        // have actually landed.
+        let landed = await waitUntil(timeout: 15) {
+            let state = self.runtime.cursorStore.state(docId: self.t22DocId)
+            return state.cellCursor != nil && state.cellFormulaText != nil
+        }
+        guard landed else {
+            let state = runtime.cursorStore.state(docId: t22DocId)
+            return (false, "cellCursor=\(String(describing: state.cellCursor)) "
+                          + "cellFormulaText=\(String(describing: state.cellFormulaText)) — one or "
+                          + "both never reached OfficeCursorStore after the click")
+        }
         let state = runtime.cursorStore.state(docId: t22DocId)
         t22FirstCellCursor = state.cellCursor
         t22FirstFormulaText = state.cellFormulaText
-        guard state.cellFormulaText != nil else { return (false, "cellFormulaText is nil after the click — the formula bar's own content source") }
         return (true, "a click landed cellCursor=\(String(describing: state.cellCursor)) "
                      + "cellFormulaText=\"\(state.cellFormulaText ?? "nil")\"")
     }
