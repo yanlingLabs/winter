@@ -526,6 +526,72 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         _ = host.teardownAllOfficeRuntimesAndStopHelper()
     }
 
+    /// **Task 2b fix round 1 (review IMPORTANT-1), live proof, minimal by design** — the unit tests
+    /// in `OfficeStageDocumentTests` already prove the STAGED FILE's own permissions/flags are
+    /// normalized; this is the one live check that LOK itself treats the result as genuinely
+    /// editable, not merely that the bytes on disk look right. Deliberately does not repeat the
+    /// tripwire's own save/close/reopen/pixel dance — `becameDirty` alone is what IMPORTANT-1's own
+    /// claim is about (a `0444` real document staging into an identically read-only copy would
+    /// reproduce Task 2's own `chmod 444` read-only-medium bug, and this is its exact symptom: a
+    /// debug edit that mutates the in-memory model but can never flip the modified flag on a
+    /// read-only medium).
+    func testOpeningADocumentStagedFromAReadOnlySourceStillBecomesEditable() async throws {
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent()
+            .appendingPathComponent("NormaOfficeHelper")
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
+                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                        + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
+        let vendorRoot = Self.vendorProductSetRoot
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
+                      "LibreOffice vendor tree not present at \(vendorRoot.path) — run "
+                        + "`bun run libreoffice:fetch` from the repo root.")
+        let fixturePath = Self.fixturesRoot.appendingPathComponent("gate.ods").path
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: fixturePath), "gate.ods fixture missing")
+
+        let stateDir = makeScratchDirectory()
+        let directory = SessionDirectory(lister: { [] })
+        let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        host.makeOfficeHelperSupervisor = {
+            OfficeHelperSupervisor(configuration: OfficeHelperSupervisor.Configuration(
+                helperExecutableURL: helperURL,
+                socketDirectory: stateDir,
+                extraArguments: ["--lok-root", vendorRoot.path, "--sandbox-profile", Self.sandboxProfilePath.path]))
+        }
+        let runtime = host.officeRuntime(for: "S1")
+
+        // The real document — READ-ONLY, per IMPORTANT-1's own scenario, restored to writable in a
+        // `defer` so this scratch dir's own teardown can still remove it.
+        let scratchDir = makeScratchDirectory()
+        let docPath = scratchDir.appendingPathComponent("readonly-gate.ods").path
+        try Data(contentsOf: URL(fileURLWithPath: fixturePath)).write(to: URL(fileURLWithPath: docPath))
+        try FileManager.default.setAttributes([.posixPermissions: 0o444], ofItemAtPath: docPath)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: docPath) }
+
+        runtime.open(docPath)
+        let settled = await waitUntil(timeout: 90) {
+            runtime.stateSnapshot.documents[docPath] != nil || runtime.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(settled, "never settled — phase: \(runtime.stateSnapshot.phase)")
+        guard let doc = runtime.stateSnapshot.documents[docPath] else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("did not open: \(runtime.stateSnapshot.openFailures[docPath] ?? "no reason recorded")")
+        }
+        let docId = doc.docId
+
+        guard let client = host.officeHelperSupervisor?.client else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("no live client to drive the debug edit door through")
+        }
+        try await client.debugEdit(docId: docId, text: "T2b-FIX-ROUND-1-READONLY-SOURCE")
+
+        let becameDirty = await waitUntil(timeout: 15) { runtime.stateSnapshot.documents[docPath]?.dirty == true }
+        XCTAssertTrue(becameDirty, "a document staged from a READ-ONLY real path must still open "
+                      + "genuinely writable — IMPORTANT-1's own claim, live")
+
+        runtime.close(docPath)
+        _ = host.teardownAllOfficeRuntimesAndStopHelper()
+    }
+
     // MARK: - office live-gate fix #3: whole-document tile residency's own live proof
 
     /// A single-sheet flat ODS whose USED RANGE is forced far larger than `gate.xlsx`'s tiny real

@@ -1,5 +1,8 @@
 import XCTest
 @testable import Norma
+#if canImport(Darwin)
+import Darwin
+#endif
 
 /// Office Stage A Task 5 — `OfficeRuntimeReducer`, PURE: no supervisor, no helper process, no
 /// socket. Mirrors `EditorRuntimeReducerTests`' own shape (a `reduce(state, [events])` fold plus a
@@ -1896,5 +1899,65 @@ final class OfficeStageDocumentTests: XCTestCase {
     func testDeleteStagedCopyIsASafeNoOpWhenNothingMatchesOrTheDirectoryDoesNotExistAtAll() {
         let docsDir = makeScratchDirectory().appendingPathComponent("never-created", isDirectory: true)
         OfficeRuntime.deleteStagedCopy(docId: "doc-1", docsDirectory: docsDir) // must not throw/crash
+    }
+
+    // MARK: - Task 2b fix round 1 (review IMPORTANT-1): the staged copy's own metadata is normalized
+
+    /// **`copyfile` preserves the SOURCE's mode by design** — a real document opened read-only
+    /// (`0444`, no owner-write bit) would otherwise stage into an identically read-only copy,
+    /// silently reproducing the exact bug this task exists to fix. Proven by actually writing to the
+    /// staged copy (stronger than only inspecting the permission bits) and by deleting it through
+    /// the SAME door `close`/teardown/reload use — a staged copy that stages read-only but merely
+    /// LOOKS deletable would still be the bug, just a different symptom.
+    func testStagingA0444SourceProducesAWritableAndDeletableStagedCopy() throws {
+        let realDir = makeScratchDirectory()
+        let realPath = realDir.appendingPathComponent("readonly.xlsx")
+        try "original content".write(to: realPath, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o444], ofItemAtPath: realPath.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: realPath.path) }
+        let docsDir = makeScratchDirectory()
+        let stagedPath = docsDir.appendingPathComponent("doc-1.xlsx")
+
+        try OfficeRuntime.stageDocument(realPath: realPath.path, stagedPath: stagedPath.path)
+
+        let mode = (try FileManager.default.attributesOfItem(atPath: stagedPath.path))[.posixPermissions] as? Int
+        XCTAssertEqual(mode, 0o600, "the staged copy must be normalized to owner read-write, "
+                       + "regardless of the real document's own read-only mode")
+        XCTAssertNoThrow(try "edited by LOK".write(to: stagedPath, atomically: true, encoding: .utf8),
+                         "a permission bit that merely LOOKS right is not the claim — the staged "
+                         + "copy must genuinely accept a write")
+        XCTAssertEqual(try String(contentsOf: stagedPath, encoding: .utf8), "edited by LOK")
+
+        OfficeRuntime.deleteStagedCopy(docId: "doc-1", docsDirectory: docsDir)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stagedPath.path), "the sweep must be "
+                       + "able to remove a copy staged from a read-only source")
+    }
+
+    /// **The worse half of the same finding**: a Finder-Locked source (`UF_IMMUTABLE`) additionally
+    /// defeats plain deletion, not just writes — `deleteStagedCopy` and the `docs/` boot sweep are
+    /// both `try?`-wrapped best-effort removals that would fail SILENTLY against it, leaking the
+    /// staged copy forever. `chflags` must run before the permissions fix — an immutable file
+    /// refuses `chmod` too, so getting the order backwards would leave this exact scenario broken.
+    func testStagingAFinderLockedSourceProducesAWritableAndDeletableStagedCopy() throws {
+        let realDir = makeScratchDirectory()
+        let realPath = realDir.appendingPathComponent("locked.xlsx")
+        try "original content".write(to: realPath, atomically: true, encoding: .utf8)
+        XCTAssertEqual(chflags(realPath.path, UInt32(UF_IMMUTABLE)), 0, "setup: the source is Finder-Locked")
+        defer { chflags(realPath.path, 0) } // let tearDown's own scratchDirs sweep actually remove it
+        let docsDir = makeScratchDirectory()
+        let stagedPath = docsDir.appendingPathComponent("doc-1.xlsx")
+
+        try OfficeRuntime.stageDocument(realPath: realPath.path, stagedPath: stagedPath.path)
+
+        var info = stat()
+        XCTAssertEqual(stat(stagedPath.path, &info), 0)
+        XCTAssertEqual(info.st_flags & UInt32(UF_IMMUTABLE), 0, "the staged copy must not inherit "
+                       + "the source's own immutable flag")
+        XCTAssertNoThrow(try "edited by LOK".write(to: stagedPath, atomically: true, encoding: .utf8))
+        XCTAssertEqual(try String(contentsOf: stagedPath, encoding: .utf8), "edited by LOK")
+
+        OfficeRuntime.deleteStagedCopy(docId: "doc-1", docsDirectory: docsDir)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stagedPath.path), "an immutable SOURCE "
+                       + "must never leak an undeletable staged copy behind it")
     }
 }

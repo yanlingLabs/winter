@@ -504,20 +504,34 @@ final class LOKBridge: OfficeDocumentBridge {
     /// tripwire alone cannot tell "`.uno:Save` worked" apart from "it silently no-op'd and the
     /// fallback carried the whole test," and the one filesystem tell — `saves/` staying empty — is
     /// destroyed by test teardown before anyone could look) recorded, for BOTH `.ods` and `.odt`:
-    /// `.uno:Save` never changed the staged file's own stat at all — a true no-op in this headless
-    /// embedding, not merely slow or async. `saveAs` is therefore the ONLY mechanism that ever
-    /// persisted real bytes, in EVERY save this task's own live testing ever ran, and is what
-    /// PERSISTS the document — the probe machinery built to decide this (`attemptUnoSaveOnDedicated
-    /// Thread`, the local stat-fingerprint pair, the stderr discriminator) was removed entirely once
-    /// the decision was made, no dead machinery kept.
+    /// **`.uno:Save`, dispatched fire-and-forget (`postUnoCommand`'s own `bNotifyWhenFinished:
+    /// false`) and re-stat'd immediately, on the same thread, showed no observable change to the
+    /// staged file's stat under that measurement.**
+    ///
+    /// **Fix round 1 (review IMPORTANT-2) — the claim above is deliberately narrower than an
+    /// earlier version of this comment stated.** A same-thread re-stat taken right after a fire-
+    /// and-forget dispatch cannot distinguish "genuinely a no-op" from "the command simply had not
+    /// completed yet by the time of the re-stat" — "true no-op … not merely slow or async" overclaimed
+    /// exactly the distinction this measurement has no way to make. The measurement was ALSO taken
+    /// with `.uno:Save` dispatched BEFORE `saveAs` (the dual-branch probe's own order); the shipped
+    /// code below dispatches it AFTER `saveAs`, an ordering never independently measured for its own
+    /// file-persistence effect. None of this changes the DECISION — `saveAs` is the only mechanism
+    /// that ever visibly persisted real bytes, in every save this task's own live testing ran, and
+    /// is what PERSISTS the document — only the RATIONALE recorded for it, which now claims no more
+    /// than what was actually observed. The probe machinery built to reach this decision
+    /// (`attemptUnoSaveOnDedicatedThread`, the local stat-fingerprint pair, the stderr discriminator)
+    /// was removed once the decision was made, no dead machinery kept.
     ///
     /// **`.uno:Save` still has ONE job left, discovered by the very next thing this task tried**: a
     /// live run against the fully-stripped code (probe gone, `saveAs` the only call) found `saveAs`
     /// alone never clears `ModifiedStatus` — I1's own live post-save dirty-clears wait failed, on
     /// BOTH formats, the moment `.uno:Save` was removed. Re-added below, unconditionally, AFTER a
-    /// successful `saveAs` — not as a competing persistence mechanism (nothing here trusts its file-
-    /// write effect, confirmed null above), purely for the `ModifiedStatus=false` it is empirically
-    /// the one thing that fires. See the call site's own comment for the full account.
+    /// successful `saveAs` (the SHIPPED ordering, not the ordering measured above) — not as a
+    /// competing persistence mechanism (nothing here trusts its file-write effect either way), but
+    /// because it is empirically required for `ModifiedStatus=false` to fire IN THAT SHIPPED
+    /// ORDERING — proven live, by I1's own wait, not inferred from the Stage 1 measurement above.
+    /// The mechanism by which it clears the flag was not root-caused (LO-internal, not this task's
+    /// to chase) — see the call site's own comment for the full account.
     private func saveAsOnDedicatedThread(docId: String, seq: UInt64) throws -> String {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
         guard let format = doc.saveFormat else {

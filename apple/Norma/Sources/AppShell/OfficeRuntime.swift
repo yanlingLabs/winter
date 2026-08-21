@@ -1631,6 +1631,31 @@ final class OfficeRuntime: ObservableObject {
                     "The document couldn't be staged: \(String(cString: strerror(errno)))."
             ])
         }
+        // **Task 2b fix round 1 (review IMPORTANT-1)** — `copyfile`'s single call above covers BOTH
+        // its own internal paths (an APFS `clonefile`, or the plain-copy fallback when cloning
+        // cannot apply): either way it faithfully preserves the SOURCE's mode, flags, and ACLs by
+        // design, which is exactly wrong here. A real document opened `0444` (read-only permission
+        // bits) or Finder-Locked (`UF_IMMUTABLE`) stages into an identically read-only/immutable
+        // copy — silently reproducing the EXACT read-only-medium bug this task exists to fix (Task
+        // 2's own in-repo `chmod 444` probe is what first proved that mechanism). Immutable is
+        // worse than merely read-only: `UF_IMMUTABLE` also defeats `deleteStagedCopy` and the
+        // `docs/` boot sweep, both `try?`-wrapped best-effort removals that fail silently against
+        // it, leaking the copy forever. Order matters: flags MUST clear before the chmod below —
+        // `UF_IMMUTABLE` blocks permission changes too, not just writes.
+        guard chflags(stagedPath, 0) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno), userInfo: [
+                NSLocalizedDescriptionKey:
+                    "The staged copy's flags couldn't be cleared: \(String(cString: strerror(errno)))."
+            ])
+        }
+        do {
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: stagedPath)
+        } catch {
+            throw NSError(domain: NSPOSIXErrorDomain, code: (error as NSError).code, userInfo: [
+                NSLocalizedDescriptionKey:
+                    "The staged copy couldn't be made writable: \(error.localizedDescription)"
+            ])
+        }
     }
 
     /// **Office Stage B Task 2b (I3) — removes `docId`'s own staged copy, whatever its extension.**
