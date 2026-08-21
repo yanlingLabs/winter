@@ -641,6 +641,7 @@ final class AppLifecycleTests: XCTestCase {
             close: { _ in }, save: { _, _ in "/tmp/live-dirty-gate-unused-save" },
             subscribeTiles: { _, _, _, _ in [] }, unsubscribeTiles: { _ in }, requestTiles: { _, _ in },
             postKey: { _, _, _, _, _ in }, postMouse: { _, _, _, _, _, _, _, _ in },
+            postExtTextInput: { _, _, _, _ in },
             stateDirectory: FileManager.default.temporaryDirectory
                 .appendingPathComponent("live-dirty-gate-state-\(UUID().uuidString)", isDirectory: true))
     }

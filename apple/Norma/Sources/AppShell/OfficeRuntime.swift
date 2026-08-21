@@ -827,6 +827,11 @@ final class OfficeRuntime: ObservableObject {
         var postKey: (_ docId: String, _ part: Int, _ type: OfficeKeyEventType, _ charCode: Int, _ keyCode: Int) async -> Void
         var postMouse: (_ docId: String, _ part: Int, _ type: OfficeMouseEventType, _ xTwips: Int64, _ yTwips: Int64,
                         _ count: Int, _ buttons: Int, _ modifiers: Int) async -> Void
+        /// Office Stage B Task 5 — the IME door, same fire-and-forget posture and same
+        /// `officeRequestQueue` routing as `postKey`/`postMouse` above. See
+        /// `OfficeRuntime.postExtTextInput`'s own header for why it joins `postKey`/`postMouse`'s
+        /// SAME `inputChainTail` ordering chain rather than a chain of its own.
+        var postExtTextInput: (_ docId: String, _ part: Int, _ type: OfficeExtTextInputType, _ text: String) async -> Void
         /// **Office Stage B Task 2b — the shared helper's own `--state-path`.** A plain stored
         /// value, unlike every sibling above: it is a FACT about the shared supervisor's
         /// configuration (`OfficeHelperSupervisor.statePath`, exposing `Configuration
@@ -1110,9 +1115,30 @@ final class OfficeRuntime: ObservableObject {
         }
     }
 
+    /// Office Stage B Task 5 — same door, same `inputChainTail` ordering chain, for the IME
+    /// marked-text/commit verb. See `postKeyEvent`'s own header for the full ordering reasoning —
+    /// not independently re-explained here.
+    ///
+    /// **Joins the SAME chain as `postKeyEvent`/`postMouseEvent`, not a chain of its own.** A
+    /// composition keystroke and an ordinary key/mouse event can legitimately interleave around each
+    /// other (an arrow key committing a composition, a click repositioning the caret mid-compose) —
+    /// two independent chains would let LOK see them in an order that does not match how the user
+    /// actually produced them, the identical corruption `postKeyEvent`'s own header names as the
+    /// reason a hand-rolled chain exists at all rather than one `Task` per call.
+    func postExtTextInput(path: String, type: OfficeExtTextInputType, text: String) {
+        guard let doc = state.documents[path] else { return }
+        let docId = doc.docId
+        let part = doc.activePart
+        let previous = inputChainTail
+        inputChainTail = Task { [driver] in
+            _ = await previous.value
+            await driver.postExtTextInput(docId, part, type, text)
+        }
+    }
+
     /// Test-only: awaits the current tail of the input-ordering chain, so a test can know a
-    /// `postKeyEvent`/`postMouseEvent` call has actually reached the driver before asserting on its
-    /// effect, without a `waitUntil` poll racing the chain's own scheduling.
+    /// `postKeyEvent`/`postMouseEvent`/`postExtTextInput` call has actually reached the driver
+    /// before asserting on its effect, without a `waitUntil` poll racing the chain's own scheduling.
     func drainInputChainForTesting() async {
         await inputChainTail.value
     }

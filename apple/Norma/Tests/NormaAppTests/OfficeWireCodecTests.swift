@@ -83,6 +83,13 @@ final class OfficeWireCodecTests: XCTestCase {
             .mouseEvent(seq: 39, docId: "doc-1", part: 0, type: .move, xTwips: -50, yTwips: 0,
                         count: 0, buttons: 1, modifiers: 0x1000),
             .mouseEventOk(seq: 40, docId: "doc-1"),
+            // Office Stage B Task 5 — the IME marked-text/commit verbs. `text: ""` on the `.end`
+            // sample is deliberate, not a placeholder — see `OfficeWireFrame.extTextInputEvent`'s own
+            // header: this bridge's own caller always sends `.end` with empty text (LOK's own
+            // `LOK_EXT_TEXTINPUT_END` ignores whatever text it's given anyway).
+            .extTextInputEvent(seq: 48, docId: "doc-1", part: 0, type: .input, text: "e"),
+            .extTextInputEvent(seq: 49, docId: "doc-1", part: 2, type: .end, text: ""),
+            .extTextInputEventOk(seq: 50, docId: "doc-1"),
             .subscribed(seq: 24, docId: "doc-1", keys: [TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0)]),
             .unsubscribed(seq: 25, docId: "doc-1"),
             .tileRequestAccepted(seq: 26, docId: "doc-1"),
@@ -148,8 +155,10 @@ final class OfficeWireCodecTests: XCTestCase {
             "saveFailed": #"{"type":"saveFailed","seq":1,"docId":"d","reason":"r"}"#,
             "keyEvent": #"{"type":"keyEvent","seq":1,"docId":"d","part":0,"eventType":0,"charCode":65,"keyCode":512}"#,
             "mouseEvent": #"{"type":"mouseEvent","seq":1,"docId":"d","part":0,"eventType":0,"xTwips":0,"yTwips":0,"count":1,"buttons":1,"modifiers":0}"#,
+            "extTextInputEvent": #"{"type":"extTextInputEvent","seq":1,"docId":"d","part":0,"eventType":0,"text":"e"}"#,
             "keyEventOk": #"{"type":"keyEventOk","seq":1,"docId":"d"}"#,
             "mouseEventOk": #"{"type":"mouseEventOk","seq":1,"docId":"d"}"#,
+            "extTextInputEventOk": #"{"type":"extTextInputEventOk","seq":1,"docId":"d"}"#,
             "error": #"{"type":"error","seq":1,"reason":"r"}"#,
             "documentEvent": #"{"type":"documentEvent","seq":1,"docId":"d","kind":"closed"}"#,
             "subscribeTiles": #"{"type":"subscribeTiles","seq":1,"docId":"d","part":0,"zoomPPT":1000,"viewportTwips":{"x":0,"y":0,"width":1,"height":1}}"#,
@@ -201,6 +210,8 @@ final class OfficeWireCodecTests: XCTestCase {
                                                    count: 1, buttons: 1, modifiers: 0).seq, 127)
         XCTAssertEqual(OfficeWireFrame.keyEventOk(seq: 128, docId: "d").seq, 128)
         XCTAssertEqual(OfficeWireFrame.mouseEventOk(seq: 129, docId: "d").seq, 129)
+        XCTAssertEqual(OfficeWireFrame.extTextInputEvent(seq: 130, docId: "d", part: 0, type: .input, text: "x").seq, 130)
+        XCTAssertEqual(OfficeWireFrame.extTextInputEventOk(seq: 131, docId: "d").seq, 131)
         XCTAssertEqual(OfficeWireFrame.helloOk(seq: 104, lokVersion: "v").seq, 104)
         XCTAssertEqual(OfficeWireFrame.refused(seq: 105, reason: "r").seq, 105)
         XCTAssertEqual(OfficeWireFrame.pong(seq: 106).seq, 106)
@@ -604,6 +615,32 @@ final class OfficeWireCodecTests: XCTestCase {
         for payload in ["", "0, 0, 1265, 254", "0, 0, 1265, 254, notanumber, 0", "a, b, c, d, e, f"] {
             XCTAssertNil(OfficeDocumentEvent.parseCellCursor(payload), "expected nil for: \"\(payload)\"")
         }
+    }
+
+    // MARK: - Office Stage B Task 5 — IME wire verb
+
+    /// **The advisor-flagged trap, pinned.** LOK declares `LOK_EXT_TEXTINPUT = 0`,
+    /// `LOK_EXT_TEXTINPUT_POS = 1`, `LOK_EXT_TEXTINPUT_END = 2` — `.end` MUST be `2`, not the naive
+    /// sequential `1`, or this bridge silently posts the candidate-window-positioning event instead
+    /// of a real commit and composition never lands. See `OfficeExtTextInputType`'s own header.
+    func testExtTextInputTypeRawValuesSkipTheUnmodeledPOSCase() {
+        XCTAssertEqual(OfficeExtTextInputType.input.rawValue, 0)
+        XCTAssertEqual(OfficeExtTextInputType.end.rawValue, 2, "must skip LOK_EXT_TEXTINPUT_POS (1) — see this type's own header")
+    }
+
+    func testExtTextInputEventMalformedPayloadsAreRejected() {
+        XCTAssertEqual(OfficeWireCodec.decodeInbound(
+            "{\"type\":\"extTextInputEvent\",\"seq\":1,\"docId\":\"d\",\"part\":0,\"eventType\":0}"), // missing text
+            .rejected(seq: 1, reason: "malformed"))
+        XCTAssertEqual(OfficeWireCodec.decodeInbound(
+            "{\"type\":\"extTextInputEvent\",\"seq\":2,\"docId\":\"d\",\"part\":0,\"text\":\"x\"}"), // missing eventType
+            .rejected(seq: 2, reason: "malformed"))
+        XCTAssertEqual(OfficeWireCodec.decodeInbound(
+            "{\"type\":\"extTextInputEvent\",\"seq\":3,\"docId\":\"d\",\"eventType\":0,\"text\":\"x\"}"), // missing part
+            .rejected(seq: 3, reason: "malformed"))
+        XCTAssertEqual(OfficeWireCodec.decodeInbound(
+            "{\"type\":\"extTextInputEvent\",\"seq\":4,\"docId\":\"d\",\"part\":0,\"eventType\":1,\"text\":\"x\"}"), // the unmodeled POS=1
+            .rejected(seq: 4, reason: "malformed"))
     }
 
     // MARK: - Shared CLI arg parser (both main.swifts)

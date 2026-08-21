@@ -195,6 +195,19 @@ final class OfficeHelperClient {
         }
     }
 
+    /// Office Stage B Task 5 — same posture as `postKey`/`postMouse` above: awaits only the
+    /// immediate `extTextInputEventOk` POST acknowledgment, never a claim of effect.
+    func postExtTextInput(docId: String, part: Int, type: OfficeExtTextInputType, text: String) async throws {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.extTextInputEvent(seq: seq, docId: docId, part: part, type: type, text: text))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .extTextInputEventOk: return
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
     // MARK: - Task 4: tiles
 
     /// Registers this connection as a tile-push subscriber for `docId` (which must already be open

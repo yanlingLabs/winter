@@ -507,6 +507,15 @@ final class LOKBridge: OfficeDocumentBridge {
         }
     }
 
+    /// Office Stage B Task 5 — same threading contract as `postKey`/`postMouse` above: called from a
+    /// CONNECTION thread (`OfficeHelperServer`'s `.extTextInputEvent` handler), never from inside a
+    /// LOK callback.
+    func postExtTextInput(docId: String, part: Int, type: OfficeExtTextInputType, text: String) throws {
+        try thread.sync {
+            try self.postExtTextInputOnDedicatedThread(docId: docId, part: part, type: type, text: text)
+        }
+    }
+
     // MARK: - Dedicated-thread-only implementation
 
     private func openOnDedicatedThread(docId: String, path: String) throws -> OfficeDocumentMetadata {
@@ -893,6 +902,31 @@ final class LOKBridge: OfficeDocumentBridge {
         doc.handle.pointee.pClass.pointee.postMouseEvent?(
             doc.handle, Int32(type.rawValue), Int32(truncatingIfNeeded: xTwips), Int32(truncatingIfNeeded: yTwips),
             Int32(truncatingIfNeeded: count), Int32(truncatingIfNeeded: buttons), Int32(truncatingIfNeeded: modifiers))
+    }
+
+    /// Office Stage B Task 5 — `postWindowExtTextInputEvent(pThis, nWindowId, nType, pText)`, LOK's
+    /// own C signature. `nWindowId` is always `0`: `desktop/source/lib/init.cxx`'s
+    /// `doc_postWindowExtTextInputEvent` resolves `nWindowId == 0` via `pDoc->getDocWindow()` —
+    /// confirmed by reading `ScModelObj::getDocWindow()`/`SwXTextDocument::getDocWindow()`/
+    /// `SdXImpressDocument::getDocWindow()` (`sc/source/ui/unoobj/docuno.cxx`,
+    /// `sw/source/uibase/uno/unotxdoc.cxx`, `sd/source/ui/unoidl/unomodel.cxx`) — all three resolve
+    /// through `GetBestViewShell`/`GetView`/`GetViewShell`, i.e. INSTANCE-scoped off `pDoc` itself,
+    /// the same door `postMouseEvent`'s own `getTiledRenderable(pThis)` already uses safely. This is
+    /// NOT the process-global-current-view hazard `setPart` has (fix round 2's own header) — but the
+    /// `setView`/`setPart` prefix below is kept anyway, for the SAME reason `postKeyOnDedicatedThread`
+    /// keeps it: `SfxLokHelper::postExtTextEventAsync`'s own dispatch (`LOKPostAsyncEvent`,
+    /// `sfx2/source/view/lokhelper.cxx`) re-asserts `SfxLokHelper::setView` if the current view has
+    /// drifted and calls `GrabFocus()` — "any posted input event is an activation gesture," the same
+    /// finding fix round 2/NEW-3 already established for `postKey`/`postMouse`. `setPart` stays
+    /// type-gated exactly like `postKeyOnDedicatedThread`'s own (fix round 4, NEW-1): for a text
+    /// document `setPart` is `GotoPage`, a caret move, not a scoping call.
+    private func postExtTextInputOnDedicatedThread(docId: String, part: Int, type: OfficeExtTextInputType, text: String) throws {
+        guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        if doc.kind != .text {
+            doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(truncatingIfNeeded: part))
+        }
+        doc.handle.pointee.pClass.pointee.postWindowExtTextInputEvent?(doc.handle, 0, Int32(type.rawValue), text)
     }
 
     // MARK: - Callback translation

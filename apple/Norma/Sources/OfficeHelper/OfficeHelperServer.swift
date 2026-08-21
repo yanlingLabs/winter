@@ -102,6 +102,15 @@ public protocol OfficeDocumentBridge: AnyObject {
     /// Office Stage B Task 4 — LOK's `postMouseEvent`, same posture as `postKey` above.
     func postMouse(docId: String, part: Int, type: OfficeMouseEventType, xTwips: Int64, yTwips: Int64,
                    count: Int, buttons: Int, modifiers: Int) throws
+
+    /// Office Stage B Task 5 — LOK's `postWindowExtTextInputEvent`, the IME marked-text/commit door.
+    /// Same fire-and-forget, throws-only-on-unopened-docId posture as `postKey`/`postMouse` above.
+    /// `FakeOfficeDocumentBridge`'s conformance is an existence-checked no-op, identical reasoning
+    /// to its `postKey`/`postMouse` stubs: wire-level dispatch is what the fixture-backed tests
+    /// exercise, never real composition. See `OfficeWireFrame.extTextInputEvent`'s own header for
+    /// what `type`/`text` mean, and `LOKBridge.postExtTextInputOnDedicatedThread`'s own header for
+    /// the real conformance's `setView`/`setPart` prefix.
+    func postExtTextInput(docId: String, part: Int, type: OfficeExtTextInputType, text: String) throws
 }
 
 /// The result of a successful `OfficeDocumentBridge.paintTile` call — helper-internal (never
@@ -190,6 +199,14 @@ public final class FakeOfficeDocumentBridge: OfficeDocumentBridge {
     }
     public func postMouse(docId: String, part: Int, type: OfficeMouseEventType, xTwips: Int64, yTwips: Int64,
                           count: Int, buttons: Int, modifiers: Int) throws {
+        lock.lock()
+        let isOpen = caches[docId] != nil
+        lock.unlock()
+        guard isOpen else {
+            throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)")
+        }
+    }
+    public func postExtTextInput(docId: String, part: Int, type: OfficeExtTextInputType, text: String) throws {
         lock.lock()
         let isOpen = caches[docId] != nil
         lock.unlock()
@@ -835,6 +852,19 @@ public final class OfficeHelperServer {
                 try documentBridge.postMouse(docId: docId, part: part, type: type, xTwips: xTwips, yTwips: yTwips,
                                              count: count, buttons: buttons, modifiers: modifiers)
                 writeReply(.mouseEventOk(seq: seq, docId: docId), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.extTextInputEvent(let seq, let docId, let part, let type, let text)):
+            // Office Stage B Task 5 — same existence check and same posture as `.keyEvent`/
+            // `.mouseEvent` above: any connection touching an already-open doc may post input to it.
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                try documentBridge.postExtTextInput(docId: docId, part: part, type: type, text: text)
+                writeReply(.extTextInputEventOk(seq: seq, docId: docId), writer: writer)
             } catch {
                 writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
             }

@@ -2198,6 +2198,158 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         _ = host.teardownAllOfficeRuntimesAndStopHelper()
     }
 
+    /// Office Stage B Task 5 — **the raw-wire probe for the IME mark/commit/cancel mechanism,
+    /// BEFORE `NSTextInputClient` exists at all** (that is Stage 4b of this task — see
+    /// `OfficeTileCanvasView`'s own header once it lands). Drives `OfficeHelperClient
+    /// .postExtTextInput` directly, never through `OfficeRuntime`/a canvas — the same "raw client,
+    /// one variable moving" discipline `testTypingIntoAWriterDocumentSurvivesAnInterleavedTileRepaint`
+    /// already established for input ordering: if `postWindowExtTextInputEvent` behaves
+    /// unexpectedly at this vendored pin, it must surface HERE, not wrapped in
+    /// `interpretKeyEvents`/`setMarkedText:` fog where "LOK did something unexpected" and "Norma's
+    /// own NSTextInputClient plumbing is wrong" would be much harder to tell apart.
+    ///
+    /// Three phases, one real Writer document, one real click position (100, 100 twips —
+    /// `postRealEdit`'s own proven-safe start-of-body point, reused verbatim):
+    /// 1. **Mark** ("xyz", `.input`) — proven by a PIXEL hash: the marked/preedit run must paint
+    ///    differently from the pre-mark baseline (LOK really rendered something at that spot).
+    /// 2. **Commit** (`.end`, empty text — see `OfficeWireFrame.extTextInputEvent`'s own header for
+    ///    why `.end` never carries real text) — proven the T4 way: save, then read the SAVED bytes
+    ///    back through `readODFContentXML`/`strippedODFBodyText`, never the in-memory model.
+    /// 3. **Cancel** (`.input("")` immediately followed by `.end`, never committing real text) — a
+    ///    second mark ("abc") is proven to have painted first (the SAME pixel-hash discipline as
+    ///    phase 1, its own fresh baseline — without this, a no-op cancel would prove nothing, since
+    ///    there would be nothing to cancel FROM), then a second save/read proves "abc" left no
+    ///    residue AT ALL — on disk, not merely that in-memory pixels reverted, which alone cannot
+    ///    tell "cancelled" apart from "committed identically by coincidence."
+    func testExtTextInputMarksCommitsAndCancelsAgainstRealLOKThroughSaveAndReopen() async throws {
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
+                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                        + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
+        let vendorRoot = Self.vendorProductSetRoot
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
+                      "LibreOffice vendor tree not present at \(vendorRoot.path) — run "
+                        + "`bun run libreoffice:fetch` from the repo root.")
+        let fixturePath = Self.fixturesRoot.appendingPathComponent("gate.odt").path
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: fixturePath), "gate.odt fixture missing")
+
+        let stateDir = makeScratchDirectory()
+        let directory = SessionDirectory(lister: { [] })
+        let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        host.makeOfficeHelperSupervisor = {
+            OfficeHelperSupervisor(configuration: OfficeHelperSupervisor.Configuration(
+                helperExecutableURL: helperURL,
+                socketDirectory: stateDir,
+                extraArguments: ["--lok-root", vendorRoot.path, "--sandbox-profile", Self.sandboxProfilePath.path]))
+        }
+        let runtime = host.officeRuntime(for: "S1")
+
+        let scratchDir = makeScratchDirectory()
+        let docPath = scratchDir.appendingPathComponent("ext-text-input-drill.odt").path
+        try Data(contentsOf: URL(fileURLWithPath: fixturePath)).write(to: URL(fileURLWithPath: docPath))
+
+        runtime.open(docPath)
+        let settled = await waitUntil(timeout: 90) {
+            runtime.stateSnapshot.documents[docPath] != nil || runtime.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(settled, "never settled — phase: \(runtime.stateSnapshot.phase)")
+        guard let doc = runtime.stateSnapshot.documents[docPath] else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("did not open: \(runtime.stateSnapshot.openFailures[docPath] ?? "no reason recorded")")
+        }
+        XCTAssertEqual(doc.type, .text, "setup: this drill is about the text-document gate")
+
+        guard let client = host.officeHelperSupervisor?.client else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("no live client to drive this drill through")
+        }
+
+        let zoomPPT = 1000
+        let originKey = TileKey(part: 0, zoomPPT: zoomPPT, tileX: 0, tileY: 0)
+        let viewport = officeViewportTwips(scrollOrigin: .zero, visibleSize: CGSize(width: 256, height: 256), zoomPPT: zoomPPT)
+        runtime.subscribeTiles(path: docPath, part: 0, zoomPPT: zoomPPT, viewportTwips: viewport)
+        let baselineArrived = await waitUntil(timeout: 30) { runtime.tileStore.tile(docId: doc.docId, key: originKey) != nil }
+        XCTAssertTrue(baselineArrived, "the drill's own pre-compose baseline tile never arrived")
+        let pixelsBaseline = try XCTUnwrap(runtime.tileStore.tile(docId: doc.docId, key: originKey), "baseline").pixels
+
+        // `postRealEdit`'s own proven-safe click position — the start of a text document's own body.
+        try await client.postMouse(docId: doc.docId, part: 0, type: .buttonDown, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await client.postMouse(docId: doc.docId, part: 0, type: .buttonUp, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+
+        // Phase 1 — mark "xyz".
+        try await client.postExtTextInput(docId: doc.docId, part: 0, type: .input, text: "xyz")
+        let markedArrived = await waitUntil(timeout: 10) {
+            guard let entry = runtime.tileStore.tile(docId: doc.docId, key: originKey) else { return false }
+            return entry.pixels != pixelsBaseline
+        }
+        // DIAGNOSTIC (Stage 4a investigation) — marking alone produced no unprompted invalidation
+        // push in the first empirical run. Force an EXPLICIT re-paint request (bypassing the
+        // push-driven refetch) to tell apart "LOK renders marked text but never proactively says so"
+        // from "LOK genuinely does not render marked text any differently in this build."
+        try await client.requestTiles(docId: doc.docId, keys: [originKey])
+        let markedArrivedAfterExplicitRequest = await waitUntil(timeout: 10) {
+            guard let entry = runtime.tileStore.tile(docId: doc.docId, key: originKey) else { return false }
+            return entry.pixels != pixelsBaseline
+        }
+        NSLog("[T5-DIAGNOSTIC] markedArrived(push)=\(markedArrived) markedArrived(explicit-request)=\(markedArrivedAfterExplicitRequest)")
+        XCTAssertTrue(markedArrived || markedArrivedAfterExplicitRequest, "marking \"xyz\" via "
+                      + "LOK_EXT_TEXTINPUT never produced a different tile hash even after an EXPLICIT "
+                      + "re-paint request — LOK must be rendering SOMETHING for marked/preedit text, "
+                      + "and this is the one-variable-moving proof that it did")
+
+        // Phase 2 — commit. `.end`'s own `text` is always sent empty — see `extTextInputEvent`'s own
+        // header for why (LOK ignores it and commits whatever is currently marked instead).
+        try await client.postExtTextInput(docId: doc.docId, part: 0, type: .end, text: "")
+        let becameDirty = await waitUntil(timeout: 15) { runtime.stateSnapshot.documents[docPath]?.dirty == true }
+        XCTAssertTrue(becameDirty, "committing the marked text never marked the document dirty")
+
+        let beforeFirstSaveStat = officeFileStat(atPath: docPath)
+        runtime.save(docPath)
+        let firstSaveLanded = await waitUntil(timeout: 30) { officeFileStat(atPath: docPath) != beforeFirstSaveStat }
+        XCTAssertTrue(firstSaveLanded, "the post-commit save never landed on disk")
+        XCTAssertNil(runtime.stateSnapshot.documentBanners[docPath], "no save-failed banner after commit")
+
+        // The direct proof, off disk — not the in-memory model, exactly like every other drill here.
+        let bodyAfterCommit = strippedODFBodyText(try readODFContentXML(atPath: docPath))
+        XCTAssertTrue(bodyAfterCommit.contains("xyz"), "the committed marked text must appear in the "
+                      + "SAVED body text — got: \"\(bodyAfterCommit)\"")
+
+        // Phase 3 — mark "abc", then CANCEL it (never commit) — must leave no residue at all.
+        // `.end`'s own commit already invalidated this tile (real trace: a genuine `INVALIDATE_TILES`
+        // callback fires on commit, unlike marking) — wait for the auto-refetch to land, mirroring
+        // `pixelsBaseline`/every other tile read in this drill, rather than reading the store's
+        // possibly-just-evicted entry mid-flight.
+        let postCommitRepainted = await waitUntil(timeout: 15) { runtime.tileStore.tile(docId: doc.docId, key: originKey) != nil }
+        XCTAssertTrue(postCommitRepainted, "the post-commit tile never re-arrived after its own invalidation")
+        let pixelsAfterCommit = try XCTUnwrap(runtime.tileStore.tile(docId: doc.docId, key: originKey), "post-commit").pixels
+        try await client.postExtTextInput(docId: doc.docId, part: 0, type: .input, text: "abc")
+        let secondMarkArrived = await waitUntil(timeout: 30) {
+            guard let entry = runtime.tileStore.tile(docId: doc.docId, key: originKey) else { return false }
+            return entry.pixels != pixelsAfterCommit
+        }
+        XCTAssertTrue(secondMarkArrived, "marking \"abc\" for the cancel phase never produced a "
+                      + "different tile hash — without this, a no-op cancel below would prove nothing")
+
+        // The cancel sequence: empty `.input` (clears whatever is marked) then `.end` (commits — the
+        // now-empty marked run, i.e. nothing).
+        try await client.postExtTextInput(docId: doc.docId, part: 0, type: .input, text: "")
+        try await client.postExtTextInput(docId: doc.docId, part: 0, type: .end, text: "")
+
+        let beforeSecondSaveStat = officeFileStat(atPath: docPath)
+        runtime.save(docPath)
+        let secondSaveLanded = await waitUntil(timeout: 30) { officeFileStat(atPath: docPath) != beforeSecondSaveStat }
+        XCTAssertTrue(secondSaveLanded, "the post-cancel save never landed on disk")
+        XCTAssertNil(runtime.stateSnapshot.documentBanners[docPath], "no save-failed banner after cancel")
+
+        let bodyAfterCancel = strippedODFBodyText(try readODFContentXML(atPath: docPath))
+        XCTAssertTrue(bodyAfterCancel.contains("xyz"), "the FIRST (committed) text must still be there "
+                      + "— got: \"\(bodyAfterCancel)\"")
+        XCTAssertFalse(bodyAfterCancel.contains("abc"), "the CANCELLED mark must leave NO residue at "
+                      + "all — got: \"\(bodyAfterCancel)\"")
+
+        _ = host.teardownAllOfficeRuntimesAndStopHelper()
+    }
+
     /// **Task 2b fix round 1 (review IMPORTANT-1), live proof, minimal by design** — the unit tests
     /// in `OfficeStageDocumentTests` already prove the STAGED FILE's own permissions/flags are
     /// normalized; this is the one live check that LOK itself treats the result as genuinely

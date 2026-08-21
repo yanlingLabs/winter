@@ -1051,6 +1051,7 @@ final class OfficeRuntimeWatcherTests: XCTestCase {
             unsubscribeTiles: { _ in },
             requestTiles: { _, _ in },
             postKey: { _, _, _, _, _ in }, postMouse: { _, _, _, _, _, _, _, _ in },
+            postExtTextInput: { _, _, _, _ in },
             stateDirectory: stateDir)
     }
 

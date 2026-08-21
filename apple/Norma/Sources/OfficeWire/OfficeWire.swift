@@ -139,6 +139,29 @@ public enum OfficeWireFrame: Equatable, Sendable {
     case mouseEvent(seq: UInt64, docId: String, part: Int, type: OfficeMouseEventType, xTwips: Int64, yTwips: Int64,
                      count: Int, buttons: Int, modifiers: Int)
 
+    /// Office Stage B Task 5 — LOK's `postWindowExtTextInputEvent(pThis, nWindowId, nType, pText)`
+    /// (`LibreOfficeKit.h`; `nWindowId` always `0` — see `LOKBridge.postExtTextInputOnDedicatedThread`'s
+    /// own header for why `0` resolves to the SAME document-instance-scoped window `postKey`/
+    /// `postMouse` already target, not a process-global one). This is the MARKED/preedit half of IME
+    /// composition — `NSTextInputClient.setMarkedText(_:...)` calls through here with `type: .input`
+    /// on every keystroke of a multi-stage compose (LOK underlines whatever `text` names, replacing
+    /// any previously-marked run); `type: .end` COMMITS — LOK's own `SfxLokHelper::postExtTextEventAsync`
+    /// (`sfx2/source/view/lokhelper.cxx`) sets `LOK_EXT_TEXTINPUT_END`'s final text unconditionally to
+    /// EMPTY, ignoring `pText` entirely, so "end" always commits whatever is CURRENTLY marked, never
+    /// text passed alongside it — `text` on an `.end` frame is therefore always sent empty by this
+    /// bridge's own caller (`OfficeRuntime.postExtTextInput`), a documented-not-decorative convention,
+    /// not a wire requirement `OfficeWireCodec` itself enforces. A plain, non-marked `insertText:`
+    /// (typing an ordinary ASCII character, no composition) does NOT come through here at all — see
+    /// `OfficeTileCanvasView.insertText(_:replacementRange:)`'s own header for why that case rides the
+    /// already-proven `postKeyEvent`-per-scalar path instead, reserving this newer, less-exercised verb
+    /// strictly for genuine marked text.
+    ///
+    /// `part` — same resolved-at-enqueue-time meaning and same ordering-chain membership as
+    /// `keyEvent`/`mouseEvent`'s own `part` (see `OfficeRuntime.postExtTextInput`'s own header): a
+    /// composition keystroke must reach LOK in the SAME relative order as any key/mouse event typed
+    /// or clicked around it, or a click-mid-compose / arrow-key-mid-compose can reorder against it.
+    case extTextInputEvent(seq: UInt64, docId: String, part: Int, type: OfficeExtTextInputType, text: String)
+
     /// Task 4 — registers this connection as a tile-push subscriber for `docId` (must already be
     /// open — by ANY connection, not necessarily this one; see `OfficeHelperServer`'s multicast
     /// seam) and reports the tile-set the CURRENT viewport needs, computed via
@@ -213,6 +236,9 @@ public enum OfficeWireFrame: Equatable, Sendable {
     case keyEventOk(seq: UInt64, docId: String)
     /// Office Stage B Task 4 — answers `mouseEvent`, same posture as `keyEventOk` above.
     case mouseEventOk(seq: UInt64, docId: String)
+    /// Office Stage B Task 5 — answers `extTextInputEvent`, same "posted, not a claim of effect"
+    /// posture as `keyEventOk`/`mouseEventOk` above.
+    case extTextInputEventOk(seq: UInt64, docId: String)
     /// Answers anything the helper refuses post-auth: an unknown frame type (`reason:"unknown"`,
     /// the brief's literal pin), a known type whose fields don't decode (`reason:"malformed"`),
     /// or a structurally valid frame that is never legal for a client to SEND (a reply shape —
@@ -299,10 +325,10 @@ public enum OfficeWireFrame: Equatable, Sendable {
     /// appear directly inside `[...]`'s element list) are gone — real edit verbs replace them.
     /// Order still matches frame-declaration order.
     public static let wireTypes: [String] = [
-        "hello", "ping", "open", "close", "save", "keyEvent", "mouseEvent",
+        "hello", "ping", "open", "close", "save", "keyEvent", "mouseEvent", "extTextInputEvent",
         "subscribeTiles", "unsubscribe", "tileRequest",
         "helloOk", "refused", "pong", "opened", "openFailed", "closed", "saved", "saveFailed",
-        "keyEventOk", "mouseEventOk",
+        "keyEventOk", "mouseEventOk", "extTextInputEventOk",
         "error", "documentEvent",
         "subscribed", "unsubscribed", "tileRequestAccepted", "tile", "tileFailed", "invalidated",
     ]
@@ -316,6 +342,7 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .save: return "save"
         case .keyEvent: return "keyEvent"
         case .mouseEvent: return "mouseEvent"
+        case .extTextInputEvent: return "extTextInputEvent"
         case .subscribeTiles: return "subscribeTiles"
         case .unsubscribe: return "unsubscribe"
         case .tileRequest: return "tileRequest"
@@ -329,6 +356,7 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .saveFailed: return "saveFailed"
         case .keyEventOk: return "keyEventOk"
         case .mouseEventOk: return "mouseEventOk"
+        case .extTextInputEventOk: return "extTextInputEventOk"
         case .error: return "error"
         case .documentEvent: return "documentEvent"
         case .subscribed: return "subscribed"
@@ -349,6 +377,7 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .save(let seq, _, _): return seq
         case .keyEvent(let seq, _, _, _, _, _): return seq
         case .mouseEvent(let seq, _, _, _, _, _, _, _, _): return seq
+        case .extTextInputEvent(let seq, _, _, _, _): return seq
         case .subscribeTiles(let seq, _, _, _, _): return seq
         case .unsubscribe(let seq, _): return seq
         case .tileRequest(let seq, _, _): return seq
@@ -362,6 +391,7 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .saveFailed(let seq, _, _): return seq
         case .keyEventOk(let seq, _): return seq
         case .mouseEventOk(let seq, _): return seq
+        case .extTextInputEventOk(let seq, _): return seq
         case .error(let seq, _): return seq
         case .documentEvent(let seq, _, _): return seq
         case .subscribed(let seq, _, _): return seq
@@ -407,7 +437,12 @@ public enum OfficeWireFrame: Equatable, Sendable {
             payload["count"] = count
             payload["buttons"] = buttons
             payload["modifiers"] = modifiers
-        case .keyEventOk(_, let docId), .mouseEventOk(_, let docId):
+        case .extTextInputEvent(_, let docId, let part, let type, let text):
+            payload["docId"] = docId
+            payload["part"] = part
+            payload["eventType"] = type.rawValue
+            payload["text"] = text
+        case .keyEventOk(_, let docId), .mouseEventOk(_, let docId), .extTextInputEventOk(_, let docId):
             payload["docId"] = docId
         case .saved(_, let docId, let tempPath):
             payload["docId"] = docId
@@ -538,6 +573,23 @@ public enum OfficeMouseEventType: Int, Equatable, Sendable {
     case buttonDown = 0
     case buttonUp = 1
     case move = 2
+}
+
+/// LOK's `LibreOfficeKitExtTextInputType` (`LibreOfficeKitEnums.h:1084-1093`) — same direct 1:1
+/// mirror as `OfficeKeyEventType`/`OfficeMouseEventType`: `rawValue` IS the wire integer, no
+/// translation. LOK declares THREE enumerators (`LOK_EXT_TEXTINPUT = 0`, `LOK_EXT_TEXTINPUT_POS = 1`,
+/// `LOK_EXT_TEXTINPUT_END = 2`) — this bridge only ever SENDS two of them. `POS` (cf.
+/// `SalEvent::ExtTextInputPos`) is an IME candidate-window positioning query; Norma answers that need
+/// itself, locally, via `NSTextInputClient.firstRect(forCharacterRange:)` reading the already-tracked
+/// caret rect — there is nothing to ask LOK for. **`.end`'s rawValue is therefore `2`, deliberately
+/// skipping `1`** — a sequential `case input = 0, end = 1` would silently post `LOK_EXT_TEXTINPUT_POS`
+/// instead of the real commit, and composition would never land; see `OfficeWireCodecTests`'s own
+/// fixture for the pinned raw value.
+public enum OfficeExtTextInputType: Int, Equatable, Sendable {
+    case input = 0
+    // LOK_EXT_TEXTINPUT_POS = 1 is intentionally not modeled — this bridge never sends it; see this
+    // enum's own header.
+    case end = 2
 }
 
 /// LOK's `LibreOfficeKitDocumentType` (`LibreOfficeKitEnums.h:22-27`), transcribed rather than
@@ -1216,6 +1268,13 @@ public enum OfficeWireCodec {
             }
             return .frame(.mouseEvent(seq: seq, docId: docId, part: part, type: type, xTwips: xTwips, yTwips: yTwips,
                                        count: count, buttons: buttons, modifiers: modifiers))
+        case "extTextInputEvent":
+            guard let docId = object["docId"] as? String, let part = intValue(object["part"]),
+                  let typeRaw = intValue(object["eventType"]), let type = OfficeExtTextInputType(rawValue: typeRaw),
+                  let text = object["text"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.extTextInputEvent(seq: seq, docId: docId, part: part, type: type, text: text))
         case "keyEventOk":
             guard let docId = object["docId"] as? String else {
                 return .rejected(seq: seq, reason: "malformed")
@@ -1226,6 +1285,11 @@ public enum OfficeWireCodec {
                 return .rejected(seq: seq, reason: "malformed")
             }
             return .frame(.mouseEventOk(seq: seq, docId: docId))
+        case "extTextInputEventOk":
+            guard let docId = object["docId"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.extTextInputEventOk(seq: seq, docId: docId))
         case "saved":
             guard let docId = object["docId"] as? String, let tempPath = object["tempPath"] as? String else {
                 return .rejected(seq: seq, reason: "malformed")

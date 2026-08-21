@@ -4110,6 +4110,7 @@ final class ShellSessionHostTests: XCTestCase {
                     self.lock.lock(); self._requestCalls.append((docId, keys)); self.lock.unlock()
                 },
                 postKey: { _, _, _, _, _ in }, postMouse: { _, _, _, _, _, _, _, _ in },
+                postExtTextInput: { _, _, _, _ in },
                 stateDirectory: stateDirectory)
         }
     }

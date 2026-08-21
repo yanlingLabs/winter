@@ -1016,6 +1016,18 @@ final class ShellSessionHost: ObservableObject {
                     NSLog("[ShellSessionHost] office postMouse(\(docId)) failed: \(error)")
                 }
             },
+            // Office Stage B Task 5 — same `queue.run` routing and same fire-and-forget-but-not-
+            // silent posture as `postKey`/`postMouse` above.
+            postExtTextInput: { [weak supervisor] docId, part, type, text in
+                do {
+                    try await queue.run {
+                        guard let client = supervisor?.client else { return }
+                        try await client.postExtTextInput(docId: docId, part: part, type: type, text: text)
+                    }
+                } catch {
+                    NSLog("[ShellSessionHost] office postExtTextInput(\(docId)) failed: \(error)")
+                }
+            },
             // Office Stage B Task 2b — the LIVE supervisor's own configured directory, never
             // `OfficeHelperSupervisor.Configuration.defaultStateDirectory()` read fresh: every live
             // test overrides `socketDirectory` with a scratch dir precisely so its own helper's
