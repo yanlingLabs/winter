@@ -1973,4 +1973,199 @@ final class OfficeTileCanvasViewTests: XCTestCase {
 
         view.unmount()
     }
+
+    // MARK: - Office Stage B Task 6: clipboard, undo/redo, the menu pass
+
+    /// `copy(_:)`/`cut(_:)` are direct method calls (this file's own established pattern —
+    /// `setActivePart(1)` above does the identical thing) rather than a routed `NSApp` menu
+    /// action: whether AppKit's own `performKeyEquivalent:`/menu validation actually reaches this
+    /// view is disclosed as untestable under xctest at the call site's own header (`keyDown`'s
+    /// policy comment) — what IS tested here is that these methods, once reached, do the right
+    /// thing.
+    func testCopyCallsRuntimePostClipboardCopyForTheOpenDocument() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.copy(nil)
+        await runtime.drainInputChainForTesting()
+        XCTAssertEqual(recorder.clipboardCopyCalls.count, 1)
+        view.unmount()
+    }
+
+    func testCutCallsRuntimePostClipboardCutForTheOpenDocument() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.cut(nil)
+        await runtime.drainInputChainForTesting()
+        XCTAssertEqual(recorder.clipboardCutCalls.count, 1)
+        view.unmount()
+    }
+
+    func testUndoAndRedoCallTheirRuntimeDoors() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.undo(nil)
+        view.redo(nil)
+        await runtime.drainInputChainForTesting()
+        XCTAssertEqual(recorder.undoCalls.count, 1)
+        XCTAssertEqual(recorder.redoCalls.count, 1)
+        view.unmount()
+    }
+
+    /// **Reads the REAL system pasteboard, save/restored around the test** — `paste(_:)` is
+    /// deliberately gesture-time-synchronous (its own header: never re-read from inside the async
+    /// chain), so there is no injected seam to substitute the way `OfficeRuntime`'s own
+    /// `writeSystemPasteboard` lets `postClipboardCopy`/`Cut` avoid the real pasteboard. The prior
+    /// contents are captured before this test writes anything and restored in every exit path.
+    func testPasteReadsTheSystemPasteboardAndCallsRuntimePostClipboardPaste() async {
+        let pasteboard = NSPasteboard.general
+        let priorContents = pasteboard.string(forType: .string)
+        defer {
+            pasteboard.clearContents()
+            if let priorContents { pasteboard.setString(priorContents, forType: .string) }
+        }
+        pasteboard.clearContents()
+        pasteboard.setString("pasted-from-test", forType: .string)
+
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.paste(nil)
+        await runtime.drainInputChainForTesting()
+        XCTAssertEqual(recorder.clipboardPasteCalls.count, 1)
+        XCTAssertEqual(recorder.clipboardPasteCalls.first?.text, "pasted-from-test")
+        view.unmount()
+    }
+
+    /// An empty pasteboard (never `nil`-from-nothing on this system, but no STRING representation)
+    /// must not post an empty/garbage paste — `paste(_:)`'s own `guard let text = ...` is the gate.
+    func testPasteIsANoOpWhenThePasteboardHasNoStringRepresentation() async {
+        let pasteboard = NSPasteboard.general
+        let priorContents = pasteboard.string(forType: .string)
+        defer {
+            pasteboard.clearContents()
+            if let priorContents { pasteboard.setString(priorContents, forType: .string) }
+        }
+        pasteboard.clearContents() // a cleared pasteboard has no .string representation at all
+
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.paste(nil)
+        await runtime.drainInputChainForTesting()
+        XCTAssertTrue(recorder.clipboardPasteCalls.isEmpty, "an empty pasteboard must never reach "
+                      + "the driver — there is nothing to paste")
+        view.unmount()
+    }
+
+    /// `validateMenuItem`'s Copy/Cut gate reads `runtime.cursorStore.state(docId:)` keyed by the
+    /// VIEW's own `docId` property (`"doc-1"`, this file's own established construction literal —
+    /// NOT the runtime's real internal docId, which `postClipboardCopy`/etc. resolve independently
+    /// from `path`; see `OfficeCursorStore`'s own per-docId keying) — seeded directly here via
+    /// `runtime.handle(documentEvent:docId:)`, the exact door `OfficeRuntime.handle(documentEvent:
+    /// docId:)`'s own production callers use.
+    func testValidateMenuItemGatesCopyAndCutOnNonEmptySelection() async {
+        let (runtime, _) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        let copyItem = NSMenuItem(title: "Copy", action: #selector(OfficeTileCanvasView.copy(_:)), keyEquivalent: "")
+        let cutItem = NSMenuItem(title: "Cut", action: #selector(OfficeTileCanvasView.cut(_:)), keyEquivalent: "")
+
+        XCTAssertFalse(view.validateMenuItem(copyItem), "no selection yet — Copy must start disabled")
+        XCTAssertFalse(view.validateMenuItem(cutItem), "no selection yet — Cut must start disabled")
+
+        runtime.handle(documentEvent: .textSelection([OfficeTwipsRect(x: 0, y: 0, width: 100, height: 100)]), docId: "doc-1")
+        XCTAssertTrue(view.validateMenuItem(copyItem), "a real selection must enable Copy")
+        XCTAssertTrue(view.validateMenuItem(cutItem), "a real selection must enable Cut")
+
+        runtime.handle(documentEvent: .textSelection([]), docId: "doc-1")
+        XCTAssertFalse(view.validateMenuItem(copyItem), "the selection collapsing back to empty must disable Copy again")
+
+        view.unmount()
+    }
+
+    func testValidateMenuItemGatesPasteOnPasteboardContent() async {
+        let pasteboard = NSPasteboard.general
+        let priorContents = pasteboard.string(forType: .string)
+        defer {
+            pasteboard.clearContents()
+            if let priorContents { pasteboard.setString(priorContents, forType: .string) }
+        }
+        let (runtime, _) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        let pasteItem = NSMenuItem(title: "Paste", action: #selector(OfficeTileCanvasView.paste(_:)), keyEquivalent: "")
+
+        pasteboard.clearContents()
+        XCTAssertFalse(view.validateMenuItem(pasteItem), "an empty pasteboard must disable Paste")
+
+        pasteboard.setString("something", forType: .string)
+        XCTAssertTrue(view.validateMenuItem(pasteItem), "a real string on the pasteboard must enable Paste")
+
+        view.unmount()
+    }
+
+    /// Undo/Redo/Zoom are reachability-gated only (this task's own disclosed scope, not a full
+    /// LOK-backed canUndo/canRedo signal — `validateMenuItem`'s own header names the follow-up):
+    /// `true` regardless of document/selection/pasteboard state, since being asked to validate AT
+    /// ALL already answers the only question this gate currently asks.
+    func testValidateMenuItemReturnsTrueForUndoRedoAndZoomRegardlessOfState() async {
+        let (runtime, _) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        let items: [NSMenuItem] = [
+            NSMenuItem(title: "Undo", action: #selector(OfficeTileCanvasView.undo(_:)), keyEquivalent: ""),
+            NSMenuItem(title: "Redo", action: #selector(OfficeTileCanvasView.redo(_:)), keyEquivalent: ""),
+            NSMenuItem(title: "Zoom In", action: #selector(OfficeTileCanvasView.zoomIn(_:)), keyEquivalent: ""),
+            NSMenuItem(title: "Zoom Out", action: #selector(OfficeTileCanvasView.zoomOut(_:)), keyEquivalent: ""),
+            NSMenuItem(title: "Actual Size", action: #selector(OfficeTileCanvasView.actualSize(_:)), keyEquivalent: ""),
+        ]
+        for item in items {
+            XCTAssertTrue(view.validateMenuItem(item), "\(item.title) must be reachability-gated only")
+        }
+        view.unmount()
+    }
+
+    /// The zoom actions' own effect — reuse of the SAME `zoomStep`/`officeZoomIn`/`officeZoomOut`
+    /// machinery `keyDown`'s ⌘±/⌘0 switch already drives (Stage B Task 4), just called from a
+    /// menu-shaped door instead of a key equivalent.
+    func testZoomInZoomOutActualSizeActionsMoveZoomPPTAlongTheSameLadderTheKeysUse() async {
+        let (runtime, _) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
+        XCTAssertEqual(view.zoomPPT, 1000, "setup: starts at the 100% pin")
+
+        view.zoomIn(nil)
+        XCTAssertEqual(view.zoomPPT, 1250, "one ladder step up from 1000")
+
+        view.zoomOut(nil)
+        view.zoomOut(nil)
+        XCTAssertEqual(view.zoomPPT, 750, "two ladder steps down from 1250")
+
+        view.actualSize(nil)
+        XCTAssertEqual(view.zoomPPT, 1000, "Actual Size returns exactly to the 100% pin")
+
+        view.unmount()
+    }
 }

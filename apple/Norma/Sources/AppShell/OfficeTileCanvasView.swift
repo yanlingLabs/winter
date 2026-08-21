@@ -311,7 +311,7 @@ private final class OfficeTileLayer: CALayer {
 ///
 /// **Owns viewport math end to end**, including part switches (`OfficeDocumentCanvasHost
 /// .setActivePart`) — see that protocol's own header for why the model does not.
-final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost, NSTextInputClient {
+final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost, NSTextInputClient, NSMenuItemValidation {
     private let runtime: OfficeRuntime
     private let path: String
     /// **office-plumbing Task 8 (T6 review F4): mutable, not `let`, as of this task.** A reload
@@ -863,19 +863,27 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost, NSTextInputC
     /// combo — now reaches `forwardKeyEvent` instead of falling through to `super`'s terminal
     /// `NSBeep()`.
     ///
-    /// **Fix round 1, m6 (confirmed brief gap) — the ⌘C/⌘V/⌘X outcome, named explicitly, as the
-    /// brief required.** These three are ordinary Cmd-combos under this same policy — not claimed by
-    /// this view's own `switch` (only `+`/`=`/`-`/`_`/`0` are) — so they fall to
-    /// `super.keyDown(with:)` exactly like ⌘S/⌘W/⌘Z. Unlike those three, though, nothing in this
-    /// app's responder chain or main menu currently IMPLEMENTS `copy(_:)`/`cut(_:)`/`paste(_:)` (no
-    /// `NSTextInputClient` conformance, no pasteboard wiring — that is Task 5/6 territory, alongside
-    /// IME) — so `performKeyEquivalent:` finds no enabled target for the standard Edit-menu items
-    /// those combos are normally bound to (a menu item with no live target validates as disabled),
-    /// the match fails, and the event falls through to `keyDown:` on this view exactly like any
-    /// other unclaimed Cmd-combo. The result, PRE-Task-6, is deliberate and disclosed, not a bug:
-    /// **disabled menu items → `super.keyDown(with:)` → `NSView`'s own terminal `NSBeep()`.** Copy/
-    /// cut/paste do nothing and beep until a future task gives them a real LOK-backed implementation
-    /// (`getTextSelection`/`paste()`/`.uno:Copy` are the likely doors — not built here).
+    /// **Fix round 1, m6 (confirmed brief gap), CLOSED by Task 6.** ⌘C/⌘V/⌘X/⌘Z/⇧⌘Z are still not
+    /// claimed by this view's own `switch` below (only `+`/`=`/`-`/`_`/`0` are, unchanged) — they
+    /// still fall to `super.keyDown(with:)` exactly like ⌘S/⌘W always have. What changed is what is
+    /// WAITING for them further up: this view now implements `copy(_:)`/`cut(_:)`/`paste(_:)`/
+    /// `undo(_:)`/`redo(_:)` directly (below, `NSMenuItemValidation` conformance alongside), so the
+    /// SwiftUI-default Edit menu's own Copy/Cut/Paste/Undo/Redo items (`target: nil`, this app's own
+    /// `NormaApp: App` carries no `.commands` override, so SwiftUI's stock command set — including
+    /// these five — is what actually ships) now find a REAL, validated target the instant this view
+    /// is first responder. `performKeyEquivalent:` resolves the combo to that menu item's action
+    /// BEFORE `keyDown:` is ever reached — the exact mechanism this header already documents for
+    /// ⌘S/⌘W — so the fallthrough to `super.keyDown(with:)`/`NSBeep()` below is simply never
+    /// exercised for these five any more, not bypassed by a new switch case.
+    ///
+    /// **Disclosed, not verified under xctest**: whether THIS app's specific `LSUIElement` +
+    /// `Settings`-only Scene shape genuinely wires these five key equivalents through SwiftUI's
+    /// default command set can only be confirmed by a live gate — the test host never builds a real
+    /// main menu at all (`AppDelegate.installEditorSaveMenuItem`'s own `!isRunningUnitTests` gate),
+    /// the identical limitation that method's own header already states for ⌘S. This file's own
+    /// tests instead pin what IS unit-testable and load-bearing: the five `@objc` methods correctly
+    /// reach `runtime`'s own doors, and `validateMenuItem` answers correctly for a hand-built
+    /// `NSMenuItem` — exactly as if AppKit's own menu validation had asked.
     override func keyDown(with event: NSEvent) {
         guard event.modifierFlags.contains(.command) else {
             // Office Stage B Task 5 — the seam Task 4 staged is now real: a text-generating keyDown
@@ -968,6 +976,80 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost, NSTextInputC
     private func isTextGeneratingKeyEvent(_ event: NSEvent) -> Bool {
         !event.modifierFlags.contains(.command) && !event.modifierFlags.contains(.control)
             && OfficeInputCodes.charCode(for: event.charactersIgnoringModifiers) != 0
+    }
+
+    // MARK: - Office Stage B Task 6: clipboard, undo/redo — the standard NSResponder actions
+    // `keyDown`'s own policy comment (above) has the full account of WHY implementing these five
+    // is the whole change needed to make ⌘C/⌘V/⌘X/⌘Z/⇧⌘Z live, with no new switch case here.
+
+    @objc func copy(_ sender: Any?) {
+        runtime.postClipboardCopy(path: path)
+    }
+
+    @objc func cut(_ sender: Any?) {
+        runtime.postClipboardCut(path: path)
+    }
+
+    /// Reads the system pasteboard SYNCHRONOUSLY, at gesture time — never from inside an async
+    /// door — and passes the string straight into `OfficeRuntime.postClipboardPaste`'s own chain.
+    /// See that method's own header for why: another app (or an earlier paste already queued
+    /// ahead of this one on the SAME chain) could change the pasteboard between now and this
+    /// call's own turn in the chain, and what gets pasted must match what the user actually saw on
+    /// the pasteboard at the moment they asked, never whatever is there later.
+    @objc func paste(_ sender: Any?) {
+        guard let text = NSPasteboard.general.string(forType: .string) else { return }
+        runtime.postClipboardPaste(path: path, text: text)
+    }
+
+    @objc func undo(_ sender: Any?) {
+        runtime.postUndo(path: path)
+    }
+
+    @objc func redo(_ sender: Any?) {
+        runtime.postRedo(path: path)
+    }
+
+    // MARK: - Office Stage B Task 6: the deferred menu pass — Zoom In/Out/Actual Size
+
+    /// The brief's own deferred menu items. ⌘±/⌘0 already zoom through `keyDown`'s own switch
+    /// (Stage B Task 4, unchanged) — these are the SAME `zoomStep`/`officeZoomIn`/`officeZoomOut`
+    /// calls, reached from a real, discoverable View-menu item too
+    /// (`OfficeCanvasMenuInstaller.install`, wired from `AppDelegate`), not merely a bare key
+    /// equivalent nobody can see or click without already knowing it exists.
+    @objc func zoomIn(_ sender: Any?) {
+        zoomStep(officeZoomIn(current: zoomPPT))
+    }
+
+    @objc func zoomOut(_ sender: Any?) {
+        zoomStep(officeZoomOut(current: zoomPPT))
+    }
+
+    @objc func actualSize(_ sender: Any?) {
+        zoomStep(1000)
+    }
+
+    // MARK: - NSMenuItemValidation
+
+    /// One switch covering every selector this view answers as a menu target (the 5 standard
+    /// actions above, plus the 3 zoom actions). Only Copy/Cut/Paste get a REAL state-based gate —
+    /// Copy/Cut on `OfficeCursorStore`'s own tracked selection (empty means nothing to copy),
+    /// Paste on whether the system pasteboard actually holds a string right now. Undo/Redo and the
+    /// 3 zoom actions are REACHABILITY-gated only (`true` in the `default` arm below — being asked
+    /// to validate AT ALL already means this view is somewhere in the responder chain, which is
+    /// the whole enabled-state question for them). A real `canUndo`/`canRedo` signal would need
+    /// LOK's own `.uno:Undo`/`.uno:Redo` command STATE_CHANGED payload parsed (Task 2's own live
+    /// transcript already saw `.uno:Undo` in that cascade, task-2-report.md) — named here as a
+    /// disclosed follow-up, not built, matching this task's own scope (`undo(_:)`/`redo(_:)` must
+    /// WORK; a precise enabled/disabled reflection of LOK's own stack state is a later refinement).
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        switch menuItem.action {
+        case #selector(copy(_:)), #selector(cut(_:)):
+            return !runtime.cursorStore.state(docId: docId).selectionRectsTwips.isEmpty
+        case #selector(paste(_:)):
+            return NSPasteboard.general.string(forType: .string) != nil
+        default:
+            return true
+        }
     }
 
     /// A left-button press — positions LOK's own cursor/selection (there is no other door to do
