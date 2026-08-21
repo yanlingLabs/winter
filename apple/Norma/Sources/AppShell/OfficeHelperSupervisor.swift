@@ -396,6 +396,13 @@ final class OfficeHelperSupervisor {
         /// helper keep its own 120s default — tests shorten this so a smoke test doesn't spend two
         /// real minutes proving idle-exit happens at all.
         var idleExitSeconds: Int?
+        /// Office Stage B Task 7 — forwarded to the helper as `--autosave-interval-seconds` when
+        /// set, the identical mirror of `idleExitSeconds` immediately above (same field shape
+        /// deliberately, `Double?` rather than `Int?` only because a live drill wants sub-second
+        /// headroom `Int` could not express, not a real design divergence). `nil` (production) lets
+        /// the helper keep its own 60s default (the brief's own cadence) — `OfficeRuntimeLiveTests`'
+        /// crash drill sets this so a sample does not cost a real minute-plus.
+        var autosaveIntervalSeconds: Double?
         /// Appended verbatim after the standard `--socket-path`/`--state-path`/`--token` (and
         /// optional `--idle-exit-seconds`) arguments. Empty in production — a pure testability
         /// seam so `OfficeSupervisorTests` can pass `NormaOfficeHelperFixture`'s `--mode` flag
@@ -562,6 +569,9 @@ final class OfficeHelperSupervisor {
         var arguments = ["--socket-path", socketPath, "--state-path", socketDirectory.path, "--token", token]
         if let idleExitSeconds = configuration.idleExitSeconds {
             arguments += ["--idle-exit-seconds", String(idleExitSeconds)]
+        }
+        if let autosaveIntervalSeconds = configuration.autosaveIntervalSeconds {
+            arguments += ["--autosave-interval-seconds", String(autosaveIntervalSeconds)]
         }
         arguments += configuration.extraArguments
         process.arguments = arguments

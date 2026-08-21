@@ -52,6 +52,15 @@ var idleExitSeconds = 120.0
 if let raw = args["idle-exit-seconds"], let parsed = Double(raw), parsed > 0 {
     idleExitSeconds = parsed
 }
+// Office Stage B Task 7 — same override idiom as `idle-exit-seconds` immediately above, for the
+// identical reason: the brief's own 60s cadence is real in production, but the live crash drill
+// (`OfficeRuntimeLiveTests`) cannot spend a real minute-plus per sample. Production callers
+// (`OfficeHelperSupervisor`, absent an explicit `Configuration.autosaveIntervalSeconds`) never pass
+// this flag.
+var autosaveIntervalSeconds = 60.0
+if let raw = args["autosave-interval-seconds"], let parsed = Double(raw), parsed > 0 {
+    autosaveIntervalSeconds = parsed
+}
 
 let statePathURL = URL(fileURLWithPath: statePath, isDirectory: true)
 
@@ -286,7 +295,8 @@ do {
 
 let server = OfficeHelperServer(
     socketPath: socketPath, statePath: statePath, expectedToken: token,
-    idleExitSeconds: idleExitSeconds, documentBridge: documentBridge)
+    idleExitSeconds: idleExitSeconds, documentBridge: documentBridge,
+    autosaveIntervalSeconds: autosaveIntervalSeconds)
 
 do {
     try server.start()

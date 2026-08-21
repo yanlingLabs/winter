@@ -66,7 +66,15 @@ final class OfficeAutosaveScheduler {
 
     private let interval: TimeInterval
     private let scheduling: Scheduling
-    private let onFire: (String) -> Void
+    /// **`var`, not `let`, and defaulted to a no-op.** `OfficeHelperServer` (this type's one real
+    /// owner) needs the fire callback to call an INSTANCE method on itself, which means the closure
+    /// must capture `[weak self]` — legal in Swift only once every one of `OfficeHelperServer`'s own
+    /// stored properties already has a value, `autosaveScheduler` (this instance) included. Passing
+    /// the real closure through this initializer would need `self` to exist before it does; two
+    /// steps (construct here with the default, assign the real closure as a separate statement
+    /// right after) is the standard way around that, and is why this is mutable at all — every
+    /// OTHER stored property on this type is a `let`.
+    var onFire: (String) -> Void
 
     /// docId -> its live timer's own cancel closure. A docId's presence here IS "a timer is
     /// currently armed for it" — no separate boolean to drift from this.
@@ -75,7 +83,7 @@ final class OfficeAutosaveScheduler {
     /// `interval` — production always 60 (the brief's own number); tests use whatever their fake
     /// `scheduling` finds convenient, since the FAKE never actually waits `interval` seconds
     /// regardless of its value — see `OfficeAutosaveSchedulerTests`.
-    init(interval: TimeInterval, scheduling: Scheduling = .real(), onFire: @escaping (String) -> Void) {
+    init(interval: TimeInterval, scheduling: Scheduling = .real(), onFire: @escaping (String) -> Void = { _ in }) {
         self.interval = interval
         self.scheduling = scheduling
         self.onFire = onFire

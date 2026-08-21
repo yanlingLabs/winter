@@ -860,6 +860,19 @@ public enum OfficeDocumentEvent: Equatable, Sendable {
     case invalidated(rectsTwips: [OfficeTwipsRect], part: Int)
     case modifiedChanged(Bool)
     case closed
+    /// Office Stage B Task 7 — the helper's own `OfficeAutosaveScheduler` fired and
+    /// `OfficeDocumentBridge.saveAsSidecar` wrote (or refreshed) `docId`'s sidecar at
+    /// `<state-path>/autosave/<docId>.<ext>`. `ext` is the extension ACTUALLY written — native for
+    /// an already-ODF document, the ODF sibling for an OOXML one (`OfficeSaveFormat.autosaveFormat`)
+    /// — not necessarily the document's own real extension, which is why this carries it rather
+    /// than leaving the app to assume. `isODFFallback` is that same fact restated as a bool, purely
+    /// so the app never has to re-derive "was this a fallback" by comparing extensions itself
+    /// (`OfficeRuntime`'s own manifest write and, eventually, the recovery banner's format
+    /// disclosure both read it directly). The helper never learns `docId`'s real PATH (the
+    /// Collabora jail — `OfficeRuntime.stageDocument`'s own header), so this is the one thing this
+    /// event exists to carry: the app is the only side that can turn `docId` back into a real path
+    /// and write the manifest entry this task's recovery flow reads at open time.
+    case autosaved(ext: String, isODFFallback: Bool)
 
     /// This case's own fields, flattened into the SAME single-level JSON object
     /// `OfficeWireFrame.encodedLine()` builds for a `.documentEvent` frame — `kind` is the
@@ -882,6 +895,8 @@ public enum OfficeDocumentEvent: Equatable, Sendable {
             return ["kind": "modifiedChanged", "modified": modified]
         case .closed:
             return ["kind": "closed"]
+        case .autosaved(let ext, let isODFFallback):
+            return ["kind": "autosaved", "ext": ext, "isODFFallback": isODFFallback]
         case .caretRect(let rect):
             return ["kind": "caretRect"].merging(Self.encodeBareRect(rect)) { _, new in new }
         case .textSelection(let rects):
@@ -943,6 +958,17 @@ public enum OfficeDocumentEvent: Equatable, Sendable {
             return .modifiedChanged(number.boolValue)
         case "closed":
             return .closed
+        case "autosaved":
+            // Wire strictness (house norm): both fields required, `isODFFallback` boolean-typed via
+            // the SAME NSNumber/CFBoolean discriminator `modifiedChanged`/`cellCursor` above use —
+            // a malformed or missing field here rejects the whole frame rather than silently
+            // defaulting, matching every other case in this switch.
+            guard let ext = object["ext"] as? String, !ext.isEmpty,
+                  let number = object["isODFFallback"] as? NSNumber,
+                  CFGetTypeID(number) == CFBooleanGetTypeID() else {
+                return nil
+            }
+            return .autosaved(ext: ext, isODFFallback: number.boolValue)
         case "caretRect":
             guard let rect = decodeBareRect(object) else { return nil }
             return .caretRect(rect)

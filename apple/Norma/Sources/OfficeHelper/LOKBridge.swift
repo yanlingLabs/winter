@@ -90,6 +90,41 @@ enum OfficeSaveFormat: Equatable {
         default: return nil
         }
     }
+
+    /// Office Stage B Task 7 — which format the AUTOSAVE SIDECAR is actually written in, and
+    /// whether that is a fallback away from this document's own real format. `saveAsSidecar`
+    /// (below) is this table's only caller.
+    ///
+    /// **All three OOXML formats fall back to their ODF sibling — not only xlsx/docx, the two the
+    /// vendor investigation actually reproduced a crash for** (`ooxml-export-investigation.md`'s
+    /// own verdict: SIGABRT in sal's `FullTextEncodingData` — `libsal_textenclo.dylib` is lazily
+    /// `dlopen`'d BY NAME for full charset tables, first touched by the xlsx export filter's font
+    /// code, and is simply ABSENT from this trimmed 59-dylib product-set; docx "fails less
+    /// reliably, mechanism unconfirmed"; pptx export worked in that investigation's one pass).
+    /// That mechanism is CONTENT-DEPENDENT and PATH-DEPENDENT, not merely format-dependent — one
+    /// clean pptx export proves the trace workload's own font code path was avoided ONCE, for ONE
+    /// document, not that every real pptx a user ever autosaves will avoid it too. Autosave calls
+    /// this on an UNATTENDED, REPEATING timer against whatever the user happens to be editing, for
+    /// as long as a session stays dirty — the cost of guessing wrong here is not "one failed
+    /// export," it is "the crash-protection feature crashes the helper," silently, exactly while a
+    /// document is dirty (the one moment autosave exists to protect). Given that asymmetry, this
+    /// table treats "OOXML" as one category, uniformly, rather than trusting a single investigation
+    /// run as exhaustive proof for the one format it happened to come back clean on. Documented as
+    /// a deliberate, disclosed judgment call for the task 7 review — see task-7-report.md; relaxing
+    /// pptx back to native once it has its OWN dedicated crash-investigation (not a side note in
+    /// xlsx's) is a reasonable, narrow follow-up, not a correction of this one.
+    ///
+    /// `.odt`/`.ods`/`.odp` are excluded on different, solid ground, not by exemption: they are
+    /// already ODF, so a sidecar `saveAs` for them never reaches the OOXML export filter code path
+    /// at all — there is no unproven mechanism here to guess about.
+    var autosaveFormat: (format: OfficeSaveFormat, isODFFallback: Bool) {
+        switch self {
+        case .odt, .ods, .odp: return (self, false)
+        case .docx: return (.odt, true)
+        case .xlsx: return (.ods, true)
+        case .pptx: return (.odp, true)
+        }
+    }
 }
 
 /// "Request to have the part number as an 5th value in the LOK_CALLBACK_INVALIDATE_TILES payload."
@@ -383,6 +418,30 @@ final class LOKBridge: OfficeDocumentBridge {
         /// can exist). Torn down explicitly in `closeOnDedicatedThread` — see that method's own
         /// header for why `doc_destroy` alone is not enough.
         var agentViewId: Int32? = nil
+        /// Office Stage B Task 7 — the best available answer to "what part is the user actually
+        /// looking at right now," for `saveAsSidecarOnDedicatedThread`'s own `setPart` prefix (the
+        /// brief's own words: "setPart type-gated w/ the user's active part"). Autosave fires on an
+        /// AUTONOMOUS timer, never in response to a wire request — unlike every other part-scoped
+        /// call in this bridge (`postKey`/`postMouse`/`saveAs`/...), which all receive `part` as an
+        /// explicit argument the APP supplied — so there is no request to read it from here.
+        ///
+        /// Updated ONLY by `paintTileOnDedicatedThread`, deliberately not by every part-scoped
+        /// method — a full sweep (postKey/postMouse/clipboard/...) would work too, but paint is the
+        /// SAME signal the app's own `DocumentEntry.activePart` traces back to in the first place
+        /// (`.subscribeRequested`'s own reducer arm sets it, which is what triggers the paint that
+        /// would update this): a viewport switch always repaints before or alongside any input
+        /// reaching that part, so tracking here is a faithful mirror of "the part currently on
+        /// screen," not a guess. Defaults `0` — the part LOK itself opens a document parked at.
+        ///
+        /// **Deliberately loose, not exact-consistent with LOK's own live `getPart()`** — a
+        /// residency-prefetch chunk landing for a part the user has since left (`.save`'s own
+        /// NEW-2 fix header has the identical caveat for the real save path) can leave this
+        /// momentarily stale. Acceptable here for a reason the real save path does not have: an
+        /// autosave sidecar's CONTENT is never scoped by part at all (`saveAs` serializes the whole
+        /// document, every sheet/page, regardless of which one is "current") — `setPart` only
+        /// affects which view/cursor position the recovered file remembers as "current," a cosmetic
+        /// detail next to the actual data-loss autosave exists to prevent.
+        var lastKnownPart: Int = 0
     }
 
     private let thread: LOKDedicatedThread
@@ -395,6 +454,15 @@ final class LOKBridge: OfficeDocumentBridge {
     /// rule) — Task 1's invariant, untouched: this task does not add a line to that profile, and
     /// does not need to.
     private let savesDirectory: URL
+    /// Office Stage B Task 7 — `<state-path>/autosave/`, the ONE place `saveAsSidecar` ever renders
+    /// to. **Deliberately NOT swept by `sweepStaleDocumentDirectories` below, unlike `docs/`/
+    /// `saves/` immediately above it** — see that method's own header for the full reasoning; the
+    /// one-sentence version is that a sidecar surviving a helper crash+respawn is the ENTIRE point
+    /// of this task, and a wholesale wipe at every boot (correct for `docs/`/`saves/`, which hold
+    /// nothing a fresh stage/render cannot instantly recreate) would delete the evidence before the
+    /// app ever gets to ask "is there something to recover" — silently disabling crash recovery on
+    /// the exact boot (a respawn after `.helperDied`) it exists to serve.
+    private let autosaveDirectory: URL
     /// Set once by `OfficeHelperServer` before any document opens. Fires on `LOKDedicatedThread`
     /// — see that type's header for the re-entrancy rule this must never violate.
     var onEvent: ((String, OfficeDocumentEvent) -> Void)?
@@ -430,6 +498,22 @@ final class LOKBridge: OfficeDocumentBridge {
         // the backstop for the case nothing on the app side ever ran at all (the whole app crashed
         // or was force-quit, not just the helper), the identical justification carried for
         // `lok-profile-*` orphans.
+        //
+        // Office Stage B Task 7 — `autosave/` is deliberately NOT swept here, unlike its two
+        // siblings above. `docs/`/`saves/` hold nothing that survives being deleted: a staged copy
+        // re-stages from the real file on the very next open, and a rendered save is a one-shot
+        // temp already relocated by `placeAtomically` before this helper could ever see it again.
+        // `autosave/` is the opposite — a sidecar surviving PAST a crash+respawn is this task's
+        // entire reason to exist ("a SIGKILL costs at most a minute," not "a SIGKILL erases the
+        // last minute AND the boot that follows it"). A wholesale wipe here would fire on EXACTLY
+        // the boot recovery needs to survive (a respawn after `.helperDied`), deleting the evidence
+        // before `OfficeRuntime`'s own recovery-candidate check at the next open ever runs. Orphan
+        // hygiene for `autosave/` still exists — it is app-side and MANIFEST-aware instead (only a
+        // sidecar with no matching manifest entry, or vice versa, is orphaned; a valid pair is never
+        // touched), because only the app knows which sidecar still maps to a real path someone might
+        // reopen — the helper never learns real paths at all (`OfficeRuntime.stageDocument`'s own
+        // "Collabora jail" header) and could not tell a live candidate from a genuine orphan even if
+        // it tried. See `OfficeRuntime.sweepAutosaveOrphans`.
         Self.sweepStaleDocumentDirectories(statePath: statePath)
 
         // Office Stage B Task 2 — `<state-path>/saves/`, ahead of anything that could render into
@@ -439,6 +523,12 @@ final class LOKBridge: OfficeDocumentBridge {
         let savesDirectory = statePath.appendingPathComponent("saves", isDirectory: true)
         try FileManager.default.createDirectory(at: savesDirectory, withIntermediateDirectories: true)
         self.savesDirectory = savesDirectory
+
+        // Office Stage B Task 7 — `<state-path>/autosave/`, created (never swept — see above)
+        // ahead of anything that could render into it.
+        let autosaveDirectory = statePath.appendingPathComponent("autosave", isDirectory: true)
+        try FileManager.default.createDirectory(at: autosaveDirectory, withIntermediateDirectories: true)
+        self.autosaveDirectory = autosaveDirectory
 
         // Carry #5 (task-3-brief): FONTCONFIG_FILE must be set BEFORE lok_init_2 — fontconfig
         // resolves its config lazily but the first font lookup happens deep inside LO's own init/
@@ -513,6 +603,16 @@ final class LOKBridge: OfficeDocumentBridge {
     /// `docId` from colliding on disk without this bridge needing a save-local counter of its own.
     func saveAs(docId: String, seq: UInt64, part: Int) throws -> String {
         try thread.sync { try self.saveAsOnDedicatedThread(docId: docId, seq: seq, part: part) }
+    }
+
+    /// Office Stage B Task 7 — called from the timer queue `OfficeAutosaveScheduler` fires on
+    /// (never a connection thread, never from inside a LOK callback) — marshals onto `thread`
+    /// exactly like `saveAs`/`open`/`close`/`paintTile` above. **No `part` parameter** — unlike
+    /// every other part-scoped call on this bridge, an autosave fire has no wire request to have
+    /// carried one; `saveAsSidecarOnDedicatedThread` reads `OpenDocument.lastKnownPart` instead
+    /// (see that field's own header for why, and why that is a deliberately looser guarantee).
+    func saveAsSidecar(docId: String) throws -> (ext: String, isODFFallback: Bool) {
+        try thread.sync { try self.saveAsSidecarOnDedicatedThread(docId: docId) }
     }
 
     /// Office Stage B Task 4 — called from a CONNECTION thread (`OfficeHelperServer`'s `.keyEvent`
@@ -655,6 +755,11 @@ final class LOKBridge: OfficeDocumentBridge {
 
     private func paintTileOnDedicatedThread(docId: String, key: TileKey) throws -> TilePaintResult {
         guard let doc = documents[docId] else { throw TileError.docNotOpen(docId) }
+        // Office Stage B Task 7 — `OpenDocument.lastKnownPart`'s own tracking write; see that
+        // field's own header for why paint (not every part-scoped call) is where this lives.
+        // Written to the DICTIONARY directly (`doc` above is a local copy of the struct at entry,
+        // never mutated itself) — every OTHER read in this function keeps using `doc`, unaffected.
+        documents[docId]?.lastKnownPart = key.part
         // Fix round 2 (CRITICAL) — see `OpenDocument.viewId`'s own header. `paintPartTile`
         // (`TileRenderer.renderRaw`'s one real LOK call) inherits the SAME process-global-current-
         // view hazard `setPart` has, through its own internal `doc_setPartImpl` call when no
@@ -864,6 +969,74 @@ final class LOKBridge: OfficeDocumentBridge {
             doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, nil, false)
         }
         return destination.path
+    }
+
+    /// Office Stage B Task 7 — the autosave sidecar write: `<state-path>/autosave/<docId>.<ext>`,
+    /// `ext` from `OfficeSaveFormat.autosaveFormat` (native for already-ODF documents, the ODF
+    /// sibling for every OOXML one — see that property's own header for why all three, not just
+    /// the two the vendor investigation reproduced a crash for).
+    ///
+    /// **Bare `saveAs`, deliberately no `.uno:Save` follow-up** — the ONE structural difference
+    /// from `saveAsOnDedicatedThread` immediately above, and the reason this is its own method
+    /// rather than that one with an extra parameter. That method's own header states, empirically
+    /// (not theoretically): a bare `saveAs` never clears LOK's `ModifiedStatus`; only the
+    /// `.uno:Save` dispatch after it does. If a sidecar write cleared the dirty flag, the very FIRST
+    /// autosave would fire `.modifiedChanged(false)` back over the wire, and
+    /// `OfficeHelperServer`'s own `.modifiedChanged(false)` handling (mirroring the app's identical
+    /// "clean means nothing to protect" reasoning) would cancel this document's OWN timer after
+    /// exactly one fire — silently defeating "every 60s for as long as the document stays dirty."
+    /// The real document's dirty/clean truth must be driven ONLY by a REAL save or a real undo,
+    /// never by this side-channel write.
+    ///
+    /// **`setView`/type-gated `setPart` prefix — the SAME discipline `saveAsOnDedicatedThread`
+    /// established** (fix rounds 2 and 4 there, cited at length in that method's own header): the
+    /// bytes this writes must record where the USER actually is, not wherever the last paint or a
+    /// bystander document's own current-view left LOK parked, and a Writer document's `setPart`
+    /// must stay gated out (`GotoPage`, a caret move, not a viewport switch — same citation).
+    ///
+    /// **Temp-then-rename, same directory** — a same-`autosave/`-directory `rename(2)` is atomic
+    /// and same-volume by construction (no `EXDEV` concern the way `placeAtomically`'s cross-
+    /// directory move has to guard against), and is the difference between "a SIGKILL mid-export
+    /// leaves a torn, half-written sidecar recovery would silently trust" and "a SIGKILL mid-export
+    /// leaves either the OLD complete sidecar or nothing — never a partial one." The temp name is
+    /// UUID-suffixed, not seq-suffixed like `saveAsOnDedicatedThread`'s own `saves/` renders — this
+    /// call carries no wire `seq` (it is never triggered by a wire request at all).
+    private func saveAsSidecarOnDedicatedThread(docId: String) throws -> (ext: String, isODFFallback: Bool) {
+        guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        if doc.kind != .text {
+            doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(truncatingIfNeeded: doc.lastKnownPart))
+        }
+        guard let realFormat = doc.saveFormat else {
+            throw SaveError.unsupportedFormat("(format not captured at open)")
+        }
+        let (format, isODFFallback) = realFormat.autosaveFormat
+        let finalDestination = autosaveDirectory.appendingPathComponent("\(docId).\(format.fileExtension)")
+        let tempDestination = autosaveDirectory
+            .appendingPathComponent(".tmp-\(docId)-\(UUID().uuidString).\(format.fileExtension)")
+        let destinationURLString = URL(fileURLWithPath: tempDestination.path).absoluteString
+        let succeeded = destinationURLString.withCString { urlPtr -> Bool in
+            format.fileExtension.withCString { formatPtr in
+                doc.handle.pointee.pClass.pointee.saveAs?(doc.handle, urlPtr, formatPtr, nil) != 0
+            }
+        }
+        guard succeeded else {
+            try? FileManager.default.removeItem(at: tempDestination)
+            let reason: String
+            if let errCStr = kit.pointee.pClass.pointee.getError?(kit) {
+                reason = String(cString: errCStr)
+                kit.pointee.pClass.pointee.freeError?(errCStr)
+            } else {
+                reason = "saveAs failed (no error string available)"
+            }
+            throw SaveError.saveAsFailed(reason)
+        }
+        guard rename(tempDestination.path, finalDestination.path) == 0 else {
+            let reason = "sidecar rename failed: \(String(cString: strerror(errno)))"
+            try? FileManager.default.removeItem(at: tempDestination)
+            throw SaveError.saveAsFailed(reason)
+        }
+        return (ext: format.fileExtension, isODFFallback: isODFFallback)
     }
 
     // Office Stage B Task 4 — the DEBUG-only `debugEditOnDedicatedThread` (a `.uno:GoToCell` +

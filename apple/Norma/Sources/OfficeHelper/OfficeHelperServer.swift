@@ -87,6 +87,29 @@ public protocol OfficeDocumentBridge: AnyObject {
     /// own header for why a save needs this even though painting already carries a part of its own.
     func saveAs(docId: String, seq: UInt64, part: Int) throws -> String
 
+    /// Office Stage B Task 7 — the autosave sidecar write: renders `docId`'s CURRENT (possibly
+    /// still-dirty) state to `<state-path>/autosave/<docId>.<ext>`, called on
+    /// `OfficeAutosaveScheduler`'s own timer queue rather than from a connection thread or a LOK
+    /// callback — `LOKBridge`'s implementation marshals onto its dedicated thread, same as
+    /// `saveAs`/`open`/`close`/`paintTile`. Returns the extension actually written (native for an
+    /// already-ODF document, the ODF sibling for an OOXML one) and whether that is a fallback away
+    /// from the document's own real format — `OfficeHelperServer` needs both to push
+    /// `.autosaved(ext:isODFFallback:)`. Throws on any failure exactly like `saveAs` — the helper
+    /// always survives; there is no reply frame here to fail, so a throw here just means "try again
+    /// next interval," logged, not surfaced to the app at all.
+    ///
+    /// **Deliberately NOT `saveAs` with a flag** — the real (`LOKBridge`) conformance never
+    /// dispatches the `.uno:Save` follow-up `saveAs` itself relies on to clear `ModifiedStatus` (see
+    /// that conformance's own header for why an autosave that cleared the dirty flag would cancel
+    /// its own timer after one fire). `FakeOfficeDocumentBridge`'s conformance is a no-op stub past
+    /// the existence check, same reasoning as its `saveAs` stub: wire-level dispatch is what the
+    /// fixture-backed tests exercise, never real content or real format selection.
+    ///
+    /// **No `part` parameter, unlike `saveAs`** — an autosave fire has no wire request to have
+    /// carried one at all (see `LOKBridge.OpenDocument.lastKnownPart`'s own header for how the real
+    /// conformance answers "which part" without one).
+    func saveAsSidecar(docId: String) throws -> (ext: String, isODFFallback: Bool)
+
     /// Office Stage B Task 4 — LOK's `postKeyEvent`, unchanged parameter shape. Throws only on a
     /// `docId` this bridge has no handle for — `postKeyEvent` itself is `void` on LOK's own side
     /// (fire-and-forget, no synchronous success/failure to report — the same posture the now-
@@ -210,6 +233,25 @@ public final class FakeOfficeDocumentBridge: OfficeDocumentBridge {
         let destination = savesDirectory.appendingPathComponent("\(docId)-\(seq).fake")
         try Data("fake saveAs output for \(docId)".utf8).write(to: destination)
         return destination.path
+    }
+
+    /// Office Stage B Task 7 — same "real wire dispatch, fake content" split as `saveAs` above:
+    /// proves `OfficeHelperServer`'s own scheduler-fires-bridge-pushes-event plumbing end to end,
+    /// over a real socket, without any real LOK format/ODF-fallback logic to fake convincingly —
+    /// that correctness is `LOKBridge`'s own live-tested job (`OfficeRuntimeLiveTests`' crash
+    /// drill). Always reports `ext: "fake", isODFFallback: false` — nothing here needs to vary it.
+    public func saveAsSidecar(docId: String) throws -> (ext: String, isODFFallback: Bool) {
+        lock.lock()
+        let isOpen = caches[docId] != nil
+        lock.unlock()
+        guard isOpen else {
+            throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)")
+        }
+        let autosaveDirectory = statePath.appendingPathComponent("autosave", isDirectory: true)
+        try FileManager.default.createDirectory(at: autosaveDirectory, withIntermediateDirectories: true)
+        let destination = autosaveDirectory.appendingPathComponent("\(docId).fake")
+        try Data("fake autosave sidecar for \(docId)".utf8).write(to: destination)
+        return (ext: "fake", isODFFallback: false)
     }
 
     /// Office Stage B Task 4 — existence-checked no-op, same reasoning as `saveAs` above: this fake
@@ -459,10 +501,24 @@ public final class OfficeHelperServer {
     private var connectionCount = 0
     private var idleTimer: DispatchSourceTimer?
     private var nextConnectionId = 0
+    /// Office Stage B Task 7 — owns the per-docId "autosave while dirty" timer; armed/disarmed by
+    /// `routeDocumentEvent`'s own `.modifiedChanged` handling and by both close paths below. Never
+    /// touched under `stateQueue` — its own internal state is independent of `docOwner`/connection
+    /// bookkeeping, so there is no ordering hazard to reason about the way the `documentBridge`
+    /// invariant above exists for.
+    private let autosaveScheduler: OfficeAutosaveScheduler
 
     public init(socketPath: String, statePath: String, expectedToken: String,
                 idleExitSeconds: Double = 120, hooks: Hooks = Hooks(),
                 documentBridge: OfficeDocumentBridge,
+                /// Office Stage B Task 7 — the brief's own 60s, overridable so the live crash drill
+                /// does not spend a real minute per sample. Mirrors `main.swift`'s own
+                /// `idle-exit-seconds` CLI-arg-override idiom exactly (never an environment
+                /// variable) — see `OfficeHelperSupervisor.Configuration.autosaveIntervalSeconds`'s
+                /// own header for the app-side half of that mirror. Production callers
+                /// (`NormaOfficeHelper`'s real `main.swift`, absent an explicit override) never pass
+                /// anything but the default.
+                autosaveIntervalSeconds: TimeInterval = 60,
                 log: @escaping (String) -> Void = { message in
                     FileHandle.standardError.write(Data((message + "\n").utf8))
                 }) {
@@ -473,8 +529,36 @@ public final class OfficeHelperServer {
         self.hooks = hooks
         self.documentBridge = documentBridge
         self.log = log
+        self.autosaveScheduler = OfficeAutosaveScheduler(interval: autosaveIntervalSeconds)
         documentBridge.onEvent = { [weak self] docId, event in
             self?.routeDocumentEvent(docId: docId, event: event)
+        }
+        // `onFire` needs `self` (to reach `documentBridge`/`routeDocumentEvent`/`log`) — assigned
+        // here, as its OWN statement after every stored property (including `autosaveScheduler`
+        // itself) already has a value, which is what makes capturing `[weak self]` legal at this
+        // point — the identical reasoning `documentBridge.onEvent`'s own assignment one line up
+        // already rests on.
+        self.autosaveScheduler.onFire = { [weak self] docId in
+            self?.performAutosaveFire(docId: docId)
+        }
+    }
+
+    /// Office Stage B Task 7 — `autosaveScheduler`'s own fire callback: render the sidecar, then
+    /// push `.autosaved` so the app can write its own manifest entry. Runs on WHATEVER queue
+    /// `OfficeAutosaveScheduler.Scheduling` fires its timer on (production: `autosaveScheduler`'s
+    /// own dedicated `office-helper.autosave` queue) — never `stateQueue`, so calling
+    /// `documentBridge`/`routeDocumentEvent` here carries no reentrancy risk against the bridge-call
+    /// invariant this file states at `docOwner`'s own header.
+    ///
+    /// **Throws never propagate anywhere — logged and dropped, exactly "the helper always
+    /// survives."** There is no reply frame for an autosave to fail; a write that fails this
+    /// interval gets another chance next interval for as long as the document stays dirty.
+    private func performAutosaveFire(docId: String) {
+        do {
+            let (ext, isODFFallback) = try documentBridge.saveAsSidecar(docId: docId)
+            routeDocumentEvent(docId: docId, event: .autosaved(ext: ext, isODFFallback: isODFFallback))
+        } catch {
+            log("[OfficeHelperServer] autosave sidecar write failed for \(docId): \(error) — retrying next interval")
         }
     }
 
@@ -496,6 +580,19 @@ public final class OfficeHelperServer {
     /// a LOK callback) — see `OfficeDocumentBridge.applyTileInvalidation`'s own header for why its
     /// implementation must never re-enter `thread.sync` here.
     private func routeDocumentEvent(docId: String, event: OfficeDocumentEvent) {
+        // Office Stage B Task 7 — the autosave timer's own arm/disarm, driven by the SAME
+        // `.modifiedChanged` firing that already feeds the app's dirty dot. Unconditional, ahead of
+        // the `docOwner` guard below (the scheduler has no concept of "who owns this docId" and
+        // never needs one — arming/disarming a timer for a docId nobody currently tracks is inert,
+        // never a leak: `markDirty` only ever starts a timer, and every close path this file has
+        // separately calls `autosaveScheduler.remove` regardless of whether this arm ever ran).
+        if case .modifiedChanged(let modified) = event {
+            if modified {
+                autosaveScheduler.markDirty(docId: docId)
+            } else {
+                autosaveScheduler.markClean(docId: docId)
+            }
+        }
         guard let entry = stateQueue.sync(execute: { docOwner[docId] }) else { return }
         pushFrame(.documentEvent(seq: entry.opener.pushSeqAllocator.nextSeq(), docId: docId, event: event),
                   to: entry.opener)
@@ -703,6 +800,10 @@ public final class OfficeHelperServer {
             }
             for docId in owned {
                 documentBridge.close(docId: docId)
+                // Office Stage B Task 7 — a connection dying (not just an explicit `.close` frame)
+                // must ALSO stop that docId's own autosave timer; same reasoning as the explicit
+                // close handler's identical call.
+                autosaveScheduler.remove(docId: docId)
             }
             var closeNotifications: [(subscriber: ConnectionWriter, docId: String)] = []
             stateQueue.sync {
@@ -872,6 +973,11 @@ public final class OfficeHelperServer {
                 return
             }
             documentBridge.close(docId: docId)
+            // Office Stage B Task 7 — the autosave timer goes with the document, the ordinary-close
+            // half of `OfficeAutosaveScheduler`'s own contract; see that type's own header for why
+            // this cancels the TIMER only, never a sidecar already on disk (the app's own
+            // `.clearAutosave` owns that, once it has proof the real path itself is resolved).
+            autosaveScheduler.remove(docId: docId)
             let remainingSubscribers = stateQueue.sync { () -> [ConnectionWriter] in
                 let subscribers = docOwner[docId]?.subscribers.filter { $0 !== writer } ?? []
                 docOwner.removeValue(forKey: docId)

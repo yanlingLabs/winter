@@ -59,8 +59,8 @@ final class OfficeCursorStore {
 
     /// Folds one caret/selection/cell-cursor `OfficeDocumentEvent` into `docId`'s own `State` and
     /// signals `cursorChanged`. A no-op (no signal) for any event kind this store does not own
-    /// (`.opened`/`.openFailed`/`.invalidated`/`.modifiedChanged`/`.closed` all belong to the
-    /// reducer/`tileStore` instead) — callers are expected to route by case already
+    /// (`.opened`/`.openFailed`/`.invalidated`/`.modifiedChanged`/`.closed`/`.autosaved` all belong
+    /// to the reducer/`tileStore` instead) — callers are expected to route by case already
     /// (`OfficeRuntime.handle(documentEvent:docId:)`'s own switch), this guard is defense-in-depth,
     /// not the primary dispatch mechanism.
     func apply(docId: String, event: OfficeDocumentEvent, activePart: Int) {
@@ -79,7 +79,7 @@ final class OfficeCursorStore {
         case .cellCursor(let cell):
             state.cellCursor = cell
             state.cellCursorPart = activePart
-        case .opened, .openFailed, .invalidated, .modifiedChanged, .closed:
+        case .opened, .openFailed, .invalidated, .modifiedChanged, .closed, .autosaved:
             return // not this store's concern — no signal, no mutation
         }
         states[docId] = state

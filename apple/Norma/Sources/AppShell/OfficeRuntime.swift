@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import CryptoKit
 #if canImport(Darwin)
 import Darwin
 #endif
@@ -151,6 +152,18 @@ struct OfficeRuntimeState: Equatable {
         /// `EditorSaveCoordinator`'s own header states for the editor's identical dot. Defaults
         /// `false`: a document that just opened has nothing unsaved yet.
         var dirty: Bool = false
+        /// **Office Stage B Task 7 — the ONE deliberate exception to `dirty`'s own "mirrors LOK and
+        /// nothing else" doctrine, stated two lines up.** Set `true` in the SAME beat `.recoveryRestored`
+        /// forces `dirty = true` (a restore loads the sidecar's content into a FRESH LOK document
+        /// that, from LOK's own point of view, was never edited — nothing will ever make it fire a
+        /// genuine `.uno:ModifiedStatus` callback on its own). Without this, a user who restores and
+        /// then immediately presses ⌘S with no further typing gets a real save (the bytes DO land —
+        /// `saveAsOnDedicatedThread`'s own `.uno:Save` follow-up runs unconditionally, it does not
+        /// gate on the modified flag) but a dirty dot that never clears, because LOK never has a
+        /// true->false transition to report for a document it always considered clean. `.saveSucceeded`
+        /// checks this flag and, ONLY when it is set, clears `dirty` directly alongside it — the one
+        /// place in this file a save's own success is allowed to touch `dirty` at all.
+        var restoredPendingSave: Bool = false
     }
 
     var phase: Phase = .idle
@@ -222,7 +235,49 @@ struct OfficeRuntimeState: Equatable {
     /// lifecycle exits every OTHER per-path dictionary here already clears on (`.opened`,
     /// `.closeRequested`, `.reloadFailed`, `.helperDied`/`.helperUnavailable`, `.teardownRequested`).
     var documentConflicts: [String: OfficeConflictKind] = [:]
+    /// **Office Stage B Task 7** — a FRESHLY opened document for which a newer-than-the-real-file
+    /// autosave sidecar exists: "Recovered unsaved changes from ~Ns ago [Restore] [Discard]"
+    /// (`PanelDocumentTabModel.recoveryCandidate`/`OfficeRecoveryBannerView`). A SEPARATE dictionary
+    /// from `documentConflicts` — a conflict is "the file moved out from under a dirty buffer,"
+    /// this is "there might be OLDER, better content than what just opened," and the two can never
+    /// be confused for one another the way folding them into one type would risk. Populated by
+    /// `.recoveryCandidateFound` (imperative check, `OfficeRuntime.checkRecoveryCandidate`, run only
+    /// for a genuinely FRESH open — never a reload/restore, see `openAndDispatch`'s own doc) and
+    /// cleared by whatever makes the offer stale or acted-on: `.opened` (unconditionally — a reload
+    /// has moved past whatever baseline the offer was computed against), `.modifiedStatusChanged`
+    /// going true (restoring over LIVE new edits would clobber them — the exact class of "one click
+    /// from data loss" T3's own review flagged for a different banner), `.recoveryRestoreRequested`/
+    /// `.recoveryDiscardRequested` (optimistic clear, mirrors `documentConflicts`' identical
+    /// pattern), and `.closeRequested` (no path, no offer to make about it).
+    var documentRecoveryCandidates: [String: OfficeRecoveryCandidate] = [:]
 }
+
+/// Office Stage B Task 7 — one path's own recovery offer: a sidecar this runtime found newer than
+/// the real file at open time. `docId` is the CRASHED session's own docId (the sidecar's own
+/// filename, `<docId>.<ext>` under `autosave/`) — deliberately NOT the freshly opened document's
+/// docId, which is a different one (`openAndDispatch` mints a fresh docId on every open, crash
+/// recovery included). `sidecarPath` is carried directly (not re-derived from `docId`+`ext` at
+/// every use) so `.restoreFromSidecar`'s effect performer and `.discardRecoveryCandidate`'s both
+/// read the exact same path this candidate was actually found at.
+struct OfficeRecoveryCandidate: Equatable {
+    var docId: String
+    var sidecarPath: String
+    /// The sidecar's own mtime at discovery — what "~Ns ago" is computed FROM (captured once, not
+    /// live-updated while the banner sits on screen; a stale-by-a-few-seconds relative time on a
+    /// banner nobody has dismissed yet is cosmetic, not a correctness concern this task's brief
+    /// asks for more than).
+    var capturedAt: Date
+    /// Office Stage B Task 7 — whether `sidecarPath` is in the document's OWN format or its ODF
+    /// fallback (`OfficeSaveFormat.autosaveFormat`) — the banner discloses this ("recovered in ODF
+    /// format" or similar) rather than silently restoring a document whose extension no longer
+    /// matches what the user will see after Restore.
+    var isODFFallback: Bool
+}
+
+// MARK: - Office Stage B Task 7: the recovery banner's copy, alongside the conflict banner's own
+
+let officeRecoveryRestoreTitle = "Restore"
+let officeRecoveryDiscardTitle = "Discard"
 
 /// Office Stage B Task 2b — mirrors `EditorConflictKind` exactly: two kinds because the ACTIONS
 /// differ, which is the only reason a state ever splits. `.changed` offers Reload/Keep mine;
@@ -342,6 +397,33 @@ enum OfficeRuntimeEvent: Equatable {
     /// The conflict banner's "Keep my version" (both kinds) — dismiss; the next ⌘S overwrites
     /// whatever the real path now holds (or recreates it, for `.deleted`).
     case conflictKeepMineRequested(path: String)
+
+    // MARK: Office Stage B Task 7 — autosave sidecars + crash recovery
+
+    /// The helper's own `OfficeAutosaveScheduler` fired and wrote (or refreshed) `docId`'s sidecar.
+    /// Routed by docId, same reasoning as `modifiedStatusChanged` — the push itself carries only
+    /// `docId`; this reducer already knows the docId->path mapping.
+    case autosaved(docId: String, ext: String, isODFFallback: Bool)
+    /// The imperative half's own post-open check (`OfficeRuntime.checkRecoveryCandidate`, run only
+    /// for a genuinely fresh open) found a sidecar newer than the real file. `docId` is the FRESH
+    /// open's own docId — the stale-open guard this event's own reducer arm uses, identical
+    /// shape to `.opened`'s: a reload/close racing the check must not attach a candidate to a
+    /// document this path has already moved past.
+    case recoveryCandidateFound(path: String, docId: String, candidate: OfficeRecoveryCandidate)
+    /// The recovery banner's "Restore" — replace the buffer with the sidecar's own content, under a
+    /// fresh docId, exactly like `.conflictReloadRequested` re-stages except FROM the sidecar
+    /// instead of from the real path (`OfficeRuntime.openAndDispatch`'s `stageFrom:` parameter).
+    case recoveryRestoreRequested(path: String)
+    /// The recovery banner's "Discard" — the offer is declined; delete the sidecar and its manifest
+    /// entry, no other document state changes (the tab is already showing the real file's own
+    /// content, opened normally — Task 7's own design note: recovery never blocks the ordinary open).
+    case recoveryDiscardRequested(path: String)
+    /// **A restore-flavored open landed.** Separate from `.opened` (which this ALWAYS fires
+    /// immediately after, never instead of) rather than a new field on it — widening `.opened`'s
+    /// own arity would touch every existing call site and reducer test that constructs it, for a
+    /// fact ( "force dirty=true, this once" ) that is true for exactly one caller. See
+    /// `DocumentEntry.restoredPendingSave`'s own header for why `dirty` needs forcing at all.
+    case recoveryRestored(path: String, docId: String)
 }
 
 /// What the imperative half must DO about an event. Named after the effect, never after the wire
@@ -414,6 +496,52 @@ enum OfficeRuntimeEffect: Equatable {
     /// `OfficeRuntime.performTeardown`); never touches the shared helper PROCESS itself, which
     /// outlives any one session's runtime (`ShellSessionHost.teardownOfficeRuntime`'s own header).
     case teardown(docIds: [String])
+
+    // MARK: Office Stage B Task 7 — autosave sidecars + crash recovery
+
+    /// Write/refresh the state-path manifest entry mapping `path`'s own hash to `docId`'s sidecar
+    /// — the ONLY place this ever happens app-side, since only the app knows `docId`'s real path
+    /// (the helper never learns it — the Collabora jail). Emitted by `.autosaved`'s own arm.
+    case recordAutosave(path: String, docId: String, ext: String, isODFFallback: Bool)
+    /// The recovery banner's "Restore" — the SAME close-old/open-new machinery `.reloadDocument`
+    /// already runs (`openAndDispatch`'s own `stageFrom:` parameter), except staging FROM
+    /// `sidecarPath` instead of from `path` itself, and forcing `dirty=true` once the fresh open
+    /// lands (`OfficeRuntime.openAndDispatch`'s `markDirtyOnOpen:` — see
+    /// `DocumentEntry.restoredPendingSave`'s own header for why that forcing is needed at all).
+    /// Deliberately a DIFFERENT case name from the EVENT that produces it
+    /// (`OfficeRuntimeEvent.recoveryRestoreRequested`) even though both exist for the same user
+    /// action — this file's own established convention names every effect after WHAT THE IMPERATIVE
+    /// HALF DOES (`.reloadDocument`, not `.conflictReloadRequested`), and a shared name between an
+    /// event and its effect would make every future grep for one also return the other.
+    case restoreFromSidecar(path: String, oldDocId: String, sidecarPath: String)
+    /// The recovery banner's "Discard" — delete `docId`'s own sidecar and `path`'s own manifest
+    /// entry, exactly like `.clearAutosave` (indeed the SAME imperative performer), kept as its own
+    /// case rather than reusing `.clearAutosave` directly so `OfficeRuntimeReducerTests` can assert
+    /// on "which door produced this" without the two call sites becoming indistinguishable in a
+    /// test's own effects list.
+    case discardRecoveryCandidate(path: String, docId: String)
+    /// **Delete `docId`'s own sidecar (glob by prefix, mirrors `.deleteStagedCopy`) AND `path`'s own
+    /// manifest entry.** The ownership rule this task's whole design rests on: the HELPER only ever
+    /// WRITES a sidecar (`OfficeAutosaveScheduler`'s own header); this is the app's own half,
+    /// emitted from exactly three places, each a genuine, explicit resolution — never a helper-side
+    /// signal, never an ambient timeout:
+    ///   * `.saveSucceeded` — the real path itself now PROVABLY carries the content
+    ///     (`placeAtomically` already ran); the sidecar this SAME docId may have been growing is
+    ///     now redundant.
+    ///   * `.closeRequested` — by the time this event reaches the reducer at all, T3's own
+    ///     dirty-close sheet has already made the user choose Save-then-close or Discard-then-close
+    ///     at the app layer; either way there is a deliberate resolution behind it, never a crash.
+    ///   * `.recoveryDiscardRequested` — the user explicitly declined the offer.
+    ///
+    /// **Deliberately NEVER emitted by `.helperDied`/`.helperUnavailable`/`.teardownRequested`** —
+    /// those three ARE the abnormal-ending case ("a SIGKILL costs at most a minute" covers an app
+    /// quit exactly as much as a literal crash: the helper's own teardown is unconditionally
+    /// `_Exit`/SIGKILL, never a flush). `OfficeRuntimeReducerTests
+    /// .testHelperDiedTeardownAndUnavailableNeverEmitAnAutosaveClear` pins this the way a positive
+    /// test alone cannot — a future site-mirroring sweep (the same instinct that correctly adds
+    /// `.deleteStagedCopy` to every document-abandoning site) must trip a RED test here, not
+    /// silently delete the evidence recovery depends on.
+    case clearAutosave(path: String, docId: String)
 }
 
 /// **The whole lifecycle, as one pure function.** Every claim Task 5 makes about this runtime —
@@ -486,6 +614,13 @@ enum OfficeRuntimeReducer {
             next.documentBanners.removeValue(forKey: path)
             // Task 2b: nor still showing a conflict — a fresh (re)open IS the resolution.
             next.documentConflicts.removeValue(forKey: path)
+            // Task 7: nor still offering a NOW-stale recovery banner — unconditional, exactly like
+            // the two clears immediately above. Correct for BOTH the case this doesn't yet cover
+            // (a fresh open has nothing to clear here — the candidate, if any, is found by a LATER,
+            // separate `.recoveryCandidateFound` dispatch this same open triggers) and the case it
+            // exists for (a reload/restore lands here with an OLDER offer still standing, computed
+            // against a baseline this new content has already moved past).
+            next.documentRecoveryCandidates.removeValue(forKey: path)
             // **Task 8: this is ALSO how a reload preserves `activePart` without a second, reload-
             // only version of this event.** `.reloadDocument` never clears `documents[path]` before
             // its own reopen resolves (see that effect's own header), so a RELOAD's `.opened` finds
@@ -527,13 +662,18 @@ enum OfficeRuntimeReducer {
             next.openFailures.removeValue(forKey: path)
             next.documentBanners.removeValue(forKey: path) // Task 8: no path to still be a document about
             next.documentConflicts.removeValue(forKey: path) // Task 2b: same — no path, no conflict about it
+            next.documentRecoveryCandidates.removeValue(forKey: path) // Task 7: same — no path, no offer about it
             guard let doc = state.documents[path] else { return (next, []) }
             next.documents.removeValue(forKey: path)
             // Task 8: the watch goes with the document — "a watcher exists exactly while a document
             // does" is an invariant of this reducer, mirroring `EditorRuntimeReducer.closeRequested`'s
-            // identical one for models. Task 2b: and so does its own staged copy.
+            // identical one for models. Task 2b: and so does its own staged copy. Task 7: and so does
+            // any autosave sidecar this docId may have been growing — by the time this event reaches
+            // the reducer at all, T3's own dirty-close sheet has already made the user choose
+            // Save-then-close or Discard-then-close at the app layer (see `.clearAutosave`'s own
+            // header for why that is what makes this site safe, unlike `.helperDied`'s).
             return (next, [.helperClose(docId: doc.docId), .unwatchFile(path: path),
-                           .deleteStagedCopy(docId: doc.docId)])
+                           .deleteStagedCopy(docId: doc.docId), .clearAutosave(path: path, docId: doc.docId)])
 
         case .subscribeRequested(let path, let part, let zoomPPT, let viewportTwips):
             guard state.phase == .ready, let doc = state.documents[path] else { return (next, []) }
@@ -567,7 +707,25 @@ enum OfficeRuntimeReducer {
             // the `@MainActor` race and misclassifying as `.external` a beat early) self-heal: the
             // conflict it spuriously raised is cleared the instant this save's own success lands.
             next.documentConflicts.removeValue(forKey: path)
-            return (next, [])
+            // Task 7: same "a save IS the resolution" reasoning, for a standing recovery offer —
+            // pressing ⌘S (whether the user ever looked at the banner or not) makes the real path
+            // hold exactly this buffer, which is precisely as strong a "resolved" as the conflict
+            // clear immediately above.
+            next.documentRecoveryCandidates.removeValue(forKey: path)
+            // **`restoredPendingSave`'s own header has the full account** — the ONE place this
+            // reducer lets a save's own success touch `dirty` directly, because a document loaded
+            // from a recovery sidecar was never actually "modified" from LOK's own point of view and
+            // will never fire the real `.uno:ModifiedStatus=false` this dot ordinarily waits for.
+            if next.documents[path]?.restoredPendingSave == true {
+                next.documents[path]?.dirty = false
+            }
+            next.documents[path]?.restoredPendingSave = false
+            // Task 7 — the ownership rule (`.clearAutosave`'s own header): the real path now
+            // PROVABLY carries this docId's content (`placeAtomically` already ran, or this dispatch
+            // would not exist), so any sidecar it may have been growing is redundant. Unconditional,
+            // like `deleteStagedCopy` at every OTHER document-abandoning site — cheap and harmless
+            // when nothing was ever autosaved.
+            return (next, [.clearAutosave(path: path, docId: docId)])
 
         case .saveFailed(let path, let docId, let reason):
             guard state.phase == .ready, state.documents[path]?.docId == docId else { return (next, []) }
@@ -587,6 +745,16 @@ enum OfficeRuntimeReducer {
                 return (next, [])
             }
             next.documents[path]?.dirty = modified
+            // **Task 7 (advisor review) — a standing recovery offer must not survive the FIRST real
+            // edit after it was raised.** The banner's "Restore" replaces the whole buffer with the
+            // sidecar's own (older) content — leaving it standing over a document the user has since
+            // made genuinely dirty again is one click from clobbering LIVE new edits with stale ones,
+            // the exact "one click from data loss" shape T3's own review flagged for a different
+            // banner. `modified == false` intentionally leaves a standing candidate untouched (an
+            // undo-back-to-clean does not retroactively make the earlier offer wrong).
+            if modified {
+                next.documentRecoveryCandidates.removeValue(forKey: path)
+            }
             return (next, [])
 
         // MARK: office-plumbing Task 8
@@ -672,6 +840,16 @@ enum OfficeRuntimeReducer {
             var fresh = OfficeRuntimeState()
             fresh.phase = .failed
             fresh.failureReason = reason
+            // **Task 7 — deliberately NO `.clearAutosave` here, for either case.** This IS the
+            // abnormal-ending shape autosave exists to survive: `.helperDied` is a literal crash,
+            // and `.helperUnavailable` is "never came up" (nothing to protect either way). `fresh`
+            // resets `documentRecoveryCandidates` to empty along with every other per-path dict —
+            // correct, since whatever candidate a NOW-abandoned open once found is moot the instant
+            // its own `documents[path]` entry is gone — but that is `OfficeRuntimeState()`'s own
+            // default-empty-dict behavior, not a line this arm writes; nothing here ever reaches for
+            // `.clearAutosave(path:docId:)`, on any docId, for any reason. Pinned by
+            // `OfficeRuntimeReducerTests.testHelperDiedTeardownAndUnavailableNeverEmitAnAutosaveClear`.
+            //
             // **Wave fix (T9 review M8)**: every watch this runtime armed for a now-cleared document
             // must stop HERE, not wait for a close that can never arrive — `.closeRequested`'s own
             // `.unwatchFile` is gated on `state.documents[path]` existing (see that arm above), and
@@ -715,6 +893,13 @@ enum OfficeRuntimeReducer {
             // releases the slot" is a claim the tests can make about the reducer alone. Every open
             // docId is handed to the imperative half to close; NEVER the shared helper process
             // itself (see `.teardown`'s own doc).
+            //
+            // Task 7 — deliberately NO `.clearAutosave` here either, same reasoning as
+            // `.helperDied`/`.helperUnavailable`'s own note: an app quit (this event's real-world
+            // trigger, `ShellSessionHost.teardownAllOfficeRuntimesAndStopHelper`) reaches the helper
+            // as `_Exit`/SIGKILL exactly like a crash does — "a SIGKILL costs at most a minute" is
+            // this task's OWN framing for why that must be true of quit too, not only of a literal
+            // abnormal death. Any dirty document's sidecar must survive to the NEXT launch.
             let docIds = state.documents.values.map(\.docId)
             // Task 2b (I3): and every one of THOSE docIds' own staged copies — teardown is exactly
             // as much "release everything this runtime holds" for `docs/` as it already is for the
@@ -740,6 +925,49 @@ enum OfficeRuntimeReducer {
             // real path, exactly as `.saveSucceeded`'s own arm already resolves a conflict.
             next.documentConflicts.removeValue(forKey: path)
             next.documentBanners.removeValue(forKey: path)
+            return (next, [])
+
+        // MARK: Office Stage B Task 7 — autosave sidecars + crash recovery
+
+        case .autosaved(let docId, let ext, let isODFFallback):
+            // Same docId->path resolution `.modifiedStatusChanged` already uses one arm up — the
+            // push itself carries only `docId`.
+            guard state.phase == .ready,
+                  let path = state.documents.first(where: { $0.value.docId == docId })?.key else {
+                return (next, [])
+            }
+            return (next, [.recordAutosave(path: path, docId: docId, ext: ext, isODFFallback: isODFFallback)])
+
+        case .recoveryCandidateFound(let path, let docId, let candidate):
+            // The stale-open guard: the async check that produced this can land after a close or a
+            // second, faster reload already moved this path past the docId it was checking FOR —
+            // same shape as `.saveSucceeded`'s own guard, same reason.
+            guard state.phase == .ready, state.documents[path]?.docId == docId else { return (next, []) }
+            next.documentRecoveryCandidates[path] = candidate
+            return (next, [])
+
+        case .recoveryRestoreRequested(let path):
+            guard state.phase == .ready, let doc = state.documents[path],
+                  let candidate = state.documentRecoveryCandidates[path] else { return (next, []) }
+            // Optimistic clear — mirrors `.conflictReloadRequested`'s identical posture: the offer
+            // is acted on now, and a failure surfaces as an ordinary reload-failure banner rather
+            // than resurrecting the same candidate for a retry (the sidecar itself is untouched
+            // either way, so nothing is actually lost by not offering a second chance here).
+            next.documentRecoveryCandidates.removeValue(forKey: path)
+            return (next, [.restoreFromSidecar(path: path, oldDocId: doc.docId, sidecarPath: candidate.sidecarPath)])
+
+        case .recoveryDiscardRequested(let path):
+            guard state.phase == .ready, let candidate = state.documentRecoveryCandidates[path] else { return (next, []) }
+            next.documentRecoveryCandidates.removeValue(forKey: path)
+            return (next, [.discardRecoveryCandidate(path: path, docId: candidate.docId)])
+
+        case .recoveryRestored(let path, let docId):
+            // Stale-open guard, same shape as `.recoveryCandidateFound`'s own — a close or a second
+            // reload racing the restore's own round trip must not force `dirty=true` onto whatever
+            // ELSE this path now shows.
+            guard state.phase == .ready, state.documents[path]?.docId == docId else { return (next, []) }
+            next.documents[path]?.dirty = true
+            next.documents[path]?.restoredPendingSave = true
             return (next, [])
         }
     }
@@ -912,6 +1140,12 @@ final class OfficeRuntime: ObservableObject {
     /// `--state-path` — computed once from `driver.stateDirectory`, never re-derived per open.
     private var docsDirectory: URL { driver.stateDirectory.appendingPathComponent("docs", isDirectory: true) }
 
+    /// Office Stage B Task 7 — where the helper's own `OfficeAutosaveScheduler` writes sidecars,
+    /// and where this runtime's own manifest entries live alongside them (one JSON file per
+    /// document, `<pathHash>.manifest.json` — see `OfficeAutosaveManifestEntry`'s own header for
+    /// why per-document, not one shared file). Sibling to `docsDirectory` above, same reasoning.
+    private var autosaveDirectory: URL { driver.stateDirectory.appendingPathComponent("autosave", isDirectory: true) }
+
     /// **Carry 6's belt: bumped by `teardown()`, checked by every in-flight `.helperOpen` before it
     /// dispatches its result.** Mirrors `OfficeHelperSupervisor.generation`'s own reasoning exactly:
     /// `teardown()` resets `state` to a value that is BYTE-IDENTICAL to a runtime that was simply
@@ -1068,6 +1302,21 @@ final class OfficeRuntime: ObservableObject {
     /// deleted): dismiss the conflict; the next ⌘S overwrites or recreates the real path.
     func keepMyVersion(_ path: String) {
         perform(dispatch(.conflictKeepMineRequested(path: path)))
+    }
+
+    /// Office Stage B Task 7 — the recovery banner's "Restore": replace the buffer with the
+    /// sidecar's own content. Thin, mirroring `reloadFromDisk`/`keepMyVersion`'s own one-line shape
+    /// exactly — everything about WHAT that means (re-stage from the sidecar, force dirty) lives in
+    /// the reducer/`openAndDispatch`, not here.
+    func restoreFromRecovery(_ path: String) {
+        perform(dispatch(.recoveryRestoreRequested(path: path)))
+    }
+
+    /// The recovery banner's "Discard" — decline the offer; delete the sidecar and its manifest
+    /// entry, no other document state changes (the tab is already showing the real file's own
+    /// content, opened normally).
+    func discardRecovery(_ path: String) {
+        perform(dispatch(.recoveryDiscardRequested(path: path)))
     }
 
     /// T6's tile door. Thin here — see `OfficeRuntimeEvent.subscribeRequested`'s own doc.
@@ -1335,6 +1584,17 @@ final class OfficeRuntime: ObservableObject {
         switch event {
         case .ready:
             perform(dispatch(.helperBecameReady))
+            // Office Stage B Task 7 — the manifest-aware autosave sweep, once per FRESH helper
+            // boot (`.ready` fires exactly there — a relaunch after `.helperDied` is exactly the
+            // boot this sweep exists to clean up after, mirroring `lok-profile-*`'s own "one live
+            // helper at a time" safety argument one layer up). Every session's own runtime reaches
+            // this on the SAME shared helper's readiness (`OfficeHelperSupervisor.events` is fanned
+            // out to all of them — this file's own header), so a multi-session app runs this
+            // redundantly, not exactly-once — harmless: the sweep only ever removes PROVABLY
+            // orphaned files (`sweepAutosaveOrphans`'s own header), so a second pass a beat later
+            // simply finds nothing left to do. Off `@MainActor`, best-effort, never blocks readiness.
+            let autosaveDirectory = autosaveDirectory
+            Task.detached(priority: .utility) { Self.sweepAutosaveOrphans(autosaveDirectory: autosaveDirectory) }
         case .helperDied:
             // Task 6: every docId this runtime's store still holds dies with the helper, in the
             // SAME beat the reducer wipes `state.documents` below — see `OfficeTileStore
@@ -1382,6 +1642,8 @@ final class OfficeRuntime: ObservableObject {
         case .caretRect, .textSelection, .textSelectionStart, .textSelectionEnd, .cellCursor:
             let activePart = state.documents.first(where: { $0.value.docId == docId })?.value.activePart ?? 0
             cursorStore.apply(docId: docId, event: event, activePart: activePart)
+        case .autosaved(let ext, let isODFFallback):
+            perform(dispatch(.autosaved(docId: docId, ext: ext, isODFFallback: isODFFallback)))
         case .opened, .openFailed, .invalidated, .closed:
             return
         }
@@ -1487,6 +1749,42 @@ final class OfficeRuntime: ObservableObject {
                 Task.detached(priority: .utility) {
                     Self.deleteStagedCopy(docId: docId, docsDirectory: docsDirectory)
                 }
+
+            // MARK: Office Stage B Task 7 — autosave sidecars + crash recovery
+
+            case .restoreFromSidecar(let path, let oldDocId, let sidecarPath):
+                // Identical store hygiene to `.reloadDocument`'s own performer immediately above —
+                // this IS that machinery, called with a different `stageFrom:`/`markDirtyOnOpen:`.
+                tileStore.evictAll(docId: oldDocId)
+                cursorStore.evict(docId: oldDocId)
+                Task { [driver] in await driver.close(oldDocId) }
+                let docsDirectory = docsDirectory
+                Task.detached(priority: .utility) {
+                    Self.deleteStagedCopy(docId: oldDocId, docsDirectory: docsDirectory)
+                }
+                openAndDispatch(path: path, myGeneration: generation, reloadingDocId: oldDocId,
+                                stageFrom: sidecarPath, markDirtyOnOpen: true)
+
+            case .recordAutosave(let path, let docId, let ext, let isODFFallback):
+                let autosaveDirectory = autosaveDirectory
+                Task.detached(priority: .utility) {
+                    Self.recordAutosaveManifest(realPath: path, docId: docId, ext: ext,
+                                                isODFFallback: isODFFallback, autosaveDirectory: autosaveDirectory)
+                }
+
+            case .clearAutosave(let path, let docId):
+                let autosaveDirectory = autosaveDirectory
+                Task.detached(priority: .utility) {
+                    Self.clearAutosave(realPath: path, docId: docId, autosaveDirectory: autosaveDirectory)
+                }
+
+            case .discardRecoveryCandidate(let path, let docId):
+                // Same imperative call as `.clearAutosave` immediately above — see that effect's own
+                // header for why this stays a separate CASE regardless (test-side distinguishability).
+                let autosaveDirectory = autosaveDirectory
+                Task.detached(priority: .utility) {
+                    Self.clearAutosave(realPath: path, docId: docId, autosaveDirectory: autosaveDirectory)
+                }
             }
         }
     }
@@ -1531,22 +1829,46 @@ final class OfficeRuntime: ObservableObject {
     /// — see that event's own header for why a plain `.openFailed` would be the wrong shape here:
     /// unlike a fresh open, `documents[path]` may already hold something by the time this resolves,
     /// and an unqualified failure could not tell "genuinely my failure" from "superseded, ignore me").
-    private func openAndDispatch(path: String, myGeneration: Int, reloadingDocId: String?) {
+    ///
+    /// **Office Stage B Task 7 — two additive parameters, both `nil`/`false` for every call site
+    /// that predates this task, so `.helperOpen`/plain `.reloadDocument` are byte-identical to
+    /// before.**
+    ///
+    /// `stageFrom`, when set, is copied INTO the staged path instead of `path` itself — the
+    /// recovery banner's "Restore" (`.restoreFromSidecar`'s own performer, below) is the one caller
+    /// that sets it, to the sidecar's own path, so the fresh LOK document loads the RECOVERED
+    /// content while every app-facing surface keeps speaking `path` unchanged (the tab, the
+    /// watcher, `documents[path]`'s own dictionary key) — "reuse the T2b staging machinery" from
+    /// this task's own dispatch note, made literal.
+    ///
+    /// `markDirtyOnOpen`, when true, dispatches ONE more event right after `.opened` lands
+    /// successfully: `.recoveryRestored(path:docId:)`, which forces `dirty=true` on the fresh entry
+    /// (see `DocumentEntry.restoredPendingSave`'s own header for why LOK's own signal can never do
+    /// this on its own for a document loaded from a sidecar). Never set without `stageFrom` also
+    /// being set in practice — the two arrive together from `.restoreFromSidecar`'s one call site —
+    /// but kept as two independent parameters rather than one, since "where the bytes come from"
+    /// and "whether to force dirty" are two genuinely separate facts a future caller could want
+    /// independently (a hypothetical "restore but the recovered content is identical, don't force a
+    /// dirty dot" would set the first without the second).
+    private func openAndDispatch(path: String, myGeneration: Int, reloadingDocId: String?,
+                                  stageFrom: String? = nil, markDirtyOnOpen: Bool = false) {
         let docId = makeDocId()
         let stagedPath = Self.stagedPath(forDocId: docId, realPath: path, docsDirectory: docsDirectory)
         let docsDirectory = docsDirectory
+        let autosaveDirectory = autosaveDirectory
+        let copySource = stageFrom ?? path
         Task { [weak self, driver] in
             guard let self else { return }
             do {
                 // **Office Stage B Task 2b — stage BEFORE the wire open.** The Collabora jail: this
-                // app (unsandboxed, the trust boundary) copies `path` INTO the helper's own
+                // app (unsandboxed, the trust boundary) copies `copySource` INTO the helper's own
                 // `--state-path` first; the wire `open` below carries the STAGED path, never the
-                // real one — the helper never touches, and never even learns, `path` itself from
-                // here on. Off `@MainActor` — a real copy, mirrors `performSave`'s own
-                // `Task.detached` around `placeAtomically` exactly, for the identical reason (a
-                // large document must not stall the shell).
+                // real one — the helper never touches, and never even learns, `path` (or, for a
+                // restore, the sidecar's own path) itself from here on. Off `@MainActor` — a real
+                // copy, mirrors `performSave`'s own `Task.detached` around `placeAtomically`
+                // exactly, for the identical reason (a large document must not stall the shell).
                 try await Task.detached(priority: .userInitiated) {
-                    try Self.stageDocument(realPath: path, stagedPath: stagedPath)
+                    try Self.stageDocument(realPath: copySource, stagedPath: stagedPath)
                 }.value
                 let metadata = try await driver.open(docId, stagedPath)
                 guard myGeneration == self.generation else {
@@ -1559,6 +1881,27 @@ final class OfficeRuntime: ObservableObject {
                     return
                 }
                 self.perform(self.dispatch(.opened(path: path, docId: docId, stagedPath: stagedPath, metadata: metadata)))
+                if markDirtyOnOpen {
+                    self.perform(self.dispatch(.recoveryRestored(path: path, docId: docId)))
+                }
+                // Office Stage B Task 7 — the recovery-candidate check, ONLY for a genuinely FRESH
+                // open. `reloadingDocId == nil` excludes both an ordinary reload AND a restore
+                // (`.restoreFromSidecar`'s own performer always passes the docId it is replacing) —
+                // a document already open in this runtime never needs a second chance to offer
+                // whatever candidate existed at its ORIGINAL open, and re-running this for a restore
+                // would immediately re-discover the very sidecar Restore just consumed. Off
+                // `@MainActor`, best-effort, never blocks the open the way staging/the wire open
+                // above do — a missing/corrupt manifest or a stat failure simply means no banner,
+                // never a failed open.
+                if reloadingDocId == nil {
+                    let realPath = path
+                    let candidate = await Task.detached(priority: .utility) {
+                        Self.checkRecoveryCandidate(realPath: realPath, autosaveDirectory: autosaveDirectory)
+                    }.value
+                    if let candidate {
+                        self.perform(self.dispatch(.recoveryCandidateFound(path: path, docId: docId, candidate: candidate)))
+                    }
+                }
             } catch {
                 // Either the STAGE itself failed (the real path is unreadable, the disk is full —
                 // nothing was ever staged, and `deleteStagedCopy` below is a harmless no-op against
@@ -2082,6 +2425,185 @@ final class OfficeRuntime: ObservableObject {
         let prefix = "\(docId)."
         for entry in entries where entry.lastPathComponent.hasPrefix(prefix) {
             try? FileManager.default.removeItem(at: entry)
+        }
+    }
+
+    // MARK: - Office Stage B Task 7: the autosave manifest (sidecar<->realPath, app-side only)
+
+    /// `<autosaveDirectory>/<sha256(realPath)>.manifest.json` — ONE small JSON file PER DOCUMENT,
+    /// not one shared table. Deliberate: two documents' sidecars can autosave concurrently (each on
+    /// its OWN helper-side timer), and a shared file would need a read-modify-write on every
+    /// update, racing across runtimes/documents for no reason a per-document file doesn't already
+    /// avoid for free — each write here is a single, independent, ATOMIC full-file overwrite of a
+    /// path no other document's own write ever touches. `SHA256`, not because this needs to be
+    /// cryptographically secure (it does not — this is a filename, not a credential) but because a
+    /// raw path cannot BE one (`/` alone rules that out) and this is the same "content -> stable hex
+    /// filename" idiom `OfficeHarness.sha256Hex` already established elsewhere in this app.
+    nonisolated private static func autosaveManifestPath(forRealPath path: String, autosaveDirectory: URL) -> URL {
+        let hash = SHA256.hash(data: Data(path.utf8)).map { String(format: "%02x", $0) }.joined()
+        return autosaveDirectory.appendingPathComponent("\(hash).manifest.json")
+    }
+
+    /// Office Stage B Task 7 — one document's own sidecar<->realPath mapping, atomically written by
+    /// `recordAutosaveManifest` and read by `checkRecoveryCandidate`/`sweepAutosaveOrphans`. `Codable`
+    /// (not hand-rolled JSON like `OfficeDocumentEvent`'s wire encoding) — this never crosses the
+    /// wire, it is a private-to-this-app disk format with no cross-language/cross-version contract
+    /// to keep, so there is nothing the wire's own hand-rolled discipline buys here that `Codable`
+    /// doesn't already give for free.
+    struct OfficeAutosaveManifestEntry: Codable, Equatable {
+        /// The REAL path this entry is about — re-checked on every read (`entry.realPath == path`)
+        /// as a defensive belt against a SHA256 collision ever mapping two different real paths to
+        /// the same manifest filename (astronomically unlikely, checked anyway: the cost of the
+        /// comparison is one string equality, the cost of skipping it is a wrong-document recovery
+        /// offer if it ever happened).
+        var realPath: String
+        /// The CRASHED session's own docId — `autosave/<docId>.<ext>` is where its sidecar lives.
+        /// Deliberately NOT the docId of whatever is open now (a fresh open always mints a new one).
+        var docId: String
+        var ext: String
+        var isODFFallback: Bool
+        /// The sidecar's own mtime AT THE MOMENT this entry was written — epoch seconds, fractional.
+        /// `checkRecoveryCandidate` does NOT trust this for the actual freshness decision (it re-stats
+        /// the sidecar live — the file on disk is always the fresher truth); this is what a banner's
+        /// "~Ns ago" is computed from without a second stat call, and what `sweepAutosaveOrphans`
+        /// uses for its own "sidecar mtime <= real file mtime" pair-drop refinement.
+        var sidecarModifiedAt: Double
+    }
+
+    /// Office Stage B Task 7 — `.recordAutosave`'s own performer: called every time the helper
+    /// pushes `.autosaved(docId:ext:isODFFallback:)`, i.e. roughly once per interval for as long as
+    /// a document stays dirty. Re-stats the sidecar the helper JUST wrote (never trusts a
+    /// wire-carried timestamp — one fewer thing that could be stale by the time this runs) and
+    /// overwrites the manifest entry wholesale. A sidecar that has ALREADY been cleared by the time
+    /// this runs (a save landed in the same beat a stale autosave push was still in flight) simply
+    /// fails the stat and writes nothing — never resurrects a manifest entry for a sidecar that no
+    /// longer exists.
+    nonisolated static func recordAutosaveManifest(realPath: String, docId: String, ext: String,
+                                                    isODFFallback: Bool, autosaveDirectory: URL) {
+        let sidecarPath = autosaveDirectory.appendingPathComponent("\(docId).\(ext)").path
+        guard let stat = officeFileStat(atPath: sidecarPath) else { return }
+        let entry = OfficeAutosaveManifestEntry(
+            realPath: realPath, docId: docId, ext: ext, isODFFallback: isODFFallback,
+            sidecarModifiedAt: Double(stat.modifiedSeconds) + Double(stat.modifiedNanoseconds) / 1_000_000_000)
+        guard let data = try? JSONEncoder().encode(entry) else { return }
+        try? FileManager.default.createDirectory(at: autosaveDirectory, withIntermediateDirectories: true)
+        try? data.write(to: Self.autosaveManifestPath(forRealPath: realPath, autosaveDirectory: autosaveDirectory),
+                        options: .atomic)
+    }
+
+    /// `true` when `newer`'s own stat is strictly later than `older`'s — nanosecond-resolution,
+    /// mirroring `officeFileStat`'s own reason for carrying both fields (a same-second POSIX mtime
+    /// with a genuinely different nanosecond component must still compare correctly).
+    nonisolated private static func statIsNewer(_ newer: OfficeFileStat, than older: OfficeFileStat) -> Bool {
+        (newer.modifiedSeconds, newer.modifiedNanoseconds) > (older.modifiedSeconds, older.modifiedNanoseconds)
+    }
+
+    /// **The recovery-candidate check — `openAndDispatch`'s own fresh-open-only call.** `nil` for
+    /// every "nothing to offer" outcome (no manifest, unreadable/corrupt manifest, a hash-collision
+    /// mismatch, a missing sidecar, a missing real file, or a sidecar that is NOT newer than the
+    /// real file) — deliberately side-effect-free (never deletes a stale manifest/orphan sidecar it
+    /// finds along the way; that is `sweepAutosaveOrphans`'s own job, kept separate so this stays a
+    /// pure read no caller has to reason about beyond its own return value).
+    nonisolated static func checkRecoveryCandidate(realPath: String, autosaveDirectory: URL) -> OfficeRecoveryCandidate? {
+        let manifestPath = Self.autosaveManifestPath(forRealPath: realPath, autosaveDirectory: autosaveDirectory)
+        guard let data = try? Data(contentsOf: manifestPath),
+              let entry = try? JSONDecoder().decode(OfficeAutosaveManifestEntry.self, from: data),
+              entry.realPath == realPath else {
+            return nil
+        }
+        let sidecarPath = autosaveDirectory.appendingPathComponent("\(entry.docId).\(entry.ext)").path
+        guard let sidecarStat = officeFileStat(atPath: sidecarPath),
+              let realStat = officeFileStat(atPath: realPath),
+              Self.statIsNewer(sidecarStat, than: realStat) else {
+            return nil
+        }
+        let capturedAt = Date(timeIntervalSince1970:
+            Double(sidecarStat.modifiedSeconds) + Double(sidecarStat.modifiedNanoseconds) / 1_000_000_000)
+        return OfficeRecoveryCandidate(docId: entry.docId, sidecarPath: sidecarPath, capturedAt: capturedAt,
+                                       isODFFallback: entry.isODFFallback)
+    }
+
+    /// Office Stage B Task 7 — **the ownership rule's app-side half**: deletes `docId`'s own
+    /// sidecar (glob-by-prefix, identical mechanism to `deleteStagedCopy` immediately above — same
+    /// "no second, driftable path table" reasoning) AND `path`'s own manifest entry. Called from
+    /// exactly the three sites `.clearAutosave`'s own header enumerates — see that effect's doc for
+    /// why `.helperDied`/`.helperUnavailable`/`.teardownRequested` never reach this. Best-effort,
+    /// `nonisolated`, same posture as every other cleanup call in this file.
+    nonisolated static func clearAutosave(realPath: String, docId: String, autosaveDirectory: URL) {
+        if let entries = try? FileManager.default.contentsOfDirectory(
+            at: autosaveDirectory, includingPropertiesForKeys: nil) {
+            let prefix = "\(docId)."
+            for entry in entries where entry.lastPathComponent.hasPrefix(prefix) {
+                try? FileManager.default.removeItem(at: entry)
+            }
+        }
+        try? FileManager.default.removeItem(
+            at: Self.autosaveManifestPath(forRealPath: realPath, autosaveDirectory: autosaveDirectory))
+    }
+
+    /// **The boot-hygiene sweep's autosave-specific half — MANIFEST-AWARE, never wholesale.**
+    /// Unlike `LOKBridge.sweepStaleDocumentDirectories` (which wipes `docs/`/`saves/` unconditionally
+    /// at every helper boot, correct for those two — see that method's own header for why `autosave/`
+    /// is EXCLUDED from it), this only ever removes a provably orphaned HALF of a pair:
+    ///   * a sidecar file with no manifest pointing at it (a manifest write that never landed, or
+    ///     already lost its own race against a crash);
+    ///   * a manifest with no matching sidecar file (the sidecar was already cleared, but this
+    ///     manifest write raced ahead of — or lost — its own delete);
+    ///   * a temp file (`.tmp-*`, `saveAsSidecarOnDedicatedThread`'s own rename-source name) left by
+    ///     a SIGKILL landing mid-write, between the `saveAs` call and the `rename` that would have
+    ///     made it real — dead by construction, nothing ever points at it;
+    ///   * (the advisor's own refinement) a VALID pair whose sidecar is no newer than the real file
+    ///     — the app crashed AFTER a clean save/close should have cleared this pair (or the real
+    ///     file was independently touched/saved after the crash), so there is genuinely nothing left
+    ///     to recover; `checkRecoveryCandidate` would refuse this pair anyway (not `isNewer`), so
+    ///     leaving it on disk costs nothing but a few bytes forever — cheap enough to sweep, not
+    ///     load-bearing enough to skip if this check is ever wrong.
+    /// A live pair — matching manifest and sidecar, sidecar genuinely newer — is NEVER touched here.
+    /// Called once per `.helperBecameReady` (`OfficeRuntime.handle(supervisorEvent:)`'s own `.ready`
+    /// case), off `@MainActor`, best-effort, redundant-but-harmless across multiple sessions sharing
+    /// one helper (the same tolerance this file already extends to `ensureHelperReady`'s own
+    /// late-joiner fold).
+    nonisolated static func sweepAutosaveOrphans(autosaveDirectory: URL) {
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            at: autosaveDirectory, includingPropertiesForKeys: nil) else { return }
+
+        var manifests: [(url: URL, entry: OfficeAutosaveManifestEntry)] = []
+        var sidecarsByDocId: [String: URL] = [:]
+        for entry in entries {
+            let name = entry.lastPathComponent
+            if name.hasPrefix(".tmp-") {
+                try? FileManager.default.removeItem(at: entry) // dead by construction — see header
+            } else if name.hasSuffix(".manifest.json") {
+                if let data = try? Data(contentsOf: entry),
+                   let decoded = try? JSONDecoder().decode(OfficeAutosaveManifestEntry.self, from: data) {
+                    manifests.append((entry, decoded))
+                } else {
+                    try? FileManager.default.removeItem(at: entry) // unreadable/corrupt — orphan
+                }
+            } else if let dotIndex = name.firstIndex(of: ".") {
+                sidecarsByDocId[String(name[name.startIndex..<dotIndex])] = entry
+            }
+        }
+
+        let manifestDocIds = Set(manifests.map(\.entry.docId))
+        for (docId, sidecar) in sidecarsByDocId where !manifestDocIds.contains(docId) {
+            try? FileManager.default.removeItem(at: sidecar)
+        }
+
+        for (manifestURL, entry) in manifests {
+            guard let sidecar = sidecarsByDocId[entry.docId], let sidecarStat = officeFileStat(atPath: sidecar.path) else {
+                try? FileManager.default.removeItem(at: manifestURL) // no matching sidecar — orphan
+                continue
+            }
+            if let realStat = officeFileStat(atPath: entry.realPath), Self.statIsNewer(sidecarStat, than: realStat) {
+                continue // a live, recoverable pair — untouched
+            }
+            // Either the real path is gone entirely (nothing to compare against — conservatively
+            // swept rather than kept forever) or the sidecar is no newer than it (a resolved pair
+            // that was never cleared, or the real file moved on since) — see this method's own
+            // header for why dropping the WHOLE pair here is safe either way.
+            try? FileManager.default.removeItem(at: manifestURL)
+            try? FileManager.default.removeItem(at: sidecar)
         }
     }
 

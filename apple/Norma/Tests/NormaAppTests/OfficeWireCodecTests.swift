@@ -65,6 +65,14 @@ final class OfficeWireCodecTests: XCTestCase {
             .documentEvent(seq: 46, docId: "doc-1", event: .cellCursor(
                 .at(rectTwips: OfficeTwipsRect(x: 0, y: 0, width: 1265, height: 254), column: 2, row: 7))),
             .documentEvent(seq: 47, docId: "doc-1", event: .cellCursor(.empty)),
+            // Task 7 — the autosave sidecar push. Both `isODFFallback` values, and an `ext` that
+            // DIFFERS from what a bare boolean round-trip would still pass with a hardcoded value
+            // — a sample pinned at, say, `ext: "odt"` for the fallback row would round-trip
+            // identically whether `ext` were carried or silently defaulted to the document's own
+            // native extension, exactly the drift class this table exists to catch (mirrors the
+            // `save`/`part: 2` sample's own non-zero-on-purpose reasoning immediately above).
+            .documentEvent(seq: 48, docId: "doc-1", event: .autosaved(ext: "odt", isODFFallback: false)),
+            .documentEvent(seq: 49, docId: "doc-1", event: .autosaved(ext: "ods", isODFFallback: true)),
             // Task 4 — tile pipeline frames.
             .subscribeTiles(seq: 20, docId: "doc-1", part: 0, zoomPPT: 1000,
                              viewportTwips: OfficeTwipsRect(x: 0, y: 0, width: 10240, height: 5120)),
@@ -349,6 +357,12 @@ final class OfficeWireCodecTests: XCTestCase {
             #"{"type":"documentEvent","seq":1,"docId":"d","kind":"modifiedChanged"}"#, // missing "modified"
             #"{"type":"documentEvent","seq":1,"docId":"d","kind":"modifiedChanged","modified":1}"#, // NSNumber-boolean trap, inverted
             #"{"type":"documentEvent","seq":1,"kind":"closed"}"#,                     // missing docId (frame-level)
+            // Task 7 — autosaved: both fields required, wire-strictness house norm.
+            #"{"type":"documentEvent","seq":1,"docId":"d","kind":"autosaved"}"#,                       // missing both
+            #"{"type":"documentEvent","seq":1,"docId":"d","kind":"autosaved","ext":"odt"}"#,           // missing isODFFallback
+            #"{"type":"documentEvent","seq":1,"docId":"d","kind":"autosaved","isODFFallback":true}"#,  // missing ext
+            #"{"type":"documentEvent","seq":1,"docId":"d","kind":"autosaved","ext":"","isODFFallback":false}"#, // empty ext
+            #"{"type":"documentEvent","seq":1,"docId":"d","kind":"autosaved","ext":"odt","isODFFallback":1}"#, // NSNumber-boolean trap
         ]
         for line in lines {
             switch OfficeWireCodec.decodeInbound(line) {

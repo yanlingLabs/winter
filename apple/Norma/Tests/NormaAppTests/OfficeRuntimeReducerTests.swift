@@ -164,8 +164,9 @@ final class OfficeRuntimeReducerTests: XCTestCase {
                                          .opened(path: "/a.xlsx", docId: "doc-a", stagedPath: "/staged/doc-a", metadata: metadata)])
         let (closed, effects) = reduce(open, [.closeRequested(path: "/a.xlsx")])
         XCTAssertEqual(effects, [.helperClose(docId: "doc-a"), .unwatchFile(path: "/a.xlsx"),
-                                 .deleteStagedCopy(docId: "doc-a")],
-                       "office-plumbing Task 8: the watch goes with the document; Task 2b: so does its staged copy")
+                                 .deleteStagedCopy(docId: "doc-a"), .clearAutosave(path: "/a.xlsx", docId: "doc-a")],
+                       "office-plumbing Task 8: the watch goes with the document; Task 2b: so does its "
+                       + "staged copy; Task 7: so does any autosave sidecar")
         XCTAssertNil(closed.documents["/a.xlsx"])
     }
 
@@ -295,7 +296,9 @@ final class OfficeRuntimeReducerTests: XCTestCase {
         let (state, effects) = reduce(open, [.saveSucceeded(path: "/a.xlsx", docId: "doc-a")])
         XCTAssertNil(state.documentBanners["/a.xlsx"], "a file just placed on disk cannot still be "
                      + "saying it was deleted")
-        XCTAssertEqual(effects, [])
+        XCTAssertEqual(effects, [.clearAutosave(path: "/a.xlsx", docId: "doc-a")],
+                       "Task 7: a successful save is the app's own proof the real path now carries "
+                       + "this docId's content — any sidecar it may have been growing is redundant")
     }
 
     func testSaveSucceededForAPathWithNoDocumentIsANoOp() {
@@ -520,7 +523,7 @@ final class OfficeRuntimeReducerTests: XCTestCase {
         let (state, effects) = reduce(conflicted, [.closeRequested(path: "/a.xlsx")])
         XCTAssertNil(state.documentConflicts["/a.xlsx"])
         XCTAssertEqual(effects, [.helperClose(docId: "doc-a"), .unwatchFile(path: "/a.xlsx"),
-                                 .deleteStagedCopy(docId: "doc-a")])
+                                 .deleteStagedCopy(docId: "doc-a"), .clearAutosave(path: "/a.xlsx", docId: "doc-a")])
     }
 
     /// T8 interface obligation 1 (activePart survives a reload): `.opened` is the SAME event a fresh
