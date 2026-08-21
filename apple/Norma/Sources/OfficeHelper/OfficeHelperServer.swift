@@ -447,15 +447,48 @@ public final class OfficeHelperServer {
     /// fast reader never blocks a socket write for long. Task 4's own measurement (a 6-tile
     /// cold-paint batch queued immediately ahead of one keystroke, both from a perfectly healthy,
     /// synchronous test client) found a real, ~212ms stall with NO slow client anywhere in the
-    /// picture — that one is ordinary `LOKDedicatedThread` FIFO contention (every `postKey`/
-    /// `postMouse`/`paintTile` call does `thread.sync`, one job at a time, regardless of which
-    /// app-side queue sent it), not this write-blocking hazard. The bounded push queue named above
-    /// would not touch that second hazard at all — it only relieves RECEIVER backpressure, and
-    /// `OfficeHelperLiveTests.testTransportMeasurementTypeBurstMidPrefetchHeadOfLineAndDragBurstLatencies`'s
-    /// own healthy-client scenario has none. Decided NOT to build it this round either — see
-    /// task-4-report.md's transport section for the numbers and the full reasoning; both hazards
-    /// stay named, neither is fixed, and they should not be conflated when a future round picks
-    /// either back up.
+    /// picture.
+    ///
+    /// **Fix round 1, F4 (IMPORTANT) — the CAUSE Task 4 originally wrote here was wrong; the
+    /// numbers, the decision, and "visible-latency, never a freeze" were all correct, only the
+    /// mechanism was misattributed.** The original text blamed "ordinary `LOKDedicatedThread` FIFO
+    /// contention... regardless of which app-side queue sent it," implying the keyEvent's own
+    /// `postKey` call was promptly SUBMITTED to the LOK thread and simply waited its turn behind 6
+    /// already-queued paint jobs. That is not what happens in this measured scenario. **The real
+    /// mechanism is READER-THREAD serialization**: `handleConnection`'s read loop
+    /// (`OfficeHelperServer.swift`, the `while let newlineIndex = buffer.firstIndex(of: 0x0A)` loop)
+    /// calls `handlePostAuthLine` INLINE, synchronously, on that one connection's own dedicated
+    /// `Thread` (`acceptLoop`'s `connectionThread`) — never dispatched elsewhere. `.tileRequest`'s
+    /// case then runs `for key in keys { documentBridge.paintTile(...) }` synchronously, IN THAT
+    /// SAME CALL, each iteration itself blocking on `thread.sync` until that one tile's paint
+    /// finishes on the LOK thread. So when a `keyEvent` line sits right behind a `tileRequest` line
+    /// from the SAME connection (this task's own measured scenario — one synchronous test client
+    /// sends both), the reader thread cannot even ATTEMPT to decode and dispatch that `keyEvent`
+    /// line — let alone call `documentBridge.postKey`, let alone have that call reach the LOK
+    /// thread's own queue — until `handlePostAuthLine`'s entire `.tileRequest` case returns, all 6
+    /// paints later. There was never a moment where 6 jobs sat queued in front of the keystroke's
+    /// own job on the LOK thread; the keystroke's job simply had not been SUBMITTED yet, because the
+    /// one thread that would submit it was still busy running through the prior line's own work,
+    /// one paint at a time, itself.
+    ///
+    /// **The two-connection case is different, and genuinely IS LOK-thread contention**: a `keyEvent`
+    /// arriving on a SEPARATE connection (its own reader thread) is attempted promptly — decoded and
+    /// dispatched to `documentBridge.postKey` immediately — and THAT call then legitimately queues
+    /// behind whichever paint job is currently executing on the one shared `LOKDedicatedThread`
+    /// (`thread.sync`, one job at a time, from any calling thread). That secondary hazard is real,
+    /// but it is not what Task 4's own single-connection measurement scenario exercised or
+    /// attributed its numbers to.
+    ///
+    /// This is a DIFFERENT hazard, either way, from `pushFrame`'s own write-blocking one two
+    /// paragraphs up (the bounded push queue named there would not touch reader-thread serialization
+    /// at all — it relieves RECEIVER backpressure on writes, not a reader thread's own inline paint
+    /// work) — see `task-4-report.md`'s transport section for the numbers and the full reasoning.
+    /// Decided NOT to build a fix for either hazard this round; both stay named, neither is fixed,
+    /// and they should not be conflated when a future round picks either back up. A real fix for
+    /// THIS hazard would need the reader thread to stop doing paint work inline — e.g. dispatching
+    /// `.tileRequest`'s paint loop onto a separate queue so the reader can return to decoding the
+    /// next line immediately — not any change to the LOK thread's own scheduling, which was never
+    /// actually the bottleneck here.
     private func pushFrame(_ frame: OfficeWireFrame, to writer: ConnectionWriter) {
         writer.writeLock.lock()
         writeFrameLocked(frame, writer: writer)
