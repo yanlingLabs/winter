@@ -250,6 +250,70 @@ struct OfficeRuntimeState: Equatable {
     /// `.recoveryDiscardRequested` (optimistic clear, mirrors `documentConflicts`' identical
     /// pattern), and `.closeRequested` (no path, no offer to make about it).
     var documentRecoveryCandidates: [String: OfficeRecoveryCandidate] = [:]
+    /// **Office Stage B Task 9 — the resurrection race's designed fix: per-path in-flight-open
+    /// cancellation.** Stage A/T8's own wave note named the shape: "close-during-reload can
+    /// resurrect a closed document — a `.opened` landing for a superseded open re-creates the entry
+    /// and re-arms the watcher... `.opened` is gated only on `state.phase == .ready`, not on whether
+    /// `documents[path]` still exists." A per-path counter fixes it where the existing per-docId
+    /// checks (`.saveSucceeded`/`.reloadFailed`'s own `documents[path]?.docId == docId` guards)
+    /// cannot: THOSE compare an arriving reply against an EXISTING entry, but a resurrection is
+    /// exactly the case where there is no existing entry (a close removed it) or a DIFFERENT,
+    /// already-superseded one is sitting there — nothing to compare a bare docId against. This dict
+    /// is that missing fact, keyed by path (never by docId — docIds are always fresh UUIDs, per
+    /// `openAndDispatch`'s own `makeDocId`, so a per-docId generation could never collide in the
+    /// first place; the race is about WHICH attempt for a given PATH is still authoritative).
+    ///
+    /// **Bumped by close and by every attempt that REPLACES an already-open document** — reload
+    /// (`.externalChangeDetected`'s clean-reload arm, `.conflictReloadRequested`) and restore
+    /// (`.recoveryRestoreRequested`) alike, since both are reload-shaped ("close old, open new" via
+    /// the same `openAndDispatch` bottleneck). **A fresh `.openRequested` (`.helperOpen`) does NOT
+    /// bump** — it CAPTURES whatever the current value already is as its own ticket. This is
+    /// deliberate, not an oversight: bumping on close/reload alone is already sufficient to
+    /// distinguish every interleaving that matters (a close moves the counter forward, so a fresh
+    /// re-open minted AFTER that close reads a strictly newer ticket than whatever open was in
+    /// flight before it — see `OfficeRuntimeReducerTests`' own two-rapid-open-close-open row), and
+    /// NOT bumping keeps two ordinary concurrent opens of the same never-yet-opened path (a double
+    /// click, both racing the identical `documents[path] == nil` guard) sharing one ticket, so
+    /// neither is spuriously cancelled — whichever `.opened` lands second still resolves through the
+    /// PRE-EXISTING `previousEntry.docId != docId` compensating-close logic one arm below, unchanged.
+    ///
+    /// **`.opened`/`.openFailed`/`.reloadFailed` all carry the ticket the imperative half captured
+    /// at the moment their OWN attempt was launched** (`OfficeRuntime.openAndDispatch`'s
+    /// `myPathGeneration` parameter — read once, synchronously, before the async round trip starts,
+    /// mirroring exactly how the EXISTING runtime-wide `generation` is captured for teardown). A
+    /// landing whose ticket no longer matches this dict's CURRENT value for that path is stale —
+    /// something newer (a close, or a newer replace) has happened since — and is dropped. Gating all
+    /// three landings, not only `.opened` (the brief's own explicit example), is the same mechanism
+    /// closing the same class of bug for its two siblings: an unguarded `.openFailed` could
+    /// overwrite a FRESH success's clean slate with a phantom failure banner, and an unguarded
+    /// `.reloadFailed` — even with ITS OWN existing `oldDocId` guard, kept alongside this one, not
+    /// replaced by it — can still act on a stale failure while a second, faster reload is in the
+    /// window where `documents[path]` still shows the SAME `oldDocId` neither reload has replaced
+    /// yet (`.reloadDocument`'s own effect never clears `documents[path]` before its reopen lands);
+    /// the ticket is what tells the two apart there, where docId identity alone cannot.
+    ///
+    /// **A drop is mutation-free except for its own compensating cleanup**: `.opened`'s drop arm
+    /// returns `state` completely untouched (no `documents`/`documentBanners`/`documentConflicts`/
+    /// `documentRecoveryCandidates` writes — those all belong to whichever attempt IS current, not
+    /// the one being cancelled) plus exactly two effects, `.helperClose`/`.deleteStagedCopy` for the
+    /// docId that just landed — the helper-side document this attempt opened, and its staged copy,
+    /// both now orphaned with no owner left to close them otherwise. No `.unwatchFile`: a dropped
+    /// open's `.watchFile` was never emitted (that only happens from INSIDE the non-dropped branch),
+    /// so there is no watch to stop. `.openFailed`/`.reloadFailed`'s own drops need no compensating
+    /// effects at all — nothing was ever opened on the helper for a failed attempt.
+    ///
+    /// **Carried forward, never reset, by `.helperDied`/`.helperUnavailable`/`.teardownRequested`.**
+    /// Those three otherwise replace the whole state with a fresh `OfficeRuntimeState()` — resetting
+    /// this dict to empty alongside everything else would let a stale pre-death/pre-teardown ticket
+    /// collide with a POST-recovery retry's own ticket (both reading the same reset-to-zero value).
+    /// The existing phase guard (`.opened`'s `state.phase == .ready`) already independently blocks a
+    /// landing while phase is `.failed`/`.idle`, so a collision is unreachable in practice either
+    /// way — but "this counter only ever goes up, for the life of the runtime" is a strictly simpler
+    /// invariant to state and verify than a reset whose safety depends on a second, separate guard
+    /// holding too, so this task keeps it monotonic on purpose. `OfficeRuntimeState()`'s own
+    /// construction (a session's very first runtime) is the only place this dict is legitimately
+    /// empty.
+    var pathGenerations: [String: Int] = [:]
 }
 
 /// Office Stage B Task 7 — one path's own recovery offer: a sidecar this runtime found newer than
@@ -328,10 +392,18 @@ enum OfficeRuntimeEvent: Equatable {
     /// **Office Stage B Task 2b** — `stagedPath` is new: where this docId actually lives inside the
     /// helper's fence, minted and copied to by `OfficeRuntime.openAndDispatch` BEFORE the wire
     /// `open` this event answers was even sent. See `DocumentEntry.stagedPath`'s own doc.
-    case opened(path: String, docId: String, stagedPath: String, metadata: OfficeDocumentMetadata)
+    /// **Office Stage B Task 9** — `pathGeneration`: the per-path ticket THIS attempt captured at
+    /// launch (`OfficeRuntime.openAndDispatch`'s `myPathGeneration`). See
+    /// `OfficeRuntimeState.pathGenerations`'s own header for the full mechanism — a value that no
+    /// longer matches `state.pathGenerations[path]` when this lands means the attempt was
+    /// superseded (a close, or a newer reload/restore) and this event is dropped.
+    case opened(path: String, docId: String, stagedPath: String, metadata: OfficeDocumentMetadata, pathGeneration: Int)
     /// A `.helperOpen` reached the helper and it refused (garbage file, unreadable path, ...) — see
     /// `OfficeHelperClientError.openFailed`, the shape the imperative half classifies this from.
-    case openFailed(path: String, reason: String)
+    /// `pathGeneration` — same ticket/staleness mechanism as `.opened`'s own (Task 9): a stale
+    /// failure must not overwrite `openFailures[path]` with a phantom reason for a path a close or a
+    /// newer attempt has already moved past.
+    case openFailed(path: String, reason: String, pathGeneration: Int)
     case closeRequested(path: String)
     /// T6's tile door: a viewport wants to see `part` of `path`. Thin at T5 — this event only
     /// updates `activePart` and asks the helper; T6 owns everything about what the viewport
@@ -378,7 +450,20 @@ enum OfficeRuntimeEvent: Equatable {
     /// their own reopen) may already have SUCCEEDED and replaced `oldDocId` with a newer entry by
     /// the time this failure lands, and a failure that blindly cleared `documents[path]` regardless
     /// would then discard a document that is genuinely fine. See this reducer's own arm.
-    case reloadFailed(path: String, oldDocId: String, reason: String)
+    ///
+    /// **Office Stage B Task 9 — `pathGeneration` joins `oldDocId` as a SECOND, independent stale
+    /// guard, deliberately not a replacement for it.** The two catch different windows: `oldDocId`
+    /// catches the case where a NEWER attempt has already LANDED and replaced `documents[path]`;
+    /// `pathGeneration` also catches the case where a newer attempt has been INITIATED but has NOT
+    /// yet landed — `.reloadDocument`'s own effect never clears `documents[path]` before its reopen
+    /// resolves (its own header: "the OLD entry stays exactly where it is until the new one is
+    /// ready"), so two reloads fired close together both read the SAME `oldDocId` from the SAME
+    /// still-standing entry. If the FIRST of the two fails while the second is still in flight, the
+    /// `oldDocId` guard alone would still match (nothing has replaced the entry yet) and would
+    /// destroy it — a real flash `OfficeRuntimeReducerTests`' own row proves — where `pathGeneration`
+    /// (bumped again by the second reload's own initiation) already reads stale and drops the first
+    /// reload's failure outright.
+    case reloadFailed(path: String, oldDocId: String, reason: String, pathGeneration: Int)
     /// The shared supervisor's own death/never-came-up signals, fanned out to every runtime in the
     /// table (`ShellSessionHost`'s own broadcast — see its header). Legal, and identically handled,
     /// from every phase — carry 4's own words, and `OfficeRuntimeReducerTests
@@ -439,7 +524,11 @@ enum OfficeRuntimeEvent: Equatable {
 /// (each documented at its own case below).
 enum OfficeRuntimeEffect: Equatable {
     case ensureHelperReady
-    case helperOpen(path: String)
+    /// Office Stage B Task 9 — `pathGeneration`: the ticket `state.pathGenerations[path]` held at
+    /// the instant the reducer decided to emit this (read, never bumped, by a fresh open — see
+    /// `OfficeRuntimeState.pathGenerations`'s own header). `OfficeRuntime.openAndDispatch` carries it
+    /// through to whichever of `.opened`/`.openFailed` this attempt eventually dispatches.
+    case helperOpen(path: String, pathGeneration: Int)
     case helperClose(docId: String)
     case subscribe(docId: String, part: Int, zoomPPT: Int, viewportTwips: OfficeTwipsRect)
     case unsubscribe(docId: String)
@@ -461,7 +550,12 @@ enum OfficeRuntimeEffect: Equatable {
     /// and, just as importantly, `PanelDocumentContent`'s `switch` never leaves the `.showCanvas`
     /// case, so SwiftUI never dismantles `OfficeTileCanvasView` and the view state living on it
     /// (`scrollOrigin`/`zoomPPT`) survives untouched.
-    case reloadDocument(path: String, oldDocId: String)
+    ///
+    /// Office Stage B Task 9 — `pathGeneration`: the FRESHLY BUMPED ticket for this reload attempt
+    /// (`OfficeRuntimeState.pathGenerations[path]` immediately after the reducer incremented it —
+    /// see that field's own header for why reload bumps and a fresh open does not). Carried through
+    /// to whichever of `.opened`/`.reloadFailed` this attempt eventually dispatches.
+    case reloadDocument(path: String, oldDocId: String, pathGeneration: Int)
     /// Office Stage B Task 2 — render+place `docId` (the path's docId at the moment `.saveRequested`
     /// was dispatched) onto `path`. The imperative performer is the WHOLE round trip: ask the
     /// helper (`driver.save`), then atomically place its answer — see `OfficeRuntime.performSave`'s
@@ -513,7 +607,11 @@ enum OfficeRuntimeEffect: Equatable {
     /// action — this file's own established convention names every effect after WHAT THE IMPERATIVE
     /// HALF DOES (`.reloadDocument`, not `.conflictReloadRequested`), and a shared name between an
     /// event and its effect would make every future grep for one also return the other.
-    case restoreFromSidecar(path: String, oldDocId: String, sidecarPath: String)
+    ///
+    /// Office Stage B Task 9 — `pathGeneration`: same freshly-bumped-ticket contract as
+    /// `.reloadDocument`'s own (restore IS reload-shaped — "close old, open new" — so it bumps on
+    /// the identical terms; see `OfficeRuntimeState.pathGenerations`'s own header).
+    case restoreFromSidecar(path: String, oldDocId: String, sidecarPath: String, pathGeneration: Int)
     /// The recovery banner's "Discard" — delete `docId`'s own sidecar and `path`'s own manifest
     /// entry, exactly like `.clearAutosave` (indeed the SAME imperative performer), kept as its own
     /// case rather than reusing `.clearAutosave` directly so `OfficeRuntimeReducerTests` can assert
@@ -615,7 +713,10 @@ enum OfficeRuntimeReducer {
                 // canvas). An already-open path is simply left alone; T6's tab layer owns dedupe/
                 // activate against ITS OWN already-open tab, mirroring `openFileTab`'s contract.
                 guard state.documents[path] == nil else { return (next, []) }
-                return (next, [.helperOpen(path: path)])
+                // Office Stage B Task 9 — CAPTURES the current per-path ticket, never bumps it (see
+                // `OfficeRuntimeState.pathGenerations`'s own header for why a fresh open is the one
+                // attempt kind that reads rather than advances this counter).
+                return (next, [.helperOpen(path: path, pathGeneration: state.pathGenerations[path, default: 0])])
             }
 
         case .helperBecameReady:
@@ -623,16 +724,50 @@ enum OfficeRuntimeReducer {
             next.phase = .ready
             let queued = next.pendingOpens
             next.pendingOpens = []
-            return (next, queued.map { .helperOpen(path: $0) })
+            // Task 9: each queued path's own current ticket — none of these could have been bumped
+            // while still `.starting` (a bump requires either `.closeRequested`, unconditional and
+            // reachable from any phase, or a reload/restore, both of which require `documents[path]`
+            // to already exist, impossible before the first `.opened` this runtime will ever record).
+            // `.closeRequested` IS reachable here, and its own `pendingOpens.removeAll` means a path
+            // closed while queued never reaches this `map` at all — so the read below is always the
+            // untouched, original ticket for every path that actually gets flushed.
+            return (next, queued.map { .helperOpen(path: $0, pathGeneration: next.pathGenerations[$0, default: 0]) })
 
-        case .opened(let path, let docId, let stagedPath, let metadata):
+        case .opened(let path, let docId, let stagedPath, let metadata, let pathGeneration):
             // Gated on `.ready`, like every other arm that records what the helper said: the async
             // reply can land after a teardown or a helper death moved this runtime past `.ready`
             // (the imperative half's own generation guard — `OfficeRuntime.perform`'s `.helperOpen`
             // case — is what stops the DISPATCH from even reaching here in the teardown case; this
             // guard is the belt, and the only line of defense for the helperDied case, which does
             // not bump that generation).
+            //
+            // **Two staleness checks, two layers, on purpose (Task 9).** The RUNTIME-WIDE `generation`
+            // above lives in the imperative half because it answers a question the pure reducer
+            // cannot: "has this whole runtime been torn down," which requires comparing against a
+            // fresh `OfficeRuntimeState()` that is byte-identical to a runtime that was never started
+            // — nothing in `state` itself could ever distinguish those two cases, so the check has to
+            // happen BEFORE dispatch, imperatively, or not at all. The PER-PATH `pathGeneration` check
+            // immediately below is the opposite: dispatching is always safe (the runtime still
+            // exists), and "was THIS path superseded" is exactly the kind of fact the reducer is
+            // supposed to own, per this file's own opening claim — so it lives here, not in
+            // `OfficeRuntime.perform`.
             guard state.phase == .ready else { return (next, []) }
+            // **Office Stage B Task 9 — the resurrection race's designed fix.** A ticket that no
+            // longer matches this path's CURRENT generation means something newer happened since
+            // this attempt launched (a close, or a newer reload/restore) — this landing is stale and
+            // must not touch `documents[path]`/`documentBanners`/`documentConflicts`/
+            // `documentRecoveryCandidates` at all (returning `next` completely untouched, identical
+            // to `state`, at this point — nothing above this guard has mutated it). The only thing
+            // left to do is compensate: `docId` genuinely IS open on the shared helper right now (the
+            // wire round trip succeeded), with its own staged copy on disk, and no owner but this
+            // dropped attempt left to close either — mirrors the existing `previousEntry.docId !=
+            // docId` compensating-close a few lines below, for the identical reason, just triggered
+            // by a per-path ticket mismatch instead of a docId mismatch. No `.unwatchFile`: a dropped
+            // attempt never reached the `.watchFile` emission below, so there is nothing watching to
+            // stop.
+            guard pathGeneration == state.pathGenerations[path, default: 0] else {
+                return (next, [.helperClose(docId: docId), .deleteStagedCopy(docId: docId)])
+            }
             next.openFailures.removeValue(forKey: path)
             // office-plumbing Task 8: a document that just (re)opened cannot still be saying it was
             // deleted — the reload success path is what answers a deleted-then-restored file.
@@ -676,13 +811,24 @@ enum OfficeRuntimeReducer {
             }
             return (next, effects)
 
-        case .openFailed(let path, let reason):
+        case .openFailed(let path, let reason, let pathGeneration):
             guard state.phase == .ready else { return (next, []) }
+            // Office Stage B Task 9 — same ticket mechanism as `.opened`'s own (that arm's own header
+            // has the full account). A stale failure has nothing left to compensate (nothing was ever
+            // opened on the helper for a FAILED attempt) — dropping it is a plain no-op, `next`
+            // untouched, unlike `.opened`'s own drop.
+            guard pathGeneration == state.pathGenerations[path, default: 0] else { return (next, []) }
             next.openFailures[path] = reason
             let basename = (path as NSString).lastPathComponent
             return (next, [.emitBanner(reason: "Couldn't open \(basename): \(reason)")])
 
         case .closeRequested(let path):
+            // Office Stage B Task 9 — bumped FIRST, unconditionally, even when there is no open
+            // document below to actually close: a close can race an open that has not landed yet, and
+            // that in-flight `.opened` has no `documents[path]` entry to compare against (the gap
+            // `OfficeRuntimeState.pathGenerations`'s own header names as exactly why a docId-keyed
+            // guard alone could never catch this case). Every other line in this arm is unchanged.
+            next.pathGenerations[path, default: 0] += 1
             next.pendingOpens.removeAll { $0 == path }
             next.openFailures.removeValue(forKey: path)
             next.documentBanners.removeValue(forKey: path) // Task 8: no path to still be a document about
@@ -817,7 +963,11 @@ enum OfficeRuntimeReducer {
             // reload always has. DIRTY → no silent re-stage: raise a conflict instead, mirroring
             // `EditorConflictReducer.reduce`'s `.externalChange(dirty:)` arm exactly.
             guard doc.dirty else {
-                return (next, [.reloadDocument(path: path, oldDocId: doc.docId)])
+                // Office Stage B Task 9 — bump BEFORE reading: this reload's own ticket is the
+                // POST-bump value, mirroring `.conflictReloadRequested`'s identical pattern below.
+                next.pathGenerations[path, default: 0] += 1
+                return (next, [.reloadDocument(path: path, oldDocId: doc.docId,
+                                               pathGeneration: next.pathGenerations[path]!)])
             }
             next.documentConflicts[path] = .changed
             return (next, [.emitBanner(reason: officeConflictChangedMessage)])
@@ -840,7 +990,7 @@ enum OfficeRuntimeReducer {
             next.documentConflicts[path] = .deleted
             return (next, [.emitBanner(reason: officeConflictDeletedMessage)])
 
-        case .reloadFailed(let path, let oldDocId, let reason):
+        case .reloadFailed(let path, let oldDocId, let reason, let pathGeneration):
             guard state.phase == .ready else { return (next, []) }
             // **The stale-failure guard**: only act if this path still shows the very entry this
             // reload was trying to replace. A second, independent reload for the same path may
@@ -848,6 +998,15 @@ enum OfficeRuntimeReducer {
             // the time this failure lands — see this event's own header. If so, there is nothing to
             // do: the newer document is genuinely fine, and its own watch is already running.
             guard state.documents[path]?.docId == oldDocId else { return (next, []) }
+            // Office Stage B Task 9 — the SECOND, independent stale guard (`.reloadFailed`'s own
+            // header has the full account of why `oldDocId` alone is not enough): a second reload for
+            // the same path can be INITIATED — bumping this path's ticket — before either one's
+            // outcome has landed, and `oldDocId` alone cannot see that yet, because `.reloadDocument`
+            // never touches `documents[path]` until its OWN reopen succeeds. Without this, the first
+            // of two racing reloads to FAIL would destroy the still-standing entry the second one is
+            // about to legitimately replace, flashing a full-screen failure over content that is
+            // about to be fine.
+            guard pathGeneration == state.pathGenerations[path, default: 0] else { return (next, []) }
             next.documents.removeValue(forKey: path)
             next.openFailures[path] = reason
             // Task 2b: a reload that failed to even land cannot still be showing a conflict about
@@ -878,6 +1037,14 @@ enum OfficeRuntimeReducer {
             var fresh = OfficeRuntimeState()
             fresh.phase = .failed
             fresh.failureReason = reason
+            // Office Stage B Task 9 — CARRIED FORWARD, not reset: see `pathGenerations`' own header
+            // for why this counter stays monotonic for the runtime's whole lifetime rather than
+            // resetting to empty alongside everything else `fresh` defaults away. A reset would let a
+            // pre-death ticket collide with a post-recovery retry's own (both reading zero); the
+            // existing `state.phase == .ready` guard on `.opened` already independently blocks a
+            // landing here regardless, but this keeps the invariant true without leaning on that
+            // second guard to make it so.
+            fresh.pathGenerations = state.pathGenerations
             // **Task 7 — deliberately NO `.clearAutosave` here, for either case.** This IS the
             // abnormal-ending shape autosave exists to survive: `.helperDied` is a literal crash,
             // and `.helperUnavailable` is "never came up" (nothing to protect either way). `fresh`
@@ -944,7 +1111,11 @@ enum OfficeRuntimeReducer {
             // helper's own open handles. Sorted for the same determinism reason as `docIds` itself
             // would want if it were ever asserted order-sensitively.
             let staleCopyEffects = docIds.sorted().map { OfficeRuntimeEffect.deleteStagedCopy(docId: $0) }
-            return (OfficeRuntimeState(), [.teardown(docIds: docIds)] + staleCopyEffects)
+            // Task 9: same carry-forward as `.helperDied`/`.helperUnavailable`'s own `fresh.pathGenerations`
+            // line — see that arm's comment for the full reasoning, identical here.
+            var fresh = OfficeRuntimeState()
+            fresh.pathGenerations = state.pathGenerations
+            return (fresh, [.teardown(docIds: docIds)] + staleCopyEffects)
 
         // MARK: Office Stage B Task 2b — resolving a standing conflict
 
@@ -954,7 +1125,11 @@ enum OfficeRuntimeReducer {
             next.documentBanners.removeValue(forKey: path)
             // The SAME reload machinery a clean document's silent external-change path already
             // uses — discard my edits, re-stage the current on-disk bytes under a fresh docId.
-            return (next, [.reloadDocument(path: path, oldDocId: doc.docId)])
+            // Office Stage B Task 9 — bumps this path's ticket, identical pattern to
+            // `.externalChangeDetected`'s own clean-reload arm.
+            next.pathGenerations[path, default: 0] += 1
+            return (next, [.reloadDocument(path: path, oldDocId: doc.docId,
+                                           pathGeneration: next.pathGenerations[path]!)])
 
         case .conflictKeepMineRequested(let path):
             guard state.phase == .ready, state.documents[path] != nil else { return (next, []) }
@@ -992,7 +1167,11 @@ enum OfficeRuntimeReducer {
             // than resurrecting the same candidate for a retry (the sidecar itself is untouched
             // either way, so nothing is actually lost by not offering a second chance here).
             next.documentRecoveryCandidates.removeValue(forKey: path)
-            return (next, [.restoreFromSidecar(path: path, oldDocId: doc.docId, sidecarPath: candidate.sidecarPath)])
+            // Office Stage B Task 9 — restore is reload-shaped (close old, open new), so it bumps
+            // this path's ticket on the identical terms as `.reloadDocument`'s own emission sites.
+            next.pathGenerations[path, default: 0] += 1
+            return (next, [.restoreFromSidecar(path: path, oldDocId: doc.docId, sidecarPath: candidate.sidecarPath,
+                                               pathGeneration: next.pathGenerations[path]!)])
 
         case .recoveryDiscardRequested(let path):
             guard state.phase == .ready, let candidate = state.documentRecoveryCandidates[path] else { return (next, []) }
@@ -1712,10 +1891,11 @@ final class OfficeRuntime: ObservableObject {
                     Task { [driver] in await driver.startHelper() }
                 }
 
-            case .helperOpen(let path):
-                openAndDispatch(path: path, myGeneration: generation, reloadingDocId: nil)
+            case .helperOpen(let path, let pathGeneration):
+                openAndDispatch(path: path, myGeneration: generation, myPathGeneration: pathGeneration,
+                                reloadingDocId: nil)
 
-            case .reloadDocument(let path, let oldDocId):
+            case .reloadDocument(let path, let oldDocId, let pathGeneration):
                 // Task 8: same store hygiene as an ordinary close (`.helperClose`'s own doc) — the
                 // old docId's tiles are gone THE INSTANT this fires, synchronously, before the new
                 // open even starts, so a stray push arriving for it lands nowhere (the store has no
@@ -1733,7 +1913,8 @@ final class OfficeRuntime: ObservableObject {
                 Task.detached(priority: .utility) {
                     Self.deleteStagedCopy(docId: oldDocId, docsDirectory: docsDirectory)
                 }
-                openAndDispatch(path: path, myGeneration: generation, reloadingDocId: oldDocId)
+                openAndDispatch(path: path, myGeneration: generation, myPathGeneration: pathGeneration,
+                                reloadingDocId: oldDocId)
 
             case .save(let path, let docId, let part):
                 performSave(path: path, docId: docId, part: part, myGeneration: generation)
@@ -1791,7 +1972,7 @@ final class OfficeRuntime: ObservableObject {
 
             // MARK: Office Stage B Task 7 — autosave sidecars + crash recovery
 
-            case .restoreFromSidecar(let path, let oldDocId, let sidecarPath):
+            case .restoreFromSidecar(let path, let oldDocId, let sidecarPath, let pathGeneration):
                 // Identical store hygiene to `.reloadDocument`'s own performer immediately above —
                 // this IS that machinery, called with a different `stageFrom:`/`markDirtyOnOpen:`.
                 tileStore.evictAll(docId: oldDocId)
@@ -1801,8 +1982,8 @@ final class OfficeRuntime: ObservableObject {
                 Task.detached(priority: .utility) {
                     Self.deleteStagedCopy(docId: oldDocId, docsDirectory: docsDirectory)
                 }
-                openAndDispatch(path: path, myGeneration: generation, reloadingDocId: oldDocId,
-                                stageFrom: sidecarPath, markDirtyOnOpen: true)
+                openAndDispatch(path: path, myGeneration: generation, myPathGeneration: pathGeneration,
+                                reloadingDocId: oldDocId, stageFrom: sidecarPath, markDirtyOnOpen: true)
 
             case .recordAutosave(let path, let docId, let ext, let isODFFallback):
                 let autosaveDirectory = autosaveDirectory
@@ -1894,7 +2075,16 @@ final class OfficeRuntime: ObservableObject {
     /// and "whether to force dirty" are two genuinely separate facts a future caller could want
     /// independently (a hypothetical "restore but the recovered content is identical, don't force a
     /// dirty dot" would set the first without the second).
-    private func openAndDispatch(path: String, myGeneration: Int, reloadingDocId: String?,
+    ///
+    /// **Office Stage B Task 9 — `myPathGeneration`.** Threaded straight through from whichever
+    /// effect (`.helperOpen`/`.reloadDocument`/`.restoreFromSidecar`) triggered this call — never
+    /// read from `self` again inside this function, unlike `myGeneration`: the reducer already
+    /// computed the correct ticket for THIS attempt at the moment it decided to emit that effect
+    /// (`OfficeRuntimeState.pathGenerations`'s own header), so there is nothing left for the
+    /// imperative half to compare it against until the attempt actually lands — see the `.opened`/
+    /// `.openFailed`/`.reloadFailed` dispatch sites below, and that state field's own header for why
+    /// the comparison itself belongs in the reducer, not here.
+    private func openAndDispatch(path: String, myGeneration: Int, myPathGeneration: Int, reloadingDocId: String?,
                                   stageFrom: String? = nil, markDirtyOnOpen: Bool = false) {
         let docId = makeDocId()
         let stagedPath = Self.stagedPath(forDocId: docId, realPath: path, docsDirectory: docsDirectory)
@@ -1924,7 +2114,8 @@ final class OfficeRuntime: ObservableObject {
                     Task.detached(priority: .utility) { Self.deleteStagedCopy(docId: docId, docsDirectory: docsDirectory) }
                     return
                 }
-                self.perform(self.dispatch(.opened(path: path, docId: docId, stagedPath: stagedPath, metadata: metadata)))
+                self.perform(self.dispatch(.opened(path: path, docId: docId, stagedPath: stagedPath, metadata: metadata,
+                                                    pathGeneration: myPathGeneration)))
                 if markDirtyOnOpen {
                     self.perform(self.dispatch(.recoveryRestored(path: path, docId: docId)))
                 }
@@ -1958,9 +2149,10 @@ final class OfficeRuntime: ObservableObject {
                 guard myGeneration == self.generation else { return } // superseded AND failed: nothing to compensate, nothing to record
                 let reason = Self.describe(error)
                 if let reloadingDocId {
-                    self.perform(self.dispatch(.reloadFailed(path: path, oldDocId: reloadingDocId, reason: reason)))
+                    self.perform(self.dispatch(.reloadFailed(path: path, oldDocId: reloadingDocId, reason: reason,
+                                                              pathGeneration: myPathGeneration)))
                 } else {
-                    self.perform(self.dispatch(.openFailed(path: path, reason: reason)))
+                    self.perform(self.dispatch(.openFailed(path: path, reason: reason, pathGeneration: myPathGeneration)))
                 }
             }
         }

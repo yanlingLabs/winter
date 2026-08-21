@@ -29,7 +29,7 @@ final class OfficeRuntimeReducerTests: XCTestCase {
     /// A runtime that has the (shared) helper up and is holding nothing.
     private func ready() -> OfficeRuntimeState {
         reduce(OfficeRuntimeState(), [.openRequested(path: "/warm.xlsx"), .helperBecameReady,
-                                       .opened(path: "/warm.xlsx", docId: "warm-doc", stagedPath: "/staged/warm-doc", metadata: metadata),
+                                       .opened(path: "/warm.xlsx", docId: "warm-doc", stagedPath: "/staged/warm-doc", metadata: metadata, pathGeneration: 0),
                                        .closeRequested(path: "/warm.xlsx")]).0
     }
 
@@ -54,7 +54,7 @@ final class OfficeRuntimeReducerTests: XCTestCase {
         let (flushed, effects) = reduce(queued, [.helperBecameReady])
         XCTAssertEqual(flushed.phase, .ready)
         XCTAssertEqual(flushed.pendingOpens, [])
-        XCTAssertEqual(effects, [.helperOpen(path: "/a.xlsx"), .helperOpen(path: "/b.xlsx")])
+        XCTAssertEqual(effects, [.helperOpen(path: "/a.xlsx", pathGeneration: 0), .helperOpen(path: "/b.xlsx", pathGeneration: 0)])
     }
 
     func testASecondHelperBecameReadyWhileAlreadyReadyChangesNothing() {
@@ -91,12 +91,12 @@ final class OfficeRuntimeReducerTests: XCTestCase {
     func testAnOpenFromReadyAsksTheHelperDirectly() {
         let (state, effects) = reduce(ready(), [.openRequested(path: "/a.xlsx")])
         XCTAssertEqual(state.phase, .ready)
-        XCTAssertEqual(effects, [.helperOpen(path: "/a.xlsx")])
+        XCTAssertEqual(effects, [.helperOpen(path: "/a.xlsx", pathGeneration: 0)])
     }
 
     func testAnOpenOfAPathAlreadyOpenAtReadyIsANoOp() {
         let (open, _) = reduce(ready(), [.openRequested(path: "/a.xlsx"),
-                                         .opened(path: "/a.xlsx", docId: "doc-a", stagedPath: "/staged/doc-a", metadata: metadata)])
+                                         .opened(path: "/a.xlsx", docId: "doc-a", stagedPath: "/staged/doc-a", metadata: metadata, pathGeneration: 0)])
         let (again, effects) = reduce(open, [.openRequested(path: "/a.xlsx")])
         XCTAssertEqual(effects, [], "no per-runtime 'current'/'activate' concept — T6's tab layer "
                        + "owns dedupe/activate against its own already-open tab, mirroring "
@@ -111,7 +111,7 @@ final class OfficeRuntimeReducerTests: XCTestCase {
         failed.openFailures["/a.xlsx"] = "stale failure from a previous attempt"
 
         let (state, effects) = reduce(failed, [
-            .opened(path: "/a.xlsx", docId: "doc-a", stagedPath: "/staged/doc-a", metadata: metadata)
+            .opened(path: "/a.xlsx", docId: "doc-a", stagedPath: "/staged/doc-a", metadata: metadata, pathGeneration: 0)
         ])
         XCTAssertEqual(effects, [.watchFile(path: "/a.xlsx")], "office-plumbing Task 8: opening arms "
                        + "the watch, the instant the document exists")
@@ -124,7 +124,7 @@ final class OfficeRuntimeReducerTests: XCTestCase {
 
     func testOpenedIsIgnoredOutsideReadySoAStaleReplyCannotResurrectATornDownRuntime() {
         let (state, effects) = reduce(OfficeRuntimeState(), [
-            .opened(path: "/a.xlsx", docId: "doc-a", stagedPath: "/staged/doc-a", metadata: metadata)
+            .opened(path: "/a.xlsx", docId: "doc-a", stagedPath: "/staged/doc-a", metadata: metadata, pathGeneration: 0)
         ])
         XCTAssertEqual(state, OfficeRuntimeState())
         XCTAssertEqual(effects, [])
@@ -136,20 +136,20 @@ final class OfficeRuntimeReducerTests: XCTestCase {
     /// than a stale success reply may.
     func testOpenFailedIsIgnoredOutsideReadyForTheSameReasonOpenedIs() {
         let (state, effects) = reduce(OfficeRuntimeState(), [
-            .openFailed(path: "/a.xlsx", reason: "corrupt file")
+            .openFailed(path: "/a.xlsx", reason: "corrupt file", pathGeneration: 0)
         ])
         XCTAssertEqual(state, OfficeRuntimeState())
         XCTAssertEqual(effects, [])
     }
 
     func testOpenFailedRecordsTheReasonAndEmitsABanner() {
-        let (state, effects) = reduce(ready(), [.openFailed(path: "/broken.xlsx", reason: "corrupt file")])
+        let (state, effects) = reduce(ready(), [.openFailed(path: "/broken.xlsx", reason: "corrupt file", pathGeneration: 0)])
         XCTAssertEqual(state.openFailures["/broken.xlsx"], "corrupt file")
         XCTAssertEqual(effects, [.emitBanner(reason: "Couldn't open broken.xlsx: corrupt file")])
     }
 
     func testANewOpenRequestSupersedesThePriorFailureForThatPathBeforeAnyPhaseDecidesAnything() {
-        let (failed, _) = reduce(ready(), [.openFailed(path: "/broken.xlsx", reason: "corrupt file")])
+        let (failed, _) = reduce(ready(), [.openFailed(path: "/broken.xlsx", reason: "corrupt file", pathGeneration: 0)])
         XCTAssertEqual(failed.openFailures["/broken.xlsx"], "corrupt file")
 
         let (retried, _) = reduce(failed, [.openRequested(path: "/broken.xlsx")])
@@ -161,7 +161,7 @@ final class OfficeRuntimeReducerTests: XCTestCase {
 
     func testClosingAnOpenDocumentRemovesItAndAsksTheHelperToClose() {
         let (open, _) = reduce(ready(), [.openRequested(path: "/a.xlsx"),
-                                         .opened(path: "/a.xlsx", docId: "doc-a", stagedPath: "/staged/doc-a", metadata: metadata)])
+                                         .opened(path: "/a.xlsx", docId: "doc-a", stagedPath: "/staged/doc-a", metadata: metadata, pathGeneration: 0)])
         let (closed, effects) = reduce(open, [.closeRequested(path: "/a.xlsx")])
         XCTAssertEqual(effects, [.helperClose(docId: "doc-a"), .unwatchFile(path: "/a.xlsx"),
                                  .deleteStagedCopy(docId: "doc-a"),
@@ -173,9 +173,17 @@ final class OfficeRuntimeReducerTests: XCTestCase {
         XCTAssertNil(closed.documents["/a.xlsx"])
     }
 
-    func testClosingAPathThatWasNeverOpenIsANoOp() {
+    /// **Task 9 narrows this test's own former title** ("...IsANoOp" — no longer true of `state` as a
+    /// whole): a close now bumps `pathGenerations[path]` UNCONDITIONALLY, even for a path with no
+    /// document to close, precisely so an in-flight open racing this close (no `documents[path]`
+    /// entry yet to compare against) can still be told it was superseded when its own `.opened`
+    /// lands later — see `OfficeRuntimeState.pathGenerations`'s own header. Every OTHER field stays
+    /// untouched, and effects stay empty — that half of the old claim is still true.
+    func testClosingAPathThatWasNeverOpenBumpsItsTicketButIsOtherwiseANoOp() {
         let (state, effects) = reduce(ready(), [.closeRequested(path: "/never.xlsx")])
-        XCTAssertEqual(state, ready())
+        var expected = ready()
+        expected.pathGenerations["/never.xlsx"] = 1
+        XCTAssertEqual(state, expected)
         XCTAssertEqual(effects, [])
     }
 
@@ -187,11 +195,11 @@ final class OfficeRuntimeReducerTests: XCTestCase {
         XCTAssertEqual(afterClose.pendingOpens, ["/b.xlsx"])
 
         let (flushed, effects) = reduce(afterClose, [.helperBecameReady])
-        XCTAssertEqual(effects, [.helperOpen(path: "/b.xlsx")], "the cancelled path never reaches the helper")
+        XCTAssertEqual(effects, [.helperOpen(path: "/b.xlsx", pathGeneration: 0)], "the cancelled path never reaches the helper")
     }
 
     func testClosingClearsAnyRecordedOpenFailureForThatPath() {
-        let (failed, _) = reduce(ready(), [.openFailed(path: "/broken.xlsx", reason: "corrupt file")])
+        let (failed, _) = reduce(ready(), [.openFailed(path: "/broken.xlsx", reason: "corrupt file", pathGeneration: 0)])
         let (closed, _) = reduce(failed, [.closeRequested(path: "/broken.xlsx")])
         XCTAssertNil(closed.openFailures["/broken.xlsx"])
     }
@@ -202,7 +210,7 @@ final class OfficeRuntimeReducerTests: XCTestCase {
 
     func testSubscribingToAnOpenDocumentRecordsTheActivePartAndAsksTheHelper() {
         let (open, _) = reduce(ready(), [.openRequested(path: "/a.xlsx"),
-                                         .opened(path: "/a.xlsx", docId: "doc-a", stagedPath: "/staged/doc-a", metadata: metadata)])
+                                         .opened(path: "/a.xlsx", docId: "doc-a", stagedPath: "/staged/doc-a", metadata: metadata, pathGeneration: 0)])
         let (subscribed, effects) = reduce(open, [
             .subscribeRequested(path: "/a.xlsx", part: 2, zoomPPT: 26214, viewportTwips: viewport)
         ])
@@ -220,7 +228,7 @@ final class OfficeRuntimeReducerTests: XCTestCase {
 
     func testUnsubscribingFromAnOpenDocumentAsksTheHelperAndTouchesNoOtherState() {
         let (open, _) = reduce(ready(), [.openRequested(path: "/a.xlsx"),
-                                         .opened(path: "/a.xlsx", docId: "doc-a", stagedPath: "/staged/doc-a", metadata: metadata)])
+                                         .opened(path: "/a.xlsx", docId: "doc-a", stagedPath: "/staged/doc-a", metadata: metadata, pathGeneration: 0)])
         let (state, effects) = reduce(open, [.unsubscribeRequested(path: "/a.xlsx")])
         XCTAssertEqual(effects, [.unsubscribe(docId: "doc-a")])
         XCTAssertEqual(state, open)
@@ -239,7 +247,8 @@ final class OfficeRuntimeReducerTests: XCTestCase {
     /// it is never useful here).
     private func readyWithOpenDocument(path: String = "/a.xlsx", docId: String = "doc-a") -> OfficeRuntimeState {
         reduce(OfficeRuntimeState(), [.openRequested(path: path), .helperBecameReady,
-                                       .opened(path: path, docId: docId, stagedPath: "/staged/\(docId)", metadata: metadata)]).0
+                                       .opened(path: path, docId: docId, stagedPath: "/staged/\(docId)", metadata: metadata,
+                                               pathGeneration: 0)]).0
     }
 
     func testSaveRequestedFromIdleIsANoOp() {
@@ -318,7 +327,7 @@ final class OfficeRuntimeReducerTests: XCTestCase {
     func testSaveSucceededForADocIdThatHasSinceBeenReplacedByAReloadIsANoOp() {
         var open = readyWithOpenDocument(path: "/a.xlsx", docId: "doc-old")
         open.documentBanners["/a.xlsx"] = "File was deleted on disk" // the reload's own banner-clear, simulated
-        let (reloaded, _) = reduce(open, [.opened(path: "/a.xlsx", docId: "doc-new", stagedPath: "/staged/doc-new", metadata: metadata)])
+        let (reloaded, _) = reduce(open, [.opened(path: "/a.xlsx", docId: "doc-new", stagedPath: "/staged/doc-new", metadata: metadata, pathGeneration: 0)])
 
         let (state, effects) = reduce(reloaded, [.saveSucceeded(path: "/a.xlsx", docId: "doc-old")])
         XCTAssertEqual(state, reloaded, "the stale save must not touch the newer entry's state at all")
@@ -343,7 +352,7 @@ final class OfficeRuntimeReducerTests: XCTestCase {
 
     func testSaveFailedForADocIdThatHasSinceBeenReplacedIsANoOp() {
         let open = readyWithOpenDocument(path: "/a.xlsx", docId: "doc-old")
-        let (reloaded, _) = reduce(open, [.opened(path: "/a.xlsx", docId: "doc-new", stagedPath: "/staged/doc-new", metadata: metadata)])
+        let (reloaded, _) = reduce(open, [.opened(path: "/a.xlsx", docId: "doc-new", stagedPath: "/staged/doc-new", metadata: metadata, pathGeneration: 0)])
 
         let (state, effects) = reduce(reloaded, [.saveFailed(path: "/a.xlsx", docId: "doc-old", reason: "disk full")])
         XCTAssertEqual(state, reloaded, "a stale save's failure must not bannerize the newer, unrelated entry")
@@ -390,9 +399,11 @@ final class OfficeRuntimeReducerTests: XCTestCase {
 
     func testExternalChangeDetectedOnAnOpenDocumentReloadsSilently() {
         let (open, _) = reduce(ready(), [.openRequested(path: "/a.xlsx"),
-                                         .opened(path: "/a.xlsx", docId: "doc-a", stagedPath: "/staged/doc-a", metadata: metadata)])
+                                         .opened(path: "/a.xlsx", docId: "doc-a", stagedPath: "/staged/doc-a", metadata: metadata, pathGeneration: 0)])
         let (state, effects) = reduce(open, [.externalChangeDetected(path: "/a.xlsx")])
-        XCTAssertEqual(effects, [.reloadDocument(path: "/a.xlsx", oldDocId: "doc-a")])
+        // Task 9: this path's ticket was 0 (never bumped by the open above) and the reload bumps it
+        // once, to 1 — see `OfficeRuntimeState.pathGenerations`'s own header.
+        XCTAssertEqual(effects, [.reloadDocument(path: "/a.xlsx", oldDocId: "doc-a", pathGeneration: 1)])
         // Stage A is view-only — no dirty buffer, no "keep mine" choice, no banner: this is ALWAYS
         // silent (T8 brief, verbatim). The document entry is UNTOUCHED through the gap — still the
         // OLD docId — which is what keeps `officeDocumentViewportPlan` on `.showCanvas` continuously
@@ -408,7 +419,7 @@ final class OfficeRuntimeReducerTests: XCTestCase {
 
     func testExternalChangeDetectedClearsAnyStandingDeletedBanner() {
         let (open, _) = reduce(ready(), [.openRequested(path: "/a.xlsx"),
-                                         .opened(path: "/a.xlsx", docId: "doc-a", stagedPath: "/staged/doc-a", metadata: metadata)])
+                                         .opened(path: "/a.xlsx", docId: "doc-a", stagedPath: "/staged/doc-a", metadata: metadata, pathGeneration: 0)])
         let (deleted, _) = reduce(open, [.externalDeleted(path: "/a.xlsx")])
         XCTAssertEqual(deleted.documentBanners["/a.xlsx"], "File was deleted on disk")
 
@@ -419,7 +430,7 @@ final class OfficeRuntimeReducerTests: XCTestCase {
 
     func testExternalDeletedSetsAPersistentBannerAndLeavesTheDocumentEntryUntouched() {
         let (open, _) = reduce(ready(), [.openRequested(path: "/a.xlsx"),
-                                         .opened(path: "/a.xlsx", docId: "doc-a", stagedPath: "/staged/doc-a", metadata: metadata)])
+                                         .opened(path: "/a.xlsx", docId: "doc-a", stagedPath: "/staged/doc-a", metadata: metadata, pathGeneration: 0)])
         let (state, effects) = reduce(open, [.externalDeleted(path: "/a.xlsx")])
         XCTAssertEqual(state.documentBanners["/a.xlsx"], "File was deleted on disk")
         XCTAssertEqual(effects, [.emitBanner(reason: "File was deleted on disk")])
@@ -438,7 +449,8 @@ final class OfficeRuntimeReducerTests: XCTestCase {
 
     private func openedAndDirty(path: String = "/a.xlsx", docId: String = "doc-a") -> OfficeRuntimeState {
         let (open, _) = reduce(ready(), [.openRequested(path: path),
-                                         .opened(path: path, docId: docId, stagedPath: "/staged/\(docId)", metadata: metadata)])
+                                         .opened(path: path, docId: docId, stagedPath: "/staged/\(docId)", metadata: metadata,
+                                                 pathGeneration: 0)])
         let (dirty, _) = reduce(open, [.modifiedStatusChanged(docId: docId, modified: true)])
         return dirty
     }
@@ -480,7 +492,10 @@ final class OfficeRuntimeReducerTests: XCTestCase {
         let (state, effects) = reduce(conflicted, [.conflictReloadRequested(path: "/a.xlsx")])
         XCTAssertNil(state.documentConflicts["/a.xlsx"])
         XCTAssertNil(state.documentBanners["/a.xlsx"])
-        XCTAssertEqual(effects, [.reloadDocument(path: "/a.xlsx", oldDocId: "doc-a")])
+        // Task 9: the DIRTY branch `.externalChangeDetected` took above never bumped the ticket (only
+        // the clean/silent-reload branch does), so it is still 0 here; this explicit reload bumps it
+        // to 1 — see `OfficeRuntimeState.pathGenerations`'s own header.
+        XCTAssertEqual(effects, [.reloadDocument(path: "/a.xlsx", oldDocId: "doc-a", pathGeneration: 1)])
     }
 
     /// **"Keep my version"**: dismisses the banner with NO other effect — the document stays exactly
@@ -538,7 +553,7 @@ final class OfficeRuntimeReducerTests: XCTestCase {
     /// (`.reloadDocument`'s own doc: never cleared first), and the new entry inherits it.
     func testAReloadsOpenedArmPreservesTheActivePartFromTheEntryItReplaces() {
         let (open, _) = reduce(ready(), [.openRequested(path: "/a.xlsx"),
-                                         .opened(path: "/a.xlsx", docId: "doc-a", stagedPath: "/staged/doc-a", metadata: metadata)])
+                                         .opened(path: "/a.xlsx", docId: "doc-a", stagedPath: "/staged/doc-a", metadata: metadata, pathGeneration: 0)])
         let (switched, _) = reduce(open, [
             .subscribeRequested(path: "/a.xlsx", part: 2, zoomPPT: 1000, viewportTwips: viewport)
         ])
@@ -546,7 +561,7 @@ final class OfficeRuntimeReducerTests: XCTestCase {
 
         // The reload: same path, a freshly-minted docId, the SAME metadata (still 3 parts).
         let (reloaded, _) = reduce(switched, [
-            .opened(path: "/a.xlsx", docId: "doc-a-reloaded", stagedPath: "/staged/doc-a-reloaded", metadata: metadata)
+            .opened(path: "/a.xlsx", docId: "doc-a-reloaded", stagedPath: "/staged/doc-a-reloaded", metadata: metadata, pathGeneration: 0)
         ])
         XCTAssertEqual(reloaded.documents["/a.xlsx"]?.docId, "doc-a-reloaded")
         XCTAssertEqual(reloaded.documents["/a.xlsx"]?.activePart, 2, "T8 obligation 1: the sheet the "
@@ -558,14 +573,14 @@ final class OfficeRuntimeReducerTests: XCTestCase {
     /// longer exists. Clamped to the new document's own last valid part.
     func testAReloadsOpenedArmClampsThePreservedActivePartToTheNewDocumentsPartCount() {
         let (open, _) = reduce(ready(), [.openRequested(path: "/a.xlsx"),
-                                         .opened(path: "/a.xlsx", docId: "doc-a", stagedPath: "/staged/doc-a", metadata: metadata)])
+                                         .opened(path: "/a.xlsx", docId: "doc-a", stagedPath: "/staged/doc-a", metadata: metadata, pathGeneration: 0)])
         let (switched, _) = reduce(open, [
             .subscribeRequested(path: "/a.xlsx", part: 2, zoomPPT: 1000, viewportTwips: viewport)
         ])
         XCTAssertEqual(switched.documents["/a.xlsx"]?.activePart, 2, "sanity")
 
         let shrunk = OfficeDocumentMetadata(type: .spreadsheet, parts: 1, sizeTwips: metadata.sizeTwips)
-        let (reloaded, _) = reduce(switched, [.opened(path: "/a.xlsx", docId: "doc-a-reloaded", stagedPath: "/staged/doc-a-reloaded", metadata: shrunk)])
+        let (reloaded, _) = reduce(switched, [.opened(path: "/a.xlsx", docId: "doc-a-reloaded", stagedPath: "/staged/doc-a-reloaded", metadata: shrunk, pathGeneration: 0)])
         XCTAssertEqual(reloaded.documents["/a.xlsx"]?.parts, 1)
         XCTAssertEqual(reloaded.documents["/a.xlsx"]?.activePart, 0, "sheet index 2 does not exist "
                        + "in a 1-part document — clamped to the last valid part, never left dangling")
@@ -577,9 +592,9 @@ final class OfficeRuntimeReducerTests: XCTestCase {
     /// shared helper.
     func testASecondOpenedForTheSamePathClosesTheDocIdItReplaces() {
         let (open, _) = reduce(ready(), [.openRequested(path: "/a.xlsx"),
-                                         .opened(path: "/a.xlsx", docId: "doc-a", stagedPath: "/staged/doc-a", metadata: metadata)])
+                                         .opened(path: "/a.xlsx", docId: "doc-a", stagedPath: "/staged/doc-a", metadata: metadata, pathGeneration: 0)])
         // A second, independent reload's own reopen resolves — same path, a DIFFERENT fresh docId.
-        let (state, effects) = reduce(open, [.opened(path: "/a.xlsx", docId: "doc-a-2", stagedPath: "/staged/doc-a-2", metadata: metadata)])
+        let (state, effects) = reduce(open, [.opened(path: "/a.xlsx", docId: "doc-a-2", stagedPath: "/staged/doc-a-2", metadata: metadata, pathGeneration: 0)])
         XCTAssertEqual(state.documents["/a.xlsx"]?.docId, "doc-a-2", "the later arrival wins the slot")
         XCTAssertEqual(effects, [.watchFile(path: "/a.xlsx"), .helperClose(docId: "doc-a"),
                                  .deleteStagedCopy(docId: "doc-a")],
@@ -591,7 +606,7 @@ final class OfficeRuntimeReducerTests: XCTestCase {
     /// The ordinary, non-racing case must NOT pay a redundant close: a document opening for the
     /// FIRST time (no `previousEntry` at all) has nothing to compensate.
     func testAFreshOpenedWithNoPriorEntryNeverEmitsACompensatingClose() {
-        let (state, effects) = reduce(ready(), [.opened(path: "/a.xlsx", docId: "doc-a", stagedPath: "/staged/doc-a", metadata: metadata)])
+        let (state, effects) = reduce(ready(), [.opened(path: "/a.xlsx", docId: "doc-a", stagedPath: "/staged/doc-a", metadata: metadata, pathGeneration: 0)])
         XCTAssertEqual(state.documents["/a.xlsx"]?.docId, "doc-a")
         XCTAssertEqual(effects, [.watchFile(path: "/a.xlsx")], "nothing to compensate — this path had "
                        + "no document a moment ago")
@@ -599,9 +614,9 @@ final class OfficeRuntimeReducerTests: XCTestCase {
 
     func testReloadFailedClearsTheDocumentAndRecordsTheFailureWhenItStillMatchesTheDocIdBeingReplaced() {
         let (open, _) = reduce(ready(), [.openRequested(path: "/a.xlsx"),
-                                         .opened(path: "/a.xlsx", docId: "doc-a", stagedPath: "/staged/doc-a", metadata: metadata)])
+                                         .opened(path: "/a.xlsx", docId: "doc-a", stagedPath: "/staged/doc-a", metadata: metadata, pathGeneration: 0)])
         let (state, effects) = reduce(open, [
-            .reloadFailed(path: "/a.xlsx", oldDocId: "doc-a", reason: "corrupt file")
+            .reloadFailed(path: "/a.xlsx", oldDocId: "doc-a", reason: "corrupt file", pathGeneration: 0)
         ])
         XCTAssertNil(state.documents["/a.xlsx"], "no document left to strand on a dead docId — the "
                      + "honest failure sentence replaces it")
@@ -617,14 +632,14 @@ final class OfficeRuntimeReducerTests: XCTestCase {
     /// document to be a banner ABOUT (this state's own header names the invariant).
     func testReloadFailedClearsAnyDeletedBannerLeftBehindByAConcurrentExternalDelete() {
         let (open, _) = reduce(ready(), [.openRequested(path: "/a.xlsx"),
-                                         .opened(path: "/a.xlsx", docId: "doc-a", stagedPath: "/staged/doc-a", metadata: metadata)])
+                                         .opened(path: "/a.xlsx", docId: "doc-a", stagedPath: "/staged/doc-a", metadata: metadata, pathGeneration: 0)])
         // The file vanished while some in-flight reload (for this same "doc-a") was still pending —
         // the document entry is untouched, so the delete's guard passes and the banner is set.
         let (deleted, _) = reduce(open, [.externalDeleted(path: "/a.xlsx")])
         XCTAssertEqual(deleted.documentBanners["/a.xlsx"], "File was deleted on disk", "sanity")
 
         let (state, effects) = reduce(deleted, [
-            .reloadFailed(path: "/a.xlsx", oldDocId: "doc-a", reason: "corrupt file")
+            .reloadFailed(path: "/a.xlsx", oldDocId: "doc-a", reason: "corrupt file", pathGeneration: 0)
         ])
         XCTAssertNil(state.documentBanners["/a.xlsx"], "no document left behind for this banner to be "
                      + "about — the failure sentence below replaces it instead")
@@ -639,15 +654,21 @@ final class OfficeRuntimeReducerTests: XCTestCase {
     /// own failure lands. The stale failure must not clobber the genuinely-fine newer document.
     func testReloadFailedIsIgnoredWhenANewerReloadAlreadySucceededAndReplacedTheEntryItWasReplacing() {
         let (open, _) = reduce(ready(), [.openRequested(path: "/a.xlsx"),
-                                         .opened(path: "/a.xlsx", docId: "doc-a", stagedPath: "/staged/doc-a", metadata: metadata)])
+                                         .opened(path: "/a.xlsx", docId: "doc-a", stagedPath: "/staged/doc-a", metadata: metadata, pathGeneration: 0)])
         // The newer reload's reopen (for the SAME original docId, "doc-a") already succeeded.
-        let (succeeded, _) = reduce(open, [.opened(path: "/a.xlsx", docId: "doc-a-new", stagedPath: "/staged/doc-a-new", metadata: metadata)])
+        let (succeeded, _) = reduce(open, [.opened(path: "/a.xlsx", docId: "doc-a-new", stagedPath: "/staged/doc-a-new", metadata: metadata, pathGeneration: 0)])
         XCTAssertEqual(succeeded.documents["/a.xlsx"]?.docId, "doc-a-new", "sanity")
 
         // The OLDER reload attempt's own failure — still carrying the ORIGINAL "doc-a" it was
-        // trying to replace — lands after the fact.
+        // trying to replace — lands after the fact. `pathGeneration: 0` matches this test's own
+        // hand-constructed sequence (nothing here ever dispatches through `.externalChangeDetected`/
+        // `.conflictReloadRequested`, so nothing ever bumps the ticket) — deliberately, so this stays
+        // a faithful, non-vacuous test of the PRE-EXISTING `oldDocId` guard in isolation, the one
+        // named in this test's own title, rather than being accidentally dropped by Task 9's newer
+        // ticket check for an unrelated reason. See `testTwoRacingReloadsTheFirstToFailIsDroppedByThe
+        // TicketNotTheOldDocIdGuard` for the scenario where the ticket check is what actually fires.
         let (state, effects) = reduce(succeeded, [
-            .reloadFailed(path: "/a.xlsx", oldDocId: "doc-a", reason: "transient error")
+            .reloadFailed(path: "/a.xlsx", oldDocId: "doc-a", reason: "transient error", pathGeneration: 0)
         ])
         XCTAssertEqual(state, succeeded, "a superseded failure has nothing left to say")
         XCTAssertEqual(effects, [])
@@ -655,7 +676,7 @@ final class OfficeRuntimeReducerTests: XCTestCase {
 
     func testReloadFailedOutsideReadyIsIgnoredForTheSameReasonOpenFailedIs() {
         let (state, effects) = reduce(OfficeRuntimeState(), [
-            .reloadFailed(path: "/a.xlsx", oldDocId: "doc-a", reason: "corrupt file")
+            .reloadFailed(path: "/a.xlsx", oldDocId: "doc-a", reason: "corrupt file", pathGeneration: 0)
         ])
         XCTAssertEqual(state, OfficeRuntimeState())
         XCTAssertEqual(effects, [])
@@ -694,11 +715,11 @@ final class OfficeRuntimeReducerTests: XCTestCase {
         let (starting, _) = reduce(OfficeRuntimeState(), [.openRequested(path: "/a.xlsx")])
         let openReady = ready()
         let (openWithDoc, _) = reduce(openReady, [.openRequested(path: "/a.xlsx"),
-                                                   .opened(path: "/a.xlsx", docId: "doc-a", stagedPath: "/staged/doc-a", metadata: metadata)])
+                                                   .opened(path: "/a.xlsx", docId: "doc-a", stagedPath: "/staged/doc-a", metadata: metadata, pathGeneration: 0)])
         let (openWithTwoDocs, _) = reduce(openReady, [.openRequested(path: "/a.xlsx"),
-                                                       .opened(path: "/a.xlsx", docId: "doc-a", stagedPath: "/staged/doc-a", metadata: metadata),
+                                                       .opened(path: "/a.xlsx", docId: "doc-a", stagedPath: "/staged/doc-a", metadata: metadata, pathGeneration: 0),
                                                        .openRequested(path: "/b.xlsx"),
-                                                       .opened(path: "/b.xlsx", docId: "doc-b", stagedPath: "/staged/doc-b", metadata: metadata)])
+                                                       .opened(path: "/b.xlsx", docId: "doc-b", stagedPath: "/staged/doc-b", metadata: metadata, pathGeneration: 0)])
         let (alreadyFailed, _) = reduce(idle, [.helperDied])
 
         let banner = OfficeRuntimeEffect.emitBanner(reason: "The office helper stopped unexpectedly.")
@@ -726,7 +747,7 @@ final class OfficeRuntimeReducerTests: XCTestCase {
     func testHelperUnavailableFromEveryPhaseAlsoFailsWithItsOwnReasonAndUnwatchesEveryOpenDocument() {
         let openReady = ready()
         let (openWithDoc, _) = reduce(openReady, [.openRequested(path: "/a.xlsx"),
-                                                   .opened(path: "/a.xlsx", docId: "doc-a", stagedPath: "/staged/doc-a", metadata: metadata)])
+                                                   .opened(path: "/a.xlsx", docId: "doc-a", stagedPath: "/staged/doc-a", metadata: metadata, pathGeneration: 0)])
         let banner = OfficeRuntimeEffect.emitBanner(reason: "The office helper couldn't be started.")
         let cases: [(OfficeRuntimeState, [OfficeRuntimeEffect])] = [
             (OfficeRuntimeState(), [banner]),
@@ -811,8 +832,8 @@ final class OfficeRuntimeReducerTests: XCTestCase {
         let idle = OfficeRuntimeState()
         let (starting, _) = reduce(OfficeRuntimeState(), [.openRequested(path: "/a.xlsx")])
         let (withDocs, _) = reduce(ready(), [
-            .openRequested(path: "/a.xlsx"), .opened(path: "/a.xlsx", docId: "doc-a", stagedPath: "/staged/doc-a", metadata: metadata),
-            .openRequested(path: "/b.xlsx"), .opened(path: "/b.xlsx", docId: "doc-b", stagedPath: "/staged/doc-b", metadata: metadata)
+            .openRequested(path: "/a.xlsx"), .opened(path: "/a.xlsx", docId: "doc-a", stagedPath: "/staged/doc-a", metadata: metadata, pathGeneration: 0),
+            .openRequested(path: "/b.xlsx"), .opened(path: "/b.xlsx", docId: "doc-b", stagedPath: "/staged/doc-b", metadata: metadata, pathGeneration: 0)
         ])
         let (failed, _) = reduce(idle, [.helperUnavailable])
 
@@ -826,7 +847,12 @@ final class OfficeRuntimeReducerTests: XCTestCase {
                        + "while queued — no docId exists yet to close")
 
         let (docsState, docsEffects) = reduce(withDocs, [.teardownRequested])
-        XCTAssertEqual(docsState, OfficeRuntimeState())
+        // Task 9 — NOT a literal fresh `OfficeRuntimeState()`: `withDocs` descends from `ready()`,
+        // which opens-then-closes "/warm.xlsx" (bumping its ticket to 1 — `pathGenerations` is
+        // deliberately CARRIED FORWARD by teardown, never reset; see that field's own header).
+        var expectedDocsState = OfficeRuntimeState()
+        expectedDocsState.pathGenerations["/warm.xlsx"] = 1
+        XCTAssertEqual(docsState, expectedDocsState)
         // Task 2b (I3): one `.teardown` (every open docId), PLUS one `.deleteStagedCopy` per docId —
         // teardown releases each document's staged copy exactly as it already releases the helper's
         // own open handle for it.
@@ -852,7 +878,12 @@ final class OfficeRuntimeReducerTests: XCTestCase {
     func testASecondTeardownIsSafe() {
         let (once, _) = reduce(ready(), [.teardownRequested])
         let (twice, twiceEffects) = reduce(once, [.teardownRequested])
-        XCTAssertEqual(twice, OfficeRuntimeState())
+        // Task 9 — same "carried forward from ready()'s own /warm.xlsx close" fact as
+        // `testTeardownIsLegalFromEveryPhaseAndAlwaysReturnsToAFreshIdleState`'s `docsState` above;
+        // a second teardown carries the SAME value forward again, unchanged.
+        var expected = OfficeRuntimeState()
+        expected.pathGenerations["/warm.xlsx"] = 1
+        XCTAssertEqual(twice, expected)
         XCTAssertEqual(twiceEffects, [.teardown(docIds: [])])
     }
 
@@ -887,7 +918,7 @@ final class OfficeRuntimeReducerTests: XCTestCase {
     /// this (slower) async check was running for — mirrors `.saveSucceeded`'s own identical shape.
     func testRecoveryCandidateFoundForADocIdThePathHasMovedPastIsANoOp() {
         let open = readyWithOpenDocument(path: "/a.odt", docId: "doc-a")
-        let (reloaded, _) = reduce(open, [.opened(path: "/a.odt", docId: "doc-a-2", stagedPath: "/staged/doc-a-2", metadata: metadata)])
+        let (reloaded, _) = reduce(open, [.opened(path: "/a.odt", docId: "doc-a-2", stagedPath: "/staged/doc-a-2", metadata: metadata, pathGeneration: 0)])
         let (state, effects) = reduce(reloaded, [.recoveryCandidateFound(path: "/a.odt", docId: "doc-a", candidate: sampleCandidate)])
         XCTAssertNil(state.documentRecoveryCandidates["/a.odt"], "the stale check's own candidate "
                      + "must never attach to a document this path has already moved past")
@@ -903,7 +934,7 @@ final class OfficeRuntimeReducerTests: XCTestCase {
         let (withCandidate, _) = reduce(open, [.recoveryCandidateFound(path: "/a.odt", docId: "doc-a", candidate: sampleCandidate)])
         XCTAssertEqual(withCandidate.documentRecoveryCandidates["/a.odt"], sampleCandidate, "sanity")
 
-        let (reloaded, _) = reduce(withCandidate, [.opened(path: "/a.odt", docId: "doc-a-2", stagedPath: "/staged/doc-a-2", metadata: metadata)])
+        let (reloaded, _) = reduce(withCandidate, [.opened(path: "/a.odt", docId: "doc-a-2", stagedPath: "/staged/doc-a-2", metadata: metadata, pathGeneration: 0)])
         XCTAssertNil(reloaded.documentRecoveryCandidates["/a.odt"])
     }
 
@@ -937,8 +968,10 @@ final class OfficeRuntimeReducerTests: XCTestCase {
         let (state, effects) = reduce(withCandidate, [.recoveryRestoreRequested(path: "/a.odt")])
         XCTAssertNil(state.documentRecoveryCandidates["/a.odt"], "optimistic clear, mirrors "
                      + ".conflictReloadRequested's identical posture")
+        // Task 9: restore is reload-shaped and bumps this path's ticket from 0 (never touched by the
+        // open/recoveryCandidateFound above) to 1.
         XCTAssertEqual(effects, [.restoreFromSidecar(path: "/a.odt", oldDocId: "doc-a",
-                                                      sidecarPath: sampleCandidate.sidecarPath)])
+                                                      sidecarPath: sampleCandidate.sidecarPath, pathGeneration: 1)])
     }
 
     func testRecoveryDiscardRequestedClearsTheCandidateAndEmitsDiscardRecoveryCandidate() {
@@ -989,7 +1022,7 @@ final class OfficeRuntimeReducerTests: XCTestCase {
 
     func testRecoveryRestoredForADocIdThePathHasMovedPastIsANoOp() {
         let open = readyWithOpenDocument(path: "/a.odt", docId: "doc-a")
-        let (reloaded, _) = reduce(open, [.opened(path: "/a.odt", docId: "doc-a-2", stagedPath: "/staged/doc-a-2", metadata: metadata)])
+        let (reloaded, _) = reduce(open, [.opened(path: "/a.odt", docId: "doc-a-2", stagedPath: "/staged/doc-a-2", metadata: metadata, pathGeneration: 0)])
 
         let (state, _) = reduce(reloaded, [.recoveryRestored(path: "/a.odt", docId: "doc-a")])
         XCTAssertEqual(state.documents["/a.odt"]?.dirty, false, "the stale restore must not force "
