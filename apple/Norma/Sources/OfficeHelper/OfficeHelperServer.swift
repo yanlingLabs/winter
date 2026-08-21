@@ -441,6 +441,21 @@ public final class OfficeHelperServer {
     /// non-blocking write or a bounded per-connection push queue (decouple "LOK produced this
     /// frame" from "the socket accepted these bytes") — deliberately NOT designed here; carried in
     /// the fix-round ledger (task-4-report.md) for a future round.
+    ///
+    /// **Office Stage B Task 4 — measured, and this is a DIFFERENT hazard from the one this task's
+    /// own transport re-eval found.** This one needs a SLOW/STALLED CLIENT to manifest — a healthy,
+    /// fast reader never blocks a socket write for long. Task 4's own measurement (a 6-tile
+    /// cold-paint batch queued immediately ahead of one keystroke, both from a perfectly healthy,
+    /// synchronous test client) found a real, ~212ms stall with NO slow client anywhere in the
+    /// picture — that one is ordinary `LOKDedicatedThread` FIFO contention (every `postKey`/
+    /// `postMouse`/`paintTile` call does `thread.sync`, one job at a time, regardless of which
+    /// app-side queue sent it), not this write-blocking hazard. The bounded push queue named above
+    /// would not touch that second hazard at all — it only relieves RECEIVER backpressure, and
+    /// `OfficeHelperLiveTests.testTransportMeasurementTypeBurstMidPrefetchHeadOfLineAndDragBurstLatencies`'s
+    /// own healthy-client scenario has none. Decided NOT to build it this round either — see
+    /// task-4-report.md's transport section for the numbers and the full reasoning; both hazards
+    /// stay named, neither is fixed, and they should not be conflated when a future round picks
+    /// either back up.
     private func pushFrame(_ frame: OfficeWireFrame, to writer: ConnectionWriter) {
         writer.writeLock.lock()
         writeFrameLocked(frame, writer: writer)
