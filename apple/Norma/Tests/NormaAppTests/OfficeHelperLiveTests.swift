@@ -1583,6 +1583,96 @@ final class OfficeHelperLiveTests: XCTestCase {
                             + "territory now, comfortably under this bar — see this test's own report entry for the real number)")
     }
 
+    // MARK: - Task 4, I2/M4: the transport re-evaluation, measured against real edit traffic
+
+    /// **Office Stage B Task 4 — the transport re-eval, measured, per the dispatch's own instruction:
+    /// implement the bounded per-connection push queue ONLY if the numbers demand it.** Three
+    /// scenarios, one spawned helper: (1) a type-burst ack-latency baseline on an otherwise-idle
+    /// document; (2) the worst REALISTIC head-of-line case this codebase's own architecture actually
+    /// has — a keystroke posted the instant a multi-tile paint batch is queued ahead of it on
+    /// `LOKDedicatedThread` (never the `officeRequestQueue` app-side funnel, which this test does
+    /// not exercise at all: that queue only orders SENDS, and `requestTiles`' own client call
+    /// returns the moment `tileRequestAccepted` arrives, BEFORE any tile actually paints — see
+    /// `OfficeHelperServer.handlePostAuthLine`'s `.tileRequest` case, `tileRequestAccepted` written
+    /// before the paint loop starts. The REAL contention is `LOKDedicatedThread` itself: every
+    /// `postKey`/`postMouse`/`paintTile` call — regardless of which app-side queue sent it —
+    /// ultimately does `thread.sync { ... }`, and that thread runs exactly one job at a time,
+    /// FIFO. A keystroke queued behind an already-in-flight 6-tile paint batch waits for every one
+    /// of those 6 paints, not merely its own); (3) a `mouseDragged`-shaped burst (many `.move`
+    /// posts in a row, the shape a real drag-select produces).
+    func testTransportMeasurementTypeBurstMidPrefetchHeadOfLineAndDragBurstLatencies() async throws {
+        try skipUnlessVendorPresent()
+        let helper = try await spawnLiveHelper()
+
+        let stagedPath = helper.stateDir.appendingPathComponent("docs", isDirectory: true)
+            .appendingPathComponent("gate-writable.ods").path
+        try FileManager.default.createDirectory(
+            at: URL(fileURLWithPath: stagedPath).deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(contentsOf: Self.fixturesRoot.appendingPathComponent("gate.ods")).write(to: URL(fileURLWithPath: stagedPath))
+        let docId = UUID().uuidString
+        _ = try await helper.client.open(docId: docId, path: stagedPath)
+        try await helper.client.postMouse(docId: docId, type: .buttonDown, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await helper.client.postMouse(docId: docId, type: .buttonUp, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+
+        // Scenario 1 — type-burst baseline, otherwise-idle document: 20 keystrokes, back to back,
+        // each one's own full send-to-ack round trip timed individually.
+        var typeBurstLatenciesMs: [Double] = []
+        for _ in 0..<20 {
+            let start = Date()
+            try await helper.client.postKey(docId: docId, type: .keyInput, charCode: 65, keyCode: 512)
+            typeBurstLatenciesMs.append(Date().timeIntervalSince(start) * 1000)
+        }
+        let typeBurstAvg = typeBurstLatenciesMs.reduce(0, +) / Double(typeBurstLatenciesMs.count)
+        let typeBurstMax = typeBurstLatenciesMs.max() ?? 0
+
+        // Scenario 2 — the worst realistic head-of-line case: queue a 6-tile paint batch (the
+        // repo's own `OfficeTileCanvasView.prefetchChunkSize`), then IMMEDIATELY post one keystroke
+        // — `tileRequestAccepted` returns before any of the 6 tiles paint, so this keystroke's own
+        // `thread.sync` job genuinely lands BEHIND all 6 on the dedicated thread's queue.
+        let prefetchKeys = (0..<6).map { TileKey(part: 0, zoomPPT: 1000, tileX: $0, tileY: 10) } // unpainted row, real cold paints
+        try await helper.client.requestTiles(docId: docId, keys: prefetchKeys)
+        let midPrefetchStart = Date()
+        try await helper.client.postKey(docId: docId, type: .keyInput, charCode: 66, keyCode: 513)
+        let midPrefetchLatencyMs = Date().timeIntervalSince(midPrefetchStart) * 1000
+
+        // Scenario 3 — a mouseDragged-shaped burst: 40 `.move` posts in a row (a real drag-select
+        // produces exactly this shape — one `postMouseEvent(LOK_MOUSEEVENT_MOUSEMOVE)` per dragged
+        // pixel-ish delta), total elapsed AND per-call latency both recorded.
+        let dragBurstStart = Date()
+        var dragBurstLatenciesMs: [Double] = []
+        for step in 0..<40 {
+            let stepStart = Date()
+            try await helper.client.postMouse(docId: docId, type: .move, xTwips: Int64(100 + step * 20), yTwips: 100,
+                                              count: 0, buttons: 1, modifiers: 0)
+            dragBurstLatenciesMs.append(Date().timeIntervalSince(stepStart) * 1000)
+        }
+        let dragBurstTotalMs = Date().timeIntervalSince(dragBurstStart) * 1000
+        let dragBurstAvg = dragBurstLatenciesMs.reduce(0, +) / Double(dragBurstLatenciesMs.count)
+
+        try await helper.client.close(docId: docId)
+
+        print("""
+        [transport measurement, I2/M4] real edit traffic, one spawned helper, single connection:
+          (1) TYPE-BURST (20 keystrokes, idle doc): avg \(String(format: "%.2f", typeBurstAvg))ms/keystroke, \
+        max \(String(format: "%.2f", typeBurstMax))ms, total \(String(format: "%.1f", typeBurstLatenciesMs.reduce(0, +)))ms
+          (2) MID-PREFETCH HEAD-OF-LINE (1 keystroke queued behind a 6-tile cold-paint batch): \
+        \(String(format: "%.2f", midPrefetchLatencyMs))ms (vs. scenario 1's own \(String(format: "%.2f", typeBurstAvg))ms idle baseline — \
+        the delta is this codebase's own real LOKDedicatedThread contention cost, not the app-side officeRequestQueue, which this test never touches)
+          (3) DRAG-BURST (40 mousemove posts): \(String(format: "%.1f", dragBurstTotalMs))ms total, \
+        avg \(String(format: "%.2f", dragBurstAvg))ms/move, \(String(format: "%.1f", 40.0 / (dragBurstTotalMs / 1000))) moves/sec effective
+        """)
+
+        // DECISION (task-4-report.md has the full writeup): informational assertions only — this is
+        // a measurement, not a target. Every one of these completing without a timeout, on real
+        // edit+paint traffic sharing one connection, is itself part of the evidence: nothing here
+        // wedges the connection, even under the deliberately adversarial scenario 2.
+        XCTAssertLessThan(typeBurstAvg, 200, "an idle-doc keystroke ack should not be anywhere near a "
+                          + "human-perceptible lag floor (~100-200ms) — if this regresses past it, "
+                          + "the bounded-queue redesign this task's own dispatch named becomes worth building")
+        XCTAssertGreaterThan(midPrefetchLatencyMs, typeBurstAvg, "sanity: the adversarial scenario must "
+                             + "actually BE slower than the idle baseline, or scenario 2 measured nothing real")
+    }
+
     // MARK: - USER LIVE-GATE FIX #4, FIX 2 research: does LOK paint an infinite grid past documentSize?
 
     /// **Empirical, not documentary.** Today the canvas clamps its scrollable extent to
