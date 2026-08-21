@@ -61,6 +61,43 @@ func officeTileScreenRect(key: TileKey, zoomPPT: Int, scrollOrigin: CGPoint) -> 
                  width: sidePoints, height: sidePoints)
 }
 
+// MARK: - Office Stage B Task 5: caret/selection/cell-cursor overlay geometry
+//
+// The SAME unit chain `officeTileScreenRect` already establishes for a `TileKey`'s bounds, applied
+// to an ARBITRARY twips rect instead — every overlay this task adds (caret, selection, cell-cursor)
+// positions itself through this ONE function, so a tile and the caret sitting on top of it can never
+// visually disagree about where the document's own twips-space maps to view-space points.
+
+/// A twips-space rect -> view-space POINTS, the exact inverse chain `officeTileScreenRect` already
+/// uses for a tile's own bounds (scroll offset, then zoom, then the fixed 2x device-scale pin) —
+/// factored out here because a caret/selection/cell-cursor rect is NOT tile-grid-aligned the way a
+/// `TileKey`'s bounds always are. Total: a degenerate (zero-or-negative width/height) input still
+/// produces a valid (if empty-looking) `CGRect` rather than `nil` — unlike `officeTileScreenRect`,
+/// there is no `TileMath.tileBoundsTwips` sane-bounds refusal in this path, since the input here is
+/// never a hostile wire-decoded tile index, only a LOK-reported rect this app already trusts enough
+/// to have parsed (Task 5's own probe-verified parsers). A caret rect's own `width == 0` (every real
+/// firing observed) is exactly this "degenerate but legitimate" case — a caret is a LINE, not a box,
+/// and must still position and size correctly (as a hairline).
+func officeTwipsRectToScreenRect(_ rectTwips: OfficeTwipsRect, zoomPPT: Int, scrollOrigin: CGPoint) -> CGRect {
+    let originXPixels = TileMath.twipsToPixels(rectTwips.x, zoomPPT: zoomPPT)
+    let originYPixels = TileMath.twipsToPixels(rectTwips.y, zoomPPT: zoomPPT)
+    let widthPixels = TileMath.twipsToPixels(rectTwips.width, zoomPPT: zoomPPT)
+    let heightPixels = TileMath.twipsToPixels(rectTwips.height, zoomPPT: zoomPPT)
+    return CGRect(x: CGFloat(originXPixels) / officeFixedDeviceScale - scrollOrigin.x,
+                 y: CGFloat(originYPixels) / officeFixedDeviceScale - scrollOrigin.y,
+                 width: CGFloat(widthPixels) / officeFixedDeviceScale,
+                 height: CGFloat(heightPixels) / officeFixedDeviceScale)
+}
+
+/// The caret's own rendered width, in POINTS — a real caret rect's `width` is always `0` twips
+/// (every firing this task's own live probe observed), which `officeTwipsRectToScreenRect` alone
+/// would draw as an invisible zero-width box. A fixed 1.5pt hairline, matching the house's own
+/// "visible but not heavy" caret convention (`EditorTheme`'s Monaco cursor is a comparable
+/// thin-line width) — independent of zoom, since a caret's on-screen THICKNESS is a UI affordance,
+/// not a document measurement, the same reasoning `Self.subscribeMarginPoints` already applies to a
+/// UI-space constant elsewhere in this file.
+let officeCaretWidthPoints: CGFloat = 1.5
+
 // MARK: - Pure: the zoom ladder (obligation 9: 50%..400%)
 
 /// Concrete `zoomPPT` steps for the ladder — the canonical "100% zoom, 2x device scale" pin is
@@ -323,6 +360,52 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
     private var tilesArrivedSink: AnyCancellable?
     private var tileLayers: [TileKey: CALayer] = [:]
 
+    // MARK: - Office Stage B Task 5: caret/selection/cell-cursor overlays
+    //
+    // Reuses `OfficeTileLayer` directly (the SAME null-action CALayer subclass tile layers already
+    // use, not a second copy of the identical 5 lines) — nothing about that class is tile-specific,
+    // and the "OVERLAYS MUST NEVER ANIMATE" mandate applies with equal force here: a hand-added
+    // sublayer's `hidden`/`opacity`/`backgroundColor`/`borderColor`/`frame` changes (every property
+    // this section's own code below touches) all fall back to bare CALayer's default implicit-action
+    // table once genuinely presented, exactly the mechanism `OfficeTileLayer`'s own header explains.
+
+    /// The blinking text caret — created once in `mount()`, torn down in `unmount()`, repositioned/
+    /// shown/hidden by `layoutOverlays()`. `zPosition = 2` — ABOVE both tiles (default 0, unset) and
+    /// the selection fill (1): a caret minted before a tile that happens to paint later must not be
+    /// silently buried under it (`addSublayer` always appends to the top of z-order at insertion
+    /// time — a tile minted by a later `relayoutVisibleTiles` pass would otherwise stack above an
+    /// EARLIER-inserted caret layer with no explicit `zPosition` to say otherwise).
+    private var caretLayer: OfficeTileLayer?
+    /// A pool of selection-fill layers, one per rect in the CURRENT selection — mirrors `tileLayers`'
+    /// own reuse discipline, with one deliberate simplification: this pool only ever GROWS, never
+    /// shrinks (`layoutSelectionLayers` hides surplus layers past the current rect count rather than
+    /// removing them) — selections are bounded in practice (a handful of visual lines), and keeping a
+    /// hidden layer around costs far less than the churn of tearing one down and re-minting it the
+    /// next time the selection grows back. `zPosition = 1` — above tiles, below the caret.
+    private var selectionLayers: [OfficeTileLayer] = []
+    /// The Calc active-cell outline — an OUTLINE, not a fill (`borderWidth`/`borderColor`, no
+    /// `backgroundColor`), so the cell's own content stays fully legible underneath, matching every
+    /// spreadsheet app's own "active cell" convention. **Disclosed scope call, not a brief
+    /// requirement**: the brief's own file list requires PARSING `CELL_CURSOR` (`OfficeCursorStore`
+    /// already does), not necessarily drawing it — drawn anyway since it reuses this exact same
+    /// null-action-layer/twips-transform/part-hide machinery for near-zero extra cost or risk.
+    private var cellCursorLayer: OfficeTileLayer?
+
+    private var cursorChangedSink: AnyCancellable?
+
+    /// Caret blink — a plain `Timer`, ~530ms (`NSTextView`'s own long-established default interval;
+    /// not pinned to any LOK/AppKit-exposed constant, since neither exposes one). Added to `.common`
+    /// run-loop modes, not the timer's own default `.default` mode alone — AppKit suspends `.default`
+    /// -mode timers during UI tracking loops (a window resize drag, a menu open), and a caret that
+    /// visibly stops blinking mid-resize is exactly the kind of "looks broken" polish gap `.common`
+    /// exists to close. **Invalidated in `unmount()`** — a live, un-invalidated repeating `Timer`
+    /// keeps firing into a freed view's `[weak self]` closure forever otherwise (a real, if small,
+    /// per-tab leak of run-loop wakeups for the rest of the app's life), the same "explicit teardown,
+    /// never hope" posture `unmount()`'s own header already takes toward `tilesArrivedSink`.
+    private var caretBlinkTimer: Timer?
+    private var caretBlinkPhaseVisible = true
+    private static let caretBlinkInterval: TimeInterval = 0.53
+
     /// Leading-edge throttle, obligation 3: the FIRST viewport change in a burst asks immediately,
     /// then at most one more ask per `Self.subscribeThrottleInterval` for as long as more changes
     /// keep arriving, and settles the moment they stop. A plain debounce (delay every ask until
@@ -501,6 +584,7 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
         // open" its own direct, reliably-testable trigger (every test in this file sets `frame`
         // BEFORE `mount()`) rather than depending solely on the indirect resize path below.
         evaluateResidencyIfNeeded()
+        mountCursorOverlays() // Office Stage B Task 5
     }
 
     /// SwiftUI is finished with this view. Unsubscribes (a hidden-but-still-open tab's tiles stop
@@ -520,6 +604,7 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
         tilesArrivedSink = nil
         runtime.unsubscribeTiles(path: path)
         if model?.canvasHost === self { model?.canvasHost = nil }
+        unmountCursorOverlays() // Office Stage B Task 5
     }
 
     override func viewDidMoveToWindow() {
@@ -539,6 +624,11 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
         super.viewDidChangeEffectiveAppearance()
         layer?.backgroundColor = resolvedPlaceholderColor()
         repaintAllVisibleTiles() // repaints every currently-placeholder tile in the new appearance's tone
+        // Office Stage B Task 5 — `layoutOverlays()` re-resolves `resolvedAccentColor()` fresh on
+        // EVERY call (never cached), so simply calling the standalone wrapper here is enough to pick
+        // up the new appearance's own accent rendering — the identical "never resolve once and
+        // cache" posture `resolvedPlaceholderColor()` one line up already established.
+        refreshOverlays()
     }
 
     // MARK: - OfficeDocumentCanvasHost (the part-strip's own door)
@@ -825,6 +915,11 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
     /// using the identical source of truth, so they can never disagree about which arm a given key
     /// falls into.
     private func forwardKeyEvent(_ event: NSEvent, type: OfficeKeyEventType) {
+        // Office Stage B Task 5 — "blink pauses while typing": every forwarded key (text-generating
+        // OR navigation — an arrow key moving the caret is exactly as much "the user is actively
+        // paying attention to the caret right now" as a printed character) snaps the caret solidly
+        // visible and restarts the blink-off countdown, the standard macOS caret feel.
+        resetCaretBlink()
         let keyCode = OfficeInputCodes.lokKeyCode(appKitKeyCode: event.keyCode, modifierFlags: event.modifierFlags)
         let isTextGenerating = OfficeInputCodes.charCode(for: event.charactersIgnoringModifiers) != 0
         if isTextGenerating {
@@ -851,6 +946,7 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
     /// future task's scope, not retrofitted silently.
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
+        resetCaretBlink() // Office Stage B Task 5 — a click repositions the caret; show it solidly
         forwardMouseEvent(event, type: .buttonDown)
     }
 
@@ -967,6 +1063,14 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
                 applyContents(to: tileLayer, key: key, placeholder: placeholder)
             }
         }
+        // Office Stage B Task 5 — INSIDE this same transaction, never a separate one: every
+        // scroll/zoom/part-switch/reload call site already routes through this one method, so
+        // hooking overlay repositioning in HERE (rather than adding a matching call at each of
+        // those call sites separately) is what keeps a caret/selection rect from ever visibly
+        // lagging a tile's own reposition by even one committed frame. `refreshOverlays()` (this
+        // method's own standalone counterpart, its own transaction) is for the case NOTHING here
+        // changed — a cursor event or a blink tick arriving on an otherwise-static viewport.
+        layoutOverlays()
     }
 
     private func clearVisibleTiles() {
@@ -1228,5 +1332,192 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
             guard self.isMounted, self.prefetchGeneration == generation else { return }
             self.prefetchSweepIssuedForTesting = true
         }
+    }
+
+    // MARK: - Office Stage B Task 5: caret/selection/cell-cursor overlay lifecycle + layout
+
+    /// `mount()`'s own tail call — mints the two singleton overlay layers (caret, cell-cursor;
+    /// selection's own pool starts empty and grows on demand — see `selectionLayers`' header),
+    /// subscribes to `runtime.cursorStore.cursorChanged` (mirrors `tilesArrivedSink`'s own docId-
+    /// filtered sink one screen up), and starts the blink timer.
+    private func mountCursorOverlays() {
+        guard let hostLayer = layer else { return }
+
+        let caret = OfficeTileLayer()
+        caret.zPosition = 2
+        caret.isHidden = true
+        hostLayer.addSublayer(caret)
+        caretLayer = caret
+
+        let cellCursor = OfficeTileLayer()
+        cellCursor.zPosition = 1
+        cellCursor.isHidden = true
+        cellCursor.backgroundColor = nil // outline only — see this property's own header
+        cellCursor.borderWidth = 1.5
+        hostLayer.addSublayer(cellCursor)
+        cellCursorLayer = cellCursor
+
+        cursorChangedSink = runtime.cursorStore.cursorChanged.sink { [weak self] changedDocId in
+            guard let self, changedDocId == self.docId else { return }
+            self.refreshOverlays()
+        }
+
+        caretBlinkPhaseVisible = true
+        let timer = Timer(timeInterval: Self.caretBlinkInterval, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            self.caretBlinkPhaseVisible.toggle()
+            self.refreshOverlays()
+        }
+        RunLoop.main.add(timer, forMode: .common) // survives UI tracking loops — see the property's own header
+        caretBlinkTimer = timer
+
+        refreshOverlays() // an initial layout — harmless no-op if nothing is known yet (every overlay starts hidden)
+    }
+
+    /// `unmount()`'s own tail call — explicit teardown for every piece `mountCursorOverlays` created,
+    /// matching this file's own established "never hope deallocation alone is enough" posture.
+    private func unmountCursorOverlays() {
+        caretBlinkTimer?.invalidate()
+        caretBlinkTimer = nil
+        cursorChangedSink = nil
+        caretLayer?.removeFromSuperlayer()
+        caretLayer = nil
+        cellCursorLayer?.removeFromSuperlayer()
+        cellCursorLayer = nil
+        for selectionLayer in selectionLayers { selectionLayer.removeFromSuperlayer() }
+        selectionLayers = []
+    }
+
+    /// The standalone entry point: opens its OWN disabled-actions transaction, then calls
+    /// `layoutOverlays()`. Every caller that is NOT already inside `relayoutVisibleTiles`'s own
+    /// transaction uses this — the cursor-changed sink, a blink tick, and `viewDidChangeEffective
+    /// Appearance`'s own accent-recolor. Guarded on `isMounted`/`layer != nil` the same way
+    /// `performSubscribe` guards its own early callers — a blink tick or a cursor push arriving after
+    /// `unmount()` (the timer/sink are torn down there, but a already-in-flight Combine delivery or a
+    /// timer fire racing `unmount()` by a beat is not impossible) must be a harmless no-op, never a
+    /// crash reaching into a torn-down `hostLayer`.
+    private func refreshOverlays() {
+        guard isMounted, layer != nil else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layoutOverlays()
+        CATransaction.commit()
+    }
+
+    /// **Must run inside an already-open, disabled-actions `CATransaction`** — never called bare;
+    /// see `refreshOverlays()` and `relayoutVisibleTiles()`'s own call site for the two doors, and
+    /// `OfficeTileLayer`'s own header for why an undisabled reposition would implicitly animate.
+    ///
+    /// **Hides every overlay whose STAMPED part disagrees with this canvas's own current `part`** —
+    /// `OfficeCursorStore.State`'s own `caretPart`/`selectionPart`/`cellCursorPart` fields exist
+    /// PURELY for this check (see that type's own header: none of these three LOK callbacks carry a
+    /// part number of their own, so the store stamps one at fold time from whatever `activePart` was
+    /// current then) — a rect computed against a page/sheet the user has since navigated away from
+    /// must never be drawn as if it were the page/sheet on screen right now.
+    private func layoutOverlays() {
+        let state = runtime.cursorStore.state(docId: docId)
+
+        if let caretLayer {
+            if let rect = state.caretRectTwips, state.caretPart == part, caretBlinkPhaseVisible {
+                var screenRect = officeTwipsRectToScreenRect(rect, zoomPPT: zoomPPT, scrollOrigin: scrollOrigin)
+                // A real caret rect's own twips WIDTH is always 0 (a caret is a line, not a box —
+                // Task 5's own live probe, every firing observed) — `officeCaretWidthPoints` is the
+                // rendered hairline thickness a zero-width box would otherwise never show at all.
+                screenRect.size.width = officeCaretWidthPoints
+                caretLayer.frame = screenRect
+                caretLayer.backgroundColor = resolvedAccentColor()
+                caretLayer.isHidden = false
+            } else {
+                caretLayer.isHidden = true
+            }
+        }
+
+        layoutSelectionLayers(state)
+
+        if let cellCursorLayer {
+            if case .at(let rect, _, _) = state.cellCursor, state.cellCursorPart == part {
+                cellCursorLayer.frame = officeTwipsRectToScreenRect(rect, zoomPPT: zoomPPT, scrollOrigin: scrollOrigin)
+                cellCursorLayer.borderColor = resolvedAccentColor()
+                cellCursorLayer.isHidden = false
+            } else {
+                cellCursorLayer.isHidden = true
+            }
+        }
+    }
+
+    /// `layoutOverlays()`'s own selection half, split out for readability — same "must run inside an
+    /// open transaction" contract as its caller.
+    private func layoutSelectionLayers(_ state: OfficeCursorStore.State) {
+        guard let hostLayer = layer else { return }
+        guard state.selectionPart == part else {
+            for selectionLayer in selectionLayers { selectionLayer.isHidden = true }
+            return
+        }
+        let rects = state.selectionRectsTwips
+        // Grows to fit — never shrinks (see `selectionLayers`' own header on why: hidden surplus
+        // layers, below, cost less than the churn of tearing one down and re-minting it the next
+        // time the selection grows back to a similar size).
+        while selectionLayers.count < rects.count {
+            let newLayer = OfficeTileLayer()
+            newLayer.zPosition = 1
+            hostLayer.addSublayer(newLayer)
+            selectionLayers.append(newLayer)
+        }
+        // office live-gate fix #4, FIX 2's own reasoning, applied here: selection is drawn at LOW
+        // opacity (never a solid fill) — a full-opacity accent box would occlude the very text the
+        // selection is highlighting, which is the entire reason a user looks at a selection at all.
+        let fillColor = resolvedAccentColor(alpha: 0.25)
+        for (index, selectionLayer) in selectionLayers.enumerated() {
+            guard index < rects.count else {
+                selectionLayer.isHidden = true
+                continue
+            }
+            selectionLayer.frame = officeTwipsRectToScreenRect(rects[index], zoomPPT: zoomPPT, scrollOrigin: scrollOrigin)
+            selectionLayer.backgroundColor = fillColor
+            selectionLayer.isHidden = false
+        }
+    }
+
+    /// `Theme.accent`'s own `NSColor(named: "AccentColor")` source, resolved against THIS view's own
+    /// effective appearance — the identical pattern `resolvedPlaceholderColor()` already establishes
+    /// one section up, for the identical reason (a plain `.cgColor` read outside
+    /// `performAsCurrentDrawingAppearance` can resolve against whatever appearance happens to be
+    /// current globally at call time, not necessarily this view's).
+    private func resolvedAccentColor(alpha: CGFloat = 1.0) -> CGColor {
+        let base = NSColor(named: "AccentColor") ?? NSColor.controlAccentColor
+        let color = alpha < 1.0 ? base.withAlphaComponent(alpha) : base
+        var resolved = color.cgColor
+        effectiveAppearance.performAsCurrentDrawingAppearance { resolved = color.cgColor }
+        return resolved
+    }
+
+    /// "Blink pauses while typing" — snaps the caret solidly visible and restarts the blink-off
+    /// countdown. `.fireDate` reschedules an EXISTING repeating `Timer`'s next fire without
+    /// invalidating/re-creating it (cheaper, and avoids ever having a brief window with no timer at
+    /// all if this fires in rapid succession, as real typing does).
+    private func resetCaretBlink() {
+        caretBlinkPhaseVisible = true
+        caretBlinkTimer?.fireDate = Date().addingTimeInterval(Self.caretBlinkInterval)
+        refreshOverlays()
+    }
+
+    // MARK: - Test seams (Office Stage B Task 5)
+
+    /// Mirrors `tileLayerForTesting`'s own precedent exactly: lets a test inspect the REAL overlay
+    /// layer's frame/visibility/implicit-action behavior through the exact production mount/layout
+    /// path, rather than a hand-built `CALayer()` that would only prove the TEST's own layer never
+    /// animates.
+    var caretLayerForTesting: CALayer? { caretLayer }
+    var cellCursorLayerForTesting: CALayer? { cellCursorLayer }
+    var selectionLayersForTesting: [CALayer] { selectionLayers }
+
+    /// A synthetic `Timer` fire has no public, deterministic AppKit door — the same shape
+    /// `setScrollOriginForTesting`/`setZoomForTesting` already worked around for scroll/zoom. Toggles
+    /// the SAME phase flag and calls the SAME `refreshOverlays()` a real timer tick does, so a test
+    /// exercises the production layout path, not a parallel test-only one — the house "no arbitrary
+    /// sleeps" rule applied to a UI timer instead of a network/process wait.
+    func advanceCaretBlinkForTesting() {
+        caretBlinkPhaseVisible.toggle()
+        refreshOverlays()
     }
 }

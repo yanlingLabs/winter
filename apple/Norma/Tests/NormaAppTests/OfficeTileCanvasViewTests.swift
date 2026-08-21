@@ -1399,4 +1399,235 @@ final class OfficeTileCanvasViewTests: XCTestCase {
 
         view.unmount()
     }
+
+    // MARK: - Office Stage B Task 5: caret/selection/cell-cursor overlay geometry + behavior
+
+    /// Pure — `officeTwipsRectToScreenRect` at the canonical pin (`zoomPPT == 1000`, `TileMath`'s own
+    /// "100% zoom, 2x device scale" configuration): 1 twip = 0.1px = 0.05pt, so a rect at
+    /// (1418, 1418, 0, 552) twips (a REAL captured caret rect — `OfficeHelperLiveTests`' own probe)
+    /// lands at (70.9, 70.9) points, zero width, 27.6pt tall.
+    func testTwipsRectToScreenRectAtCanonicalZoomNoScroll() {
+        let rect = officeTwipsRectToScreenRect(
+            OfficeTwipsRect(x: 1418, y: 1418, width: 0, height: 552), zoomPPT: 1000, scrollOrigin: .zero)
+        // 1418 twips -> roundedDivide(1418*1000, 10000) = 142px (ties-away-from-zero: 141.8 -> 142)
+        // -> 142/2 = 71.0pt. 552 twips -> roundedDivide(552000, 10000) = 55px -> 55/2 = 27.5pt.
+        // `TileMath.twipsToPixels`'s own rounding, not naive twips*0.05 — matching every OTHER
+        // consumer of that function in this file (`officeTileScreenRect` above).
+        XCTAssertEqual(rect.origin.x, 71.0, accuracy: 0.01)
+        XCTAssertEqual(rect.origin.y, 71.0, accuracy: 0.01)
+        XCTAssertEqual(rect.size.width, 0, accuracy: 0.01)
+        XCTAssertEqual(rect.size.height, 27.5, accuracy: 0.01)
+    }
+
+    /// Scroll offset subtracts from the ORIGIN, matching `officeTileScreenRect`'s own identical
+    /// scroll-handling — a rect fixed in document space must move OPPOSITE the scroll direction on
+    /// screen, exactly like every tile already does.
+    func testTwipsRectToScreenRectSubtractsScrollOrigin() {
+        let rect = officeTwipsRectToScreenRect(
+            OfficeTwipsRect(x: 1000, y: 1000, width: 1000, height: 1000), zoomPPT: 1000, scrollOrigin: CGPoint(x: 10, y: 20))
+        let unscrolled = officeTwipsRectToScreenRect(
+            OfficeTwipsRect(x: 1000, y: 1000, width: 1000, height: 1000), zoomPPT: 1000, scrollOrigin: .zero)
+        XCTAssertEqual(rect.origin.x, unscrolled.origin.x - 10, accuracy: 0.01)
+        XCTAssertEqual(rect.origin.y, unscrolled.origin.y - 20, accuracy: 0.01)
+    }
+
+    /// A degenerate (zero-width) rect must still produce a valid, non-`nil` `CGRect` — UNLIKE
+    /// `officeTileScreenRect`, this function has no `TileMath.tileBoundsTwips` refusal gate at all
+    /// (see its own header) — every REAL caret rect this task's own probe observed has `width == 0`.
+    func testTwipsRectToScreenRectNeverRefusesADegenerateRect() {
+        let rect = officeTwipsRectToScreenRect(
+            OfficeTwipsRect(x: 0, y: 0, width: 0, height: 0), zoomPPT: 1000, scrollOrigin: .zero)
+        XCTAssertEqual(rect, .zero)
+    }
+
+    /// A mounted canvas with NOTHING known yet (no click, no type, no cell click — `OfficeCursorStore`
+    /// starts every docId at its own empty `.State()`) must show NO overlay at all: no caret, no
+    /// selection, no cell-cursor box.
+    func testFreshlyMountedCanvasShowsNoOverlaysUntilACursorEventArrives() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
+        view.mount()
+        // `recorder`'s driver closures capture it `[unowned self]` — this MUST stay alive until
+        // `performSubscribe()`'s own detached Task has landed, or the Task deref's a freed object
+        // the moment this test discards `recorder` early (see `makeOpenedRuntime`'s own callers,
+        // several lines up, for the identical precedent and its own header comment on this hazard).
+        _ = await waitUntil { recorder.subscribeCalls.count >= 1 }
+
+        XCTAssertEqual(view.caretLayerForTesting?.isHidden, true)
+        XCTAssertEqual(view.cellCursorLayerForTesting?.isHidden, true)
+        XCTAssertEqual(view.selectionLayersForTesting.count, 0)
+
+        view.unmount()
+    }
+
+    /// **The load-bearing overlay proof**: a caret event for the canvas's OWN current part shows the
+    /// caret, positioned via the SAME `officeTwipsRectToScreenRect` transform tiles themselves use; a
+    /// caret event stamped with a DIFFERENT part (the canvas navigated away, or the event raced a
+    /// part switch — `OfficeCursorStore`'s own header names this exact window) hides it — the
+    /// brief's own "must hide when their part ≠ the canvas's active part" requirement.
+    func testCaretShowsForTheMatchingPartAndHidesForAMismatchedPart() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
+        view.mount()
+        _ = await waitUntil { recorder.subscribeCalls.count >= 1 } // see testFreshlyMounted...'s own comment
+
+        let rect = OfficeTwipsRect(x: 1418, y: 1418, width: 0, height: 552)
+        runtime.cursorStore.apply(docId: "doc-1", event: .caretRect(rect), activePart: 0)
+        let shown = await waitUntil { view.caretLayerForTesting?.isHidden == false }
+        XCTAssertTrue(shown, "a caret event for part 0 must show the caret on a canvas whose own part is 0")
+        let expected = officeTwipsRectToScreenRect(rect, zoomPPT: 1000, scrollOrigin: .zero)
+        if let screenRect = view.caretLayerForTesting?.frame {
+            XCTAssertEqual(screenRect.origin.x, expected.origin.x, accuracy: 0.01)
+            XCTAssertEqual(screenRect.origin.y, expected.origin.y, accuracy: 0.01)
+            XCTAssertEqual(screenRect.size.width, officeCaretWidthPoints, accuracy: 0.01,
+                           "a real caret rect's own twips width is always 0 — the rendered hairline is this constant, not 0pt")
+        } else {
+            XCTFail("caretLayerForTesting must be non-nil once mounted")
+        }
+
+        // A caret event stamped with a DIFFERENT part (a race, or simply the wrong page/sheet) hides it.
+        runtime.cursorStore.apply(docId: "doc-1", event: .caretRect(rect), activePart: 1)
+        let hidden = await waitUntil { view.caretLayerForTesting?.isHidden == true }
+        XCTAssertTrue(hidden, "a caret rect stamped for a DIFFERENT part than the canvas's own must never be shown")
+
+        view.unmount()
+    }
+
+    /// The blink timer's own test seam — `advanceCaretBlinkForTesting()` toggles visibility WITHOUT
+    /// waiting `OfficeTileCanvasView`'s real ~530ms interval (the house "no arbitrary sleeps" rule).
+    func testCaretBlinkTogglesVisibilityWithoutRealTime() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
+        view.mount()
+        _ = await waitUntil { recorder.subscribeCalls.count >= 1 } // see testFreshlyMounted...'s own comment
+        runtime.cursorStore.apply(docId: "doc-1", event: .caretRect(OfficeTwipsRect(x: 1, y: 1, width: 0, height: 1)), activePart: 0)
+        let shown = await waitUntil { view.caretLayerForTesting?.isHidden == false }
+        XCTAssertTrue(shown, "setup: the caret must be visible before this test can prove blink toggles it off")
+
+        view.advanceCaretBlinkForTesting()
+        XCTAssertEqual(view.caretLayerForTesting?.isHidden, true, "one toggle from the visible phase must hide it")
+
+        view.advanceCaretBlinkForTesting()
+        XCTAssertEqual(view.caretLayerForTesting?.isHidden, false, "a second toggle returns to visible")
+
+        view.unmount()
+    }
+
+    /// The selection pool grows to match the rect COUNT and hides exactly the surplus when the
+    /// selection shrinks — never fewer real layers than rects, never a stale extra one left visible.
+    func testSelectionLayerPoolGrowsToMatchRectCountAndHidesSurplusWhenItShrinks() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
+        view.mount()
+        _ = await waitUntil { recorder.subscribeCalls.count >= 1 } // see testFreshlyMounted...'s own comment
+
+        let twoRects = [OfficeTwipsRect(x: 0, y: 0, width: 100, height: 20), OfficeTwipsRect(x: 0, y: 20, width: 200, height: 20)]
+        runtime.cursorStore.apply(docId: "doc-1", event: .textSelection(twoRects), activePart: 0)
+        let grew = await waitUntil {
+            view.selectionLayersForTesting.count == 2 && view.selectionLayersForTesting.allSatisfy { !$0.isHidden }
+        }
+        XCTAssertTrue(grew, "two selection rects must produce two visible layers")
+
+        runtime.cursorStore.apply(docId: "doc-1", event: .textSelection([]), activePart: 0)
+        let shrank = await waitUntil { view.selectionLayersForTesting.allSatisfy(\.isHidden) }
+        XCTAssertTrue(shrank, "an empty selection must hide every pooled layer")
+        XCTAssertEqual(view.selectionLayersForTesting.count, 2, "the pool itself is kept, not torn down — see its own header")
+
+        view.unmount()
+    }
+
+    /// `CELL_CURSOR`'s own two shapes, end to end through the canvas: a real cell shows the outline
+    /// box at the right screen position; `.empty` (observed live during in-cell edit) hides it.
+    func testCellCursorShowsForARealCellAndHidesForEmpty() async {
+        let (runtime, recorder) = await makeOpenedRuntime(documentType: .spreadsheet)
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
+        view.mount()
+        _ = await waitUntil { recorder.subscribeCalls.count >= 1 } // see testFreshlyMounted...'s own comment
+
+        let cellRect = OfficeTwipsRect(x: 0, y: 0, width: 1265, height: 254)
+        runtime.cursorStore.apply(docId: "doc-1", event: .cellCursor(.at(rectTwips: cellRect, column: 0, row: 0)), activePart: 0)
+        let shown = await waitUntil { view.cellCursorLayerForTesting?.isHidden == false }
+        XCTAssertTrue(shown)
+        let expected = officeTwipsRectToScreenRect(cellRect, zoomPPT: 1000, scrollOrigin: .zero)
+        if let cellCursorFrame = view.cellCursorLayerForTesting?.frame {
+            XCTAssertEqual(cellCursorFrame.origin.x, expected.origin.x, accuracy: 0.01)
+        } else {
+            XCTFail("cellCursorLayerForTesting must be non-nil once mounted")
+        }
+
+        runtime.cursorStore.apply(docId: "doc-1", event: .cellCursor(.empty), activePart: 0)
+        let hidden = await waitUntil { view.cellCursorLayerForTesting?.isHidden == true }
+        XCTAssertTrue(hidden, "EMPTY (in-cell edit mode) must hide the cell-cursor outline")
+
+        view.unmount()
+    }
+
+    /// office live-gate fix #4's own null-action discipline, extended to Task 5's three new layer
+    /// types — mirrors `testTileLayerNeverResolvesAnAnimatableActionForAnyKeyThisFileTouches` exactly
+    /// (same keys, same assertion shape), against the REAL production caret/cell-cursor layers
+    /// `mountCursorOverlays()` mints, not a hand-built `CALayer()`.
+    func testCaretAndCellCursorLayersNeverResolveAnAnimatableAction() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
+        view.mount()
+        _ = await waitUntil { recorder.subscribeCalls.count >= 1 } // see testFreshlyMounted...'s own comment
+
+        for layer in [view.caretLayerForTesting, view.cellCursorLayerForTesting].compactMap({ $0 }) {
+            for actionKey in ["position", "bounds", "backgroundColor", "borderColor", "borderWidth", "hidden", "opacity"] {
+                XCTAssertTrue(layer.action(forKey: actionKey) is NSNull,
+                             "\(actionKey): expected the OfficeTileLayer null-action override")
+            }
+        }
+
+        view.unmount()
+    }
+
+    /// `unmount()` must invalidate the blink timer and clear the sink — otherwise a repeating
+    /// `Timer` fires into a freed view's `[weak self]` forever (see `caretBlinkTimer`'s own header).
+    /// Proven indirectly: after `unmount()`, the overlay layers are gone (removed from their
+    /// superlayer) and a stray `cursorChanged` push for this docId does nothing observable.
+    func testUnmountTearsDownOverlayLayersAndTheBlinkTimer() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
+        view.mount()
+        _ = await waitUntil { recorder.subscribeCalls.count >= 1 } // see testFreshlyMounted...'s own comment
+        XCTAssertNotNil(view.caretLayerForTesting, "setup: mount() must have minted the caret layer")
+
+        view.unmount()
+
+        XCTAssertNil(view.caretLayerForTesting, "unmount() must release the caret layer")
+        XCTAssertNil(view.cellCursorLayerForTesting, "unmount() must release the cell-cursor layer")
+        // A push after unmount must not crash or resurrect anything — the sink was cleared.
+        runtime.cursorStore.apply(docId: "doc-1", event: .caretRect(OfficeTwipsRect(x: 1, y: 1, width: 0, height: 1)), activePart: 0)
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertNil(view.caretLayerForTesting, "still nil — a post-unmount push must not resurrect the layer")
+    }
 }
