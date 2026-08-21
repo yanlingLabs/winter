@@ -2433,6 +2433,12 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         // produces wrong coordinates rather than crashing — not something to re-risk here).
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 512, height: 512),
                               styleMask: [.borderless], backing: .buffered, defer: true)
+        // Fix round 1, I-1: `OfficeTileCanvasViewTests`' own precedent (its
+        // `testRepositioningInARealPresentedWindowLeavesNoSettleGlideAfterInputStops`) — without
+        // this, `close()` below performs an ADDITIONAL release on top of ARC's own and this drill
+        // accumulates window state in the shared test host across runs instead of tearing down.
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
         window.contentView = view
         _ = window.makeFirstResponder(view)
 
@@ -2498,15 +2504,38 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         XCTAssertNil(runtime.stateSnapshot.documentBanners[docPath], "no save-failed banner")
 
         // The direct, off-disk placement proof — not the in-memory model, not merely "dirty" or
-        // "pixels changed." `hasPrefix`, not `contains`: the click landed at the very start of the
-        // body (this fixture's own seed text, "NORMA GATE...", follows it), so the ONLY way this
-        // could read anything OTHER than "é" first is a stray character landing ahead of it — the
-        // precise, disk-level version of "no stray e" the brief's own acceptance criterion names.
+        // "pixels changed." The click landed at the very start of the body (this fixture's own seed
+        // text follows it), so isolating the untouched seed's own tail leaves EXACTLY what this
+        // drill's own composition put there — the precise, disk-level version of "exactly once, no
+        // stray e" the brief's own acceptance criterion names.
         let body = strippedODFBodyText(try readODFContentXML(atPath: docPath))
-        XCTAssertTrue(body.hasPrefix("é"), "expected the body to start with exactly one é, got: \"\(body)\"")
-        XCTAssertFalse(body.hasPrefix("eé"), "a stray plain \"e\" landed BEFORE the composed é — the "
-                      + "double-delivery failure mode this task's whole seam exists to prevent")
-        XCTAssertFalse(body.hasPrefix("ée"), "a stray plain \"e\" landed AFTER the composed é")
+        // gate.odt's own untouched body — captured directly from its real content.xml via this
+        // file's own `strippedODFBodyText` algorithm (between `<office:text...>` and
+        // `</office:text>`, tags stripped). Hardcoded rather than re-read from `fixturePath` at
+        // runtime: OfficeHelperLiveTests' own sha256 pin on gate.odt means any future change to the
+        // fixture breaks that hash test first, before this literal could silently drift out of sync.
+        let seedText = "NORMA GATEoffice stage A embed probe"
+        XCTAssertTrue(body.hasSuffix(seedText), "the untouched seed text must survive, byte-identical, "
+                      + "as the tail — got: \"\(body)\"")
+        // Fix round 1, M-2: the ORIGINAL `hasPrefix`-based assertions here were a confirmed gap —
+        // `body.hasPrefix("é")` also passes for "éé..." (a double-committed é), and
+        // `!body.hasPrefix("eé")` is VACUOUS once `hasPrefix("é")` already holds (a string starting
+        // with "é" can never also start with "eé"). Isolating exactly what landed ahead of the
+        // untouched seed (above) and counting occurrences closes both holes: "éé" now fails the
+        // é-count/exact-match checks below; "eé"/"ée" now fail the e-count/exact-match checks below.
+        let insertionSite = body.dropLast(seedText.count)
+        XCTAssertEqual(insertionSite.filter { $0 == "é" }.count, 1, "expected exactly one é at the "
+                      + "insertion site, got: \"\(insertionSite)\"")
+        XCTAssertEqual(insertionSite.filter { $0 == "e" }.count, 0, "a stray plain \"e\" landed at "
+                      + "the insertion site — the double-delivery failure mode this task's whole "
+                      + "seam exists to prevent")
+        // Subsumes both counts above, and additionally catches a stray UNCOMMITTED "´" — this
+        // drill's own option-´ keyUp (above) fires mid-composition, so a regression that
+        // leaked the mark instead of cleanly committing it is a plausible failure shape here, not a
+        // hypothetical one; it would pass both counts above (0 stray "e", exactly 1 "é") while still
+        // being wrong.
+        XCTAssertEqual(String(insertionSite), "é", "the insertion site must be EXACTLY one é and "
+                      + "nothing else, got: \"\(insertionSite)\"")
 
         view.unmount()
         _ = host.teardownAllOfficeRuntimesAndStopHelper()

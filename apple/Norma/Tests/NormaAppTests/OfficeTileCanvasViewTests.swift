@@ -1800,6 +1800,11 @@ final class OfficeTileCanvasViewTests: XCTestCase {
         _ = await waitUntil { recorder.subscribeCalls.count >= 1 }
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 300),
                               styleMask: [.borderless], backing: .buffered, defer: true)
+        window.isReleasedWhenClosed = false // this file's own precedent (line ~1269) — an AppKit
+        // NSWindow defaults to releasing itself on close(); without this, close() below performs an
+        // ADDITIONAL release on top of ARC's own, and repeated runs accumulate window state instead
+        // of tearing down cleanly.
+        defer { window.close() }
         window.contentView = view
 
         var actual = NSRange(location: NSNotFound, length: 0)
@@ -1817,6 +1822,8 @@ final class OfficeTileCanvasViewTests: XCTestCase {
         _ = await waitUntil { recorder.subscribeCalls.count >= 1 }
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 300),
                               styleMask: [.borderless], backing: .buffered, defer: true)
+        window.isReleasedWhenClosed = false // see testFirstRectIsZeroWhenNoCaretRectIsTrackedYet's own comment
+        defer { window.close() }
         window.contentView = view
 
         runtime.cursorStore.apply(docId: "doc-1", event: .caretRect(OfficeTwipsRect(x: 1418, y: 1418, width: 0, height: 552)), activePart: 0)
@@ -1838,6 +1845,8 @@ final class OfficeTileCanvasViewTests: XCTestCase {
         _ = await waitUntil { recorder.subscribeCalls.count >= 1 }
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 300),
                               styleMask: [.borderless], backing: .buffered, defer: true)
+        window.isReleasedWhenClosed = false // see testFirstRectIsZeroWhenNoCaretRectIsTrackedYet's own comment
+        defer { window.close() }
         window.contentView = view
 
         runtime.cursorStore.apply(docId: "doc-1", event: .caretRect(OfficeTwipsRect(x: 1418, y: 1418, width: 0, height: 552)), activePart: 1)
@@ -1885,6 +1894,8 @@ final class OfficeTileCanvasViewTests: XCTestCase {
         let view = makeMountedView(runtime: runtime)
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 300),
                               styleMask: [.borderless], backing: .buffered, defer: true)
+        window.isReleasedWhenClosed = false // see testFirstRectIsZeroWhenNoCaretRectIsTrackedYet's own comment
+        defer { window.close() }
         window.contentView = view
         _ = window.makeFirstResponder(view)
 
@@ -1899,6 +1910,14 @@ final class OfficeTileCanvasViewTests: XCTestCase {
         XCTAssertTrue(arrived, "interpretKeyEvents never resolved to insertText for a plain 'a' — "
                       + "routing regressed to something that produces no postKey call at all")
         guard arrived else { return }
+        // Fix round 1, M-6: `>= 1` above only proves ARRIVAL, not the absence of a SECOND delivery —
+        // a regressed double-post (this classifier's own `interpretKeyEvents` path AND the old direct
+        // `forwardKeyEvent` path both firing) would still leave `postKeyCalls[0]` matching charCode 97
+        // / keyCode 0 below and pass undetected. The input chain is already fully drained above, so
+        // by this point the count is settled, not still arriving — a hard `== 1` is the direct pin.
+        XCTAssertEqual(recorder.postKeyCalls.count, 1, "exactly one delivery — a second entry would "
+                      + "mean the old direct forwardKeyEvent path ALSO fired: the double-delivery "
+                      + "this task's whole seam exists to prevent (see this test's own header)")
         XCTAssertEqual(recorder.postKeyCalls[0].charCode, 97)
         XCTAssertEqual(recorder.postKeyCalls[0].keyCode, 0, "must be insertText's own 0, not "
                       + "forwardKeyEvent's physical-keyCode 512 (Key.a) — see this test's own header")
