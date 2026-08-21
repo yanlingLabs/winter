@@ -622,7 +622,7 @@ final class LOKBridge: OfficeDocumentBridge {
     /// between the `setPart` and the event it is scoping.
     private func postKeyOnDedicatedThread(docId: String, part: Int, type: OfficeKeyEventType, charCode: Int, keyCode: Int) throws {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
-        doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(part))
+        doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(truncatingIfNeeded: part))
         doc.handle.pointee.pClass.pointee.postKeyEvent?(
             doc.handle, Int32(type.rawValue), Int32(truncatingIfNeeded: charCode), Int32(truncatingIfNeeded: keyCode))
     }
@@ -643,7 +643,7 @@ final class LOKBridge: OfficeDocumentBridge {
     private func postMouseOnDedicatedThread(docId: String, part: Int, type: OfficeMouseEventType, xTwips: Int64, yTwips: Int64,
                                             count: Int, buttons: Int, modifiers: Int) throws {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
-        doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(part))
+        doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(truncatingIfNeeded: part))
         doc.handle.pointee.pClass.pointee.postMouseEvent?(
             doc.handle, Int32(type.rawValue), Int32(truncatingIfNeeded: xTwips), Int32(truncatingIfNeeded: yTwips),
             Int32(truncatingIfNeeded: count), Int32(truncatingIfNeeded: buttons), Int32(truncatingIfNeeded: modifiers))
