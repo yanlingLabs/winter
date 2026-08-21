@@ -408,6 +408,34 @@ final class PanelDocumentTabModel: ObservableObject {
         host?.requestCloseTab(tabId)
     }
 
+    /// Office Stage B Task 7 — the recovery banner's own source, read directly like `banner`/
+    /// `conflict` above (`OfficeRuntimeState.documentRecoveryCandidates`, single source). A THIRD,
+    /// separate optional rather than folded into either existing dict — `documentBanners`'s own
+    /// protected-tripwire constraint (`conflict`'s own header) already rules out widening THAT one,
+    /// and `documentConflicts` is about a different fact entirely (the file moved out from under a
+    /// dirty buffer, not "there might be older content worth offering back"). The view decides
+    /// precedence (`PanelDocumentContent.body`): a conflict wins over the plain banner, which wins
+    /// over a recovery offer — the least urgent of the three, since nothing about it blocks the
+    /// canvas already showing real, current content underneath it.
+    var recoveryCandidate: OfficeRecoveryCandidate? {
+        guard let path else { return nil }
+        return runtimeState?.documentRecoveryCandidates[path]
+    }
+
+    /// **"Restore"** — replace the buffer with the sidecar's own (older) content, under a fresh
+    /// docId, dirty (the user must ⌘S to land it on the real path).
+    func restoreRecovery() {
+        guard let runtime = resolvedRuntime(), let path else { return }
+        runtime.restoreFromRecovery(path)
+    }
+
+    /// **"Discard"** — decline the offer; delete the sidecar and its manifest entry. The tab is
+    /// already showing the real file's own content, opened normally — nothing else changes.
+    func discardRecovery() {
+        guard let runtime = resolvedRuntime(), let path else { return }
+        runtime.discardRecovery(path)
+    }
+
     /// Test seam: drive one refresh cycle synchronously, without a view.
     func refreshForTesting() { refresh() }
 }
@@ -590,6 +618,13 @@ struct PanelDocumentContent: View {
                                          onKeepMine: { model.keepMyVersion() }, onClose: { model.closeTab() })
             } else if let banner = model.banner {
                 OfficeDocumentBannerView(text: banner)
+            } else if let recoveryCandidate = model.recoveryCandidate {
+                // Office Stage B Task 7 — lowest of the three: a recovery offer blocks nothing (the
+                // canvas below is already showing the real file's own current content), so a
+                // conflict or a plain banner — either one about something ACTIVELY wrong right now
+                // — wins the one visible row over it.
+                OfficeRecoveryBannerView(candidate: recoveryCandidate, onRestore: { model.restoreRecovery() },
+                                         onDiscard: { model.discardRecovery() })
             }
             viewport
         }
@@ -723,6 +758,91 @@ struct OfficeConflictBannerView: View {
 
     /// Identical to `EditorBannerView`'s own private `action` helper — the panel's ONE text-button
     /// treatment, not reinvented here.
+    private func action(_ title: String, _ perform: @escaping () -> Void) -> some View {
+        Button(action: perform) {
+            Text(title)
+                .font(Typography.caption(.medium))
+                .foregroundStyle(Theme.textMuted)
+                .padding(.horizontal, panelEditorBannerGap)
+                .frame(height: panelChromeButtonSize)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(ShellSidebarRowStyle(isSelected: false))
+        .accessibilityLabel(title)
+    }
+}
+
+// MARK: - Office Stage B Task 7: the recovery banner (a freshly opened document, an older sidecar)
+
+/// **"~Ns ago" from the brief's own banner text** — generalized past bare seconds once the gap
+/// grows (a crashed document might not be reopened for hours, even days), never more precision than
+/// the unit warrants. `now` is a parameter, not `Date()` read inline, purely so this stays a pure,
+/// directly-testable function — the view itself calls it with the real `Date()` at render time (no
+/// live-updating countdown; a banner sitting on screen for a while showing a slightly stale
+/// relative time is cosmetic, not a correctness concern here).
+func officeRecoveryAgeDescription(capturedAt: Date, now: Date) -> String {
+    let seconds = max(0, now.timeIntervalSince(capturedAt))
+    switch seconds {
+    case ..<60: return "~\(Int(seconds))s ago"
+    case ..<3600: return "~\(Int(seconds / 60))m ago"
+    case ..<86400: return "~\(Int(seconds / 3600))h ago"
+    default: return "~\(Int(seconds / 86400))d ago"
+    }
+}
+
+/// **The same `EditorBannerView`/`OfficeConflictBannerView` vocabulary** (`Theme.elevatedSurface` +
+/// `Theme.hairline`, `.primary` sentence / `Theme.textMuted` detail, `ShellSidebarRowStyle` text
+/// buttons) — the THIRD banner shape this file now carries, and deliberately still not folded into
+/// one enum with the other two (`PanelDocumentTabModel.recoveryCandidate`'s own header has the
+/// dictionary-separation reasoning one layer down; the view-level story is the same: a conflict and
+/// a plain banner already have an established, tested precedence between them, and adding a third
+/// independent source is simpler than re-deriving a three-way sum type this late).
+struct OfficeRecoveryBannerView: View {
+    let candidate: OfficeRecoveryCandidate
+    let onRestore: () -> Void
+    let onDiscard: () -> Void
+
+    var body: some View {
+        HStack(spacing: panelEditorBannerGap) {
+            Text("Recovered unsaved changes from \(officeRecoveryAgeDescription(capturedAt: candidate.capturedAt, now: Date()))")
+                .font(Typography.caption(.medium))
+                .foregroundStyle(.primary)
+                .lineLimit(2)
+                .truncationMode(.middle)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if candidate.isODFFallback {
+                // Office Stage B Task 7 — the OOXML sidecar fallback's own disclosure
+                // (`OfficeSaveFormat.autosaveFormat`'s own header): Restore loads ODF-format
+                // content, never silently pretending the recovered bytes are still the document's
+                // OWN original format.
+                Text("Recovered in ODF format")
+                    .font(Typography.caption())
+                    .foregroundStyle(Theme.textMuted)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: panelEditorBannerGap)
+
+            // Restore first (answers the sentence's own implicit question), Discard second — the
+            // SAME "the more consequential/likely choice reads first" ordering
+            // `OfficeConflictBannerView.body`'s own `.changed` case documents.
+            action(officeRecoveryRestoreTitle, onRestore)
+            action(officeRecoveryDiscardTitle, onDiscard)
+        }
+        .padding(.horizontal, panelTabPillInset)
+        .padding(.vertical, panelEditorBannerVerticalPadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.elevatedSurface)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Theme.hairline).frame(height: 1)
+        }
+    }
+
+    /// Identical to `OfficeConflictBannerView`'s own private `action` helper — not shared via a
+    /// free function purely because SwiftUI view-builder helpers this small read better local to
+    /// their own type than hoisted, matching this file's existing precedent (the conflict banner
+    /// keeps its own copy rather than reaching for the plain banner's).
     private func action(_ title: String, _ perform: @escaping () -> Void) -> some View {
         Button(action: perform) {
             Text(title)
