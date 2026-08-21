@@ -517,4 +517,168 @@ final class AppLifecycleTests: XCTestCase {
         XCTAssertNil(host.officeHelperSupervisor, "still never minted — the quit leg must not "
                      + "construct one just to immediately stop it")
     }
+
+    // MARK: - Office Stage B Task 3: the quit gate's office leg (PURE)
+
+    private func officeDirtyState(_ path: String, dirty: Bool = true) -> OfficeRuntimeState {
+        var state = OfficeRuntimeState()
+        state.documents[path] = OfficeRuntimeState.DocumentEntry(
+            docId: "doc-\(path)", stagedPath: "/tmp/staged-\(path)", type: .spreadsheet, parts: 1,
+            sizeTwips: OfficeDocumentSize(widthTwips: 100, heightTwips: 100), dirty: dirty)
+        return state
+    }
+
+    /// Small, bounded polling helper — this file's own version of `ShellSessionHostTests
+    /// .officeWaitUntil` (there is no existing one here to reuse; the two test targets do not share
+    /// private helpers across files). Never an unconditional sleep: every caller checks a real
+    /// condition each pass, so this only ever waits as long as Swift's own async machinery actually
+    /// takes to settle, bounded by `timeout` as the failure backstop.
+    private func waitUntil(timeout: TimeInterval = 2, _ condition: () -> Bool) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition() {
+            if Date() >= deadline { return false }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        return true
+    }
+
+    /// `quitDirtyFilePathsGathersEveryDirtyModelAcrossEveryRuntimeAndIgnoresCleanOnes`'s own
+    /// `.document` mirror.
+    func testOfficeDirtyFilePathsGathersEveryDirtyDocumentAcrossEveryRuntimeAndIgnoresCleanOnes() {
+        let clean = officeDirtyState("/repo/clean.xlsx", dirty: false)
+        var mixed = officeDirtyState("/repo/a.xlsx", dirty: true)
+        mixed.documents["/repo/clean2.xlsx"] = OfficeRuntimeState.DocumentEntry(
+            docId: "doc-clean2", stagedPath: "/tmp/staged-clean2", type: .spreadsheet, parts: 1,
+            sizeTwips: OfficeDocumentSize(widthTwips: 100, heightTwips: 100), dirty: false)
+        let secondRuntime = officeDirtyState("/other/b.xlsx", dirty: true)
+
+        XCTAssertEqual(officeDirtyFilePaths(runtimeStates: []), [])
+        XCTAssertEqual(officeDirtyFilePaths(runtimeStates: [clean]), [], "nothing dirty, nothing gathered")
+        XCTAssertEqual(Set(officeDirtyFilePaths(runtimeStates: [mixed, secondRuntime])),
+                       Set(["/repo/a.xlsx", "/other/b.xlsx"]))
+    }
+
+    /// **The alert is ONE list, both sources.** `EditorQuitGate.run()` concatenates `quitDirtyFilePaths`'
+    /// own gather with `officeDirtyFilePaths`'s — a user with one dirty code tab and one dirty
+    /// document tab sees a single "2 unsaved files" alert naming both, not two separate prompts.
+    func testEditorQuitGateCombinesEditorAndOfficeDirtyPathsIntoOneAlert() {
+        var presentedPaths: [String]?
+        let gate = EditorQuitGate(
+            dirtyRuntimeStates: { [self.dirtyState("/repo/a.ts")] },
+            dirtyOfficeRuntimeStates: { [self.officeDirtyState("/repo/b.xlsx")] },
+            teardownAllRuntimes: { 2 },
+            presentAlert: { paths in presentedPaths = paths; return .quitAnyway },
+            proceedWithQuit: { _ in },
+            cancelQuit: { XCTFail("Quit Anyway must never cancel") })
+
+        gate.run()
+
+        XCTAssertEqual(Set(presentedPaths ?? []), Set(["/repo/a.ts", "/repo/b.xlsx"]),
+                       "both sources' dirty paths reach the SAME alert")
+    }
+
+    /// **The regression this test exists to catch**: a quit gate that only ever asked
+    /// `dirtyRuntimeStates` would answer `.proceedUntouched` — no alert, straight to teardown — for a
+    /// session whose ONLY unsaved work is an office document. `dirtyOfficeRuntimeStates`'s own
+    /// default (`{ [] }`, additive so old tests keep compiling) is exactly what would produce that
+    /// silent-data-loss shape if `AppDelegate.editorQuitGate`'s real wiring ever forgot to override it
+    /// — this test pins the DECISION side of that claim; `testAppDelegateEditorQuitGate
+    /// DirtyOfficeRuntimeStatesReadsTheHostsOfficeRuntimeTable` below pins the WIRING side.
+    func testEditorQuitGateConfirmsWhenOnlyOfficeIsDirty() {
+        var presented = 0
+        var proceeded = 0
+        let gate = EditorQuitGate(
+            dirtyRuntimeStates: { [] },
+            dirtyOfficeRuntimeStates: { [self.officeDirtyState("/repo/b.xlsx")] },
+            teardownAllRuntimes: { 1 },
+            presentAlert: { paths in presented += 1; XCTAssertEqual(paths, ["/repo/b.xlsx"]); return .review },
+            proceedWithQuit: { _ in proceeded += 1 },
+            cancelQuit: { })
+
+        gate.run()
+
+        XCTAssertEqual(presented, 1, "an office-only dirty document must still gate the quit")
+        XCTAssertEqual(proceeded, 0)
+    }
+
+    /// **The real-wiring proof**: `AppDelegate.editorQuitGate.dirtyOfficeRuntimeStates` — the actual
+    /// production closure, not a spy standing in for it — reaches a REAL `ShellSessionHost` and reads
+    /// its `officeRuntimes` table. Mirrors `testAppDelegateTeardownAllRuntimesClosureWalksBothRuntime
+    /// TablesAndStopsTheSharedOfficeHelper`'s own proof for `teardownAllRuntimes`, at the GATHER level
+    /// instead of the teardown level — the two closures are independent fields on `EditorQuitGate`
+    /// (that struct's own doc explains why), so proving one is wired says nothing about the other.
+    /// No `.open()` here, deliberately — MINTING alone (`officeRuntime(for:)`) never touches the
+    /// driver, so this stays exactly as safe as `testAppDelegateTeardownAllRuntimesClosureWalksBoth
+    /// RuntimeTablesAndStopsTheSharedOfficeHelper`'s own identical choice.
+    func testAppDelegateEditorQuitGateDirtyOfficeRuntimeStatesReadsTheHostsOfficeRuntimeTable() {
+        let directory = SessionDirectory(lister: { [] })
+        let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        _ = host.officeRuntime(for: "S1")
+        XCTAssertEqual(host.officeRuntimes.count, 1)
+
+        let controller = AppWindowController(directory: directory, host: host,
+                                             frame: NSRect(x: 0, y: 0, width: 100, height: 100))
+        let delegate = AppDelegate()
+        delegate.setAppWindowForTesting(controller)
+
+        let states = delegate.editorQuitGate.dirtyOfficeRuntimeStates()
+
+        XCTAssertEqual(states.count, 1, "the real closure must read the host's officeRuntimes table, "
+                       + "not the struct's own defaulted empty array")
+    }
+
+    // MARK: - Office Stage B Task 3: Sparkle's dirty-editors gate grows an office leg
+
+    /// A scripted, fully in-process `Driver` — no real helper process, so `runtime.open` resolves in
+    /// this test host exactly as `OfficeRuntimeWatcherTests.makeDriver` (`OfficeRuntimeReducerTests.swift`)
+    /// resolves in its own file; duplicated here rather than shared because that helper is `private`
+    /// to a different test target file, and the seam is four fields, not worth threading across files.
+    private func scratchOfficeDriver() -> OfficeRuntime.Driver {
+        OfficeRuntime.Driver(
+            helperState: { .ready }, startHelper: { },
+            open: { _, _ in OfficeDocumentMetadata(
+                type: .spreadsheet, parts: 1, sizeTwips: OfficeDocumentSize(widthTwips: 100, heightTwips: 100)) },
+            close: { _ in }, save: { _ in "/tmp/live-dirty-gate-unused-save" },
+            subscribeTiles: { _, _, _, _ in [] }, unsubscribeTiles: { _ in }, requestTiles: { _, _ in },
+            stateDirectory: FileManager.default.temporaryDirectory
+                .appendingPathComponent("live-dirty-gate-state-\(UUID().uuidString)", isDirectory: true))
+    }
+
+    /// **The claim `deps.dirtyEditors`'s own wiring comment makes**: an in-flight Sparkle install must
+    /// defer for a genuinely dirty OFFICE document, exactly as it already does for a dirty editor
+    /// model — proven end-to-end (a real open, a real `.modifiedChanged(true)` callback, read back
+    /// through the SAME method `AppDelegate.boot()` actually wires into `deps.dirtyEditors`), not
+    /// merely at the pure-function or wiring-only level the two tests above stop at.
+    func testLiveDirtyEditorsOrOfficeDocumentsIsTrueWhenAnOfficeDocumentIsGenuinelyDirty() async throws {
+        let directory = SessionDirectory(lister: { [] })
+        let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        let driver = scratchOfficeDriver()
+        host.makeOfficeRuntime = { sessionId, _ in OfficeRuntime(sessionId: sessionId, driver: driver) }
+        let runtime = host.officeRuntime(for: "S1")
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("live-dirty-gate-\(UUID().uuidString).xlsx").path
+        try Data().write(to: URL(fileURLWithPath: path))
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        runtime.open(path)
+        let opened = await waitUntil { runtime.stateSnapshot.documents[path] != nil }
+        XCTAssertTrue(opened, "setup: the scripted open must land")
+
+        let controller = AppWindowController(directory: directory, host: host,
+                                             frame: NSRect(x: 0, y: 0, width: 100, height: 100))
+        let delegate = AppDelegate()
+        delegate.setAppWindowForTesting(controller)
+        XCTAssertFalse(delegate.liveDirtyEditorsOrOfficeDocuments(), "clean so far — nothing to defer for")
+
+        let docId = try XCTUnwrap(runtime.stateSnapshot.documents[path]?.docId)
+        runtime.handle(documentEvent: .modifiedChanged(true), docId: docId)
+
+        XCTAssertTrue(delegate.liveDirtyEditorsOrOfficeDocuments(), "a dirty office document, with no "
+                     + "dirty editor at all, must still trip Sparkle's install-deferral gate")
+    }
+
+    func testLiveDirtyEditorsOrOfficeDocumentsIsFalseWithNoAppWindow() {
+        let delegate = AppDelegate()
+        XCTAssertFalse(delegate.liveDirtyEditorsOrOfficeDocuments(), "no host at all reads as clean, "
+                       + "never as an error")
+    }
 }

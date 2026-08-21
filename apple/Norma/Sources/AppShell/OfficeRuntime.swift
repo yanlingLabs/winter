@@ -910,6 +910,80 @@ final class OfficeRuntime: ObservableObject {
         perform(dispatch(.saveRequested(path: path)))
     }
 
+    /// Office Stage B Task 3 — **the dirty-close sheet's own door.** `save(_:)` above is deliberately
+    /// fire-and-forget (its own doc: "never sequence off this call returning"), which is right for
+    /// ⌘S and the save button — but the close-sheet's Save choice needs the ACTUAL outcome to decide
+    /// between closing the tab and leaving it open with the failure banner showing
+    /// (`dirtyCloseActionAfterSave`'s own contract, `PanelEditorTab.swift`). Rather than reconstruct
+    /// that outcome by diffing `$state` from the outside — which cannot be made correct (see below) —
+    /// this is a second, awaitable door onto the exact same `.saveRequested`/`performSave` machinery,
+    /// resolved by `performSave` itself at the moment it already knows the answer.
+    ///
+    /// **Why not infer the outcome from `dirty`/`documentBanners` externally, the way a first design
+    /// of this door tried:** two holes, both real. (1) LOK's `ModifiedStatus=false` fires helper-side
+    /// the instant the helper's OWN `saveAs` completes — *before* `performSave`'s own `placeAtomically`
+    /// ever runs on this side. If the place then fails (disk full, permissions), an outside observer
+    /// watching `dirty` would already have seen it flip false and would report `.saved` for a save
+    /// that in fact never reached the real path — exactly the "saveFailed → close cancelled" case the
+    /// brief names, inverted into a silent data-loss close. (2) A retried save that fails with the
+    /// SAME reason writes the identical string into `documentBanners[path]` a second time — no
+    /// observable transition for an outside `$state` diff to catch, so it would simply never resolve.
+    /// This door has neither hole: it is resolved at the exact two `perform(dispatch(...))` call sites
+    /// inside `performSave` that already know, authoritatively, which of the two happened.
+    ///
+    /// **Reuses `SaveOutcome`** (`EditorSaveCoordinator.swift`) rather than inventing an office-shaped
+    /// twin — the shape (`.saved`/`.failed(String)`/`.noModel`) is generic to "did a save succeed",
+    /// not editor-specific, and reusing it is what lets `dirtyCloseAction`/`dirtyCloseActionAfterSave`
+    /// (`PanelEditorTab.swift`) drive BOTH tab kinds' close gates verbatim, with no second decision
+    /// layer to write or keep in sync.
+    ///
+    /// `.noModel` mirrors `EditorSaveCoordinator.performSave`'s own gate: answered here, directly,
+    /// without ever registering a waiter, whenever dispatching `.saveRequested` produces no `.save`
+    /// effect (not `.ready`, or no open document for `path`) — read from the dispatch's own returned
+    /// effects rather than a hand-duplicated copy of the reducer's guard, so the two can never drift.
+    func saveAndAwaitOutcome(_ path: String) async -> SaveOutcome {
+        await withCheckedContinuation { continuation in
+            let effects = dispatch(.saveRequested(path: path))
+            guard case .save(_, let docId)? = effects.first else {
+                perform(effects) // always `[]` here, but keeps the dispatch/perform pairing uniform
+                continuation.resume(returning: .noModel)
+                return
+            }
+            saveWaiters[path, default: []].append(SaveWaiter(docId: docId, continuation: continuation))
+            perform(effects)
+        }
+    }
+
+    /// One `saveAndAwaitOutcome` caller, still waiting. Kept per PATH (a table, not a single slot) —
+    /// two overlapping close-sheet saves for two DIFFERENT documents are legal and independent, the
+    /// same reasoning `EditorSaveCoordinator.waiters`' own per-seq table gives; unlike that type this
+    /// one does not also COALESCE two callers for the same path onto one save, since the only
+    /// caller today (the close sheet) can never fire twice for the same tab.
+    private struct SaveWaiter {
+        /// The docId `.saveRequested` resolved AT DISPATCH TIME — never re-read later, so a reload or
+        /// close that swaps or removes `documents[path]` after this waiter was registered cannot be
+        /// mistaken for the save this waiter is actually about (mirrors the reducer's own `.saveSucceeded`
+        /// /`.saveFailed` stale-docId guards, applied one layer up).
+        let docId: String
+        let continuation: CheckedContinuation<SaveOutcome, Never>
+    }
+    private var saveWaiters: [String: [SaveWaiter]] = [:]
+
+    /// Resolve every waiter registered for this EXACT `(path, docId)` pair, and only those — a waiter
+    /// for a DIFFERENT docId at the same path (a save superseded by a reload, still pending) is left
+    /// untouched, since it is not this call's to answer. Idempotent by construction: called again for
+    /// a pair nothing is waiting on (the ordinary case — most saves have no `saveAndAwaitOutcome`
+    /// caller at all) it simply finds nothing and does nothing, which is what makes it safe to call
+    /// from every one of `performSave`'s exits, including the ones that also run after
+    /// `performTeardown`'s own flush (below) has already resolved everything.
+    private func resumeSaveWaiters(path: String, docId: String, outcome: SaveOutcome) {
+        guard let waiters = saveWaiters[path] else { return }
+        let matching = waiters.filter { $0.docId == docId }
+        let remaining = waiters.filter { $0.docId != docId }
+        if remaining.isEmpty { saveWaiters.removeValue(forKey: path) } else { saveWaiters[path] = remaining }
+        for waiter in matching { waiter.continuation.resume(returning: outcome) }
+    }
+
     /// Office Stage B Task 2b — the conflict banner's "Reload from disk": discard my edits, re-stage
     /// the current on-disk bytes under a fresh docId. A no-op unless `path` currently has an open
     /// document (mirrors every other door's reducer-level guard).
@@ -1233,6 +1307,13 @@ final class OfficeRuntime: ObservableObject {
                     // (`try?`), and keeps this guard's shape identical to every other superseded-
                     // save path in this file.
                     try? FileManager.default.removeItem(atPath: tempPath)
+                    // Office Stage B Task 3 — the helper's own save genuinely succeeded, but a reload
+                    // or a close moved this path past THIS docId before the place could run: nothing
+                    // was written here, so this is `.failed`, not `.saved` — a `saveAndAwaitOutcome`
+                    // caller (the only kind that can even be waiting; `save(_:)`'s fire-and-forget
+                    // callers register no waiter) must not be told a save landed when it did not.
+                    self.resumeSaveWaiters(path: path, docId: docId,
+                                          outcome: .failed("the document changed before this save could finish"))
                     return
                 }
                 // **Before the place, always** — mirrors `EditorSaveCoordinator.performSave`'s own
@@ -1286,15 +1367,36 @@ final class OfficeRuntime: ObservableObject {
                     // only mechanism this vendor build's `.uno:Save` ever proved out was this one).
                     try? FileManager.default.removeItem(atPath: tempPath)
                     self.perform(self.dispatch(.saveSucceeded(path: path, docId: docId)))
+                    // Office Stage B Task 3 — the ONE genuine success exit. Resolved here, not by an
+                    // outside observer waiting for `dirty` to clear: LOK's own `ModifiedStatus=false`
+                    // is a separate, later helper round trip (`OfficeRuntimeLiveTests`' own
+                    // `becameCleanAfterSave` proves it eventually arrives) that this door must not
+                    // block on — the write to the real path already landed, which is the fact a
+                    // `saveAndAwaitOutcome` caller actually needs to decide whether it may close.
+                    self.resumeSaveWaiters(path: path, docId: docId, outcome: .saved)
                 } catch {
                     // No event will arrive to consume the note now — the rename never happened.
                     self.withdrawExpectedWrite(path: path, token: expectedWriteToken)
                     try? FileManager.default.removeItem(atPath: tempPath)
-                    self.perform(self.dispatch(.saveFailed(path: path, docId: docId, reason: Self.describe(error))))
+                    let reason = Self.describe(error)
+                    self.perform(self.dispatch(.saveFailed(path: path, docId: docId, reason: reason)))
+                    self.resumeSaveWaiters(path: path, docId: docId, outcome: .failed(reason))
                 }
             } catch {
-                guard myGeneration == self.generation else { return } // superseded AND failed: nothing to compensate, nothing to record
-                self.perform(self.dispatch(.saveFailed(path: path, docId: docId, reason: Self.describe(error))))
+                guard myGeneration == self.generation else {
+                    // Office Stage B Task 3 — superseded (a teardown) AND the driver's own save
+                    // threw: `performTeardown`'s own flush (below) has already resolved every waiter
+                    // this runtime was holding, including this docId's if one was registered, so this
+                    // is a no-op call, kept only for the property `resumeSaveWaiters` itself already
+                    // states in its own header — every exit calls it, uniformly, whether or not
+                    // anything is actually left to resolve.
+                    self.resumeSaveWaiters(path: path, docId: docId,
+                                          outcome: .failed("the document was torn down before this save could finish"))
+                    return // superseded AND failed: nothing to compensate, nothing to record
+                }
+                let reason = Self.describe(error)
+                self.perform(self.dispatch(.saveFailed(path: path, docId: docId, reason: reason)))
+                self.resumeSaveWaiters(path: path, docId: docId, outcome: .failed(reason))
             }
         }
     }
@@ -1697,6 +1799,25 @@ final class OfficeRuntime: ObservableObject {
         // Office Stage B Task 2 — the save-suppression bag goes with everything else this runtime
         // holds; mirrors `EditorRuntime`'s own teardown treatment of its identical bag.
         pendingExpectedWrites.removeAll()
+        // Office Stage B Task 3 — **load-bearing, not tidiness.** `performSave`'s own Tasks capture
+        // only `[weak self]`/`[driver]`, never a strong reference to this runtime, and the quit path
+        // (`ShellSessionHost.teardownAllOfficeRuntimesAndStopHelper`) can be the LAST strong reference
+        // this runtime has (`officeRuntimes.removeValue(forKey:)` drops the table's own hold the
+        // instant before calling `.teardown()`). A `saveAndAwaitOutcome` waiter registered in
+        // `saveWaiters` is a live `CheckedContinuation` — Swift's own runtime treats a continuation
+        // that is dropped WITHOUT being resumed as a misuse (a logged failure, not a silent no-op) —
+        // so if this object deallocates with one still pending, there is no `self` left for
+        // `performSave`'s own exits to call `resumeSaveWaiters` on, ever. Flushing here, before that
+        // can happen, guarantees every waiter is resolved exactly once: either by `performSave`'s own
+        // exits (the ordinary case) or, whichever comes first, by this teardown. Safe against a
+        // double-resolve — `resumeSaveWaiters`'s own header states why calling it again for a pair
+        // this already resolved is a no-op — so a `performSave` exit that runs AFTER this flush
+        // (the in-flight `driver.save`/`placeAtomically` this runtime no longer waits for) finds
+        // nothing left and does nothing.
+        for waiter in saveWaiters.values.flatMap({ $0 }) {
+            waiter.continuation.resume(returning: .failed("the document was torn down before this save could finish"))
+        }
+        saveWaiters.removeAll()
     }
 
     // MARK: - office-plumbing Task 8: the world changing underneath an open document

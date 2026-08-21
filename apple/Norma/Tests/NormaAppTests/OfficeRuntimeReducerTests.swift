@@ -1676,6 +1676,120 @@ final class OfficeRuntimeWatcherTests: XCTestCase {
         let settled = await waitUntil { runtime.expectedWriteCount(for: path) == 0 }
         XCTAssertTrue(settled, "no fire ever arrived, and the note must still not be left standing")
     }
+
+    // MARK: - Office Stage B Task 3: saveAndAwaitOutcome — the dirty-close sheet's own awaitable door
+
+    /// The ordinary success path: the outcome resolves `.saved` exactly once the write to the REAL
+    /// path has genuinely landed — not merely once the driver's own `save` returned, which
+    /// `testASaveWithNoWatcherFireAtAllStillLeavesNoLeakedNote` above already proves is not the same
+    /// beat (the atomic place still has to run). No `runtime.handle(documentEvent:.modifiedChanged…)`
+    /// anywhere in this test — this door's whole reason for existing (its own doc) is that it does
+    /// NOT wait for LOK's separate, later `ModifiedStatus=false` callback.
+    func testSaveAndAwaitOutcomeReturnsSavedOnceTheRealFileIsWritten() async throws {
+        let path = try scratchFile(contents: "one")
+        let tempPath = try scratchFile(name: "rendered.xlsx", contents: "rendered")
+        let runtime = OfficeRuntime(sessionId: "S1", driver: makeDriver(save: { _ in tempPath }))
+        runtimes.append(runtime)
+        runtime.open(path)
+        _ = await waitUntil { runtime.stateSnapshot.documents[path] != nil }
+
+        let outcome = await runtime.saveAndAwaitOutcome(path)
+
+        XCTAssertEqual(outcome, .saved)
+        XCTAssertEqual(try String(contentsOfFile: path, encoding: .utf8), "rendered")
+    }
+
+    /// The helper's own `saveAs` fails (`OfficeHelperClientError.saveFailed`, the shape
+    /// `OfficeDriverRecorder`'s identical seam in `ShellSessionHostTests` throws) — resolved from the
+    /// OUTER catch in `performSave` (the driver's own `try await driver.save(docId)` never returns).
+    func testSaveAndAwaitOutcomeReturnsFailedWhenTheDriversSaveThrows() async throws {
+        let path = try scratchFile(contents: "one")
+        let runtime = OfficeRuntime(sessionId: "S1", driver: makeDriver(save: { _ in
+            throw OfficeHelperClientError.saveFailed(reason: "disk full")
+        }))
+        runtimes.append(runtime)
+        runtime.open(path)
+        _ = await waitUntil { runtime.stateSnapshot.documents[path] != nil }
+
+        let outcome = await runtime.saveAndAwaitOutcome(path)
+
+        guard case .failed(let reason) = outcome else {
+            return XCTFail("expected .failed, got \(outcome)")
+        }
+        XCTAssertTrue(reason.contains("disk full"), "the driver's own reason must reach the caller: \(reason)")
+        XCTAssertEqual(runtime.stateSnapshot.documentBanners[path]?.contains("disk full"), true,
+                       "the ordinary banner machinery still fires — this door adds a SECOND way to "
+                       + "learn the outcome, it does not replace the first")
+    }
+
+    /// The driver's own `save` succeeds (a real temp path comes back) but the ATOMIC PLACE fails —
+    /// the inner catch, `performSave`'s own distinct exit from the driver-throws case above. A
+    /// nonexistent temp path is enough: `placeAtomically`'s `copyItem` throws ENOENT before ever
+    /// touching the real destination.
+    func testSaveAndAwaitOutcomeReturnsFailedWhenThePlaceCannotFindTheHelpersTempFile() async throws {
+        let path = try scratchFile(contents: "one")
+        let runtime = OfficeRuntime(sessionId: "S1", driver: makeDriver(
+            save: { _ in "/tmp/office-save-await-nonexistent-\(UUID().uuidString)" }))
+        runtimes.append(runtime)
+        runtime.open(path)
+        _ = await waitUntil { runtime.stateSnapshot.documents[path] != nil }
+        let before = try String(contentsOfFile: path, encoding: .utf8)
+
+        let outcome = await runtime.saveAndAwaitOutcome(path)
+
+        guard case .failed = outcome else {
+            return XCTFail("expected .failed, got \(outcome)")
+        }
+        XCTAssertEqual(try String(contentsOfFile: path, encoding: .utf8), before,
+                       "a failed place must never touch the real file")
+    }
+
+    /// `.noModel` — mirrors `EditorSaveCoordinator.performSave`'s own `hasModel` gate: a path this
+    /// runtime holds no open document for, answered WITHOUT ever registering a waiter (read from
+    /// `.saveRequested`'s own dispatched effects, never a hand-duplicated copy of the reducer's
+    /// guard — this door's own doc explains why that matters).
+    func testSaveAndAwaitOutcomeReturnsNoModelForAPathWithNoOpenDocument() async {
+        let runtime = OfficeRuntime(sessionId: "S1", driver: makeDriver())
+        runtimes.append(runtime)
+
+        let outcome = await runtime.saveAndAwaitOutcome("/never-opened.xlsx")
+
+        XCTAssertEqual(outcome, .noModel)
+    }
+
+    /// **Supersession, EXIT A of `performSave`: the driver's own save genuinely succeeds, but the
+    /// document is closed before the place can run.** Provoked deterministically, with no suspend/
+    /// resume continuation machinery: the driver's OWN `save` closure calls `runtime.close(path)` as
+    /// a side effect before returning its (otherwise valid) temp path — since that closure runs
+    /// synchronously to completion on the main actor with no `await` of its own inside it, the close
+    /// is guaranteed to have already landed in `documents` by the time `performSave` re-checks
+    /// `self.state.documents[path]?.docId == docId` immediately after the `await` returns. This is
+    /// the exact race a genuine tab-close racing an in-flight save would produce, minus the timing
+    /// uncertainty — the OUTCOME this door must report is what is under test, not the scheduler.
+    func testSaveAndAwaitOutcomeReturnsFailedWhenACloseSupersedesTheSaveBeforeThePlaceCanRun() async throws {
+        let path = try scratchFile(contents: "one")
+        let tempPath = try scratchFile(name: "rendered.xlsx", contents: "rendered")
+        final class RuntimeBox { weak var runtime: OfficeRuntime? }
+        let box = RuntimeBox()
+        let runtime = OfficeRuntime(sessionId: "S1", driver: makeDriver(save: { [box] _ in
+            box.runtime?.close(path)
+            return tempPath
+        }))
+        runtimes.append(runtime)
+        box.runtime = runtime
+        runtime.open(path)
+        _ = await waitUntil { runtime.stateSnapshot.documents[path] != nil }
+
+        let outcome = await runtime.saveAndAwaitOutcome(path)
+
+        guard case .failed = outcome else {
+            return XCTFail("expected .failed (the close superseded this docId), got \(outcome)")
+        }
+        XCTAssertNil(runtime.stateSnapshot.documents[path], "the close this test provoked must have landed")
+        XCTAssertEqual(try String(contentsOfFile: path, encoding: .utf8), "one",
+                       "a superseded save must never place its bytes onto a path the runtime no "
+                       + "longer considers open")
+    }
 }
 
 // MARK: - Office Stage B Task 2: OfficeRuntime.placeAtomically, driven directly

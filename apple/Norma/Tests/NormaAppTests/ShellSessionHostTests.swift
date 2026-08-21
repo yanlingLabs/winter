@@ -4216,18 +4216,20 @@ final class ShellSessionHostTests: XCTestCase {
         try? FileManager.default.removeItem(atPath: bPath)
     }
 
-    /// **Departure always-release** (Stage A has no dirty state) — driven through the REAL door the
-    /// shell uses on a hop, mirroring `testHidingTheShellReleasesACleanEditorAndKeepsOneWithUnsavedWork`
-    /// exactly, minus the "dirty: kept" half that has no office analogue yet.
-    ///
-    /// **A hop moves the attachment on the SAME socket — no second connection**
-    /// (`testHopDetachesThePreviousAndAttachesTheNewWithNoAbort`'s own pin, immediately above this
-    /// section): `releaseOfficeRuntimeIfClean` fires synchronously inside `hop(to:)`, well before
-    /// any round trip, so this test never needs a second `factory.made` connection or its reply —
-    /// `host.select("S2")` alone is the trigger.
-    func testHopAlwaysReleasesTheOfficeRuntimeRegardlessOfWhatItHolds() async {
+    /// **Office Stage B Task 3 — the Stage A "always releases" claim these two tests used to pin is
+    /// now false, and this is the rewrite: clean released, dirty RETAINED.** Mirrors
+    /// `testHidingTheShellReleasesACleanEditorAndKeepsOneWithUnsavedWork`'s own two-host shape
+    /// exactly, including the reason (two independent hosts, since the first host's clean release
+    /// tears the runtime down and there is nothing left to make dirty afterward). Driven through the
+    /// REAL door the shell uses on a hop — `releaseOfficeRuntimeIfClean` fires synchronously inside
+    /// `hop(to:)`, well before any round trip (`testHopDetachesThePreviousAndAttachesTheNewWithNoAbort`'s
+    /// own pin), so this test never needs a second `factory.made` connection or its reply —
+    /// `host.select("S2")` alone is the trigger, on both hosts.
+    func testHopReleasesACleanOfficeRuntimeAndKeepsOneWithUnsavedWork() async throws {
         let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)]),
                    codeRow("S2", dirs: [SessionDirEntry(path: "/repo2", locked: false)])]
+
+        // Clean: released.
         let (host, factory) = makeHost(rows: rows)
         defer { host.deselect() }
         let office = officeFactory()
@@ -4237,7 +4239,6 @@ final class ShellSessionHostTests: XCTestCase {
         host.select("S1")
         await waitUntilMade(factory, 1)
         await answerHandshake(factory.made[0], sessionId: "S1")
-
         let runtime = host.officeRuntime(for: "S1")
         let gatePath = makeScratchOfficePath("gate")
         runtime.open(gatePath)
@@ -4246,20 +4247,47 @@ final class ShellSessionHostTests: XCTestCase {
 
         host.select("S2")
 
-        XCTAssertEqual(host.officeRuntimes.count, 0, "Stage A has no dirty state to protect — a "
-                       + "document tab is view-only, so a hop ALWAYS releases")
+        XCTAssertEqual(host.officeRuntimes.count, 0, "a clean office runtime is rebuilt on demand")
         // See the identical comment in `testTeardownOfficeRuntimeRemovesItFromTheTableAnd
         // ClosesEveryOpenDocument` — waited out so the test does not return with an orphaned close
         // Task still in flight.
         await officeWaitUntil(timeout: 2) { office.recorder.closeCalls.count == 1 }
         XCTAssertEqual(office.recorder.closeCalls.count, 1, "the open document was closed on the way out")
         try? FileManager.default.removeItem(atPath: gatePath)
+
+        // Dirty: kept.
+        let (host2, factory2) = makeHost(rows: rows)
+        defer { host2.deselect() }
+        let office2 = officeFactory()
+        host2.makeOfficeRuntime = office2.make
+        await host2.directory.refresh()
+        host2.setShellVisible(true)
+        host2.select("S1")
+        await waitUntilMade(factory2, 1)
+        await answerHandshake(factory2.made[0], sessionId: "S1")
+        let runtime2 = host2.officeRuntime(for: "S1")
+        let gatePath2 = makeScratchOfficePath("gate2")
+        runtime2.open(gatePath2)
+        await officeWaitUntil(timeout: 2) { runtime2.stateSnapshot.documents[gatePath2] != nil }
+        let docId2 = try XCTUnwrap(runtime2.stateSnapshot.documents[gatePath2]?.docId)
+        runtime2.handle(documentEvent: .modifiedChanged(true), docId: docId2)
+        XCTAssertEqual(runtime2.stateSnapshot.documents[gatePath2]?.dirty, true, "setup must leave the document dirty")
+
+        host2.select("S2")
+
+        XCTAssertEqual(host2.officeRuntimes.count, 1, "hopping away must never destroy unsaved office edits")
+        XCTAssertEqual(office2.recorder.closeCalls.count, 0)
+        XCTAssertEqual(runtime2.stateSnapshot.documents[gatePath2]?.dirty, true)
+        try? FileManager.default.removeItem(atPath: gatePath2)
     }
 
     /// Hiding the shell (⌘W / window close) detaches exactly like a hop does — same policy, same
-    /// always-release door (`detachCurrent`), driven via `setShellVisible(false)`.
-    func testHidingTheShellAlsoAlwaysReleasesTheOfficeRuntime() async {
+    /// clean-only-release door (`detachCurrent`), driven via `setShellVisible(false)`. Same rewrite
+    /// as the hop test immediately above, for the identical reason.
+    func testHidingTheShellReleasesACleanOfficeRuntimeAndKeepsOneWithUnsavedWork() async throws {
         let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+
+        // Clean: released.
         let (host, factory) = makeHost(rows: rows)
         let office = officeFactory()
         host.makeOfficeRuntime = office.make
@@ -4268,7 +4296,6 @@ final class ShellSessionHostTests: XCTestCase {
         host.select("S1")
         await waitUntilMade(factory, 1)
         await answerHandshake(factory.made[0], sessionId: "S1")
-
         let runtime = host.officeRuntime(for: "S1")
         let gatePath = makeScratchOfficePath("gate")
         runtime.open(gatePath)
@@ -4280,6 +4307,234 @@ final class ShellSessionHostTests: XCTestCase {
         await officeWaitUntil(timeout: 2) { office.recorder.closeCalls.count == 1 }
         XCTAssertEqual(office.recorder.closeCalls.count, 1)
         try? FileManager.default.removeItem(atPath: gatePath)
+
+        // Dirty: kept.
+        let (host2, factory2) = makeHost(rows: rows)
+        defer { host2.deselect() }
+        let office2 = officeFactory()
+        host2.makeOfficeRuntime = office2.make
+        await host2.directory.refresh()
+        host2.setShellVisible(true)
+        host2.select("S1")
+        await waitUntilMade(factory2, 1)
+        await answerHandshake(factory2.made[0], sessionId: "S1")
+        let runtime2 = host2.officeRuntime(for: "S1")
+        let gatePath2 = makeScratchOfficePath("gate2")
+        runtime2.open(gatePath2)
+        await officeWaitUntil(timeout: 2) { runtime2.stateSnapshot.documents[gatePath2] != nil }
+        let docId2 = try XCTUnwrap(runtime2.stateSnapshot.documents[gatePath2]?.docId)
+        runtime2.handle(documentEvent: .modifiedChanged(true), docId: docId2)
+
+        host2.setShellVisible(false)
+
+        XCTAssertEqual(host2.officeRuntimes.count, 1, "hiding the window must never destroy unsaved office edits")
+        XCTAssertEqual(office2.recorder.closeCalls.count, 0)
+        XCTAssertEqual(runtime2.stateSnapshot.documents[gatePath2]?.dirty, true)
+        try? FileManager.default.removeItem(atPath: gatePath2)
+    }
+
+    // MARK: - Office Stage B Task 3: the document tab-close gate
+
+    /// `makeDirtyCodeTab`'s own `.document` mirror: drive one session to a real open, DIRTY document
+    /// (`runtime.handle(documentEvent: .modifiedChanged(true), docId:)` — the same test door
+    /// `OfficeRuntimeLiveTests`' own `becameDirty` wait proves is the real LOK callback's shape,
+    /// driven directly rather than through a live helper) and register its `.document` tab in the
+    /// panel. Returns the docId alongside the runtime/path — `OfficeDriverRecorder`'s `save`/
+    /// `saveFailures`/`saveTempPaths` seams are all keyed by docId, never by path.
+    private func makeDirtyDocumentTab(host: ShellSessionHost, factory: ShellTransportFactory,
+                                      sessionId: String, tabId: String, scratchPrefix: String)
+        async throws -> (runtime: OfficeRuntime, path: String, docId: String) {
+        await host.directory.refresh()
+        host.setShellVisible(true)
+        host.select(sessionId)
+        await waitUntilMade(factory, 1)
+        await answerHandshake(factory.made[0], sessionId: sessionId)
+        let runtime = host.officeRuntime(for: sessionId)
+        let path = makeScratchOfficePath(scratchPrefix)
+        runtime.open(path)
+        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.documents[path] != nil }
+        let docId = try XCTUnwrap(runtime.stateSnapshot.documents[path]?.docId)
+        runtime.handle(documentEvent: .modifiedChanged(true), docId: docId)
+        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.dirty, true, "setup must leave the document dirty")
+        host.panelStore.applyFetchedSnapshot(
+            sessionId: sessionId,
+            tabs: [PanelTab(tabId: tabId, kind: .document, url: path, title: (path as NSString).lastPathComponent)],
+            activeTabId: nil)
+        return (runtime, path, docId)
+    }
+
+    /// A clean document tab's `×` takes the silent path — no sheet — and `closePanelTab`'s own
+    /// inline close still runs (Office Stage B Task 3's own header on `requestCloseTab`: the gate
+    /// DECIDES ONLY, `closePanelTab` stays the one closer for a `.document` tab).
+    func testRequestCloseTabOnACleanDocumentTabClosesSilently() async {
+        let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+        let (host, factory, mgmt) = await makeHostWithManagement(rows: rows)
+        defer { host.deselect() }
+        let office = officeFactory()
+        host.makeOfficeRuntime = office.make
+        await host.directory.refresh()
+        host.setShellVisible(true)
+        host.select("S1")
+        await waitUntilMade(factory, 1)
+        await answerHandshake(factory.made[0], sessionId: "S1")
+        let runtime = host.officeRuntime(for: "S1")
+        let path = makeScratchOfficePath("clean")
+        runtime.open(path)
+        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.documents[path] != nil }
+        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.dirty, false, "setup must leave the document clean")
+        host.panelStore.applyFetchedSnapshot(
+            sessionId: "S1", tabs: [PanelTab(tabId: "t1", kind: .document, url: path, title: "clean.xlsx")],
+            activeTabId: nil)
+        var sheetsPresented = 0
+        host.presentDirtyCloseSheet = { _, _, _ in sheetsPresented += 1 }
+
+        host.requestCloseTab("t1")
+
+        XCTAssertEqual(sheetsPresented, 0, "a clean document tab must never show the sheet")
+        await feedWaitUntil { mgmt.methods.contains("panel.closeTab") }
+        await officeWaitUntil(timeout: 2) { office.recorder.closeCalls.count == 1 }
+        XCTAssertEqual(office.recorder.closeCalls.count, 1, "closePanelTab's own inline close must still run")
+        try? FileManager.default.removeItem(atPath: path)
+    }
+
+    /// The dirty sheet's Cancel: nothing closes, nothing saves, the tab and its document are untouched.
+    func testRequestCloseTabOnADirtyDocumentTabCancelChoiceLeavesEverythingOpen() async throws {
+        let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+        let (host, factory, mgmt) = await makeHostWithManagement(rows: rows)
+        defer { host.deselect() }
+        let office = officeFactory()
+        host.makeOfficeRuntime = office.make
+        let (runtime, path, _) = try await makeDirtyDocumentTab(
+            host: host, factory: factory, sessionId: "S1", tabId: "t1", scratchPrefix: "cancel")
+        var presentedBasename: String?
+        host.presentDirtyCloseSheet = { basename, _, respond in
+            presentedBasename = basename
+            respond(.cancel)
+        }
+
+        host.requestCloseTab("t1")
+
+        XCTAssertEqual(presentedBasename, (path as NSString).lastPathComponent)
+        try? await Task.sleep(nanoseconds: 100_000_000) // given a beat, in case a close were racing behind it
+        XCTAssertFalse(mgmt.methods.contains("panel.closeTab"), "Cancel must never fire the RPC")
+        XCTAssertNotNil(runtime.stateSnapshot.documents[path], "the document must still be open")
+        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.dirty, true, "still dirty — nothing was saved or discarded")
+        try? FileManager.default.removeItem(atPath: path)
+    }
+
+    /// The dirty sheet's Discard: closes without ever asking the save door for anything.
+    func testRequestCloseTabOnADirtyDocumentTabDiscardChoiceClosesWithoutSaving() async throws {
+        let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+        let (host, factory, mgmt) = await makeHostWithManagement(rows: rows)
+        defer { host.deselect() }
+        let office = officeFactory()
+        host.makeOfficeRuntime = office.make
+        let (runtime, path, _) = try await makeDirtyDocumentTab(
+            host: host, factory: factory, sessionId: "S1", tabId: "t1", scratchPrefix: "discard")
+        host.presentDirtyCloseSheet = { _, _, respond in respond(.discard) }
+
+        host.requestCloseTab("t1")
+
+        XCTAssertNil(runtime.stateSnapshot.documents[path], "discard still closes the document — synchronous "
+                     + "in the reducer's own state (`OfficeRuntimeReducer.closeRequested`)")
+        await feedWaitUntil { mgmt.methods.contains("panel.closeTab") }
+        XCTAssertTrue(office.recorder.saveCalls.isEmpty, "Discard must never save")
+        await officeWaitUntil(timeout: 2) { office.recorder.closeCalls.count == 1 }
+        try? FileManager.default.removeItem(atPath: path)
+    }
+
+    /// The dirty sheet's Save, when the save FAILS: the tab stays open — the reducer's own
+    /// `documentBanners[path]` already carries the sentence, mirroring the editor's identical posture
+    /// toward T9's banner.
+    func testRequestCloseTabOnADirtyDocumentTabSaveChoiceThatFailsKeepsTheTabOpen() async throws {
+        let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+        let (host, factory, mgmt) = await makeHostWithManagement(rows: rows)
+        defer { host.deselect() }
+        let office = officeFactory()
+        host.makeOfficeRuntime = office.make
+        let (runtime, path, docId) = try await makeDirtyDocumentTab(
+            host: host, factory: factory, sessionId: "S1", tabId: "t1", scratchPrefix: "savefail")
+        office.recorder.saveFailures[docId] = "disk full"
+        host.presentDirtyCloseSheet = { _, _, respond in respond(.save) }
+
+        host.requestCloseTab("t1")
+
+        await officeWaitUntil(timeout: 2) { office.recorder.saveCalls.contains(docId) }
+        try? await Task.sleep(nanoseconds: 100_000_000) // let the failed save's outcome settle
+        XCTAssertFalse(mgmt.methods.contains("panel.closeTab"), "a failed save must not close the tab")
+        XCTAssertNotNil(runtime.stateSnapshot.documents[path], "the document is untouched by a failed save")
+        XCTAssertNotNil(runtime.stateSnapshot.documentBanners[path], "the failure banner must be up")
+        try? FileManager.default.removeItem(atPath: path)
+    }
+
+    /// The dirty sheet's Save, when the save SUCCEEDS: closes only once the outcome is known, and
+    /// AFTER it. `saveTempPaths` points at a REAL file with real bytes — `OfficeRuntime.placeAtomically`
+    /// copies FROM it, so a nonexistent temp would fail the save (`testSaveAndAwaitOutcomeReturnsFailed
+    /// WhenThePlaceCannotFindTheHelpersTempFile`'s own case, deliberately not this one).
+    func testRequestCloseTabOnADirtyDocumentTabSaveChoiceThatSucceedsClosesAfterSaving() async throws {
+        let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+        let (host, factory, mgmt) = await makeHostWithManagement(rows: rows)
+        defer { host.deselect() }
+        let office = officeFactory()
+        host.makeOfficeRuntime = office.make
+        let (_, path, docId) = try await makeDirtyDocumentTab(
+            host: host, factory: factory, sessionId: "S1", tabId: "t1", scratchPrefix: "savesucceed")
+        let renderedPath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rendered-\(UUID().uuidString).xlsx").path
+        try Data("rendered".utf8).write(to: URL(fileURLWithPath: renderedPath))
+        office.recorder.saveTempPaths[docId] = renderedPath
+        host.presentDirtyCloseSheet = { _, _, respond in respond(.save) }
+
+        host.requestCloseTab("t1")
+
+        await feedWaitUntil { mgmt.methods.contains("panel.closeTab") }
+        XCTAssertEqual(try? String(contentsOfFile: path, encoding: .utf8), "rendered",
+                       "a successful save must land on the real path before the tab closes")
+        try? FileManager.default.removeItem(atPath: path)
+    }
+
+    /// **The closing loop the brief's own context note names**: a runtime RETAINED dirty by one
+    /// departure, reattached, and made clean again by closing its (now only) dirty tab through the
+    /// sheet — releases on the NEXT departure exactly as a runtime that was always clean would. No
+    /// eager release is invented here: `resolveDirtyDocumentTabClose`'s own `.close` branch only ever
+    /// calls `closePanelTab` (which closes the DOCUMENT, not the runtime) — the same shape the
+    /// editor's own `resolveDirtyTabClose` `.close` case already takes. It is `releaseOfficeRuntimeIfClean`,
+    /// reached by the SUBSEQUENT departure, that notices the runtime is clean again and finally lets it go.
+    func testClosingTheLastDirtyDocumentTabThroughTheSheetLetsTheNextDepartureReleaseTheRuntime() async throws {
+        let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)]),
+                   codeRow("S2", dirs: [SessionDirEntry(path: "/repo2", locked: false)])]
+        let (host, factory, mgmt) = await makeHostWithManagement(rows: rows)
+        defer { host.deselect() }
+        let office = officeFactory()
+        host.makeOfficeRuntime = office.make
+        let (runtime, path, _) = try await makeDirtyDocumentTab(
+            host: host, factory: factory, sessionId: "S1", tabId: "t1", scratchPrefix: "retain")
+
+        // First departure: dirty, retained.
+        host.select("S2")
+        XCTAssertEqual(host.officeRuntimes.count, 1, "the dirty runtime must survive the first departure")
+        XCTAssertTrue(host.existingOfficeRuntime(for: "S1") === runtime, "the SAME retained runtime, not a fresh mint")
+
+        // Reattach — `attachedSessionId` (and so `panelTargetSessionId`) flips synchronously, ahead
+        // of any round trip (`testHopDetachesThePreviousAndAttachesTheNewWithNoAbort`'s own pin), so
+        // this test never needs to feed a second `session.attach` reply on the per-session transport
+        // to make the assertions below true.
+        host.select("S1")
+        XCTAssertTrue(host.officeRuntime(for: "S1") === runtime, "returning finds the SAME retained runtime")
+
+        // Discard through the sheet — the runtime's own last document closes, and the runtime becomes clean.
+        host.presentDirtyCloseSheet = { _, _, respond in respond(.discard) }
+        host.requestCloseTab("t1")
+        await feedWaitUntil { mgmt.methods.contains("panel.closeTab") }
+        XCTAssertNil(runtime.stateSnapshot.documents[path], "the document itself is closed")
+        XCTAssertEqual(host.officeRuntimes.count, 1, "closing the tab must not itself tear the runtime "
+                       + "down — no eager release exists for office, mirroring the editor's own gate")
+
+        // Second departure: now clean, released.
+        host.select("S2")
+        XCTAssertEqual(host.officeRuntimes.count, 0, "the runtime the first departure retained is "
+                       + "finally released once it has nothing left to protect")
+        try? FileManager.default.removeItem(atPath: path)
     }
 
     /// The fan-out itself: `broadcastOfficeHelperEvent` is the ONE consumer's routing logic, tested
