@@ -420,15 +420,18 @@ final class LOKBridge: OfficeDocumentBridge {
     /// Office Stage B Task 4 — called from a CONNECTION thread (`OfficeHelperServer`'s `.keyEvent`
     /// handler), never from inside a LOK callback — marshals onto `thread` exactly like every other
     /// document-scoped call on this bridge.
-    func postKey(docId: String, type: OfficeKeyEventType, charCode: Int, keyCode: Int) throws {
-        try thread.sync { try self.postKeyOnDedicatedThread(docId: docId, type: type, charCode: charCode, keyCode: keyCode) }
+    ///
+    /// **Fix round 1, F2 (CRITICAL) — `part` added; see `postKeyOnDedicatedThread`'s own header for
+    /// what happens with it and why.**
+    func postKey(docId: String, part: Int, type: OfficeKeyEventType, charCode: Int, keyCode: Int) throws {
+        try thread.sync { try self.postKeyOnDedicatedThread(docId: docId, part: part, type: type, charCode: charCode, keyCode: keyCode) }
     }
 
     /// Office Stage B Task 4 — same threading contract as `postKey` above.
-    func postMouse(docId: String, type: OfficeMouseEventType, xTwips: Int64, yTwips: Int64,
+    func postMouse(docId: String, part: Int, type: OfficeMouseEventType, xTwips: Int64, yTwips: Int64,
                    count: Int, buttons: Int, modifiers: Int) throws {
         try thread.sync {
-            try self.postMouseOnDedicatedThread(docId: docId, type: type, xTwips: xTwips, yTwips: yTwips,
+            try self.postMouseOnDedicatedThread(docId: docId, part: part, type: type, xTwips: xTwips, yTwips: yTwips,
                                                 count: count, buttons: buttons, modifiers: modifiers)
         }
     }
@@ -602,8 +605,24 @@ final class LOKBridge: OfficeDocumentBridge {
     /// unchanged. `SaveError.docNotOpen` reused rather than a fresh error case for this non-save
     /// purpose — a real, dedicated `InputError` was considered and set aside as over-structure for
     /// one shared case with no other divergent member.
-    private func postKeyOnDedicatedThread(docId: String, type: OfficeKeyEventType, charCode: Int, keyCode: Int) throws {
+    ///
+    /// **Fix round 1, F2 (CRITICAL) — `setPart` immediately before the post, unconditionally, in
+    /// this SAME dedicated-thread job.** `postKeyEvent` has NO part parameter in LOK's own C API
+    /// (`LibreOfficeKit.h` — confirmed by reading the header directly, not assumed): it always
+    /// targets whichever part `setPart`/`getPart` currently say is active, a genuinely STATEFUL
+    /// notion on LOK's side. This is a REAL constraint, not a design choice this bridge is free to
+    /// avoid the way `paintPartTile` avoids it — `TileRenderer.renderRaw`'s own doc comment records
+    /// that painting passes `nPart` DIRECTLY, "never a separate `setPart` call first," specifically
+    /// so interleaved requests for different parts never need to coordinate a shared mutation.
+    /// Input has no such stateless call to reach for; `setPart` is the only door LOK exposes. Called
+    /// UNCONDITIONALLY (never gated on "did the part actually change," which would need its own
+    /// `getPart` read and buys nothing but a saved no-op call) — both calls run inside the SAME
+    /// `thread.sync` job as `postKey`'s own single call into this method, so no other queued LOK
+    /// work (a paint for a different part, another connection's own input) can observe or interleave
+    /// between the `setPart` and the event it is scoping.
+    private func postKeyOnDedicatedThread(docId: String, part: Int, type: OfficeKeyEventType, charCode: Int, keyCode: Int) throws {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(part))
         doc.handle.pointee.pClass.pointee.postKeyEvent?(
             doc.handle, Int32(type.rawValue), Int32(truncatingIfNeeded: charCode), Int32(truncatingIfNeeded: keyCode))
     }
@@ -616,9 +635,15 @@ final class LOKBridge: OfficeDocumentBridge {
     /// drives nothing but LOK's own hit-testing, which a truncated-but-still-huge value cannot crash
     /// — LOK's own coordinate clamping, not this bridge's, is what makes an out-of-document click
     /// harmless).
-    private func postMouseOnDedicatedThread(docId: String, type: OfficeMouseEventType, xTwips: Int64, yTwips: Int64,
+    ///
+    /// **Fix round 1, F2 — same `setPart`-first reasoning as `postKeyOnDedicatedThread` above, with
+    /// one addition**: `nX`/`nY` are document-space twips, meaningful only relative to whichever
+    /// part is current — a mismatched part would not just misdirect the click, it would misinterpret
+    /// the COORDINATES themselves against the wrong part's own layout.
+    private func postMouseOnDedicatedThread(docId: String, part: Int, type: OfficeMouseEventType, xTwips: Int64, yTwips: Int64,
                                             count: Int, buttons: Int, modifiers: Int) throws {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(part))
         doc.handle.pointee.pClass.pointee.postMouseEvent?(
             doc.handle, Int32(type.rawValue), Int32(truncatingIfNeeded: xTwips), Int32(truncatingIfNeeded: yTwips),
             Int32(truncatingIfNeeded: count), Int32(truncatingIfNeeded: buttons), Int32(truncatingIfNeeded: modifiers))

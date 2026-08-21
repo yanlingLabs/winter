@@ -995,21 +995,21 @@ final class ShellSessionHost: ObservableObject {
             // (the single-outstanding-request funnel), and the SAME fire-and-forget-but-not-silent
             // posture `close`/`unsubscribeTiles` already established: a post that fails has nothing
             // for `OfficeRuntime` to roll back, only something worth logging.
-            postKey: { [weak supervisor] docId, type, charCode, keyCode in
+            postKey: { [weak supervisor] docId, part, type, charCode, keyCode in
                 do {
                     try await queue.run {
                         guard let client = supervisor?.client else { return }
-                        try await client.postKey(docId: docId, type: type, charCode: charCode, keyCode: keyCode)
+                        try await client.postKey(docId: docId, part: part, type: type, charCode: charCode, keyCode: keyCode)
                     }
                 } catch {
                     NSLog("[ShellSessionHost] office postKey(\(docId)) failed: \(error)")
                 }
             },
-            postMouse: { [weak supervisor] docId, type, xTwips, yTwips, count, buttons, modifiers in
+            postMouse: { [weak supervisor] docId, part, type, xTwips, yTwips, count, buttons, modifiers in
                 do {
                     try await queue.run {
                         guard let client = supervisor?.client else { return }
-                        try await client.postMouse(docId: docId, type: type, xTwips: xTwips, yTwips: yTwips,
+                        try await client.postMouse(docId: docId, part: part, type: type, xTwips: xTwips, yTwips: yTwips,
                                                    count: count, buttons: buttons, modifiers: modifiers)
                     }
                 } catch {

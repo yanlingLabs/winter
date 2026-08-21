@@ -951,12 +951,12 @@ final class OfficeHelperLiveTests: XCTestCase {
         // earlier probe form, as roughly "0, 0, 1265, 254" — (100, 100) twips is safely inside it),
         // type one character, commit it with Return (Calc's own cell-edit commit — ends the pending
         // edit rather than leaving it in-flight for anything after this to race).
-        try await helper.client.postMouse(docId: docId, type: .buttonDown, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
-        try await helper.client.postMouse(docId: docId, type: .buttonUp, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
-        try await helper.client.postKey(docId: docId, type: .keyInput, charCode: 65, keyCode: 512) // 'A', KEY_A
-        try await helper.client.postKey(docId: docId, type: .keyUp, charCode: 65, keyCode: 512)
-        try await helper.client.postKey(docId: docId, type: .keyInput, charCode: 0, keyCode: 1280) // Return commits the cell edit
-        try await helper.client.postKey(docId: docId, type: .keyUp, charCode: 0, keyCode: 1280)
+        try await helper.client.postMouse(docId: docId, part: 0, type: .buttonDown, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await helper.client.postMouse(docId: docId, part: 0, type: .buttonUp, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await helper.client.postKey(docId: docId, part: 0, type: .keyInput, charCode: 65, keyCode: 512) // 'A', KEY_A
+        try await helper.client.postKey(docId: docId, part: 0, type: .keyUp, charCode: 65, keyCode: 512)
+        try await helper.client.postKey(docId: docId, part: 0, type: .keyInput, charCode: 0, keyCode: 1280) // Return commits the cell edit
+        try await helper.client.postKey(docId: docId, part: 0, type: .keyUp, charCode: 0, keyCode: 1280)
 
         let invalidationArrived = await waitUntil(timeout: 10) { !invalidatedEventPushes.isEmpty && !invalidatedKeyPushes.isEmpty }
         XCTAssertTrue(invalidationArrived, "the edit must produce both the raw documentEvent push (to the "
@@ -1116,17 +1116,17 @@ final class OfficeHelperLiveTests: XCTestCase {
             let seq = seqAllocator.nextSeq() + 10 // clear of A's own earlier hand-minted seqs above
             try await connectionA.send(build(seq))
         }
-        try await sendA { .mouseEvent(seq: $0, docId: docId, type: .buttonDown, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0) }
+        try await sendA { .mouseEvent(seq: $0, docId: docId, part: 0, type: .buttonDown, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0) }
         guard case .mouseEventOk = await connectionA.nextFrame(timeout: 10.0) else { return XCTFail("A mouseDown not acked") }
-        try await sendA { .mouseEvent(seq: $0, docId: docId, type: .buttonUp, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0) }
+        try await sendA { .mouseEvent(seq: $0, docId: docId, part: 0, type: .buttonUp, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0) }
         guard case .mouseEventOk = await connectionA.nextFrame(timeout: 10.0) else { return XCTFail("A mouseUp not acked") }
-        try await sendA { .keyEvent(seq: $0, docId: docId, type: .keyInput, charCode: 65, keyCode: 512) }
+        try await sendA { .keyEvent(seq: $0, docId: docId, part: 0, type: .keyInput, charCode: 65, keyCode: 512) }
         guard case .keyEventOk = await connectionA.nextFrame(timeout: 10.0) else { return XCTFail("A keyDown not acked") }
-        try await sendA { .keyEvent(seq: $0, docId: docId, type: .keyUp, charCode: 65, keyCode: 512) }
+        try await sendA { .keyEvent(seq: $0, docId: docId, part: 0, type: .keyUp, charCode: 65, keyCode: 512) }
         guard case .keyEventOk = await connectionA.nextFrame(timeout: 10.0) else { return XCTFail("A keyUp not acked") }
-        try await sendA { .keyEvent(seq: $0, docId: docId, type: .keyInput, charCode: 0, keyCode: 1280) }
+        try await sendA { .keyEvent(seq: $0, docId: docId, part: 0, type: .keyInput, charCode: 0, keyCode: 1280) }
         guard case .keyEventOk = await connectionA.nextFrame(timeout: 10.0) else { return XCTFail("A Return not acked") }
-        try await sendA { .keyEvent(seq: $0, docId: docId, type: .keyUp, charCode: 0, keyCode: 1280) }
+        try await sendA { .keyEvent(seq: $0, docId: docId, part: 0, type: .keyUp, charCode: 0, keyCode: 1280) }
         guard case .keyEventOk = await connectionA.nextFrame(timeout: 10.0) else { return XCTFail("A Return-up not acked") }
 
         let bothReceived = await waitUntil(timeout: 10.0) {
@@ -1611,15 +1611,15 @@ final class OfficeHelperLiveTests: XCTestCase {
         try Data(contentsOf: Self.fixturesRoot.appendingPathComponent("gate.ods")).write(to: URL(fileURLWithPath: stagedPath))
         let docId = UUID().uuidString
         _ = try await helper.client.open(docId: docId, path: stagedPath)
-        try await helper.client.postMouse(docId: docId, type: .buttonDown, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
-        try await helper.client.postMouse(docId: docId, type: .buttonUp, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await helper.client.postMouse(docId: docId, part: 0, type: .buttonDown, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await helper.client.postMouse(docId: docId, part: 0, type: .buttonUp, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
 
         // Scenario 1 — type-burst baseline, otherwise-idle document: 20 keystrokes, back to back,
         // each one's own full send-to-ack round trip timed individually.
         var typeBurstLatenciesMs: [Double] = []
         for _ in 0..<20 {
             let start = Date()
-            try await helper.client.postKey(docId: docId, type: .keyInput, charCode: 65, keyCode: 512)
+            try await helper.client.postKey(docId: docId, part: 0, type: .keyInput, charCode: 65, keyCode: 512)
             typeBurstLatenciesMs.append(Date().timeIntervalSince(start) * 1000)
         }
         let typeBurstAvg = typeBurstLatenciesMs.reduce(0, +) / Double(typeBurstLatenciesMs.count)
@@ -1632,7 +1632,7 @@ final class OfficeHelperLiveTests: XCTestCase {
         let prefetchKeys = (0..<6).map { TileKey(part: 0, zoomPPT: 1000, tileX: $0, tileY: 10) } // unpainted row, real cold paints
         try await helper.client.requestTiles(docId: docId, keys: prefetchKeys)
         let midPrefetchStart = Date()
-        try await helper.client.postKey(docId: docId, type: .keyInput, charCode: 66, keyCode: 513)
+        try await helper.client.postKey(docId: docId, part: 0, type: .keyInput, charCode: 66, keyCode: 513)
         let midPrefetchLatencyMs = Date().timeIntervalSince(midPrefetchStart) * 1000
 
         // Scenario 3 — a mouseDragged-shaped burst: 40 `.move` posts in a row (a real drag-select
@@ -1642,7 +1642,7 @@ final class OfficeHelperLiveTests: XCTestCase {
         var dragBurstLatenciesMs: [Double] = []
         for step in 0..<40 {
             let stepStart = Date()
-            try await helper.client.postMouse(docId: docId, type: .move, xTwips: Int64(100 + step * 20), yTwips: 100,
+            try await helper.client.postMouse(docId: docId, part: 0, type: .move, xTwips: Int64(100 + step * 20), yTwips: 100,
                                               count: 0, buttons: 1, modifiers: 0)
             dragBurstLatenciesMs.append(Date().timeIntervalSince(stepStart) * 1000)
         }

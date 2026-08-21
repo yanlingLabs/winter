@@ -79,8 +79,21 @@ public enum OfficeWireFrame: Equatable, Sendable {
     case save(seq: UInt64, docId: String)
 
     /// Office Stage B Task 4 — **the real edit verb.** LOK's `postKeyEvent(nType, nCharCode,
-    /// nKeyCode)` (`LibreOfficeKit.h`), unchanged parameter-for-parameter across the wire. `charCode`
-    /// is the Unicode scalar the key produces (0 for a non-printing key — arrows, Delete, bare
+    /// nKeyCode)` (`LibreOfficeKit.h`), unchanged parameter-for-parameter across the wire.
+    ///
+    /// **Fix round 1, F2 (CRITICAL) — `part` added.** `postKeyEvent` has NO part parameter in LOK's
+    /// own C signature (unlike `paintPartTile`'s explicit `nPart`) — it always targets whatever
+    /// `getPart()`/the document's current part happens to be, a genuinely STATEFUL LOK-side notion
+    /// painting never has to deal with. Before this field existed, a keystroke posted while viewing
+    /// sheet 2 could silently land on sheet 0 (whatever LOK's internal "current part" happened to be
+    /// last set to, never communicated over this wire at all) — persisted by save, no visible
+    /// repaint to notice by. `part` carries the SAME value `subscribeTiles`/`tileRequest` already
+    /// scope painting by (`OfficeRuntimeState.DocumentEntry.activePart`, resolved at enqueue time —
+    /// see `OfficeRuntime.postKeyEvent`'s own doc); the helper is what turns this into a real
+    /// `setPart` call immediately before the post — see `LOKBridge.postKeyOnDedicatedThread`'s own
+    /// header for why that stateful step cannot be avoided the way `paintPartTile`'s avoids it.
+    ///
+    /// `charCode` is the Unicode scalar the key produces (0 for a non-printing key — arrows, Delete, bare
     /// modifiers); `keyCode` is a FULL VCL-packed value — `com.sun.star.awt.Key`'s base code (e.g.
     /// `512` for `A`) OR'd with SHIFTED modifier bits (`0x1000`/`0x2000`/`0x4000`/`0x8000` for
     /// Shift/Mod1/Mod2/Mod3), never the bare, unshifted `KeyModifier` group's `1/2/4/8`. This is not
@@ -91,8 +104,14 @@ public enum OfficeWireFrame: Equatable, Sendable {
     /// `nKeyCodeAndModifiers` verbatim (`include/vcl/keycod.hxx`). `OfficeInputCodes` is the one
     /// place that builds this packed value; see its own header for the AppKit-keyCode source and the
     /// cross-check against this repo's own independent `ComputerCapabilities.cuKeyCode` table.
-    case keyEvent(seq: UInt64, docId: String, type: OfficeKeyEventType, charCode: Int, keyCode: Int)
+    case keyEvent(seq: UInt64, docId: String, part: Int, type: OfficeKeyEventType, charCode: Int, keyCode: Int)
     /// Office Stage B Task 4 — LOK's `postMouseEvent(nType, nX, nY, nCount, nButtons, nModifier)`.
+    /// **Fix round 1, F2 — `part` added, same reasoning and same resolution point as `keyEvent`'s
+    /// own doc comment above**: `postMouseEvent` has no part parameter either, `xTwips`/`yTwips`
+    /// are only meaningful once the RIGHT part is current (a document-space coordinate is anchored
+    /// to whichever part LOK considers active), so this is not merely "which part gets the click" —
+    /// an un-scoped `setPart` mismatch would misinterpret the coordinates themselves, against
+    /// whatever part LOK happened to have current.
     /// `xTwips`/`yTwips` are DOCUMENT-space twips (LOK's own coordinate system for this call —
     /// confirmed against `ScModelObj::postMouseEvent`, `sc/source/ui/unoobj/docuno.cxx`, which
     /// converts them via `GetPPTX()`/`GetPPTY()` the same way every other twips-space input this
@@ -104,7 +123,7 @@ public enum OfficeWireFrame: Equatable, Sendable {
     /// combined by a CALLER. `modifiers` uses the SAME shifted encoding `keyEvent.keyCode`'s
     /// modifier half does (`OfficeInputCodes.modifierMask`) — confirmed by `MouseEvent::IsShift()`
     /// checking `mnCode & KEY_SHIFT` (`0x1000`), the identical constant `KeyCode::IsShift()` checks.
-    case mouseEvent(seq: UInt64, docId: String, type: OfficeMouseEventType, xTwips: Int64, yTwips: Int64,
+    case mouseEvent(seq: UInt64, docId: String, part: Int, type: OfficeMouseEventType, xTwips: Int64, yTwips: Int64,
                      count: Int, buttons: Int, modifiers: Int)
 
     /// Task 4 — registers this connection as a tile-push subscriber for `docId` (must already be
@@ -315,8 +334,8 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .open(let seq, _, _): return seq
         case .close(let seq, _): return seq
         case .save(let seq, _): return seq
-        case .keyEvent(let seq, _, _, _, _): return seq
-        case .mouseEvent(let seq, _, _, _, _, _, _, _): return seq
+        case .keyEvent(let seq, _, _, _, _, _): return seq
+        case .mouseEvent(let seq, _, _, _, _, _, _, _, _): return seq
         case .subscribeTiles(let seq, _, _, _, _): return seq
         case .unsubscribe(let seq, _): return seq
         case .tileRequest(let seq, _, _): return seq
@@ -357,13 +376,15 @@ public enum OfficeWireFrame: Equatable, Sendable {
             payload["path"] = path
         case .close(_, let docId), .closed(_, let docId), .save(_, let docId):
             payload["docId"] = docId
-        case .keyEvent(_, let docId, let type, let charCode, let keyCode):
+        case .keyEvent(_, let docId, let part, let type, let charCode, let keyCode):
             payload["docId"] = docId
+            payload["part"] = part
             payload["eventType"] = type.rawValue
             payload["charCode"] = charCode
             payload["keyCode"] = keyCode
-        case .mouseEvent(_, let docId, let type, let xTwips, let yTwips, let count, let buttons, let modifiers):
+        case .mouseEvent(_, let docId, let part, let type, let xTwips, let yTwips, let count, let buttons, let modifiers):
             payload["docId"] = docId
+            payload["part"] = part
             payload["eventType"] = type.rawValue
             payload["xTwips"] = xTwips
             payload["yTwips"] = yTwips
@@ -926,21 +947,21 @@ public enum OfficeWireCodec {
             }
             return .frame(.save(seq: seq, docId: docId))
         case "keyEvent":
-            guard let docId = object["docId"] as? String,
+            guard let docId = object["docId"] as? String, let part = intValue(object["part"]),
                   let typeRaw = intValue(object["eventType"]), let type = OfficeKeyEventType(rawValue: typeRaw),
                   let charCode = intValue(object["charCode"]), let keyCode = intValue(object["keyCode"]) else {
                 return .rejected(seq: seq, reason: "malformed")
             }
-            return .frame(.keyEvent(seq: seq, docId: docId, type: type, charCode: charCode, keyCode: keyCode))
+            return .frame(.keyEvent(seq: seq, docId: docId, part: part, type: type, charCode: charCode, keyCode: keyCode))
         case "mouseEvent":
-            guard let docId = object["docId"] as? String,
+            guard let docId = object["docId"] as? String, let part = intValue(object["part"]),
                   let typeRaw = intValue(object["eventType"]), let type = OfficeMouseEventType(rawValue: typeRaw),
                   let xTwips = int64Value(object["xTwips"]), let yTwips = int64Value(object["yTwips"]),
                   let count = intValue(object["count"]), let buttons = intValue(object["buttons"]),
                   let modifiers = intValue(object["modifiers"]) else {
                 return .rejected(seq: seq, reason: "malformed")
             }
-            return .frame(.mouseEvent(seq: seq, docId: docId, type: type, xTwips: xTwips, yTwips: yTwips,
+            return .frame(.mouseEvent(seq: seq, docId: docId, part: part, type: type, xTwips: xTwips, yTwips: yTwips,
                                        count: count, buttons: buttons, modifiers: modifiers))
         case "keyEventOk":
             guard let docId = object["docId"] as? String else {

@@ -161,9 +161,13 @@ final class OfficeHelperClient {
     /// acknowledgment, same posture `requestTiles` already has toward its own slow, async-pushed
     /// effect: the actual edit (and whatever it invalidates) is observed later, through
     /// `onDocumentEvent`/`onInvalidated`, never through this reply.
-    func postKey(docId: String, type: OfficeKeyEventType, charCode: Int, keyCode: Int) async throws {
+    ///
+    /// **Fix round 1, F2 — `part` added, threaded straight onto the wire frame; see
+    /// `OfficeRuntime.postKeyEvent`'s own header for where it is resolved (at enqueue time, from
+    /// `activePart`, the same source `subscribeTiles` already uses).**
+    func postKey(docId: String, part: Int, type: OfficeKeyEventType, charCode: Int, keyCode: Int) async throws {
         let seq = seqAllocator.nextSeq()
-        try await connection.send(.keyEvent(seq: seq, docId: docId, type: type, charCode: charCode, keyCode: keyCode))
+        try await connection.send(.keyEvent(seq: seq, docId: docId, part: part, type: type, charCode: charCode, keyCode: keyCode))
         let reply = try await expectReply(seq: seq)
         switch reply {
         case .keyEventOk: return
@@ -173,10 +177,10 @@ final class OfficeHelperClient {
     }
 
     /// Office Stage B Task 4 — same posture as `postKey` above.
-    func postMouse(docId: String, type: OfficeMouseEventType, xTwips: Int64, yTwips: Int64,
+    func postMouse(docId: String, part: Int, type: OfficeMouseEventType, xTwips: Int64, yTwips: Int64,
                    count: Int, buttons: Int, modifiers: Int) async throws {
         let seq = seqAllocator.nextSeq()
-        try await connection.send(.mouseEvent(seq: seq, docId: docId, type: type, xTwips: xTwips, yTwips: yTwips,
+        try await connection.send(.mouseEvent(seq: seq, docId: docId, part: part, type: type, xTwips: xTwips, yTwips: yTwips,
                                               count: count, buttons: buttons, modifiers: modifiers))
         let reply = try await expectReply(seq: seq)
         switch reply {

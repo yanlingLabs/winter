@@ -60,12 +60,12 @@ final class OfficeWireCodecTests: XCTestCase {
             ]),
             .tileRequest(seq: 23, docId: "doc-1", keys: []), // an empty key list is a legal (if pointless) request
             // Office Stage B Task 4 — the real edit verbs.
-            .keyEvent(seq: 35, docId: "doc-1", type: .keyInput, charCode: 65, keyCode: 512),
-            .keyEvent(seq: 36, docId: "doc-1", type: .keyUp, charCode: 0, keyCode: 1026),
+            .keyEvent(seq: 35, docId: "doc-1", part: 0, type: .keyInput, charCode: 65, keyCode: 512),
+            .keyEvent(seq: 36, docId: "doc-1", part: 0, type: .keyUp, charCode: 0, keyCode: 1026),
             .keyEventOk(seq: 37, docId: "doc-1"),
-            .mouseEvent(seq: 38, docId: "doc-1", type: .buttonDown, xTwips: 100, yTwips: 200,
+            .mouseEvent(seq: 38, docId: "doc-1", part: 0, type: .buttonDown, xTwips: 100, yTwips: 200,
                         count: 1, buttons: 1, modifiers: 0),
-            .mouseEvent(seq: 39, docId: "doc-1", type: .move, xTwips: -50, yTwips: 0,
+            .mouseEvent(seq: 39, docId: "doc-1", part: 0, type: .move, xTwips: -50, yTwips: 0,
                         count: 0, buttons: 1, modifiers: 0x1000),
             .mouseEventOk(seq: 40, docId: "doc-1"),
             .subscribed(seq: 24, docId: "doc-1", keys: [TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0)]),
@@ -131,8 +131,8 @@ final class OfficeWireCodecTests: XCTestCase {
             "closed": #"{"type":"closed","seq":1,"docId":"d"}"#,
             "saved": #"{"type":"saved","seq":1,"docId":"d","tempPath":"/tmp/p"}"#,
             "saveFailed": #"{"type":"saveFailed","seq":1,"docId":"d","reason":"r"}"#,
-            "keyEvent": #"{"type":"keyEvent","seq":1,"docId":"d","eventType":0,"charCode":65,"keyCode":512}"#,
-            "mouseEvent": #"{"type":"mouseEvent","seq":1,"docId":"d","eventType":0,"xTwips":0,"yTwips":0,"count":1,"buttons":1,"modifiers":0}"#,
+            "keyEvent": #"{"type":"keyEvent","seq":1,"docId":"d","part":0,"eventType":0,"charCode":65,"keyCode":512}"#,
+            "mouseEvent": #"{"type":"mouseEvent","seq":1,"docId":"d","part":0,"eventType":0,"xTwips":0,"yTwips":0,"count":1,"buttons":1,"modifiers":0}"#,
             "keyEventOk": #"{"type":"keyEventOk","seq":1,"docId":"d"}"#,
             "mouseEventOk": #"{"type":"mouseEventOk","seq":1,"docId":"d"}"#,
             "error": #"{"type":"error","seq":1,"reason":"r"}"#,
@@ -181,8 +181,8 @@ final class OfficeWireCodecTests: XCTestCase {
         XCTAssertEqual(OfficeWireFrame.save(seq: 121, docId: "d").seq, 121)
         XCTAssertEqual(OfficeWireFrame.saved(seq: 122, docId: "d", tempPath: "/p").seq, 122)
         XCTAssertEqual(OfficeWireFrame.saveFailed(seq: 123, docId: "d", reason: "r").seq, 123)
-        XCTAssertEqual(OfficeWireFrame.keyEvent(seq: 126, docId: "d", type: .keyInput, charCode: 65, keyCode: 512).seq, 126)
-        XCTAssertEqual(OfficeWireFrame.mouseEvent(seq: 127, docId: "d", type: .buttonDown, xTwips: 0, yTwips: 0,
+        XCTAssertEqual(OfficeWireFrame.keyEvent(seq: 126, docId: "d", part: 0, type: .keyInput, charCode: 65, keyCode: 512).seq, 126)
+        XCTAssertEqual(OfficeWireFrame.mouseEvent(seq: 127, docId: "d", part: 0, type: .buttonDown, xTwips: 0, yTwips: 0,
                                                    count: 1, buttons: 1, modifiers: 0).seq, 127)
         XCTAssertEqual(OfficeWireFrame.keyEventOk(seq: 128, docId: "d").seq, 128)
         XCTAssertEqual(OfficeWireFrame.mouseEventOk(seq: 129, docId: "d").seq, 129)
@@ -229,6 +229,24 @@ final class OfficeWireCodecTests: XCTestCase {
             XCTAssertEqual(reason, "malformed")
         case .frame, .tilePending, .tileHeaderMalformed, .unreadable:
             XCTFail("expected .rejected(seq: 7, reason: \"malformed\")")
+        }
+    }
+
+    /// Fix round 1, F2 — `part` is now a REQUIRED field on `keyEvent`/`mouseEvent`, exactly like
+    /// every other required field on this wire: missing it is "malformed," never a silent default.
+    /// This is the wire-decode-level pin for F2's fix (the store/bridge/LOK-thread half is proven
+    /// live by `OfficeRuntimeLiveTests`' two-part drill).
+    func testKeyEventAndMouseEventMissingPartIsMalformed() {
+        let missingPartKeyEvent = #"{"type":"keyEvent","seq":1,"docId":"d","eventType":0,"charCode":65,"keyCode":512}"#
+        let missingPartMouseEvent = #"{"type":"mouseEvent","seq":1,"docId":"d","eventType":0,"xTwips":0,"yTwips":0,"count":1,"buttons":1,"modifiers":0}"#
+        for line in [missingPartKeyEvent, missingPartMouseEvent] {
+            switch OfficeWireCodec.decodeInbound(line) {
+            case .rejected(let seq, let reason):
+                XCTAssertEqual(seq, 1)
+                XCTAssertEqual(reason, "malformed", "expected malformed for: \(line)")
+            case .frame, .tilePending, .tileHeaderMalformed, .unreadable:
+                XCTFail("expected .rejected(seq: 1, reason: \"malformed\") for: \(line)")
+            }
         }
     }
 

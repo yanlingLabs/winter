@@ -509,6 +509,185 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         _ = host.teardownAllOfficeRuntimesAndStopHelper()
     }
 
+    /// Fix round 1, F2 (CRITICAL) — **the two-part live drill.** Reads `content.xml` out of a real
+    /// saved `.ods` via `/usr/bin/unzip -p`, the same "shell out to a well-understood system tool
+    /// rather than reimplement it" precedent `OfficeEmbedLayoutTests`' own symlink check already
+    /// uses for `find`. Slices the flat XML by sheet name (`<table:table table:name="..."` to the
+    /// next `</table:table>`) — sheets never nest in ODF, so a simple substring search between two
+    /// markers is exact, not a heuristic, for this fixture.
+    private func readODFContentXML(atPath path: String) throws -> String {
+        let unzip = Process()
+        unzip.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+        unzip.arguments = ["-p", path, "content.xml"]
+        let pipe = Pipe()
+        unzip.standardOutput = pipe
+        try unzip.run()
+        unzip.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        return try XCTUnwrap(String(data: data, encoding: .utf8), "content.xml was not valid UTF-8")
+    }
+
+    /// `nil` if `sheetName` is not present at all — a real failure mode this drill wants to FAIL
+    /// loudly on (a two-sheet fixture that reopens with only one sheet is not "sheet 1 unchanged,"
+    /// it is a corrupted save), never silently treated as "nothing to check."
+    private func extractTableXML(_ content: String, sheetName: String) -> String? {
+        let marker = "<table:table table:name=\"\(sheetName)\""
+        guard let start = content.range(of: marker) else { return nil }
+        guard let end = content.range(of: "</table:table>", range: start.upperBound..<content.endIndex) else { return nil }
+        return String(content[start.lowerBound..<end.upperBound])
+    }
+
+    /// Fix round 1, F2 (CRITICAL) — **input is now part-scoped; this is the live proof.** Before
+    /// this fix, `postKeyEvent`/`postMouseEvent` carried no part at all — a keystroke posted while
+    /// viewing sheet 2 silently landed wherever LOK's own internal "current part" happened to be
+    /// (never communicated over this wire, and never necessarily sheet 2), persisted by save, with
+    /// no visible repaint to notice by. Drives through the REAL `OfficeTileCanvasView` (`view
+    /// .mouseDown`/`.keyDown`, exactly like `testTheTypingDrillARealKeyDownThroughTheRealCanvasView
+    /// ReachesLOKAndTheCaretTileRepaints` right above) rather than a raw wire client — a raw
+    /// `client.postKey`/`postMouse` call bypasses `OfficeRuntime.postKeyEvent`'s own `activePart`
+    /// read entirely (it takes `part` as an explicit caller-supplied argument, always `0` in every
+    /// OTHER live test in this file), which is exactly the code path this fix lives in and a
+    /// wire-level-only test would never actually exercise.
+    func testTypingOnSheetTwoLandsOnSheetTwoNotSheetOneThroughSaveAndReopen() async throws {
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
+                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                        + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
+        let vendorRoot = Self.vendorProductSetRoot
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
+                      "LibreOffice vendor tree not present at \(vendorRoot.path) — run "
+                        + "`bun run libreoffice:fetch` from the repo root.")
+        let fixturePath = Self.fixturesRoot.appendingPathComponent("two-sheet.ods").path
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: fixturePath), "two-sheet.ods fixture missing")
+
+        let stateDir = makeScratchDirectory()
+        let directory = SessionDirectory(lister: { [] })
+        let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        host.makeOfficeHelperSupervisor = {
+            OfficeHelperSupervisor(configuration: OfficeHelperSupervisor.Configuration(
+                helperExecutableURL: helperURL,
+                socketDirectory: stateDir,
+                extraArguments: ["--lok-root", vendorRoot.path, "--sandbox-profile", Self.sandboxProfilePath.path]))
+        }
+        let runtime = host.officeRuntime(for: "S1")
+
+        // A WRITABLE copy — the checked-in Fixtures directory is never itself a save target (same
+        // discipline every other live test in this file already follows).
+        let scratchDir = makeScratchDirectory()
+        let docPath = scratchDir.appendingPathComponent("two-part-drill.ods").path
+        try Data(contentsOf: URL(fileURLWithPath: fixturePath)).write(to: URL(fileURLWithPath: docPath))
+
+        runtime.open(docPath)
+        let settled = await waitUntil(timeout: 90) {
+            runtime.stateSnapshot.documents[docPath] != nil || runtime.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(settled, "never settled — phase: \(runtime.stateSnapshot.phase)")
+        guard let doc = runtime.stateSnapshot.documents[docPath] else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("did not open: \(runtime.stateSnapshot.openFailures[docPath] ?? "no reason recorded")")
+        }
+        XCTAssertEqual(doc.parts, 2, "setup: the fixture's own two <table:table> elements — if this "
+                       + "fails, the hand-built fixture itself is the problem, not F2's fix")
+
+        // initialPart: 1 -- sheet 2 (0-indexed) is the ACTIVE part from the very first
+        // `subscribeTiles` call `mount()` fires (`performSubscribe`'s own `runtime.subscribeTiles
+        // (path:part: part, ...)` call, using `self.part` from `initialPart`) — this is what sets
+        // `state.documents[docPath].activePart = 1`, the value F2's fix reads at keystroke time.
+        let model = PanelDocumentTabModel(tabId: "two-part-drill", path: docPath)
+        let view = OfficeTileCanvasView(runtime: runtime, path: docPath, docId: doc.docId,
+                                        sizeTwips: doc.sizeTwips, initialPart: 1, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 512, height: 512)
+        view.mount()
+
+        let zoomPPT = 1000
+        let originKeyPart1 = TileKey(part: 1, zoomPPT: zoomPPT, tileX: 0, tileY: 0)
+        let baselineArrived = await waitUntil(timeout: 30) { runtime.tileStore.tile(docId: doc.docId, key: originKeyPart1) != nil }
+        XCTAssertTrue(baselineArrived, "sheet 2's own baseline (pre-typing) tile never arrived — setup")
+
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 512, height: 512),
+                              styleMask: [.borderless], backing: .buffered, defer: true)
+        window.contentView = view
+        // Same view-local click point the single-part typing drill already proved lands inside A1's
+        // real bounding rect (200, 200 twips at zoomPPT 1000) — this fixture's Sheet2 clones Sheet1's
+        // own column/row geometry verbatim (see two-sheet.ods's own provenance in this task's report),
+        // so the same point lands on Sheet2's A1 too.
+        let clickPoint = NSPoint(x: 10, y: 10)
+        let windowClickPoint = view.convert(clickPoint, to: nil)
+        func makeMouseEvent(_ type: NSEvent.EventType) -> NSEvent {
+            try! XCTUnwrap(NSEvent.mouseEvent(with: type, location: windowClickPoint, modifierFlags: [],
+                                              timestamp: 0, windowNumber: window.windowNumber, context: nil,
+                                              eventNumber: 0, clickCount: 1, pressure: 1))
+        }
+        func makeKeyEvent(_ type: NSEvent.EventType, characters: String, keyCode: UInt16) -> NSEvent {
+            try! XCTUnwrap(NSEvent.keyEvent(with: type, location: .zero, modifierFlags: [], timestamp: 0,
+                                            windowNumber: window.windowNumber, context: nil, characters: characters,
+                                            charactersIgnoringModifiers: characters, isARepeat: false,
+                                            keyCode: keyCode))
+        }
+
+        view.mouseDown(with: makeMouseEvent(.leftMouseDown))
+        view.mouseUp(with: makeMouseEvent(.leftMouseUp))
+        // "T4EDIT" — the SAME marker string and AppKit-keyCode table `postRealEdit` below uses (real
+        // physical keyCodes this time, since `forwardKeyEvent` runs these through `OfficeInputCodes`,
+        // not a hand-picked `com.sun.star.awt.Key` value): T=17, 4=21, E=14, D=2, I=34 (verified in
+        // `OfficeInputCodesTests`).
+        let marker = "T4EDIT"
+        let physicalKeyCodes: [Character: UInt16] = ["T": 17, "4": 21, "E": 14, "D": 2, "I": 34]
+        for character in marker {
+            let keyCode = try XCTUnwrap(physicalKeyCodes[character])
+            let characters = String(character)
+            view.keyDown(with: makeKeyEvent(.keyDown, characters: characters, keyCode: keyCode))
+            view.keyUp(with: makeKeyEvent(.keyUp, characters: characters, keyCode: keyCode))
+        }
+        // Return — commits the pending cell edit.
+        view.keyDown(with: makeKeyEvent(.keyDown, characters: "\r", keyCode: 36))
+        view.keyUp(with: makeKeyEvent(.keyUp, characters: "\r", keyCode: 36))
+
+        await runtime.drainInputChainForTesting()
+
+        let becameDirty = await waitUntil(timeout: 15) { runtime.stateSnapshot.documents[docPath]?.dirty == true }
+        XCTAssertTrue(becameDirty, "the real edit's own ModifiedStatus callback never landed")
+
+        let beforeSaveStat = officeFileStat(atPath: docPath)
+        runtime.save(docPath)
+        let fileChanged = await waitUntil(timeout: 30) { officeFileStat(atPath: docPath) != beforeSaveStat }
+        XCTAssertTrue(fileChanged, "the save never landed on disk")
+        XCTAssertNil(runtime.stateSnapshot.documentBanners[docPath], "no save-failed banner")
+
+        // The direct proof: read the SAVED file's own XML back, off disk — not the in-memory model,
+        // which cannot distinguish "landed on the right part" from "landed on some part."
+        let content = try readODFContentXML(atPath: docPath)
+        let sheet1XML = try XCTUnwrap(extractTableXML(content, sheetName: "Sheet1"), "Sheet1 must still exist")
+        let sheet2XML = try XCTUnwrap(extractTableXML(content, sheetName: "Sheet2"), "Sheet2 must still exist")
+        XCTAssertTrue(sheet2XML.contains(marker), "the typed marker must appear on SHEET 2 — this is "
+                      + "F2's fix: input now carries the SAME part the viewport was showing")
+        XCTAssertFalse(sheet1XML.contains(marker), "the typed marker must NOT leak onto sheet 1 — "
+                      + "the pre-fix failure mode this drill exists to close")
+        XCTAssertTrue(sheet1XML.contains("NORMA GATE"), "sheet 1's own original seed content must be "
+                      + "completely untouched, not merely marker-free")
+
+        view.unmount()
+        runtime.close(docPath)
+        XCTAssertNil(runtime.stateSnapshot.documents[docPath], "close is synchronous in the reducer's own state")
+
+        // Reopen — the round-trip half: the saved file is still a genuinely valid two-part document,
+        // not merely a file that happens to contain the right string somewhere.
+        runtime.open(docPath)
+        let reopened = await waitUntil(timeout: 90) {
+            runtime.stateSnapshot.documents[docPath] != nil || runtime.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(reopened, "the saved file never reopened — phase: \(runtime.stateSnapshot.phase)")
+        guard let reopenedDoc = runtime.stateSnapshot.documents[docPath] else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("reopen failed — the save corrupted the file: "
+                    + "\(runtime.stateSnapshot.openFailures[docPath] ?? "no reason recorded")")
+        }
+        XCTAssertEqual(reopenedDoc.parts, 2, "the saved file is still genuinely two-part after reopening")
+
+        runtime.close(docPath)
+        _ = host.teardownAllOfficeRuntimesAndStopHelper()
+    }
+
     /// Office Stage B Task 4 — the shared real-edit helper both migrated tests below use: a real
     /// mouse click (positions LOK's own cursor/selection — twips (100, 100), inside both A1's own
     /// real bounding rect for a spreadsheet AND the very start of a text document's body,
@@ -520,8 +699,8 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// with `KEY_SHIFT` (`0x1000`) — matching how a real user actually holds Shift to type them,
     /// the same packed-modifier convention `OfficeInputCodes`'s own header derives at length.
     private func postRealEdit(client: OfficeHelperClient, docId: String, marker: String) async throws {
-        try await client.postMouse(docId: docId, type: .buttonDown, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
-        try await client.postMouse(docId: docId, type: .buttonUp, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await client.postMouse(docId: docId, part: 0, type: .buttonDown, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await client.postMouse(docId: docId, part: 0, type: .buttonUp, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
         let keyCodes: [Character: Int] = [
             "T": 531 | 0x1000, "E": 516 | 0x1000, "D": 515 | 0x1000, "I": 520 | 0x1000, "4": 260,
         ]
@@ -529,14 +708,14 @@ final class OfficeRuntimeLiveTests: XCTestCase {
             let keyCode = try XCTUnwrap(keyCodes[character], "postRealEdit's own marker text used a "
                                         + "character with no test-local keyCode: \(character)")
             let charCode = try XCTUnwrap(character.asciiValue.map(Int.init))
-            try await client.postKey(docId: docId, type: .keyInput, charCode: charCode, keyCode: keyCode)
-            try await client.postKey(docId: docId, type: .keyUp, charCode: charCode, keyCode: keyCode)
+            try await client.postKey(docId: docId, part: 0, type: .keyInput, charCode: charCode, keyCode: keyCode)
+            try await client.postKey(docId: docId, part: 0, type: .keyUp, charCode: charCode, keyCode: keyCode)
         }
         // Return — commits a pending Calc cell edit (Calc's own semantics); a harmless paragraph
         // break for Writer, which does not change whether the document is now dirty or whether its
         // rendered pixels differ, this test's own two proofs either way.
-        try await client.postKey(docId: docId, type: .keyInput, charCode: 0, keyCode: 1280)
-        try await client.postKey(docId: docId, type: .keyUp, charCode: 0, keyCode: 1280)
+        try await client.postKey(docId: docId, part: 0, type: .keyInput, charCode: 0, keyCode: 1280)
+        try await client.postKey(docId: docId, part: 0, type: .keyUp, charCode: 0, keyCode: 1280)
     }
 
     /// **Office Stage B Task 4 — migrated off the DEBUG-only `debugEdit` door, now that a real one

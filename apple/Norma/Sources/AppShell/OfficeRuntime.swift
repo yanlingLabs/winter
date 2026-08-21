@@ -812,8 +812,11 @@ final class OfficeRuntime: ObservableObject {
         /// on the SAME terms as every other Driver call — see `OfficeRuntime.postKeyEvent`'s own
         /// header for why ORDERING across this queue (not merely eventual delivery) is load-bearing
         /// here in a way none of the other Driver calls need.
-        var postKey: (_ docId: String, _ type: OfficeKeyEventType, _ charCode: Int, _ keyCode: Int) async -> Void
-        var postMouse: (_ docId: String, _ type: OfficeMouseEventType, _ xTwips: Int64, _ yTwips: Int64,
+        /// Fix round 1, F2 — `part` added. See `OfficeRuntime.postKeyEvent`'s own header for where
+        /// it is resolved (`activePart`, at enqueue time, the same reducer-owned value
+        /// `subscribeTiles` already scopes painting by).
+        var postKey: (_ docId: String, _ part: Int, _ type: OfficeKeyEventType, _ charCode: Int, _ keyCode: Int) async -> Void
+        var postMouse: (_ docId: String, _ part: Int, _ type: OfficeMouseEventType, _ xTwips: Int64, _ yTwips: Int64,
                         _ count: Int, _ buttons: Int, _ modifiers: Int) async -> Void
         /// **Office Stage B Task 2b — the shared helper's own `--state-path`.** A plain stored
         /// value, unlike every sibling above: it is a FACT about the shared supervisor's
@@ -1051,12 +1054,29 @@ final class OfficeRuntime: ObservableObject {
     /// the ORIGINAL docId it was meant for, which the helper answers `docNotOpen` for — logged,
     /// harmless, never misdirected at whatever NEW docId happens to occupy `path` by the time this
     /// runs.
+    ///
+    /// **Fix round 1, F2 (CRITICAL) — `part` resolved the SAME way, at the SAME moment, from the
+    /// SAME `state.documents[path]` read as `docId` above.** Before this fix, input carried no part
+    /// at all — a keystroke posted while viewing sheet 2 could silently land on whatever part LOK's
+    /// own internal state happened to have current (never communicated over this wire), persisted by
+    /// save, with no visible repaint to notice by; painting was already part-scoped
+    /// (`subscribeTiles`/`.subscribe`'s own `part` argument), input was the live gap. `activePart`
+    /// is the SAME reducer-owned value `.subscribeRequested` already writes and `.subscribe` already
+    /// reads — resolving it here, at enqueue time, extends the identical stale-keystroke reasoning
+    /// `docId` already gets: a keystroke aimed at part 1 stays aimed at part 1 even if the user
+    /// switches parts before this keystroke's own turn in the chain arrives — it was typed while
+    /// part 1 was on screen, and that is where it belongs, not wherever the viewport has since moved
+    /// to. (There is no analogous "part closed/reloaded out from under it" case the way a `docId`
+    /// can go stale — a part number is just an index; the helper's own `docNotOpen` still covers the
+    /// `docId`-level staleness this shares with `postKeyEvent`'s existing guard.)
     func postKeyEvent(path: String, type: OfficeKeyEventType, charCode: Int, keyCode: Int) {
-        guard let docId = state.documents[path]?.docId else { return }
+        guard let doc = state.documents[path] else { return }
+        let docId = doc.docId
+        let part = doc.activePart
         let previous = inputChainTail
         inputChainTail = Task { [driver] in
             _ = await previous.value
-            await driver.postKey(docId, type, charCode, keyCode)
+            await driver.postKey(docId, part, type, charCode, keyCode)
         }
     }
 
@@ -1064,11 +1084,13 @@ final class OfficeRuntime: ObservableObject {
     /// `postKeyEvent`'s own header for the full reasoning; this is not independently re-explained.
     func postMouseEvent(path: String, type: OfficeMouseEventType, xTwips: Int64, yTwips: Int64,
                         count: Int, buttons: Int, modifiers: Int) {
-        guard let docId = state.documents[path]?.docId else { return }
+        guard let doc = state.documents[path] else { return }
+        let docId = doc.docId
+        let part = doc.activePart
         let previous = inputChainTail
         inputChainTail = Task { [driver] in
             _ = await previous.value
-            await driver.postMouse(docId, type, xTwips, yTwips, count, buttons, modifiers)
+            await driver.postMouse(docId, part, type, xTwips, yTwips, count, buttons, modifiers)
         }
     }
 
