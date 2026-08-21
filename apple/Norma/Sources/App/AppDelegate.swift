@@ -520,7 +520,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         appWindow = controller
         installEditorSaveMenuItem(host: host)
-        installOfficeZoomMenuItems()
+        installOfficeCanvasMenuItems()
         controller.summon(navigatingTo: destination)
     }
 
@@ -588,13 +588,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// to reuse across calls — `OfficeCanvasMenuInstaller.install` is a pure function of the menu
     /// tree, idempotent by matching on ACTION SELECTOR (see its own header for why `target === self`,
     /// `EditorSaveMenuCommand`'s own comparison, does not apply here).
-    private func installOfficeZoomMenuItems() {
+    ///
+    /// **Review fix round 1 (I-1) — renamed from `installOfficeZoomMenuItems`, now a SECOND, separate
+    /// call**: `OfficeCanvasMenuInstaller.installEditActionsIfAbsent` (the belt for Copy/Cut/Paste/
+    /// Undo/Redo — see that method's own header for why it is a distinct call, not folded into
+    /// `install`). Same timing/gating as the zoom install right above it.
+    private func installOfficeCanvasMenuItems() {
         guard !Self.isRunningUnitTests else { return }
         guard let mainMenu = NSApp.mainMenu else {
-            OrbDebug.log("office zoom: no main menu to install Zoom In/Out/Actual Size into")
+            OrbDebug.log("office menu items: no main menu to install Zoom/Edit fallbacks into")
             return
         }
         OfficeCanvasMenuInstaller.install(in: mainMenu)
+        OfficeCanvasMenuInstaller.installEditActionsIfAbsent(in: mainMenu)
     }
 
     /// app-shell T9: the floating panel's click-through door — the exact call shape

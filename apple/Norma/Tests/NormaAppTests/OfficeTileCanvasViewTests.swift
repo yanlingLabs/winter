@@ -2098,6 +2098,34 @@ final class OfficeTileCanvasViewTests: XCTestCase {
         view.unmount()
     }
 
+    /// **Review fix round 1 (I-3) — the Calc case `selectionRectsTwips` alone misses.** A plain
+    /// click on a Calc cell (no drag) never populates `TEXT_SELECTION` — T5's own probe found Calc
+    /// fires the bare `"EMPTY"` sentinel for exactly this, folded to `[]` by the parser — while
+    /// `CELL_CURSOR` is what actually carries the live cell state. Before this fix,
+    /// `validateMenuItem` reported Copy/Cut DISABLED in precisely the state commit `73f89c9b`'s own
+    /// live drill proves `clipboardCopy` genuinely works in (a plain click, no drag) — a real,
+    /// reachable bug this test pins shut.
+    func testValidateMenuItemGatesCopyAndCutOnALiveCellCursorToo() async {
+        let (runtime, _) = await makeOpenedRuntime(documentType: .spreadsheet)
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        let copyItem = NSMenuItem(title: "Copy", action: #selector(OfficeTileCanvasView.copy(_:)), keyEquivalent: "")
+        let cutItem = NSMenuItem(title: "Cut", action: #selector(OfficeTileCanvasView.cut(_:)), keyEquivalent: "")
+
+        XCTAssertFalse(view.validateMenuItem(copyItem), "no cell cursor yet — Copy must start disabled")
+
+        runtime.handle(documentEvent: .cellCursor(.at(rectTwips: OfficeTwipsRect(x: 0, y: 0, width: 1265, height: 254),
+                                                       column: 0, row: 0)),
+                       docId: "doc-1")
+        XCTAssertTrue(view.validateMenuItem(copyItem), "a live cell cursor (`.at`) must enable Copy "
+                      + "even with `selectionRectsTwips` empty — the plain-click Calc case")
+        XCTAssertTrue(view.validateMenuItem(cutItem), "same for Cut")
+
+        view.unmount()
+    }
+
     func testValidateMenuItemGatesPasteOnPasteboardContent() async {
         let pasteboard = NSPasteboard.general
         let priorContents = pasteboard.string(forType: .string)

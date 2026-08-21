@@ -3307,9 +3307,14 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         let marker = "UNDO"
         try await postRawUppercaseMarker(client: client, docId: doc.docId, marker: marker)
 
+        // Review fix round 1, I-4's own spirit swept here too (not named explicitly for this test,
+        // but the identical defect class): every `waitUntil` below is now captured and asserted,
+        // never discarded — a silent save timeout must fail loud, not read back stale bytes that
+        // happen to satisfy (or fail) the next content check for the wrong reason.
         var beforeStat = officeFileStat(atPath: docPath)
         runtime.save(docPath)
-        _ = await waitUntil(timeout: 30) { officeFileStat(atPath: docPath) != beforeStat }
+        var saveLanded = await waitUntil(timeout: 30) { officeFileStat(atPath: docPath) != beforeStat }
+        XCTAssertTrue(saveLanded, "the setup save never landed on disk")
         let bodyAfterTyping = strippedODFBodyText(try readODFContentXML(atPath: docPath))
         XCTAssertTrue(bodyAfterTyping.contains(marker), "setup: the marker must actually be "
                       + "present before this drill starts undoing anything — got: "
@@ -3322,7 +3327,8 @@ final class OfficeRuntimeLiveTests: XCTestCase {
             undosTaken += 1
             beforeStat = officeFileStat(atPath: docPath)
             runtime.save(docPath)
-            _ = await waitUntil(timeout: 30) { officeFileStat(atPath: docPath) != beforeStat }
+            saveLanded = await waitUntil(timeout: 30) { officeFileStat(atPath: docPath) != beforeStat }
+            XCTAssertTrue(saveLanded, "undo #\(undosTaken)'s own save never landed on disk")
             bodyAfterUndo = strippedODFBodyText(try readODFContentXML(atPath: docPath))
         }
         XCTAssertFalse(bodyAfterUndo.contains(marker), "the marker must be fully gone after at "
@@ -3336,7 +3342,8 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         }
         beforeStat = officeFileStat(atPath: docPath)
         runtime.save(docPath)
-        _ = await waitUntil(timeout: 30) { officeFileStat(atPath: docPath) != beforeStat }
+        saveLanded = await waitUntil(timeout: 30) { officeFileStat(atPath: docPath) != beforeStat }
+        XCTAssertTrue(saveLanded, "the post-redo save never landed on disk")
         let bodyAfterRedo = strippedODFBodyText(try readODFContentXML(atPath: docPath))
         XCTAssertTrue(bodyAfterRedo.contains(marker), "redo must restore the typed text — got: "
                       + "\"\(bodyAfterRedo)\"")
@@ -3426,7 +3433,10 @@ final class OfficeRuntimeLiveTests: XCTestCase {
 
         var beforeStat = officeFileStat(atPath: docPath)
         runtime.save(docPath)
-        _ = await waitUntil(timeout: 30) { officeFileStat(atPath: docPath) != beforeStat }
+        var saveLanded = await waitUntil(timeout: 30) { officeFileStat(atPath: docPath) != beforeStat }
+        XCTAssertTrue(saveLanded, "the post-A save never landed on disk — load-bearing: a silent "
+                      + "timeout here would leave STALE (pre-A) bytes that the assertion below "
+                      + "cannot distinguish from a genuine failure")
         let bodyAfterA = strippedODFBodyText(try readODFContentXML(atPath: docPath))
         XCTAssertTrue(bodyAfterA.contains("AAAA"), "view A's own edit must land before this drill "
                       + "proceeds to view B — got: \"\(bodyAfterA)\"")
@@ -3444,7 +3454,9 @@ final class OfficeRuntimeLiveTests: XCTestCase {
 
         beforeStat = officeFileStat(atPath: docPath)
         runtime.save(docPath)
-        _ = await waitUntil(timeout: 30) { officeFileStat(atPath: docPath) != beforeStat }
+        saveLanded = await waitUntil(timeout: 30) { officeFileStat(atPath: docPath) != beforeStat }
+        XCTAssertTrue(saveLanded, "the post-B save never landed on disk — same load-bearing "
+                      + "reason as the post-A save above")
         let bodyAfterB = strippedODFBodyText(try readODFContentXML(atPath: docPath))
         XCTAssertTrue(bodyAfterB.contains("AAAA"), "view A's edit must still be there after view "
                       + "B's own edit — got: \"\(bodyAfterB)\"")
@@ -3454,9 +3466,23 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         // THE drill: undo via view A's own primary-view door.
         try await client.undo(docId: doc.docId)
 
+        // **Review fix round 1, I-4 — the load-bearing save.** A discarded `_ = await waitUntil`
+        // here (this test's own original shape) would make a TIMED-OUT save indistinguishable from
+        // the REFUSED/NO-OP finding this drill exists to prove: both leave `bodyAfterUndo` reading
+        // the UNCHANGED bodyAfterB bytes (both markers present), for entirely different reasons —
+        // one a real LOK characterization, the other this test's own plumbing silently not
+        // running. Every other save+dump step in this drill already fails loud on its own content
+        // assertion if ITS save stalls (stale bytes lack the marker the very next line checks for)
+        // — this is the ONE save whose stale-bytes case is BY CONSTRUCTION indistinguishable from
+        // a passing outcome, so it is the one that must fail loud on the wait itself, not just on
+        // content.
         beforeStat = officeFileStat(atPath: docPath)
         runtime.save(docPath)
-        _ = await waitUntil(timeout: 30) { officeFileStat(atPath: docPath) != beforeStat }
+        saveLanded = await waitUntil(timeout: 30) { officeFileStat(atPath: docPath) != beforeStat }
+        XCTAssertTrue(saveLanded, "the post-undo save never landed on disk — without this "
+                      + "assertion, a silent save timeout here would read back the SAME bytes as "
+                      + "bodyAfterB and be indistinguishable from the REFUSED/NO-OP finding this "
+                      + "drill exists to characterize")
         let bodyAfterUndo = strippedODFBodyText(try readODFContentXML(atPath: docPath))
 
         let aSurvived = bodyAfterUndo.contains("AAAA")
@@ -3492,6 +3518,122 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         XCTAssertTrue(bSurvived, "PINNED FINDING: view B's edit ALSO survives undo-via-A — "
                       + "REFUSED/NO-OP, not SHARED/LIFO and not per-view isolation — got body: "
                       + "\"\(bodyAfterUndo)\"")
+
+        _ = host.teardownAllOfficeRuntimesAndStopHelper()
+    }
+
+    /// Office Stage B Task 6, fix round 1 (I-2) — **the discriminator the coordinator's review
+    /// demanded.** The two-view drill above observed `(aSurvived: true, bSurvived: true)` after
+    /// "edit A, edit B, undo via A" and read it as REFUSED/NO-OP — LO declining to undo a foreign
+    /// view's top item. But that SAME observable signature is also exactly what a totally
+    /// different, more severe finding would produce: undo-via-A simply INOPERATIVE the instant a
+    /// second view exists AT ALL, with no regard to who made the top edit. The two readings are
+    /// indistinguishable from the original drill's own data alone — this test is the pair member
+    /// that tells them apart.
+    ///
+    /// **The design**: mint view B (the two-writer groundwork itself), but never post a single
+    /// edit through it — edit ONLY via view A, then undo via A. If A's OWN edit is cleanly removed
+    /// here, undo-via-A is NOT broken by B's mere existence — it specifically stood down when B's
+    /// edit was the most recent action, which is what "refused a foreign view's top item" actually
+    /// means, and the original drill's REFUSED/NO-OP reading is the pair's joint conclusion. If
+    /// A's edit ALSO survives here, undo-via-A is inoperative merely because a second view exists
+    /// — a materially different and more limiting finding for Stage C, and the original drill's
+    /// own characterization needs rewriting to say so.
+    ///
+    /// Same sequencing discipline as the paired drill (save+dump proves the edit landed before
+    /// undo ever runs; every wait's own success is asserted, never discarded — review fix round 1,
+    /// I-4's own lesson applied here from the start rather than retrofitted).
+    func testUndoViaAWorksNormallyWhenViewBExistsButWasNeverEdited() async throws {
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
+                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                        + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
+        let vendorRoot = Self.vendorProductSetRoot
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
+                      "LibreOffice vendor tree not present at \(vendorRoot.path) — run "
+                        + "`bun run libreoffice:fetch` from the repo root.")
+        let fixturePath = Self.fixturesRoot.appendingPathComponent("gate.odt").path
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: fixturePath), "gate.odt fixture missing")
+
+        let stateDir = makeScratchDirectory()
+        let directory = SessionDirectory(lister: { [] })
+        let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        host.makeOfficeHelperSupervisor = {
+            OfficeHelperSupervisor(configuration: OfficeHelperSupervisor.Configuration(
+                helperExecutableURL: helperURL,
+                socketDirectory: stateDir,
+                extraArguments: ["--lok-root", vendorRoot.path, "--sandbox-profile", Self.sandboxProfilePath.path]))
+        }
+        let runtime = host.officeRuntime(for: "S1")
+
+        let scratchDir = makeScratchDirectory()
+        let docPath = scratchDir.appendingPathComponent("two-view-discriminator-drill.odt").path
+        try Data(contentsOf: URL(fileURLWithPath: fixturePath)).write(to: URL(fileURLWithPath: docPath))
+
+        runtime.open(docPath)
+        let settled = await waitUntil(timeout: 90) {
+            runtime.stateSnapshot.documents[docPath] != nil || runtime.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(settled, "never settled — phase: \(runtime.stateSnapshot.phase)")
+        guard let doc = runtime.stateSnapshot.documents[docPath] else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("did not open: \(runtime.stateSnapshot.openFailures[docPath] ?? "no reason recorded")")
+        }
+        guard let client = host.officeHelperSupervisor?.client else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("no live client to drive this drill through")
+        }
+
+        // Mint B — present, but NEVER edited. The one variable this test isolates against the
+        // paired drill above.
+        let viewIdB = try await client.createAgentView(docId: doc.docId)
+        XCTAssertGreaterThanOrEqual(viewIdB, 0, "a real LOK view id")
+
+        // Edit via A only.
+        try await client.postMouse(docId: doc.docId, part: 0, type: .buttonDown, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await client.postMouse(docId: doc.docId, part: 0, type: .buttonUp, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await postRawUppercaseMarker(client: client, docId: doc.docId, marker: "SOLO")
+
+        let beforeEditStat = officeFileStat(atPath: docPath)
+        runtime.save(docPath)
+        let editSaveLanded = await waitUntil(timeout: 30) { officeFileStat(atPath: docPath) != beforeEditStat }
+        XCTAssertTrue(editSaveLanded, "the post-edit save never landed on disk")
+        let bodyAfterEdit = strippedODFBodyText(try readODFContentXML(atPath: docPath))
+        XCTAssertTrue(bodyAfterEdit.contains("SOLO"), "view A's own edit must land before undo runs "
+                      + "— got: \"\(bodyAfterEdit)\"")
+
+        // THE discriminator: undo via A, with B present but never having touched the document.
+        try await client.undo(docId: doc.docId)
+
+        let beforeUndoStat = officeFileStat(atPath: docPath)
+        runtime.save(docPath)
+        let undoSaveLanded = await waitUntil(timeout: 30) { officeFileStat(atPath: docPath) != beforeUndoStat }
+        XCTAssertTrue(undoSaveLanded, "the post-undo save never landed on disk — load-bearing for "
+                      + "the SAME reason as the paired drill's own I-4 fix: a silent timeout here "
+                      + "reads back the SAME (unchanged) bytes a genuine undo-inoperative finding "
+                      + "would also produce")
+        let bodyAfterUndo = strippedODFBodyText(try readODFContentXML(atPath: docPath))
+        let soloSurvived = bodyAfterUndo.contains("SOLO")
+
+        NSLog("[T6 discriminator] undo via A with B present-but-untouched: SOLO "
+              + "\(soloSurvived ? "SURVIVED (undo did not fire)" : "was REMOVED (undo fired normally)") "
+              + "— body after undo: \"\(bodyAfterUndo)\"")
+
+        // PINNED, from a real run against real LOK (see task-6-report.md's headline section for
+        // the pair's joint conclusion): undo via A REMOVES A's own solo edit cleanly when B exists
+        // but was never edited. This discriminates the paired drill's REFUSED/NO-OP reading
+        // cleanly: undo-via-A is NOT broken merely by a second view's EXISTENCE — it specifically
+        // stands down when a FOREIGN view's edit is the most recent action on the (apparently
+        // document-scoped, per this pair) undo stack. The paired drill's own REFUSED/NO-OP
+        // characterization is confirmed, not merely asserted — this is the second, independent
+        // data point that makes it a characterization rather than a single unreplicated
+        // observation.
+        XCTAssertFalse(soloSurvived, "PINNED FINDING: undo via A must cleanly remove A's OWN solo "
+                      + "edit when B exists but was never edited — if this fails, undo-via-A is "
+                      + "inoperative merely because a second view exists, and the paired drill's "
+                      + "REFUSED/NO-OP reading is WRONG (the real finding would be "
+                      + "undo-inoperative-with-second-view-present, not a foreign-edit refusal) — "
+                      + "got body: \"\(bodyAfterUndo)\"")
 
         _ = host.teardownAllOfficeRuntimesAndStopHelper()
     }

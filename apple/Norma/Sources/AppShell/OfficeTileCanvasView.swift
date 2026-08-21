@@ -1041,10 +1041,28 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost, NSTextInputC
     /// transcript already saw `.uno:Undo` in that cascade, task-2-report.md) — named here as a
     /// disclosed follow-up, not built, matching this task's own scope (`undo(_:)`/`redo(_:)` must
     /// WORK; a precise enabled/disabled reflection of LOK's own stack state is a later refinement).
+    /// **Review fix round 1 (I-3) — the Copy/Cut gate now also accepts a live Calc cell cursor.**
+    /// `selectionRectsTwips` alone missed a real, common state: a Calc cell selected by a plain
+    /// click (no drag) never populates `TEXT_SELECTION` at all — T5's own probe found Calc's own
+    /// `TEXT_SELECTION` fires its undocumented bare `"EMPTY"` sentinel for exactly this case,
+    /// which `OfficeDocumentEvent`'s parser folds to `[]`, same as Writer's ordinary "no selection"
+    /// shape — while `CELL_CURSOR` is what actually carries the live cell state. This was a
+    /// concrete, proven-reachable bug, not a hypothetical: commit `73f89c9b`'s own
+    /// `testClipboardCopyOnACalcDocumentExercisesTheTypeGatedSetPartBranch` drives EXACTLY this
+    /// state (a plain click on A1, no drag) and its `clipboardCopy` call genuinely returns real
+    /// content — this gate, unfixed, would have reported Copy/Cut as DISABLED the whole time.
+    /// `cellCursor != nil` covers both of `OfficeCellCursor`'s own cases (`.at`/`.empty`) — a
+    /// disclosed, deliberate widening (`.empty` is LOK's own "in-cell edit mode" sentinel per T5's
+    /// probe, not literally "a cell is selected"), matching the SAME "reachability is close enough
+    /// to correct, not a perfect LOK-state mirror" posture this gate's own header already states
+    /// for Undo/Redo — a false-positive-enabled Copy on an empty cell is a copy of `""`, harmless;
+    /// the bug this fixes (false-negative-DISABLED Copy on a real selection) was the one that
+    /// actually broke a real, tested, working feature.
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
         case #selector(copy(_:)), #selector(cut(_:)):
-            return !runtime.cursorStore.state(docId: docId).selectionRectsTwips.isEmpty
+            let state = runtime.cursorStore.state(docId: docId)
+            return !state.selectionRectsTwips.isEmpty || state.cellCursor != nil
         case #selector(paste(_:)):
             return NSPasteboard.general.string(forType: .string) != nil
         default:
