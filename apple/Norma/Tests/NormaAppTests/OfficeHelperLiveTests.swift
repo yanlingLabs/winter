@@ -877,39 +877,43 @@ final class OfficeHelperLiveTests: XCTestCase {
                 + "state-changed observed=\(anyStateChangedObserved), total raw lines=\(rawLines.count)")
     }
 
-    // MARK: - Task 4 PROBE: does postKeyEvent's effect apply synchronously, or does it need a pump?
+    // MARK: - Task 4, criteria 1+2+3: a real edit's raw INVALIDATE_TILES, its rects->keys
+    // translation, and the resulting generation bump — all against ONE real edit, one still-open
+    // document (spawning a fresh sandboxed helper is this file's expensive part; combining what
+    // naturally shares one edit keeps the suite's wall-clock reasonable without weakening any one
+    // criterion's own assertion).
 
-    /// **Office Stage B Task 4 — empirical pre-flight, before any of the six criteria are built.**
-    /// `SfxLokHelper::postKeyEventAsync` (`sfx2/source/view/lokhelper.cxx`, read against the actual
-    /// LibreOffice core source) branches on `vcl::lok::isUnipoll()`: in unipoll mode the event
-    /// dispatches DIRECTLY and synchronously (`LOKPostAsyncEvent` called inline); otherwise it is
-    /// queued via `Application::PostUserEvent` for VCL's own event loop to drain later — and
-    /// `LOKBridge` never calls `runLoop` (the ONE thing that flips `isUnipoll()` true), so on paper
-    /// this helper should be in the QUEUED branch. Nothing in this codebase's `LOKDedicatedThread`
-    /// runs anything resembling `Application::Yield()`/`Scheduler::ProcessEventsToIdle()`. Whether
-    /// that queued event ever actually applies — immediately, on some later incidental LOK call, or
-    /// never — is NOT something to reason about further from source alone (this repo's own house
-    /// lesson: capture REAL callback payloads before writing parsers, applied here to real EFFECTS
-    /// before writing six tests that assume one). This probe answers it directly.
-    func testPostKeyEventProbeDoesItsEffectApplySynchronouslyOrDoesItNeedAFollowUpLOKCall() async throws {
+    /// **Methodological note, preserved from this test's own earlier probe form.** The FIRST attempt
+    /// opened `gate.ods` directly from the checked-in fixtures directory and observed NOTHING — no
+    /// `INVALIDATE_TILES`, `ModifiedStatus` staying `false` — which read, on paper, like LOK's own
+    /// unipoll/event-queueing model (`SfxLokHelper::postKeyEventAsync`, LibreOffice core source,
+    /// read directly) might require a pump this dedicated-thread architecture never runs (`LOKBridge`
+    /// never calls `runLoop`, the one thing that flips `vcl::lok::isUnipoll()` true). That theory was
+    /// WRONG: the real cause was T2's own already-documented trap — a document opened from OUTSIDE
+    /// `--state-path`, under this sandboxed helper, loads READ-ONLY (`LOKBridge.swift`'s
+    /// `disableDocumentLockFile` header has the full account; `paste()`/`postKeyEvent` both still
+    /// "succeed" against the in-memory model, but the modified flag can never flip against a
+    /// read-only medium). Against a properly STAGED (inside `--state-path`) writable copy, a posted
+    /// key applies promptly, with NO pump needed — proven by every assertion below, none of which
+    /// needed a follow-up "unrelated LOK call" to make anything happen.
+    func testARealEditFiresInvalidateTilesTranslatesToTheSameKeysTheStoreWouldAndBumpsTheGeneration() async throws {
         try skipUnlessVendorPresent()
         let helper = try await spawnLiveHelper(captureStderr: true)
 
-        var observedPushes: [(String, OfficeDocumentEvent)] = []
-        let observedLock = NSLock()
-        helper.client.onDocumentEvent = { docId, event in
-            observedLock.lock(); observedPushes.append((docId, event)); observedLock.unlock()
+        var invalidatedEventPushes: [(rects: [OfficeTwipsRect], part: Int)] = []
+        var invalidatedKeyPushes: [[TileKey]] = []
+        let pushLock = NSLock()
+        helper.client.onDocumentEvent = { _, event in
+            guard case .invalidated(let rects, let part) = event else { return }
+            pushLock.lock(); invalidatedEventPushes.append((rects, part)); pushLock.unlock()
+        }
+        helper.client.onInvalidated = { _, _, keys in
+            pushLock.lock(); invalidatedKeyPushes.append(keys); pushLock.unlock()
         }
 
-        // T2's own root-caused finding (LOKBridge.swift's `disableDocumentLockFile` header): a
-        // document opened from OUTSIDE `--state-path`, under this sandboxed helper (the default —
-        // `spawnLiveHelper`'s own `sandboxProfilePath` default), loads READ-ONLY: the write fence
-        // denies the SfxMedium write-classed open the sandbox itself blocks for any path outside
-        // `--state-path`, not merely a Unix-permissions question a plain `chmod`/scratch-dir copy
-        // would fix — `paste()` still "succeeds" against the in-memory model but the modified flag
-        // can never flip, T2b's own resolved bug. The copy must land INSIDE this spawned helper's
-        // OWN `--state-path` (`helper.stateDir`), mirroring `OfficeRuntime.stageDocument`'s real
-        // staging directory, or this probe reproduces exactly that trap for an EDIT probe.
+        // T2's own root-caused finding — see this test's own header. The copy must land INSIDE this
+        // spawned helper's OWN `--state-path` (`helper.stateDir`), mirroring
+        // `OfficeRuntime.stageDocument`'s real staging directory.
         let stagedPath = helper.stateDir.appendingPathComponent("docs", isDirectory: true)
             .appendingPathComponent("gate-writable.ods").path
         try FileManager.default.createDirectory(
@@ -917,67 +921,227 @@ final class OfficeHelperLiveTests: XCTestCase {
         try Data(contentsOf: Self.fixturesRoot.appendingPathComponent("gate.ods")).write(to: URL(fileURLWithPath: stagedPath))
 
         let docId = UUID().uuidString
-        let opened = try await helper.client.open(docId: docId, path: stagedPath)
-        print("[postKey probe] opened a writable gate.ods copy staged inside --state-path: type=\(opened.type) parts=\(opened.parts)")
+        _ = try await helper.client.open(docId: docId, path: stagedPath)
 
-        // Round 1 (this test's original hypothesis): paint the origin tile FIRST — establishing a
-        // real view/viewport before any input, exactly the order production always has (the canvas
-        // cannot exist, let alone accept a click/keystroke, before it has rendered at least once).
-        try await helper.client.requestTiles(docId: docId, keys: [TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0)])
-        try? await Task.sleep(nanoseconds: 500_000_000)
+        let zoomPPT = 1000
+        let originKey = TileKey(part: 0, zoomPPT: zoomPPT, tileX: 0, tileY: 0)
+        let viewport = OfficeTwipsRect(x: 0, y: 0, width: 5120, height: 5120) // exactly one tile span
+        _ = try await helper.client.subscribeTiles(docId: docId, part: 0, zoomPPT: zoomPPT, viewportTwips: viewport)
 
-        // One character, no modifiers: 'A' — charCode 65 (its own Unicode scalar), keyCode 512
-        // (com.sun.star.awt.Key.A, LibreOffice core's offapi/com/sun/star/awt/Key.idl, fetched and
-        // read directly — no modifier bits set). LOK_KEYEVENT_KEYINPUT = 0.
-        try await helper.client.postKey(docId: docId, type: .keyInput, charCode: 65, keyCode: 512)
+        final class OriginTileCollector: @unchecked Sendable {
+            private let lock = NSLock()
+            private var pushes: [(generation: Int, pixels: Data)] = []
+            func record(generation: Int, pixels: Data) { lock.lock(); pushes.append((generation, pixels)); lock.unlock() }
+            func snapshot() -> [(generation: Int, pixels: Data)] { lock.lock(); defer { lock.unlock() }; return pushes }
+        }
+        let collector = OriginTileCollector()
+        helper.client.onTile = { _, _, key, generation, _, _, pixels in
+            guard key == originKey else { return }
+            collector.record(generation: generation, pixels: pixels)
+        }
+
+        // Baseline paint, before any edit.
+        try await helper.client.requestTiles(docId: docId, keys: [originKey])
+        let baselineArrived = await waitUntil(timeout: 10) { collector.snapshot().count >= 1 }
+        XCTAssertTrue(baselineArrived, "expected a baseline .tile push before any edit")
+        let baseline = try XCTUnwrap(collector.snapshot().first)
+        XCTAssertEqual(baseline.generation, 0, "a document's first-ever paint of any coordinate starts at generation 0")
+
+        // The real edit: click inside A1 (its own bounding rect observed live, in this same test's
+        // earlier probe form, as roughly "0, 0, 1265, 254" — (100, 100) twips is safely inside it),
+        // type one character, commit it with Return (Calc's own cell-edit commit — ends the pending
+        // edit rather than leaving it in-flight for anything after this to race).
+        try await helper.client.postMouse(docId: docId, type: .buttonDown, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await helper.client.postMouse(docId: docId, type: .buttonUp, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await helper.client.postKey(docId: docId, type: .keyInput, charCode: 65, keyCode: 512) // 'A', KEY_A
         try await helper.client.postKey(docId: docId, type: .keyUp, charCode: 65, keyCode: 512)
-        print("[postKey probe] posted KEYINPUT+KEYUP for 'A' — waiting 2s for anything synchronous")
-        try? await Task.sleep(nanoseconds: 2_000_000_000)
+        try await helper.client.postKey(docId: docId, type: .keyInput, charCode: 0, keyCode: 1280) // Return commits the cell edit
+        try await helper.client.postKey(docId: docId, type: .keyUp, charCode: 0, keyCode: 1280)
 
-        let linesAfterKeyAlone = (helper.stderrCapture?.linesSnapshot() ?? []).filter { $0.contains("[LOKBridge raw callback]") }
-        print("[postKey probe] \(linesAfterKeyAlone.count) raw callback(s) after postKey alone, 2s settle:")
-        for line in linesAfterKeyAlone { print("  " + line) }
+        let invalidationArrived = await waitUntil(timeout: 10) { !invalidatedEventPushes.isEmpty && !invalidatedKeyPushes.isEmpty }
+        XCTAssertTrue(invalidationArrived, "the edit must produce both the raw documentEvent push (to the "
+                      + "opener) and the translated .invalidated key push (to the subscriber)")
 
-        // The pump hypothesis: does an UNRELATED subsequent LOK call (a tile paint) drain whatever
-        // postKeyEvent queued? `paintTile` is the cheapest real LOK call this wire already exposes.
-        try await helper.client.requestTiles(docId: docId, keys: [TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0)])
-        try? await Task.sleep(nanoseconds: 2_000_000_000)
+        // CRITERION 1 — the 5-value part payload parses under LOK_FEATURE_PART_IN_INVALIDATION_CALLBACK.
+        let rawLines = (helper.stderrCapture?.linesSnapshot() ?? []).filter {
+            $0.contains("[LOKBridge raw callback]") && $0.contains(" type=0 ")
+        }
+        XCTAssertFalse(rawLines.isEmpty, "expected at least one real LOK_CALLBACK_INVALIDATE_TILES firing")
+        let firstRawLine = try XCTUnwrap(rawLines.first)
+        let payloadRange = try XCTUnwrap(firstRawLine.range(of: " payload="))
+        let rawPayload = String(firstRawLine[payloadRange.upperBound...])
+        let fields = rawPayload.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        // Disclosed, real finding: this vendored LOK build's own real firing carries 6 fields, not
+        // 5 ("x, y, width, height, part, <unidentified 6th value — always observed 0>") — the
+        // header doc comment's own "@see LOK_FEATURE_PART_IN_INVALIDATION_CALLBACK" names only the
+        // part as position 5; the parser's own `fields.count >= 5` leniency (never `== 5`) already
+        // covers this without any change, but the ASSERTION here is intentionally `>= 5`, not `==
+        // 5`, so it stays true to what was actually observed rather than overclaiming a field count
+        // no real firing in this codebase has ever produced.
+        XCTAssertGreaterThanOrEqual(fields.count, 5, "criterion 1: a real firing must carry the part as a "
+                                    + "5th value — observed \(fields.count) fields: \"\(rawPayload)\"")
+        guard case .invalidated(_, let parsedPart) = OfficeDocumentEvent.parseInvalidateTiles(rawPayload) else {
+            return XCTFail("criterion 1: the real \(fields.count)-value payload failed to parse: \"\(rawPayload)\"")
+        }
+        XCTAssertEqual(parsedPart, 0, "criterion 1: the real part value (position 4) parses correctly — "
+                       + "gate.ods is single-part (the six-format matrix's own pin), so 0 is the only "
+                       + "legitimate value a correct parser could report here")
 
-        let linesAfterPump = (helper.stderrCapture?.linesSnapshot() ?? []).filter { $0.contains("[LOKBridge raw callback]") }
-        print("[postKey probe] \(linesAfterPump.count) raw callback(s) TOTAL after a follow-up tileRequest pump:")
-        for line in linesAfterPump { print("  " + line) }
+        // CRITERION 2 — rects->keys against REAL LOK coordinates: the raw rects the OPENER's own
+        // documentEvent push carried, independently run through the SAME TileMath the store itself
+        // uses, must equal the keys the SUBSCRIBER's own .invalidated push actually reported —
+        // proving the server's real rect->key translation (TileCache.invalidate ->
+        // OfficeHelperServer's multicast) agrees with TileMath's own authority, against genuine LOK
+        // numbers, not hand-built test fixtures.
+        let firstEventPush = try XCTUnwrap(invalidatedEventPushes.first)
+        let expectedKeys = Set(firstEventPush.rects.flatMap { rect in
+            TileMath.tileCoordinates(rectTwips: rect, zoomPPT: zoomPPT).map {
+                TileKey(part: firstEventPush.part, zoomPPT: zoomPPT, tileX: $0.tileX, tileY: $0.tileY)
+            }
+        })
+        let actualKeys = Set(invalidatedKeyPushes.first ?? [])
+        XCTAssertFalse(expectedKeys.isEmpty, "criterion 2 setup: the real edit's own rect must touch at least one tile")
+        XCTAssertEqual(actualKeys, expectedKeys, "criterion 2: the server's real rect->key translation must "
+                       + "match TileMath's own independently-computed key set for the SAME real rect")
+        XCTAssertTrue(actualKeys.contains(originKey), "criterion 2: the edited cell (A1, inside the origin "
+                      + "tile) must be among the bumped keys")
 
-        print("[postKey probe] documentEvent pushes observed: \(observedPushes.count)")
-        for (pushDocId, event) in observedPushes { print("  docId=\(pushDocId) event=\(event)") }
-
-        // Round 2: a real mouse click (buttonDown+buttonUp) at a point INSIDE cell A1's own
-        // bounding rect — the raw probe above observed a real `LOK_CALLBACK_CELL_CURSOR`-shaped
-        // payload "0, 0, 1265, 254, 0, 0" for A1, so (100, 100) twips is safely inside it — testing
-        // whether Calc's grid needs an actual click (not merely `GrabFocus()`, which the key-alone
-        // round above already proved happens) before a posted key actually inserts.
-        try await helper.client.postMouse(docId: docId, type: .buttonDown, xTwips: 100, yTwips: 100,
-                                          count: 1, buttons: 1 /* MOUSE_LEFT */, modifiers: 0)
-        try await helper.client.postMouse(docId: docId, type: .buttonUp, xTwips: 100, yTwips: 100,
-                                          count: 1, buttons: 1, modifiers: 0)
-        try? await Task.sleep(nanoseconds: 500_000_000)
-        try await helper.client.postKey(docId: docId, type: .keyInput, charCode: 66, keyCode: 513) // 'B', KEY_B
-        try await helper.client.postKey(docId: docId, type: .keyUp, charCode: 66, keyCode: 513)
-        try? await Task.sleep(nanoseconds: 2_000_000_000)
-
-        let linesAfterClickThenType = (helper.stderrCapture?.linesSnapshot() ?? []).filter { $0.contains("[LOKBridge raw callback]") }
-        let newLinesFromRound2 = linesAfterClickThenType.count - linesAfterPump.count
-        print("[postKey probe] ROUND 2 (click then type 'B'): \(newLinesFromRound2) new raw callback(s):")
-        for line in linesAfterClickThenType.suffix(newLinesFromRound2) { print("  " + line) }
-        print("[postKey probe] ROUND 2 documentEvent pushes observed: \(observedPushes.count)")
-        for (pushDocId, event) in observedPushes { print("  docId=\(pushDocId) event=\(event)") }
+        // CRITERION 3 — same-document generation bump + a genuinely differing hash, on the
+        // STILL-OPEN doc (no close/reopen — that is
+        // `testReloadOfAModifiedFixtureCopyProducesADifferentTileHashAtTheSameCoordinates`'s own,
+        // different proof, which explicitly does NOT establish this).
+        try await helper.client.requestTiles(docId: docId, keys: [originKey])
+        let repaintArrived = await waitUntil(timeout: 10) { collector.snapshot().count >= 2 }
+        XCTAssertTrue(repaintArrived, "expected a SECOND .tile push for the origin key after the real edit")
+        let repainted = collector.snapshot()[1]
+        XCTAssertGreaterThan(repainted.generation, baseline.generation, "criterion 3: a real edit-triggered "
+                             + "invalidation must bump the generation on the SAME open document")
+        XCTAssertNotEqual(repainted.pixels, baseline.pixels, "criterion 3: the typed character must be "
+                          + "visibly different — the same tile coordinate, genuinely different pixels")
 
         try await helper.client.close(docId: docId)
+    }
 
-        // Deliberately NOT a pass/fail assertion on WHICH of the three outcomes happened (applies
-        // immediately / applies only after a pump / never applies) — this is a probe, not a claim;
-        // task-4-report.md records the interpretation. The one thing asserted: the run itself
-        // completed without the helper dying, so whatever the printed evidence shows is trustworthy.
-        XCTAssertTrue(helper.process.isRunning, "the helper must survive posting a real key event either way")
+    // MARK: - Task 4, criterion 4: multicast delivery against the REAL bridge (two connections)
+
+    /// The REAL-bridge counterpart to `OfficeSupervisorTests
+    /// .testMulticastInvalidationReachesBothSubscribersWithPerConnectionSeqAndCloseByNonOwnerIsRefused`
+    /// (that test's own trigger is `NormaOfficeHelperFixture`'s synthetic `--mode multicastInvalidate`
+    /// hook — proves the WIRE-LEVEL fan-out mechanics without booting real LOK). This test proves the
+    /// same fan-out against a REAL edit: connection A opens+stages the document and subscribes;
+    /// connection B (never the opener) subscribes to the SAME doc; a REAL keystroke posted on A's
+    /// connection must multicast its `.invalidated` push to BOTH.
+    func testMulticastInvalidationFromARealEditReachesBothSubscribersAgainstTheRealBridge() async throws {
+        try skipUnlessVendorPresent()
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
+                      "NormaOfficeHelper was not built into this run — add it to the scheme's build list.")
+        let stateDir = makeScratchDirectory()
+        let socketPath = stateDir.appendingPathComponent("office.sock").path
+        let token = "officelive-multicast-\(UUID().uuidString.prefix(8))"
+
+        let process = Process()
+        process.executableURL = helperURL
+        process.arguments = ["--socket-path", socketPath, "--state-path", stateDir.path,
+                              "--token", token, "--idle-exit-seconds", "30",
+                              "--lok-root", Self.vendorProductSetRoot.path,
+                              "--sandbox-profile", Self.repoSandboxProfilePath.path]
+        try process.run()
+        runningProcesses.append(process)
+        let socketAppeared = await waitUntil(timeout: 60.0) { FileManager.default.fileExists(atPath: socketPath) }
+        XCTAssertTrue(socketAppeared, "real helper never created its socket file")
+
+        // Staged copy INSIDE --state-path — see the sibling criteria-1/2/3 test's own header for why.
+        let stagedPath = stateDir.appendingPathComponent("docs", isDirectory: true)
+            .appendingPathComponent("gate-writable.ods").path
+        try FileManager.default.createDirectory(
+            at: URL(fileURLWithPath: stagedPath).deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(contentsOf: Self.fixturesRoot.appendingPathComponent("gate.ods")).write(to: URL(fileURLWithPath: stagedPath))
+
+        let docId = UUID().uuidString
+        let zoomPPT = 1000
+        let originKey = TileKey(part: 0, zoomPPT: zoomPPT, tileX: 0, tileY: 0)
+        let viewport = OfficeTwipsRect(x: 0, y: 0, width: 5120, height: 5120)
+
+        // Connection A: opens (becomes the OWNER), subscribes, paints the origin tile so the real
+        // invalidation below has something already-cached to bump (an empty cache has nothing to
+        // report — the sibling criteria-1/2/3 test's own baseline-paint step, for the same reason).
+        let connectionA = OfficeWireConnection(socketPath: socketPath)
+        openConnections.append(connectionA)
+        try await connectionA.open()
+        try await connectionA.send(.hello(seq: 1, role: .app, token: token))
+        guard case .helloOk = await connectionA.nextFrame(timeout: 10.0) else { return XCTFail("A hello failed") }
+        try await connectionA.send(.open(seq: 2, docId: docId, path: stagedPath))
+        guard case .opened = await connectionA.nextFrame(timeout: 10.0) else { return XCTFail("A open failed") }
+        try await connectionA.send(.subscribeTiles(seq: 3, docId: docId, part: 0, zoomPPT: zoomPPT, viewportTwips: viewport))
+        guard case .subscribed = await connectionA.nextFrame(timeout: 10.0) else { return XCTFail("A subscribe failed") }
+
+        final class PushCollector: @unchecked Sendable {
+            private let lock = NSLock()
+            private var invalidations: [[TileKey]] = []
+            private var tileCount = 0
+            func record(_ keys: [TileKey]) { lock.lock(); invalidations.append(keys); lock.unlock() }
+            func recordTile() { lock.lock(); tileCount += 1; lock.unlock() }
+            func snapshot() -> [[TileKey]] { lock.lock(); defer { lock.unlock() }; return invalidations }
+            func tileCountSnapshot() -> Int { lock.lock(); defer { lock.unlock() }; return tileCount }
+        }
+        let collectorA = PushCollector()
+        let collectorB = PushCollector()
+        connectionA.onInvalidated = { _, _, keys in collectorA.record(keys) }
+        // `.tile` is a PUSH, never delivered through `nextFrame`/`frameQueue` — see
+        // `OfficeWireConnection.onTile`'s own header. `OfficeSupervisorTests`' own multicast test
+        // (the fixture-backed sibling this one mirrors) uses the identical callback+poll shape.
+        connectionA.onTile = { _, _, _, _, _, _, _ in collectorA.recordTile() }
+
+        try await connectionA.send(.tileRequest(seq: 4, docId: docId, keys: [originKey]))
+        guard case .tileRequestAccepted = await connectionA.nextFrame(timeout: 10.0) else { return XCTFail("A tileRequest not accepted") }
+        let sawOriginTile = await waitUntil(timeout: 10.0) { collectorA.tileCountSnapshot() >= 1 }
+        XCTAssertTrue(sawOriginTile, "expected A's own baseline .tile push for the origin key")
+
+        // Connection B: never opens — only subscribes to the doc A already opened, the SAME shape
+        // the fixture-backed multicast test already established.
+        let connectionB = OfficeWireConnection(socketPath: socketPath)
+        openConnections.append(connectionB)
+        try await connectionB.open()
+        try await connectionB.send(.hello(seq: 1, role: .app, token: token))
+        guard case .helloOk = await connectionB.nextFrame(timeout: 10.0) else { return XCTFail("B hello failed") }
+        try await connectionB.send(.subscribeTiles(seq: 2, docId: docId, part: 0, zoomPPT: zoomPPT, viewportTwips: viewport))
+        guard case .subscribed = await connectionB.nextFrame(timeout: 10.0) else { return XCTFail("B subscribe failed") }
+        connectionB.onInvalidated = { _, _, keys in collectorB.record(keys) }
+
+        // The real edit, posted on A's own connection — a click + one character + Return, the same
+        // shape the sibling criteria test uses.
+        let seqAllocator = OfficeWireSeqAllocator()
+        func sendA(_ build: (UInt64) -> OfficeWireFrame) async throws {
+            let seq = seqAllocator.nextSeq() + 10 // clear of A's own earlier hand-minted seqs above
+            try await connectionA.send(build(seq))
+        }
+        try await sendA { .mouseEvent(seq: $0, docId: docId, type: .buttonDown, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0) }
+        guard case .mouseEventOk = await connectionA.nextFrame(timeout: 10.0) else { return XCTFail("A mouseDown not acked") }
+        try await sendA { .mouseEvent(seq: $0, docId: docId, type: .buttonUp, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0) }
+        guard case .mouseEventOk = await connectionA.nextFrame(timeout: 10.0) else { return XCTFail("A mouseUp not acked") }
+        try await sendA { .keyEvent(seq: $0, docId: docId, type: .keyInput, charCode: 65, keyCode: 512) }
+        guard case .keyEventOk = await connectionA.nextFrame(timeout: 10.0) else { return XCTFail("A keyDown not acked") }
+        try await sendA { .keyEvent(seq: $0, docId: docId, type: .keyUp, charCode: 65, keyCode: 512) }
+        guard case .keyEventOk = await connectionA.nextFrame(timeout: 10.0) else { return XCTFail("A keyUp not acked") }
+        try await sendA { .keyEvent(seq: $0, docId: docId, type: .keyInput, charCode: 0, keyCode: 1280) }
+        guard case .keyEventOk = await connectionA.nextFrame(timeout: 10.0) else { return XCTFail("A Return not acked") }
+        try await sendA { .keyEvent(seq: $0, docId: docId, type: .keyUp, charCode: 0, keyCode: 1280) }
+        guard case .keyEventOk = await connectionA.nextFrame(timeout: 10.0) else { return XCTFail("A Return-up not acked") }
+
+        let bothReceived = await waitUntil(timeout: 10.0) {
+            !collectorA.snapshot().isEmpty && !collectorB.snapshot().isEmpty
+        }
+        XCTAssertTrue(bothReceived, "criterion 4: both subscribers must receive the SAME real edit's "
+                      + "invalidated push — the multicast fan-out, against the real bridge, not the fixture")
+        let keysA = Set(collectorA.snapshot().first ?? [])
+        let keysB = Set(collectorB.snapshot().first ?? [])
+        XCTAssertEqual(keysA, keysB, "criterion 4: both subscribers must see the IDENTICAL bumped key set "
+                       + "for the same underlying invalidation")
+        XCTAssertTrue(keysA.contains(originKey), "criterion 4: the edited cell's own tile must be among them")
+
+        try await connectionA.send(.close(seq: 99, docId: docId))
+        _ = await connectionA.nextFrame(timeout: 10.0)
     }
 
     // MARK: - Invalidation drill: reload-triggered (Stage A has no edit verbs)
