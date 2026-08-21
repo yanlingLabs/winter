@@ -12,7 +12,17 @@ import Foundation
 
 private enum LOKCallbackType {
     static let invalidateTiles: Int32 = 0   // LibreOfficeKitEnums.h:130 (LOK_CALLBACK_INVALIDATE_TILES)
+    /// Task 5 — LibreOfficeKitEnums.h:141 (LOK_CALLBACK_INVALIDATE_VISIBLE_CURSOR).
+    static let invalidateVisibleCursor: Int32 = 1
+    /// Task 5 — LibreOfficeKitEnums.h:150 (LOK_CALLBACK_TEXT_SELECTION).
+    static let textSelection: Int32 = 2
+    /// Task 5 — LibreOfficeKitEnums.h:160 (LOK_CALLBACK_TEXT_SELECTION_START).
+    static let textSelectionStart: Int32 = 3
+    /// Task 5 — LibreOfficeKitEnums.h:170 (LOK_CALLBACK_TEXT_SELECTION_END).
+    static let textSelectionEnd: Int32 = 4
     static let stateChanged: Int32 = 8      // LibreOfficeKitEnums.h:229 (LOK_CALLBACK_STATE_CHANGED)
+    /// Task 5 — LibreOfficeKitEnums.h:335 (LOK_CALLBACK_CELL_CURSOR, Calc only).
+    static let cellCursor: Int32 = 17
 }
 
 // LOKTileMode (LOK_TILEMODE_RGBA/BGRA, LibreOfficeKitEnums.h:40-41) lived here for
@@ -908,8 +918,18 @@ final class LOKBridge: OfficeDocumentBridge {
         switch type {
         case LOKCallbackType.invalidateTiles:
             event = OfficeDocumentEvent.parseInvalidateTiles(payload)
+        case LOKCallbackType.invalidateVisibleCursor:
+            event = OfficeDocumentEvent.parseCaretRect(payload)
+        case LOKCallbackType.textSelection:
+            event = OfficeDocumentEvent.parseTextSelection(payload)
+        case LOKCallbackType.textSelectionStart:
+            event = OfficeDocumentEvent.parseTextSelectionStart(payload)
+        case LOKCallbackType.textSelectionEnd:
+            event = OfficeDocumentEvent.parseTextSelectionEnd(payload)
         case LOKCallbackType.stateChanged:
             event = OfficeDocumentEvent.parseModifiedStatus(payload)
+        case LOKCallbackType.cellCursor:
+            event = OfficeDocumentEvent.parseCellCursor(payload)
         default:
             event = nil
         }

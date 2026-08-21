@@ -633,6 +633,30 @@ public struct OfficeTwipsRect: Equatable, Sendable {
 public enum OfficeDocumentEvent: Equatable, Sendable {
     case opened(type: OfficeDocumentKind, parts: Int, sizeTwips: OfficeDocumentSize)
     case openFailed(reason: String)
+    /// Task 5 — `LOK_CALLBACK_INVALIDATE_VISIBLE_CURSOR`'s parsed rect: the blinking text caret's
+    /// own position/size. Never carries "no cursor" — LOK only ever fires this with a real
+    /// rectangle (see `parseCaretRect`'s own header for the empirical capture this is built from);
+    /// Norma owns the actual BLINK timing itself (`LOK_CALLBACK_CURSOR_VISIBLE`, type 5, is
+    /// deliberately not wired — a disclosed Task 5 scope decision, not an oversight).
+    case caretRect(OfficeTwipsRect)
+    /// Task 5 — `LOK_CALLBACK_TEXT_SELECTION`'s parsed rect LIST: one rect per visual line the
+    /// selection spans (a multi-line selection is NOT one bounding box). Empty means no selection —
+    /// LOK's own payload is `""` or (observed live from Calc specifically, an undocumented
+    /// divergence) the bare string `"EMPTY"`; both fold to `[]` here, mirroring `.invalidated`'s own
+    /// established leniency for the identical sentinel on a different callback.
+    case textSelection([OfficeTwipsRect])
+    /// Task 5 — `LOK_CALLBACK_TEXT_SELECTION_START`'s parsed rect: the selection anchor's own
+    /// cursor-shaped rectangle (used to draw a selection handle). Per LO's own source
+    /// (`SwSelPaintRects::getLOKPayload`, `sw/source/core/crsr/viscrs.cxx`, read at the pinned
+    /// commit) this callback simply does not fire at all when there is no selection — never observed
+    /// live with an empty payload, so unlike `textSelection` there is no "no selection" case to fold.
+    case textSelectionStart(OfficeTwipsRect)
+    /// Task 5 — the selection's trailing edge, `TEXT_SELECTION_END`'s counterpart to
+    /// `textSelectionStart` above. Same "always a real rect" posture.
+    case textSelectionEnd(OfficeTwipsRect)
+    /// Task 5 — `LOK_CALLBACK_CELL_CURSOR`'s parsed payload (Calc only) — see `OfficeCellCursor`'s
+    /// own header for the two shapes (a real cell, or the in-cell-edit `"EMPTY"` window).
+    case cellCursor(OfficeCellCursor)
     /// `rectsTwips` is plural/an array (the brief's own field name) even though a single stock LOK
     /// `LOK_CALLBACK_INVALIDATE_TILES` firing carries exactly one rectangle, or the string
     /// `"EMPTY"` meaning "the whole document" — represented here as an EMPTY array, documented at
@@ -677,7 +701,27 @@ public enum OfficeDocumentEvent: Equatable, Sendable {
             return ["kind": "modifiedChanged", "modified": modified]
         case .closed:
             return ["kind": "closed"]
+        case .caretRect(let rect):
+            return ["kind": "caretRect"].merging(Self.encodeBareRect(rect)) { _, new in new }
+        case .textSelection(let rects):
+            return ["kind": "textSelection", "rectsTwips": rects.map { Self.encodeBareRect($0) }]
+        case .textSelectionStart(let rect):
+            return ["kind": "textSelectionStart"].merging(Self.encodeBareRect(rect)) { _, new in new }
+        case .textSelectionEnd(let rect):
+            return ["kind": "textSelectionEnd"].merging(Self.encodeBareRect(rect)) { _, new in new }
+        case .cellCursor(let cell):
+            switch cell {
+            case .empty:
+                return ["kind": "cellCursor", "empty": true]
+            case .at(let rect, let column, let row):
+                return ["kind": "cellCursor", "empty": false, "column": column, "row": row]
+                    .merging(Self.encodeBareRect(rect)) { _, new in new }
+            }
         }
+    }
+
+    private static func encodeBareRect(_ rect: OfficeTwipsRect) -> [String: Any] {
+        ["x": rect.x, "y": rect.y, "width": rect.width, "height": rect.height]
     }
 
     /// The inverse of `encodedFields()`, reading from the SAME flat object a `.documentEvent`
@@ -718,9 +762,44 @@ public enum OfficeDocumentEvent: Equatable, Sendable {
             return .modifiedChanged(number.boolValue)
         case "closed":
             return .closed
+        case "caretRect":
+            guard let rect = decodeBareRect(object) else { return nil }
+            return .caretRect(rect)
+        case "textSelection":
+            guard let rawRects = object["rectsTwips"] as? [[String: Any]] else { return nil }
+            var rects: [OfficeTwipsRect] = []
+            for rawRect in rawRects {
+                guard let rect = decodeBareRect(rawRect) else { return nil }
+                rects.append(rect)
+            }
+            return .textSelection(rects)
+        case "textSelectionStart":
+            guard let rect = decodeBareRect(object) else { return nil }
+            return .textSelectionStart(rect)
+        case "textSelectionEnd":
+            guard let rect = decodeBareRect(object) else { return nil }
+            return .textSelectionEnd(rect)
+        case "cellCursor":
+            guard let number = object["empty"] as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else {
+                return nil
+            }
+            if number.boolValue { return .cellCursor(.empty) }
+            guard let rect = decodeBareRect(object), let column = intValue(object["column"]),
+                  let row = intValue(object["row"]) else {
+                return nil
+            }
+            return .cellCursor(.at(rectTwips: rect, column: column, row: row))
         default:
             return nil
         }
+    }
+
+    private static func decodeBareRect(_ object: [String: Any]) -> OfficeTwipsRect? {
+        guard let x = int64Value(object["x"]), let y = int64Value(object["y"]),
+              let width = int64Value(object["width"]), let height = int64Value(object["height"]) else {
+            return nil
+        }
+        return OfficeTwipsRect(x: x, y: y, width: width, height: height)
     }
 
     // MARK: - LOK raw callback payload parsing
@@ -820,6 +899,157 @@ public enum OfficeDocumentEvent: Equatable, Sendable {
         guard payload.hasPrefix(prefix) else { return nil }
         return .modifiedChanged(payload.dropFirst(prefix.count) == "true")
     }
+
+    // MARK: - Task 5: caret, selection, cell-cursor raw payload parsing
+    //
+    // Every shape below is built from a REAL captured firing, not from the enum header's own doc
+    // comments alone — `OfficeHelperLiveTests.testRealLOKCallbackProbeCapturesCaretSelectionAndCell
+    // CursorRawPayloads` is where each was first observed; see that test's own header for the full
+    // methodology and why more than one input door (keyboard AND mouse, Writer AND Calc) was probed
+    // before writing any of this. The header comments for these five LOK callback types describe a
+    // shape at least one of them does NOT actually produce at this vendored pin (`LOK_FEATURE_
+    // VIEWID_IN_VISCURSOR_INVALIDATION_CALLBACK`'s own JSON format for `INVALIDATE_VISIBLE_CURSOR` —
+    // see `parseCaretRect`'s own header) — the T4 lesson, generalized past `INVALIDATE_TILES`'s own
+    // "EMPTY carries no part" mistake to the whole callback vocabulary.
+
+    /// Shared core: a bare `"x, y, width, height"` rect, the SAME shape `INVALIDATE_TILES`'s own
+    /// non-EMPTY branch parses, reused here rather than re-derived — every one of Task 5's five new
+    /// callback types builds on this same primitive (`CELL_CURSOR` extends it with two more fields;
+    /// `TEXT_SELECTION` repeats it, semicolon-joined). `>= 4`, never `== 4` — mirrors
+    /// `parseInvalidateTiles`'s own established leniency for a payload that turns out to carry more
+    /// fields than any live capture has shown so far, even though every firing THIS task's own probe
+    /// observed carried exactly 4.
+    private static func parseBareRect(_ text: String) -> OfficeTwipsRect? {
+        let fields = text.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        guard fields.count >= 4,
+              let x = Int64(fields[0]), let y = Int64(fields[1]),
+              let width = Int64(fields[2]), let height = Int64(fields[3]) else {
+            return nil
+        }
+        return OfficeTwipsRect(x: x, y: y, width: width, height: height)
+    }
+
+    /// Parses `LOK_CALLBACK_INVALIDATE_VISIBLE_CURSOR`'s raw payload.
+    ///
+    /// **Empirically a bare `"x, y, width, height"` rect, identical for every scenario probed** —
+    /// Writer's main document caret (typing in the body) AND Calc's in-cell edit caret (typing inside
+    /// a cell) both produced this exact shape; `width` was `0` in every one of the six real firings
+    /// observed (a caret is a vertical line, no horizontal extent). The enum header's own doc comment
+    /// (`LibreOfficeKitEnums.h:131-140`) describes a DIFFERENT "new format" — a JSON object with
+    /// `viewId`/`rectangle`/`misspelledWord` — gated on `LOK_FEATURE_VIEWID_IN_VISCURSOR_INVALIDATION_
+    /// CALLBACK`; source-reading ahead of the probe (`SfxLokHelper::notifyCursorInvalidation`,
+    /// `sfx2/source/view/lokhelper.cxx`, pinned commit `11482c8f`) found that function's own
+    /// `bControlEvent == false` branch never closes the `"rectangle"` value's own JSON string before
+    /// appending `" }"` — looks structurally incapable of producing valid JSON — but the probe's own
+    /// real captures show this path is simply never reached by ordinary document-caret movement in
+    /// this build at all (every real firing is the plain rect, not JSON, malformed or otherwise).
+    /// Accepted anyway, defensively, as a fallback — cheap, matches the header's own documented
+    /// alternative, and costs nothing against a future LOK version or an untested path (a floating
+    /// dialog's own cursor, reached with `nWindowId != 0`) that DOES emit it.
+    static func parseCaretRect(_ payload: String) -> OfficeDocumentEvent? {
+        if let rect = parseBareRect(payload) {
+            return .caretRect(rect)
+        }
+        guard let data = payload.data(using: .utf8),
+              let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let rectString = object["rectangle"] as? String,
+              let rect = parseBareRect(rectString) else {
+            return nil
+        }
+        return .caretRect(rect)
+    }
+
+    /// Parses `LOK_CALLBACK_TEXT_SELECTION`'s raw payload: `"rect1[; rect2[; ...]]"`
+    /// (`LibreOfficeKitEnums.h:142-149`'s own documented shape, confirmed live for the single-rect
+    /// case — every selection this task's own probe produced fit on one line, so the semicolon-joined
+    /// multi-rect shape is accepted by construction of this parser but not itself cross-checked
+    /// against a real multi-line-selection firing; disclosed, not chased further, the same posture
+    /// `parseInvalidateTiles`'s own header takes toward its own never-observed EMPTY-with-garbage
+    /// case). Empty selection folds BOTH real shapes observed live to `[]`: LOK's documented `""`,
+    /// AND (Calc-specific, undocumented, found by reading `sc/source/ui/view/gridwin.cxx:7005` ahead
+    /// of the probe though not itself re-triggered by this task's own Writer-focused probe run) the
+    /// bare string `"EMPTY"` — mirrors `parseInvalidateTiles`'s own established EMPTY leniency on a
+    /// different callback entirely.
+    static func parseTextSelection(_ payload: String) -> OfficeDocumentEvent? {
+        let trimmed = payload.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty || trimmed == "EMPTY" {
+            return .textSelection([])
+        }
+        var rects: [OfficeTwipsRect] = []
+        for piece in trimmed.split(separator: ";") {
+            guard let rect = parseBareRect(String(piece)) else { return nil }
+            rects.append(rect)
+        }
+        return .textSelection(rects)
+    }
+
+    /// Parses `LOK_CALLBACK_TEXT_SELECTION_START`'s raw payload — a bare rect, confirmed live
+    /// (Writer, keyboard shift-selection). Per `SwSelPaintRects::getLOKPayload`
+    /// (`sw/source/core/crsr/viscrs.cxx`, read at the pin) this callback does not fire AT ALL when
+    /// there is no selection (`if (!size()) return {}` — no payload, not an empty one), consistent
+    /// with the probe's own capture: no START/END line was ever observed accompanying a
+    /// selection-collapse. `nil` for anything that doesn't parse as a bare rect — there is no
+    /// documented or observed "empty" shape for this callback to be lenient toward.
+    static func parseTextSelectionStart(_ payload: String) -> OfficeDocumentEvent? {
+        guard let rect = parseBareRect(payload) else { return nil }
+        return .textSelectionStart(rect)
+    }
+
+    /// The trailing-edge counterpart to `parseTextSelectionStart` — same shape, same posture,
+    /// confirmed live the same way.
+    static func parseTextSelectionEnd(_ payload: String) -> OfficeDocumentEvent? {
+        guard let rect = parseBareRect(payload) else { return nil }
+        return .textSelectionEnd(rect)
+    }
+
+    /// Parses `LOK_CALLBACK_CELL_CURSOR`'s raw payload (Calc only).
+    ///
+    /// **A SIX-field payload, not the four-field shape the enum header's own doc comment would
+    /// suggest by analogy with `INVALIDATE_TILES`** — confirmed live (two real firings, A1 and a
+    /// distant cell) and cross-checked against source ahead of the probe
+    /// (`ScViewData::describeCellCursorAt`, `sc/source/ui/view/viewdata.cxx`, pinned commit
+    /// `11482c8f`, the non-print-twips branch this helper's own registry configuration takes —
+    /// `LibreOfficeKit::isCompatFlagSet(Compat::scPrintTwipsMsgs)` is never set here): `"x, y, width,
+    /// height, col, row"` — the trailing `col`/`row` are the cell's own 0-based column/row indices,
+    /// which `TileMath`'s existing rect-only vocabulary has no field for. Kept, not discarded — this
+    /// is the brief's own named T8 feed ("CELL_CURSOR parsing you build now feeds it"), and the parse
+    /// stays pure and reusable exactly as asked: this function has no opinion about the formula
+    /// bar/cell-ref strip that will eventually read `column`/`row`.
+    ///
+    /// **The bare `"EMPTY"` sentinel — confirmed live, during in-cell edit mode.** Unlike
+    /// `INVALIDATE_TILES`'s `"EMPTY, <part>, <mode>"`, this one carries no trailing fields at all —
+    /// `ScGridWindow::getCellCursor()` (`sc/source/ui/view/gridwin.cxx`) returns the bare literal
+    /// whenever `mpOOCursors` is unset, which the probe's own capture shows happens the moment a cell
+    /// enters text-edit mode (the grid's own "current cell" concept doesn't apply while editing text
+    /// inside one) — `column`/`row` are genuinely unknown in that state, not merely omitted, which is
+    /// exactly why `OfficeCellCursor` models this as its own case rather than a rect-optional pair
+    /// carrying stale/sentinel numbers.
+    static func parseCellCursor(_ payload: String) -> OfficeDocumentEvent? {
+        let trimmed = payload.trimmingCharacters(in: .whitespaces)
+        if trimmed == "EMPTY" {
+            return .cellCursor(.empty)
+        }
+        let fields = trimmed.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        guard fields.count >= 6,
+              let x = Int64(fields[0]), let y = Int64(fields[1]),
+              let width = Int64(fields[2]), let height = Int64(fields[3]),
+              let column = Int(fields[4]), let row = Int(fields[5]) else {
+            return nil
+        }
+        return .cellCursor(.at(rectTwips: OfficeTwipsRect(x: x, y: y, width: width, height: height), column: column, row: row))
+    }
+}
+
+/// Task 5 — `LOK_CALLBACK_CELL_CURSOR`'s two real shapes (Calc only), kept as its own type rather
+/// than an `(OfficeTwipsRect?, Int, Int)` tuple with meaningless sentinel numbers when empty — see
+/// `OfficeDocumentEvent.parseCellCursor`'s own header for the empirical basis of both cases.
+public enum OfficeCellCursor: Equatable, Sendable {
+    /// A real cell is current: its own rect (twips) plus its 0-based `(column, row)` — the T8
+    /// formula-bar/cell-ref strip's own feed.
+    case at(rectTwips: OfficeTwipsRect, column: Int, row: Int)
+    /// No cell cursor to report right now (observed live: while a cell is in text-edit mode) — LOK's
+    /// own bare `"EMPTY"` sentinel, carrying no column/row at all.
+    case empty
 }
 
 /// Task 2 introduced this as a Stage-A-wide placeholder (no LibreOfficeKit loaded anywhere yet).

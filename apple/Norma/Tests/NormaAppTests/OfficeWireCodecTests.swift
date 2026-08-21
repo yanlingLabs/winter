@@ -53,6 +53,18 @@ final class OfficeWireCodecTests: XCTestCase {
             .documentEvent(seq: 17, docId: "doc-1", event: .modifiedChanged(true)),
             .documentEvent(seq: 18, docId: "doc-1", event: .modifiedChanged(false)),
             .documentEvent(seq: 19, docId: "doc-1", event: .closed),
+            // Task 5 — caret/selection/cell-cursor, one sample per new OfficeDocumentEvent case.
+            .documentEvent(seq: 41, docId: "doc-1", event: .caretRect(OfficeTwipsRect(x: 100, y: 200, width: 0, height: 300))),
+            .documentEvent(seq: 42, docId: "doc-1", event: .textSelection([
+                OfficeTwipsRect(x: 10, y: 20, width: 30, height: 40),
+                OfficeTwipsRect(x: 0, y: 60, width: 500, height: 40), // a second line — the multi-rect shape
+            ])),
+            .documentEvent(seq: 43, docId: "doc-1", event: .textSelection([])), // no selection
+            .documentEvent(seq: 44, docId: "doc-1", event: .textSelectionStart(OfficeTwipsRect(x: 10, y: 20, width: 0, height: 40))),
+            .documentEvent(seq: 45, docId: "doc-1", event: .textSelectionEnd(OfficeTwipsRect(x: 500, y: 60, width: 0, height: 40))),
+            .documentEvent(seq: 46, docId: "doc-1", event: .cellCursor(
+                .at(rectTwips: OfficeTwipsRect(x: 0, y: 0, width: 1265, height: 254), column: 2, row: 7))),
+            .documentEvent(seq: 47, docId: "doc-1", event: .cellCursor(.empty)),
             // Task 4 — tile pipeline frames.
             .subscribeTiles(seq: 20, docId: "doc-1", part: 0, zoomPPT: 1000,
                              viewportTwips: OfficeTwipsRect(x: 0, y: 0, width: 10240, height: 5120)),
@@ -489,6 +501,109 @@ final class OfficeWireCodecTests: XCTestCase {
         // non-"true" suffix on an otherwise-matching prefix (including garbage, not just "false")
         // yields `.modifiedChanged(false)` rather than nil.
         XCTAssertEqual(OfficeDocumentEvent.parseModifiedStatus(".uno:ModifiedStatus=garbage"), .modifiedChanged(false))
+    }
+
+    // MARK: - Task 5: caret/selection/cell-cursor raw payload parsers, against REAL captured shapes
+    //
+    // Every literal string below is copied verbatim from
+    // `testRealLOKCallbackProbeCapturesCaretSelectionAndCellCursorRawPayloads`'s own printed output
+    // (a real, sandboxed, vendored-LOK run against gate.odt/gate.ods) — not hand-invented. See that
+    // test's own header, and `OfficeDocumentEvent.parseCaretRect`/`.parseCellCursor`'s own headers,
+    // for the full methodology and citations.
+
+    func testParseCaretRectRealCapturedShapes() {
+        // Writer body typing.
+        XCTAssertEqual(OfficeDocumentEvent.parseCaretRect("1418, 1418, 0, 552"),
+                       .caretRect(OfficeTwipsRect(x: 1418, y: 1418, width: 0, height: 552)))
+        // Calc in-cell edit — the SAME shape, confirmed live from a structurally different emitter
+        // (editeng, not vcl's document-window cursor) — see the parser's own header on why this
+        // cross-app agreement was checked rather than assumed.
+        XCTAssertEqual(OfficeDocumentEvent.parseCaretRect("2616, 1800, 0, 210"),
+                       .caretRect(OfficeTwipsRect(x: 2616, y: 1800, width: 0, height: 210)))
+    }
+
+    /// The header-documented JSON alternative — never observed live (see the parser's own header for
+    /// why), accepted defensively anyway. Uses the WELL-FORMED shape (`bControlEvent == true`'s own
+    /// branch, which properly closes every JSON string) — the malformed branch's own output is not
+    /// reproduced here since it is not valid JSON by construction and this parser makes no promise
+    /// about recovering meaning from broken JSON.
+    func testParseCaretRectAcceptsTheDocumentedJSONShapeAsAFallback() {
+        let json = "{ \"viewId\": \"0\", \"rectangle\": \"100, 200, 0, 300\", \"controlEvent\": true, \"windowId\": \"5\" }"
+        XCTAssertEqual(OfficeDocumentEvent.parseCaretRect(json),
+                       .caretRect(OfficeTwipsRect(x: 100, y: 200, width: 0, height: 300)))
+    }
+
+    func testParseCaretRectMalformedPayloadsAreRejected() {
+        for payload in ["", "not a rect", "1, 2, 3", "{ \"no rectangle field\": true }"] {
+            XCTAssertNil(OfficeDocumentEvent.parseCaretRect(payload), "expected nil for: \"\(payload)\"")
+        }
+    }
+
+    func testParseTextSelectionRealCapturedShapes() {
+        XCTAssertEqual(OfficeDocumentEvent.parseTextSelection(""), .textSelection([]),
+                       "LOK's documented empty-selection shape")
+        XCTAssertEqual(OfficeDocumentEvent.parseTextSelection("1764, 1418, 320, 551"),
+                       .textSelection([OfficeTwipsRect(x: 1764, y: 1418, width: 320, height: 551)]))
+        XCTAssertEqual(OfficeDocumentEvent.parseTextSelection("1418, 1418, 666, 551"),
+                       .textSelection([OfficeTwipsRect(x: 1418, y: 1418, width: 666, height: 551)]))
+    }
+
+    /// Calc's own undocumented divergence, found by reading `gridwin.cxx:7005` ahead of the probe —
+    /// the parser folds it to the SAME "no selection" outcome as the documented `""`.
+    func testParseTextSelectionCalcsBareEMPTYAlsoMeansNoSelection() {
+        XCTAssertEqual(OfficeDocumentEvent.parseTextSelection("EMPTY"), .textSelection([]))
+        XCTAssertEqual(OfficeDocumentEvent.parseTextSelection("  EMPTY  "), .textSelection([]),
+                       "surrounding whitespace is trimmed before the EMPTY comparison, mirroring parseInvalidateTiles")
+    }
+
+    /// The documented multi-rect shape — a selection spanning more than one visual line. Not itself
+    /// triggered by this task's own live probe (every real selection captured fit on one line — see
+    /// the parser's own header) but structurally supported and pinned here as a pure fixture.
+    func testParseTextSelectionMultiRectSemicolonJoinedShape() {
+        let result = OfficeDocumentEvent.parseTextSelection("10, 20, 30, 40; 0, 60, 500, 40")
+        XCTAssertEqual(result, .textSelection([
+            OfficeTwipsRect(x: 10, y: 20, width: 30, height: 40),
+            OfficeTwipsRect(x: 0, y: 60, width: 500, height: 40),
+        ]))
+    }
+
+    func testParseTextSelectionMalformedPayloadsAreRejected() {
+        for payload in ["10, 20, 30", "a, b, c, d", "10, 20, 30, 40; garbage"] {
+            XCTAssertNil(OfficeDocumentEvent.parseTextSelection(payload), "expected nil for: \"\(payload)\"")
+        }
+    }
+
+    func testParseTextSelectionStartAndEndRealCapturedShapes() {
+        XCTAssertEqual(OfficeDocumentEvent.parseTextSelectionStart("1764, 1418, 0, 551"),
+                       .textSelectionStart(OfficeTwipsRect(x: 1764, y: 1418, width: 0, height: 551)))
+        XCTAssertEqual(OfficeDocumentEvent.parseTextSelectionEnd("2084, 1418, 0, 551"),
+                       .textSelectionEnd(OfficeTwipsRect(x: 2084, y: 1418, width: 0, height: 551)))
+    }
+
+    func testParseTextSelectionStartAndEndMalformedPayloadsAreRejected() {
+        // Unlike parseTextSelection, START/END never fire with an empty payload at all (LO's own
+        // source returns no payload rather than ""), so "" is rejected here, not folded to anything.
+        for payload in ["", "1, 2, 3", "not a rect"] {
+            XCTAssertNil(OfficeDocumentEvent.parseTextSelectionStart(payload), "expected nil for: \"\(payload)\"")
+            XCTAssertNil(OfficeDocumentEvent.parseTextSelectionEnd(payload), "expected nil for: \"\(payload)\"")
+        }
+    }
+
+    func testParseCellCursorRealCapturedShapes() {
+        // A1.
+        XCTAssertEqual(OfficeDocumentEvent.parseCellCursor("0, 0, 1265, 254, 0, 0"),
+                       .cellCursor(.at(rectTwips: OfficeTwipsRect(x: 0, y: 0, width: 1265, height: 254), column: 0, row: 0)))
+        // A distant cell — column C (0-based index 2), row 8 (0-based index 7).
+        XCTAssertEqual(OfficeDocumentEvent.parseCellCursor("2533, 1785, 1265, 254, 2, 7"),
+                       .cellCursor(.at(rectTwips: OfficeTwipsRect(x: 2533, y: 1785, width: 1265, height: 254), column: 2, row: 7)))
+        // In-cell edit mode — the grid's own "current cell" concept does not apply.
+        XCTAssertEqual(OfficeDocumentEvent.parseCellCursor("EMPTY"), .cellCursor(.empty))
+    }
+
+    func testParseCellCursorMalformedPayloadsAreRejected() {
+        for payload in ["", "0, 0, 1265, 254", "0, 0, 1265, 254, notanumber, 0", "a, b, c, d, e, f"] {
+            XCTAssertNil(OfficeDocumentEvent.parseCellCursor(payload), "expected nil for: \"\(payload)\"")
+        }
     }
 
     // MARK: - Shared CLI arg parser (both main.swifts)

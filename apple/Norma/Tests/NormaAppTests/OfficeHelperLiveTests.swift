@@ -1865,6 +1865,206 @@ final class OfficeHelperLiveTests: XCTestCase {
                           + "NEW broke saveAs for OOXML formats specifically")
         }
     }
+
+    // MARK: - Task 5: caret/selection/cell-cursor raw callback probe (the T4-lesson, applied again)
+
+    /// **Task 5 — capture REAL payloads before writing a single parser line.** Mirrors
+    /// `testRealLOKCallbackProbeCapturesRawPayloadsAndCrossChecksTheParsers`'s own methodology
+    /// exactly (raw stderr capture of `LOKBridge.handleCallback`'s unconditional trace line), aimed
+    /// at the five callback types this task's brief names: `LOK_CALLBACK_INVALIDATE_VISIBLE_CURSOR`
+    /// (1), `LOK_CALLBACK_TEXT_SELECTION` (2), `_START` (3), `_END` (4), and `LOK_CALLBACK_CELL_CURSOR`
+    /// (17).
+    ///
+    /// **Why more than one scenario per callback type — read this before trusting a single capture.**
+    /// Source-reading ahead of this probe (LO core, pinned commit `11482c8f` — see `VERSION-PIN`)
+    /// found the *payload-construction* code for these callbacks is NOT one shared function per type:
+    /// `LOK_CALLBACK_INVALIDATE_VISIBLE_CURSOR` alone has independent emitters in `editeng/` (in-place
+    /// text edit engines — Calc's in-cell edit, shape text) and `sfx2/source/view/lokhelper.cxx`'s
+    /// `notifyCursorInvalidation` (the ordinary VCL document-window caret, reached via
+    /// `vcl/source/window/cursor.cxx`) — and reading `notifyCursorInvalidation` itself raised a real
+    /// question this probe is what actually answers: its `bControlEvent == false` branch never closes
+    /// the `"rectangle"` value's own JSON quote before appending `" }"`, which LOOKS like it would
+    /// produce structurally invalid JSON — every traced call site in this tree passes `true`, so the
+    /// malformed branch may simply be dead in practice, but that is a claim about RUNTIME BEHAVIOR no
+    /// amount of source-reading settles on its own. Four scenarios, therefore: Writer body typing
+    /// (the vcl path), Writer shift-arrow AND drag selection (selection has its own independent
+    /// per-app emitters too — `sw/source/core/crsr/viscrs.cxx` for Writer), and Calc cell
+    /// navigation + in-cell edit (`sc/source/ui/view/gridwin.cxx`'s own `getCellCursor()` — a SIX-field
+    /// payload per that source read: `x, y, width, height, col, row` in the non-print-twips mode this
+    /// helper runs in, not the four-field shape the enum header's own doc comment would suggest by
+    /// analogy with `INVALIDATE_TILES`).
+    ///
+    /// **This probe is deliberately observational first.** It prints every matching raw line for
+    /// visual inspection (`grep '\[caret probe\]' <test log>` if the printed lines below scroll past),
+    /// then asserts only the WEAK, format-agnostic properties that must hold no matter which of the
+    /// several possible real shapes each callback turns out to use: `type=<n>` is one of the five,
+    /// `payload=` is present, and (once real output is read back) the specific field-count/shape
+    /// assertions this task's parser is built against — added in a follow-up pass once the FIRST run's
+    /// output is actually read, matching `testRealLOKCallbackProbeCapturesRawPayloadsAndCrossChecksThe
+    /// Parsers`'s own two-pass history (that test's own committed form already has its assertions;
+    /// this one starts the same way that one did, before its own fields.count>=5 finding existed).
+    func testRealLOKCallbackProbeCapturesCaretSelectionAndCellCursorRawPayloads() async throws {
+        try skipUnlessVendorPresent()
+        let helper = try await spawnLiveHelper(captureStderr: true)
+
+        // MARK: Writer — body typing, shift-arrow selection, drag selection
+        let writerStagedPath = helper.stateDir.appendingPathComponent("docs", isDirectory: true)
+            .appendingPathComponent("caret-probe-writer.odt").path
+        try FileManager.default.createDirectory(
+            at: URL(fileURLWithPath: writerStagedPath).deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(contentsOf: Self.fixturesRoot.appendingPathComponent("gate.odt")).write(to: URL(fileURLWithPath: writerStagedPath))
+        let writerDocId = UUID().uuidString
+        _ = try await helper.client.open(docId: writerDocId, path: writerStagedPath)
+
+        // A conservative in-body point — gate.odt's page is 12474x17406 twips (the six-format
+        // matrix's own pin); (1200, 1200) sits well inside a default ~1440-twip margin's own text
+        // area regardless of the seed content's exact layout. Exact placement is not load-bearing
+        // for a PROBE (unlike the placement drills in section below) — LOK resolves a click to the
+        // nearest valid text position regardless.
+        try await helper.client.postMouse(docId: writerDocId, part: 0, type: .buttonDown, xTwips: 1200, yTwips: 1200, count: 1, buttons: 1, modifiers: 0)
+        try await helper.client.postMouse(docId: writerDocId, part: 0, type: .buttonUp, xTwips: 1200, yTwips: 1200, count: 1, buttons: 1, modifiers: 0)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        // Type "AB" — each keystroke's caret move is a fresh chance for INVALIDATE_VISIBLE_CURSOR.
+        try await helper.client.postKey(docId: writerDocId, part: 0, type: .keyInput, charCode: 65, keyCode: 512) // A
+        try await helper.client.postKey(docId: writerDocId, part: 0, type: .keyUp, charCode: 65, keyCode: 512)
+        try await helper.client.postKey(docId: writerDocId, part: 0, type: .keyInput, charCode: 66, keyCode: 513) // B
+        try await helper.client.postKey(docId: writerDocId, part: 0, type: .keyUp, charCode: 66, keyCode: 513)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        // Shift+Left x2 — a real text selection via the KEYBOARD door.
+        let keyShift = 0x1000
+        let keyLeft = 1026
+        try await helper.client.postKey(docId: writerDocId, part: 0, type: .keyInput, charCode: 0, keyCode: keyLeft | keyShift)
+        try await helper.client.postKey(docId: writerDocId, part: 0, type: .keyUp, charCode: 0, keyCode: keyLeft | keyShift)
+        try await helper.client.postKey(docId: writerDocId, part: 0, type: .keyInput, charCode: 0, keyCode: keyLeft | keyShift)
+        try await helper.client.postKey(docId: writerDocId, part: 0, type: .keyUp, charCode: 0, keyCode: keyLeft | keyShift)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        // A bare Left arrow collapses the selection — the "selection went away" shape.
+        try await helper.client.postKey(docId: writerDocId, part: 0, type: .keyInput, charCode: 0, keyCode: keyLeft)
+        try await helper.client.postKey(docId: writerDocId, part: 0, type: .keyUp, charCode: 0, keyCode: keyLeft)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        // A drag selection via the MOUSE door — a genuinely different input path than shift-arrow.
+        try await helper.client.postMouse(docId: writerDocId, part: 0, type: .buttonDown, xTwips: 1200, yTwips: 1200, count: 1, buttons: 1, modifiers: 0)
+        try await helper.client.postMouse(docId: writerDocId, part: 0, type: .move, xTwips: 2400, yTwips: 1200, count: 1, buttons: 1, modifiers: 0)
+        try await helper.client.postMouse(docId: writerDocId, part: 0, type: .move, xTwips: 3600, yTwips: 1200, count: 1, buttons: 1, modifiers: 0)
+        try await helper.client.postMouse(docId: writerDocId, part: 0, type: .buttonUp, xTwips: 3600, yTwips: 1200, count: 1, buttons: 1, modifiers: 0)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+
+        try await helper.client.close(docId: writerDocId)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+
+        // MARK: Calc — cell navigation (CELL_CURSOR) + in-cell edit (INVALIDATE_VISIBLE_CURSOR again)
+        let calcStagedPath = helper.stateDir.appendingPathComponent("docs", isDirectory: true)
+            .appendingPathComponent("caret-probe-calc.ods").path
+        try Data(contentsOf: Self.fixturesRoot.appendingPathComponent("gate.ods")).write(to: URL(fileURLWithPath: calcStagedPath))
+        let calcDocId = UUID().uuidString
+        _ = try await helper.client.open(docId: calcDocId, path: calcStagedPath)
+
+        // A1, proven safe by testARealEditFiresInvalidateTiles...'s own precedent.
+        try await helper.client.postMouse(docId: calcDocId, part: 0, type: .buttonDown, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await helper.client.postMouse(docId: calcDocId, part: 0, type: .buttonUp, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        // A distant cell — several rows/columns over (row height ~254 twips, so 2000 twips is
+        // several rows down; column width varies but 3000 twips is comfortably a different column).
+        try await helper.client.postMouse(docId: calcDocId, part: 0, type: .buttonDown, xTwips: 3000, yTwips: 2000, count: 1, buttons: 1, modifiers: 0)
+        try await helper.client.postMouse(docId: calcDocId, part: 0, type: .buttonUp, xTwips: 3000, yTwips: 2000, count: 1, buttons: 1, modifiers: 0)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        // Enter in-cell edit mode — Calc's OWN edit-engine caret, a plausible SECOND
+        // INVALIDATE_VISIBLE_CURSOR emitter distinct from Writer's vcl-level one.
+        try await helper.client.postKey(docId: calcDocId, part: 0, type: .keyInput, charCode: 67, keyCode: 514) // C
+        try await helper.client.postKey(docId: calcDocId, part: 0, type: .keyUp, charCode: 67, keyCode: 514)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        try await helper.client.postKey(docId: calcDocId, part: 0, type: .keyInput, charCode: 0, keyCode: 1280) // Return commits
+        try await helper.client.postKey(docId: calcDocId, part: 0, type: .keyUp, charCode: 0, keyCode: 1280)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+
+        try await helper.client.close(docId: calcDocId)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+
+        // MARK: Cross-check — every raw line for types 1/2/3/4/17 must parse under its own parser.
+        //
+        // **First-run finding, disclosed rather than chased further**: the drag-selection scenario
+        // above (mouseDown/move/move/buttonUp at three DISCRETE, separately-async-posted twips
+        // points) produced NO `TEXT_SELECTION_START`/`_END` firing at all — the total counts below
+        // (`3=2, 4=2`) match EXACTLY the two shift-arrow keystrokes and leave nothing over for the
+        // drag. Whether the drag ALSO produced a redundant EMPTY `TEXT_SELECTION` is not
+        // individually isolated (see `sawSelectionEmpty`'s own comment near the bottom of this
+        // function). Plausible mechanism for the drag producing no real selection at all, not
+        // confirmed: T4's own fix-round-4 finding (NEW-3, task-4-report.md) already established that
+        // EVERY posted input event re-asserts the current view and grabs focus at DISPATCH time
+        // (`LOKPostAsyncEvent`) — three independently-posted mouse events may not preserve VCL's own
+        // continuous drag-tracking state the way one genuine, uninterrupted OS gesture would. Left
+        // disclosed rather than chased: this task's own parser is payload-shape-agnostic to WHICH
+        // input door produced a firing, and the keyboard door already proves the real shape live.
+        let interestingTypes: Set<Int32> = [1, 2, 3, 4, 17]
+        let rawLines = (helper.stderrCapture?.linesSnapshot() ?? []).filter { $0.contains("[LOKBridge raw callback]") }
+        var perType: [Int32: Int] = [:]
+        var sawCaretRect = false, sawSelectionRect = false, sawSelectionEmpty = false
+        var sawSelectionStart = false, sawSelectionEnd = false
+        var sawCellCursorAt = false, sawCellCursorEmpty = false
+        for line in rawLines {
+            guard let typeRange = line.range(of: "type="), let payloadRange = line.range(of: " payload=") else { continue }
+            guard let type = Int32(line[typeRange.upperBound..<payloadRange.lowerBound]) else { continue }
+            guard interestingTypes.contains(type) else { continue }
+            perType[type, default: 0] += 1
+            let payload = String(line[payloadRange.upperBound...])
+            print("[caret probe] type=\(type) payload=\"\(payload)\"")
+            switch type {
+            case 1:
+                guard case .caretRect(let rect) = OfficeDocumentEvent.parseCaretRect(payload) else {
+                    return XCTFail("a REAL INVALIDATE_VISIBLE_CURSOR payload failed to parse: \"\(payload)\"")
+                }
+                sawCaretRect = true
+                XCTAssertEqual(rect.width, 0, "every real caret rect observed has zero width (a caret has no horizontal extent)")
+            case 2:
+                guard case .textSelection(let rects) = OfficeDocumentEvent.parseTextSelection(payload) else {
+                    return XCTFail("a REAL TEXT_SELECTION payload failed to parse: \"\(payload)\"")
+                }
+                if rects.isEmpty { sawSelectionEmpty = true } else { sawSelectionRect = true }
+            case 3:
+                guard case .textSelectionStart = OfficeDocumentEvent.parseTextSelectionStart(payload) else {
+                    return XCTFail("a REAL TEXT_SELECTION_START payload failed to parse: \"\(payload)\"")
+                }
+                sawSelectionStart = true
+            case 4:
+                guard case .textSelectionEnd = OfficeDocumentEvent.parseTextSelectionEnd(payload) else {
+                    return XCTFail("a REAL TEXT_SELECTION_END payload failed to parse: \"\(payload)\"")
+                }
+                sawSelectionEnd = true
+            case 17:
+                guard case .cellCursor(let cell) = OfficeDocumentEvent.parseCellCursor(payload) else {
+                    return XCTFail("a REAL CELL_CURSOR payload failed to parse: \"\(payload)\"")
+                }
+                switch cell {
+                case .at: sawCellCursorAt = true
+                case .empty: sawCellCursorEmpty = true
+                }
+            default:
+                break
+            }
+        }
+        print("[caret probe] SUMMARY by type: \(perType.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: ", "))")
+
+        // Every scenario this probe actually drove DID produce real traffic (unlike the drag-
+        // selection disclosure above) — these are real assertions, not the "vacuously true for zero
+        // firings" honesty clause `testRealLOKCallbackProbeCapturesRawPayloadsAndCrossChecksTheParsers`
+        // uses for callbacks that may or may not fire incidentally.
+        XCTAssertTrue(sawCaretRect, "Writer typing and Calc in-cell edit must both produce a real caret rect")
+        XCTAssertTrue(sawSelectionRect, "Shift-arrow selection must produce a real, non-empty TEXT_SELECTION")
+        XCTAssertTrue(sawSelectionStart, "a real selection must produce TEXT_SELECTION_START")
+        XCTAssertTrue(sawSelectionEnd, "a real selection must produce TEXT_SELECTION_END")
+        XCTAssertTrue(sawCellCursorAt, "a real Calc cell click must produce a real CELL_CURSOR rect+col+row")
+        XCTAssertTrue(sawCellCursorEmpty, "entering Calc in-cell edit mode must produce CELL_CURSOR \"EMPTY\"")
+        // `sawSelectionEmpty` is observed (this run's own capture: 3 of the 5 total TEXT_SELECTION
+        // firings carried an empty payload) but deliberately NOT asserted here — this test's own raw
+        // line filter reads type+payload only, not `docId`, so which specific step(s) among "the
+        // very first click," "the bare-arrow collapse," "the drag selection," and "Calc's own
+        // initial no-selection state" produced which empty firing was not individually isolated.
+        // Not chased further: the PARSER (this test's actual subject) already has real, both-shapes
+        // coverage from `testParseTextSelectionCalcsBareEMPTYAlsoMeansNoSelection`/`...Real
+        // CapturedShapes`, and every one of these 3 empty firings above already parsed correctly as
+        // `.textSelection([])` without tripping the XCTFail branch.
+        _ = sawSelectionEmpty
+    }
 }
 
 /// `Process.TerminationReason.uncaughtSignal`'s raw value, for the SIGTERM measurement's log line
