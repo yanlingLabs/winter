@@ -5448,4 +5448,44 @@ final class ShellSessionHostTests: XCTestCase {
         await officeWaitUntil(timeout: 2) { office.recorder.closeCalls.count == 1 }
         try? FileManager.default.removeItem(atPath: badPath)
     }
+
+    // MARK: - Office Stage B Task 9: LOK's raw error text never reaches the banner
+
+    /// `OfficeRuntime.describe(_:)` is `private` — this drives the mapping through the REAL round
+    /// trip a live failure takes (`OfficeDriverRecorder.failNextOpenReason` throws
+    /// `OfficeHelperClientError.openFailed(reason:)` exactly like the real wire client would,
+    /// `openAndDispatch`'s own catch block is what calls `describe`), rather than asserting on a
+    /// symbol no test file can see. A KNOWN shape (this task's own live-observed
+    /// `legacy-xls.xls` text) maps to its house sentence; an UNRECOGNIZED shape maps to the generic
+    /// fallback — NEITHER raw string ever reaches `openFailures`.
+    func testALegacyImportFailuresRawLOKTextNeverReachesOpenFailuresOnlyTheMappedSentenceDoes() async throws {
+        let office = officeFactory()
+        let runtime = OfficeRuntime(sessionId: "S-error-mapping", driver: office.recorder.driver)
+        let knownPath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("known-\(UUID().uuidString).xls").path
+        try Data().write(to: URL(fileURLWithPath: knownPath)) // staging needs a real source file
+
+        office.recorder.failNextOpenReason = "loadComponentFromURL returned an empty reference"
+        runtime.open(knownPath)
+        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.openFailures[knownPath] != nil }
+        let knownReason = runtime.stateSnapshot.openFailures[knownPath]
+        XCTAssertEqual(knownReason, "This file couldn't be opened — it may be corrupted or in a "
+                       + "format the office viewer doesn't support.")
+        XCTAssertFalse((knownReason ?? "").contains("loadComponentFromURL"), "the raw LOK string must "
+                       + "never reach the banner")
+
+        let unknownPath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("unknown-\(UUID().uuidString).xls").path
+        try Data().write(to: URL(fileURLWithPath: unknownPath))
+        office.recorder.failNextOpenReason = "some brand-new LOK failure text nobody has seen before"
+        runtime.open(unknownPath)
+        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.openFailures[unknownPath] != nil }
+        let unknownReason = runtime.stateSnapshot.openFailures[unknownPath]
+        XCTAssertEqual(unknownReason, "This document couldn't be processed. See the log for details.")
+        XCTAssertFalse((unknownReason ?? "").contains("brand-new LOK failure"), "an UNRECOGNIZED raw "
+                       + "string must fall back to the generic sentence, never surface verbatim")
+
+        try? FileManager.default.removeItem(atPath: knownPath)
+        try? FileManager.default.removeItem(atPath: unknownPath)
+    }
 }

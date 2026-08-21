@@ -3050,18 +3050,90 @@ final class OfficeRuntime: ObservableObject {
         }
     }
 
+    /// **Office Stage B Task 9 — LOK's raw `getError()`/exception text, mapped to a short,
+    /// house-voice sentence: sentence case, no exclamation, actionable where possible.** Every
+    /// entry here is a shape this task actually OBSERVED against the real vendored LOK
+    /// (`OfficeHelperLiveTests.testKnownLimitationLegacyBinaryImportDoesNotOpenInThisVendorBuild`'s
+    /// own legacy-format matrix), never a guess at LOK's possible vocabulary — the Stage A concern
+    /// this closes is specifically "LOK's raw getError strings surface verbatim in openFailures
+    /// banners," not every error string this file can produce (see `describe(_:)`'s own header for
+    /// where the line is drawn). Matched by case-insensitive substring, not exact equality: LOK's
+    /// own strings often carry request-specific detail (a path, a docId) wrapped around a stable
+    /// core phrase.
+    private static let knownLOKErrorShapes: [(needle: String, sentence: String)] = [
+        // legacy-xls.xls's own observed failure — documentLoad returns NULL cleanly, no crash.
+        ("loadComponentFromURL returned an empty reference",
+         "This file couldn't be opened — it may be corrupted or in a format the office viewer doesn't support."),
+        // legacy-doc.doc/legacy-ppt.ppt's own observed text — LOK's own generic UNO-framework
+        // fallback string. In practice that specific pair kills the helper process outright before
+        // a reply carrying this text can even arrive (a direct libc `exit()` deep in LO's own
+        // import path — see that test's own header), but the string is LOK's documented fallback
+        // for other internal failures too, so it is mapped defensively rather than assumed
+        // unreachable from here.
+        ("Unspecified Application Error", "The office viewer couldn't make sense of this file."),
+        // LOKBridge.openOnDedicatedThread's own fallback when getError() itself returns nothing.
+        ("documentLoad failed", "This file couldn't be opened by the office viewer."),
+    ]
+
+    /// The mapping itself — a known shape's sentence, or a generic, honest fallback that never
+    /// repeats the raw text. `rawReason` is ALWAYS logged verbatim by this function's one caller
+    /// (`describe(_:)`, immediately below) before this ever runs; this function's return value is
+    /// the ONLY thing that ever reaches a banner.
+    private static func houseErrorSentence(forRawReason rawReason: String) -> String {
+        for shape in knownLOKErrorShapes where rawReason.localizedCaseInsensitiveContains(shape.needle) {
+            return shape.sentence
+        }
+        return "This document couldn't be processed. See the log for details."
+    }
+
     /// PURE: classifies an `OfficeHelperClient` failure into the short sentence
-    /// `.openFailed`/`.emitBanner` show. `.openFailed(reason:)` already carries the helper's own
-    /// text; everything else (a timeout, a protocol-level refusal, an unexpected reply shape) is
-    /// this runtime's own connection trouble, not a fact about the document.
+    /// `.openFailed`/`.emitBanner` show.
+    ///
+    /// **`.openFailed(reason:)`/`.saveFailed(reason:)` carry LOK's own raw text** — mapped through
+    /// `houseErrorSentence` rather than surfaced verbatim (`knownLOKErrorShapes`'s own header has
+    /// the full account). The raw string is logged here, unconditionally, so nothing is lost for
+    /// debugging — only the MAPPED sentence is ever RETURNED, and therefore the only thing that
+    /// ever reaches `openFailures`/a banner.
+    ///
+    /// **Everything else (a timeout, a protocol-level refusal, an unexpected reply shape) is this
+    /// runtime's own CONNECTION trouble, not a fact about the document** — `OfficeHelperClientError`
+    /// already carries this app's own hand-authored wording for those cases (no LOK text involved,
+    /// nothing to map), so `.description` passes through unchanged.
+    ///
+    /// **Office Stage B Task 9 — the NSError fix, found while building the mapping above.** Every
+    /// OTHER error this file's own throw sites produce (`stageDocument`'s Cocoa file-system errors,
+    /// `placeAtomically`'s `NSPOSIXErrorDomain` one) is a genuine `NSError`, and `NSError`
+    /// unconditionally conforms to `CustomStringConvertible` (confirmed empirically — Swift bridges
+    /// it whether or not the concrete type ever intended that) — but its `.description` is the
+    /// full "Error Domain=... Code=... UserInfo={...}" DEBUG dump, never fit for a banner.
+    /// `.localizedDescription` is the SAME Foundation machinery `NSAlert` and every other
+    /// user-facing surface already trusts, and it is EXACTLY the hand-authored text these throw
+    /// sites already craft (`placeAtomically`'s own `NSLocalizedDescriptionKey`, `FileManager`'s
+    /// own Cocoa-domain messages, e.g. "The file "x.xlsx" couldn't be opened because there is no
+    /// such file.") — the OLD blind `(error as? CustomStringConvertible)?.description` cast picked
+    /// the WRONG one for every one of them, discarding that already-house-voice-adjacent text in
+    /// favor of a technical dump nobody wrote for a user to read. `Error.localizedDescription` never
+    /// throws and is defined for every `Error`, so this also replaces the old hardcoded
+    /// `"the office helper request failed"` fallback — a truly unrecognized error type still gets a
+    /// non-crashing, generic-but-real sentence from Foundation's own default bridging, not a
+    /// hand-maintained string this function would otherwise need to keep guessing at.
+    ///
+    /// **Deliberately NOT extended to reword `OfficeHelperClientError`'s own `.description` wording
+    /// for `.timedOut`/`.serverError`/`.unexpectedReply`** — considered, disclosed rather than done:
+    /// that text is a SEPARATE, smaller polish (house-style casing/tone, not a "raw LOK text"
+    /// problem this task's own brief names), and touching it risks an unreviewed side effect on
+    /// whatever else in this codebase reads that same `.description` outside this one call site.
     private static func describe(_ error: Error) -> String {
         if let clientError = error as? OfficeHelperClientError {
             switch clientError {
-            case .openFailed(let reason), .saveFailed(let reason): return reason
-            default: break
+            case .openFailed(let reason), .saveFailed(let reason):
+                NSLog("[OfficeRuntime] raw office error (mapped for the banner above): \(reason)")
+                return houseErrorSentence(forRawReason: reason)
+            default:
+                return clientError.description
             }
         }
-        return (error as? CustomStringConvertible)?.description ?? "the office helper request failed"
+        return error.localizedDescription
     }
 }
 
