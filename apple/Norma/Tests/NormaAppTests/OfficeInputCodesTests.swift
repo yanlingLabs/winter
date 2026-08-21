@@ -169,6 +169,41 @@ final class OfficeInputCodesTests: XCTestCase {
         XCTAssertEqual(OfficeInputCodes.charCode(for: "AB"), 65)
     }
 
+    /// **A real correctness bug, caught while building the six-criteria live tests, fixed here.**
+    /// Real AppKit `characters` for Return/Tab/Escape/Backspace are NOT empty — they carry genuine,
+    /// non-zero C0-control Unicode scalars ("\r"=0x0D, "\t"=0x09, "\u{1B}"=0x1B, "\u{7F}"/"\u{8}").
+    /// An earlier version of this function had no exclusion at all, meaning `charCode` would have
+    /// reported a non-zero value for every one of these — silently sending Return's own "\r" to LOK
+    /// as if it were a character to type, alongside its own `keyCode`. Verified against real
+    /// LibreOffice source before fixing: `vcl/osx/salframeview.mm`'s own `insertText:`-shaped
+    /// handler gates real character insertion on `aCharCode > 0x1f` for exactly this reason — this
+    /// function's own header has the full citation.
+    func testControlCharactersProduceZeroCharCodeNeverTheirRawScalar() {
+        XCTAssertEqual(OfficeInputCodes.charCode(for: "\r"), 0, "Return")
+        XCTAssertEqual(OfficeInputCodes.charCode(for: "\n"), 0, "Return (LF form)")
+        XCTAssertEqual(OfficeInputCodes.charCode(for: "\t"), 0, "Tab")
+        XCTAssertEqual(OfficeInputCodes.charCode(for: "\u{1B}"), 0, "Escape")
+        XCTAssertEqual(OfficeInputCodes.charCode(for: "\u{08}"), 0, "Backspace (BS, C0)")
+        XCTAssertEqual(OfficeInputCodes.charCode(for: "\u{7F}"), 0, "Delete (DEL, C1 boundary)")
+    }
+
+    /// AppKit represents arrow keys / function keys / Home / End / PageUp / PageDown via its own
+    /// Private-Use-Area Unicode encoding (`NSEvent`'s documented `0xF700`...`0xF8FF` range, e.g.
+    /// `NSUpArrowFunctionKey == 0xF700`) — a REAL, non-empty, non-zero `characters` string for these
+    /// keys, which a naive "non-zero scalar means text" rule would wrongly forward to LOK as if
+    /// `0xF700` were a character to insert.
+    func testAppKitPrivateUseAreaFunctionKeyCodesProduceZeroCharCode() {
+        XCTAssertEqual(OfficeInputCodes.charCode(for: "\u{F700}"), 0, "NSUpArrowFunctionKey")
+        XCTAssertEqual(OfficeInputCodes.charCode(for: "\u{F729}"), 0, "NSHomeFunctionKey")
+        XCTAssertEqual(OfficeInputCodes.charCode(for: "\u{F8FF}"), 0, "the top of the excluded range")
+    }
+
+    func testOrdinaryPrintableCharactersAreUnaffectedByTheControlExclusion() {
+        XCTAssertEqual(OfficeInputCodes.charCode(for: " "), 32, "space is real content, not a control")
+        XCTAssertEqual(OfficeInputCodes.charCode(for: "~"), 126, "the printable-ASCII ceiling")
+        XCTAssertEqual(OfficeInputCodes.charCode(for: "é"), 233, "non-ASCII Unicode text is still forwarded")
+    }
+
     // MARK: - Mouse buttons (include/vcl/event.hxx)
 
     func testAppKitButtonNumbersMapToVCLsDifferentlyOrderedBits() {

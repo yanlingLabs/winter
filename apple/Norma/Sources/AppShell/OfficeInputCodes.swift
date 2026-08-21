@@ -93,18 +93,35 @@ enum OfficeInputCodes {
         baseCode(appKitKeyCode: appKitKeyCode) | modifierMask(modifierFlags)
     }
 
-    /// `nCharCode`: the Unicode scalar the key produces, or `0` for a non-printing key (arrows,
-    /// function keys, bare modifiers, Delete/Escape/Tab's OWN char slot — `ImplMapCharCode`'s table
-    /// maps `0x7f`/`0xf700`-range codes to `KEY_*` base codes, never to a printable character, and
-    /// this mirrors that: those keys carry their meaning entirely in `keyCode`). Takes the FIRST
-    /// Unicode scalar only — every character this table's own live typing drill exercises (ASCII
-    /// letters/digits/punctuation) is a single scalar; a future IME/combining-character path is
-    /// Task 5's `NSTextInputClient` route, never this one (see `OfficeTileCanvasView.keyDown`'s own
-    /// header on why text-generating and navigation keys stay structurally separable for that
-    /// reason).
+    /// `nCharCode`: the Unicode scalar the key produces, or `0` for anything that is NOT real
+    /// insertable text — verified against real LibreOffice source, not assumed: native LO's own
+    /// macOS `insertText:`-shaped handler (`vcl/osx/salframeview.mm`, the block starting `if( pInsert
+    /// && ... )`) gates its OWN character insertion on the exact SAME shape excluded here —
+    /// `aCharCode < 0x80 && aCharCode > 0x1f`, i.e. printable ASCII only, C0 controls (Tab `0x09`,
+    /// Return `0x0D`/`0x0A`, Escape `0x1B`) explicitly excluded — confirming Return/Tab/Escape/
+    /// Delete carry their meaning ENTIRELY in `keyCode` for real LO too, never as "a character to
+    /// insert." Generalized here past that narrow ASCII ceiling for genuine Unicode TEXT (accented
+    /// Latin, non-Latin scripts typed without an active IME composition — plain, non-composed input
+    /// is exactly what raw `keyDown` can see; a composed sequence never reaches this door in the
+    /// first place, since AppKit delivers it via `insertText:`, not `keyDown` — Task 5's own,
+    /// unimplemented route), while STILL excluding two control ranges native LO's own narrower gate
+    /// has no need to separately name because its ceiling already excludes them: C1 controls
+    /// (`0x7F`...`0x9F`, DEL plus its extended-control siblings) and AppKit's own Private-Use-Area
+    /// encoding for arrows/function keys/Home/End/PageUp/PageDown (`0xF700`...`0xF8FF` — `NSEvent`'s
+    /// documented range, e.g. `NSUpArrowFunctionKey`) — without this second exclusion, an arrow
+    /// key's OWN `characters` string (a genuine, non-empty, non-zero scalar in that range) would
+    /// read as "text" and get sent to LOK as if `0xF700` were a real character to insert.
+    ///
+    /// Takes the FIRST Unicode scalar only — every character this table's own live typing drill
+    /// exercises (ASCII letters/digits/punctuation) is a single scalar; a future IME/combining-
+    /// character path is Task 5's `NSTextInputClient` route, never this one (see
+    /// `OfficeTileCanvasView.keyDown`'s own header on why text-generating and navigation keys stay
+    /// structurally separable for that reason).
     static func charCode(for characters: String?) -> Int {
         guard let scalar = characters?.unicodeScalars.first else { return 0 }
-        return Int(scalar.value)
+        let value = scalar.value
+        guard value > 0x1F, !(0x7F...0x9F).contains(value), !(0xF700...0xF8FF).contains(value) else { return 0 }
+        return Int(value)
     }
 
     // MARK: - Mouse
