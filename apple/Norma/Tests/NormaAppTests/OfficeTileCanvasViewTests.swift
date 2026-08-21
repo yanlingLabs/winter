@@ -332,6 +332,19 @@ final class OfficeTileCanvasViewTests: XCTestCase {
         var subscribeCalls: [(docId: String, part: Int, zoomPPT: Int, viewportTwips: OfficeTwipsRect)] {
             lock.lock(); defer { lock.unlock() }; return _subscribeCalls
         }
+        /// Office Stage B Task 5 — the IME tests below need to see WHICH door a given
+        /// `insertText`/`setMarkedText`/`unmarkText`/`keyDown` call actually reached: the already-
+        /// proven per-scalar `postKey` door, or the new `postExtTextInput` door. Additive — every
+        /// PRE-existing test in this file only ever reads `subscribeCalls`, never these two, so
+        /// recording more here cannot change any of their outcomes.
+        private var _postKeyCalls: [(docId: String, part: Int, type: OfficeKeyEventType, charCode: Int, keyCode: Int)] = []
+        var postKeyCalls: [(docId: String, part: Int, type: OfficeKeyEventType, charCode: Int, keyCode: Int)] {
+            lock.lock(); defer { lock.unlock() }; return _postKeyCalls
+        }
+        private var _postExtTextInputCalls: [(docId: String, part: Int, type: OfficeExtTextInputType, text: String)] = []
+        var postExtTextInputCalls: [(docId: String, part: Int, type: OfficeExtTextInputType, text: String)] {
+            lock.lock(); defer { lock.unlock() }; return _postExtTextInputCalls
+        }
         /// office live-gate fix #4, FIX 2: `OfficeTileCanvasView.isSpreadsheet` reads this back via
         /// `runtime.stateSnapshot.documents[path]?.type` — every OTHER test in this file relies on
         /// the pre-existing `.text` default (the infinite-grid margin must stay INERT for them), so
@@ -359,8 +372,13 @@ final class OfficeTileCanvasViewTests: XCTestCase {
                 },
                 unsubscribeTiles: { _ in },
                 requestTiles: { _, _ in },
-                postKey: { _, _, _, _, _ in }, postMouse: { _, _, _, _, _, _, _, _ in },
-                postExtTextInput: { _, _, _, _ in },
+                postKey: { [unowned self] docId, part, type, charCode, keyCode in
+                    self.lock.lock(); self._postKeyCalls.append((docId, part, type, charCode, keyCode)); self.lock.unlock()
+                },
+                postMouse: { _, _, _, _, _, _, _, _ in },
+                postExtTextInput: { [unowned self] docId, part, type, text in
+                    self.lock.lock(); self._postExtTextInputCalls.append((docId, part, type, text)); self.lock.unlock()
+                },
                 stateDirectory: stateDirectory)
         }
     }
@@ -1631,5 +1649,260 @@ final class OfficeTileCanvasViewTests: XCTestCase {
         runtime.cursorStore.apply(docId: "doc-1", event: .caretRect(OfficeTwipsRect(x: 1, y: 1, width: 0, height: 1)), activePart: 0)
         try? await Task.sleep(nanoseconds: 30_000_000)
         XCTAssertNil(view.caretLayerForTesting, "still nil — a post-unmount push must not resurrect the layer")
+    }
+
+    // MARK: - Office Stage B Task 5 — NSTextInputClient (IME)
+
+    private func makeMountedView(runtime: OfficeRuntime, docId: String = "doc-1") -> OfficeTileCanvasView {
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: docId,
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
+        view.mount()
+        return view
+    }
+
+    /// The plain-commit path (`markedText == nil` — no composition in progress): one `postKey
+    /// (.keyInput)` per Unicode scalar, `keyCode: 0` for every one of them (no real physical key
+    /// behind synthetic text — `insertText`'s own header explains why `0`, not a guess).
+    func testInsertTextPlainCommitPostsOnePostKeyPerScalarWithKeyCodeZero() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let view = makeMountedView(runtime: runtime)
+
+        view.insertText("ab", replacementRange: NSRange(location: NSNotFound, length: 0))
+        await runtime.drainInputChainForTesting()
+
+        XCTAssertEqual(recorder.postKeyCalls.count, 2)
+        XCTAssertEqual(recorder.postKeyCalls.map(\.charCode), [97, 98])
+        XCTAssertEqual(recorder.postKeyCalls.map(\.keyCode), [0, 0])
+        XCTAssertEqual(recorder.postKeyCalls.map(\.type), [.keyInput, .keyInput])
+        XCTAssertTrue(recorder.postExtTextInputCalls.isEmpty, "a plain commit must never touch the "
+                      + "ext-text-input door at all")
+
+        view.unmount()
+    }
+
+    func testInsertTextWithEmptyStringIsANoOp() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let view = makeMountedView(runtime: runtime)
+
+        view.insertText("", replacementRange: NSRange(location: NSNotFound, length: 0))
+        try? await Task.sleep(nanoseconds: 30_000_000)
+
+        XCTAssertTrue(recorder.postKeyCalls.isEmpty)
+        XCTAssertTrue(recorder.postExtTextInputCalls.isEmpty)
+        view.unmount()
+    }
+
+    /// The composed-commit path: `setMarkedText` first (so `markedText != nil`), then `insertText`
+    /// must post the FINAL text as `.input` immediately followed by `.end` — the exact two-frame
+    /// sequence `OfficeRuntimeLiveTests.testExtTextInputMarksCommitsAndCancelsAgainstRealLOKThrough
+    /// SaveAndReopen` already proved against real LOK. Never touches `postKey` at all.
+    func testInsertTextWhenComposingPostsExtTextInputThenEndAndClearsMarkedText() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let view = makeMountedView(runtime: runtime)
+
+        view.setMarkedText("e", selectedRange: NSRange(location: 1, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
+        XCTAssertTrue(view.hasMarkedText(), "setup: composition must be active before this test means anything")
+
+        view.insertText("é", replacementRange: NSRange(location: NSNotFound, length: 0))
+        await runtime.drainInputChainForTesting()
+
+        // One call from setMarkedText, two from insertText's own commit sequence.
+        XCTAssertEqual(recorder.postExtTextInputCalls.count, 3)
+        XCTAssertEqual(recorder.postExtTextInputCalls[1].type, .input)
+        XCTAssertEqual(recorder.postExtTextInputCalls[1].text, "é")
+        XCTAssertEqual(recorder.postExtTextInputCalls[2].type, .end)
+        XCTAssertEqual(recorder.postExtTextInputCalls[2].text, "", "`.end` must always carry empty "
+                      + "text — LOK ignores it and commits whatever is currently marked instead")
+        XCTAssertTrue(recorder.postKeyCalls.isEmpty, "a composed commit must never touch the postKey "
+                      + "door at all")
+        XCTAssertFalse(view.hasMarkedText(), "insertText must clear the local composing state on commit")
+
+        view.unmount()
+    }
+
+    func testSetMarkedTextPostsInputAndReflectsComposingState() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let view = makeMountedView(runtime: runtime)
+
+        XCTAssertFalse(view.hasMarkedText(), "setup: nothing composing yet")
+        XCTAssertEqual(view.markedRange(), NSRange(location: NSNotFound, length: 0))
+
+        view.setMarkedText("xyz", selectedRange: NSRange(location: 3, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
+        await runtime.drainInputChainForTesting()
+
+        XCTAssertEqual(recorder.postExtTextInputCalls.count, 1)
+        XCTAssertEqual(recorder.postExtTextInputCalls[0].type, .input)
+        XCTAssertEqual(recorder.postExtTextInputCalls[0].text, "xyz")
+        XCTAssertTrue(view.hasMarkedText())
+        XCTAssertEqual(view.markedRange(), NSRange(location: 0, length: 3))
+        XCTAssertEqual(view.selectedRange(), NSRange(location: 3, length: 0))
+
+        view.unmount()
+    }
+
+    /// AppKit's OWN door for "the input method finished quietly" (a focus change mid-compose) —
+    /// same commit mechanism as `insertText`'s own composed-commit arm, `.end` alone.
+    func testUnmarkTextCommitsWhateverIsMarkedAndClearsComposingState() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let view = makeMountedView(runtime: runtime)
+        view.setMarkedText("xyz", selectedRange: NSRange(location: 3, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
+        await runtime.drainInputChainForTesting()
+
+        view.unmarkText()
+        await runtime.drainInputChainForTesting()
+
+        XCTAssertEqual(recorder.postExtTextInputCalls.count, 2)
+        XCTAssertEqual(recorder.postExtTextInputCalls[1].type, .end)
+        XCTAssertEqual(recorder.postExtTextInputCalls[1].text, "")
+        XCTAssertFalse(view.hasMarkedText())
+
+        view.unmount()
+    }
+
+    /// **Refuse-never-pointless**: `unmarkText` with nothing marked must not post anything — mirrors
+    /// the "fire-and-forget, but never a pointless post" posture this codebase already holds
+    /// `OfficeDocumentBridge.postKey` to elsewhere.
+    func testUnmarkTextIsANoOpWhenNothingIsMarked() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let view = makeMountedView(runtime: runtime)
+
+        view.unmarkText()
+        try? await Task.sleep(nanoseconds: 30_000_000)
+
+        XCTAssertTrue(recorder.postExtTextInputCalls.isEmpty)
+        view.unmount()
+    }
+
+    func testFirstRectIsZeroWithNoWindow() async {
+        // `recorder` kept alive (never `let (runtime, _)`) — `mount()` fires `performSubscribe()`'s
+        // detached `Task` into `SubscribeCapturingDriverRecorder`'s own `[unowned self]`-capturing
+        // driver closures; discarding the recorder lets it deallocate before that `Task` runs,
+        // crashing on the unowned read — this file's own documented hazard (see this class's own
+        // header on `driver`), hit and fixed here the same way every other mounting test already is.
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let view = makeMountedView(runtime: runtime)
+        _ = await waitUntil { recorder.subscribeCalls.count >= 1 }
+        // Deliberately never added to an NSWindow — mirrors this suite's own headless-by-default
+        // posture (every OTHER test in this file mounts without a real window too).
+        var actual = NSRange(location: NSNotFound, length: 0)
+        let rect = view.firstRect(forCharacterRange: NSRange(location: 0, length: 0), actualRange: &actual)
+        XCTAssertEqual(rect, .zero, "no window means no screen to report a rect in — must degrade to "
+                      + ".zero, never crash or fabricate a coordinate")
+        view.unmount()
+    }
+
+    func testFirstRectIsZeroWhenNoCaretRectIsTrackedYet() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let view = makeMountedView(runtime: runtime)
+        _ = await waitUntil { recorder.subscribeCalls.count >= 1 }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 300),
+                              styleMask: [.borderless], backing: .buffered, defer: true)
+        window.contentView = view
+
+        var actual = NSRange(location: NSNotFound, length: 0)
+        let rect = view.firstRect(forCharacterRange: NSRange(location: 0, length: 0), actualRange: &actual)
+        XCTAssertEqual(rect, .zero, "setup: nothing has stamped a caret rect for this docId yet")
+        view.unmount()
+    }
+
+    /// The brief's own named door, proven positive: a REAL tracked caret rect (fed through the SAME
+    /// `cursorStore.apply` fold `OfficeRuntime.handle(documentEvent:docId:)` uses in production)
+    /// converts to a non-zero SCREEN rect once the view sits in a real window.
+    func testFirstRectReflectsTheTrackedCaretRectWhenPartMatches() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let view = makeMountedView(runtime: runtime, docId: "doc-1")
+        _ = await waitUntil { recorder.subscribeCalls.count >= 1 }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 300),
+                              styleMask: [.borderless], backing: .buffered, defer: true)
+        window.contentView = view
+
+        runtime.cursorStore.apply(docId: "doc-1", event: .caretRect(OfficeTwipsRect(x: 1418, y: 1418, width: 0, height: 552)), activePart: 0)
+
+        var actual = NSRange(location: NSNotFound, length: 0)
+        let rect = view.firstRect(forCharacterRange: NSRange(location: 0, length: 0), actualRange: &actual)
+        XCTAssertNotEqual(rect, .zero, "a real tracked caret rect, matching part, in a real window — "
+                          + "must produce a real screen rect")
+        view.unmount()
+    }
+
+    /// The SAME part-mismatch discipline `layoutOverlays()` already enforces for the caret overlay
+    /// itself — a caret rect stamped against a part the canvas has since navigated away from must
+    /// never be reported as "here," to LOK's own candidate-window positioning any more than to the
+    /// overlay's own drawing.
+    func testFirstRectIsZeroWhenTrackedCaretPartDoesNotMatchCanvasPart() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let view = makeMountedView(runtime: runtime, docId: "doc-1") // initialPart: 0
+        _ = await waitUntil { recorder.subscribeCalls.count >= 1 }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 300),
+                              styleMask: [.borderless], backing: .buffered, defer: true)
+        window.contentView = view
+
+        runtime.cursorStore.apply(docId: "doc-1", event: .caretRect(OfficeTwipsRect(x: 1418, y: 1418, width: 0, height: 552)), activePart: 1)
+
+        var actual = NSRange(location: NSNotFound, length: 0)
+        let rect = view.firstRect(forCharacterRange: NSRange(location: 0, length: 0), actualRange: &actual)
+        XCTAssertEqual(rect, .zero, "the tracked rect belongs to part 1; this canvas is on part 0 — "
+                      + "must not report a stale-part rect")
+        view.unmount()
+    }
+
+    /// **The advisor-flagged regression this task's own classifier fix targets.** Before the
+    /// `.control` exclusion, a Ctrl-held key reported a non-zero `charactersIgnoringModifiers`
+    /// scalar (the base letter) and was misclassified text-generating — this pins the FIXED
+    /// behavior directly against `forwardKeyEvent`'s own observable wire payload for a real Ctrl+A
+    /// keyUp (the one call site `isTextGeneratingKeyEvent` still gates for every key, per that
+    /// method's own header): charCode must be `0`, matching "this is not text to insert."
+    func testControlHeldKeyUpPostsZeroCharCodeNotTheBaseLetter() async throws {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let view = makeMountedView(runtime: runtime)
+
+        let event = try XCTUnwrap(NSEvent.keyEvent(with: .keyUp, location: .zero, modifierFlags: [.control],
+                                                    timestamp: 0, windowNumber: 0, context: nil,
+                                                    characters: "a", charactersIgnoringModifiers: "a",
+                                                    isARepeat: false, keyCode: 0))
+        view.keyUp(with: event)
+        await runtime.drainInputChainForTesting()
+
+        XCTAssertEqual(recorder.postKeyCalls.count, 1)
+        XCTAssertEqual(recorder.postKeyCalls[0].charCode, 0, "Ctrl+A is a command, not text — charCode "
+                      + "must be 0, never 97")
+        view.unmount()
+    }
+
+    /// **The end-to-end routing proof** — not just that `insertText` posts the right thing when
+    /// called directly (the tests above), but that a REAL plain-ASCII `keyDown` genuinely reaches it
+    /// THROUGH `interpretKeyEvents`, never through the old direct `forwardKeyEvent` call `keyDown`'s
+    /// own guard now withholds from every text-generating key. `keyCode: 0` is the discriminator:
+    /// `insertText`'s own path always posts `0` (no real physical key behind synthetic text — see its
+    /// own header); had this key WRONGLY fallen through to `forwardKeyEvent`'s direct path instead,
+    /// physical keyCode `0` maps to `Key.a = 512` in `OfficeInputCodes`'s own table — a plainly
+    /// DIFFERENT, nonzero value this assertion would catch.
+    func testPlainAsciiKeyDownRoutesThroughInterpretKeyEventsNotDirectlyToForwardKeyEvent() async throws {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let view = makeMountedView(runtime: runtime)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 300),
+                              styleMask: [.borderless], backing: .buffered, defer: true)
+        window.contentView = view
+        _ = window.makeFirstResponder(view)
+
+        let event = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+                                                    timestamp: 0, windowNumber: window.windowNumber, context: nil,
+                                                    characters: "a", charactersIgnoringModifiers: "a",
+                                                    isARepeat: false, keyCode: 0))
+        view.keyDown(with: event)
+        await runtime.drainInputChainForTesting()
+
+        let arrived = await waitUntil { recorder.postKeyCalls.count >= 1 }
+        XCTAssertTrue(arrived, "interpretKeyEvents never resolved to insertText for a plain 'a' — "
+                      + "routing regressed to something that produces no postKey call at all")
+        guard arrived else { return }
+        XCTAssertEqual(recorder.postKeyCalls[0].charCode, 97)
+        XCTAssertEqual(recorder.postKeyCalls[0].keyCode, 0, "must be insertText's own 0, not "
+                      + "forwardKeyEvent's physical-keyCode 512 (Key.a) — see this test's own header")
+
+        view.unmount()
     }
 }

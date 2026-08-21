@@ -124,6 +124,26 @@ enum OfficeInputCodes {
         return Int(value)
     }
 
+    /// Office Stage B Task 5 — `insertText(_:replacementRange:)`'s own multi-scalar door. `charCode
+    /// (for:)` above takes only the FIRST scalar because every caller before Task 5 (`keyDown`/
+    /// `keyUp`, one real physical key each) only ever hands it a single-scalar string. A genuine
+    /// multi-character commit — a composed IME string landing in one `insertText` call, or a future
+    /// dictation/autocomplete insert — needs one entry per scalar, each independently excluded or
+    /// kept by the IDENTICAL rule `charCode(for:)` applies (same three exclusions: C0 controls, C1
+    /// controls, AppKit's Private-Use-Area function-key range) — this is that same per-scalar
+    /// exclusion, just iterated rather than taking the first and stopping. A scalar this rule
+    /// excludes is DROPPED, not substituted with `0`: a `0`-charCode `keyEvent` is a real, meaningful
+    /// "bare modifier / unmapped key" wire value elsewhere in this file (see `lokKeyCode`'s own
+    /// header), so silently inserting one here for a scalar `insertText` was never asked to send
+    /// would be a fabricated keystroke, not a faithful translation of `text`.
+    static func charCodes(for text: String) -> [Int] {
+        text.unicodeScalars.compactMap { scalar in
+            let value = scalar.value
+            guard value > 0x1F, !(0x7F...0x9F).contains(value), !(0xF700...0xF8FF).contains(value) else { return nil }
+            return Int(value)
+        }
+    }
+
     // MARK: - Mouse
 
     /// VCL's `MOUSE_LEFT`/`MOUSE_MIDDLE`/`MOUSE_RIGHT` bitmask for `postMouseEvent`'s `nButtons` —

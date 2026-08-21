@@ -311,7 +311,7 @@ private final class OfficeTileLayer: CALayer {
 ///
 /// **Owns viewport math end to end**, including part switches (`OfficeDocumentCanvasHost
 /// .setActivePart`) — see that protocol's own header for why the model does not.
-final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
+final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost, NSTextInputClient {
     private let runtime: OfficeRuntime
     private let path: String
     /// **office-plumbing Task 8 (T6 review F4): mutable, not `let`, as of this task.** A reload
@@ -878,7 +878,21 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
     /// (`getTextSelection`/`paste()`/`.uno:Copy` are the likely doors — not built here).
     override func keyDown(with event: NSEvent) {
         guard event.modifierFlags.contains(.command) else {
-            forwardKeyEvent(event, type: .keyInput)
+            // Office Stage B Task 5 — the seam Task 4 staged is now real: a text-generating keyDown
+            // routes through `interpretKeyEvents`, an `NSTextInputClient` conformance, so dead keys/
+            // composition/CJK input methods work — `insertText(_:replacementRange:)`/`setMarkedText
+            // (_:selectedRange:replacementRange:)` are what actually reach the wire from there, never
+            // this method posting directly. Navigation (arrows, Delete, Return, Tab, Escape, function
+            // keys) stays on the EXACT direct `forwardKeyEvent` path it always used — IME has no
+            // opinion about a key that produces no text, and `interpretKeyEvents` is a keyDown-only
+            // mechanism to begin with (see `keyUp`'s own header for why ITS text-generating case
+            // stays on this same direct path too, deliberately, not for symmetry's own sake).
+            if isTextGeneratingKeyEvent(event) {
+                resetCaretBlink()
+                interpretKeyEvents([event])
+            } else {
+                forwardKeyEvent(event, type: .keyInput)
+            }
             return
         }
         switch event.charactersIgnoringModifiers {
@@ -893,6 +907,16 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
     /// for (`LOK_KEYEVENT_KEYUP`) but Stage A never had a door to send it through. Same Cmd-held
     /// gate as `keyDown` — a Cmd-combo's own key-up is exactly as much "app chrome's business, not
     /// LOK's" as its key-down half was.
+    ///
+    /// **Office Stage B Task 5 — deliberately UNCHANGED, for every key including text-generating
+    /// ones.** `keyDown`'s own text-generating arm now routes through `interpretKeyEvents`, but
+    /// `interpretKeyEvents` is a keyDown-only AppKit mechanism — there is no `NSTextInputClient`
+    /// counterpart for a key RELEASE, and none is needed: `insertText`/`setMarkedText` already posted
+    /// whatever this keystroke's own text was via the ext-text-input/postKey doors. This method keeps
+    /// calling `forwardKeyEvent(event, type: .keyUp)` for every key exactly as Task 4 left it — a
+    /// SECOND synthetic keyUp from `insertText` itself would be the double-delivery this task's own
+    /// seam exists to prevent (see `forwardKeyEvent`'s own header); the real, single keyUp AppKit
+    /// still delivers here for the SAME physical key is the only one LOK ever sees.
     override func keyUp(with event: NSEvent) {
         guard !event.modifierFlags.contains(.command) else {
             super.keyUp(with: event)
@@ -901,19 +925,22 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
         forwardKeyEvent(event, type: .keyUp)
     }
 
-    /// **The text-generating/navigation seam Task 5 needs, made explicit rather than fused.** Both
-    /// arms call the identical `runtime.postKeyEvent` today — Task 4 has no IME to route through,
-    /// and every key this view forwards (printable characters AND navigation) genuinely does belong
-    /// on the wire either way. The branch exists anyway because Task 5's own job is to take AWAY the
-    /// text-generating arm's direct call here and replace it with `interpretKeyEvents([event])` (an
-    /// `NSTextInputClient` conformance this view does not have yet), routing through
-    /// `insertText(_:replacementRange:)` instead so dead keys/composition/CJK input methods work —
-    /// while the navigation arm (arrows, Delete, Return, Tab, Escape, function keys) must stay
-    /// EXACTLY as it is here, since IME has no opinion about a key that produces no text. Deciding
-    /// "text-generating" the same way `OfficeInputCodes.charCode` itself does (a non-zero Unicode
-    /// scalar from `charactersIgnoringModifiers`) keeps the classification and the wire encoding
-    /// using the identical source of truth, so they can never disagree about which arm a given key
-    /// falls into.
+    /// **The text-generating/navigation seam Task 4 staged and Task 5 now USES**, not merely keeps.
+    /// `keyDown`'s own guard means this method's `type == .keyInput` call is only ever reached for
+    /// NAVIGATION keys now (text-generating keyDowns take the `interpretKeyEvents` branch instead and
+    /// never call this at all) — but `keyUp` still calls this for EVERY key, text-generating included
+    /// (see that method's own header for why), so `isTextGenerating` below still matters: it decides
+    /// whether a keyUp's own wire payload carries a real charCode or `0`, exactly as before.
+    ///
+    /// **`.control` excluded, not just `.command` — a fix this task made, not merely documented.**
+    /// Control-held combos (Ctrl+A, emacs-style bindings AppKit maps to editing commands) report a
+    /// non-zero `charactersIgnoringModifiers` scalar (the base letter, not the C0 control code that
+    /// lands in `.characters` instead) — WITHOUT this exclusion, `isTextGeneratingKeyEvent` would
+    /// misclassify a Ctrl-held key as text-generating, and `keyDown` would route it into
+    /// `interpretKeyEvents`, which resolves it to `doCommand(by:)` (e.g.
+    /// `moveToBeginningOfParagraph:` for Ctrl+A) — this view's own `doCommand(by:)` is a no-op,
+    /// so an un-excluded Ctrl+A would simply stop reaching LOK at all, silently. See
+    /// `isTextGeneratingKeyEvent`'s own header for the shared classifier this fix lives in.
     private func forwardKeyEvent(_ event: NSEvent, type: OfficeKeyEventType) {
         // Office Stage B Task 5 — "blink pauses while typing": every forwarded key (text-generating
         // OR navigation — an arrow key moving the caret is exactly as much "the user is actively
@@ -921,15 +948,26 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
         // visible and restarts the blink-off countdown, the standard macOS caret feel.
         resetCaretBlink()
         let keyCode = OfficeInputCodes.lokKeyCode(appKitKeyCode: event.keyCode, modifierFlags: event.modifierFlags)
-        let isTextGenerating = OfficeInputCodes.charCode(for: event.charactersIgnoringModifiers) != 0
-        if isTextGenerating {
-            // TEXT-GENERATING — Task 5 replaces this call with `interpretKeyEvents([event])`.
+        if isTextGeneratingKeyEvent(event) {
             let charCode = OfficeInputCodes.charCode(for: event.characters)
             runtime.postKeyEvent(path: path, type: type, charCode: charCode, keyCode: keyCode)
         } else {
-            // NAVIGATION/non-printing — stays exactly this shape after Task 5.
             runtime.postKeyEvent(path: path, type: type, charCode: 0, keyCode: keyCode)
         }
+    }
+
+    /// Office Stage B Task 5 — "does this key event carry real, insertable text?" Shared by
+    /// `keyDown`'s own ROUTING decision (text-generating -> `interpretKeyEvents`, everything else ->
+    /// the direct `forwardKeyEvent` wire path) and `forwardKeyEvent`'s own charCode-vs-zero decision
+    /// (still reached for every `keyUp`, and for every NAVIGATION `keyDown`) — kept as ONE function
+    /// so the two can never disagree about which key is which. `.command` is excluded defensively
+    /// even though `keyDown`'s own call site already guarantees it false (its outer guard) —
+    /// `charactersIgnoringModifiers` is documented to still reflect Command's own remapping in some
+    /// layouts, so this stays a real, not merely decorative, exclusion. `.control` is excluded for
+    /// the reason `forwardKeyEvent`'s own header gives at length (the Ctrl+A silent-swallow trap).
+    private func isTextGeneratingKeyEvent(_ event: NSEvent) -> Bool {
+        !event.modifierFlags.contains(.command) && !event.modifierFlags.contains(.control)
+            && OfficeInputCodes.charCode(for: event.charactersIgnoringModifiers) != 0
     }
 
     /// A left-button press — positions LOK's own cursor/selection (there is no other door to do
@@ -969,6 +1007,160 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
         let modifiers = OfficeInputCodes.modifierMask(event.modifierFlags)
         runtime.postMouseEvent(path: path, type: type, xTwips: twips.x, yTwips: twips.y,
                                count: event.clickCount, buttons: buttons, modifiers: modifiers)
+    }
+
+    // MARK: - NSTextInputClient (Office Stage B Task 5 — IME)
+
+    /// The one piece of state this conformance needs: the text of the ACTIVE composition, or `nil`
+    /// when nothing is being composed. **Local bookkeeping only — never synced with LOK's own
+    /// document model.** This view has no text-buffer representation of the document at all (it is a
+    /// tile-pixel canvas; the document's real content lives entirely inside LOK, reachable only
+    /// through twips-space rects and rendered pixels) — `markedText` exists purely so
+    /// `hasMarkedText()`/`markedRange()`/`selectedRange()` can answer AppKit's own questions about
+    /// composition state without a wire round trip, and so `insertText`/`unmarkText` know whether
+    /// they are committing a REAL composition (ext-text-input door) or plain typed text (the
+    /// already-proven per-scalar `postKeyEvent` door). `nil`, not `""`, distinguishes "never started
+    /// composing" from "composing, but the marked run is momentarily empty" (a real IME state —
+    /// backspacing through a composition down to nothing does not end it).
+    private var markedText: String?
+
+    /// Commits text — called by `interpretKeyEvents` directly for a plain, non-composed key (the
+    /// common case: every ordinary US-layout letter/digit/punctuation, no dead key, no active IME),
+    /// or by the input method at the END of a real composition (a CJK candidate confirmed, an
+    /// option-e-then-e é resolved). Which one happened is exactly what `markedText` (above) already
+    /// tracks — no new state needed to tell them apart.
+    ///
+    /// **Composed commit** — `markedText != nil`: posts `text` as the FINAL marked run
+    /// (`LOK_EXT_TEXTINPUT`) immediately followed by the commit (`LOK_EXT_TEXTINPUT_END`, whose own
+    /// `text` argument is always sent empty — see `OfficeWireFrame.extTextInputEvent`'s own header:
+    /// LOK ignores it and commits whatever is CURRENTLY marked, which is why the mark must be posted
+    /// first, same call). This is the exact two-frame sequence `OfficeRuntimeLiveTests
+    /// .testExtTextInputMarksCommitsAndCancelsAgainstRealLOKThroughSaveAndReopen` already proved
+    /// against real LOK before this method existed.
+    ///
+    /// **Plain commit** — `markedText == nil`: the already-proven T4 path, one `postKeyEvent
+    /// (.keyInput)` per Unicode scalar in `text` (`OfficeInputCodes.charCodes(for:)`). Deliberately
+    /// posts ONLY `.keyInput`, never a paired synthetic `.keyUp` — the REAL `keyUp` AppKit still
+    /// delivers for the physical key that triggered this `insertText` call reaches `keyUp(with:)`
+    /// exactly like any other key (that method's own header explains why it stays unconditional) and
+    /// supplies the keyUp half; a synthetic one here would be exactly the double-delivery this
+    /// task's whole seam exists to prevent. `keyCode: 0` for every posted scalar — there is no real
+    /// physical key behind synthetic/composed text (é is not a physical US key), and `0` is LOK's own
+    /// documented "no physical key, charCode carries the meaning" value (`OfficeInputCodes.charCode`'s
+    /// own header: a non-zero charCode is unambiguously "insert this character," independent of
+    /// keyCode) — never a guessed value that might collide with a real key's meaning by accident.
+    func insertText(_ string: Any, replacementRange: NSRange) {
+        resetCaretBlink()
+        let text = (string as? String) ?? (string as? NSAttributedString)?.string ?? ""
+        guard !text.isEmpty else { return }
+        if markedText != nil {
+            runtime.postExtTextInput(path: path, type: .input, text: text)
+            runtime.postExtTextInput(path: path, type: .end, text: "")
+            markedText = nil
+        } else {
+            let keyCode = 0
+            for charCode in OfficeInputCodes.charCodes(for: text) {
+                runtime.postKeyEvent(path: path, type: .keyInput, charCode: charCode, keyCode: keyCode)
+            }
+        }
+    }
+
+    /// Preedit — called on every keystroke of a multi-stage compose (option-e, then e again: this
+    /// fires once for the accent-pending state, then `insertText` fires once with the resolved "é").
+    /// Forwards `string` verbatim as `LOK_EXT_TEXTINPUT` — proven, in the same live drill
+    /// `insertText`'s own header cites, to make LOK repaint the marked run with a distinct
+    /// (traditionally underlined) decoration; the empty-string case (an IME clearing its own marked
+    /// run without ending composition) is not special-cased — it is exactly `.input("")`, the SAME
+    /// frame this drill's own cancel phase already proved leaves no residue once followed by `.end`.
+    func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        resetCaretBlink()
+        let text = (string as? String) ?? (string as? NSAttributedString)?.string ?? ""
+        markedText = text
+        runtime.postExtTextInput(path: path, type: .input, text: text)
+    }
+
+    /// Ends composition WITHOUT going through `insertText` — AppKit's own door for "the input method
+    /// decided to just finish quietly" (focus change, a click elsewhere while composing). Same commit
+    /// mechanism as `insertText`'s own composed-commit arm: `.end` alone, text empty, committing
+    /// whatever is currently marked. A no-op when nothing is marked — matches `OfficeDocumentBridge
+    /// .postKey`'s own "fire-and-forget, but never a POINTLESS post" posture elsewhere in this file.
+    func unmarkText() {
+        guard markedText != nil else { return }
+        runtime.postExtTextInput(path: path, type: .end, text: "")
+        markedText = nil
+    }
+
+    /// **Deliberately local, fake state — this view owns no real text buffer to report a range
+    /// against.** The document's actual content lives entirely inside LOK; reporting a range "into"
+    /// it would require a text-model this canvas does not have and does not need for typing to work
+    /// (LOK already knows where the real caret/selection is — see `OfficeCursorStore`). This is the
+    /// same minimal-fake-buffer posture other canvas-rendered (non-`NSTextView`) text surfaces take:
+    /// a coordinate WITHIN the local `markedText` string, never into the document.
+    func selectedRange() -> NSRange {
+        guard let markedText else { return NSRange(location: 0, length: 0) }
+        return NSRange(location: markedText.count, length: 0)
+    }
+
+    func markedRange() -> NSRange {
+        guard let markedText else { return NSRange(location: NSNotFound, length: 0) }
+        return NSRange(location: 0, length: markedText.count)
+    }
+
+    func hasMarkedText() -> Bool { markedText != nil }
+
+    /// Always `nil` — this view has no text buffer to answer a "what text is at this range" query
+    /// against (see `selectedRange`'s own header). `nil` is a documented, legal answer for "no
+    /// substring available," not a crash or a refusal; the input methods this app targets (accent/
+    /// dead-key composition, CJK candidate windows) do not depend on reconversion working here.
+    func attributedSubstring(forProposedRange range: NSRange, actualRange: NSRangePointer?) -> NSAttributedString? {
+        actualRange?.pointee = NSRange(location: NSNotFound, length: 0)
+        return nil
+    }
+
+    /// No attributes — marked-text decoration (the underline) is drawn by LOK's own tile rendering
+    /// (the live drill this file's `insertText` header cites proves it, pixel-for-pixel), never by an
+    /// `NSAttributedString` this view would have to composite on top — a SECOND, Norma-drawn
+    /// rendering of the same marked text was considered and rejected for exactly this reason: LOK's
+    /// own model already contains it, so anything this view drew independently would double-render on
+    /// the next incidental repaint.
+    func validAttributesForMarkedText() -> [NSAttributedString.Key] { [] }
+
+    /// The brief's own named door: the IME candidate-window anchor point, answered from the SAME
+    /// tracked caret rect the caret overlay itself draws from (`OfficeCursorStore`, Task 5's own
+    /// Stage 3) — never a fresh LOK query (LOK has no "where would the candidate window go" concept
+    /// of its own; `LOK_EXT_TEXTINPUT_POS` is deliberately unmodeled, see `OfficeExtTextInputType`'s
+    /// own header, precisely because this local answer already covers the need).
+    /// `.zero` when there is no window (this view's own headless/unmounted test posture) or no
+    /// tracked caret rect yet, or when the tracked rect's own stamped part disagrees with this
+    /// canvas's current `part` — the SAME "never show a stale-part rect" discipline the caret overlay
+    /// itself already enforces (`layoutOverlays`'s own header).
+    func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect {
+        actualRange?.pointee = range
+        guard let window else { return .zero }
+        let state = runtime.cursorStore.state(docId: docId)
+        guard let caretRectTwips = state.caretRectTwips, state.caretPart == part else { return .zero }
+        let viewRect = officeTwipsRectToScreenRect(caretRectTwips, zoomPPT: zoomPPT, scrollOrigin: scrollOrigin)
+        let windowRect = convert(viewRect, to: nil)
+        return window.convertToScreen(windowRect)
+    }
+
+    /// Always `NSNotFound` — the inverse of `firstRect` (screen point -> document character index),
+    /// which needs the same text-model this view does not have. Used by AppKit for click-driven
+    /// reconversion UI this app's target input methods (accent/dead-key, CJK candidate windows) do
+    /// not exercise.
+    func characterIndex(for point: NSPoint) -> Int { NSNotFound }
+
+    /// **Expected UNREACHABLE in ordinary typing, by construction of `keyDown`'s own routing** — only
+    /// TEXT-GENERATING keys ever reach `interpretKeyEvents` (see `keyDown`'s own header), and for a
+    /// plain, non-composing key that always resolves to `insertText`, never this. A DEBUG-only log
+    /// canary, not a silent no-op: if some input method/layout combination DOES route a text-
+    /// generating key here (an edge case this task's own live drills did not surface), this is where
+    /// that would first become visible instead of silently swallowing a keystroke.
+    override func doCommand(by selector: Selector) {
+        #if DEBUG
+        NSLog("[OfficeTileCanvasView] doCommand(by:) unexpectedly reached: \(selector) — only "
+              + "text-generating keys route through interpretKeyEvents, so this should be unreachable")
+        #endif
     }
 
     private func zoomStep(_ target: Int) {

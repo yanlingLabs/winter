@@ -204,6 +204,27 @@ final class OfficeInputCodesTests: XCTestCase {
         XCTAssertEqual(OfficeInputCodes.charCode(for: "é"), 233, "non-ASCII Unicode text is still forwarded")
     }
 
+    // MARK: - charCodes (Office Stage B Task 5 — insertText's multi-scalar door)
+
+    func testCharCodesReturnsOneEntryPerScalarInOrder() {
+        XCTAssertEqual(OfficeInputCodes.charCodes(for: "AB"), [65, 66])
+        XCTAssertEqual(OfficeInputCodes.charCodes(for: "é"), [233])
+        XCTAssertEqual(OfficeInputCodes.charCodes(for: "xyz"), [120, 121, 122])
+    }
+
+    func testCharCodesIsEmptyForEmptyString() {
+        XCTAssertEqual(OfficeInputCodes.charCodes(for: ""), [])
+    }
+
+    /// Same three exclusions as `charCode(for:)` — this is the identical rule, just applied
+    /// per-scalar rather than to the first scalar only.
+    func testCharCodesDropsExcludedScalarsRatherThanSubstitutingZero() {
+        XCTAssertEqual(OfficeInputCodes.charCodes(for: "A\rB"), [65, 66], "the C0 control (\\r) is "
+                       + "DROPPED, not turned into a fabricated 0-charCode entry between A and B")
+        XCTAssertEqual(OfficeInputCodes.charCodes(for: "\t\u{1B}"), [], "an all-control string yields "
+                       + "an empty array, not an array of zeros")
+    }
+
     // MARK: - Mouse buttons (include/vcl/event.hxx)
 
     func testAppKitButtonNumbersMapToVCLsDifferentlyOrderedBits() {
