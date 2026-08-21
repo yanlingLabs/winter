@@ -3112,6 +3112,17 @@ final class OfficeRuntime: ObservableObject {
     /// own strings often carry request-specific detail (a path, a docId) wrapped around a stable
     /// core phrase.
     private static let knownLOKErrorShapes: [(needle: String, sentence: String)] = [
+        // Office Stage B Task 10 — the CFB release blocker's own refusal reason
+        // (`LOKBridge.cfbUnderModernExtensionReason`, hand-mirrored across the module boundary the
+        // same way every other needle in this table already is — see that constant's own header).
+        // Placed FIRST: distinct from every other shape below by construction (contains none of
+        // their needles as a substring), so ordering has no effect on which sentence a genuine CFB
+        // refusal gets, but leading with the newest/most specific shape matches this table's own
+        // house style of putting the legacy-format matrix's three entries in the order they were
+        // discovered.
+        ("refused before documentLoad: legacy OLE2/CFB binary content under a modern Office extension",
+         "This file's contents don't match its extension — it looks like an older binary Office "
+       + "format and can't be opened here."),
         // legacy-xls.xls's own observed failure — documentLoad returns NULL cleanly, no crash.
         ("loadComponentFromURL returned an empty reference",
          "This file couldn't be opened — it may be corrupted or in a format the office viewer doesn't support."),

@@ -476,6 +476,58 @@ final class OfficeHelperLiveTests: XCTestCase {
         }
     }
 
+    // MARK: - Office Stage B Task 10 — the CFB release blocker's own refusal drill
+
+    /// **The adopted release blocker, live: a GENUINE OLE2/CFB document under a MODERN extension —
+    /// "a user's genuine .doc renamed .docx," the exact scenario the blocker names.** Reuses
+    /// `legacy-doc.doc`'s own committed bytes (never synthesized magic-bytes-plus-garbage:
+    /// `testGarbageFileOpenFailsAndHelperSurvives`'s own well-known caveat — LOK's content-sniffing
+    /// is lenient enough that arbitrary bytes rarely reproduce a REAL format-specific failure —
+    /// applies here too, and inverted: a hand-rolled prefix risks never reaching the real crash path
+    /// this test exists to prove is now intercepted) — copied byte-for-byte to a `.docx`-named
+    /// scratch path, never a repo fixture (the interesting fact is the RENAME, not new content).
+    ///
+    /// **Pre-fix, this reproduces `testKnownLimitationLegacyBinaryImportDoesNotOpenInThisVendorBuild`'s
+    /// own helper-death mode** — confirmed live, once, before `LOKBridge`'s CFB sniff landed (see
+    /// task-10-report.md for the transcript: the open never replies, `helper.process.isRunning`
+    /// goes false, identical to that test's own `.doc`/`.ppt` legs). **Post-fix**, the refusal below
+    /// fires INSIDE `openOnDedicatedThread`, strictly before `documentLoad` is ever called, so LOK
+    /// never sees these bytes at all and the crash path is never reached.
+    func testCFBBytesUnderAModernExtensionRefuseCleanlyAndTheHelperStaysAlive() async throws {
+        try skipUnlessVendorPresent()
+        let helper = try await spawnLiveHelper()
+
+        let scratch = makeScratchDirectory()
+        let renamed = scratch.appendingPathComponent("renamed-legacy.docx")
+        try FileManager.default.copyItem(
+            at: Self.fixturesRoot.appendingPathComponent("legacy-doc.doc"), to: renamed)
+
+        do {
+            _ = try await helper.client.open(docId: UUID().uuidString, path: renamed.path)
+            XCTFail("renamed-legacy.docx: expected the CFB refusal to fire — if this succeeded, "
+                    + "either the sniff regressed or documentLoad itself no longer needs guarding "
+                    + "against this content (re-verify testKnownLimitationLegacyBinaryImportDoesNot"
+                    + "OpenInThisVendorBuild's own .doc leg before assuming either)")
+        } catch OfficeHelperClientError.openFailed(let reason) {
+            XCTAssertEqual(reason, "refused before documentLoad: legacy OLE2/CFB binary content "
+                            + "under a modern Office extension",
+                            "renamed-legacy.docx: unexpected refusal reason — \(reason)")
+        }
+
+        // Liveness proof, exactly the brief's own bar: not merely `isRunning` (a boolean that would
+        // stay true for a hung-but-not-dead process too) but a SECOND, GOOD document actually
+        // opening on the same helper right after — the same behavioral proof
+        // `testGarbageFileOpenFailsAndHelperSurvives`'s sibling assertion below already establishes
+        // the pattern for.
+        XCTAssertTrue(helper.process.isRunning, "the CFB refusal must not take the helper down")
+        let goodDocId = UUID().uuidString
+        let goodPath = Self.fixturesRoot.appendingPathComponent("gate.docx").path
+        let metadata = try await helper.client.open(docId: goodDocId, path: goodPath)
+        XCTAssertEqual(metadata.type, .text, "gate.docx must open normally on the same helper, "
+                        + "right after the refusal — the actual liveness proof, not just the flag")
+        try await helper.client.close(docId: goodDocId)
+    }
+
     // MARK: - Garbage-file survival
 
     /// Task 3 finding, empirical, disclosed in the report — TWO escalating attempts before this

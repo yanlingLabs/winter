@@ -142,6 +142,87 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         XCTAssertTrue(died, "the helper process (pid \(helperPID)) survived teardown")
     }
 
+    /// **Office Stage B Task 10 — the CFB release blocker, proven through the REAL staging pipeline,
+    /// not just the raw wire.** `OfficeHelperLiveTests.testCFBBytesUnderAModernExtensionRefuseCleanly
+    /// AndTheHelperStaysAlive` proves the sniff fires against a path handed DIRECTLY to the helper;
+    /// this test proves the SAME refusal survives `OfficeRuntime`'s own staging jail
+    /// (`stageDocument`/`stagedPath` — Task 2b) first, which is what a REAL open always goes through
+    /// in production (`runtime.open` never hands the helper `realPath` at all — only the staged
+    /// copy). `OfficeRuntime.stagedPath(forDocId:realPath:docsDirectory:)`'s own construction
+    /// (`"\(docId).\(ext)"`) preserves the SOURCE path's extension, which is the one fact this test's
+    /// own pass/fail turns on: if a future change to staging ever stopped preserving the extension,
+    /// the CFB gate (keyed off the STAGED path's extension, inside
+    /// `LOKBridge.openOnDedicatedThread`) would silently stop firing for real opens while every
+    /// direct-wire test above kept passing — this is the test that would catch that regression.
+    ///
+    /// Also proves the brief's own "banner with the mapped sentence" bar specifically — `openFailures`
+    /// holds the MAPPED house-voice sentence, never `LOKBridge.cfbUnderModernExtensionReason`'s own
+    /// raw wire text, because that mapping happens between the wire reply and this dispatch
+    /// (`OfficeRuntime.describe(_:)` -> `houseErrorSentence`) — `OfficeHelperLiveTests`'s own test
+    /// stops one layer below this and asserts the RAW reason for exactly that reason (proving the
+    /// wire itself is unmapped, as designed).
+    func testCFBBytesUnderAModernExtensionRefuseWithTheMappedBannerThroughRealStagingAndTheRuntimeStaysUsable() async throws {
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent()
+            .appendingPathComponent("NormaOfficeHelper")
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
+                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                        + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
+        let vendorRoot = Self.vendorProductSetRoot
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
+                      "LibreOffice vendor tree not present at \(vendorRoot.path) — run "
+                        + "`bun run libreoffice:fetch` from the repo root.")
+        let legacyDocPath = Self.fixturesRoot.appendingPathComponent("legacy-doc.doc").path
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: legacyDocPath), "legacy-doc.doc fixture missing at \(legacyDocPath)")
+        let goodPath = Self.fixturesRoot.appendingPathComponent("gate.docx").path
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: goodPath), "gate.docx fixture missing at \(goodPath)")
+
+        let stateDir = makeScratchDirectory()
+        // A SEPARATE scratch dir stands in for "wherever the user's real document lives" — never
+        // nested inside `stateDir`, the same separation `OfficeHarness`'s own zip-surgery scratch
+        // keeps from its fixtures scratch — so this test cannot accidentally exercise an
+        // already-staged path instead of a genuine real-source open.
+        let sourceDir = makeScratchDirectory()
+        let renamedSource = sourceDir.appendingPathComponent("renamed-legacy.docx")
+        try FileManager.default.copyItem(atPath: legacyDocPath, toPath: renamedSource.path)
+
+        let directory = SessionDirectory(lister: { [] })
+        let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        host.makeOfficeHelperSupervisor = {
+            OfficeHelperSupervisor(configuration: OfficeHelperSupervisor.Configuration(
+                helperExecutableURL: helperURL,
+                socketDirectory: stateDir,
+                extraArguments: ["--lok-root", vendorRoot.path, "--sandbox-profile", Self.sandboxProfilePath.path]))
+        }
+
+        let runtime = host.officeRuntime(for: "S1")
+        runtime.open(renamedSource.path)
+
+        let settled = await waitUntil(timeout: 90) {
+            runtime.stateSnapshot.openFailures[renamedSource.path] != nil
+                || runtime.stateSnapshot.documents[renamedSource.path] != nil
+        }
+        XCTAssertTrue(settled, "renamed-legacy.docx never settled — phase: \(runtime.stateSnapshot.phase)")
+        XCTAssertNil(runtime.stateSnapshot.documents[renamedSource.path],
+                     "renamed-legacy.docx must never actually open")
+        XCTAssertEqual(runtime.stateSnapshot.openFailures[renamedSource.path],
+                       "This file's contents don't match its extension — it looks like an older "
+                     + "binary Office format and can't be opened here.",
+                       "the banner-facing reason must be the MAPPED house-voice sentence, never "
+                     + "LOKBridge's raw wire marker text")
+
+        // Liveness proof, through the SAME runtime and the SAME shared helper process: a good
+        // document opens normally right after — not merely a process-alive flag, an actual open.
+        runtime.open(goodPath)
+        let goodSettled = await waitUntil(timeout: 90) {
+            runtime.stateSnapshot.documents[goodPath] != nil || runtime.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(goodSettled, "gate.docx never settled after the refusal — phase: \(runtime.stateSnapshot.phase)")
+        XCTAssertNotNil(runtime.stateSnapshot.documents[goodPath], "gate.docx did not open: "
+                        + "\(runtime.stateSnapshot.openFailures[goodPath] ?? "no reason recorded")")
+
+        _ = host.teardownAllOfficeRuntimesAndStopHelper()
+    }
+
     /// **office-plumbing Task 6's own exit gate** — the tile pipeline, end to end, through the REAL
     /// production wiring this task added: `OfficeRuntime.perform`'s `.subscribe` case (subscribeTiles
     /// -> filter through the store -> requestTiles, all through `officeRequestQueue`), and

@@ -689,9 +689,66 @@ final class LOKBridge: OfficeDocumentBridge {
         }
     }
 
+    // MARK: - Office Stage B Task 10 — the CFB release blocker
+
+    /// The on-disk signature of every OLE2/Compound File Binary document — the container format
+    /// underneath every legacy MS Office binary format (`.doc`/`.xls`/`.ppt`). Content-sniffed, not
+    /// path-sniffed, because the crash this closes is ITSELF content-sniffed: LOK's own importer
+    /// dispatches off the BYTES, never the extension
+    /// (`OfficeHelperLiveTests.testKnownLimitationLegacyBinaryImportDoesNotOpenInThisVendorBuild`'s
+    /// own `legacy-doc.doc`/`legacy-ppt.ppt` — a direct libc `exit()` deep inside LO's C++ import
+    /// path that bypasses Swift's `try`/`catch` entirely, taking every OTHER open document's
+    /// unsaved edits down with the one shared helper). A user's genuine `.doc` renamed `.docx` (or
+    /// any CFB file placed under a modern extension, accidentally or not) hits that identical path
+    /// today, unless intercepted here, first.
+    private static let cfbMagicBytes: [UInt8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]
+
+    /// **The needle `OfficeRuntime.knownLOKErrorShapes` (app target) matches on.** Hand-mirrored,
+    /// never imported — the SAME cross-module boundary `OfficeSaveFormat`'s own header already
+    /// documents (`OfficeDocumentBridge`'s header in `OfficeHelperServer.swift`): the app target
+    /// cannot import this module, so its mapping table carries this exact string as a second,
+    /// intentional copy. Distinct from every existing shape in that table by construction — contains
+    /// neither "documentLoad failed" nor "Unspecified Application Error" nor "loadComponentFromURL
+    /// returned an empty reference" as a substring — so first-hit needle matching there can never
+    /// mis-route this reason to a different sentence, in either direction.
+    private static let cfbUnderModernExtensionReason =
+        "refused before documentLoad: legacy OLE2/CFB binary content under a modern Office extension"
+
+    /// Reads only the first 8 bytes (`FileHandle`, never a full-file load) — cheap regardless of the
+    /// real document's size. `false` for a nonexistent/unreadable/shorter-than-8-bytes path,
+    /// deliberately: this gate must never be the reason a garbage/missing path (the pre-existing
+    /// `2.garbage`-shaped tests) sees a DIFFERENT failure than `documentLoad`'s own not-found
+    /// handling already produces — it only ever intercepts a path that is both readable AND
+    /// genuinely CFB-shaped.
+    private func pathBeginsWithCFBMagic(_ path: String) -> Bool {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return false }
+        defer { handle.closeFile() }
+        let prefix = handle.readData(ofLength: Self.cfbMagicBytes.count)
+        return Array(prefix) == Self.cfbMagicBytes
+    }
+
     // MARK: - Dedicated-thread-only implementation
 
     private func openOnDedicatedThread(docId: String, path: String) throws -> OfficeDocumentMetadata {
+        // Office Stage B Task 10 — the release blocker's refusal, ahead of `documentLoad` on
+        // purpose: the whole point is that LOK never sees these bytes at all for a path whose
+        // extension maps to one of the six MODERN, read-write formats (`OfficeSaveFormat
+        // (pathExtension:)` — the SAME predicate `saveAsOnDedicatedThread` already gates on, so
+        // this check and the save-format gate can never drift relative to each other; one Swift
+        // type, one initializer, two call sites). `path` here is already the STAGED copy
+        // (`OfficeRuntime.stagedPath` preserves the real document's own extension — verified before
+        // writing this), so the production open path is gated exactly like every direct/live-test
+        // open below is. CFB bytes under `xlsm`/`odg` (Task 9's widened, read-only-viewer formats)
+        // or any other extension fall through to `documentLoad` completely unguarded — Task 9's own
+        // already-characterized behavior for those (clean failure for `.xls`-shaped content, a
+        // helper-killing `exit()` for `.doc`/`.ppt`-shaped content) is left standing on purpose: this
+        // fix targets the common, modern-format path a mislabeled or malicious file is most likely to
+        // be opened through, not a blanket content-type policy.
+        if OfficeSaveFormat(pathExtension: (path as NSString).pathExtension) != nil,
+           pathBeginsWithCFBMagic(path) {
+            throw LoadError.documentLoadFailed(Self.cfbUnderModernExtensionReason)
+        }
+
         // URL(fileURLWithPath:).absoluteString percent-encodes correctly (spaces included — this
         // repo's own checkout path has one: ".../Xcode progects/..."); the spike's naive
         // "file://" + path concatenation is fine for its own spaceless fixture names but not
