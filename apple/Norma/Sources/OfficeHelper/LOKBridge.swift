@@ -50,6 +50,17 @@ private enum LOKCallbackType {
 /// own methodology throughout (every task-N-report.md) refuses to ship a filter name nobody has
 /// proven against real LOK — `later` is this comment's own honest placeholder for that work, not a
 /// promise this task keeps.
+///
+/// **Office Stage B Task 9, fix round 1 (review F4) — back-pointer.** The app target cannot import
+/// this module (`OfficeDocumentBridge`'s own header in `OfficeHelperServer.swift` explains why), so
+/// `PanelEditorTab.swift`'s `officeReadWriteExtensions` is a deliberate, hand-mirrored SECOND copy of
+/// these six cases — the boundary `officeDocumentIsReadOnlyFormat` draws. **Adding a case here does
+/// NOT automatically widen that copy or lift its read-only gates** — no compile-time tripwire can
+/// exist across this module boundary; the drift signal is empirical instead:
+/// `OfficeHelperLiveTests.testWidenedFormatsXlsmAndOdgFailSaveWithUnsupportedFormatTheDriftTripwire
+/// ForOfficeReadWriteExtensions` goes RED the day `xlsm`/`odg` gain a case here, because the `saveAs`
+/// it currently asserts fails would start succeeding. If you add a case for a DIFFERENT extension,
+/// that test says nothing — update `officeReadWriteExtensions` by hand, in the same change.
 enum OfficeSaveFormat: Equatable {
     case odt, docx, ods, xlsx, odp, pptx
 

@@ -847,11 +847,14 @@ final class OfficeRuntimeReducerTests: XCTestCase {
                        + "while queued — no docId exists yet to close")
 
         let (docsState, docsEffects) = reduce(withDocs, [.teardownRequested])
-        // Task 9 — NOT a literal fresh `OfficeRuntimeState()`: `withDocs` descends from `ready()`,
-        // which opens-then-closes "/warm.xlsx" (bumping its ticket to 1 — `pathGenerations` is
-        // deliberately CARRIED FORWARD by teardown, never reset; see that field's own header).
+        // Task 9, fix round 1 (review F2) — NOT a literal fresh `OfficeRuntimeState()`, and no
+        // longer a bare carry-forward either: `withDocs` descends from `ready()` (which opens-then-
+        // closes "/warm.xlsx", landing its ticket at 1) and then freshly opens "/a.xlsx"/"/b.xlsx"
+        // (each captured AND RECORDED at 0 — the capture-is-also-recorded fix, field header's own
+        // account). Teardown now BUMPS every existing entry by one rather than carrying it forward
+        // unchanged: 1->2 for "/warm.xlsx", 0->1 for each of the other two.
         var expectedDocsState = OfficeRuntimeState()
-        expectedDocsState.pathGenerations["/warm.xlsx"] = 1
+        expectedDocsState.pathGenerations = ["/warm.xlsx": 2, "/a.xlsx": 1, "/b.xlsx": 1]
         XCTAssertEqual(docsState, expectedDocsState)
         // Task 2b (I3): one `.teardown` (every open docId), PLUS one `.deleteStagedCopy` per docId —
         // teardown releases each document's staged copy exactly as it already releases the helper's
@@ -878,11 +881,12 @@ final class OfficeRuntimeReducerTests: XCTestCase {
     func testASecondTeardownIsSafe() {
         let (once, _) = reduce(ready(), [.teardownRequested])
         let (twice, twiceEffects) = reduce(once, [.teardownRequested])
-        // Task 9 — same "carried forward from ready()'s own /warm.xlsx close" fact as
-        // `testTeardownIsLegalFromEveryPhaseAndAlwaysReturnsToAFreshIdleState`'s `docsState` above;
-        // a second teardown carries the SAME value forward again, unchanged.
+        // Task 9, fix round 1 (review F2) — `ready()`'s own "/warm.xlsx" close lands its ticket at 1;
+        // EACH teardown bumps by one, so two in a row lands at 3 (1 -> 2 -> 3), never held constant
+        // the way a bare carry-forward would. Still strictly monotonic either way — a second teardown
+        // is still safe, just no longer a no-op on this dict specifically.
         var expected = OfficeRuntimeState()
-        expected.pathGenerations["/warm.xlsx"] = 1
+        expected.pathGenerations["/warm.xlsx"] = 3
         XCTAssertEqual(twice, expected)
         XCTAssertEqual(twiceEffects, [.teardown(docIds: [])])
     }
@@ -1288,15 +1292,79 @@ final class OfficeRuntimeReducerTests: XCTestCase {
                        + "time would let the eventual `.opened` be misjudged as stale against itself")
     }
 
-    func testHelperDiedCarriesPathGenerationsForwardRatherThanResettingThem() {
+    /// Fix round 1 (review F2) — this test's own former title ("...CarriesPathGenerationsForward
+    /// RatherThanResettingThem") pinned the INVERTED, buggy rationale: bare carry-forward-unchanged,
+    /// which the review proved collides ALWAYS with a post-recovery retry's own capture (both read
+    /// the identical surviving value). The fix is neither carry-forward nor a bare reset — every
+    /// existing entry is BUMPED by one, so any ticket captured before this boundary is now provably
+    /// stale against anything captured after it. See `OfficeRuntimeState.pathGenerations`'s own
+    /// header for the full account, and the row immediately below for the actual race this closes.
+    func testHelperDiedBumpsEveryPathGenerationRatherThanResettingOrCarryingForwardUnchanged() {
         let (afterClose, _) = reduce(ready(), [.closeRequested(path: "/a.xlsx")])
         XCTAssertEqual(afterClose.pathGenerations["/a.xlsx"], 1)
         let (state, _) = reduce(afterClose, [.helperDied])
-        XCTAssertEqual(state.pathGenerations, afterClose.pathGenerations, "carried forward, not reset "
-                       + "— see `OfficeRuntimeState.pathGenerations`'s own header for why a reset "
-                       + "would reopen a ticket-collision question a monotonic counter avoids by "
-                       + "construction")
+        XCTAssertEqual(state.pathGenerations["/a.xlsx"], 2, "bumped by one — carried forward "
+                       + "unchanged would read 1 (the review's own always-collides case), a bare "
+                       + "reset would read 0 (collides only when the pre-death ticket happened to be "
+                       + "0); bumping is the one operation neither alternative performs and the one "
+                       + "that actually closes the window")
         XCTAssertEqual(state.phase, .failed)
+    }
+
+    /// **The review's own concrete counter-example, red-proven.** Path at ticket 0 (a fresh,
+    /// never-before-touched path — the case the F2 fix's "capture is also recorded" half exists for,
+    /// since a path that had never been closed/reloaded would otherwise have NO entry for the death
+    /// bump below to reach). An open captures ticket 0 and is still in flight when `.helperDied`
+    /// fires. The runtime recovers (a second `.openRequested` flushed through `.helperBecameReady`,
+    /// exactly like a real relaunch-on-next-demand retry) and reaches `.ready` again BEFORE the
+    /// pre-death attempt's own stale `.opened(0)` finally lands — the review's own point that the
+    /// phase guard alone does NOT block this landing, phase really is back to `.ready` by then. Only
+    /// the ticket can tell the two apart, and only because death bumped it.
+    func testAStaleOpenSurvivingAHelperDeathIsDroppedOnceTheRuntimeRecoversNotResurrected() {
+        let (afterFirstOpen, firstEffects) = reduce(ready(), [.openRequested(path: "/z.xlsx")])
+        XCTAssertEqual(firstEffects, [.helperOpen(path: "/z.xlsx", pathGeneration: 0)], "sanity — a "
+                       + "never-touched path captures ticket 0")
+        XCTAssertEqual(afterFirstOpen.pathGenerations["/z.xlsx"], 0, "sanity — and the capture is "
+                       + "RECORDED, not just read (fix round 1's other half) — nothing to bump below "
+                       + "otherwise")
+
+        // The helper dies with that open still outstanding.
+        let (afterDeath, _) = reduce(afterFirstOpen, [.helperDied])
+        XCTAssertEqual(afterDeath.pathGenerations["/z.xlsx"], 1, "sanity — bumped past the in-flight "
+                       + "attempt's own captured 0")
+        XCTAssertEqual(afterDeath.phase, .failed)
+
+        // The runtime recovers: a fresh ask, restarted helper, flushed queue — an ordinary retry,
+        // reaching `.ready` again with its OWN new ticket (1, the post-death current value).
+        let (afterRetryRequested, _) = reduce(afterDeath, [.openRequested(path: "/z.xlsx")])
+        let (afterRetryReady, retryEffects) = reduce(afterRetryRequested, [.helperBecameReady])
+        XCTAssertEqual(retryEffects, [.helperOpen(path: "/z.xlsx", pathGeneration: 1)], "the retry "
+                       + "reads the POST-death current ticket, strictly newer than what the zombie "
+                       + "attempt captured")
+        XCTAssertEqual(afterRetryReady.phase, .ready, "the review's own point: phase is back to "
+                       + ".ready well before the pre-death reply below ever lands — the phase guard "
+                       + "alone cannot be what protects this")
+
+        // THE ZOMBIE: the pre-death attempt's own reply finally arrives, carrying the ticket it
+        // captured before any of this happened — 0.
+        let (afterZombieLands, zombieEffects) = reduce(afterRetryReady, [
+            .opened(path: "/z.xlsx", docId: "zombie-doc", stagedPath: "/staged/zombie-doc", metadata: metadata, pathGeneration: 0)
+        ])
+        XCTAssertNil(afterZombieLands.documents["/z.xlsx"], "the zombie must not install itself — "
+                     + "this is the exact resurrection the review's counter-example predicted the "
+                     + "OLD carry-forward-unchanged rationale would allow (0 == 0 under carry-"
+                     + "forward; here, 0 != 1)")
+        XCTAssertEqual(afterZombieLands, afterRetryReady, "mutation-free drop — nothing else in state moved")
+        XCTAssertEqual(zombieEffects, [.helperClose(docId: "zombie-doc"), .deleteStagedCopy(docId: "zombie-doc")],
+                       "the zombie's own helper-side handle is compensated, not leaked")
+
+        // The retry's OWN reply lands next, carrying ITS ticket, 1 — accepted normally.
+        let (finalState, finalEffects) = reduce(afterZombieLands, [
+            .opened(path: "/z.xlsx", docId: "retry-doc", stagedPath: "/staged/retry-doc", metadata: metadata, pathGeneration: 1)
+        ])
+        XCTAssertEqual(finalState.documents["/z.xlsx"]?.docId, "retry-doc", "the LEGITIMATE retry "
+                       + "installs normally — the fix rejects only the zombie, not recovery itself")
+        XCTAssertEqual(finalEffects, [.watchFile(path: "/z.xlsx")])
     }
 
     /// **The T7 closure this task's own dispatch note names**: "a stale open must NOT have consumed

@@ -277,6 +277,15 @@ struct OfficeRuntimeState: Equatable {
     /// neither is spuriously cancelled — whichever `.opened` lands second still resolves through the
     /// PRE-EXISTING `previousEntry.docId != docId` compensating-close logic one arm below, unchanged.
     ///
+    /// **Fix round 1 (review F2) — a fresh open's CAPTURE is also RECORDED, not only read.** Both
+    /// sites that mint a `.helperOpen` ticket for a path with no bump of its own (the `.ready`-phase
+    /// immediate open below, and `.helperBecameReady`'s queue flush) now also write
+    /// `next.pathGenerations[path] = ticket` — previously they only *read* `[path, default: 0]`
+    /// without ever inserting an entry for a path that had never been closed/reloaded before. This
+    /// does not change what "capture, don't bump" means (still true, previous paragraph unchanged);
+    /// it only makes sure a FIRST-EVER open of a never-touched path leaves a real dictionary entry
+    /// behind, which the death/teardown bump immediately below depends on existing.
+    ///
     /// **`.opened`/`.openFailed`/`.reloadFailed` all carry the ticket the imperative half captured
     /// at the moment their OWN attempt was launched** (`OfficeRuntime.openAndDispatch`'s
     /// `myPathGeneration` parameter — read once, synchronously, before the async round trip starts,
@@ -302,17 +311,33 @@ struct OfficeRuntimeState: Equatable {
     /// so there is no watch to stop. `.openFailed`/`.reloadFailed`'s own drops need no compensating
     /// effects at all — nothing was ever opened on the helper for a failed attempt.
     ///
-    /// **Carried forward, never reset, by `.helperDied`/`.helperUnavailable`/`.teardownRequested`.**
-    /// Those three otherwise replace the whole state with a fresh `OfficeRuntimeState()` — resetting
-    /// this dict to empty alongside everything else would let a stale pre-death/pre-teardown ticket
-    /// collide with a POST-recovery retry's own ticket (both reading the same reset-to-zero value).
-    /// The existing phase guard (`.opened`'s `state.phase == .ready`) already independently blocks a
-    /// landing while phase is `.failed`/`.idle`, so a collision is unreachable in practice either
-    /// way — but "this counter only ever goes up, for the life of the runtime" is a strictly simpler
-    /// invariant to state and verify than a reset whose safety depends on a second, separate guard
-    /// holding too, so this task keeps it monotonic on purpose. `OfficeRuntimeState()`'s own
+    /// **Fix round 1 (review F2) — the ORIGINAL carry-forward-unchanged here was backwards, not
+    /// merely simpler.** The claim used to be "resetting to empty would let a stale pre-death ticket
+    /// collide with a post-recovery retry's own (both reading zero)." That premise is inverted: an
+    /// in-flight attempt captures its ticket BEFORE the boundary, so under a bare reset it holds some
+    /// `T` while the retry reads `0` — they collide only in the special case `T == 0`. Under the
+    /// ORIGINAL carry-forward-unchanged they collided ALWAYS, because a fresh retry's own capture
+    /// (previous paragraph) reads the exact same value the in-flight zombie already holds — there is
+    /// nothing to tell them apart. The "existing phase guard makes a collision unreachable in
+    /// practice" claim was ALSO false: the review's own concrete counter-example (path at ticket 3,
+    /// open in flight, `.helperDied`, retry succeeds and returns phase to `.ready`, THEN the
+    /// pre-death `.opened(path, 3)` lands with `3 == 3`) shows phase is back to `.ready`, not blocked,
+    /// by the time the zombie arrives — the window is real, not merely theoretical.
+    ///
+    /// **The actual fix: `.helperDied`/`.helperUnavailable`/`.teardownRequested` BUMP every existing
+    /// entry by one, rather than either resetting to empty or carrying forward unchanged.** Combined
+    /// with the capture-is-also-recorded fix in the paragraph above (so a path mid-open-for-the-first-
+    /// time has an entry there to bump), this closes the window completely rather than merely
+    /// narrowing it to `T == 0`: ANY ticket captured before the death/teardown boundary is now
+    /// strictly less than the value a retry reads after it, for every path, unconditionally — not
+    /// "usually self-heals when the retry's own `.opened` lands," but never reachable at all. Neither
+    /// a bare reset (collides when `T == 0`) nor bare carry-forward (collides always) has this
+    /// property; incrementing does, because it is the one operation guaranteed to differ from
+    /// whatever value was already there, for every path, without needing to know which paths had an
+    /// attempt in flight (bumping an idle path's ticket is inert — the next fresh open for it simply
+    /// captures the bumped value, with nothing pending to invalidate). `OfficeRuntimeState()`'s own
     /// construction (a session's very first runtime) is the only place this dict is legitimately
-    /// empty.
+    /// empty; every other boundary now strictly advances it.
     var pathGenerations: [String: Int] = [:]
 }
 
@@ -715,8 +740,13 @@ enum OfficeRuntimeReducer {
                 guard state.documents[path] == nil else { return (next, []) }
                 // Office Stage B Task 9 — CAPTURES the current per-path ticket, never bumps it (see
                 // `OfficeRuntimeState.pathGenerations`'s own header for why a fresh open is the one
-                // attempt kind that reads rather than advances this counter).
-                return (next, [.helperOpen(path: path, pathGeneration: state.pathGenerations[path, default: 0])])
+                // attempt kind that reads rather than advances this counter). Fix round 1 (review
+                // F2): also RECORDS the capture — a never-before-touched path had no entry here to
+                // record into, which is exactly the gap the death/teardown bump fix depends on not
+                // existing (see the field header's own account).
+                let ticket = state.pathGenerations[path, default: 0]
+                next.pathGenerations[path] = ticket
+                return (next, [.helperOpen(path: path, pathGeneration: ticket)])
             }
 
         case .helperBecameReady:
@@ -729,9 +759,18 @@ enum OfficeRuntimeReducer {
             // reachable from any phase, or a reload/restore, both of which require `documents[path]`
             // to already exist, impossible before the first `.opened` this runtime will ever record).
             // `.closeRequested` IS reachable here, and its own `pendingOpens.removeAll` means a path
-            // closed while queued never reaches this `map` at all — so the read below is always the
-            // untouched, original ticket for every path that actually gets flushed.
-            return (next, queued.map { .helperOpen(path: $0, pathGeneration: next.pathGenerations[$0, default: 0]) })
+            // closed while queued never reaches this loop at all — so the read below is always the
+            // untouched, original ticket for every path that actually gets flushed. Fix round 1
+            // (review F2) — also RECORDS each capture, same reasoning as the `.ready`-phase immediate
+            // open's own identical fix just above: a path queued here for its FIRST-EVER open has no
+            // prior entry, and the death/teardown bump needs one to reach.
+            var effects: [OfficeRuntimeEffect] = []
+            for path in queued {
+                let ticket = next.pathGenerations[path, default: 0]
+                next.pathGenerations[path] = ticket
+                effects.append(.helperOpen(path: path, pathGeneration: ticket))
+            }
+            return (next, effects)
 
         case .opened(let path, let docId, let stagedPath, let metadata, let pathGeneration):
             // Gated on `.ready`, like every other arm that records what the helper said: the async
@@ -928,7 +967,18 @@ enum OfficeRuntimeReducer {
                   let path = state.documents.first(where: { $0.value.docId == docId })?.key else {
                 return (next, [])
             }
-            next.documents[path]?.dirty = modified
+            // Fix round 1 (review F3) — gated at the SOURCE, not only at each downstream consumer.
+            // `officeDocumentIsDirty` (`PanelDocumentTab.swift`) already masked its OWN read of this
+            // field, but the quit gate's `officeDirtyFilePaths` (`AppDelegate.swift`) read `dirty`
+            // RAW and disagreed with it — a read-only `.xlsm` could be named unsaved at quit with no
+            // dirty dot and a disabled ⌘S to act on, a dead end. Gating THIS single writer instead
+            // means every consumer, present and future, inherits the guarantee for free; the two
+            // existing masked predicates become belt rather than the only guard. Only the assignment
+            // is gated, not an early return — the recovery-offer clear below stays unconditional on
+            // `modified` (harmless for a read-only path: no candidate can exist there in the first
+            // place, per the autosave chain's own two-layer fail-closed walk — `saveAsSidecar` throws
+            // `unsupportedFormat` before any manifest is ever written).
+            next.documents[path]?.dirty = modified && !officeDocumentIsReadOnlyFormat(path: path)
             // **Task 7 (advisor review) — a standing recovery offer must not survive the FIRST real
             // edit after it was raised.** The banner's "Restore" replaces the whole buffer with the
             // sidecar's own (older) content — leaving it standing over a document the user has since
@@ -1037,14 +1087,13 @@ enum OfficeRuntimeReducer {
             var fresh = OfficeRuntimeState()
             fresh.phase = .failed
             fresh.failureReason = reason
-            // Office Stage B Task 9 — CARRIED FORWARD, not reset: see `pathGenerations`' own header
-            // for why this counter stays monotonic for the runtime's whole lifetime rather than
-            // resetting to empty alongside everything else `fresh` defaults away. A reset would let a
-            // pre-death ticket collide with a post-recovery retry's own (both reading zero); the
-            // existing `state.phase == .ready` guard on `.opened` already independently blocks a
-            // landing here regardless, but this keeps the invariant true without leaning on that
-            // second guard to make it so.
-            fresh.pathGenerations = state.pathGenerations
+            // Office Stage B Task 9, fix round 1 (review F2) — every existing ticket BUMPED by one,
+            // not carried forward unchanged and not reset to empty: see `pathGenerations`' own header
+            // for the full account (the original carry-forward-unchanged rationale here was inverted,
+            // not merely simpler). Any ticket an in-flight attempt captured before this boundary is
+            // now strictly less than what a post-recovery retry for the same path will read, so a
+            // stale reply from before the death can never again match the current value and land.
+            fresh.pathGenerations = state.pathGenerations.mapValues { $0 + 1 }
             // **Task 7 — deliberately NO `.clearAutosave` here, for either case.** This IS the
             // abnormal-ending shape autosave exists to survive: `.helperDied` is a literal crash,
             // and `.helperUnavailable` is "never came up" (nothing to protect either way). `fresh`
@@ -1111,10 +1160,12 @@ enum OfficeRuntimeReducer {
             // helper's own open handles. Sorted for the same determinism reason as `docIds` itself
             // would want if it were ever asserted order-sensitively.
             let staleCopyEffects = docIds.sorted().map { OfficeRuntimeEffect.deleteStagedCopy(docId: $0) }
-            // Task 9: same carry-forward as `.helperDied`/`.helperUnavailable`'s own `fresh.pathGenerations`
-            // line — see that arm's comment for the full reasoning, identical here.
+            // Task 9, fix round 1 (review F2): same bump-by-one as `.helperDied`/`.helperUnavailable`'s
+            // own `fresh.pathGenerations` line — see that arm's comment for the full reasoning,
+            // identical here (an app quit reaches the helper as `_Exit`/SIGKILL exactly like a crash
+            // does, per this arm's own note above, so the same zombie-reply window applies).
             var fresh = OfficeRuntimeState()
-            fresh.pathGenerations = state.pathGenerations
+            fresh.pathGenerations = state.pathGenerations.mapValues { $0 + 1 }
             return (fresh, [.teardown(docIds: docIds)] + staleCopyEffects)
 
         // MARK: Office Stage B Task 2b — resolving a standing conflict
@@ -3078,9 +3129,15 @@ final class OfficeRuntime: ObservableObject {
     /// The mapping itself — a known shape's sentence, or a generic, honest fallback that never
     /// repeats the raw text. `rawReason` is ALWAYS logged verbatim by this function's one caller
     /// (`describe(_:)`, immediately below) before this ever runs; this function's return value is
-    /// the only thing that ever reaches an OPEN-failure banner. (Not banners in general — `describe`
-    /// only routes `.openFailed`-shaped errors here; a `.saveFailed` banner carries its raw reason
-    /// verbatim, by a pinned pre-existing contract `describe(_:)`'s own header explains.)
+    /// the only thing that ever reaches an OPEN-failure banner.
+    ///
+    /// **Fix round 1 (review F1) — `.saveFailed` has its OWN sibling below
+    /// (`houseErrorSentenceForSaveFailure`), sharing this table's KNOWN-shape half but not its
+    /// UNKNOWN-shape fallback.** An unrecognized OPEN reason is a fact about a document nobody could
+    /// open at all — there is no better fallback than the generic sentence. An unrecognized SAVE
+    /// reason is different: a pinned, pre-existing test requires it to reach the caller verbatim
+    /// (`describe(_:)`'s own header has the full account), so the miss behavior cannot be shared
+    /// here even though the hit table can.
     private static func houseErrorSentence(forRawReason rawReason: String) -> String {
         for shape in knownLOKErrorShapes where rawReason.localizedCaseInsensitiveContains(shape.needle) {
             return shape.sentence
@@ -3088,30 +3145,52 @@ final class OfficeRuntime: ObservableObject {
         return "This document couldn't be processed. See the log for details."
     }
 
+    /// **Fix round 1 (review F1) — `.saveFailed`'s own mapping: known shapes still map to house
+    /// voice; an UNRECOGNIZED reason returns the raw text VERBATIM instead of `houseErrorSentence`'s
+    /// generic fallback.** Required, not a style choice: a pinned, pre-existing test
+    /// (`testSaveAndAwaitOutcomeReturnsFailedWhenTheDriversSaveThrows`, `describe(_:)`'s own header
+    /// has the full account) asserts the driver's raw save reason (`"disk full"` in that test's own
+    /// fixture) reaches BOTH `saveAndAwaitOutcome`'s outcome and the banner verbatim — `"disk full"`
+    /// matches no known LOK shape, so it falls through unchanged here, satisfying that contract,
+    /// while a GENUINE raw LOK `getError()` string still gets mapped. That genuine case is real, not
+    /// hypothetical — `LOKBridge.saveAsOnDedicatedThread`'s own `guard succeeded else { ... throw
+    /// SaveError.saveAsFailed(reason) }` reads `kit.getError()` directly and wraps it with zero
+    /// transformation (`SaveError.saveAsFailed(let reason): return reason`, its own `.description`)
+    /// — unlike every OTHER `SaveError` case (`.unsupportedFormat`/`.docNotOpen`/...), which are this
+    /// app's own hand-authored wire/save-layer text, `.saveAsFailed` alone is a direct LOK passthrough.
+    private static func houseErrorSentenceForSaveFailure(rawReason: String) -> String {
+        for shape in knownLOKErrorShapes where rawReason.localizedCaseInsensitiveContains(shape.needle) {
+            return shape.sentence
+        }
+        return rawReason
+    }
+
     /// PURE: classifies an `OfficeHelperClient` failure into the short sentence
     /// `.openFailed`/`.emitBanner` show.
     ///
-    /// **Only `.openFailed(reason:)` carries LOK's own raw `getError()` text** — mapped through
+    /// **`.openFailed(reason:)` carries LOK's own raw `getError()` text** — mapped through
     /// `houseErrorSentence` rather than surfaced verbatim (`knownLOKErrorShapes`'s own header has
     /// the full account). The raw string is logged here, unconditionally, so nothing is lost for
     /// debugging — only the MAPPED sentence is ever RETURNED, and therefore the only thing that
     /// ever reaches `openFailures`/a banner for an open failure.
     ///
-    /// **`.saveFailed(reason:)` is deliberately NOT mapped, despite looking like `.openFailed`'s
-    /// twin** — found the hard way, by breaking a pre-existing, pinned test
-    /// (`testSaveAndAwaitOutcomeReturnsFailedWhenTheDriversSaveThrows`, `performSave`'s own OUTER
-    /// catch) that asserts the driver's raw save reason reaches BOTH `saveAndAwaitOutcome`'s
-    /// `.failed(reason:)` outcome AND the ordinary banner verbatim. Unlike `.openFailed`,
-    /// `.saveFailed`'s reason is not LOK's raw C-API `getError()` string — Task 2's own header on
-    /// that case says it is a wire/save-layer reason (an unsupported format, a genuine disk problem
-    /// under the helper's `--state-path`), already plain-English and already the specific contract
-    /// callers of the save path rely on. It falls to the `default` arm below like every other
-    /// non-open `OfficeHelperClientError`.
+    /// **Fix round 1 (review F1) — `.saveFailed(reason:)` ALSO carries LOK's own raw `getError()`
+    /// text, sometimes, and the ORIGINAL version of this comment claiming it "is not LOK's raw C-API
+    /// string" was empirically false.** `LOKBridge.saveAsOnDedicatedThread`'s own failure path reads
+    /// `kit.getError()` directly into `SaveError.saveAsFailed(reason)`, whose `.description` is that
+    /// string with ZERO wrapping — traced end to end, wire reply through `OfficeHelperClientError
+    /// .saveFailed(reason:)`, to a real banner. The ORIGINAL fix (narrowing the mapped switch arm to
+    /// `.openFailed` alone) restored the pinned `"disk full"` contract but did so by making `.saveFailed`
+    /// carry raw LOK text UNLOGGED into a banner — exactly backwards from "raw preserved in log only,
+    /// never banner." The ACTUAL fix, below: `.saveFailed` is now ALSO logged and ALSO mapped, through
+    /// its own sibling helper (`houseErrorSentenceForSaveFailure`'s own header has the full account)
+    /// that maps known shapes but returns an unrecognized reason verbatim rather than falling to the
+    /// generic sentence — satisfying the pinned contract (`"disk full"` matches no shape) AND the "raw
+    /// only in logs" constraint (a genuine LOK string now gets mapped, and is logged either way).
     ///
-    /// **Everything else (a timeout, a protocol-level refusal, an unexpected reply shape, a save
-    /// failure) is not LOK-open text this task's brief was about** — `OfficeHelperClientError`
-    /// already carries this app's own hand-authored wording for those cases, so `.description`
-    /// passes through unchanged.
+    /// **Everything else (a timeout, a protocol-level refusal, an unexpected reply shape) is not
+    /// LOK text at all** — `OfficeHelperClientError` already carries this app's own hand-authored
+    /// wording for those cases, so `.description` passes through unchanged.
     ///
     /// **Office Stage B Task 9 — the NSError fix, found while building the mapping above.** Every
     /// OTHER error this file's own throw sites produce (`stageDocument`'s Cocoa file-system errors,
@@ -3142,6 +3221,15 @@ final class OfficeRuntime: ObservableObject {
             case .openFailed(let reason):
                 NSLog("[OfficeRuntime] raw office error (mapped for the banner above): \(reason)")
                 return houseErrorSentence(forRawReason: reason)
+            case .saveFailed(let reason):
+                // Fix round 1 (review F1) — logged unconditionally, exactly like `.openFailed`
+                // above, regardless of whether the shape below is recognized: a genuine LOK
+                // `getError()` string is mapped and therefore only visible here; an unrecognized
+                // reason (e.g. the pinned test's own "disk full") is already visible in the banner
+                // too, but logging it here as well costs nothing and keeps this branch symmetric
+                // with `.openFailed`'s own unconditional log.
+                NSLog("[OfficeRuntime] raw office save error (mapped below if a known LOK shape): \(reason)")
+                return houseErrorSentenceForSaveFailure(rawReason: reason)
             default:
                 return clientError.description
             }

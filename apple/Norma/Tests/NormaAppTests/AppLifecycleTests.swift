@@ -688,4 +688,42 @@ final class AppLifecycleTests: XCTestCase {
         XCTAssertFalse(delegate.liveDirtyEditorsOrOfficeDocuments(), "no host at all reads as clean, "
                        + "never as an error")
     }
+
+    // MARK: - Office Stage B Task 9, fix round 1 (review F3): the quit gate must agree with the mask
+
+    /// **The quit gate's own leg of the claim the test above proves for Sparkle's dirty gate** —
+    /// `officeDirtyFilePaths` must never name a read-only-format document, because its `dirty` field
+    /// can no longer BECOME true for one, gated at the single writer (`.modifiedStatusChanged`'s
+    /// reducer arm), not merely at `officeDocumentIsDirty`'s own UI-facing mask. Driving state
+    /// through the REAL reducer (`runtime.handle(documentEvent:docId:)`, exactly like the sibling
+    /// test above) is the whole point — a test that hand-set `dirty = true` on a struct literal
+    /// (`officeDirtyState`'s own helper above, used elsewhere on purpose for a DIFFERENT concern that
+    /// already knows its dirty flag is genuine) would pass by construction without ever exercising
+    /// the fix, since `officeDirtyFilePaths` itself still reads the field raw either way.
+    func testOfficeDirtyFilePathsNeverNamesAReadOnlyFormatDocumentEvenAfterAGenuineModifiedChangedTrue() async throws {
+        let directory = SessionDirectory(lister: { [] })
+        let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        let driver = scratchOfficeDriver()
+        host.makeOfficeRuntime = { sessionId, _ in OfficeRuntime(sessionId: sessionId, driver: driver) }
+        let runtime = host.officeRuntime(for: "S1")
+        // .xlsm — Task 9's own widened, read-only-format extension: no OfficeSaveFormat case, so
+        // officeDocumentIsReadOnlyFormat(path:) (PanelEditorTab.swift) is true for it.
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("read-only-quit-gate-\(UUID().uuidString).xlsm").path
+        try Data().write(to: URL(fileURLWithPath: path))
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        runtime.open(path)
+        let opened = await waitUntil { runtime.stateSnapshot.documents[path] != nil }
+        XCTAssertTrue(opened, "setup: the scripted open must land")
+
+        let docId = try XCTUnwrap(runtime.stateSnapshot.documents[path]?.docId)
+        runtime.handle(documentEvent: .modifiedChanged(true), docId: docId)
+
+        XCTAssertFalse(runtime.stateSnapshot.documents[path]?.dirty ?? true, "the writer itself must "
+                       + "never set dirty=true for a read-only-format path, even on a genuine "
+                       + "ModifiedStatus=true callback")
+        XCTAssertEqual(officeDirtyFilePaths(runtimeStates: [runtime.stateSnapshot]), [], "the quit "
+                       + "gate must never name a read-only document as unsaved — before this fix it "
+                       + "read dirty RAW and disagreed with officeDocumentIsDirty's own masked answer")
+    }
 }

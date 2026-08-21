@@ -349,6 +349,47 @@ final class OfficeHelperLiveTests: XCTestCase {
         }
     }
 
+    /// **Fix round 1 (review F4) — the drift tripwire `officeReadWriteExtensions` itself cannot
+    /// have.** `PanelEditorTab.swift`'s own header explains why a compile-time parity test against
+    /// `OfficeSaveFormat` cannot exist: the app target has no visibility into `NormaOfficeHelper`'s
+    /// module (`OfficeDocumentBridge`'s own header in `OfficeHelperServer.swift`). This is the
+    /// EMPIRICAL substitute the review names instead — a live assertion, against the REAL vendored
+    /// LOK, that `saveAs` genuinely fails `unsupportedFormat` for `xlsm`/`odg`. `saveAsOnDedicatedThread`'s
+    /// `guard let format = doc.saveFormat else { throw SaveError.unsupportedFormat(...) }` fires
+    /// before any LOK C call at all — no death race like the OOXML-export limitation's own test below
+    /// has to account for, so this can assert synchronously rather than polling for a process death.
+    /// **The day `OfficeSaveFormat` gains a case for either format, this test goes red** (the save
+    /// would succeed instead of throwing) — the signal that `officeReadWriteExtensions`' own hand-
+    /// mirrored copy (`PanelDocumentTabTests.testOfficeDocumentIsReadOnlyFormatIsTrueOnlyForTheWidened
+    /// NonNativeSaveExtensions` pins the copy against ITSELF, not against the original — exactly the
+    /// gap this test closes) is now stale and the read-only gates it drives need lifting.
+    func testWidenedFormatsXlsmAndOdgFailSaveWithUnsupportedFormatTheDriftTripwireForOfficeReadWriteExtensions() async throws {
+        try skipUnlessVendorPresent()
+        let helper = try await spawnLiveHelper()
+
+        for fixture in ["gate.xlsm", "gate.odg"] {
+            let path = Self.fixturesRoot.appendingPathComponent(fixture).path
+            let docId = UUID().uuidString
+            _ = try await helper.client.open(docId: docId, path: path)
+            do {
+                _ = try await helper.client.save(docId: docId, part: 0)
+                XCTFail("\(fixture): saveAs SUCCEEDED — OfficeSaveFormat has gained a case for this "
+                        + "format. Update officeReadWriteExtensions (PanelEditorTab.swift) to include "
+                        + "it and lift its read-only gates (officeDocumentIsReadOnlyFormat and every "
+                        + "doc comment naming this as a Task 9 widened-but-read-only format).")
+            } catch let error as OfficeHelperClientError {
+                guard case .saveFailed(let reason) = error else {
+                    XCTFail("\(fixture): expected .saveFailed, got \(error)")
+                    continue
+                }
+                XCTAssertTrue(reason.localizedCaseInsensitiveContains("not supported"), "\(fixture): "
+                              + "expected SaveError.unsupportedFormat's own wording (\"saving is not "
+                              + "supported for this document's format\"), got: \(reason)")
+            }
+            try await helper.client.close(docId: docId)
+        }
+    }
+
     /// **The three formats the widening decision REJECTED — a known, disclosed limitation, pinned
     /// the same way `testKnownLimitationOOXMLExportIsNotAvailableInThisVendorBuildWhileODFExportWorks`
     /// already pins the export-side gap, so a future vendor rebuild that fixes this is caught by a

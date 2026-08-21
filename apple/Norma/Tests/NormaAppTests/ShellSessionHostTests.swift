@@ -4778,15 +4778,22 @@ final class ShellSessionHostTests: XCTestCase {
         XCTAssertTrue(runtime.stateSnapshot.documents.isEmpty, "not recorded until the reply lands")
 
         host.teardownOfficeRuntime(for: "S1")
-        XCTAssertEqual(runtime.stateSnapshot, OfficeRuntimeState(), "teardown resets synchronously "
+        // Task 9, fix round 1 (review F2) — NOT a literal fresh `OfficeRuntimeState()`: `aPath`'s
+        // open captured ticket 0 and, since the F2 fix, that capture is RECORDED (not merely read)
+        // at the moment it's issued — so teardown's own bump-every-entry-by-one lands it at 1, not
+        // absent. See `OfficeRuntimeState.pathGenerations`'s own header for the full mechanism.
+        var expectedAfterTeardown = OfficeRuntimeState()
+        expectedAfterTeardown.pathGenerations[aPath] = 1
+        XCTAssertEqual(runtime.stateSnapshot, expectedAfterTeardown, "teardown resets synchronously "
                        + "even with the open still awaiting its reply")
         XCTAssertEqual(host.officeRuntimes.count, 0)
 
         office.recorder.resumeNextOpen()
         await officeWaitUntil(timeout: 2) { office.recorder.closeCalls.count == 1 }
 
-        XCTAssertEqual(runtime.stateSnapshot, OfficeRuntimeState(), "the late resume must not "
-                       + "resurrect the torn-down runtime")
+        XCTAssertEqual(runtime.stateSnapshot, expectedAfterTeardown, "the late resume must not "
+                       + "resurrect the torn-down runtime — and must not touch pathGenerations "
+                       + "either: a drop is mutation-free")
         // Office Stage B Task 2b — the old `openCalls.map(\.path) == ["/a.xlsx"]` compared against
         // the REAL path; the driver only ever sees the STAGED one now, so "opened exactly once" and
         // "for this path" are asserted separately: a count, plus the closest recoverable identity
