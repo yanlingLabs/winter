@@ -85,6 +85,43 @@ final class OfficeTileCanvasViewTests: XCTestCase {
         XCTAssertEqual(viewport.height, 0)
     }
 
+    // MARK: - officePointToTwips (Office Stage B Task 4 — the mouse-event unit chain)
+
+    func testOriginPointAtZeroScrollIsTheDocumentOrigin() {
+        let twips = officePointToTwips(viewPoint: .zero, scrollOrigin: .zero, zoomPPT: 1000)
+        XCTAssertEqual(twips.x, 0)
+        XCTAssertEqual(twips.y, 0)
+    }
+
+    /// Same 100pt-of-scroll fixture `testScrollOriginTranslatesToTheViewportsTwipsOrigin` uses for
+    /// `officeViewportTwips` — a point at the view's own origin, once `scrollOrigin` is added in,
+    /// must land on the IDENTICAL twips coordinate that function already reports as the viewport's
+    /// own origin: both functions are the same unit chain, applied to different inputs (a whole
+    /// viewport vs. one point), and must never disagree about where "the view's origin, scrolled by
+    /// this much" sits in document space.
+    func testAPointAtTheViewOriginAgreesWithOfficeViewportTwipsOwnOriginForTheSameScroll() {
+        let scrollOrigin = CGPoint(x: 100, y: 50)
+        let viewport = officeViewportTwips(scrollOrigin: scrollOrigin, visibleSize: CGSize(width: 256, height: 256), zoomPPT: 1000)
+        let point = officePointToTwips(viewPoint: .zero, scrollOrigin: scrollOrigin, zoomPPT: 1000)
+        XCTAssertEqual(point.x, viewport.x)
+        XCTAssertEqual(point.y, viewport.y)
+    }
+
+    func testAPointOffsetFromTheOriginAddsItsOwnTwipsDistance() {
+        // 10pt right/down from the origin, at 2x scale and zoomPPT 1000 (1 twip == 0.1px): 10pt ==
+        // 20px == 200 twips.
+        let twips = officePointToTwips(viewPoint: CGPoint(x: 10, y: 10), scrollOrigin: .zero, zoomPPT: 1000)
+        XCTAssertEqual(twips.x, 200)
+        XCTAssertEqual(twips.y, 200)
+    }
+
+    func testHalfZoomDoublesTheTwipsDistanceForTheSamePointOffset() {
+        let full = officePointToTwips(viewPoint: CGPoint(x: 10, y: 10), scrollOrigin: .zero, zoomPPT: 1000)
+        let half = officePointToTwips(viewPoint: CGPoint(x: 10, y: 10), scrollOrigin: .zero, zoomPPT: 500)
+        XCTAssertEqual(half.x, full.x * 2)
+        XCTAssertEqual(half.y, full.y * 2)
+    }
+
     // MARK: - officeTileScreenRect (the inverse unit chain)
 
     func testTheOriginTileAtCanonicalZoomWithNoScrollIsAt256PointOrigin() {

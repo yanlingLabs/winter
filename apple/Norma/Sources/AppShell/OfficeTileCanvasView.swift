@@ -28,6 +28,19 @@ func officeViewportTwips(scrollOrigin: CGPoint, visibleSize: CGSize, zoomPPT: In
         height: TileMath.pixelsToTwips(heightPixels, zoomPPT: zoomPPT))
 }
 
+/// Office Stage B Task 4 — the INVERSE unit chain from `officeViewportTwips`: a point in this
+/// view's own bounds-space (already flipped top-down, matching document space directly — see
+/// `OfficeTileCanvasView.isFlipped`) -> the document-space twips coordinate `postMouseEvent` wants.
+/// `viewPoint` is offset by `scrollOrigin` FIRST (the view's own content offset), exactly mirroring
+/// `officeViewportTwips`'s own origin handling, before the same points -> 2x-scale-pixels -> twips
+/// conversion every other coordinate in this file already goes through.
+func officePointToTwips(viewPoint: CGPoint, scrollOrigin: CGPoint, zoomPPT: Int) -> (x: Int64, y: Int64) {
+    let documentXPixels = Int(((viewPoint.x + scrollOrigin.x) * officeFixedDeviceScale).rounded())
+    let documentYPixels = Int(((viewPoint.y + scrollOrigin.y) * officeFixedDeviceScale).rounded())
+    return (x: TileMath.pixelsToTwips(documentXPixels, zoomPPT: zoomPPT),
+            y: TileMath.pixelsToTwips(documentYPixels, zoomPPT: zoomPPT))
+}
+
 /// A `TileKey`'s on-screen rectangle, in view-space POINTS — the inverse unit chain of
 /// `officeViewportTwips`. `nil` for a key `TileMath.tileBoundsTwips` itself refuses (a
 /// hostile/invalid key; TileMath never traps, and a key this function cannot place is simply not
@@ -738,19 +751,114 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
         scheduleThrottledSubscribe()
     }
 
+    // MARK: - Real input (Office Stage B Task 4 — the edit verbs: keyboard + mouse)
+
     /// **Scope disclosure**: bound to this view's own `keyDown`, not a main-menu command. The main
     /// menu is shared app-wide state this task did not want to touch mid-panel-work — a menu item
     /// with a key equivalent is the natural follow-up once a second surface needs the same shortcut.
     /// `acceptsFirstResponder`/the window-join `makeFirstResponder` above are what make this reach
     /// the view at all.
+    ///
+    /// **Office Stage B Task 4 — retires the beep.** The `default: super.keyDown(with: event)` arm
+    /// below is UNCHANGED — the ⌘-shortcut policy this task's brief names (app chrome keeps
+    /// ⌘S/⌘W/⌘±/⌘Z-family) is exactly "⌘± are the only Cmd-combos this view claims for itself;
+    /// everything else Cmd-held falls to `super`, which is how ⌘S/⌘W/⌘Z already reach whatever
+    /// ALREADY handles them further up the responder chain / as a main-menu key equivalent (checked
+    /// by AppKit's own `performKeyEquivalent:` BEFORE `keyDown:` dispatch ever reaches a first
+    /// responder at all, for any Cmd-combo that IS a registered menu item's key equivalent) — this
+    /// view was never in that path and this task does not put it there. The NEW behavior is the
+    /// `guard` itself: every key WITHOUT `.command` held — which is every printable character, every
+    /// arrow (shift-selection included, since Shift's own bit rides along in `modifierFlags`
+    /// unconditionally), Return/Tab/Delete/Escape, Option-modified characters, and a bare Control
+    /// combo — now reaches `forwardKeyEvent` instead of falling through to `super`'s terminal
+    /// `NSBeep()`.
     override func keyDown(with event: NSEvent) {
-        guard event.modifierFlags.contains(.command) else { return super.keyDown(with: event) }
+        guard event.modifierFlags.contains(.command) else {
+            forwardKeyEvent(event, type: .keyInput)
+            return
+        }
         switch event.charactersIgnoringModifiers {
         case "+", "=": zoomStep(officeZoomIn(current: zoomPPT))
         case "-", "_": zoomStep(officeZoomOut(current: zoomPPT))
         case "0": zoomStep(1000)
         default: super.keyDown(with: event)
         }
+    }
+
+    /// Office Stage B Task 4 — the `keyDown` mirror LOK's own vocabulary always wanted a second half
+    /// for (`LOK_KEYEVENT_KEYUP`) but Stage A never had a door to send it through. Same Cmd-held
+    /// gate as `keyDown` — a Cmd-combo's own key-up is exactly as much "app chrome's business, not
+    /// LOK's" as its key-down half was.
+    override func keyUp(with event: NSEvent) {
+        guard !event.modifierFlags.contains(.command) else {
+            super.keyUp(with: event)
+            return
+        }
+        forwardKeyEvent(event, type: .keyUp)
+    }
+
+    /// **The text-generating/navigation seam Task 5 needs, made explicit rather than fused.** Both
+    /// arms call the identical `runtime.postKeyEvent` today — Task 4 has no IME to route through,
+    /// and every key this view forwards (printable characters AND navigation) genuinely does belong
+    /// on the wire either way. The branch exists anyway because Task 5's own job is to take AWAY the
+    /// text-generating arm's direct call here and replace it with `interpretKeyEvents([event])` (an
+    /// `NSTextInputClient` conformance this view does not have yet), routing through
+    /// `insertText(_:replacementRange:)` instead so dead keys/composition/CJK input methods work —
+    /// while the navigation arm (arrows, Delete, Return, Tab, Escape, function keys) must stay
+    /// EXACTLY as it is here, since IME has no opinion about a key that produces no text. Deciding
+    /// "text-generating" the same way `OfficeInputCodes.charCode` itself does (a non-zero Unicode
+    /// scalar from `charactersIgnoringModifiers`) keeps the classification and the wire encoding
+    /// using the identical source of truth, so they can never disagree about which arm a given key
+    /// falls into.
+    private func forwardKeyEvent(_ event: NSEvent, type: OfficeKeyEventType) {
+        let keyCode = OfficeInputCodes.lokKeyCode(appKitKeyCode: event.keyCode, modifierFlags: event.modifierFlags)
+        let isTextGenerating = OfficeInputCodes.charCode(for: event.charactersIgnoringModifiers) != 0
+        if isTextGenerating {
+            // TEXT-GENERATING — Task 5 replaces this call with `interpretKeyEvents([event])`.
+            let charCode = OfficeInputCodes.charCode(for: event.characters)
+            runtime.postKeyEvent(path: path, type: type, charCode: charCode, keyCode: keyCode)
+        } else {
+            // NAVIGATION/non-printing — stays exactly this shape after Task 5.
+            runtime.postKeyEvent(path: path, type: type, charCode: 0, keyCode: keyCode)
+        }
+    }
+
+    /// A left-button press — positions LOK's own cursor/selection (there is no other door to do
+    /// this now that the DEBUG-only `.uno:GoToCell` is gone; a real click is how a real user, and
+    /// this task's own live typing drill, ever tell LOK where to start typing). Also re-asserts
+    /// first responder — `viewDidMoveToWindow` only claims it once, at window-join time, and a
+    /// click is the ordinary way a user moves keyboard focus BACK to this view after it visited
+    /// some other control (a toolbar field, a sibling panel) without this view ever leaving its
+    /// window.
+    ///
+    /// **Scope disclosure**: left button only (`mouseDown`/`mouseDragged`/`mouseUp`, AppKit's own
+    /// three-method family for it) — the brief's own file list. Right-click (a context menu) and
+    /// other pointing devices are `rightMouseDown`/`otherMouseDown`, neither overridden here; a
+    /// future task's scope, not retrofitted silently.
+    override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
+        forwardMouseEvent(event, type: .buttonDown)
+    }
+
+    /// LOK's own `LOK_MOUSEEVENT_MOUSEMOVE` doc comment: "The mouse has moved while a button is
+    /// pressed" — exactly `mouseDragged`'s own AppKit contract (unlike `mouseMoved`, which requires
+    /// opting into `acceptsMouseMovedEvents` and fires with NO button held; this view does neither,
+    /// so there is no hover-move door to confuse this with).
+    override func mouseDragged(with event: NSEvent) {
+        forwardMouseEvent(event, type: .move)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        forwardMouseEvent(event, type: .buttonUp)
+    }
+
+    private func forwardMouseEvent(_ event: NSEvent, type: OfficeMouseEventType) {
+        let viewPoint = convert(event.locationInWindow, from: nil)
+        let twips = officePointToTwips(viewPoint: viewPoint, scrollOrigin: scrollOrigin, zoomPPT: zoomPPT)
+        let buttons = OfficeInputCodes.mouseButton(appKitButtonNumber: event.buttonNumber)
+        let modifiers = OfficeInputCodes.modifierMask(event.modifierFlags)
+        runtime.postMouseEvent(path: path, type: type, xTwips: twips.x, yTwips: twips.y,
+                               count: event.clickCount, buttons: buttons, modifiers: modifiers)
     }
 
     private func zoomStep(_ target: Int) {
