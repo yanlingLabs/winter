@@ -286,23 +286,41 @@ final class LOKBridge: OfficeDocumentBridge {
         /// later `saveAs`, never the `open` that produced it.
         let saveFormat: OfficeSaveFormat?
         /// **Fix round 2 (CRITICAL)** — this document's OWN view id, captured via `getView(rawDoc)`
-        /// immediately after `initializeForRendering` in `openOnDedicatedThread`, while it is the
-        /// ONLY view that exists for this document (so the lookup is unambiguous — "the view that
-        /// `documentLoad` creates is current at load time," confirmed by reading
-        /// `SfxLokHelper::createView`/`getViewId` directly). Exists because LOK's "current view" is
-        /// a PROCESS-GLOBAL concept, not scoped to the document handle it is read through:
-        /// `ScModelObj::setPart`/`::getPart` (`sc/source/ui/unoobj/docuno.cxx`) resolve via the
-        /// STATIC `ScDocShell::GetViewData()` (ultimately `SfxViewShell::Current()`), ignoring
-        /// `this->pDocShell` entirely — unlike `paintTile`/`postMouseEvent`/`getDocWindow`, which all
-        /// correctly use the INSTANCE-scoped `pDocShell->GetBestViewShell(false)`. `doc_paintPartTile`
+        /// immediately after `initializeForRendering` in `openOnDedicatedThread`.
+        ///
+        /// **Fix round 3 correction — the capture's own reliability was mis-attributed.** An earlier
+        /// version of this comment justified the capture with "the view that `documentLoad` creates
+        /// is current at load time" — true (see `openOnDedicatedThread`'s own comment, right below
+        /// the `getView` call, for where THAT fact is actually load-bearing), but not why THIS read
+        /// is safe. `doc_getView` (`desktop/source/lib/init.cxx:7003-7012`, this codebase's pinned
+        /// LO commit `11482c8f`) and `doc_registerCallback` (same file, `:4663-4675`) both resolve via
+        /// `SfxLokHelper::getViewId(pDocument->mnDocumentId)` — a DocId-FILTERED scan of the global
+        /// view-shell list (confirmed by reading `sfx2/source/view/lokhelper.cxx` directly) — genuinely
+        /// document-scoped REGARDLESS of what is globally "current," not `SfxViewShell::Current()`.
+        /// This capture would be exactly as reliable if `rawDoc`'s view were never current at all.
+        ///
+        /// Exists because a DIFFERENT category of LOK call — `ScModelObj::setPart`/`::getPart`
+        /// (`sc/source/ui/unoobj/docuno.cxx`) — resolves via the STATIC `ScDocShell::GetViewData()`
+        /// (ultimately `SfxViewShell::Current()`), ignoring `this->pDocShell` entirely — unlike
+        /// `paintTile`/`postMouseEvent`/`getDocWindow`, which all correctly use the INSTANCE-scoped
+        /// `pDocShell->GetBestViewShell(false)`. `doc_paintPartTile`
         /// (`desktop/source/lib/init.cxx`) inherits the SAME hazard through its own internal
         /// `doc_setPartImpl` call — confirmed empirically, not just by source reading, by the two-
         /// document live drills in `OfficeRuntimeLiveTests.swift` failing at the paint-detector
-        /// assertion (byte-identical part-0/part-1 tiles) before this fix. `-1` (LOK's own "no view"
-        /// sentinel, per `getViewId`'s documented return) is stored as-is, never substituted — every
-        /// call site's own `setView` prefix degrades harmlessly to today's pre-fix behavior in that
-        /// case (`SfxLokHelper::setView`'s `getViewOfId` lookup returns null for `-1` and no-ops),
-        /// rather than this bridge inventing a fallback LOK itself does not provide.
+        /// assertion (byte-identical part-0/part-1 tiles) before this fix. **Fix round 3 found a
+        /// SECOND paint hazard in the same function, not closed by `setView` alone**:
+        /// `getAlternativeViewForPaint` (`init.cxx:4387-4414`) searches every open view for one
+        /// already sitting at the requested part/mode/render-state with NO `DocId` filter — a
+        /// bystander document (any type) can match, and when it does, `doc_paintPartTile` skips
+        /// `setPart` entirely and paints via the REQUESTING document's own (unmoved) view — see
+        /// `paintTileOnDedicatedThread`'s own header for the fix (an explicit `setPart` in the paint
+        /// prefix, which prevents the mismatch that triggers this search from ever arising).
+        ///
+        /// `-1` (LOK's own "no view" sentinel, per `getViewId`'s documented return) is stored as-is,
+        /// never substituted — every call site's own `setView` prefix degrades harmlessly to today's
+        /// pre-fix behavior in that case (`SfxLokHelper::setView`'s `getViewOfId` lookup returns null
+        /// for `-1` and no-ops), rather than this bridge inventing a fallback LOK itself does not
+        /// provide.
         let viewId: Int32
     }
 
@@ -482,10 +500,10 @@ final class LOKBridge: OfficeDocumentBridge {
 
         rawDoc.pointee.pClass.pointee.initializeForRendering?(rawDoc, nil)
 
-        // Fix round 2 (CRITICAL) — captured HERE, while this document's view is the only one that
-        // exists (see `OpenDocument.viewId`'s own header for the full mechanism and why this is the
-        // one unambiguous moment to read it). `?? -1` mirrors `getView`'s own documented "no view"
-        // sentinel — never invented by this bridge.
+        // Fix round 2 (CRITICAL) — captured HERE. Reliable via `getView`'s own DocId-filtered
+        // resolution (see `OpenDocument.viewId`'s own header — this read does NOT depend on
+        // `rawDoc`'s view actually being "current"). `?? -1` mirrors `getView`'s own documented
+        // "no view" sentinel — never invented by this bridge.
         let viewId = rawDoc.pointee.pClass.pointee.getView?(rawDoc) ?? -1
 
         let typeInt = rawDoc.pointee.pClass.pointee.getDocumentType?(rawDoc) ?? -1
@@ -493,6 +511,19 @@ final class LOKBridge: OfficeDocumentBridge {
         let parts = Int(rawDoc.pointee.pClass.pointee.getParts?(rawDoc) ?? 0)
         var width: Int = 0
         var height: Int = 0
+        // Fix round 3 (MINOR, safety argument for a future reader adding calls here) —
+        // `getDocumentSize` (`ScModelObj::getDocumentSize`, `sc/source/ui/unoobj/docuno.cxx`) IS
+        // current-view-dependent for Calc, via the same static `ScDocShell::GetViewData()` pattern
+        // as the confirmed-broken `setPart`/`getPart` (not instance-scoped like `paintTile`). Safe
+        // HERE, specifically, only because `lo_documentLoadWithOptions`'s own source carries its own
+        // confirming comment — `desktop/source/lib/init.cxx:2984`, this codebase's pinned LO commit
+        // `11482c8f`: `// After loading the document, its initial view is the "current" view.` —
+        // `rawDoc`'s freshly-created view is genuinely process-global-current at this exact point,
+        // and nothing else can run on `thread` between `documentLoad` and this call within the same
+        // synchronous `openOnDedicatedThread` job to disturb that. This does NOT generalize: a call
+        // added later in this same function, or in any OTHER dedicated-thread job, has no such
+        // guarantee and needs its own `setView(rawDoc, viewId)` prefix — this call is safe only by
+        // virtue of being the FIRST current-view-dependent read after the view that makes it current.
         rawDoc.pointee.pClass.pointee.getDocumentSize?(rawDoc, &width, &height)
 
         // Office Stage B Task 2 — captured once, here, from the path this document was opened
@@ -524,6 +555,27 @@ final class LOKBridge: OfficeDocumentBridge {
         // for why this bridge never tries to track "did the current view already happen to match"
         // instead.
         doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        // Fix round 3 (IMPORTANT-A) — a SECOND, separate hazard in the same LOK function, not closed
+        // by `setView` alone: `getAlternativeViewForPaint` (`desktop/source/lib/init.cxx:4387-4414`)
+        // searches every open view-shell for one already sitting at the requested part/mode with a
+        // matching render-state string — with NO `DocId` filter. A bystander document of ANY type
+        // (confirmed live with a Writer document, whose `getPart()`/`getEditMode()` trivially read
+        // 0/0) can match; when it does, `doc_paintPartTile` skips `setPart` ENTIRELY and paints via
+        // THIS document's own view exactly as it already sits — stale, if it was last left at a
+        // different part by real typing. `setPart` here — explicit, ahead of the paint, matching
+        // `key.part` — closes this the same way the input path already does: `doc_paintPartTile`'s
+        // own trigger for the search (`nPart != doc_getPart(pThis)`) is the FIRST thing it checks,
+        // so by the time it runs, this document is already at the requested part and the mismatch
+        // that summons the unfiltered scan never arises. Checked, not assumed, that this is safe to
+        // call unconditionally on EVERY paint (including prefetch): every `TileKey` this codebase
+        // ever constructs — on-demand or the whole-document residency prefetch
+        // (`officeResidencyPrefetchOrder`) — carries the requesting canvas's own currently active
+        // part, never any other; there is no path where a paint's own `key.part` could differ from
+        // what the user is actually looking at, so this can never steal the document's own active-
+        // sheet state out from under a real user action. Confirmed empirically, not just by source
+        // reading: `testRequestingPartZeroAfterTypingOnSheetTwoRendersSheetOneNotAStaleBystanderMatch`
+        // (`OfficeRuntimeLiveTests.swift`) fails at exactly this mismatch before this line existed.
+        doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(truncatingIfNeeded: key.part))
         let (generation, pixels) = try doc.tileRenderer.paint(key: key)
         return TilePaintResult(generation: generation, pixels: pixels,
                                 width: TileMath.tilePixelSize, height: TileMath.tilePixelSize)
@@ -580,7 +632,9 @@ final class LOKBridge: OfficeDocumentBridge {
     /// `pDocument->mxComponent` directly (`desktop/source/lib/init.cxx`'s `doc_saveAs`, confirmed by
     /// reading it) — instance-scoped, genuinely safe regardless of which view is globally current.
     /// The `.uno:Save` FOLLOW-UP below is not: `doc_postUnoCommand` dispatches it through
-    /// `comphelper::dispatchCommand`'s 3-argument overload, which resolves its target via
+    /// `comphelper::dispatchCommand` called with just `(command, arguments)` — the 2-argument call
+    /// site, relying on the 3rd parameter's own DEFAULTED listener (`= {}` in
+    /// `include/comphelper/dispatchcommand.hxx`) — which resolves its target via
     /// `xDesktop->getActiveFrame()` — the SAME process-global "current frame" concept `setPart` was
     /// found to misuse (confirmed by reading `comphelper/source/misc/dispatchcommand.cxx`), not the
     /// document-scoped `SfxLokHelper::getViewId` lookup `doc_postUnoCommand` performs earlier in its
