@@ -63,7 +63,7 @@ final class OfficeAutosaveSchedulerTests: XCTestCase {
 
     func testMarkDirtyArmsATimerButDoesNotFireBeforeTheIntervalElapses() {
         scheduler.markDirty(docId: "doc-a")
-        XCTAssertTrue(scheduler.isArmedForTesting(docId: "doc-a"))
+        XCTAssertTrue(scheduler.isArmed(docId: "doc-a"))
         XCTAssertEqual(firedDocIds, [], "arming must not itself count as the first fire — the "
                        + "brief's cadence is 60s WHILE dirty, not the instant a document goes dirty")
         XCTAssertEqual(fake.scheduledIntervals, [60], "the scheduler's own `interval` must reach "
@@ -93,7 +93,7 @@ final class OfficeAutosaveSchedulerTests: XCTestCase {
         scheduler.markDirty(docId: "doc-a")
         fake.fire(at: 0) // one genuine fire while still dirty
         scheduler.markClean(docId: "doc-a")
-        XCTAssertFalse(scheduler.isArmedForTesting(docId: "doc-a"))
+        XCTAssertFalse(scheduler.isArmed(docId: "doc-a"))
         XCTAssertEqual(fake.liveCount, 0, "the underlying timer must actually be cancelled, not "
                        + "merely forgotten by this scheduler's own bookkeeping")
         XCTAssertEqual(firedDocIds, ["doc-a"], "exactly the one fire before markClean — nothing "
@@ -102,7 +102,7 @@ final class OfficeAutosaveSchedulerTests: XCTestCase {
 
     func testMarkCleanForADocWithNoArmedTimerIsANoOp() {
         scheduler.markClean(docId: "never-armed")
-        XCTAssertFalse(scheduler.isArmedForTesting(docId: "never-armed"))
+        XCTAssertFalse(scheduler.isArmed(docId: "never-armed"))
     }
 
     // MARK: - remove (the close path) — same cancellation contract as markClean
@@ -110,7 +110,7 @@ final class OfficeAutosaveSchedulerTests: XCTestCase {
     func testRemoveCancelsFutureFires() {
         scheduler.markDirty(docId: "doc-a")
         scheduler.remove(docId: "doc-a")
-        XCTAssertFalse(scheduler.isArmedForTesting(docId: "doc-a"))
+        XCTAssertFalse(scheduler.isArmed(docId: "doc-a"))
         XCTAssertEqual(fake.liveCount, 0)
     }
 
@@ -120,7 +120,7 @@ final class OfficeAutosaveSchedulerTests: XCTestCase {
         scheduler.markDirty(docId: "doc-a")
         scheduler.markClean(docId: "doc-a")
         scheduler.markDirty(docId: "doc-a")
-        XCTAssertTrue(scheduler.isArmedForTesting(docId: "doc-a"))
+        XCTAssertTrue(scheduler.isArmed(docId: "doc-a"))
         XCTAssertEqual(fake.scheduledIntervals.count, 2, "a genuinely NEW timer, not a resurrection "
                        + "of the cancelled one")
         fake.fire(at: 1) // the second (fresh) timer
@@ -149,5 +149,57 @@ final class OfficeAutosaveSchedulerTests: XCTestCase {
         scheduler.markClean(docId: "doc-a")
         fake.fire(at: 1) // doc-b's own timer — must still be live; doc-a's cancel must not reach it
         XCTAssertEqual(firedDocIds, ["doc-a", "doc-b"])
+    }
+
+    // MARK: - Fix round 1 (review I-1) — isArmed is a LIVE query, not a snapshot
+
+    /// **The core mechanism `OfficeHelperServer.performAutosaveFire`'s own fix relies on, isolated
+    /// from everything helper/LOK-adjacent** (`FakeOfficeDocumentBridge`/`OfficeHelperServer` are
+    /// reachable only through a spawned subprocess — see `project.yml`'s own `NormaAppTests`
+    /// `excludes:` comment — so THIS file, already compiled in-process, is where the closure-capture
+    /// contract itself gets pinned). The review's own words: "an autosave fire racing ⌘S... the
+    /// timer stays armed past placeAtomically/.clearAutosave because ModifiedStatus=false is a later
+    /// round trip... re-check armed-ness inside the dedicated-thread job." The fix is only correct
+    /// if the closure `performAutosaveFire` builds (`{ scheduler.isArmed(docId: docId) }`) captures
+    /// `scheduler` BY REFERENCE and re-reads `armed` at CALL time — a closure that captured a
+    /// pre-computed `Bool` at construction time (i.e., built BEFORE marshaling onto the dedicated
+    /// thread) would still observe the STALE "armed" answer and write the spurious sidecar the
+    /// review describes. This test constructs the exact shape of closure `performAutosaveFire`
+    /// builds, disarms AFTER building it (standing in for "the real save's `.modifiedChanged(false)`
+    /// round-trip lands while the fire's own job is still queued on the dedicated thread"), and
+    /// proves the closure's answer changes — i.e., invoking it at JOB-EXECUTION time, not at
+    /// fire-enqueue time, is what closes the race.
+    func testIsArmedReflectsADisarmThatHappensAfterAClosureCapturingItWasBuiltButBeforeThatClosureIsCalled() {
+        scheduler.markDirty(docId: "doc-a")
+        XCTAssertTrue(scheduler.isArmed(docId: "doc-a"), "sanity")
+
+        // The exact shape `OfficeHelperServer.performAutosaveFire` builds and hands to
+        // `OfficeDocumentBridge.saveAsSidecar(docId:isStillArmed:)` — captures `scheduler`, not a
+        // `Bool`.
+        let isStillArmed: () -> Bool = { [scheduler] in scheduler!.isArmed(docId: "doc-a") }
+
+        // Something else disarms it — standing in for the real save's own `.modifiedChanged(false)`
+        // landing — AFTER the closure above was built but BEFORE anything calls it. This ordering
+        // (disarm between construction and invocation) is precisely "disarms between fire-enqueue
+        // and job-execution": `performAutosaveFire` builds this closure and hands it to
+        // `documentBridge.saveAsSidecar` BEFORE that call marshals onto (and possibly queues behind
+        // other work on) the dedicated thread — this line simulates whatever lands during that
+        // queueing delay.
+        scheduler.markClean(docId: "doc-a")
+
+        XCTAssertFalse(isStillArmed(), "a closure built before the disarm must still observe it once "
+                       + "actually INVOKED — proving `isArmed` is a live, re-checkable query rather "
+                       + "than something safe to snapshot once and reuse. This is what makes checking "
+                       + "armed-ness INSIDE the dedicated-thread job (at call time) correct where "
+                       + "checking it once before marshaling onto that thread would not be.")
+    }
+
+    func testIsArmedItselfIsAPlainLiveReadWithNoCachingOfItsOwn() {
+        XCTAssertFalse(scheduler.isArmed(docId: "doc-a"), "never armed")
+        scheduler.markDirty(docId: "doc-a")
+        XCTAssertTrue(scheduler.isArmed(docId: "doc-a"))
+        scheduler.markClean(docId: "doc-a")
+        XCTAssertFalse(scheduler.isArmed(docId: "doc-a"), "must flip back the instant markClean runs "
+                       + "— no lingering `true` from the read a moment before")
     }
 }

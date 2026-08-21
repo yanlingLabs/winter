@@ -144,8 +144,21 @@ final class OfficeAutosaveScheduler {
         cancel?()
     }
 
-    /// Test-only observation door — never read by production code.
-    func isArmedForTesting(docId: String) -> Bool {
+    /// **Fix round 1 (review I-1) — promoted from a test-only observation door to a real
+    /// production query.** `OfficeHelperServer.performAutosaveFire` calls this to build the
+    /// `isStillArmed` closure it hands `OfficeDocumentBridge.saveAsSidecar`, so a fire that raced a
+    /// real save can re-check "is this docId STILL armed" at the moment the dedicated-thread job
+    /// actually runs — not merely at the moment the timer fired. See `saveAsSidecar`'s own header
+    /// (`OfficeHelperServer.swift`) for the full race this closes: a bare `saveAsSidecar` never
+    /// clears `ModifiedStatus` itself, so the SCHEDULER only learns "clean now" once the real
+    /// save's OWN `.uno:Save`-triggered `.modifiedChanged(false)` round-trips back — a later event
+    /// than the real save's own `placeAtomically`/`.clearAutosave`. A fire that started before that
+    /// round-trip lands, but whose dedicated-thread job doesn't actually EXECUTE until after it
+    /// does, would otherwise write a sidecar newer than the just-saved real file — a spurious
+    /// "Recovered unsaved changes" banner on the next open, no data lost, but one click from
+    /// restaging an unsaveable OOXML tab. Safe to call from ANY thread — protected by `lock`,
+    /// exactly like every other access to `armed`.
+    func isArmed(docId: String) -> Bool {
         lock.lock()
         defer { lock.unlock() }
         return armed[docId] != nil

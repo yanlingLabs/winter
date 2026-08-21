@@ -611,8 +611,12 @@ final class LOKBridge: OfficeDocumentBridge {
     /// every other part-scoped call on this bridge, an autosave fire has no wire request to have
     /// carried one; `saveAsSidecarOnDedicatedThread` reads `OpenDocument.lastKnownPart` instead
     /// (see that field's own header for why, and why that is a deliberately looser guarantee).
-    func saveAsSidecar(docId: String) throws -> (ext: String, isODFFallback: Bool) {
-        try thread.sync { try self.saveAsSidecarOnDedicatedThread(docId: docId) }
+    ///
+    /// **Fix round 1 (review I-1) — `isStillArmed` threaded straight through to the dedicated-
+    /// thread job unevaluated.** This wrapper does not call it — see
+    /// `saveAsSidecarOnDedicatedThread`'s own header for exactly where and why it gets called.
+    func saveAsSidecar(docId: String, isStillArmed: @escaping () -> Bool) throws -> (ext: String, isODFFallback: Bool)? {
+        try thread.sync { try self.saveAsSidecarOnDedicatedThread(docId: docId, isStillArmed: isStillArmed) }
     }
 
     /// Office Stage B Task 4 — called from a CONNECTION thread (`OfficeHelperServer`'s `.keyEvent`
@@ -1001,7 +1005,21 @@ final class LOKBridge: OfficeDocumentBridge {
     /// leaves either the OLD complete sidecar or nothing — never a partial one." The temp name is
     /// UUID-suffixed, not seq-suffixed like `saveAsOnDedicatedThread`'s own `saves/` renders — this
     /// call carries no wire `seq` (it is never triggered by a wire request at all).
-    private func saveAsSidecarOnDedicatedThread(docId: String) throws -> (ext: String, isODFFallback: Bool) {
+    ///
+    /// **Fix round 1 (review I-1) — `isStillArmed()` is the VERY FIRST thing this method does, on
+    /// purpose.** This IS "the dedicated-thread job" the review's own fix instruction names: by the
+    /// time `thread.sync`'s closure actually starts running THIS body, any queueing delay against
+    /// other work already on `thread` (a concurrent real save's own `.uno:Save`, most concretely)
+    /// has already elapsed — checking here, rather than in `saveAsSidecar`'s own wrapper (which runs
+    /// BEFORE that queueing delay, on the timer queue), is what makes the check see the state of
+    /// the world AT THE MOMENT this method is about to write, not at the moment the timer fired
+    /// minutes/moments earlier. A caller that captured its own boolean up front instead of a live
+    /// closure would defeat this regardless of WHERE the check ran — see
+    /// `OfficeAutosaveScheduler.isArmed`'s own header for the closure-capture half of this
+    /// argument. Returning `nil` here (not throwing) is deliberate: skipping is the CORRECT outcome,
+    /// not a failure — see the protocol requirement's own header.
+    private func saveAsSidecarOnDedicatedThread(docId: String, isStillArmed: () -> Bool) throws -> (ext: String, isODFFallback: Bool)? {
+        guard isStillArmed() else { return nil }
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
         doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
         if doc.kind != .text {

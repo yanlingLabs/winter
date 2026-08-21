@@ -108,7 +108,25 @@ public protocol OfficeDocumentBridge: AnyObject {
     /// **No `part` parameter, unlike `saveAs`** — an autosave fire has no wire request to have
     /// carried one at all (see `LOKBridge.OpenDocument.lastKnownPart`'s own header for how the real
     /// conformance answers "which part" without one).
-    func saveAsSidecar(docId: String) throws -> (ext: String, isODFFallback: Bool)
+    ///
+    /// **Fix round 1 (review I-1) — `isStillArmed` and the `Optional` return.** A bare `saveAs`
+    /// (this method's whole point) never clears `ModifiedStatus`, so the ONLY way this document's
+    /// own scheduler timer ever disarms is a REAL save's `.uno:Save` follow-up round-tripping
+    /// `.modifiedChanged(false)` back through the wire — a later event than that same real save's
+    /// own `placeAtomically`/`.clearAutosave` on the app side. A fire that started (the timer
+    /// callback ran, `performAutosaveFire` began) before that round-trip lands, but whose call into
+    /// this method doesn't actually reach the dedicated thread until after it does, would otherwise
+    /// write a sidecar with a newer mtime than the just-saved real file — a spurious "Recovered
+    /// unsaved changes" banner on the next open (no data lost, but one click from restaging an
+    /// unsaveable tab on an already-OOXML-broken document). `isStillArmed` is called ON the
+    /// dedicated thread, as the very first action, by both conformances below — re-checking at
+    /// EXECUTION time, not at the moment `performAutosaveFire` was invoked, is what actually closes
+    /// this window (a check made before marshaling onto a possibly-busy dedicated thread would not:
+    /// arbitrary time can still pass between that check and this method's own real work). Returns
+    /// `nil` — not a throw — when the re-check fails: this is not a failure, there is nothing wrong,
+    /// there is simply nothing left to do. `OfficeHelperServer.performAutosaveFire` logs the
+    /// distinction and does not push `.autosaved` for a `nil` result.
+    func saveAsSidecar(docId: String, isStillArmed: @escaping () -> Bool) throws -> (ext: String, isODFFallback: Bool)?
 
     /// Office Stage B Task 4 — LOK's `postKeyEvent`, unchanged parameter shape. Throws only on a
     /// `docId` this bridge has no handle for — `postKeyEvent` itself is `void` on LOK's own side
@@ -240,7 +258,19 @@ public final class FakeOfficeDocumentBridge: OfficeDocumentBridge {
     /// over a real socket, without any real LOK format/ODF-fallback logic to fake convincingly —
     /// that correctness is `LOKBridge`'s own live-tested job (`OfficeRuntimeLiveTests`' crash
     /// drill). Always reports `ext: "fake", isODFFallback: false` — nothing here needs to vary it.
-    public func saveAsSidecar(docId: String) throws -> (ext: String, isODFFallback: Bool) {
+    ///
+    /// **Fix round 1 (review I-1) — `isStillArmed` checked FIRST, mirroring `LOKBridge`'s own
+    /// conformance exactly** (see that method's own header, and the protocol requirement's, for the
+    /// race this closes). This fake has no real dedicated thread to queue behind, so it cannot
+    /// reproduce the RACE itself — that is `OfficeAutosaveSchedulerTests
+    /// .testIsArmedReflectsADisarmThatHappensAfterAClosureCapturingItWasBuiltButBeforeThatClosureIsCalled`'s
+    /// own job, the one piece of this fix reachable in-process at all (`FakeOfficeDocumentBridge` is
+    /// exercised only through a spawned subprocess — see `project.yml`'s `NormaAppTests`
+    /// `excludes:` comment). What this conformance DOES guarantee: any caller that hands it an
+    /// already-false `isStillArmed` gets `nil` back and no file written, keeping this fake an
+    /// honest stand-in for the real contract.
+    public func saveAsSidecar(docId: String, isStillArmed: @escaping () -> Bool) throws -> (ext: String, isODFFallback: Bool)? {
+        guard isStillArmed() else { return nil }
         lock.lock()
         let isOpen = caches[docId] != nil
         lock.unlock()
@@ -553,9 +583,24 @@ public final class OfficeHelperServer {
     /// **Throws never propagate anywhere — logged and dropped, exactly "the helper always
     /// survives."** There is no reply frame for an autosave to fail; a write that fails this
     /// interval gets another chance next interval for as long as the document stays dirty.
+    ///
+    /// **Fix round 1 (review I-1) — the `isStillArmed` closure this hands `saveAsSidecar`.** Built
+    /// HERE, at fire time, but — critically — capturing `autosaveScheduler` by reference and calling
+    /// `isArmed` only when the CONFORMANCE actually invokes it (on the dedicated thread, as that
+    /// method's own header states) rather than being evaluated once right here and passed down as
+    /// an already-decided `Bool`. That distinction is the entire fix: `OfficeAutosaveScheduler
+    /// .isArmed`'s own header, and `OfficeAutosaveSchedulerTests
+    /// .testIsArmedReflectsADisarmThatHappensAfterAClosureCapturingItWasBuiltButBeforeThatClosureIsCalled`,
+    /// both spell out why a snapshot taken here would still lose the race the review describes.
     private func performAutosaveFire(docId: String) {
         do {
-            let (ext, isODFFallback) = try documentBridge.saveAsSidecar(docId: docId)
+            guard let (ext, isODFFallback) = try documentBridge.saveAsSidecar(
+                docId: docId, isStillArmed: { [autosaveScheduler] in autosaveScheduler.isArmed(docId: docId) }
+            ) else {
+                log("[OfficeHelperServer] autosave sidecar write skipped for \(docId): no longer "
+                    + "armed by the time the dedicated-thread job ran — a real save already landed")
+                return
+            }
             routeDocumentEvent(docId: docId, event: .autosaved(ext: ext, isODFFallback: isODFFallback))
         } catch {
             log("[OfficeHelperServer] autosave sidecar write failed for \(docId): \(error) — retrying next interval")
