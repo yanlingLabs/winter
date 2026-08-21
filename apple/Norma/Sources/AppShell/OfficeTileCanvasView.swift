@@ -772,6 +772,20 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
     /// unconditionally), Return/Tab/Delete/Escape, Option-modified characters, and a bare Control
     /// combo — now reaches `forwardKeyEvent` instead of falling through to `super`'s terminal
     /// `NSBeep()`.
+    ///
+    /// **Fix round 1, m6 (confirmed brief gap) — the ⌘C/⌘V/⌘X outcome, named explicitly, as the
+    /// brief required.** These three are ordinary Cmd-combos under this same policy — not claimed by
+    /// this view's own `switch` (only `+`/`=`/`-`/`_`/`0` are) — so they fall to
+    /// `super.keyDown(with:)` exactly like ⌘S/⌘W/⌘Z. Unlike those three, though, nothing in this
+    /// app's responder chain or main menu currently IMPLEMENTS `copy(_:)`/`cut(_:)`/`paste(_:)` (no
+    /// `NSTextInputClient` conformance, no pasteboard wiring — that is Task 5/6 territory, alongside
+    /// IME) — so `performKeyEquivalent:` finds no enabled target for the standard Edit-menu items
+    /// those combos are normally bound to (a menu item with no live target validates as disabled),
+    /// the match fails, and the event falls through to `keyDown:` on this view exactly like any
+    /// other unclaimed Cmd-combo. The result, PRE-Task-6, is deliberate and disclosed, not a bug:
+    /// **disabled menu items → `super.keyDown(with:)` → `NSView`'s own terminal `NSBeep()`.** Copy/
+    /// cut/paste do nothing and beep until a future task gives them a real LOK-backed implementation
+    /// (`getTextSelection`/`paste()`/`.uno:Copy` are the likely doors — not built here).
     override func keyDown(with event: NSEvent) {
         guard event.modifierFlags.contains(.command) else {
             forwardKeyEvent(event, type: .keyInput)
