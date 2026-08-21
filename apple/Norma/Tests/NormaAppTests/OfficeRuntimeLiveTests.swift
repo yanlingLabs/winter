@@ -844,21 +844,31 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         // (iii) Even with (i) and (ii) both applied, this drill STILL measured green with `setView`
         // deleted — a THIRD reason, found only after removing the click entirely (see
         // `testDirectlyProvesTheInputPathsOwnSetViewPrefixIsLoadBearingBelowTheCanvasLayer`'s own
-        // header for the full mechanism): `view.mouseDown`'s own posted LOK mouse-down is itself a
-        // VCL/SFX activation gesture that makes A's frame current as a side effect, independent of
-        // this fix — so by the time the first keystroke's own `setPart` ran, A was already current by
-        // accident. No amount of displacing A's own state beforehand survives a click that reasserts
-        // it. Closed by dropping the click below — Calc needs none to start editing the current cell.
+        // header for the full mechanism): the posted LOK event's own dispatch `GrabFocus`es A's
+        // window (`LOKPostAsyncEvent`, `sfx2/source/view/lokhelper.cxx:1186-1203`, at this
+        // codebase's pinned LO commit `11482c8f`), which makes A's frame current as a side effect,
+        // independent of this fix — so by the time the NEXT `setPart` ran, A was already current by
+        // accident. No amount of displacing A's own state beforehand survives that. Closed by
+        // dropping the click below — Calc needs none to start editing the current cell. (Fix round
+        // 4, NEW-3: this used to be attributed to the CLICK specifically. It is not click-specific —
+        // the same dispatch path runs for key events, which is exactly why only the FIRST keystroke
+        // is damaged below rather than all of them.)
         //
-        // **The actual observed disabled-build signature, corrected from an earlier, wrong
-        // prediction**: with `setView` deleted and the click removed, the marker lands on NEITHER of
-        // A's own sheets — B (a second Calc document here) accepts the misdirected `setPart`/
-        // `postKeyEvent` instead (`dynamic_cast<ScTabViewShell*>` succeeds on a Calc sibling), so B's
-        // OWN dirty flag flips and the edit leaks onto B's current cell, not A's sheet 1. Confirmed
-        // live: 3 failing assertions (B's dirty flag before AND after A's save, plus the sheet-2
-        // miss below) — contrast the Writer-B sibling drill and the raw drill, where the identical
-        // misdirected call is a silent no-op (`dynamic_cast` fails) and the edit is simply lost
-        // rather than leaked.
+        // **The disabled-build signature, RE-MEASURED in fix round 4 (NEW-3) with A's saved bytes
+        // dumped rather than inferred from which assertions fired.** With `setView` deleted and the
+        // click removed: A's Sheet1 is UNTOUCHED (`NORMA GATE`, `42`) and **A's Sheet2!A1 =
+        // `4EDIZ`** — the marker (`T4EDIZ`) minus its FIRST character, which is destroyed. B's own
+        // dirty flag does flip, both before and after A's save. 3 failing assertions, and the
+        // reasons are two different things, not one: (a) the first `setPart(A.handle, 1)` runs while
+        // B is current, and because B is a second CALC document the `dynamic_cast<ScTabViewShell*>`
+        // SUCCEEDS — so B's own active sheet is switched under it, which is what dirties B; (b) the
+        // keystrokes themselves always reach A (`getDocWindow`'s instance-scoped self-correction),
+        // so A's first character opens a cell edit on the WRONG sheet and is then discarded when the
+        // second keystroke's now-correctly-targeted `setPart` switches A to sheet 2. An earlier
+        // version of this comment said "the edit leaks onto B's current cell"; the bytes say it does
+        // not — nothing of the marker reaches B. The Writer-B sibling drill and the raw drill show
+        // the same A-side damage with (a) absent, since `dynamic_cast` fails there: one failing
+        // assertion, B never dirty.
         let sweepDrained = await waitUntil(timeout: 30) { view.prefetchSweepIssuedForTesting }
         XCTAssertTrue(sweepDrained, "A's own background residency-prefetch sweep never finished issuing "
                       + "its chunks — the input interleave below cannot discriminate anything while it's "
@@ -1433,16 +1443,28 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// REJECTS it if `GetViewData().GetDocShell() != this`, falling back to a by-frame lookup scoped
     /// to the target document — unlike `setPart`'s own resolution (`ScDocShell::GetViewData()`,
     /// `docsh4.cxx:3069-3074`), which is the naive `SfxViewShell::Current()` dynamic_cast this whole
-    /// fix round is about. `SfxLokHelper::postKeyEventAsync`/`postMouseEventAsync`
-    /// (`lokhelper.cxx:1294-1375`) then take that already-resolved window directly and post the event
-    /// through VCL's own async queue — they do not re-resolve "current" at dispatch time. A mouse
-    /// button-down delivered to a window is itself a VCL/SFX activation gesture: posting it to A's
-    /// window (correctly resolved via `getDocWindow`'s own self-correction, with or without this
-    /// fix's `setView`) makes A's frame the process-global "current" one as a SIDE EFFECT of the click
-    /// landing — so by the time the FIRST keystroke's own `setPart` runs, A is already current by
-    /// accident, and the fix under test never gets a chance to matter. No drill that clicks before
-    /// typing can discriminate this fix, mounted-canvas or raw — confirmed by disabling `setView` and
-    /// observing GREEN across three independently-designed click-first drills before this was traced.
+    /// fix round is about. Posting the event to A's window (correctly resolved by `getDocWindow`'s
+    /// own self-correction, with or without this fix's `setView`) is itself an ACTIVATION: the event
+    /// arrives at A and A becomes the process-global current view as a side effect — so by the time
+    /// the NEXT `setPart` runs, A is already current by accident, and the fix under test never gets
+    /// a chance to matter. No drill that clicks before typing can discriminate this fix,
+    /// mounted-canvas or raw — confirmed by disabling `setView` and observing GREEN across three
+    /// independently-designed click-first drills before this was traced.
+    ///
+    /// **Fix round 4 (NEW-3) — the activation mechanism named above was mis-attributed to the CLICK
+    /// specifically, and to a claim about `postKeyEventAsync` that the source contradicts.** An
+    /// earlier version of this header said `SfxLokHelper::postKeyEventAsync`/`postMouseEventAsync`
+    /// "take that already-resolved window directly and post the event through VCL's own async queue
+    /// — they do not re-resolve 'current' at dispatch time." They do, and it is not click-specific.
+    /// Read at the pin: `postEventAsync` (`sfx2/source/view/lokhelper.cxx:1273-1291`) stamps every
+    /// queued event with `mnView = SfxLokHelper::getCurrentView()` AT POST TIME, and its dispatcher
+    /// `LOKPostAsyncEvent` (`:1186-1203`) then calls `SfxLokHelper::setView(pLOKEv->mnView)` if
+    /// current has drifted since, followed by `pLOKEv->mpWindow->GrabFocus()` when the target window
+    /// does not already hold focus. That `GrabFocus` is the real activation gesture, it runs for
+    /// KEY events exactly as much as for mouse ones, and it is why a click was never actually
+    /// required to spoil a drill — the FIRST keystroke does it too. The conclusion the round-3
+    /// investigation reached (click-first drills cannot discriminate this fix) survives unchanged;
+    /// only the reason does, and it is broader than was written.
     ///
     /// **The actual proof: remove the click.** Calc's own real UX needs no click to start editing the
     /// current cell — the cursor is already at A1 from `documentLoad`, and a keystroke alone enters
@@ -1453,22 +1475,49 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// gone: raw `requestTiles` genuinely parks A at part 0 (the paint prefix's own
     /// `setView`+`setPart`, unaffected by anything under test here); a second raw `requestTiles`
     /// against B makes B current; a raw `postKey` (no `postMouse` at all) sequence with `part: 1` is
-    /// the ONLY thing left that can move A back to part 1 before the marker lands. Confirmed both
-    /// ways: GREEN with the fix intact, RED — `XCTAssertTrue failed - the typed marker must appear on
-    /// A's SHEET 2` — with `setView` deleted from both dedicated-thread input functions, restored
-    /// immediately after.
+    /// the ONLY thing left that can move A back to part 1 before the marker lands. GREEN with the
+    /// fix intact.
+    ///
+    /// **The disabled-build signature, RE-MEASURED in fix round 4 (NEW-3) with the saved bytes
+    /// actually dumped rather than inferred from which assertions fired.** With `setView` deleted
+    /// from both dedicated-thread input functions (restored immediately after), the saved file
+    /// contains: Sheet1 completely untouched (`NORMA GATE`, `42`), and **Sheet2!A1 = `4EDIT`** — the
+    /// marker is `T4EDIT`, so every character but the FIRST lands correctly and the first one is
+    /// destroyed. Exactly ONE assertion fails (`the typed marker must appear on A's SHEET 2`, a
+    /// substring miss), and B's own dirty flag stays false.
+    ///
+    /// Round 3 recorded that one-failure count correctly but explained it as "the marker lands on
+    /// neither sheet," and the assertion message below claimed the marker would land on SHEET 1.
+    /// Both were wrong; the bytes say so. The mechanism that fits them, given `postEventAsync`'s
+    /// post-time view stamp and `LOKPostAsyncEvent`'s `GrabFocus` (cited above):
+    ///
+    ///   1. B was painted last, so B is current. The first `postKey`'s `setPart(A.handle, 1)`
+    ///      resolves through `ScDocShell::GetViewData()` → `SfxViewShell::Current()` = B's `SwView`
+    ///      → `dynamic_cast<ScTabViewShell*>` fails → silent no-op. A stays on sheet 1.
+    ///   2. `postKeyEvent` still reaches A's own window (`getDocWindow`'s self-correction), and its
+    ///      dispatch `GrabFocus`es that window — A becomes current, and `T` opens a cell edit on
+    ///      **Sheet1!A1**.
+    ///   3. The SECOND keystroke's `setPart(A.handle, 1)` now finds A current, succeeds, and
+    ///      switches A to sheet 2 — which discards the cell edit that step 2 had opened. `T` is
+    ///      gone, having never been committed anywhere.
+    ///   4. `4EDIT` types into Sheet2!A1 and Return commits it.
+    ///
+    /// Steps 1, 2 and 4 are read straight off the cited source plus the dumped bytes; step 3's
+    /// "a tab switch discards an open cell edit" is the reading that fits the observation (a `T`
+    /// that reached A yet appears nowhere in the saved file) and was not separately traced into
+    /// `ScTabView::SetTabNo`.
     ///
     /// **What this proves beyond "the marker lands correctly," matching the finding's own "any
     /// second doc open" framing**: `ScModelObj::setPart`'s static resolution (re-verified at this
     /// codebase's pinned LO commit `11482c8f`) means a misdirected `setPart(A.handle, 1)` — without
     /// this fix — does not merely fail to move A; it ACTS on whichever document is current. B is a
     /// Writer document here specifically so that action is a silent no-op (the `dynamic_cast`-fails
-    /// case): the marker lands on neither sheet, and B's own dirty flag never flips (confirmed: this
-    /// drill's disabled-build run shows exactly ONE failing assertion, the "must appear on sheet 2"
-    /// one). The sibling drill below, with B as a SECOND Calc document, demonstrates the OTHER half —
-    /// a Calc B accepts the misdirected call, and the marker leaks onto B's own current cell instead
-    /// (confirmed: three failing assertions there — B's dirty flag flips both before and after A's
-    /// save, plus the same "must appear on sheet 2" miss).
+    /// case), which is why the damage stays inside A and B never goes dirty. The sibling drill
+    /// below, with B as a SECOND Calc document, demonstrates the OTHER half — a Calc B ACCEPTS the
+    /// misdirected call and has its own active sheet switched under it (re-measured in fix round 4:
+    /// three failing assertions there, B's dirty flag flipping both before and after A's save, plus
+    /// the same "must appear on sheet 2" miss). The Writer-B mounted-canvas drill re-measures at one
+    /// failing assertion, matching this one.
     func testDirectlyProvesTheInputPathsOwnSetViewPrefixIsLoadBearingBelowTheCanvasLayer() async throws {
         let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
@@ -1578,8 +1627,11 @@ final class OfficeRuntimeLiveTests: XCTestCase {
                       + "the input path's OWN setView+setPart prefix moving A from its parked part 0 "
                       + "back to part 1, with nothing else around to do it")
         XCTAssertFalse(sheet1XML.contains(marker), "the typed marker must NOT leak onto A's sheet 1 — "
-                      + "without the fix, this is exactly where it would land (A stays parked at part "
-                      + "0 because the misdirected setPart acts on B, a Writer document, instead)")
+                      + "this is the guard against the OTHER way the marker could go wrong. Note "
+                        + "(fix round 4, NEW-3) that this is NOT the assertion the disabled build "
+                        + "fails: measured, the disabled build leaves sheet 1 untouched and puts "
+                        + "'4EDIT' — the marker minus its first character — on sheet 2. See this "
+                        + "test's own header for the four-step mechanism and the dumped bytes.")
         XCTAssertTrue(sheet1XML.contains("NORMA GATE"), "A's sheet 1 seed content must be untouched")
 
         runtime.close(pathA)
