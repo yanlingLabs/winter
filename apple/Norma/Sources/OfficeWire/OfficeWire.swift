@@ -603,6 +603,18 @@ public enum OfficeDocumentEvent: Equatable, Sendable {
     /// forward-compatible with a future coalesced/batched-rects producer without another wire
     /// change. `part` is present because `LOK_FEATURE_PART_IN_INVALIDATION_CALLBACK` is enabled at
     /// boot (`LOKBridge`), which appends the part number as the payload's 5th value.
+    ///
+    /// **Fix round 1, F3 — corrected: `"EMPTY"` DOES carry a part number, always, once the
+    /// part-in-invalidation feature is on.** `RectangleAndPart::toString()` (LO core,
+    /// `desktop/inc/lib/init.hxx`) is unconditional about this: `if (m_nPart >= -1) return
+    /// (isInfinite() ? "EMPTY" : rect) + ", " + part + ", " + mode;` — a whole-document
+    /// invalidation is `"EMPTY, <part>, <mode>"` on the wire, not bare `"EMPTY"`, whenever
+    /// `isPartInInvalidation()` is true (which `LOKBridge` always sets). `part` for this case can
+    /// legitimately be `-1` — LO's own "all parts" sentinel (`init.hxx`'s own `m_nPart(INT_MIN)`/
+    /// "-1 is reserved to mean 'all parts'" comment; `SfxLokHelper::notifyInvalidation`'s single-
+    /// rectangle overload can be called with an explicit `-1`) — harmless here since the EMPTY case
+    /// already bumps every part regardless (`TileCache.invalidate`'s own doc), but a NON-empty rect
+    /// can carry `-1` too; see that method's own fix-round doc for how it now honors that.
     case invalidated(rectsTwips: [OfficeTwipsRect], part: Int)
     case modifiedChanged(Bool)
     case closed
@@ -677,12 +689,26 @@ public enum OfficeDocumentEvent: Equatable, Sendable {
     // MARK: - LOK raw callback payload parsing
 
     /// Parses `LOK_CALLBACK_INVALIDATE_TILES`'s raw payload: `"x, y, width, height"` in twips,
-    /// `"x, y, width, height, part"` with `LOK_FEATURE_PART_IN_INVALIDATION_CALLBACK` set (always,
-    /// in `LOKBridge`), or the literal string `"EMPTY"` meaning "the whole document" —
-    /// `LibreOfficeKitEnums.h:120-129`. `"EMPTY"` maps to an EMPTY `rectsTwips` array (documented on
-    /// the `.invalidated` case itself); `part` for that case defaults to `0` — LOK's own "EMPTY"
-    /// firing carries no part number to parse, and "whole document" is not meaningfully scoped to
-    /// one part anyway. `nil` for anything that doesn't parse as either shape.
+    /// `"x, y, width, height, part, mode"` with `LOK_FEATURE_PART_IN_INVALIDATION_CALLBACK` set
+    /// (always, in `LOKBridge`), or `"EMPTY"` — with the SAME optional `", part, mode"` suffix —
+    /// meaning "the whole document" (`LibreOfficeKitEnums.h:120-129`). `nil` for anything that
+    /// doesn't parse as either shape.
+    ///
+    /// **Fix round 1, F3 (CRITICAL — a real, confirmed bug, not a hardening nice-to-have): a bare
+    /// `trimmed == "EMPTY"` exact-match used to be the ONLY accepted whole-document shape.** With
+    /// `LOK_FEATURE_PART_IN_INVALIDATION_CALLBACK` on (always, in `LOKBridge`), LO's own writer
+    /// (`RectangleAndPart::toString()`, `desktop/inc/lib/init.hxx`, fetched and read directly, not
+    /// guessed) NEVER emits bare `"EMPTY"` — it unconditionally appends `", " + part + ", " + mode`
+    /// whenever `m_nPart >= -1`, i.e. the real wire shape is `"EMPTY, 0, 0"` (or whatever part/mode
+    /// happen to be). The old exact-match rejected that: it fell through to the numeric-rect branch,
+    /// `Int64("EMPTY")` failed, and the WHOLE callback was silently dropped — a genuine
+    /// whole-document invalidation that never reached `TileCache.invalidate` at all, leaving stale
+    /// pixels no scroll/zoom could ever correct (nothing re-marks a key "stale" if the invalidation
+    /// that should have done so was never parsed in the first place). Fixed below by matching on
+    /// `fields[0] == "EMPTY"` rather than the whole trimmed string, mirroring LO's OWN reader's
+    /// leniency (`RectangleAndPart::Create`, same file: part is read if present, mode is optional
+    /// even then) — this parser now accepts bare `"EMPTY"`, `"EMPTY, <part>"`, and `"EMPTY, <part>,
+    /// <mode>"` alike, discarding mode (`OfficeDocumentEvent.invalidated` carries no mode field).
     ///
     /// Lives here (not on `LOKBridge`, its one real caller) so a test can reach it at all:
     /// `LOKBridge` is a `type: tool` Xcode target no test bundle can import. Task 4's live callback
@@ -690,8 +716,13 @@ public enum OfficeDocumentEvent: Equatable, Sendable {
     /// Parsers`) DOES now provoke real LOK callbacks over open+paintTile+close, so this parser is no
     /// longer permanently zero-coverage against real firings — but that probe observed **zero**
     /// `LOK_CALLBACK_INVALIDATE_TILES` firings against a view-only document with no edit verb
-    /// available (Stage A ships none), so this function specifically remains untested against real
-    /// data; the table test below is still its only exercise.
+    /// available (Stage A ships none); Task 4's OWN live edit tests are what first observed a real
+    /// firing (the 6-field, non-EMPTY rect shape) — see `OfficeHelperLiveTests`' criterion-1 test.
+    /// The EMPTY shape specifically remains cross-checked only against real UPSTREAM SOURCE (this
+    /// comment's own citations), not yet against a captured live EMPTY firing — Stage B's own edit
+    /// traffic so far has stayed within one already-visible tile range, never triggered a genuine
+    /// whole-document invalidation (a format change, a huge paste, a full recalc). Revisit the day
+    /// one is captured live.
     ///
     /// **Re-judged leniency (Task 4, debt #1), one clause at a time:**
     /// - `"EMPTY"` and the 4-field shape: both structurally reachable and both covered by the table
@@ -703,18 +734,30 @@ public enum OfficeDocumentEvent: Equatable, Sendable {
     ///   unconditionally in `LOKBridge`, so production should always get 5 fields when this callback
     ///   ever DOES fire — but that claim is a header-doc reading, not something Task 4's probe
     ///   confirmed live. Structurally unreachable until a Stage-B edit verb exists to provoke a real
-    ///   invalidation; revisit this comment the day one does.
+    ///   invalidation; revisit this comment the day one does. **Fix round 1 update**: Task 4's own
+    ///   live edit traffic DID cross-check this — real firings observed 6 fields, always with a
+    ///   parseable `fields[4]`, never exercising the default. The default itself (garbage or a
+    ///   missing 5th field) is still unexercised by real data.
     static func parseInvalidateTiles(_ payload: String) -> OfficeDocumentEvent? {
         let trimmed = payload.trimmingCharacters(in: .whitespaces)
-        if trimmed == "EMPTY" {
-            return .invalidated(rectsTwips: [], part: 0)
-        }
         let fields = trimmed.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        guard let first = fields.first else { return nil }
+        if first == "EMPTY" {
+            // Fix round 1, F3: part (and, if present, mode) after "EMPTY" — see this function's own
+            // header. `part` can legitimately be `-1` ("all parts") — passed through unchanged;
+            // `TileCache.invalidate`'s empty-rects branch already ignores `part` entirely, so `-1`
+            // is indistinguishable from any other value there (harmless either way).
+            let part = fields.count >= 2 ? (Int(fields[1]) ?? 0) : 0
+            return .invalidated(rectsTwips: [], part: part)
+        }
         guard fields.count >= 4,
               let x = Int64(fields[0]), let y = Int64(fields[1]),
               let width = Int64(fields[2]), let height = Int64(fields[3]) else {
             return nil
         }
+        // `Int` parses a leading "-" natively — `part == -1` ("all parts," the same LO sentinel the
+        // EMPTY branch above can carry) survives this unchanged; `TileCache.invalidate`'s own
+        // fix-round update is what makes a NON-empty rect actually honor it.
         let part = fields.count >= 5 ? (Int(fields[4]) ?? 0) : 0
         return .invalidated(rectsTwips: [OfficeTwipsRect(x: x, y: y, width: width, height: height)], part: part)
     }

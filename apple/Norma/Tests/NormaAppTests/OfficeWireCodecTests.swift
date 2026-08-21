@@ -393,9 +393,49 @@ final class OfficeWireCodecTests: XCTestCase {
         XCTAssertEqual(tight, size5, "no space after commas parses identically to the spaced form")
 
         XCTAssertEqual(OfficeDocumentEvent.parseInvalidateTiles("EMPTY"), .invalidated(rectsTwips: [], part: 0),
-                       "EMPTY means the whole document; part defaults to 0 — LOK's own EMPTY firing carries no part")
+                       "bare EMPTY (no part-in-invalidation feature) means the whole document; part defaults to 0")
         XCTAssertEqual(OfficeDocumentEvent.parseInvalidateTiles("  EMPTY  "), .invalidated(rectsTwips: [], part: 0),
                        "surrounding whitespace is trimmed before the EMPTY comparison")
+    }
+
+    /// Fix round 1, F3 (CRITICAL) — **the real wire shape, confirmed against LO core's own writer**
+    /// (`RectangleAndPart::toString()`, `desktop/inc/lib/init.hxx`): with
+    /// `LOK_FEATURE_PART_IN_INVALIDATION_CALLBACK` on (always, in `LOKBridge`), a whole-document
+    /// invalidation is NEVER bare `"EMPTY"` — it is always `"EMPTY, <part>, <mode>"`. The OLD parser
+    /// (`trimmed == "EMPTY"` exact match) rejected this outright: `parseInvalidateTiles` returned
+    /// `nil`, and the callback was silently dropped — a genuine whole-document invalidation that
+    /// never reached `TileCache.invalidate`, leaving stale pixels no scroll/zoom could ever correct.
+    /// This test is the one that would have failed against the pre-fix parser; the previous version
+    /// of `testParseInvalidateTilesRecognizedShapes` above only ever exercised bare `"EMPTY"`, which
+    /// is why this bug shipped past that table uncaught.
+    func testParseInvalidateTilesEmptyWithPartAndModeTheRealUpstreamShape() {
+        XCTAssertEqual(OfficeDocumentEvent.parseInvalidateTiles("EMPTY, 0, 0"), .invalidated(rectsTwips: [], part: 0),
+                       "the real shape RectangleAndPart::toString() emits for part 0 whole-document invalidation")
+        XCTAssertEqual(OfficeDocumentEvent.parseInvalidateTiles("EMPTY, 3, 0"), .invalidated(rectsTwips: [], part: 3),
+                       "part is fields[1]; mode (fields[2]) is parsed and discarded")
+        XCTAssertEqual(OfficeDocumentEvent.parseInvalidateTiles("EMPTY,0,0"), .invalidated(rectsTwips: [], part: 0),
+                       "no space after commas parses identically to the spaced form")
+    }
+
+    /// Fix round 1, F3 — LO's own READER (`RectangleAndPart::Create`, same file) tolerates mode
+    /// being absent even when part is present (`bHasMode = nSeparatorPos > 0`) — mirrored here even
+    /// though LO's own WRITER never actually emits this shape (`toString()` always appends both or
+    /// neither), the same "accept more than we ever expect to receive" leniency this parser already
+    /// takes for the numeric-rect branch's optional 5th field.
+    func testParseInvalidateTilesEmptyWithPartButNoModeStillParses() {
+        XCTAssertEqual(OfficeDocumentEvent.parseInvalidateTiles("EMPTY, 3"), .invalidated(rectsTwips: [], part: 3))
+    }
+
+    /// Fix round 1, F3 — LO reserves `-1` for "all parts" (`init.hxx`'s own `m_nPart(INT_MIN)`/
+    /// "-1 is reserved to mean 'all parts'" comment; `RectangleAndPart::toString()` serializes any
+    /// `m_nPart >= -1`, so `-1` legitimately reaches the wire on EITHER the EMPTY or the rect-
+    /// bearing shape). The parser passes it through unchanged in both cases — `Int` parses a
+    /// leading "-" the same as any other digit string; what actually HONORS `-1` is
+    /// `TileCache.invalidate`'s own fix-round update (`TileCacheTests`' own pin), not this parser.
+    func testParseInvalidateTilesPassesThroughLOKsAllPartsNegativeOneSentinelUnchanged() {
+        XCTAssertEqual(OfficeDocumentEvent.parseInvalidateTiles("EMPTY, -1, 0"), .invalidated(rectsTwips: [], part: -1))
+        XCTAssertEqual(OfficeDocumentEvent.parseInvalidateTiles("10, 20, 300, 400, -1"),
+                       .invalidated(rectsTwips: [OfficeTwipsRect(x: 10, y: 20, width: 300, height: 400)], part: -1))
     }
 
     func testParseInvalidateTilesMalformedPayloadsAreRejected() {

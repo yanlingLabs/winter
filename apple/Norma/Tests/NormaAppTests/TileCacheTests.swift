@@ -97,6 +97,32 @@ final class TileCacheTests: XCTestCase {
         XCTAssertNotNil(cache.lookup(key: key(0, 0, part: 1)), "other-part key untouched despite same coords")
     }
 
+    /// Fix round 1, F3 — LOK's own `-1` "all parts" sentinel (`desktop/inc/lib/init.hxx`'s
+    /// `RectangleAndPart`; reachable on a NON-empty rect via `SfxLokHelper::notifyInvalidation`'s
+    /// explicit-part overload, independent of whether the rect itself is empty) must bump every
+    /// part's key that the rect geometrically intersects — NOT be treated as a literal part number
+    /// no real cached key could ever equal (which is what the pre-fix `key.part == part` guard did:
+    /// silently bump nothing, every time, for a real, reachable upstream shape). Deliberately reuses
+    /// the SAME two-key setup as `testNonEmptyInvalidationOnlyBumpsIntersectingKeysOfTheMatchingPart`
+    /// right above — the only variable changed is `part: -1` — so this test is provably the same
+    /// scenario with the scoping guard bypassed, not a different geometry doing the work.
+    func testNegativeOnePartOnANonEmptyRectBumpsTheIntersectingKeyAcrossEveryPart() throws {
+        var cache = TileCache(capacity: 32)
+        cache.recordPaint(key: key(0, 0, part: 0), pixels: pixels(1)) // intersects, part 0
+        cache.recordPaint(key: key(0, 0, part: 1), pixels: pixels(2)) // intersects, part 1 -- same coords
+        cache.recordPaint(key: key(5, 5, part: 0), pixels: pixels(3)) // does NOT intersect -- geometry still applies
+
+        let dirtyRect = try XCTUnwrap(TileMath.tileBoundsTwips(tileX: 0, tileY: 0, zoomPPT: 1000))
+        let bumped = cache.invalidate(rectsTwips: [dirtyRect], part: -1)
+
+        XCTAssertEqual(Set(bumped), [key(0, 0, part: 0), key(0, 0, part: 1)],
+                        "-1 matches every part at the intersecting coordinate, not a literal part number")
+        XCTAssertNil(cache.lookup(key: key(0, 0, part: 0)))
+        XCTAssertNil(cache.lookup(key: key(0, 0, part: 1)))
+        XCTAssertNotNil(cache.lookup(key: key(5, 5, part: 0)), "non-intersecting key untouched -- -1 bypasses "
+                        + "the PART guard only, geometry is still enforced")
+    }
+
     /// Office Stage B Task 4, criterion 5 — DECIDED and pinned here, at the exact call site
     /// (`invalidate`'s own `rectsTwips.contains { $0.intersects(bounds) }`), not merely as a
     /// consequence of `OfficeTwipsRect.intersects`'s own unit tests: a genuinely DEGENERATE rect
