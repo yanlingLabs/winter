@@ -90,6 +90,22 @@ final class OfficeWireCodecTests: XCTestCase {
             .extTextInputEvent(seq: 48, docId: "doc-1", part: 0, type: .input, text: "e"),
             .extTextInputEvent(seq: 49, docId: "doc-1", part: 2, type: .end, text: ""),
             .extTextInputEventOk(seq: 50, docId: "doc-1"),
+            // Office Stage B Task 6 — clipboard, undo/redo, the second ("agent") view.
+            .clipboardCopy(seq: 51, docId: "doc-1", part: 0),
+            .clipboardCopyOk(seq: 52, docId: "doc-1", text: "selected text"),
+            .clipboardCopyOk(seq: 53, docId: "doc-1", text: ""), // no selection
+            .clipboardCut(seq: 54, docId: "doc-1", part: 1),
+            .clipboardCutOk(seq: 55, docId: "doc-1", text: "cut text"),
+            .clipboardPaste(seq: 56, docId: "doc-1", part: 0, text: "pasted text"),
+            .clipboardPasteOk(seq: 57, docId: "doc-1"),
+            .undo(seq: 58, docId: "doc-1"),
+            .undoOk(seq: 59, docId: "doc-1"),
+            .redo(seq: 60, docId: "doc-1"),
+            .redoOk(seq: 61, docId: "doc-1"),
+            .createView(seq: 62, docId: "doc-1"),
+            .agentViewReady(seq: 63, docId: "doc-1", viewId: 2),
+            .agentKeyEvent(seq: 64, docId: "doc-1", part: 0, type: .keyInput, charCode: 65, keyCode: 512),
+            .agentKeyEventOk(seq: 65, docId: "doc-1"),
             .subscribed(seq: 24, docId: "doc-1", keys: [TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0)]),
             .unsubscribed(seq: 25, docId: "doc-1"),
             .tileRequestAccepted(seq: 26, docId: "doc-1"),
@@ -159,6 +175,21 @@ final class OfficeWireCodecTests: XCTestCase {
             "keyEventOk": #"{"type":"keyEventOk","seq":1,"docId":"d"}"#,
             "mouseEventOk": #"{"type":"mouseEventOk","seq":1,"docId":"d"}"#,
             "extTextInputEventOk": #"{"type":"extTextInputEventOk","seq":1,"docId":"d"}"#,
+            // Office Stage B Task 6 — clipboard, undo/redo, the second ("agent") view.
+            "clipboardCopy": #"{"type":"clipboardCopy","seq":1,"docId":"d","part":0}"#,
+            "clipboardCut": #"{"type":"clipboardCut","seq":1,"docId":"d","part":0}"#,
+            "clipboardPaste": #"{"type":"clipboardPaste","seq":1,"docId":"d","part":0,"text":"x"}"#,
+            "undo": #"{"type":"undo","seq":1,"docId":"d"}"#,
+            "redo": #"{"type":"redo","seq":1,"docId":"d"}"#,
+            "createView": #"{"type":"createView","seq":1,"docId":"d"}"#,
+            "agentKeyEvent": #"{"type":"agentKeyEvent","seq":1,"docId":"d","part":0,"eventType":0,"charCode":65,"keyCode":512}"#,
+            "clipboardCopyOk": #"{"type":"clipboardCopyOk","seq":1,"docId":"d","text":"x"}"#,
+            "clipboardCutOk": #"{"type":"clipboardCutOk","seq":1,"docId":"d","text":"x"}"#,
+            "clipboardPasteOk": #"{"type":"clipboardPasteOk","seq":1,"docId":"d"}"#,
+            "undoOk": #"{"type":"undoOk","seq":1,"docId":"d"}"#,
+            "redoOk": #"{"type":"redoOk","seq":1,"docId":"d"}"#,
+            "agentViewReady": #"{"type":"agentViewReady","seq":1,"docId":"d","viewId":2}"#,
+            "agentKeyEventOk": #"{"type":"agentKeyEventOk","seq":1,"docId":"d"}"#,
             "error": #"{"type":"error","seq":1,"reason":"r"}"#,
             "documentEvent": #"{"type":"documentEvent","seq":1,"docId":"d","kind":"closed"}"#,
             "subscribeTiles": #"{"type":"subscribeTiles","seq":1,"docId":"d","part":0,"zoomPPT":1000,"viewportTwips":{"x":0,"y":0,"width":1,"height":1}}"#,
@@ -212,6 +243,20 @@ final class OfficeWireCodecTests: XCTestCase {
         XCTAssertEqual(OfficeWireFrame.mouseEventOk(seq: 129, docId: "d").seq, 129)
         XCTAssertEqual(OfficeWireFrame.extTextInputEvent(seq: 130, docId: "d", part: 0, type: .input, text: "x").seq, 130)
         XCTAssertEqual(OfficeWireFrame.extTextInputEventOk(seq: 131, docId: "d").seq, 131)
+        XCTAssertEqual(OfficeWireFrame.clipboardCopy(seq: 132, docId: "d", part: 0).seq, 132)
+        XCTAssertEqual(OfficeWireFrame.clipboardCopyOk(seq: 133, docId: "d", text: "x").seq, 133)
+        XCTAssertEqual(OfficeWireFrame.clipboardCut(seq: 134, docId: "d", part: 0).seq, 134)
+        XCTAssertEqual(OfficeWireFrame.clipboardCutOk(seq: 135, docId: "d", text: "x").seq, 135)
+        XCTAssertEqual(OfficeWireFrame.clipboardPaste(seq: 136, docId: "d", part: 0, text: "x").seq, 136)
+        XCTAssertEqual(OfficeWireFrame.clipboardPasteOk(seq: 137, docId: "d").seq, 137)
+        XCTAssertEqual(OfficeWireFrame.undo(seq: 138, docId: "d").seq, 138)
+        XCTAssertEqual(OfficeWireFrame.undoOk(seq: 139, docId: "d").seq, 139)
+        XCTAssertEqual(OfficeWireFrame.redo(seq: 140, docId: "d").seq, 140)
+        XCTAssertEqual(OfficeWireFrame.redoOk(seq: 141, docId: "d").seq, 141)
+        XCTAssertEqual(OfficeWireFrame.createView(seq: 142, docId: "d").seq, 142)
+        XCTAssertEqual(OfficeWireFrame.agentViewReady(seq: 143, docId: "d", viewId: 2).seq, 143)
+        XCTAssertEqual(OfficeWireFrame.agentKeyEvent(seq: 144, docId: "d", part: 0, type: .keyInput, charCode: 65, keyCode: 512).seq, 144)
+        XCTAssertEqual(OfficeWireFrame.agentKeyEventOk(seq: 145, docId: "d").seq, 145)
         XCTAssertEqual(OfficeWireFrame.helloOk(seq: 104, lokVersion: "v").seq, 104)
         XCTAssertEqual(OfficeWireFrame.refused(seq: 105, reason: "r").seq, 105)
         XCTAssertEqual(OfficeWireFrame.pong(seq: 106).seq, 106)

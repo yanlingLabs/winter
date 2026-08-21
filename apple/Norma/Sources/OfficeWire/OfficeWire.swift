@@ -162,6 +162,51 @@ public enum OfficeWireFrame: Equatable, Sendable {
     /// or clicked around it, or a click-mid-compose / arrow-key-mid-compose can reorder against it.
     case extTextInputEvent(seq: UInt64, docId: String, part: Int, type: OfficeExtTextInputType, text: String)
 
+    // MARK: Office Stage B Task 6 — clipboard, undo/redo, the second ("agent") view
+
+    /// Reads the CURRENT text selection back to the caller — never mutates the document. `part`
+    /// is asserted onto LOK immediately before the read (`setView` + type-gated `setPart`,
+    /// exactly `save`'s own prefix): `getTextSelection`'s own answer is genuinely view-dependent —
+    /// LOK's own `doc_createView` calls `forceSetClipboardForCurrentView` (confirmed by reading
+    /// `desktop/source/lib/init.cxx` at this repo's vendored pin), so a stale current-view/part
+    /// left over from unrelated paint traffic could answer with the WRONG selection.
+    case clipboardCopy(seq: UInt64, docId: String, part: Int)
+    /// Same read as `clipboardCopy`, but ALSO deletes the selection afterward (`.uno:Cut`,
+    /// fire-and-forget exactly like `undo`/`redo` below) — the text returned is what was selected
+    /// just BEFORE the cut; it is never re-read after (there would be nothing left to read).
+    case clipboardCut(seq: UInt64, docId: String, part: Int)
+    /// Writes `text` at the current caret via LOK's own `paste()`, which — confirmed by reading
+    /// `doc_paste` at the vendored pin — internally stages the bytes (`doc_setClipboard`) then
+    /// dispatches `.uno:Paste` through the SAME process-global-current-frame `comphelper::
+    /// dispatchCommand` mechanism the `.uno:Save` follow-up's own fix-round-2 citation already
+    /// found in `LOKBridge`. `part` is carried for the identical reason `clipboardCopy` carries it.
+    case clipboardPaste(seq: UInt64, docId: String, part: Int, text: String)
+    /// `.uno:Undo`, dispatched via `postUnoCommand` against the document's OWN primary view (never
+    /// a caller-supplied view id — see `LOKBridge.OpenDocument.viewId`, the identical view every
+    /// `postKey`/`postMouse`/`save` already targets). No `part` field: `.uno:Save`'s own
+    /// fix-round-2 citation already established `postUnoCommand`'s dispatch resolves through the
+    /// process-global "active frame," never a part-scoped call — and the brief's own words for
+    /// this door are "view-scoped (setView prefix)"; `setPart` was never asked for and is not
+    /// added speculatively.
+    case undo(seq: UInt64, docId: String)
+    /// `.uno:Redo`, same posture as `undo` above.
+    case redo(seq: UInt64, docId: String)
+    /// The two-writer groundwork: mints a SECOND LOK view for `docId` on demand (`createView()`),
+    /// for a future AI collaborator's own edits — never used by the app today (the brief's own
+    /// words), only by the live characterization drill (`OfficeRuntimeLiveTests`). Refused
+    /// (`error{reason:"agentViewExists"}`) if this docId already has one — deliberate, not "return
+    /// the existing id": a second mint is a caller bug this wire makes visible, never silently
+    /// tolerated.
+    case createView(seq: UInt64, docId: String)
+    /// Posts a key event through the AGENT view specifically (never the primary view `keyEvent`
+    /// targets) — the only way to actually PRODUCE an edit "as" the second view, needed to drive
+    /// the two-writer characterization drill. Refused (`error{reason:"noAgentView"}`) if
+    /// `createView` was never called for this docId. Same shape as `keyEvent` in every other
+    /// respect (`part`/`type`/`charCode`/`keyCode`). Deliberately NOT reachable from
+    /// `OfficeRuntime`/`Driver` — the drill talks to `OfficeHelperClient` directly, the same
+    /// raw-probe precedent Task 5's ext-text-input investigation already set.
+    case agentKeyEvent(seq: UInt64, docId: String, part: Int, type: OfficeKeyEventType, charCode: Int, keyCode: Int)
+
     /// Task 4 — registers this connection as a tile-push subscriber for `docId` (must already be
     /// open — by ANY connection, not necessarily this one; see `OfficeHelperServer`'s multicast
     /// seam) and reports the tile-set the CURRENT viewport needs, computed via
@@ -239,6 +284,34 @@ public enum OfficeWireFrame: Equatable, Sendable {
     /// Office Stage B Task 5 — answers `extTextInputEvent`, same "posted, not a claim of effect"
     /// posture as `keyEventOk`/`mouseEventOk` above.
     case extTextInputEventOk(seq: UInt64, docId: String)
+    /// Office Stage B Task 6 — answers `clipboardCopy`: `text` is exactly what `getTextSelection`
+    /// returned, or `""` for LOK's own `nullptr` "no selection" answer (never a distinct
+    /// empty-vs-absent case on this wire — `""` already means "nothing to put on the pasteboard"
+    /// to every caller).
+    case clipboardCopyOk(seq: UInt64, docId: String, text: String)
+    /// Office Stage B Task 6 — answers `clipboardCut`: `text` is what was selected just before the
+    /// cut, same `""` -> "nothing selected" convention as `clipboardCopyOk`.
+    case clipboardCutOk(seq: UInt64, docId: String, text: String)
+    /// Office Stage B Task 6 — answers a successful `clipboardPaste`. `paste()` is LOK's one
+    /// clipboard door with a real, synchronous success/failure return — a `false` throws
+    /// `SaveError.pasteFailed` server-side and surfaces as `.error`, never silently swallowed the
+    /// way `postKeyEvent`'s `void` return forces `keyEventOk` to be.
+    case clipboardPasteOk(seq: UInt64, docId: String)
+    /// Office Stage B Task 6 — answers `undo`: the command was DISPATCHED, not a claim it changed
+    /// anything (an empty undo stack, or an LO-internal refusal, both dispatch cleanly and both
+    /// answer `undoOk`; see `LOKBridge.undoOnDedicatedThread`'s own header for why this bridge
+    /// cannot tell the difference without widening scope beyond what Task 6 asks for).
+    case undoOk(seq: UInt64, docId: String)
+    /// Office Stage B Task 6 — answers `redo`, same posture as `undoOk`.
+    case redoOk(seq: UInt64, docId: String)
+    /// Office Stage B Task 6 — answers a successful `createView`: `viewId` is `createView()`'s OWN
+    /// return value (never re-derived via `getView()`, which becomes ambiguous the instant a
+    /// second view exists — see `LOKBridge.createAgentViewOnDedicatedThread`'s own header). The
+    /// dispatch context's own name for this reply, kept verbatim.
+    case agentViewReady(seq: UInt64, docId: String, viewId: Int32)
+    /// Office Stage B Task 6 — answers `agentKeyEvent`, same "posted, not a claim of effect"
+    /// posture every other `...Ok` input reply already has.
+    case agentKeyEventOk(seq: UInt64, docId: String)
     /// Answers anything the helper refuses post-auth: an unknown frame type (`reason:"unknown"`,
     /// the brief's literal pin), a known type whose fields don't decode (`reason:"malformed"`),
     /// or a structurally valid frame that is never legal for a client to SEND (a reply shape —
@@ -326,9 +399,13 @@ public enum OfficeWireFrame: Equatable, Sendable {
     /// Order still matches frame-declaration order.
     public static let wireTypes: [String] = [
         "hello", "ping", "open", "close", "save", "keyEvent", "mouseEvent", "extTextInputEvent",
+        // Office Stage B Task 6 — clipboard, undo/redo, the second ("agent") view.
+        "clipboardCopy", "clipboardCut", "clipboardPaste", "undo", "redo", "createView", "agentKeyEvent",
         "subscribeTiles", "unsubscribe", "tileRequest",
         "helloOk", "refused", "pong", "opened", "openFailed", "closed", "saved", "saveFailed",
         "keyEventOk", "mouseEventOk", "extTextInputEventOk",
+        "clipboardCopyOk", "clipboardCutOk", "clipboardPasteOk", "undoOk", "redoOk",
+        "agentViewReady", "agentKeyEventOk",
         "error", "documentEvent",
         "subscribed", "unsubscribed", "tileRequestAccepted", "tile", "tileFailed", "invalidated",
     ]
@@ -343,6 +420,13 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .keyEvent: return "keyEvent"
         case .mouseEvent: return "mouseEvent"
         case .extTextInputEvent: return "extTextInputEvent"
+        case .clipboardCopy: return "clipboardCopy"
+        case .clipboardCut: return "clipboardCut"
+        case .clipboardPaste: return "clipboardPaste"
+        case .undo: return "undo"
+        case .redo: return "redo"
+        case .createView: return "createView"
+        case .agentKeyEvent: return "agentKeyEvent"
         case .subscribeTiles: return "subscribeTiles"
         case .unsubscribe: return "unsubscribe"
         case .tileRequest: return "tileRequest"
@@ -357,6 +441,13 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .keyEventOk: return "keyEventOk"
         case .mouseEventOk: return "mouseEventOk"
         case .extTextInputEventOk: return "extTextInputEventOk"
+        case .clipboardCopyOk: return "clipboardCopyOk"
+        case .clipboardCutOk: return "clipboardCutOk"
+        case .clipboardPasteOk: return "clipboardPasteOk"
+        case .undoOk: return "undoOk"
+        case .redoOk: return "redoOk"
+        case .agentViewReady: return "agentViewReady"
+        case .agentKeyEventOk: return "agentKeyEventOk"
         case .error: return "error"
         case .documentEvent: return "documentEvent"
         case .subscribed: return "subscribed"
@@ -378,6 +469,13 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .keyEvent(let seq, _, _, _, _, _): return seq
         case .mouseEvent(let seq, _, _, _, _, _, _, _, _): return seq
         case .extTextInputEvent(let seq, _, _, _, _): return seq
+        case .clipboardCopy(let seq, _, _): return seq
+        case .clipboardCut(let seq, _, _): return seq
+        case .clipboardPaste(let seq, _, _, _): return seq
+        case .undo(let seq, _): return seq
+        case .redo(let seq, _): return seq
+        case .createView(let seq, _): return seq
+        case .agentKeyEvent(let seq, _, _, _, _, _): return seq
         case .subscribeTiles(let seq, _, _, _, _): return seq
         case .unsubscribe(let seq, _): return seq
         case .tileRequest(let seq, _, _): return seq
@@ -392,6 +490,13 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .keyEventOk(let seq, _): return seq
         case .mouseEventOk(let seq, _): return seq
         case .extTextInputEventOk(let seq, _): return seq
+        case .clipboardCopyOk(let seq, _, _): return seq
+        case .clipboardCutOk(let seq, _, _): return seq
+        case .clipboardPasteOk(let seq, _): return seq
+        case .undoOk(let seq, _): return seq
+        case .redoOk(let seq, _): return seq
+        case .agentViewReady(let seq, _, _): return seq
+        case .agentKeyEventOk(let seq, _): return seq
         case .error(let seq, _): return seq
         case .documentEvent(let seq, _, _): return seq
         case .subscribed(let seq, _, _): return seq
@@ -444,6 +549,30 @@ public enum OfficeWireFrame: Equatable, Sendable {
             payload["text"] = text
         case .keyEventOk(_, let docId), .mouseEventOk(_, let docId), .extTextInputEventOk(_, let docId):
             payload["docId"] = docId
+        case .clipboardCopy(_, let docId, let part), .clipboardCut(_, let docId, let part):
+            payload["docId"] = docId
+            payload["part"] = part
+        case .clipboardPaste(_, let docId, let part, let text):
+            payload["docId"] = docId
+            payload["part"] = part
+            payload["text"] = text
+        case .undo(_, let docId), .redo(_, let docId), .createView(_, let docId):
+            payload["docId"] = docId
+        case .agentKeyEvent(_, let docId, let part, let type, let charCode, let keyCode):
+            payload["docId"] = docId
+            payload["part"] = part
+            payload["eventType"] = type.rawValue
+            payload["charCode"] = charCode
+            payload["keyCode"] = keyCode
+        case .clipboardCopyOk(_, let docId, let text), .clipboardCutOk(_, let docId, let text):
+            payload["docId"] = docId
+            payload["text"] = text
+        case .clipboardPasteOk(_, let docId), .undoOk(_, let docId), .redoOk(_, let docId),
+             .agentKeyEventOk(_, let docId):
+            payload["docId"] = docId
+        case .agentViewReady(_, let docId, let viewId):
+            payload["docId"] = docId
+            payload["viewId"] = viewId
         case .saved(_, let docId, let tempPath):
             payload["docId"] = docId
             payload["tempPath"] = tempPath
@@ -1290,6 +1419,79 @@ public enum OfficeWireCodec {
                 return .rejected(seq: seq, reason: "malformed")
             }
             return .frame(.extTextInputEventOk(seq: seq, docId: docId))
+        case "clipboardCopy":
+            guard let docId = object["docId"] as? String, let part = intValue(object["part"]) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.clipboardCopy(seq: seq, docId: docId, part: part))
+        case "clipboardCut":
+            guard let docId = object["docId"] as? String, let part = intValue(object["part"]) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.clipboardCut(seq: seq, docId: docId, part: part))
+        case "clipboardPaste":
+            guard let docId = object["docId"] as? String, let part = intValue(object["part"]),
+                  let text = object["text"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.clipboardPaste(seq: seq, docId: docId, part: part, text: text))
+        case "undo":
+            guard let docId = object["docId"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.undo(seq: seq, docId: docId))
+        case "redo":
+            guard let docId = object["docId"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.redo(seq: seq, docId: docId))
+        case "createView":
+            guard let docId = object["docId"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.createView(seq: seq, docId: docId))
+        case "agentKeyEvent":
+            guard let docId = object["docId"] as? String, let part = intValue(object["part"]),
+                  let typeRaw = intValue(object["eventType"]), let type = OfficeKeyEventType(rawValue: typeRaw),
+                  let charCode = intValue(object["charCode"]), let keyCode = intValue(object["keyCode"]) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.agentKeyEvent(seq: seq, docId: docId, part: part, type: type, charCode: charCode, keyCode: keyCode))
+        case "clipboardCopyOk":
+            guard let docId = object["docId"] as? String, let text = object["text"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.clipboardCopyOk(seq: seq, docId: docId, text: text))
+        case "clipboardCutOk":
+            guard let docId = object["docId"] as? String, let text = object["text"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.clipboardCutOk(seq: seq, docId: docId, text: text))
+        case "clipboardPasteOk":
+            guard let docId = object["docId"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.clipboardPasteOk(seq: seq, docId: docId))
+        case "undoOk":
+            guard let docId = object["docId"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.undoOk(seq: seq, docId: docId))
+        case "redoOk":
+            guard let docId = object["docId"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.redoOk(seq: seq, docId: docId))
+        case "agentViewReady":
+            guard let docId = object["docId"] as? String, let viewId = intValue(object["viewId"]) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.agentViewReady(seq: seq, docId: docId, viewId: Int32(truncatingIfNeeded: viewId)))
+        case "agentKeyEventOk":
+            guard let docId = object["docId"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.agentKeyEventOk(seq: seq, docId: docId))
         case "saved":
             guard let docId = object["docId"] as? String, let tempPath = object["tempPath"] as? String else {
                 return .rejected(seq: seq, reason: "malformed")
