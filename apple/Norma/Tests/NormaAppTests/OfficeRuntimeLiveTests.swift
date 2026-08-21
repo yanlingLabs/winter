@@ -1,4 +1,5 @@
 import XCTest
+import AppKit
 @testable import Norma
 #if canImport(Darwin)
 import Darwin
@@ -368,6 +369,146 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// layer, and none is needed: a successful re-parse as the SAME kind IS the format-preservation
     /// proof.
     ///
+    // MARK: - Office Stage B Task 4: the typing drill — the REAL production path, not the wire client
+
+    /// **The typing drill.** Every criteria-1-through-4 live test in `OfficeHelperLiveTests.swift`
+    /// drives the wire directly (`OfficeHelperClient.postKey`/`postMouse`) — proof that the
+    /// helper/store/multicast machinery is correct, but NOT proof that `OfficeTileCanvasView`'s own
+    /// `keyDown`/`mouseDown` ever actually reach it. This test is that proof: a REAL
+    /// `OfficeTileCanvasView`, mounted against a REAL `OfficeRuntime` wired to the REAL supervisor+
+    /// helper (`ShellSessionHost`'s own production wiring — the same posture every other test in
+    /// this file already takes), fed SYNTHETIC but real `NSEvent`s through its actual overrides —
+    /// `NSEvent.mouseEvent`/`.keyEvent` are genuine AppKit factory methods (unlike `.scrollWheel`,
+    /// which `OfficeTileCanvasView`'s own `setScrollOriginForTesting` comment notes has none — key
+    /// and mouse button events are not in that same boat).
+    ///
+    /// The full path this exercises, start to finish: a synthetic `NSEvent` -> `OfficeInputCodes`
+    /// (the AppKit->LOK encoding) -> `OfficeTileCanvasView.forwardMouseEvent`/`forwardKeyEvent` ->
+    /// `OfficeRuntime.postMouseEvent`/`postKeyEvent` (the input-ordering chain) -> the Driver ->
+    /// `OfficeHelperClient` -> the wire -> `LOKBridge` -> REAL LOK -> a real callback ->
+    /// `OfficeHelperServer`'s multicast -> the wire -> `OfficeWireConnection`/`OfficeHelperClient` ->
+    /// `ShellSessionHost.wireOfficeTileCallbacks` -> `OfficeTileStore.invalidate` -> `tilesArrived`
+    /// -> `OfficeTileCanvasView.handleTilesArrived` -> `OfficeRuntime.refetchInvalidatedTiles` (the
+    /// fix this same task made — without it, this drill would never see a fresh tile at all, since
+    /// nothing else re-subscribes on a static viewport) -> a fresh `.tile` push -> `ingest` -> a
+    /// DIFFERENT `CGImage` at the caret's own tile. Pixel-diffed at the end, not merely "an event
+    /// fired somewhere."
+    func testTheTypingDrillARealKeyDownThroughTheRealCanvasViewReachesLOKAndTheCaretTileRepaints() async throws {
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
+                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                        + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
+        let vendorRoot = Self.vendorProductSetRoot
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
+                      "LibreOffice vendor tree not present at \(vendorRoot.path) — run "
+                        + "`bun run libreoffice:fetch` from the repo root.")
+        let fixturePath = Self.fixturesRoot.appendingPathComponent("gate.ods").path
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: fixturePath), "gate.ods fixture missing")
+
+        let stateDir = makeScratchDirectory()
+        let directory = SessionDirectory(lister: { [] })
+        let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        host.makeOfficeHelperSupervisor = {
+            OfficeHelperSupervisor(configuration: OfficeHelperSupervisor.Configuration(
+                helperExecutableURL: helperURL,
+                socketDirectory: stateDir,
+                extraArguments: ["--lok-root", vendorRoot.path, "--sandbox-profile", Self.sandboxProfilePath.path]))
+        }
+        let runtime = host.officeRuntime(for: "S1")
+
+        let scratchDir = makeScratchDirectory()
+        let docPath = scratchDir.appendingPathComponent("typing-drill-gate.ods").path
+        try Data(contentsOf: URL(fileURLWithPath: fixturePath)).write(to: URL(fileURLWithPath: docPath))
+
+        runtime.open(docPath)
+        let settled = await waitUntil(timeout: 90) {
+            runtime.stateSnapshot.documents[docPath] != nil || runtime.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(settled, "never settled — phase: \(runtime.stateSnapshot.phase)")
+        guard let doc = runtime.stateSnapshot.documents[docPath] else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("did not open: \(runtime.stateSnapshot.openFailures[docPath] ?? "no reason recorded")")
+        }
+
+        let model = PanelDocumentTabModel(tabId: "typing-drill", path: docPath)
+        let view = OfficeTileCanvasView(runtime: runtime, path: docPath, docId: doc.docId,
+                                        sizeTwips: doc.sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 512, height: 512)
+        view.mount()
+
+        let zoomPPT = 1000
+        let originKey = TileKey(part: 0, zoomPPT: zoomPPT, tileX: 0, tileY: 0)
+        let baselineArrived = await waitUntil(timeout: 30) { runtime.tileStore.tile(docId: doc.docId, key: originKey) != nil }
+        XCTAssertTrue(baselineArrived, "the drill's own baseline (pre-typing) tile never arrived")
+        let pixelsBefore = try XCTUnwrap(runtime.tileStore.tile(docId: doc.docId, key: originKey), "baseline").pixels
+
+        // A view-local click point of (10, 10) points -> twips (200, 200) at zoomPPT 1000
+        // (officePointToTwips's own unit chain) — inside A1's own real bounding rect (observed live,
+        // in the criteria-1-4 tests, as roughly x:[0,1265) y:[0,254) twips) and inside the origin
+        // tile this drill watches. `NSEvent.mouseEvent`/`.keyEvent` are genuine AppKit factories —
+        // unlike `.scrollWheel`, there is nothing synthetic-unfriendly about these two event types.
+        // **Live-test-caught correction**: `NSView.convert(_:from:nil)` — what `forwardMouseEvent`
+        // actually calls — is only well-defined once the view has a REAL window (`self.window !=
+        // nil`); a first attempt at this drill left the view window-less and reached WILDLY wrong
+        // twips (a real firing at y≈9930-13005, roughly two tile-rows below A1, not the intended
+        // click point at all) — never a crash, just silently the wrong cell, so the ONLY tell was
+        // the caret-region tile this drill watches never repainting (a genuinely different, real
+        // edit landed two tiles away instead). A real (never-ordered-front, invisible — this
+        // process's own window list stays empty for `HarnessQuietTests`' own "nothing shown at full
+        // opacity" check) `NSWindow` fixes this, AND `view.convert(_:to:nil)` — the SAME conversion
+        // `forwardMouseEvent` will later invert — is used to compute the event's own `location`
+        // rather than hand-guessing window-base coordinates, so this drill stays correct regardless
+        // of this window's exact geometry.
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 512, height: 512),
+                              styleMask: [.borderless], backing: .buffered, defer: true)
+        window.contentView = view
+        let clickPoint = NSPoint(x: 10, y: 10) // view-bounds space — inside the origin tile (0,0)
+        let windowClickPoint = view.convert(clickPoint, to: nil)
+        func makeMouseEvent(_ type: NSEvent.EventType) -> NSEvent {
+            try! XCTUnwrap(NSEvent.mouseEvent(with: type, location: windowClickPoint, modifierFlags: [],
+                                              timestamp: 0, windowNumber: window.windowNumber, context: nil,
+                                              eventNumber: 0, clickCount: 1, pressure: 1))
+        }
+        func makeKeyEvent(_ type: NSEvent.EventType, characters: String, keyCode: UInt16) -> NSEvent {
+            try! XCTUnwrap(NSEvent.keyEvent(with: type, location: .zero, modifierFlags: [], timestamp: 0,
+                                            windowNumber: window.windowNumber, context: nil, characters: characters,
+                                            charactersIgnoringModifiers: characters, isARepeat: false,
+                                            keyCode: keyCode))
+        }
+
+        view.mouseDown(with: makeMouseEvent(.leftMouseDown))
+        view.mouseUp(with: makeMouseEvent(.leftMouseUp))
+        // 'Z' — AppKit physical keyCode 6 (verified in `OfficeInputCodesTests`), a letter this
+        // fixture's own A1 seed content ("NORMA GATE") does not already contain, so a successful
+        // insertion is unambiguously this drill's own doing, not a coincidence of existing content.
+        view.keyDown(with: makeKeyEvent(.keyDown, characters: "Z", keyCode: 6))
+        view.keyUp(with: makeKeyEvent(.keyUp, characters: "Z", keyCode: 6))
+        // Return — commits the pending cell edit (Calc's own semantics; the criteria-1-4 live test's
+        // own header names why an uncommitted edit is the wrong note to end a typing sequence on).
+        view.keyDown(with: makeKeyEvent(.keyDown, characters: "\r", keyCode: 36))
+        view.keyUp(with: makeKeyEvent(.keyUp, characters: "\r", keyCode: 36))
+
+        // The input-ordering chain (`OfficeRuntime.postKeyEvent`'s own header) means every post
+        // above is already ENQUEUED synchronously by the time `keyUp` returns — this only awaits
+        // their actual delivery to the driver, not merely their having been queued.
+        await runtime.drainInputChainForTesting()
+
+        let repainted = await waitUntil(timeout: 30) {
+            guard let entry = runtime.tileStore.tile(docId: doc.docId, key: originKey) else { return false }
+            return entry.pixels != pixelsBefore
+        }
+        XCTAssertTrue(repainted, "the typing drill's own caret-region tile never showed a different pixel "
+                      + "hash — key -> LOK -> invalidation -> a fresh tile is the thing this test exists "
+                      + "to prove, start to finish, through the REAL keyDown/mouseDown overrides")
+
+        let becameDirty = await waitUntil(timeout: 15) { runtime.stateSnapshot.documents[docPath]?.dirty == true }
+        XCTAssertTrue(becameDirty, "a real typed character must also mark the document dirty, through the "
+                      + "SAME ModifiedStatus wire this task's own migrated tripwire depends on")
+
+        view.unmount()
+        _ = host.teardownAllOfficeRuntimesAndStopHelper()
+    }
+
     /// **The edit itself** goes through the DEBUG-only `debugEdit` wire door directly — bypassing
     /// `OfficeRuntime`/`ShellSessionHost` entirely, straight at `OfficeHelperSupervisor.client`
     /// (`@testable import`, the same access this file's other tests already use for
