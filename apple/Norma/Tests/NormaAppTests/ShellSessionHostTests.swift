@@ -4422,6 +4422,50 @@ final class ShellSessionHostTests: XCTestCase {
         try? FileManager.default.removeItem(atPath: path)
     }
 
+    /// **T2b composition, pinned explicitly**: a document already in conflict (an external write
+    /// raced a still-dirty document) is still DIRTY — `officeDocumentIsDirty` reads the same `dirty`
+    /// bit the conflict machinery leaves untouched, and the gate never inspects `documentConflicts`
+    /// at all — so the close gate must show the sheet exactly as the plain-dirty case does. This does
+    /// not exercise a new branch; the task's own dispatch context explicitly named this composition
+    /// as an obligation ("a document sitting in conflict state is still DIRTY — gates fire"), so it
+    /// is pinned here rather than left to code-reading alone.
+    func testRequestCloseTabOnADirtyDocumentTabInConflictStillShowsTheSheet() async throws {
+        let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+        let (host, factory, mgmt) = await makeHostWithManagement(rows: rows)
+        defer { host.deselect() }
+        let office = officeFactory()
+        host.makeOfficeRuntime = office.make
+        let (runtime, path, _) = try await makeDirtyDocumentTab(
+            host: host, factory: factory, sessionId: "S1", tabId: "t1", scratchPrefix: "conflict")
+
+        // Race an external write onto the already-dirty document — same shape as
+        // `testExternalWriteBetweenNoteExpectedWriteAndTheOwningSavesWithdrawOnADirtyDocumentRaisesAConflict`
+        // (OfficeRuntimeReducerTests), minus the expected-write note: this wants a plain, untracked
+        // external write, which `officeDiskChange` classifies `.external` with no identity to match.
+        try Data("external bytes landed while this document was still dirty".utf8)
+            .write(to: URL(fileURLWithPath: path))
+        runtime.fileChangedOnDisk(path)
+        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.documentConflicts[path] != nil }
+        XCTAssertEqual(runtime.stateSnapshot.documentConflicts[path], .changed, "setup: genuinely "
+                       + "conflicted, not merely dirty")
+        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.dirty, true, "setup: a conflict never "
+                       + "silently clears dirty")
+
+        var presentedBasename: String?
+        host.presentDirtyCloseSheet = { basename, _, respond in
+            presentedBasename = basename
+            respond(.cancel)
+        }
+
+        host.requestCloseTab("t1")
+
+        XCTAssertEqual(presentedBasename, (path as NSString).lastPathComponent, "the sheet must still "
+                       + "fire — conflict never bypasses the dirty gate, it only adds a banner on top of it")
+        try? await Task.sleep(nanoseconds: 100_000_000) // given a beat, in case a close were racing behind it
+        XCTAssertFalse(mgmt.methods.contains("panel.closeTab"), "Cancel must never fire the RPC")
+        try? FileManager.default.removeItem(atPath: path)
+    }
+
     /// The dirty sheet's Discard: closes without ever asking the save door for anything.
     func testRequestCloseTabOnADirtyDocumentTabDiscardChoiceClosesWithoutSaving() async throws {
         let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
@@ -4529,6 +4573,12 @@ final class ShellSessionHostTests: XCTestCase {
         XCTAssertNil(runtime.stateSnapshot.documents[path], "the document itself is closed")
         XCTAssertEqual(host.officeRuntimes.count, 1, "closing the tab must not itself tear the runtime "
                        + "down — no eager release exists for office, mirroring the editor's own gate")
+        // Drain the fire-and-forget close before proceeding, exactly like every other Discard/close
+        // test in this file — otherwise the in-flight Task can still be holding `runtime`/`office`
+        // when `tearDown` clears `officeDoubles`, an orphaned-Task-touches-a-deallocated-recorder
+        // crash class this file's own doc comments name repeatedly. Count is 1, not 2: the second
+        // departure's own teardown (below) walks zero docIds since this document already closed.
+        await officeWaitUntil(timeout: 2) { office.recorder.closeCalls.count == 1 }
 
         // Second departure: now clean, released.
         host.select("S2")
