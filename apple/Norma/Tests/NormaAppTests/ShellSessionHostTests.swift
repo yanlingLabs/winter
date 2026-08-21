@@ -4466,6 +4466,99 @@ final class ShellSessionHostTests: XCTestCase {
         try? FileManager.default.removeItem(atPath: path)
     }
 
+    /// **Fix round 1 (task review, IMPORTANT-1) — the `.deleted` half of the pair above.** Deleting
+    /// the file out from under a dirty document raises `.deleted`, never `.changed` — the SAME gate
+    /// claim, the OTHER conflict kind, and the specific kind that matters here: `.deleted` is the
+    /// only conflict kind `PanelDocumentTabModel.closeTab()`'s own conflict-banner "Close" button
+    /// ever targets (`OfficeConflictBannerView.body`'s `.deleted` case is the only one offering a
+    /// Close action at all — see that view's own switch). This test proves the GATE'S decision is
+    /// correct for `.deleted` specifically, driven directly through `requestCloseTab`; the actual
+    /// wiring bug the review caught — `closeTab()` reaching `closePanelTab` instead of this gate — is
+    /// separately pinned by `testPanelDocumentTabModelCloseTabRoutesADeletionConflictThroughTheGate`
+    /// immediately below, which drives the SAME `.deleted` setup through the real caller.
+    func testRequestCloseTabOnADirtyDocumentTabInDeletionConflictStillShowsTheSheet() async throws {
+        let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+        let (host, factory, mgmt) = await makeHostWithManagement(rows: rows)
+        defer { host.deselect() }
+        let office = officeFactory()
+        host.makeOfficeRuntime = office.make
+        let (runtime, path, _) = try await makeDirtyDocumentTab(
+            host: host, factory: factory, sessionId: "S1", tabId: "t1", scratchPrefix: "delconflict")
+
+        try? FileManager.default.removeItem(atPath: path)
+        runtime.fileChangedOnDisk(path)
+        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.documentConflicts[path] != nil }
+        XCTAssertEqual(runtime.stateSnapshot.documentConflicts[path], .deleted, "setup: a deletion "
+                       + "conflict specifically, not `.changed`")
+        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.dirty, true, "setup: `.deleted` "
+                       + "conflicts are raised only on an already-dirty document "
+                       + "(`OfficeRuntimeReducer.externalDeleted`'s own `guard doc.dirty`)")
+
+        var presentedBasename: String?
+        host.presentDirtyCloseSheet = { basename, _, respond in
+            presentedBasename = basename
+            respond(.cancel)
+        }
+
+        host.requestCloseTab("t1")
+
+        XCTAssertEqual(presentedBasename, (path as NSString).lastPathComponent, "the sheet must fire "
+                       + "for a deletion conflict exactly as it does for a plain dirty tab")
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertFalse(mgmt.methods.contains("panel.closeTab"), "Cancel must never fire the RPC")
+        try? FileManager.default.removeItem(atPath: path)
+    }
+
+    /// **The wiring pin itself (task review, IMPORTANT-1).** Drives the real caller —
+    /// `PanelDocumentTabModel.closeTab()`, the conflict banner's own "Close" button — instead of
+    /// calling `host.requestCloseTab` directly the way every other test in this section does.
+    /// Pre-fix, `closeTab()` called `host?.closePanelTab(tabId)` directly: this exact setup (a
+    /// `.deleted` conflict, always dirty by construction) would have closed the document with NO
+    /// sheet, no Save/Discard/Cancel choice, silently discarding the unsaved edits — the review's own
+    /// "one click from silent discard" finding. Post-fix, `closeTab()` calls
+    /// `host?.requestCloseTab(tabId)`, the same gate the panel's own `×` uses, so this must now show
+    /// the sheet exactly like `testRequestCloseTabOnADirtyDocumentTabInDeletionConflictStillShowsThe
+    /// Sheet` immediately above — the only difference is which caller asks.
+    func testPanelDocumentTabModelCloseTabRoutesADeletionConflictThroughTheGate() async throws {
+        let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+        let (host, factory, mgmt) = await makeHostWithManagement(rows: rows)
+        defer { host.deselect() }
+        let office = officeFactory()
+        host.makeOfficeRuntime = office.make
+        let (runtime, path, _) = try await makeDirtyDocumentTab(
+            host: host, factory: factory, sessionId: "S1", tabId: "t1", scratchPrefix: "banner-close")
+
+        try? FileManager.default.removeItem(atPath: path)
+        runtime.fileChangedOnDisk(path)
+        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.documentConflicts[path] == .deleted }
+
+        // The conflict banner's own model — constructed and bound exactly as
+        // `PanelDocumentTabModels.model(for:host:sessionId:)` would for this tab, mirroring
+        // `PanelDocumentTabTests`' own `makeHost`-adjacent tests. `closeTab()` reads only `self.host`
+        // (set synchronously by `bind`, before its own deferred `activate()` Task even runs) and
+        // `self.tabId` — no need to await anything model-side before calling it.
+        let model = PanelDocumentTabModel(tabId: "t1", path: path)
+        model.bind(host: host, sessionId: "S1")
+        var presentedBasename: String?
+        host.presentDirtyCloseSheet = { basename, _, respond in
+            presentedBasename = basename
+            respond(.cancel)
+        }
+
+        model.closeTab()
+
+        XCTAssertEqual(presentedBasename, (path as NSString).lastPathComponent, "the banner's Close "
+                       + "button must reach the SAME gated sheet the × does — this is the exact "
+                       + "regression IMPORTANT-1 caught")
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertFalse(mgmt.methods.contains("panel.closeTab"), "Cancel must never fire the RPC, "
+                       + "from this caller either")
+        XCTAssertNotNil(runtime.stateSnapshot.documents[path], "pre-fix this caller would have closed "
+                        + "the document with no sheet at all — still open proves the gate, not the "
+                        + "old direct door, was reached")
+        try? FileManager.default.removeItem(atPath: path)
+    }
+
     /// The dirty sheet's Discard: closes without ever asking the save door for anything.
     func testRequestCloseTabOnADirtyDocumentTabDiscardChoiceClosesWithoutSaving() async throws {
         let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]

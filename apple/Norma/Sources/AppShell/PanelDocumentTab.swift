@@ -391,13 +391,21 @@ final class PanelDocumentTabModel: ObservableObject {
 
     /// **"Close"** — the dirty-deletion conflict's own second action: this document is gone from
     /// disk and the user does not want it back, so there is nothing left to reload TO (unlike
-    /// `.changed`, which always offers Reload) — closing the tab is the only other choice. Reuses
-    /// the SAME door the ordinary tab-close control already calls
-    /// (`ShellSessionHost.closePanelTab`), which closes both the panel tab and this runtime's own
-    /// document — no new gating logic: `closePanelTab`'s own header already covers a `.document`
-    /// tab's close policy.
+    /// `.changed`, which always offers Reload) — closing the tab is the only other choice.
+    ///
+    /// **Office Stage B Task 3 fix round 1 (task review, IMPORTANT-1)**: this used to call
+    /// `ShellSessionHost.closePanelTab` directly, on the (pre-Task-3-accurate, now-false) claim
+    /// that it "reuses the SAME door the ordinary tab-close control already calls." Task 3 gave the
+    /// ordinary `×` control a gate (`requestCloseTab`) that shows the dirty-close sheet before ever
+    /// reaching `closePanelTab` — but left THIS caller pointed at the ungated door underneath it.
+    /// `.deleted` conflicts are raised only on an already-dirty document (`OfficeRuntimeReducer
+    /// .externalDeleted`'s own `guard doc.dirty` — a clean deletion never reaches `documentConflicts`
+    /// at all, it goes silent-banner instead), so this button was **always** one click from silently
+    /// discarding unsaved edits — precisely the ×-sheets/banner-doesn't inconsistency the review
+    /// caught. Routes through the gate now: a dirty (always true here) `.deleted`-conflict document
+    /// raises the SAME dirty-close sheet the `×` does, Discard/Save/Cancel and all.
     func closeTab() {
-        host?.closePanelTab(tabId)
+        host?.requestCloseTab(tabId)
     }
 
     /// Test seam: drive one refresh cycle synchronously, without a view.

@@ -1201,13 +1201,23 @@ final class ShellSessionHost: ObservableObject {
     /// `closePanelTab`'s own `.document` branch already calls `officeRuntime.close(path)` inline, and
     /// always has, since Stage A. Moving it here too would not fix anything and would create a SECOND
     /// door that closes an office document (this gate's `.close`/Discard path, AND `closePanelTab`'s
-    /// own inline call the moment this method reaches it) — worse, it would silently stop closing the
-    /// runtime document for the ONE caller that reaches `closePanelTab` directly, bypassing this gate
-    /// entirely: `PanelDocumentTabModel.closeTab()`, the `.deleted`-conflict banner's own "Close"
-    /// button (`PanelDocumentTab.swift`'s own header — a deliberate, already-reviewed choice from
-    /// Task 2b, kept unchanged by this task). So this gate DECIDES ONLY (sheet or silent-fallthrough);
-    /// `closePanelTab` stays the one and only closer for a `.document` tab's own open document, exactly
-    /// as it already was — see that method's own updated comment for the seam this reasoning lives at.
+    /// own inline call the moment this method reaches it). So this gate DECIDES ONLY (sheet or
+    /// silent-fallthrough); `closePanelTab` stays the one and only closer for a `.document` tab's own
+    /// open document, exactly as it already was — see that method's own updated comment for the seam
+    /// this reasoning lives at.
+    ///
+    /// **Fix round 1 (task review, IMPORTANT-1)**: the paragraph above used to end by naming ONE
+    /// caller that reached `closePanelTab` directly, bypassing this gate entirely —
+    /// `PanelDocumentTabModel.closeTab()`, the `.deleted`-conflict banner's own "Close" button — and
+    /// called that deliberate. It was not a safe thing to leave ungated: `.deleted` conflicts are
+    /// raised only on an already-dirty document (`OfficeRuntimeReducer.externalDeleted`'s own `guard
+    /// doc.dirty`), so that button was unconditionally one click from silently discarding unsaved
+    /// edits — a real ×-shows-a-sheet/banner-Close-doesn't inconsistency Task 3 itself introduced by
+    /// giving the `×` a gate and leaving this second door pointed under it. Fixed at the caller
+    /// (`PanelDocumentTab.swift`'s `closeTab()` now calls `host?.requestCloseTab(tabId)`, the same
+    /// gate the `×` uses), not here — this method needed no change, since `dirtyDocumentCloseCandidate`
+    /// already resolves any `.document` tab reached by tabId regardless of which button called it.
+    /// There is now exactly one door into a `.document` tab's close, gated, from every caller.
     func requestCloseTab(_ tabId: String) {
         if let (path, runtime) = dirtyCloseCandidate(tabId: tabId) {
             guard editorTabIsDirty(state: runtime.stateSnapshot, path: path) else {
@@ -1391,17 +1401,25 @@ final class ShellSessionHost: ObservableObject {
         // found it was previously reached NOWHERE ELSE (a dirty buffer could be silently discarded by
         // `closePanelTab` alone, with no door for a sheet to intervene first) — this call site already
         // WAS that door, since Stage A, before dirty documents could even exist. Duplicating it into
-        // the gate too would not add safety, only a second place that closes the same document: this
-        // method's own header cites `PanelDocumentTabModel.closeTab()` (the `.deleted`-conflict
-        // banner's own "Close" button) as the ONE caller that reaches this method WITHOUT ever passing
-        // through the gate, and a close that stopped happening here would silently stop happening for
-        // it. `requestCloseTab` (Task 3) now gates the `.document` leg exactly like `.code`'s — a
+        // the gate too would not add safety, only a second place that closes the same document.
+        // `requestCloseTab` (Task 3) now gates the `.document` leg exactly like `.code`'s — a
         // dirty document tab's `×` shows the sheet, and Discard/a successful Save both still end by
         // calling THIS method, unconditionally, so the actual close stays exactly where it already
         // was. `runtime.close(path)` evicts the doc's own tiles from `OfficeTileStore` too
         // (`OfficeRuntime.perform`'s `.helperClose` case) — closing the tab is what makes that
         // eviction correct: a closed document's cached pixels are dead weight for the rest of the
         // process's life.
+        //
+        // **Fix round 1 (task review, IMPORTANT-1)**: this comment used to name `PanelDocumentTabModel
+        // .closeTab()` (the `.deleted`-conflict banner's own "Close" button) as the ONE caller that
+        // reached this method WITHOUT ever passing through the gate — and treated that as safe because
+        // this call site "already WAS that door" before dirty documents existed. That stopped being
+        // true the moment `requestCloseTab` grew a `.document` leg: from then on, a caller reaching
+        // `closePanelTab` directly wasn't reaching "the door," it was reaching the room BEHIND the
+        // door the `×` had just been given, on a conflict banner button that (per `.externalDeleted`'s
+        // own `guard doc.dirty`) is unconditionally dirty every time it's shown. Fixed at the caller —
+        // `closeTab()` now calls `host?.requestCloseTab(tabId)` instead. No caller reaches this method
+        // directly for a `.document` tab anymore; `requestCloseTab` is the only door, for both buttons.
         if let tab = panelStore.tabs.first(where: { $0.tabId == tabId }), tab.kind == .document,
            let path = tab.url, !path.isEmpty, let officeRuntime = existingOfficeRuntime(for: sessionId) {
             officeRuntime.close(path)
