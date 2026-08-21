@@ -849,6 +849,192 @@ final class OfficeRuntimeReducerTests: XCTestCase {
         XCTAssertEqual(twice, OfficeRuntimeState())
         XCTAssertEqual(twiceEffects, [.teardown(docIds: [])])
     }
+
+    // MARK: - Office Stage B Task 7: autosave sidecars + crash recovery
+
+    private let sampleCandidate = OfficeRecoveryCandidate(
+        docId: "crashed-doc", sidecarPath: "/state/autosave/crashed-doc.odt",
+        capturedAt: Date(timeIntervalSince1970: 1_000_000), isODFFallback: false)
+
+    func testAutosavedResolvesDocIdToPathAndEmitsRecordAutosave() {
+        let open = readyWithOpenDocument(path: "/a.xlsx", docId: "doc-a")
+        let (state, effects) = reduce(open, [.autosaved(docId: "doc-a", ext: "ods", isODFFallback: true)])
+        XCTAssertEqual(state, open, "no state changes here — the manifest write is entirely the "
+                       + "imperative half's own job")
+        XCTAssertEqual(effects, [.recordAutosave(path: "/a.xlsx", docId: "doc-a", ext: "ods", isODFFallback: true)])
+    }
+
+    func testAutosavedForADocIdThisRuntimeDoesNotKnowIsANoOp() {
+        let (state, effects) = reduce(ready(), [.autosaved(docId: "ghost-doc", ext: "odt", isODFFallback: false)])
+        XCTAssertEqual(state, ready())
+        XCTAssertEqual(effects, [])
+    }
+
+    func testRecoveryCandidateFoundRecordsTheCandidateUnderThePath() {
+        let open = readyWithOpenDocument(path: "/a.odt", docId: "doc-a")
+        let (state, effects) = reduce(open, [.recoveryCandidateFound(path: "/a.odt", docId: "doc-a", candidate: sampleCandidate)])
+        XCTAssertEqual(state.documentRecoveryCandidates["/a.odt"], sampleCandidate)
+        XCTAssertEqual(effects, [])
+    }
+
+    /// The stale-open guard: a close or a faster second reload already moved `/a.odt` past the docId
+    /// this (slower) async check was running for — mirrors `.saveSucceeded`'s own identical shape.
+    func testRecoveryCandidateFoundForADocIdThePathHasMovedPastIsANoOp() {
+        let open = readyWithOpenDocument(path: "/a.odt", docId: "doc-a")
+        let (reloaded, _) = reduce(open, [.opened(path: "/a.odt", docId: "doc-a-2", stagedPath: "/staged/doc-a-2", metadata: metadata)])
+        let (state, effects) = reduce(reloaded, [.recoveryCandidateFound(path: "/a.odt", docId: "doc-a", candidate: sampleCandidate)])
+        XCTAssertNil(state.documentRecoveryCandidates["/a.odt"], "the stale check's own candidate "
+                     + "must never attach to a document this path has already moved past")
+        XCTAssertEqual(state, reloaded)
+        XCTAssertEqual(effects, [])
+    }
+
+    /// `.opened` clears any standing candidate UNCONDITIONALLY — a fresh open has nothing to clear
+    /// yet (the candidate, if any, is found by a LATER, separate dispatch), and a reload/restore
+    /// lands here with a now-stale offer computed against a baseline this new content has replaced.
+    func testOpenedClearsAnyStandingRecoveryCandidate() {
+        let open = readyWithOpenDocument(path: "/a.odt", docId: "doc-a")
+        let (withCandidate, _) = reduce(open, [.recoveryCandidateFound(path: "/a.odt", docId: "doc-a", candidate: sampleCandidate)])
+        XCTAssertEqual(withCandidate.documentRecoveryCandidates["/a.odt"], sampleCandidate, "sanity")
+
+        let (reloaded, _) = reduce(withCandidate, [.opened(path: "/a.odt", docId: "doc-a-2", stagedPath: "/staged/doc-a-2", metadata: metadata)])
+        XCTAssertNil(reloaded.documentRecoveryCandidates["/a.odt"])
+    }
+
+    /// **Advisor review — the class of bug T3's own review flagged for a different banner**: a
+    /// standing "Restore" offer left up over a document the user has since made genuinely dirty
+    /// again is one click from clobbering LIVE new edits with the sidecar's older content.
+    func testModifiedStatusChangedTrueClearsAStandingRecoveryCandidate() {
+        let open = readyWithOpenDocument(path: "/a.odt", docId: "doc-a")
+        let (withCandidate, _) = reduce(open, [.recoveryCandidateFound(path: "/a.odt", docId: "doc-a", candidate: sampleCandidate)])
+
+        let (state, _) = reduce(withCandidate, [.modifiedStatusChanged(docId: "doc-a", modified: true)])
+        XCTAssertNil(state.documentRecoveryCandidates["/a.odt"])
+        XCTAssertEqual(state.documents["/a.odt"]?.dirty, true, "sanity — the ordinary dirty-tracking "
+                       + "write still happens")
+    }
+
+    /// The `false` direction deliberately does NOT clear a standing candidate — an undo-back-to-
+    /// clean does not retroactively invalidate an earlier recovery offer.
+    func testModifiedStatusChangedFalseLeavesAStandingRecoveryCandidateInPlace() {
+        let open = readyWithOpenDocument(path: "/a.odt", docId: "doc-a")
+        let (withCandidate, _) = reduce(open, [.recoveryCandidateFound(path: "/a.odt", docId: "doc-a", candidate: sampleCandidate)])
+
+        let (state, _) = reduce(withCandidate, [.modifiedStatusChanged(docId: "doc-a", modified: false)])
+        XCTAssertEqual(state.documentRecoveryCandidates["/a.odt"], sampleCandidate)
+    }
+
+    func testRecoveryRestoreRequestedClearsTheCandidateAndEmitsRestoreFromSidecar() {
+        let open = readyWithOpenDocument(path: "/a.odt", docId: "doc-a")
+        let (withCandidate, _) = reduce(open, [.recoveryCandidateFound(path: "/a.odt", docId: "doc-a", candidate: sampleCandidate)])
+
+        let (state, effects) = reduce(withCandidate, [.recoveryRestoreRequested(path: "/a.odt")])
+        XCTAssertNil(state.documentRecoveryCandidates["/a.odt"], "optimistic clear, mirrors "
+                     + ".conflictReloadRequested's identical posture")
+        XCTAssertEqual(effects, [.restoreFromSidecar(path: "/a.odt", oldDocId: "doc-a",
+                                                      sidecarPath: sampleCandidate.sidecarPath)])
+    }
+
+    func testRecoveryDiscardRequestedClearsTheCandidateAndEmitsDiscardRecoveryCandidate() {
+        let open = readyWithOpenDocument(path: "/a.odt", docId: "doc-a")
+        let (withCandidate, _) = reduce(open, [.recoveryCandidateFound(path: "/a.odt", docId: "doc-a", candidate: sampleCandidate)])
+
+        let (state, effects) = reduce(withCandidate, [.recoveryDiscardRequested(path: "/a.odt")])
+        XCTAssertNil(state.documentRecoveryCandidates["/a.odt"])
+        // The candidate's OWN docId (the crashed session's), never the currently-open one — the
+        // sidecar to delete is `<candidate.docId>.<ext>`, not `doc-a.<ext>`.
+        XCTAssertEqual(effects, [.discardRecoveryCandidate(path: "/a.odt", docId: "crashed-doc")])
+        XCTAssertEqual(state.documents["/a.odt"]?.docId, "doc-a", "Discard touches no document state "
+                       + "— the tab is already showing the real file's own content, opened normally")
+    }
+
+    func testRecoveryRestoreAndDiscardRequestedWithNoStandingCandidateAreNoOps() {
+        let open = readyWithOpenDocument(path: "/a.odt", docId: "doc-a")
+        for event in [OfficeRuntimeEvent.recoveryRestoreRequested(path: "/a.odt"),
+                      .recoveryDiscardRequested(path: "/a.odt")] {
+            let (state, effects) = reduce(open, [event])
+            XCTAssertEqual(state, open)
+            XCTAssertEqual(effects, [])
+        }
+    }
+
+    func testRecoveryRestoreAndDiscardRequestedForAPathThatIsNotOpenAreNoOps() {
+        for event in [OfficeRuntimeEvent.recoveryRestoreRequested(path: "/never.odt"),
+                      .recoveryDiscardRequested(path: "/never.odt")] {
+            let (state, effects) = reduce(ready(), [event])
+            XCTAssertEqual(state, ready())
+            XCTAssertEqual(effects, [])
+        }
+    }
+
+    /// **`DocumentEntry.restoredPendingSave`'s own header** — the ONE deliberate exception to
+    /// "dirty mirrors LOK and nothing else." A fresh open from a sidecar was never actually
+    /// "modified" from LOK's own point of view, so nothing will ever fire the real
+    /// `.uno:ModifiedStatus=true` this dot ordinarily waits for; `.recoveryRestored` forces it.
+    func testRecoveryRestoredForcesDirtyTrueAndSetsRestoredPendingSave() {
+        let open = readyWithOpenDocument(path: "/a.odt", docId: "doc-a")
+        XCTAssertEqual(open.documents["/a.odt"]?.dirty, false, "sanity — a fresh open starts clean")
+
+        let (state, effects) = reduce(open, [.recoveryRestored(path: "/a.odt", docId: "doc-a")])
+        XCTAssertEqual(state.documents["/a.odt"]?.dirty, true)
+        XCTAssertEqual(state.documents["/a.odt"]?.restoredPendingSave, true)
+        XCTAssertEqual(effects, [])
+    }
+
+    func testRecoveryRestoredForADocIdThePathHasMovedPastIsANoOp() {
+        let open = readyWithOpenDocument(path: "/a.odt", docId: "doc-a")
+        let (reloaded, _) = reduce(open, [.opened(path: "/a.odt", docId: "doc-a-2", stagedPath: "/staged/doc-a-2", metadata: metadata)])
+
+        let (state, _) = reduce(reloaded, [.recoveryRestored(path: "/a.odt", docId: "doc-a")])
+        XCTAssertEqual(state.documents["/a.odt"]?.dirty, false, "the stale restore must not force "
+                       + "dirty onto whatever ELSE this path now shows")
+        XCTAssertEqual(state.documents["/a.odt"]?.restoredPendingSave, false)
+    }
+
+    /// **`.saveSucceeded`'s own ONE allowed touch of `dirty` directly** — proven by actually driving
+    /// a save through a restored, never-typed-into document: without this, the dot would stay stuck
+    /// forever (LOK never transitions a document it always considered clean).
+    func testSaveSucceededClearsDirtyAndRestoredPendingSaveWhenSetByARestore() {
+        let open = readyWithOpenDocument(path: "/a.odt", docId: "doc-a")
+        let (restored, _) = reduce(open, [.recoveryRestored(path: "/a.odt", docId: "doc-a")])
+        XCTAssertEqual(restored.documents["/a.odt"]?.dirty, true, "sanity")
+
+        let (state, effects) = reduce(restored, [.saveSucceeded(path: "/a.odt", docId: "doc-a")])
+        XCTAssertEqual(state.documents["/a.odt"]?.dirty, false, "a save succeeding for a "
+                       + "restore-pending document must clear the dot directly — LOK will never "
+                       + "fire the real transition")
+        XCTAssertEqual(state.documents["/a.odt"]?.restoredPendingSave, false)
+        XCTAssertEqual(effects, [.clearAutosave(path: "/a.odt", docId: "doc-a")])
+    }
+
+    /// **The regression guard for the ORDINARY save path** — `restoredPendingSave` defaults `false`,
+    /// so `.saveSucceeded` must NOT force `dirty=false` for a document that became dirty through a
+    /// genuine edit; that dot still waits for LOK's own real `.uno:ModifiedStatus=false`, unchanged
+    /// from every task before this one.
+    func testSaveSucceededDoesNotForceDirtyFalseForAnOrdinaryEdit() {
+        let dirty = openedAndDirty(path: "/a.odt", docId: "doc-a")
+        XCTAssertEqual(dirty.documents["/a.odt"]?.restoredPendingSave, false, "sanity — never touched by a plain edit")
+
+        let (state, _) = reduce(dirty, [.saveSucceeded(path: "/a.odt", docId: "doc-a")])
+        XCTAssertEqual(state.documents["/a.odt"]?.dirty, true, "unchanged by this save — only a real "
+                       + "LOK ModifiedStatus=false callback may clear it, exactly as before Task 7")
+    }
+
+    /// **The negative pin (advisor review) — a future site-mirroring sweep that adds `.clearAutosave`
+    /// everywhere `.deleteStagedCopy` already is must trip THIS test, not silently delete the crash
+    /// evidence recovery depends on.** All three abnormal-ending events, driven against a state that
+    /// HAS an open, dirty document (so a positive-but-wrong emission would show up), asserting the
+    /// full effects list never contains `.clearAutosave` for any docId.
+    func testHelperDiedTeardownAndUnavailableNeverEmitAnAutosaveClear() {
+        let dirty = openedAndDirty(path: "/a.xlsx", docId: "doc-a")
+        for event in [OfficeRuntimeEvent.helperDied, .helperUnavailable, .teardownRequested] {
+            let (_, effects) = reduce(dirty, [event])
+            XCTAssertFalse(effects.contains { if case .clearAutosave = $0 { return true } else { return false } },
+                           "\(event) must never emit .clearAutosave — this IS the abnormal-ending "
+                           + "case autosave exists to survive; only .saveSucceeded/.closeRequested/"
+                           + "explicit Discard may clear a sidecar")
+        }
+    }
 }
 
 // MARK: - OfficeHelperRequestQueue: the shared client's request funnel
@@ -2100,5 +2286,294 @@ final class OfficeStageDocumentTests: XCTestCase {
         OfficeRuntime.deleteStagedCopy(docId: "doc-1", docsDirectory: docsDir)
         XCTAssertFalse(FileManager.default.fileExists(atPath: stagedPath.path), "an immutable SOURCE "
                        + "must never leak an undeletable staged copy behind it")
+    }
+}
+
+// MARK: - Office Stage B Task 7: the autosave manifest — PURE disk I/O, no reducer, no LOK, no
+// socket. Mirrors OfficePlaceAtomicallyTests/OfficeStageDocumentTests' own per-class scratch-dir
+// shape immediately above.
+
+final class OfficeAutosaveManifestTests: XCTestCase {
+    private var scratchDirs: [URL] = []
+
+    override func tearDown() {
+        for dir in scratchDirs { try? FileManager.default.removeItem(at: dir) }
+        scratchDirs = []
+        super.tearDown()
+    }
+
+    private func makeScratchDirectory() -> URL {
+        let dir = URL(fileURLWithPath: "/tmp/office-autosave-manifest-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        scratchDirs.append(dir)
+        return dir
+    }
+
+    /// Explicit — two rapid writes in the SAME test can legitimately land the same nanosecond-
+    /// resolution mtime on a fast enough filesystem; every freshness-dependent test below sets both
+    /// timestamps far enough apart that flakiness is not physically possible, rather than trusting
+    /// wall-clock ordering between two `Data.write` calls.
+    private func setModificationDate(_ date: Date, atPath path: String) {
+        try? FileManager.default.setAttributes([.modificationDate: date], ofItemAtPath: path)
+    }
+
+    private func autosaveDirectoryContents(_ dir: URL) -> Set<String> {
+        Set((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? [])
+    }
+
+    // MARK: - recordAutosaveManifest + checkRecoveryCandidate round trip
+
+    func testRecordThenCheckFindsACandidateWhenTheSidecarIsNewerThanTheRealFile() throws {
+        let autosaveDir = makeScratchDirectory()
+        let realDir = makeScratchDirectory()
+        let realPath = realDir.appendingPathComponent("notes.odt")
+        try "old content".write(to: realPath, atomically: true, encoding: .utf8)
+        setModificationDate(Date(timeIntervalSince1970: 1_000_000), atPath: realPath.path)
+
+        let sidecarPath = autosaveDir.appendingPathComponent("crashed-doc.odt")
+        try "recovered content".write(to: sidecarPath, atomically: true, encoding: .utf8)
+        setModificationDate(Date(timeIntervalSince1970: 1_000_060), atPath: sidecarPath.path) // +60s
+
+        OfficeRuntime.recordAutosaveManifest(realPath: realPath.path, docId: "crashed-doc", ext: "odt",
+                                             isODFFallback: false, autosaveDirectory: autosaveDir)
+
+        let candidate = OfficeRuntime.checkRecoveryCandidate(realPath: realPath.path, autosaveDirectory: autosaveDir)
+        let found = try XCTUnwrap(candidate)
+        XCTAssertEqual(found.docId, "crashed-doc")
+        XCTAssertEqual(found.sidecarPath, sidecarPath.path)
+        XCTAssertEqual(found.isODFFallback, false)
+        XCTAssertEqual(found.capturedAt.timeIntervalSince1970, 1_000_060, accuracy: 0.001)
+    }
+
+    func testCheckReturnsNilWhenTheSidecarIsNotNewerThanTheRealFile() throws {
+        let autosaveDir = makeScratchDirectory()
+        let realDir = makeScratchDirectory()
+        let realPath = realDir.appendingPathComponent("notes.odt")
+        try "later content".write(to: realPath, atomically: true, encoding: .utf8)
+        setModificationDate(Date(timeIntervalSince1970: 1_000_060), atPath: realPath.path)
+
+        let sidecarPath = autosaveDir.appendingPathComponent("crashed-doc.odt")
+        try "older content".write(to: sidecarPath, atomically: true, encoding: .utf8)
+        setModificationDate(Date(timeIntervalSince1970: 1_000_000), atPath: sidecarPath.path) // -60s
+
+        OfficeRuntime.recordAutosaveManifest(realPath: realPath.path, docId: "crashed-doc", ext: "odt",
+                                             isODFFallback: false, autosaveDirectory: autosaveDir)
+
+        XCTAssertNil(OfficeRuntime.checkRecoveryCandidate(realPath: realPath.path, autosaveDirectory: autosaveDir),
+                     "the real file was independently saved/touched AFTER the sidecar — nothing to recover")
+    }
+
+    func testCheckReturnsNilWhenNoManifestWasEverWritten() throws {
+        let autosaveDir = makeScratchDirectory()
+        let realPath = makeScratchDirectory().appendingPathComponent("never-recorded.odt")
+        try "content".write(to: realPath, atomically: true, encoding: .utf8)
+        XCTAssertNil(OfficeRuntime.checkRecoveryCandidate(realPath: realPath.path, autosaveDirectory: autosaveDir))
+    }
+
+    /// A manifest exists, but the sidecar it points at is already gone (cleared by a save that
+    /// raced ahead of a stale, in-flight autosave push) — a stale bookkeeping entry, not a
+    /// recoverable candidate.
+    func testCheckReturnsNilWhenTheManifestsSidecarIsMissing() throws {
+        let autosaveDir = makeScratchDirectory()
+        let realPath = makeScratchDirectory().appendingPathComponent("notes.odt")
+        try "content".write(to: realPath, atomically: true, encoding: .utf8)
+        let sidecarPath = autosaveDir.appendingPathComponent("crashed-doc.odt")
+        try "sidecar".write(to: sidecarPath, atomically: true, encoding: .utf8)
+        OfficeRuntime.recordAutosaveManifest(realPath: realPath.path, docId: "crashed-doc", ext: "odt",
+                                             isODFFallback: false, autosaveDirectory: autosaveDir)
+        try FileManager.default.removeItem(at: sidecarPath) // simulate the race
+
+        XCTAssertNil(OfficeRuntime.checkRecoveryCandidate(realPath: realPath.path, autosaveDirectory: autosaveDir))
+    }
+
+    /// `recordAutosaveManifest` itself never resurrects a manifest for a sidecar that does not (yet,
+    /// or any longer) exist — guards the identical race from the WRITE side.
+    func testRecordWritesNothingWhenTheSidecarDoesNotExist() throws {
+        let autosaveDir = makeScratchDirectory()
+        let realPath = makeScratchDirectory().appendingPathComponent("notes.odt")
+        try "content".write(to: realPath, atomically: true, encoding: .utf8)
+
+        OfficeRuntime.recordAutosaveManifest(realPath: realPath.path, docId: "never-written", ext: "odt",
+                                             isODFFallback: false, autosaveDirectory: autosaveDir)
+
+        XCTAssertEqual(autosaveDirectoryContents(autosaveDir), [], "no sidecar existed to stat — "
+                       + "nothing should have been written")
+    }
+
+    // MARK: - clearAutosave
+
+    func testClearAutosaveDeletesTheSidecarAndTheManifest() throws {
+        let autosaveDir = makeScratchDirectory()
+        let realPath = makeScratchDirectory().appendingPathComponent("notes.odt")
+        try "content".write(to: realPath, atomically: true, encoding: .utf8)
+        try "sidecar".write(to: autosaveDir.appendingPathComponent("doc-a.odt"), atomically: true, encoding: .utf8)
+        OfficeRuntime.recordAutosaveManifest(realPath: realPath.path, docId: "doc-a", ext: "odt",
+                                             isODFFallback: false, autosaveDirectory: autosaveDir)
+        XCTAssertEqual(autosaveDirectoryContents(autosaveDir).count, 2, "sanity: sidecar + manifest both exist")
+
+        OfficeRuntime.clearAutosave(realPath: realPath.path, docId: "doc-a", autosaveDirectory: autosaveDir)
+
+        XCTAssertEqual(autosaveDirectoryContents(autosaveDir), [], "both the sidecar and the manifest are gone")
+    }
+
+    func testClearAutosaveIsASafeNoOpWhenNothingExists() {
+        let autosaveDir = makeScratchDirectory()
+        OfficeRuntime.clearAutosave(realPath: "/never/opened.odt", docId: "doc-a", autosaveDirectory: autosaveDir) // must not throw/crash
+    }
+
+    /// The identical prefix-collision discrimination `deleteStagedCopy`'s own pin proves for
+    /// `docs/` — `"doc-1."` must never match `"doc-10.odt"`.
+    func testClearAutosaveRemovesOnlyItsOwnDocIdNeverAPrefixCollision() throws {
+        let autosaveDir = makeScratchDirectory()
+        let ownFile = autosaveDir.appendingPathComponent("doc-1.odt")
+        let collisionCandidate = autosaveDir.appendingPathComponent("doc-10.odt")
+        try "mine".write(to: ownFile, atomically: true, encoding: .utf8)
+        try "not mine".write(to: collisionCandidate, atomically: true, encoding: .utf8)
+
+        OfficeRuntime.clearAutosave(realPath: "/some/real/path.odt", docId: "doc-1", autosaveDirectory: autosaveDir)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: ownFile.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: collisionCandidate.path))
+    }
+
+    // MARK: - sweepAutosaveOrphans — manifest-aware, never wholesale (the load-bearing distinction
+    // from LOKBridge.sweepStaleDocumentDirectories's own docs/saves wipe)
+
+    func testSweepRemovesASidecarThatHasNoMatchingManifest() throws {
+        let autosaveDir = makeScratchDirectory()
+        let orphanSidecar = autosaveDir.appendingPathComponent("orphan-doc.odt")
+        try "orphan".write(to: orphanSidecar, atomically: true, encoding: .utf8)
+
+        OfficeRuntime.sweepAutosaveOrphans(autosaveDirectory: autosaveDir)
+
+        XCTAssertEqual(autosaveDirectoryContents(autosaveDir), [])
+    }
+
+    func testSweepRemovesAManifestThatHasNoMatchingSidecar() throws {
+        let autosaveDir = makeScratchDirectory()
+        let realPath = makeScratchDirectory().appendingPathComponent("notes.odt")
+        try "content".write(to: realPath, atomically: true, encoding: .utf8)
+        let sidecarPath = autosaveDir.appendingPathComponent("doc-a.odt")
+        try "sidecar".write(to: sidecarPath, atomically: true, encoding: .utf8)
+        OfficeRuntime.recordAutosaveManifest(realPath: realPath.path, docId: "doc-a", ext: "odt",
+                                             isODFFallback: false, autosaveDirectory: autosaveDir)
+        try FileManager.default.removeItem(at: sidecarPath) // the sidecar's own clear raced ahead
+
+        OfficeRuntime.sweepAutosaveOrphans(autosaveDirectory: autosaveDir)
+
+        XCTAssertEqual(autosaveDirectoryContents(autosaveDir), [], "the now-pointless manifest must go too")
+    }
+
+    func testSweepRemovesTornTempFilesUnconditionally() throws {
+        let autosaveDir = makeScratchDirectory()
+        try "half-written by a SIGKILL mid-rename".write(
+            to: autosaveDir.appendingPathComponent(".tmp-doc-a-\(UUID().uuidString).odt"),
+            atomically: true, encoding: .utf8)
+
+        OfficeRuntime.sweepAutosaveOrphans(autosaveDirectory: autosaveDir)
+
+        XCTAssertEqual(autosaveDirectoryContents(autosaveDir), [], "dead by construction — nothing "
+                       + "ever points at a temp-named file")
+    }
+
+    /// **The load-bearing negative case**: a genuinely live, recoverable pair (sidecar newer than
+    /// the real file, both present) must survive the sweep untouched — this is the whole reason the
+    /// sweep is manifest-AWARE rather than a wholesale wipe.
+    func testSweepNeverTouchesALiveRecoverablePair() throws {
+        let autosaveDir = makeScratchDirectory()
+        let realPath = makeScratchDirectory().appendingPathComponent("notes.odt")
+        try "old".write(to: realPath, atomically: true, encoding: .utf8)
+        setModificationDate(Date(timeIntervalSince1970: 1_000_000), atPath: realPath.path)
+        let sidecarPath = autosaveDir.appendingPathComponent("doc-a.odt")
+        try "recovered".write(to: sidecarPath, atomically: true, encoding: .utf8)
+        setModificationDate(Date(timeIntervalSince1970: 1_000_060), atPath: sidecarPath.path)
+        OfficeRuntime.recordAutosaveManifest(realPath: realPath.path, docId: "doc-a", ext: "odt",
+                                             isODFFallback: false, autosaveDirectory: autosaveDir)
+        let before = autosaveDirectoryContents(autosaveDir)
+        XCTAssertEqual(before.count, 2, "sanity")
+
+        OfficeRuntime.sweepAutosaveOrphans(autosaveDirectory: autosaveDir)
+
+        XCTAssertEqual(autosaveDirectoryContents(autosaveDir), before, "a live, recoverable pair is "
+                       + "NEVER removed by the boot sweep")
+        XCTAssertNotNil(OfficeRuntime.checkRecoveryCandidate(realPath: realPath.path, autosaveDirectory: autosaveDir),
+                        "still genuinely recoverable after the sweep")
+    }
+
+    /// **The advisor's own refinement**: a VALID pair whose sidecar is no newer than the real file
+    /// (the app crashed after a clean save/close should already have cleared this, or the real file
+    /// was independently saved after the crash) has nothing left to recover — swept, not kept
+    /// forever for a `checkRecoveryCandidate` that would refuse it anyway.
+    func testSweepRemovesAValidPairWhoseSidecarIsNoNewerThanTheRealFile() throws {
+        let autosaveDir = makeScratchDirectory()
+        let realPath = makeScratchDirectory().appendingPathComponent("notes.odt")
+        try "newer".write(to: realPath, atomically: true, encoding: .utf8)
+        setModificationDate(Date(timeIntervalSince1970: 1_000_060), atPath: realPath.path)
+        let sidecarPath = autosaveDir.appendingPathComponent("doc-a.odt")
+        try "stale".write(to: sidecarPath, atomically: true, encoding: .utf8)
+        setModificationDate(Date(timeIntervalSince1970: 1_000_000), atPath: sidecarPath.path)
+        OfficeRuntime.recordAutosaveManifest(realPath: realPath.path, docId: "doc-a", ext: "odt",
+                                             isODFFallback: false, autosaveDirectory: autosaveDir)
+
+        OfficeRuntime.sweepAutosaveOrphans(autosaveDirectory: autosaveDir)
+
+        XCTAssertEqual(autosaveDirectoryContents(autosaveDir), [], "a resolved pair — nothing left to recover")
+    }
+
+    /// A manifest whose own real path no longer exists AT ALL (the source document was deleted or
+    /// moved and will never be reopened at this path again) is conservatively swept along with its
+    /// sidecar, rather than kept forever — see `sweepAutosaveOrphans`'s own header.
+    func testSweepRemovesAPairWhoseRealPathNoLongerExists() throws {
+        let autosaveDir = makeScratchDirectory()
+        let goneRealPath = makeScratchDirectory().appendingPathComponent("deleted-source.odt").path
+        let sidecarPath = autosaveDir.appendingPathComponent("doc-a.odt")
+        try "orphaned-by-a-deleted-source".write(to: sidecarPath, atomically: true, encoding: .utf8)
+        OfficeRuntime.recordAutosaveManifest(realPath: goneRealPath, docId: "doc-a", ext: "odt",
+                                             isODFFallback: false, autosaveDirectory: autosaveDir)
+
+        OfficeRuntime.sweepAutosaveOrphans(autosaveDirectory: autosaveDir)
+
+        XCTAssertEqual(autosaveDirectoryContents(autosaveDir), [])
+    }
+
+    /// A directory that does not exist at all (never autosaved to this boot) must never throw or
+    /// crash — the identical best-effort posture every other sweep in this codebase states.
+    func testSweepIsASafeNoOpWhenTheDirectoryDoesNotExist() {
+        let autosaveDir = makeScratchDirectory().appendingPathComponent("never-created", isDirectory: true)
+        OfficeRuntime.sweepAutosaveOrphans(autosaveDirectory: autosaveDir) // must not throw/crash
+    }
+
+    /// A composite scenario, closest to what a real crashed-then-relaunched boot actually looks
+    /// like: one genuinely live pair, one orphan sidecar, one orphan manifest, and a torn temp file
+    /// all in the SAME directory at once — only the live pair survives.
+    func testSweepInAMixedDirectoryKeepsOnlyTheLivePair() throws {
+        let autosaveDir = makeScratchDirectory()
+        let liveRealPath = makeScratchDirectory().appendingPathComponent("live.odt")
+        try "old".write(to: liveRealPath, atomically: true, encoding: .utf8)
+        setModificationDate(Date(timeIntervalSince1970: 1_000_000), atPath: liveRealPath.path)
+        let liveSidecar = autosaveDir.appendingPathComponent("live-doc.odt")
+        try "recovered".write(to: liveSidecar, atomically: true, encoding: .utf8)
+        setModificationDate(Date(timeIntervalSince1970: 1_000_060), atPath: liveSidecar.path)
+        OfficeRuntime.recordAutosaveManifest(realPath: liveRealPath.path, docId: "live-doc", ext: "odt",
+                                             isODFFallback: false, autosaveDirectory: autosaveDir)
+
+        try "orphan sidecar, no manifest".write(to: autosaveDir.appendingPathComponent("orphan-doc.ods"),
+                                                atomically: true, encoding: .utf8)
+        try "torn".write(to: autosaveDir.appendingPathComponent(".tmp-dead-\(UUID().uuidString).odt"),
+                         atomically: true, encoding: .utf8)
+        let orphanRealPath = makeScratchDirectory().appendingPathComponent("orphan-manifest-source.odt")
+        try "content".write(to: orphanRealPath, atomically: true, encoding: .utf8)
+        let orphanManifestSidecar = autosaveDir.appendingPathComponent("orphan-manifest-doc.odt")
+        try "sidecar".write(to: orphanManifestSidecar, atomically: true, encoding: .utf8)
+        OfficeRuntime.recordAutosaveManifest(realPath: orphanRealPath.path, docId: "orphan-manifest-doc", ext: "odt",
+                                             isODFFallback: false, autosaveDirectory: autosaveDir)
+        try FileManager.default.removeItem(at: orphanManifestSidecar) // its own sidecar now gone
+
+        OfficeRuntime.sweepAutosaveOrphans(autosaveDirectory: autosaveDir)
+
+        let remaining = autosaveDirectoryContents(autosaveDir)
+        XCTAssertEqual(remaining.count, 2, "exactly the live pair's own two files: \(remaining)")
+        XCTAssertTrue(remaining.contains("live-doc.odt"))
+        XCTAssertNotNil(OfficeRuntime.checkRecoveryCandidate(realPath: liveRealPath.path, autosaveDirectory: autosaveDir))
     }
 }
