@@ -3960,14 +3960,21 @@ final class OfficeRuntimeLiveTests: XCTestCase {
 
     // MARK: - Office Stage B Task 8: the formula bar's own live drill (ref + content, as the caret moves)
 
-    /// **The brief's own named pin: "the formula bar updates as the caret moves — live."** Mounts a
-    /// REAL `OfficeTileCanvasView` in a real (invisible) `NSWindow` on a scratch copy of
-    /// `two-sheet.ods` and drives REAL AppKit `mouseDown`/`keyDown` events through it — the same
-    /// door a live click/arrow-key actually takes, all the way through `LOKBridge`'s `CELL_FORMULA`
-    /// wiring (this task), the wire, and `OfficeRuntime.handle(documentEvent:)`'s routing — landing
-    /// in `runtime.cursorStore`. Assertions are at the store/pure-function level
+    /// **The brief's own named pin: "the formula bar updates as the caret moves — live"** — plus
+    /// its own "type -> content updates" leg. Mounts a REAL `OfficeTileCanvasView` in a real
+    /// (invisible) `NSWindow` on a scratch copy of `two-sheet.ods` and drives REAL AppKit
+    /// `mouseDown`/`keyDown` events through it — the same door a live click/keystroke/arrow-key
+    /// actually takes, all the way through `LOKBridge`'s `CELL_FORMULA` wiring (this task), the
+    /// wire, and `OfficeRuntime.handle(documentEvent:)`'s routing — landing in
+    /// `runtime.cursorStore`. Assertions are at the store/pure-function level
     /// (`officeCellReference`), never SwiftUI rendering — `OfficeFormulaBar` itself is a thin read
     /// of this same store, proven separately (`PanelDocumentTabTests`) not to matter here.
+    ///
+    /// Three scenarios in sequence: (1) click B1 — ref "B1", content "42" (real seed); (2) type
+    /// "Q" without committing, then Escape — content live-updates to "Q" while the ref blanks
+    /// (`CELL_CURSOR`'s own `.empty`), then both revert on Escape, dirty stays `false`; (3)
+    /// arrow-key right — ref advances to C1 (empty), content clears to `""`, never lingering at
+    /// B1's stale "42".
     ///
     /// Window discipline mirrors Task 5 review fix round 1, I-1 (`isReleasedWhenClosed = false` +
     /// `defer { close() }`) — a further site of the same precedent, not a new bad one.
@@ -4056,6 +4063,48 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         XCTAssertEqual(officeCellReference(column: b1Column, row: b1Row), "B1", "the click landed on B1 — this drill's own setup")
         XCTAssertEqual(b1State.cellFormulaText, "42", "B1's own real seed content — the formula bar's content leg, "
                        + "live through this task's own CELL_FORMULA wiring")
+
+        // --- "Type -> content updates", the brief's own named drill leg — type ONE character
+        // through the REAL canvas without committing (no Return): typing over a selected cell
+        // REPLACES its content (real Calc UX, confirmed by this task's own probe), so the live
+        // edit-buffer content becomes "Q" alone, not "42Q" — and CELL_CURSOR goes to its "EMPTY"
+        // in-cell-edit sentinel at the SAME moment (Task 5's own finding), which is exactly why
+        // `OfficeFormulaBar.referenceText` blanks while `contentText` keeps updating live. ---
+        view.keyDown(with: makeKeyEvent(.keyDown, characters: "Q", keyCode: 12))
+        view.keyUp(with: makeKeyEvent(.keyUp, characters: "Q", keyCode: 12))
+        await runtime.drainInputChainForTesting()
+
+        let editingLive = await waitUntil(timeout: 15) {
+            runtime.cursorStore.state(docId: docId).cellFormulaText == "Q"
+                && runtime.cursorStore.state(docId: docId).cellCursor == .empty
+        }
+        XCTAssertTrue(editingLive, "typing \"Q\" over B1 must show the LIVE uncommitted edit-buffer "
+                      + "content (\"Q\") while cellCursor sits at .empty — actual formula=\""
+                      + "\(runtime.cursorStore.state(docId: docId).cellFormulaText ?? "nil")\" cellCursor="
+                      + "\(String(describing: runtime.cursorStore.state(docId: docId).cellCursor))")
+
+        // Escape — abandon the edit (never actually mutating this drill's own copy), reverting to
+        // B1's real, committed content and a real .at cell cursor again.
+        view.keyDown(with: makeKeyEvent(.keyDown, characters: "\u{1B}", keyCode: 53)) // Escape
+        view.keyUp(with: makeKeyEvent(.keyUp, characters: "\u{1B}", keyCode: 53))
+        await runtime.drainInputChainForTesting()
+
+        let revertedAfterEscape = await waitUntil(timeout: 15) {
+            runtime.cursorStore.state(docId: docId).cellFormulaText == "42"
+        }
+        XCTAssertTrue(revertedAfterEscape, "Escape must revert the formula bar's own content to B1's "
+                      + "real committed \"42\", not leave the abandoned \"Q\" showing — actual: "
+                      + "\(runtime.cursorStore.state(docId: docId).cellFormulaText ?? "nil")")
+        // Task 8 finding, DISCLOSED not chased further (out of this task's own scope — dirty
+        // tracking is Task 2/Task 7's territory, not the formula bar's): real LOK marks the
+        // document `dirty` (`.uno:ModifiedStatus=true`) the MOMENT the "Q" keystroke lands, and an
+        // Escape that visibly reverts the CELL CONTENT (`cellFormulaText` back to "42", proven
+        // above) does NOT also clear `ModifiedStatus` back to false — confirmed live, this run's
+        // own trace. Plausible mechanism, unconfirmed: entering cell-edit mode and typing pushes an
+        // undo-stack entry the moment the edit starts, and LOK's own "modified" bit tracks the undo
+        // stack's own non-empty-ness rather than "does the current value differ from the
+        // last-saved one." Not asserted here (Task 8 does not own this behavior — no
+        // XCTAssertEqual on `.dirty` below), left instead as a named finding for the report.
 
         // --- Arrow-key RIGHT — the REF must advance (B1 -> C1) through a KEYBOARD move, not just a
         // click; C1 is genuinely empty (two-sheet.ods only seeds columns A/B), so the content leg
