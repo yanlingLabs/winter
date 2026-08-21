@@ -3495,4 +3495,75 @@ final class OfficeRuntimeLiveTests: XCTestCase {
 
         _ = host.teardownAllOfficeRuntimesAndStopHelper()
     }
+
+    /// Office Stage B Task 6 — **closes a real gap the four drills above leave**: every one of
+    /// them drives a `.odt` (`OfficeDocumentKind.text`), where `clipboardCopyOnDedicatedThread`'s
+    /// own `if doc.kind != .text` guard means the `setPart` half of its prefix NEVER actually
+    /// executes — the type-gated branch this whole file's own house discipline (T4's fix round 4)
+    /// insists on is written but UNEXERCISED by real LOK anywhere else in this task. This test
+    /// is deliberately lightweight (the wire reply itself, not a full save+reopen XML parse — the
+    /// MECHANISM is already proven identical for text docs by the round-trip drill above; the only
+    /// question this test answers is "does the type-gated `setPart` branch run cleanly against a
+    /// REAL Calc document," not a second full placement proof): type into a cell, re-select it,
+    /// copy, and confirm the real content comes back.
+    func testClipboardCopyOnACalcDocumentExercisesTheTypeGatedSetPartBranch() async throws {
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
+                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                        + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
+        let vendorRoot = Self.vendorProductSetRoot
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
+                      "LibreOffice vendor tree not present at \(vendorRoot.path) — run "
+                        + "`bun run libreoffice:fetch` from the repo root.")
+        let fixturePath = Self.fixturesRoot.appendingPathComponent("gate.ods").path
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: fixturePath), "gate.ods fixture missing")
+
+        let stateDir = makeScratchDirectory()
+        let directory = SessionDirectory(lister: { [] })
+        let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        host.makeOfficeHelperSupervisor = {
+            OfficeHelperSupervisor(configuration: OfficeHelperSupervisor.Configuration(
+                helperExecutableURL: helperURL,
+                socketDirectory: stateDir,
+                extraArguments: ["--lok-root", vendorRoot.path, "--sandbox-profile", Self.sandboxProfilePath.path]))
+        }
+        let runtime = host.officeRuntime(for: "S1")
+
+        let scratchDir = makeScratchDirectory()
+        let docPath = scratchDir.appendingPathComponent("clipboard-calc-drill.ods").path
+        try Data(contentsOf: URL(fileURLWithPath: fixturePath)).write(to: URL(fileURLWithPath: docPath))
+
+        runtime.open(docPath)
+        let settled = await waitUntil(timeout: 90) {
+            runtime.stateSnapshot.documents[docPath] != nil || runtime.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(settled, "never settled — phase: \(runtime.stateSnapshot.phase)")
+        guard let doc = runtime.stateSnapshot.documents[docPath] else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("did not open: \(runtime.stateSnapshot.openFailures[docPath] ?? "no reason recorded")")
+        }
+        XCTAssertEqual(doc.type, .spreadsheet, "setup: this drill is about the Calc type gate specifically")
+        guard let client = host.officeHelperSupervisor?.client else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("no live client to drive this drill through")
+        }
+
+        // `postRealEdit`'s own established twips(100,100) — inside A1's own real bounding rect —
+        // type "CALC" (already-proven test-local keyCodes: `postRawUppercaseMarker`'s closed-form
+        // table covers every uppercase letter), Return commits the cell edit and moves the cursor
+        // to A2, then a second click at the SAME coordinates re-selects A1.
+        try await client.postMouse(docId: doc.docId, part: 0, type: .buttonDown, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await client.postMouse(docId: doc.docId, part: 0, type: .buttonUp, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await postRawUppercaseMarker(client: client, docId: doc.docId, marker: "CALC")
+        try await client.postKey(docId: doc.docId, part: 0, type: .keyInput, charCode: 0, keyCode: 1280) // Return
+        try await client.postKey(docId: doc.docId, part: 0, type: .keyUp, charCode: 0, keyCode: 1280)
+        try await client.postMouse(docId: doc.docId, part: 0, type: .buttonDown, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await client.postMouse(docId: doc.docId, part: 0, type: .buttonUp, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+
+        let copied = try await client.clipboardCopy(docId: doc.docId, part: 0)
+        XCTAssertTrue(copied.contains("CALC"), "the type-gated setPart branch must not corrupt or "
+                      + "block a real Calc selection read — got: \"\(copied)\"")
+
+        _ = host.teardownAllOfficeRuntimesAndStopHelper()
+    }
 }
