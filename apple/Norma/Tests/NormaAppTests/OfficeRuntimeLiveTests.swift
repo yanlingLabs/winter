@@ -4145,4 +4145,98 @@ final class OfficeRuntimeLiveTests: XCTestCase {
 
         _ = host.teardownAllOfficeRuntimesAndStopHelper()
     }
+
+    /// **The presentation twin of office-plumbing Task 9's own sheet proof** — brief: "rail shows
+    /// 2, click switches, tiles differ per part." This is the T9 SHAPE deliberately, not the T4
+    /// round-3 "type on sheet 2, diff parts" shape: two independently-seeded parts, no edit step
+    /// at all — `two-slide.fodp`'s own two `<draw:page>` slides already carry distinct fills
+    /// (`#ff6600` vs `#0033cc`) and text, both inside a 20cm×10cm rect at (1cm,1cm) — squarely
+    /// inside tile (0,0) at 100% zoom, so the very first tile each part paints is already the
+    /// discriminating one (advisor review, this task: "both slides' distinguishing content must
+    /// land inside tile (0,0)").
+    ///
+    /// Mounts a REAL `OfficeTileCanvasView` (auto-registers as `model.canvasHost` — `mount()`'s own
+    /// `model?.canvasHost = self`) and drives the switch through `model.selectPart(1)` — the EXACT
+    /// call `OfficeSlideRail`'s own `onSelect` closure makes on a real rail click
+    /// (`OfficeDocumentSurface.body`: `OfficeSlideRail(..., onSelect: model.selectPart)`), never
+    /// `runtime.subscribeTiles` called directly — this proves the STRIP'S OWN DOOR, not merely that
+    /// real LOK can paint two parts differently. `activePart == 1` afterward is also the exact
+    /// field `OfficeSlideRail`'s own current-part highlight reads
+    /// (`index == activePart ? Color.primary : Theme.textMuted`) — this drill's own pass IS that
+    /// highlight's live-gate proof by construction, not a separate assertion to add.
+    func testTwoSlideRailClickSwitchesPartsAndTilesDifferPerPart() async throws {
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
+                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                        + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
+        let vendorRoot = Self.vendorProductSetRoot
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
+                      "LibreOffice vendor tree not present at \(vendorRoot.path) — run "
+                        + "`bun run libreoffice:fetch` from the repo root.")
+        let fixturePath = Self.fixturesRoot.appendingPathComponent("two-slide.fodp").path
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: fixturePath), "two-slide.fodp fixture missing")
+
+        let stateDir = makeScratchDirectory()
+        let directory = SessionDirectory(lister: { [] })
+        let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        host.makeOfficeHelperSupervisor = {
+            OfficeHelperSupervisor(configuration: OfficeHelperSupervisor.Configuration(
+                helperExecutableURL: helperURL, socketDirectory: stateDir,
+                extraArguments: ["--lok-root", vendorRoot.path, "--sandbox-profile", Self.sandboxProfilePath.path]))
+        }
+        let runtime = host.officeRuntime(for: "S1")
+
+        let scratchDir = makeScratchDirectory()
+        let path = scratchDir.appendingPathComponent("two-slide-drill.fodp").path
+        try Data(contentsOf: URL(fileURLWithPath: fixturePath)).write(to: URL(fileURLWithPath: path))
+
+        runtime.open(path)
+        let settled = await waitUntil(timeout: 90) {
+            runtime.stateSnapshot.documents[path] != nil || runtime.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(settled, "two-slide.fodp never settled — phase: \(runtime.stateSnapshot.phase)")
+        guard let doc = runtime.stateSnapshot.documents[path] else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("two-slide.fodp did not open: "
+                           + "\(runtime.stateSnapshot.openFailures[path] ?? "no reason recorded")")
+        }
+        XCTAssertEqual(doc.parts, 2, "setup: this drill needs the real two-slide fixture")
+        let docId = doc.docId
+
+        let model = PanelDocumentTabModel(tabId: "two-slide-drill", path: path)
+        let view = OfficeTileCanvasView(runtime: runtime, path: path, docId: docId,
+                                        sizeTwips: doc.sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 256, height: 256)
+        view.mount()
+        XCTAssertTrue(model.canvasHost === view, "setup: mount() must register itself as the model's "
+                      + "canvasHost — the exact door OfficeSlideRail's own click uses")
+
+        let zoomPPT = 1000
+        let part0Key = TileKey(part: 0, zoomPPT: zoomPPT, tileX: 0, tileY: 0)
+        let part0Arrived = await waitUntil(timeout: 30) { runtime.tileStore.tile(docId: docId, key: part0Key) != nil }
+        XCTAssertTrue(part0Arrived, "slide 1's own origin tile never arrived after mount()'s own initial subscribe")
+        let part0Pixels = try XCTUnwrap(runtime.tileStore.tile(docId: docId, key: part0Key), "slide 1").pixels
+
+        // --- "Click switches": model.selectPart(1) — the EXACT call a real rail click makes. ---
+        model.selectPart(1)
+        await runtime.drainInputChainForTesting()
+
+        let activePartMoved = await waitUntil(timeout: 15) { runtime.stateSnapshot.documents[path]?.activePart == 1 }
+        XCTAssertTrue(activePartMoved, "selectPart(1) never landed on activePart — the rail's own "
+                      + "current-part highlight reads this exact field")
+
+        let part1Key = TileKey(part: 1, zoomPPT: zoomPPT, tileX: 0, tileY: 0)
+        let part1Arrived = await waitUntil(timeout: 30) { runtime.tileStore.tile(docId: docId, key: part1Key) != nil }
+        XCTAssertTrue(part1Arrived, "slide 2's own origin tile never arrived after the rail's own selectPart(1) door")
+        let part1Pixels = try XCTUnwrap(runtime.tileStore.tile(docId: docId, key: part1Key), "slide 2").pixels
+
+        XCTAssertNotEqual(part0Pixels, part1Pixels, "slide 1 and slide 2 rendered IDENTICAL pixels at "
+                          + "the same tile coordinate through the rail's own click door — "
+                          + "two-slide.fodp's own #ff6600-vs-#0033cc fills must diverge, or the "
+                          + "\"tiles differ per part\" claim is false")
+        XCTAssertEqual(part1Pixels.count, TileMath.bytesPerTile)
+
+        view.unmount()
+        _ = host.teardownAllOfficeRuntimesAndStopHelper()
+    }
 }
