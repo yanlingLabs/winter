@@ -285,6 +285,25 @@ final class LOKBridge: OfficeDocumentBridge {
         /// outside `OfficeSaveFormat`'s six — see that type's own doc for why a `nil` here fails a
         /// later `saveAs`, never the `open` that produced it.
         let saveFormat: OfficeSaveFormat?
+        /// **Fix round 2 (CRITICAL)** — this document's OWN view id, captured via `getView(rawDoc)`
+        /// immediately after `initializeForRendering` in `openOnDedicatedThread`, while it is the
+        /// ONLY view that exists for this document (so the lookup is unambiguous — "the view that
+        /// `documentLoad` creates is current at load time," confirmed by reading
+        /// `SfxLokHelper::createView`/`getViewId` directly). Exists because LOK's "current view" is
+        /// a PROCESS-GLOBAL concept, not scoped to the document handle it is read through:
+        /// `ScModelObj::setPart`/`::getPart` (`sc/source/ui/unoobj/docuno.cxx`) resolve via the
+        /// STATIC `ScDocShell::GetViewData()` (ultimately `SfxViewShell::Current()`), ignoring
+        /// `this->pDocShell` entirely — unlike `paintTile`/`postMouseEvent`/`getDocWindow`, which all
+        /// correctly use the INSTANCE-scoped `pDocShell->GetBestViewShell(false)`. `doc_paintPartTile`
+        /// (`desktop/source/lib/init.cxx`) inherits the SAME hazard through its own internal
+        /// `doc_setPartImpl` call — confirmed empirically, not just by source reading, by the two-
+        /// document live drills in `OfficeRuntimeLiveTests.swift` failing at the paint-detector
+        /// assertion (byte-identical part-0/part-1 tiles) before this fix. `-1` (LOK's own "no view"
+        /// sentinel, per `getViewId`'s documented return) is stored as-is, never substituted — every
+        /// call site's own `setView` prefix degrades harmlessly to today's pre-fix behavior in that
+        /// case (`SfxLokHelper::setView`'s `getViewOfId` lookup returns null for `-1` and no-ops),
+        /// rather than this bridge inventing a fallback LOK itself does not provide.
+        let viewId: Int32
     }
 
     private let thread: LOKDedicatedThread
@@ -463,6 +482,12 @@ final class LOKBridge: OfficeDocumentBridge {
 
         rawDoc.pointee.pClass.pointee.initializeForRendering?(rawDoc, nil)
 
+        // Fix round 2 (CRITICAL) — captured HERE, while this document's view is the only one that
+        // exists (see `OpenDocument.viewId`'s own header for the full mechanism and why this is the
+        // one unambiguous moment to read it). `?? -1` mirrors `getView`'s own documented "no view"
+        // sentinel — never invented by this bridge.
+        let viewId = rawDoc.pointee.pClass.pointee.getView?(rawDoc) ?? -1
+
         let typeInt = rawDoc.pointee.pClass.pointee.getDocumentType?(rawDoc) ?? -1
         let kind = OfficeDocumentKind(lokDocumentType: typeInt)
         let parts = Int(rawDoc.pointee.pClass.pointee.getParts?(rawDoc) ?? 0)
@@ -475,7 +500,8 @@ final class LOKBridge: OfficeDocumentBridge {
         // what `OfficeSaveFormat.init?(pathExtension:)` expects.
         let saveFormat = OfficeSaveFormat(pathExtension: (path as NSString).pathExtension)
         documents[docId] = OpenDocument(handle: rawDoc, context: unmanagedContext,
-                                          tileRenderer: TileRenderer(handle: rawDoc), saveFormat: saveFormat)
+                                          tileRenderer: TileRenderer(handle: rawDoc), saveFormat: saveFormat,
+                                          viewId: viewId)
         return OfficeDocumentMetadata(
             type: kind, parts: parts,
             sizeTwips: OfficeDocumentSize(widthTwips: Int64(width), heightTwips: Int64(height)))
@@ -489,6 +515,15 @@ final class LOKBridge: OfficeDocumentBridge {
 
     private func paintTileOnDedicatedThread(docId: String, key: TileKey) throws -> TilePaintResult {
         guard let doc = documents[docId] else { throw TileError.docNotOpen(docId) }
+        // Fix round 2 (CRITICAL) — see `OpenDocument.viewId`'s own header. `paintPartTile`
+        // (`TileRenderer.renderRaw`'s one real LOK call) inherits the SAME process-global-current-
+        // view hazard `setPart` has, through its own internal `doc_setPartImpl` call when no
+        // "alternative view" is found — confirmed empirically by the two-document live drills in
+        // `OfficeRuntimeLiveTests.swift` failing at this exact assertion before this line existed.
+        // Asserted UNCONDITIONALLY, first, every job — see `postKeyOnDedicatedThread`'s own header
+        // for why this bridge never tries to track "did the current view already happen to match"
+        // instead.
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
         let (generation, pixels) = try doc.tileRenderer.paint(key: key)
         return TilePaintResult(generation: generation, pixels: pixels,
                                 width: TileMath.tilePixelSize, height: TileMath.tilePixelSize)
@@ -539,8 +574,30 @@ final class LOKBridge: OfficeDocumentBridge {
     /// ORDERING — proven live, by I1's own wait, not inferred from the Stage 1 measurement above.
     /// The mechanism by which it clears the flag was not root-caused (LO-internal, not this task's
     /// to chase) — see the call site's own comment for the full account.
+    ///
+    /// **Fix round 2 (CRITICAL) — `setView` first, same job, same reasoning as `postKeyOnDedicated
+    /// Thread`/`paintTileOnDedicatedThread`.** The real, byte-writing `saveAs` C-API call below reads
+    /// `pDocument->mxComponent` directly (`desktop/source/lib/init.cxx`'s `doc_saveAs`, confirmed by
+    /// reading it) — instance-scoped, genuinely safe regardless of which view is globally current.
+    /// The `.uno:Save` FOLLOW-UP below is not: `doc_postUnoCommand` dispatches it through
+    /// `comphelper::dispatchCommand`'s 3-argument overload, which resolves its target via
+    /// `xDesktop->getActiveFrame()` — the SAME process-global "current frame" concept `setPart` was
+    /// found to misuse (confirmed by reading `comphelper/source/misc/dispatchcommand.cxx`), not the
+    /// document-scoped `SfxLokHelper::getViewId` lookup `doc_postUnoCommand` performs earlier in its
+    /// own body for its PDF-save special case and its unmodified-skip gate — that lookup is never
+    /// used to target the dispatch itself. With a second document current, A's save still WRITES
+    /// A's own bytes correctly (`saveAs` is safe) but the `.uno:Save` clear-the-flag follow-up lands
+    /// on the OTHER document's frame — `ModifiedStatus=false` never fires for A, and the other
+    /// document receives a `.uno:Save` dispatch it never asked for. Placed at the TOP of this method,
+    /// unconditionally, matching every other dedicated-thread job's own placement — not narrowly
+    /// scoped to just the `.uno:Save` call — the SAME "assert on entry, every job" invariant, never
+    /// "track what the previous job left current." Empirically confirmed necessary (not merely
+    /// theoretical) by the two-document live drills in `OfficeRuntimeLiveTests.swift`: RED at this
+    /// exact dirty-clear wait once each drill's own "save interleave" (a real tile request against
+    /// the OTHER document, immediately before save) reasserted it as current — GREEN with this line.
     private func saveAsOnDedicatedThread(docId: String, seq: UInt64) throws -> String {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
         guard let format = doc.saveFormat else {
             throw SaveError.unsupportedFormat("(format not captured at open)")
         }
@@ -610,18 +667,30 @@ final class LOKBridge: OfficeDocumentBridge {
     /// this SAME dedicated-thread job.** `postKeyEvent` has NO part parameter in LOK's own C API
     /// (`LibreOfficeKit.h` — confirmed by reading the header directly, not assumed): it always
     /// targets whichever part `setPart`/`getPart` currently say is active, a genuinely STATEFUL
-    /// notion on LOK's side. This is a REAL constraint, not a design choice this bridge is free to
-    /// avoid the way `paintPartTile` avoids it — `TileRenderer.renderRaw`'s own doc comment records
-    /// that painting passes `nPart` DIRECTLY, "never a separate `setPart` call first," specifically
-    /// so interleaved requests for different parts never need to coordinate a shared mutation.
-    /// Input has no such stateless call to reach for; `setPart` is the only door LOK exposes. Called
-    /// UNCONDITIONALLY (never gated on "did the part actually change," which would need its own
-    /// `getPart` read and buys nothing but a saved no-op call) — both calls run inside the SAME
-    /// `thread.sync` job as `postKey`'s own single call into this method, so no other queued LOK
-    /// work (a paint for a different part, another connection's own input) can observe or interleave
-    /// between the `setPart` and the event it is scoping.
+    /// notion on LOK's side. Called UNCONDITIONALLY (never gated on "did the part actually change,"
+    /// which would need its own `getPart` read and buys nothing but a saved no-op call) — this call
+    /// and the post below run inside the SAME `thread.sync` job as `postKey`'s own single call into
+    /// this method, so no other queued LOK work can observe or interleave between them.
+    ///
+    /// **Fix round 2 (CRITICAL) — `setView` first, same job, same reasoning.** Round 1's own comment
+    /// here claimed `paintPartTile` avoids needing this because it "passes `nPart` DIRECTLY" — TRUE
+    /// of the WIRE call this bridge makes, but it understated what `paintPartTile` does internally:
+    /// reading `desktop/source/lib/init.cxx` showed it falls back to the SAME `doc_setPartImpl` this
+    /// method's own `setPart` call reaches, and `sc/source/ui/unoobj/docuno.cxx` showed THAT call
+    /// resolves its target through `ScDocShell::GetViewData()` — a PROCESS-GLOBAL "current view,"
+    /// not `doc.handle`'s own document. With more than one document open (Norma's ordinary case),
+    /// `setPart` on a NON-current document silently mutates whichever OTHER document is current
+    /// instead — the target's own part never moves, and the wrong document's active part does.
+    /// `setView` first, unconditionally, in every job that (directly or, like `setPart`, internally)
+    /// depends on the current view, is the fix: assert the invariant on entry, every time, rather
+    /// than track whether the previous job on this thread happened to leave the right view current —
+    /// which is also why there is no matching "restore" call afterward. See `OpenDocument.viewId`'s
+    /// own header for how the id is captured, and `paintTileOnDedicatedThread` for the identical
+    /// prefix on the paint side — both empirically confirmed necessary by the two-document live
+    /// drills in `OfficeRuntimeLiveTests.swift` (RED without this line, GREEN with it).
     private func postKeyOnDedicatedThread(docId: String, part: Int, type: OfficeKeyEventType, charCode: Int, keyCode: Int) throws {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
         doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(truncatingIfNeeded: part))
         doc.handle.pointee.pClass.pointee.postKeyEvent?(
             doc.handle, Int32(type.rawValue), Int32(truncatingIfNeeded: charCode), Int32(truncatingIfNeeded: keyCode))
@@ -640,9 +709,14 @@ final class LOKBridge: OfficeDocumentBridge {
     /// one addition**: `nX`/`nY` are document-space twips, meaningful only relative to whichever
     /// part is current — a mismatched part would not just misdirect the click, it would misinterpret
     /// the COORDINATES themselves against the wrong part's own layout.
+    ///
+    /// **Fix round 2 (CRITICAL) — same `setView`-first reasoning as `postKeyOnDedicatedThread`
+    /// above**, for the identical reason: `setPart` below depends on the process-global current
+    /// view, not `doc.handle`.
     private func postMouseOnDedicatedThread(docId: String, part: Int, type: OfficeMouseEventType, xTwips: Int64, yTwips: Int64,
                                             count: Int, buttons: Int, modifiers: Int) throws {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
         doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(truncatingIfNeeded: part))
         doc.handle.pointee.pClass.pointee.postMouseEvent?(
             doc.handle, Int32(type.rawValue), Int32(truncatingIfNeeded: xTwips), Int32(truncatingIfNeeded: yTwips),
