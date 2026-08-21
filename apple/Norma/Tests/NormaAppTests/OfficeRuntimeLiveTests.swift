@@ -2281,8 +2281,13 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         // marking genuinely DOES fire a real `INVALIDATE_TILES` callback, exactly like an ordinary
         // keystroke** — an in-process `Entry.generation` check (never a log-text read: two separate
         // processes' output streams interleaved by xcodebuild's own capture proved unreliable to
-        // reason about ordering from) confirmed the generation bumps on every phase below. The
-        // client-side `OfficeTileStore` entry is evicted (`onInvalidated` -> `tileStore.invalidate`)
+        // reason about ordering from) confirmed the generation bumps 0 -> 1 across the MARK phase
+        // specifically (that check, and only that one, was actually instrumented — commit and cancel
+        // are not separately re-verified this way below, only inferred from the identical code path:
+        // `routeDocumentEvent`'s `applyTileInvalidation` call is the ONLY thing in this codebase that
+        // ever bumps a generation, gated on nothing but a real `.invalidated` event, so there is no
+        // separate mechanism for the later phases to differ through). The client-side
+        // `OfficeTileStore` entry is evicted (`onInvalidated` -> `tileStore.invalidate`)
         // exactly like any other edit — nothing repaints it without an explicit re-request, because
         // `refetchInvalidatedTiles` (`OfficeRuntime.swift`) is ONLY EVER called from a MOUNTED
         // `OfficeTileCanvasView`'s own `tilesArrived` handling, never automatically by a bare
@@ -2445,13 +2450,42 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         view.mouseUp(with: makeMouseEvent(.leftMouseUp))
         await runtime.drainInputChainForTesting()
 
+        // **Closes the untested middle** — this repo's own repeatedly-named pattern ("two doubles
+        // bracket the untested middle", memory: `chat-slice-d-shipped`) applied here: the
+        // procedural `setMarkedText`/`insertText` pair below proves the COMMIT mechanism (already
+        // proven against real LOK, stage 4a); the classifier tests prove `keyUp` posts a real
+        // charCode for a plain key. Nobody proves them INTERLEAVED the way a real composition
+        // actually produces them — a real Option-e-then-e sequence's true event order is
+        // `keyDown(⌥e)` [intercepted by the real, layout-dependent IME machinery into
+        // `setMarkedText` — not exercised here, see this drill's own header], `keyUp(⌥e)` [reaches
+        // `keyUp(with:)` regardless of what the keyDown did — `keyUp`'s own header explains why it is
+        // UNCONDITIONAL], `keyDown(e)` [resolves the composition into `insertText`], `keyUp(e)`.
+        // `keyUp`'s own classifier excludes only `.command`/`.control` — a REAL Option-held keyUp's
+        // `charactersIgnoringModifiers` is NOT excluded by that classifier, so it posts a REAL,
+        // non-zero charCode onto the wire — a "keystroke" LOK receives while this drill's own preedit
+        // run is still active. If that orphan post corrupted the composition (inserted extra text,
+        // reset the marked run, raced the commit), the placement assertions below would catch it —
+        // synthetic `NSEvent`s only, deterministic, no keyboard-layout dependency (unlike a REAL
+        // keyDown for these two keys, which this drill deliberately never attempts — see its header).
+        func makeKeyUpEvent(characters: String, keyCode: UInt16, modifiers: NSEvent.ModifierFlags) -> NSEvent {
+            try! XCTUnwrap(NSEvent.keyEvent(with: .keyUp, location: .zero, modifierFlags: modifiers, timestamp: 0,
+                                            windowNumber: window.windowNumber, context: nil, characters: characters,
+                                            charactersIgnoringModifiers: characters, isARepeat: false, keyCode: keyCode))
+        }
+
         // The composition itself — two `NSTextInputClient` calls, the exact pair a real Option-e
-        // (marks the pending accent) then e (resolves and commits "é") sequence drives AppKit into.
+        // (marks the pending accent) then e (resolves and commits "é") sequence drives AppKit into,
+        // with the two orphan keyUps posted at their own real, interleaved positions.
         XCTAssertFalse(view.hasMarkedText(), "setup: nothing composing before this drill starts")
         view.setMarkedText("´", selectedRange: NSRange(location: 1, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
         XCTAssertTrue(view.hasMarkedText(), "setMarkedText must register composition as active")
+        // Real macOS: `charactersIgnoringModifiers` for the Option-e dead-key's own physical keyUp
+        // reports "´" (the same accent glyph `setMarkedText` above just marked) — AppKit keyCode 14
+        // is 'e's own physical position (`OfficeInputCodesTests`' own table).
+        view.keyUp(with: makeKeyUpEvent(characters: "´", keyCode: 14, modifiers: .option))
         view.insertText("é", replacementRange: NSRange(location: NSNotFound, length: 0))
         XCTAssertFalse(view.hasMarkedText(), "insertText must end composition on commit")
+        view.keyUp(with: makeKeyUpEvent(characters: "e", keyCode: 14, modifiers: []))
         await runtime.drainInputChainForTesting()
 
         let becameDirty = await waitUntil(timeout: 15) { runtime.stateSnapshot.documents[docPath]?.dirty == true }

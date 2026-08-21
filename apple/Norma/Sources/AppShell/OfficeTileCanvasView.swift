@@ -1612,9 +1612,14 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost, NSTextInputC
         if let caretLayer {
             if let rect = state.caretRectTwips, state.caretPart == part, caretBlinkPhaseVisible {
                 var screenRect = officeTwipsRectToScreenRect(rect, zoomPPT: zoomPPT, scrollOrigin: scrollOrigin)
-                // A real caret rect's own twips WIDTH is always 0 (a caret is a line, not a box —
-                // Task 5's own live probe, every firing observed) — `officeCaretWidthPoints` is the
-                // rendered hairline thickness a zero-width box would otherwise never show at all.
+                // A PLAIN caret rect's own twips WIDTH is 0 (a caret is a line, not a box — Task 5's
+                // Stage 1 probe, every plain firing observed). **Not universally true**: the Stage 5
+                // é composition drill's own real trace showed a NON-zero width (346 twips) on every
+                // `INVALIDATE_VISIBLE_CURSOR` firing WHILE a preedit run is active — LOK reports the
+                // caret as spanning the marked text during composition, collapsing back to 0 the
+                // instant it commits. `officeCaretWidthPoints` forces BOTH cases to the same rendered
+                // hairline thickness — a real box (346-wide, mid-compose) would otherwise draw as a
+                // solid highlight instead of a caret, and a zero-width one would never show at all.
                 screenRect.size.width = officeCaretWidthPoints
                 caretLayer.frame = screenRect
                 caretLayer.backgroundColor = resolvedAccentColor()
