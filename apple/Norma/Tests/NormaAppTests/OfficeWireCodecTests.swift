@@ -19,11 +19,10 @@ final class OfficeWireCodecTests: XCTestCase {
     /// `testTileHeaderRoundTripsAndPayloadSurvivesSeparately` right below.
     func testEveryFrameTypeRoundTrips() throws {
         let size = OfficeDocumentSize(widthTwips: 26593, heightTwips: 13005)
-        // `#if` does not parse directly inside an array literal's element list ("expected
-        // expression in container literal" — verified empirically, see `OfficeWireFrame
-        // .wireTypes`'s own identical fix) — built as a `var` with an ordinary appended statement
-        // for the DEBUG-only samples instead.
-        var samples: [OfficeWireFrame] = [
+        // Office Stage B Task 4 — the DEBUG-only `debugEdit`/`debugEditOk` samples (which forced
+        // the `var`-plus-conditional-append shape this comment used to explain) are gone — real
+        // edit verbs replace them; back to a plain `let` array literal.
+        let samples: [OfficeWireFrame] = [
             .hello(seq: 1, role: .app, token: "tok-app"),
             .hello(seq: 2, role: .agent, token: "tok-agent"),
             .ping(seq: 3),
@@ -80,12 +79,6 @@ final class OfficeWireCodecTests: XCTestCase {
                 TileKey(part: 1, zoomPPT: 2000, tileX: -3, tileY: 7), // negative index + a second part/zoom
             ]),
         ]
-        #if DEBUG
-        samples += [
-            .debugEdit(seq: 33, docId: "doc-1", text: "hello from the debug door"),
-            .debugEditOk(seq: 34, docId: "doc-1"),
-        ]
-        #endif
         for frame in samples {
             let line = try XCTUnwrap(String(data: frame.encodedLine(), encoding: .utf8))
             XCTAssertTrue(line.hasSuffix("\n"), "every encoded line must be newline-terminated: \(line)")
@@ -124,10 +117,7 @@ final class OfficeWireCodecTests: XCTestCase {
     /// per name in `wireTypes`, decode, assert the case that comes back names itself the same way
     /// — so `wireTypes`, `decode`, and `wireType` cannot drift apart unnoticed.
     func testWireTypesFixturesEachDecodeToTheCaseTheyName() throws {
-        // `#if` inside a dictionary literal has the identical parse problem the array-literal fix
-        // above documents — built as a `var` with an ordinary merge statement for the DEBUG-only
-        // entries instead.
-        var fixtures: [String: String] = [
+        let fixtures: [String: String] = [
             "hello": #"{"type":"hello","seq":1,"role":"app","token":"t"}"#,
             "ping": #"{"type":"ping","seq":1}"#,
             "open": #"{"type":"open","seq":1,"docId":"d","path":"/p"}"#,
@@ -161,10 +151,6 @@ final class OfficeWireCodecTests: XCTestCase {
             "tileFailed": #"{"type":"tileFailed","seq":1,"docId":"d","key":{"part":0,"zoomPPT":1000,"tileX":0,"tileY":0},"reason":"r"}"#,
             "invalidated": #"{"type":"invalidated","seq":1,"docId":"d","keys":[]}"#,
         ]
-        #if DEBUG
-        fixtures["debugEdit"] = #"{"type":"debugEdit","seq":1,"docId":"d","text":"t"}"#
-        fixtures["debugEditOk"] = #"{"type":"debugEditOk","seq":1,"docId":"d"}"#
-        #endif
         XCTAssertEqual(Set(fixtures.keys), Set(OfficeWireFrame.wireTypes),
                        "fixtures must cover exactly OfficeWireFrame.wireTypes, no more, no less")
         for type in OfficeWireFrame.wireTypes {
@@ -195,10 +181,11 @@ final class OfficeWireCodecTests: XCTestCase {
         XCTAssertEqual(OfficeWireFrame.save(seq: 121, docId: "d").seq, 121)
         XCTAssertEqual(OfficeWireFrame.saved(seq: 122, docId: "d", tempPath: "/p").seq, 122)
         XCTAssertEqual(OfficeWireFrame.saveFailed(seq: 123, docId: "d", reason: "r").seq, 123)
-        #if DEBUG
-        XCTAssertEqual(OfficeWireFrame.debugEdit(seq: 124, docId: "d", text: "t").seq, 124)
-        XCTAssertEqual(OfficeWireFrame.debugEditOk(seq: 125, docId: "d").seq, 125)
-        #endif
+        XCTAssertEqual(OfficeWireFrame.keyEvent(seq: 126, docId: "d", type: .keyInput, charCode: 65, keyCode: 512).seq, 126)
+        XCTAssertEqual(OfficeWireFrame.mouseEvent(seq: 127, docId: "d", type: .buttonDown, xTwips: 0, yTwips: 0,
+                                                   count: 1, buttons: 1, modifiers: 0).seq, 127)
+        XCTAssertEqual(OfficeWireFrame.keyEventOk(seq: 128, docId: "d").seq, 128)
+        XCTAssertEqual(OfficeWireFrame.mouseEventOk(seq: 129, docId: "d").seq, 129)
         XCTAssertEqual(OfficeWireFrame.helloOk(seq: 104, lokVersion: "v").seq, 104)
         XCTAssertEqual(OfficeWireFrame.refused(seq: 105, reason: "r").seq, 105)
         XCTAssertEqual(OfficeWireFrame.pong(seq: 106).seq, 106)

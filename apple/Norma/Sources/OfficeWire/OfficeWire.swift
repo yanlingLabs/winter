@@ -107,21 +107,6 @@ public enum OfficeWireFrame: Equatable, Sendable {
     case mouseEvent(seq: UInt64, docId: String, type: OfficeMouseEventType, xTwips: Int64, yTwips: Int64,
                      count: Int, buttons: Int, modifiers: Int)
 
-    #if DEBUG
-    /// Office Stage B Task 2 — **DEBUG-only, and REMOVED BY TASK 4** (which lands real edit verbs).
-    /// The one wire door this task's own live round-trip test uses to prove a save persists a REAL
-    /// content change, in the absence of any shipped input verb yet: selects a cell (`.uno:GoToCell`)
-    /// then pastes `text` into it (`LibreOfficeKitDocumentClass.paste`) on the LOK dedicated thread —
-    /// see `LOKBridge.debugEditOnDedicatedThread`'s own header for why `paste`, not the brief's own
-    /// suggested `.uno:EnterString` (a live-test-caught correction: that UNO dispatch popped a real
-    /// LOK window callback this headless door cannot answer, and crashed the helper). `#if DEBUG` at
-    /// the CASE level, not merely at a call site — this frame cannot be constructed, encoded, or
-    /// decoded at all outside a DEBUG build, so a Release helper has no way to reach it: it is
-    /// simply absent from `wireTypes` in that configuration, and an attempt to send it is refused
-    /// identically to any other unrecognized type (`error{reason:"unknown"}`).
-    case debugEdit(seq: UInt64, docId: String, text: String)
-    #endif
-
     /// Task 4 — registers this connection as a tile-push subscriber for `docId` (must already be
     /// open — by ANY connection, not necessarily this one; see `OfficeHelperServer`'s multicast
     /// seam) and reports the tile-set the CURRENT viewport needs, computed via
@@ -189,20 +174,13 @@ public enum OfficeWireFrame: Equatable, Sendable {
     case saveFailed(seq: UInt64, docId: String, reason: String)
     /// Office Stage B Task 4 — answers `keyEvent`: the key was POSTED to LOK — not a claim it
     /// already took effect (`postKeyEvent` is `void` on LOK's own side, exactly as fire-and-forget
-    /// as `postUnoCommand` was for the debug door this replaces — see that case's own retired
-    /// `debugEditOk` reply, whose "posted, not a claim of effect" wording this one deliberately
-    /// repeats). The real effect is observed the same way every other Stage A/B async effect is:
+    /// as `postUnoCommand` was for the now-removed DEBUG-only `debugEdit` door this replaces — the
+    /// "posted, not a claim of effect" wording is that retired reply's own, deliberately repeated
+    /// here). The real effect is observed the same way every other Stage A/B async effect is:
     /// through the `documentEvent`/`invalidated` pushes that follow.
     case keyEventOk(seq: UInt64, docId: String)
     /// Office Stage B Task 4 — answers `mouseEvent`, same posture as `keyEventOk` above.
     case mouseEventOk(seq: UInt64, docId: String)
-    #if DEBUG
-    /// Office Stage B Task 2 — **DEBUG-only, and REMOVED BY TASK 4.** Answers `debugEdit`: the UNO
-    /// command was POSTED — not a claim it already took effect (`postUnoCommand` is fire-and-forget
-    /// on LOK's own side, with no synchronous result). This task's live test observes the real
-    /// effect through the `modifiedChanged(true)` push that follows, never through this reply.
-    case debugEditOk(seq: UInt64, docId: String)
-    #endif
     /// Answers anything the helper refuses post-auth: an unknown frame type (`reason:"unknown"`,
     /// the brief's literal pin), a known type whose fields don't decode (`reason:"malformed"`),
     /// or a structurally valid frame that is never legal for a client to SEND (a reply shape —
@@ -284,26 +262,18 @@ public enum OfficeWireFrame: Equatable, Sendable {
     /// `EditorBridgeInbound.wireTypes`'s own test does — one fixture per name, decode, assert the
     /// case names itself the same way — so this array and `decode`/`wireType` cannot drift apart
     /// unnoticed.
-    /// Built via a closure, not a bare array literal — verified empirically, not assumed: `#if`
-    /// directly inside `[...]`'s element list does not parse here ("expected expression in
-    /// container literal"), so the DEBUG-only entries are appended as ordinary statements instead,
-    /// which is unambiguously supported. Order still matches frame-declaration order.
-    public static let wireTypes: [String] = {
-        var types = ["hello", "ping", "open", "close", "save"]
-        #if DEBUG
-        types.append("debugEdit")
-        #endif
-        types += ["keyEvent", "mouseEvent",
-                   "subscribeTiles", "unsubscribe", "tileRequest",
-                   "helloOk", "refused", "pong", "opened", "openFailed", "closed", "saved", "saveFailed",
-                   "keyEventOk", "mouseEventOk"]
-        #if DEBUG
-        types.append("debugEditOk")
-        #endif
-        types += ["error", "documentEvent",
-                   "subscribed", "unsubscribed", "tileRequestAccepted", "tile", "tileFailed", "invalidated"]
-        return types
-    }()
+    /// Office Stage B Task 4 — reverted to a plain array literal: the DEBUG-only `debugEdit`/
+    /// `debugEditOk` entries (which previously forced a closure-building shape, since `#if` cannot
+    /// appear directly inside `[...]`'s element list) are gone — real edit verbs replace them.
+    /// Order still matches frame-declaration order.
+    public static let wireTypes: [String] = [
+        "hello", "ping", "open", "close", "save", "keyEvent", "mouseEvent",
+        "subscribeTiles", "unsubscribe", "tileRequest",
+        "helloOk", "refused", "pong", "opened", "openFailed", "closed", "saved", "saveFailed",
+        "keyEventOk", "mouseEventOk",
+        "error", "documentEvent",
+        "subscribed", "unsubscribed", "tileRequestAccepted", "tile", "tileFailed", "invalidated",
+    ]
 
     public var wireType: String {
         switch self {
@@ -312,9 +282,6 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .open: return "open"
         case .close: return "close"
         case .save: return "save"
-        #if DEBUG
-        case .debugEdit: return "debugEdit"
-        #endif
         case .keyEvent: return "keyEvent"
         case .mouseEvent: return "mouseEvent"
         case .subscribeTiles: return "subscribeTiles"
@@ -330,9 +297,6 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .saveFailed: return "saveFailed"
         case .keyEventOk: return "keyEventOk"
         case .mouseEventOk: return "mouseEventOk"
-        #if DEBUG
-        case .debugEditOk: return "debugEditOk"
-        #endif
         case .error: return "error"
         case .documentEvent: return "documentEvent"
         case .subscribed: return "subscribed"
@@ -351,9 +315,6 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .open(let seq, _, _): return seq
         case .close(let seq, _): return seq
         case .save(let seq, _): return seq
-        #if DEBUG
-        case .debugEdit(let seq, _, _): return seq
-        #endif
         case .keyEvent(let seq, _, _, _, _): return seq
         case .mouseEvent(let seq, _, _, _, _, _, _, _): return seq
         case .subscribeTiles(let seq, _, _, _, _): return seq
@@ -369,9 +330,6 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .saveFailed(let seq, _, _): return seq
         case .keyEventOk(let seq, _): return seq
         case .mouseEventOk(let seq, _): return seq
-        #if DEBUG
-        case .debugEditOk(let seq, _): return seq
-        #endif
         case .error(let seq, _): return seq
         case .documentEvent(let seq, _, _): return seq
         case .subscribed(let seq, _, _): return seq
@@ -399,13 +357,6 @@ public enum OfficeWireFrame: Equatable, Sendable {
             payload["path"] = path
         case .close(_, let docId), .closed(_, let docId), .save(_, let docId):
             payload["docId"] = docId
-        #if DEBUG
-        case .debugEdit(_, let docId, let text):
-            payload["docId"] = docId
-            payload["text"] = text
-        case .debugEditOk(_, let docId):
-            payload["docId"] = docId
-        #endif
         case .keyEvent(_, let docId, let type, let charCode, let keyCode):
             payload["docId"] = docId
             payload["eventType"] = type.rawValue
@@ -931,18 +882,6 @@ public enum OfficeWireCodec {
                 return .rejected(seq: seq, reason: "malformed")
             }
             return .frame(.save(seq: seq, docId: docId))
-        #if DEBUG
-        case "debugEdit":
-            guard let docId = object["docId"] as? String, let text = object["text"] as? String else {
-                return .rejected(seq: seq, reason: "malformed")
-            }
-            return .frame(.debugEdit(seq: seq, docId: docId, text: text))
-        case "debugEditOk":
-            guard let docId = object["docId"] as? String else {
-                return .rejected(seq: seq, reason: "malformed")
-            }
-            return .frame(.debugEditOk(seq: seq, docId: docId))
-        #endif
         case "keyEvent":
             guard let docId = object["docId"] as? String,
                   let typeRaw = intValue(object["eventType"]), let type = OfficeKeyEventType(rawValue: typeRaw),

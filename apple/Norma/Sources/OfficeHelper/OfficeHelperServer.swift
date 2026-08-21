@@ -82,21 +82,12 @@ public protocol OfficeDocumentBridge: AnyObject {
     /// `open`; `OfficeHelperServer` translates this into a `saveFailed` reply.
     func saveAs(docId: String, seq: UInt64) throws -> String
 
-    #if DEBUG
-    /// Office Stage B Task 2 — **DEBUG-only, and REMOVED BY TASK 4.** See `OfficeWireFrame
-    /// .debugEdit`'s own header for what this stands in for and why. `FakeOfficeDocumentBridge`'s
-    /// own conformance is a no-op (Stage A/B fixture wire tests never need real content to change,
-    /// only the dispatch shape — docNotOpen, seq echo, the reply case) — only `LOKBridge`'s
-    /// conformance does anything real.
-    func debugEdit(docId: String, text: String) throws
-    #endif
-
     /// Office Stage B Task 4 — LOK's `postKeyEvent`, unchanged parameter shape. Throws only on a
     /// `docId` this bridge has no handle for — `postKeyEvent` itself is `void` on LOK's own side
-    /// (fire-and-forget, no synchronous success/failure to report), the identical posture
-    /// `debugEdit` above already had. `FakeOfficeDocumentBridge`'s conformance is a no-op past the
-    /// existence check — same reasoning as its `debugEdit`/`saveAs` stubs: wire-level dispatch is
-    /// what the fixture-backed tests exercise, never real content.
+    /// (fire-and-forget, no synchronous success/failure to report — the same posture the now-
+    /// removed DEBUG-only `debugEdit` door had, replaced by this real verb). `FakeOfficeDocumentBridge`'s
+    /// conformance is a no-op past the existence check — same reasoning as its `saveAs` stub:
+    /// wire-level dispatch is what the fixture-backed tests exercise, never real content.
     func postKey(docId: String, type: OfficeKeyEventType, charCode: Int, keyCode: Int) throws
     /// Office Stage B Task 4 — LOK's `postMouseEvent`, same posture as `postKey` above.
     func postMouse(docId: String, type: OfficeMouseEventType, xTwips: Int64, yTwips: Int64,
@@ -176,16 +167,9 @@ public final class FakeOfficeDocumentBridge: OfficeDocumentBridge {
         return destination.path
     }
 
-    #if DEBUG
-    /// Office Stage B Task 2 — **DEBUG-only, and REMOVED BY TASK 4.** No-op: this fake has no real
-    /// document content for a UNO command to change — see `OfficeDocumentBridge.debugEdit`'s own
-    /// header for why only `LOKBridge`'s conformance does anything real.
-    public func debugEdit(docId: String, text: String) throws {}
-    #endif
-
-    /// Office Stage B Task 4 — existence-checked no-op, same reasoning as `debugEdit`/`saveAs`
-    /// above: this fake has no real LOK document to post an event to, only wire-level dispatch
-    /// (docId-not-open, the `keyEventOk` reply shape) is exercised against it.
+    /// Office Stage B Task 4 — existence-checked no-op, same reasoning as `saveAs` above: this fake
+    /// has no real LOK document to post an event to, only wire-level dispatch (docId-not-open, the
+    /// `keyEventOk` reply shape) is exercised against it.
     public func postKey(docId: String, type: OfficeKeyEventType, charCode: Int, keyCode: Int) throws {
         lock.lock()
         let isOpen = caches[docId] != nil
@@ -768,25 +752,10 @@ public final class OfficeHelperServer {
                 // The helper SURVIVES a failed save — same posture as a failed open.
                 writeReply(.saveFailed(seq: seq, docId: docId, reason: "\(error)"), writer: writer)
             }
-        #if DEBUG
-        case .frame(.debugEdit(let seq, let docId, let text)):
-            // Office Stage B Task 2 — **DEBUG-only, and REMOVED BY TASK 4.** Same existence check as
-            // `.save` above (not an ownership check — this is a test-only door, not a destructive one).
-            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
-                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
-                return
-            }
-            do {
-                try documentBridge.debugEdit(docId: docId, text: text)
-                writeReply(.debugEditOk(seq: seq, docId: docId), writer: writer)
-            } catch {
-                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
-            }
-        #endif
         case .frame(.keyEvent(let seq, let docId, let type, let charCode, let keyCode)):
-            // Office Stage B Task 4 — same existence check as `.save`/`.debugEdit` above (not an
-            // ownership check — any connection touching an already-open doc may post input to it,
-            // matching `tileRequest`'s own posture, not `close`'s).
+            // Office Stage B Task 4 — same existence check as `.save` above (not an ownership check
+            // — any connection touching an already-open doc may post input to it, matching
+            // `tileRequest`'s own posture, not `close`'s).
             guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
                 writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
                 return

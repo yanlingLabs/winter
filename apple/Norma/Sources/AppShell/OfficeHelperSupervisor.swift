@@ -155,24 +155,6 @@ final class OfficeHelperClient {
         }
     }
 
-    #if DEBUG
-    /// Office Stage B Task 2 — **DEBUG-only, and REMOVED BY TASK 4.** See `OfficeWireFrame
-    /// .debugEdit`'s own header. Used by nothing in production — `OfficeRuntime` never calls this;
-    /// only `OfficeRuntimeLiveTests`' own save round-trip test reaches it directly, through
-    /// `OfficeHelperSupervisor.client`, to provoke a real, committed content change with no shipped
-    /// edit verb to use instead.
-    func debugEdit(docId: String, text: String) async throws {
-        let seq = seqAllocator.nextSeq()
-        try await connection.send(.debugEdit(seq: seq, docId: docId, text: text))
-        let reply = try await expectReply(seq: seq)
-        switch reply {
-        case .debugEditOk: return
-        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
-        default: throw OfficeHelperClientError.unexpectedReply(reply)
-        }
-    }
-    #endif
-
     // MARK: - Task 4: real input
 
     /// Office Stage B Task 4 — the real edit verb. Awaits only the immediate `keyEventOk` POST

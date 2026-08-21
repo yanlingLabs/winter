@@ -239,8 +239,8 @@ final class LOKBridge: OfficeDocumentBridge {
         }
     }
 
-    /// Office Stage B Task 2 — a `saveAs` (or, DEBUG-only, a `debugEdit`) operation named a `docId`
-    /// this bridge has no open handle for, asked to save a document whose format `OfficeSaveFormat`
+    /// Office Stage B Task 2 — a `saveAs` (Task 4: also `postKey`/`postMouse`) operation named a
+    /// `docId` this bridge has no open handle for, asked to save a document whose format `OfficeSaveFormat`
     /// does not cover, or hit a real `saveAs` failure. Never a crash — `OfficeHelperServer`
     /// translates every case into a `saveFailed` reply, the same "the helper always survives"
     /// posture `LoadError`/`TileError` already have.
@@ -417,18 +417,6 @@ final class LOKBridge: OfficeDocumentBridge {
         try thread.sync { try self.saveAsOnDedicatedThread(docId: docId, seq: seq) }
     }
 
-    #if DEBUG
-    /// Office Stage B Task 2 — **DEBUG-only, and REMOVED BY TASK 4.** Selects a cell then pastes
-    /// `text` into it (`debugEditOnDedicatedThread`'s own header has the corrected mechanism and
-    /// the live-test trace that forced the correction away from `.uno:EnterString`) — see
-    /// `OfficeWireFrame.debugEdit`'s own header for why this exists and what it stands in for.
-    /// Throws on a docId this bridge has no handle for, OR on `paste()` itself reporting failure
-    /// (unlike `postUnoCommand`, `paste` DOES return a synchronous success/failure `bool`).
-    func debugEdit(docId: String, text: String) throws {
-        try thread.sync { try self.debugEditOnDedicatedThread(docId: docId, text: text) }
-    }
-    #endif
-
     /// Office Stage B Task 4 — called from a CONNECTION thread (`OfficeHelperServer`'s `.keyEvent`
     /// handler), never from inside a LOK callback — marshals onto `thread` exactly like every other
     /// document-scoped call on this bridge.
@@ -595,71 +583,25 @@ final class LOKBridge: OfficeDocumentBridge {
         return destination.path
     }
 
-    #if DEBUG
-    /// Office Stage B Task 2 — **DEBUG-only, and REMOVED BY TASK 4.**
-    ///
-    /// **Corrected, live-test-caught, twice (task-2-report.md has the full transcript both
-    /// times).** The brief named `.uno:EnterString`; dispatching it (via `postUnoCommand`) against
-    /// this task's own live fixtures popped a real LOK window callback — an "Information" dialog
-    /// this headless door has no way to answer — and the WHOLE HELPER PROCESS then exited with
-    /// "Unspecified Application Error." A first theory (the fixture's own stray
-    /// `<workbookProtection/>` XML) was tested and DISPROVEN empirically: stripping that element
-    /// from a scratch copy and verifying the rebuilt archive genuinely lacked it changed nothing —
-    /// the SAME dialog, the SAME crash. Whatever `.uno:EnterString`'s own dispatch path does in
-    /// this headless LOK embedding (no real window system behind it), it is not safe to call.
-    /// **Plausible (not confirmed) reinterpretation, found later while root-causing the dirty-
-    /// tracking bug this same task hit (`disableDocumentLockFile`'s header)**: every fixture this
-    /// door was ever exercised against was opened sandboxed and outside `--state-path`, exactly the
-    /// condition now shown to make LOK load a document read-only. An "Information" dialog popping
-    /// the instant an edit command dispatches is consistent with a read-only-document refusal
-    /// prompt, not necessarily an `EnterString`-specific defect — not re-tested against a
-    /// known-writable (inside-fence) document to confirm, so this stays a note for the next reader
-    /// rather than a claim; `paste()` remains the right choice regardless, since it never surfaces
-    /// UI either way.
-    ///
-    /// Uses `LibreOfficeKitDocumentClass.paste` instead — a direct C-API data-insertion call, not a
-    /// UNO-dispatch through the SfxDispatcher/UI layer `.uno:EnterString` goes through, and the
-    /// SAME mechanism a real clipboard paste uses. `.uno:GoToCell` still selects the target cell
-    /// first (moves the cursor away from whatever a fixture's own default cursor, e.g. A1, happens
-    /// to hold) — `paste` inserts at the CURRENT selection, exactly like `.uno:EnterString` would
-    /// have.
-    private func debugEditOnDedicatedThread(docId: String, text: String) throws {
-        guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
-        // Ruled out as a red herring while root-causing the dirty-tracking bug (task-2-report.md):
-        // disabling GoToCell entirely reproduced the SAME missing-modified-callback failure, which
-        // is what pointed the search away from this dispatch and at the sandboxed document-outside-
-        // fence condition instead (see `disableDocumentLockFile`'s header for the read-only-medium
-        // finding that condition actually root-caused to). GoToCell itself was never the problem —
-        // restored unconditionally.
-        let gotoPayload: [String: Any] = ["ToPoint": ["type": "string", "value": "D10"]]
-        if let gotoData = try? JSONSerialization.data(withJSONObject: gotoPayload),
-           let gotoString = String(data: gotoData, encoding: .utf8) {
-            ".uno:GoToCell".withCString { commandPtr in
-                gotoString.withCString { argsPtr in
-                    doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, argsPtr, false)
-                }
-            }
-        }
-        let textBytes = Array(text.utf8)
-        let pasted = "text/plain;charset=utf-8".withCString { mimePtr -> Bool in
-            textBytes.withUnsafeBufferPointer { buffer -> Bool in
-                guard let base = buffer.baseAddress else { return false }
-                return base.withMemoryRebound(to: CChar.self, capacity: buffer.count) { charPtr in
-                    doc.handle.pointee.pClass.pointee.paste?(doc.handle, mimePtr, charPtr, buffer.count) ?? false
-                }
-            }
-        }
-        guard pasted else {
-            throw SaveError.saveAsFailed("debugEdit: paste() reported failure")
-        }
-    }
-    #endif
+    // Office Stage B Task 4 — the DEBUG-only `debugEditOnDedicatedThread` (a `.uno:GoToCell` +
+    // `LibreOfficeKitDocumentClass.paste` stand-in for a real edit verb) is REMOVED, replaced by
+    // the real `postKeyOnDedicatedThread`/`postMouseOnDedicatedThread` below. Its own retired
+    // history, for the next reader who reaches for `.uno:EnterString` again: the brief originally
+    // named that UNO command, but dispatching it via `postUnoCommand` popped a real LOK "Information"
+    // dialog this headless embedding cannot answer and crashed the whole helper — reproduced twice,
+    // a stray-XML theory tested and disproven (task-2-report.md has the full transcript). Later,
+    // while root-causing a SEPARATE dirty-tracking bug, a plausible (never confirmed) reinterpretation
+    // surfaced: every fixture that door was ever exercised against was sandboxed and outside
+    // `--state-path`, the exact condition since shown to load a document read-only — an "Information"
+    // dialog on the first edit attempt is consistent with a read-only-refusal prompt, not necessarily
+    // an `EnterString`-specific defect. Documents are staged and genuinely writable now (Task 2b), and
+    // `postKeyEvent`/`postMouseEvent` proved this task's own live tests never need `.uno:EnterString`
+    // at all — the mystery is moot, not re-litigated.
 
     /// Office Stage B Task 4 — `postKeyEvent(nType, nCharCode, nKeyCode)`, LOK's own C signature,
-    /// unchanged. `SaveError.docNotOpen` reused rather than a fresh error case — the exact same
-    /// existence-check reuse `debugEditOnDedicatedThread` above already established for a
-    /// non-save purpose; a real, dedicated `InputError` was considered and set aside as
-    /// over-structure for one shared case with no other divergent member.
+    /// unchanged. `SaveError.docNotOpen` reused rather than a fresh error case for this non-save
+    /// purpose — a real, dedicated `InputError` was considered and set aside as over-structure for
+    /// one shared case with no other divergent member.
     private func postKeyOnDedicatedThread(docId: String, type: OfficeKeyEventType, charCode: Int, keyCode: Int) throws {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
         doc.handle.pointee.pClass.pointee.postKeyEvent?(

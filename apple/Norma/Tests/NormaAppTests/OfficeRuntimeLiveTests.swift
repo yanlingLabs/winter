@@ -509,16 +509,50 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         _ = host.teardownAllOfficeRuntimesAndStopHelper()
     }
 
-    /// **The edit itself** goes through the DEBUG-only `debugEdit` wire door directly — bypassing
-    /// `OfficeRuntime`/`ShellSessionHost` entirely, straight at `OfficeHelperSupervisor.client`
-    /// (`@testable import`, the same access this file's other tests already use for
-    /// `host.officeHelperSupervisor?.process`) — production code never calls this; only THIS test
-    /// does, standing in for Task 4's real edit verbs. `.uno:GoToCell` (a no-op for `.odt`, which has
-    /// no concept of "cell") then a `paste()` at the current selection/cursor — see
-    /// `LOKBridge.debugEditOnDedicatedThread`'s own header for why `paste`, not the brief's own
-    /// suggested `.uno:EnterString` (a SEPARATE live-test-caught correction: that UNO dispatch popped
-    /// its own real LOK window callback, unrelated to the OOXML finding above).
-    func testSaveThroughTheDebugEditDoorThenCloseThenReopenPersistsRealContentAcrossTwoFormats() async throws {
+    /// Office Stage B Task 4 — the shared real-edit helper both migrated tests below use: a real
+    /// mouse click (positions LOK's own cursor/selection — twips (100, 100), inside both A1's own
+    /// real bounding rect for a spreadsheet AND the very start of a text document's body,
+    /// empirically the same shape the criteria-1-4 live tests in `OfficeHelperLiveTests.swift`
+    /// already use) then real `postKey` calls for `marker`'s own characters, committed with Return.
+    /// `keyCodes` is a small, TEST-LOCAL table (not `OfficeInputCodes`, which is keyed by AppKit
+    /// PHYSICAL keyCode — there is no `NSEvent` anywhere in this wire-level helper) of exactly the
+    /// `com.sun.star.awt.Key` base codes this file's own marker text needs, uppercase letters OR'd
+    /// with `KEY_SHIFT` (`0x1000`) — matching how a real user actually holds Shift to type them,
+    /// the same packed-modifier convention `OfficeInputCodes`'s own header derives at length.
+    private func postRealEdit(client: OfficeHelperClient, docId: String, marker: String) async throws {
+        try await client.postMouse(docId: docId, type: .buttonDown, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await client.postMouse(docId: docId, type: .buttonUp, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        let keyCodes: [Character: Int] = [
+            "T": 531 | 0x1000, "E": 516 | 0x1000, "D": 515 | 0x1000, "I": 520 | 0x1000, "4": 260,
+        ]
+        for character in marker {
+            let keyCode = try XCTUnwrap(keyCodes[character], "postRealEdit's own marker text used a "
+                                        + "character with no test-local keyCode: \(character)")
+            let charCode = try XCTUnwrap(character.asciiValue.map(Int.init))
+            try await client.postKey(docId: docId, type: .keyInput, charCode: charCode, keyCode: keyCode)
+            try await client.postKey(docId: docId, type: .keyUp, charCode: charCode, keyCode: keyCode)
+        }
+        // Return — commits a pending Calc cell edit (Calc's own semantics); a harmless paragraph
+        // break for Writer, which does not change whether the document is now dirty or whether its
+        // rendered pixels differ, this test's own two proofs either way.
+        try await client.postKey(docId: docId, type: .keyInput, charCode: 0, keyCode: 1280)
+        try await client.postKey(docId: docId, type: .keyUp, charCode: 0, keyCode: 1280)
+    }
+
+    /// **Office Stage B Task 4 — migrated off the DEBUG-only `debugEdit` door, now that a real one
+    /// exists.** Before this task, the edit went straight at `OfficeHelperSupervisor.client
+    /// .debugEdit` — bypassing `OfficeRuntime`/`ShellSessionHost` entirely — dispatching
+    /// `.uno:GoToCell` (a no-op for `.odt`, which has no concept of "cell") then a `paste()` at the
+    /// current selection/cursor. That whole door, and its `paste()` mechanism, is GONE — removed in
+    /// the same commit as this migration, per the dispatch's own "no green gap" instruction. The
+    /// real replacement (`postRealEdit`, below) is a real mouse click (positions LOK's own
+    /// cursor/selection — there is no other door for this now) then real `postKey` calls, the exact
+    /// same wire verb `OfficeTileCanvasView.forwardKeyEvent` uses in production, just called
+    /// directly here (bypassing the canvas view itself, which is `OfficeRuntimeLiveTests
+    /// .testTheTypingDrillARealKeyDownThroughTheRealCanvasViewReachesLOKAndTheCaretTileRepaints`'s
+    /// own, separate job) — this test's own scope stays exactly what it always was: a SAVE/
+    /// persistence round trip, not a canvas-forwarding proof.
+    func testSaveThroughTheRealEditDoorThenCloseThenReopenPersistsRealContentAcrossTwoFormats() async throws {
         let helperURL = Bundle.main.bundleURL.deletingLastPathComponent()
             .appendingPathComponent("NormaOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
@@ -582,28 +616,28 @@ final class OfficeRuntimeLiveTests: XCTestCase {
                                               "\(fixtureName)").pixels
 
             guard let client = host.officeHelperSupervisor?.client else {
-                XCTFail("\(fixtureName): no live client to drive the debug edit door through")
+                XCTFail("\(fixtureName): no live client to drive the real edit door through")
                 continue
             }
-            try await client.debugEdit(docId: originalDocId, text: "T2-EDIT-\(fixtureName)")
+            try await postRealEdit(client: client, docId: originalDocId, marker: "T4EDIT")
 
             // Office Stage B Task 2b resolved the NEEDS_CONTEXT finding this assertion used to be
             // pinned against (this test's own header has the full before/after account): staging
-            // makes every document genuinely writable, so the debug edit's `paste()` is no longer a
-            // silent no-op against a read-only medium.
+            // makes every document genuinely writable, so a real edit is no longer a silent no-op
+            // against a read-only medium.
             let becameDirty = await waitUntil(timeout: 15) { runtime.stateSnapshot.documents[docPath]?.dirty == true }
-            XCTAssertTrue(becameDirty, "\(fixtureName): the debug edit's own `.uno:ModifiedStatus=true` "
+            XCTAssertTrue(becameDirty, "\(fixtureName): the real edit's own `.uno:ModifiedStatus=true` "
                           + "callback never reached documents[path].dirty — the dirty-tracking wire "
                           + "(ShellSessionHost.wireOfficeTileCallbacks' onDocumentEvent routing) is "
                           + "what this assertion actually proves, not merely that the edit happened")
 
-            // Sanity: the debug edit's own target docId must still be `docPath`'s CURRENT docId the
+            // Sanity: the edit's own target docId must still be `docPath`'s CURRENT docId the
             // instant before save is requested — a guard against a spurious reload racing the edit
             // that would otherwise make a genuine save-flow failure look identical to "the edit
             // landed on a handle nothing downstream cares about anymore."
             XCTAssertEqual(runtime.stateSnapshot.documents[docPath]?.docId, originalDocId,
                            "\(fixtureName): docId changed BEFORE save was even requested — something "
-                           + "reloaded and the debug edit's target handle is gone")
+                           + "reloaded and the edit's target handle is gone")
 
             let beforeSaveStat = officeFileStat(atPath: docPath)
             runtime.save(docPath)
@@ -674,8 +708,9 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// tripwire's own save/close/reopen/pixel dance — `becameDirty` alone is what IMPORTANT-1's own
     /// claim is about (a `0444` real document staging into an identically read-only copy would
     /// reproduce Task 2's own `chmod 444` read-only-medium bug, and this is its exact symptom: a
-    /// debug edit that mutates the in-memory model but can never flip the modified flag on a
-    /// read-only medium).
+    /// real edit that mutates the in-memory model but can never flip the modified flag on a
+    /// read-only medium). Office Stage B Task 4 — migrated off `debugEdit` to `postRealEdit`
+    /// (this file's own shared helper, below), same reasoning as the tripwire's own migration.
     func testOpeningADocumentStagedFromAReadOnlySourceStillBecomesEditable() async throws {
         let helperURL = Bundle.main.bundleURL.deletingLastPathComponent()
             .appendingPathComponent("NormaOfficeHelper")
@@ -721,9 +756,9 @@ final class OfficeRuntimeLiveTests: XCTestCase {
 
         guard let client = host.officeHelperSupervisor?.client else {
             _ = host.teardownAllOfficeRuntimesAndStopHelper()
-            return XCTFail("no live client to drive the debug edit door through")
+            return XCTFail("no live client to drive the real edit door through")
         }
-        try await client.debugEdit(docId: docId, text: "T2b-FIX-ROUND-1-READONLY-SOURCE")
+        try await postRealEdit(client: client, docId: docId, marker: "T4EDIT")
 
         let becameDirty = await waitUntil(timeout: 15) { runtime.stateSnapshot.documents[docPath]?.dirty == true }
         XCTAssertTrue(becameDirty, "a document staged from a READ-ONLY real path must still open "
