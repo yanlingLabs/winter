@@ -1028,6 +1028,62 @@ final class ShellSessionHost: ObservableObject {
                     NSLog("[ShellSessionHost] office postExtTextInput(\(docId)) failed: \(error)")
                 }
             },
+            // Office Stage B Task 6 — same `queue.run` routing every other Driver call already
+            // has. `nil` on failure (never `""`, which is LOK's own legal "nothing selected"
+            // answer) — the same discrimination `close`/`unsubscribeTiles` already draw between
+            // "nothing to report" and "a real, empty-but-valid result."
+            clipboardCopy: { [weak supervisor] docId, part in
+                do {
+                    return try await queue.run {
+                        guard let client = supervisor?.client else { return nil }
+                        return try await client.clipboardCopy(docId: docId, part: part)
+                    }
+                } catch {
+                    NSLog("[ShellSessionHost] office clipboardCopy(\(docId)) failed: \(error)")
+                    return nil
+                }
+            },
+            clipboardCut: { [weak supervisor] docId, part in
+                do {
+                    return try await queue.run {
+                        guard let client = supervisor?.client else { return nil }
+                        return try await client.clipboardCut(docId: docId, part: part)
+                    }
+                } catch {
+                    NSLog("[ShellSessionHost] office clipboardCut(\(docId)) failed: \(error)")
+                    return nil
+                }
+            },
+            clipboardPaste: { [weak supervisor] docId, part, text in
+                do {
+                    try await queue.run {
+                        guard let client = supervisor?.client else { return }
+                        try await client.clipboardPaste(docId: docId, part: part, text: text)
+                    }
+                } catch {
+                    NSLog("[ShellSessionHost] office clipboardPaste(\(docId)) failed: \(error)")
+                }
+            },
+            undo: { [weak supervisor] docId in
+                do {
+                    try await queue.run {
+                        guard let client = supervisor?.client else { return }
+                        try await client.undo(docId: docId)
+                    }
+                } catch {
+                    NSLog("[ShellSessionHost] office undo(\(docId)) failed: \(error)")
+                }
+            },
+            redo: { [weak supervisor] docId in
+                do {
+                    try await queue.run {
+                        guard let client = supervisor?.client else { return }
+                        try await client.redo(docId: docId)
+                    }
+                } catch {
+                    NSLog("[ShellSessionHost] office redo(\(docId)) failed: \(error)")
+                }
+            },
             // Office Stage B Task 2b — the LIVE supervisor's own configured directory, never
             // `OfficeHelperSupervisor.Configuration.defaultStateDirectory()` read fresh: every live
             // test overrides `socketDirectory` with a scratch dir precisely so its own helper's

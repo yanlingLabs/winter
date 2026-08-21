@@ -345,6 +345,33 @@ final class OfficeTileCanvasViewTests: XCTestCase {
         var postExtTextInputCalls: [(docId: String, part: Int, type: OfficeExtTextInputType, text: String)] {
             lock.lock(); defer { lock.unlock() }; return _postExtTextInputCalls
         }
+        /// Office Stage B Task 6 — the clipboard/undo/redo call sequences the canvas's own menu
+        /// pins need to see. Same additive-only reasoning as `postExtTextInputCalls` above: every
+        /// PRE-existing test in this file only reads the arrays it already knew about.
+        private var _clipboardCopyCalls: [(docId: String, part: Int)] = []
+        var clipboardCopyCalls: [(docId: String, part: Int)] {
+            lock.lock(); defer { lock.unlock() }; return _clipboardCopyCalls
+        }
+        private var _clipboardCutCalls: [(docId: String, part: Int)] = []
+        var clipboardCutCalls: [(docId: String, part: Int)] {
+            lock.lock(); defer { lock.unlock() }; return _clipboardCutCalls
+        }
+        private var _clipboardPasteCalls: [(docId: String, part: Int, text: String)] = []
+        var clipboardPasteCalls: [(docId: String, part: Int, text: String)] {
+            lock.lock(); defer { lock.unlock() }; return _clipboardPasteCalls
+        }
+        private var _undoCalls: [String] = []
+        var undoCalls: [String] {
+            lock.lock(); defer { lock.unlock() }; return _undoCalls
+        }
+        private var _redoCalls: [String] = []
+        var redoCalls: [String] {
+            lock.lock(); defer { lock.unlock() }; return _redoCalls
+        }
+        /// The text `clipboardCopy`/`clipboardCut` answer with — configurable per test
+        /// (`copyAndCutAnswer`), defaulting to a fixed, deterministic, non-empty string so the
+        /// common "did a pasteboard write happen" pin does not need to configure anything.
+        var copyAndCutAnswer: String? = "clipboard-recorder-text"
         /// office live-gate fix #4, FIX 2: `OfficeTileCanvasView.isSpreadsheet` reads this back via
         /// `runtime.stateSnapshot.documents[path]?.type` — every OTHER test in this file relies on
         /// the pre-existing `.text` default (the infinite-grid margin must stay INERT for them), so
@@ -378,6 +405,23 @@ final class OfficeTileCanvasViewTests: XCTestCase {
                 postMouse: { _, _, _, _, _, _, _, _ in },
                 postExtTextInput: { [unowned self] docId, part, type, text in
                     self.lock.lock(); self._postExtTextInputCalls.append((docId, part, type, text)); self.lock.unlock()
+                },
+                clipboardCopy: { [unowned self] docId, part in
+                    self.lock.lock(); self._clipboardCopyCalls.append((docId, part)); self.lock.unlock()
+                    return self.copyAndCutAnswer
+                },
+                clipboardCut: { [unowned self] docId, part in
+                    self.lock.lock(); self._clipboardCutCalls.append((docId, part)); self.lock.unlock()
+                    return self.copyAndCutAnswer
+                },
+                clipboardPaste: { [unowned self] docId, part, text in
+                    self.lock.lock(); self._clipboardPasteCalls.append((docId, part, text)); self.lock.unlock()
+                },
+                undo: { [unowned self] docId in
+                    self.lock.lock(); self._undoCalls.append(docId); self.lock.unlock()
+                },
+                redo: { [unowned self] docId in
+                    self.lock.lock(); self._redoCalls.append(docId); self.lock.unlock()
                 },
                 stateDirectory: stateDirectory)
         }
@@ -855,6 +899,11 @@ final class OfficeTileCanvasViewTests: XCTestCase {
                 },
                 postKey: { _, _, _, _, _ in }, postMouse: { _, _, _, _, _, _, _, _ in },
                 postExtTextInput: { _, _, _, _ in },
+                clipboardCopy: { _, _ in nil },
+                clipboardCut: { _, _ in nil },
+                clipboardPaste: { _, _, _ in },
+                undo: { _ in },
+                redo: { _ in },
                 stateDirectory: stateDirectory)
         }
     }

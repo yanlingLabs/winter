@@ -145,6 +145,11 @@ final class OfficeCursorStoreTests: XCTestCase {
             requestTiles: { _, _ in },
             postKey: { _, _, _, _, _ in }, postMouse: { _, _, _, _, _, _, _, _ in },
             postExtTextInput: { _, _, _, _ in },
+            clipboardCopy: { _, _ in nil },
+            clipboardCut: { _, _ in nil },
+            clipboardPaste: { _, _, _ in },
+            undo: { _ in },
+            redo: { _ in },
             stateDirectory: stateDir)
         let runtime = OfficeRuntime(sessionId: "S1", driver: driver)
         integrationRuntimes.append(runtime)

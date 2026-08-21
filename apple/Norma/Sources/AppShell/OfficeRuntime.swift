@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 #if canImport(Darwin)
 import Darwin
 #endif
@@ -832,6 +833,23 @@ final class OfficeRuntime: ObservableObject {
         /// `OfficeRuntime.postExtTextInput`'s own header for why it joins `postKey`/`postMouse`'s
         /// SAME `inputChainTail` ordering chain rather than a chain of its own.
         var postExtTextInput: (_ docId: String, _ part: Int, _ type: OfficeExtTextInputType, _ text: String) async -> Void
+        /// Office Stage B Task 6 — reads the current text selection. `nil` on any failure
+        /// (`docNotOpen`, a protocol error) — same fire-and-forget-but-not-silent posture
+        /// `close`/`unsubscribeTiles` already have (the production implementation logs a thrown
+        /// error; there is no caller-side recovery action either way). `""` — LOK's own "no
+        /// selection" answer — is a LEGAL, non-`nil` result: only a genuine failure answers `nil`.
+        var clipboardCopy: (_ docId: String, _ part: Int) async -> String?
+        /// Same shape as `clipboardCopy`, but also deletes the selection on the far side.
+        var clipboardCut: (_ docId: String, _ part: Int) async -> String?
+        /// Fire-and-forget, same posture as `postKey`/`postMouse` — a paste that fails has nothing
+        /// for `OfficeRuntime` to roll back, only something worth logging.
+        var clipboardPaste: (_ docId: String, _ part: Int, _ text: String) async -> Void
+        /// `.uno:Undo` against the document's own primary view. Fire-and-forget — see
+        /// `OfficeWireFrame.undoOk`'s own header for why this never claims to have changed
+        /// anything, only that the command was dispatched.
+        var undo: (_ docId: String) async -> Void
+        /// `.uno:Redo`, same posture as `undo` above.
+        var redo: (_ docId: String) async -> Void
         /// **Office Stage B Task 2b — the shared helper's own `--state-path`.** A plain stored
         /// value, unlike every sibling above: it is a FACT about the shared supervisor's
         /// configuration (`OfficeHelperSupervisor.statePath`, exposing `Configuration
@@ -908,14 +926,29 @@ final class OfficeRuntime: ObservableObject {
     /// is), matching `OfficeHelperRequestQueue.tail`'s identical shape and identical reasoning.
     private var inputChainTail: Task<Void, Never> = Task {}
 
+    /// Office Stage B Task 6 — where `postClipboardCopy`/`postClipboardCut` write their result.
+    /// Injected, like `makeWatcher` above, rather than touching `NSPasteboard.general` directly in
+    /// this file: the actual write happens INSIDE the `inputChainTail` chain (see
+    /// `postClipboardCopy`'s own header for why — the advisor's own review point for this task),
+    /// so a test proving chain-ordering must be able to observe/replace it without touching the
+    /// REAL system pasteboard (shared, global, and a source of cross-test flake if several test
+    /// runs ever wrote to it concurrently).
+    private let writeSystemPasteboard: (String) -> Void
+
     init(sessionId: String, driver: Driver, makeDocId: @escaping () -> String = { UUID().uuidString },
          makeWatcher: @escaping EditorFileWatcherFactory = { path, onChange in
              DispatchSourceFileWatcher(path: path, onChange: onChange)
+         },
+         writeSystemPasteboard: @escaping (String) -> Void = { text in
+             let pasteboard = NSPasteboard.general
+             pasteboard.clearContents()
+             pasteboard.setString(text, forType: .string)
          }) {
         self.sessionId = sessionId
         self.driver = driver
         self.makeDocId = makeDocId
         self.makeWatcher = makeWatcher
+        self.writeSystemPasteboard = writeSystemPasteboard
     }
 
     // MARK: The doors
@@ -1136,9 +1169,91 @@ final class OfficeRuntime: ObservableObject {
         }
     }
 
+    /// Office Stage B Task 6 — same door, same `inputChainTail` ordering chain, for Copy. Joins
+    /// the chain for the SAME reason `postKeyEvent`'s own header gives: a paste racing ahead of a
+    /// queued caret-click would paste at the wrong position, and a copy racing ahead of the
+    /// keystrokes that produced the selection it reads would read the WRONG selection — advisor
+    /// review, this task.
+    ///
+    /// **The pasteboard WRITE happens INSIDE the chained task, after the reply arrives** — not
+    /// returned to the caller for it to write later. A caller-side write (e.g. from
+    /// `OfficeTileCanvasView.copy(_:)`, `Task { await runtime.something(); writeToPasteboard() }`)
+    /// would run OUTSIDE this chain's own ordering guarantee: a rapid ⌘C-then-⌘V could read the
+    /// system pasteboard before this call's own asynchronous round trip had actually written to
+    /// it. Writing here, as the chain's own last act for this call, closes that window the same
+    /// way every other ordering guarantee in this file is closed — by construction, not by timing.
+    func postClipboardCopy(path: String) {
+        guard let doc = state.documents[path] else { return }
+        let docId = doc.docId
+        let part = doc.activePart
+        let previous = inputChainTail
+        inputChainTail = Task { [driver, writeSystemPasteboard] in
+            _ = await previous.value
+            guard let text = await driver.clipboardCopy(docId, part), !text.isEmpty else { return }
+            writeSystemPasteboard(text)
+        }
+    }
+
+    /// Same door, same chain, same "write inside the chained task" reasoning as `postClipboardCopy`
+    /// above — for Cut.
+    func postClipboardCut(path: String) {
+        guard let doc = state.documents[path] else { return }
+        let docId = doc.docId
+        let part = doc.activePart
+        let previous = inputChainTail
+        inputChainTail = Task { [driver, writeSystemPasteboard] in
+            _ = await previous.value
+            guard let text = await driver.clipboardCut(docId, part), !text.isEmpty else { return }
+            writeSystemPasteboard(text)
+        }
+    }
+
+    /// Office Stage B Task 6 — Paste. `text` is captured by the CALLER at gesture time (e.g.
+    /// `OfficeTileCanvasView.paste(_:)` reads `NSPasteboard.general` synchronously, before ever
+    /// calling this door) and passed in here, NEVER re-read from the system pasteboard from inside
+    /// the chained task below — advisor review, this task: another app (or another paste on this
+    /// SAME wire, still ahead in the chain) could change the system pasteboard between when the
+    /// user pressed ⌘V and when this call's own turn in the chain arrives; reading at gesture time
+    /// is what makes "what gets pasted" match what the user actually saw on the pasteboard when
+    /// they asked.
+    func postClipboardPaste(path: String, text: String) {
+        guard let doc = state.documents[path] else { return }
+        let docId = doc.docId
+        let part = doc.activePart
+        let previous = inputChainTail
+        inputChainTail = Task { [driver] in
+            _ = await previous.value
+            await driver.clipboardPaste(docId, part, text)
+        }
+    }
+
+    /// Office Stage B Task 6 — `.uno:Undo`, same door, same chain: an undo racing ahead of a
+    /// queued keystroke would undo the wrong (not-yet-landed) edit.
+    func postUndo(path: String) {
+        guard let doc = state.documents[path] else { return }
+        let docId = doc.docId
+        let previous = inputChainTail
+        inputChainTail = Task { [driver] in
+            _ = await previous.value
+            await driver.undo(docId)
+        }
+    }
+
+    /// `.uno:Redo`, same posture as `postUndo` above.
+    func postRedo(path: String) {
+        guard let doc = state.documents[path] else { return }
+        let docId = doc.docId
+        let previous = inputChainTail
+        inputChainTail = Task { [driver] in
+            _ = await previous.value
+            await driver.redo(docId)
+        }
+    }
+
     /// Test-only: awaits the current tail of the input-ordering chain, so a test can know a
-    /// `postKeyEvent`/`postMouseEvent`/`postExtTextInput` call has actually reached the driver
-    /// before asserting on its effect, without a `waitUntil` poll racing the chain's own scheduling.
+    /// `postKeyEvent`/`postMouseEvent`/`postExtTextInput`/`postClipboardCopy`/`postClipboardCut`/
+    /// `postClipboardPaste`/`postUndo`/`postRedo` call has actually reached the driver before
+    /// asserting on its effect, without a `waitUntil` poll racing the chain's own scheduling.
     func drainInputChainForTesting() async {
         await inputChainTail.value
     }
