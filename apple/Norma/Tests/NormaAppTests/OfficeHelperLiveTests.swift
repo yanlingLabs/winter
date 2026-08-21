@@ -502,6 +502,59 @@ final class OfficeHelperLiveTests: XCTestCase {
             .filter { $0.lastPathComponent.hasPrefix("lok-profile-") }
     }
 
+    // MARK: - Office Stage B Task 7 — autosave/ is the ONE state-path directory NOT wholesale-swept
+
+    /// **The load-bearing counterpart to the sweep test immediately above — same two-sequential-
+    /// boots-same-state-path shape, opposite claim.** `docs/`/`saves/` are wiped unconditionally at
+    /// every boot (`LOKBridge.sweepStaleDocumentDirectories`, proven implicitly by every save/stage
+    /// test in this file leaving no cross-boot leftovers) because nothing they hold survives being
+    /// deleted — a staged copy re-stages, a rendered save is a one-shot temp already relocated.
+    /// `autosave/` is the opposite: whatever is sitting there when a helper boots is the ONE thing a
+    /// crash-recovery feature exists to NOT delete out from under the app's own next-open check.
+    /// Proves this the SAME way `testStaleProfileDirectoriesAreSweptOnTheNextBootOfTheSameStatePath`
+    /// proves the wipe: a file placed under the FIRST boot's own `autosave/`, that boot SIGKILLed
+    /// (matching how a dead helper actually goes away once LOK is loaded — carry #4), a SECOND
+    /// helper booted against the exact same `--state-path`, and the file still there afterward.
+    ///
+    /// Deliberately does not need a REAL autosaved sidecar (no wire traffic, no LOK document, no
+    /// dirty timer) — `LOKBridge.init`'s own boot-time sweep call runs unconditionally, before
+    /// anything document-shaped ever happens, so a bare marker file already proves the claim: this
+    /// directory is either swept at boot or it is not, independent of what created its contents.
+    func testAutosaveDirectorySurvivesAcrossASIGKILLAndRespawnUnlikeDocsAndSaves() async throws {
+        try skipUnlessVendorPresent()
+        let sharedStateDir = makeScratchDirectory()
+
+        let first = try await spawnLiveHelper(stateDir: sharedStateDir)
+        let autosaveDir = sharedStateDir.appendingPathComponent("autosave", isDirectory: true)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: autosaveDir.path),
+                      "the boot-time sweep call (which also CREATES this directory, mirroring "
+                      + "docs/saves) must have run")
+        let markerPath = autosaveDir.appendingPathComponent("crashed-doc.odt")
+        try "unsaved content from before the crash".write(to: markerPath, atomically: true, encoding: .utf8)
+
+        // SIGKILL — matching the sweep test immediately above, and production
+        // (`OfficeHelperSupervisor.forceKill`, carry #4) — confirmed fully reaped before the
+        // second boot starts, so the "one live helper per state-path at a time" safety argument
+        // both sweeps' own headers rely on genuinely holds.
+        let killResult = kill(first.process.processIdentifier, SIGKILL)
+        XCTAssertEqual(killResult, 0, "setup: kill(SIGKILL) syscall itself failed: errno \(errno)")
+        first.process.waitUntilExit()
+        let firstDied = await waitUntil(timeout: 5.0) { !first.process.isRunning }
+        XCTAssertTrue(firstDied, "setup: first helper must be fully dead before the second boots against the same state path")
+
+        let second = try await spawnLiveHelper(stateDir: sharedStateDir)
+
+        XCTAssertEqual(try String(contentsOf: markerPath, encoding: .utf8), "unsaved content from before the crash",
+                       "autosave/ must survive a crash+respawn — deleting it here is deleting the "
+                       + "evidence crash recovery exists to find")
+
+        // The sweep must not have left the second helper in a broken state.
+        let docId = UUID().uuidString
+        let metadata = try await second.client.open(docId: docId, path: Self.fixturesRoot.appendingPathComponent("gate.xlsx").path)
+        XCTAssertEqual(metadata.type, .spreadsheet, "the second helper must still be fully functional")
+        try await second.client.close(docId: docId)
+    }
+
     // MARK: - Embedded root (carry #1: at least one test against the REAL built app)
 
     func testEmbeddedRootBootsAgainstTheRealBuiltAppAndBundleStaysUntouched() async throws {
