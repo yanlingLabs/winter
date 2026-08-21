@@ -752,6 +752,15 @@ targets:
     sources:
       - path: Tests/NormaAppTests
       - path: HelperSources/SMCController.swift
+      # Office Stage B Task 7 — OfficeAutosaveScheduler.swift is Foundation-only by deliberate
+      # constraint (see its own header): no LOK, no bridging header, no wire types, so it is safe
+      # to compile directly into the test bundle, mirroring SMCController.swift's own precedent one
+      # line up, and letting the cadence tests inject a fake clock with zero subprocess/socket
+      # involved. The REST of Sources/OfficeHelper stays out of this target on purpose — everything
+      # else there either needs the bridging header (LOKBridge.swift/TileRenderer.swift/Support) or
+      # is exercised only through a real spawned process (OfficeHelperServer.swift, via
+      # NormaOfficeHelperFixture/NormaOfficeHelper — see those targets' own `excludes:`).
+      - path: Sources/OfficeHelper/OfficeAutosaveScheduler.swift
     dependencies:
       - target: Norma
     settings:
