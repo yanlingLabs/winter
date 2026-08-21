@@ -307,6 +307,134 @@ final class OfficeHelperLiveTests: XCTestCase {
         }
     }
 
+    // MARK: - Office Stage B Task 9: the legacy-format widening decision, empirical
+
+    /// **The two formats the widening decision ACCEPTED.** `gate.xlsm` is `gate.xlsx`'s own bytes,
+    /// renamed — `cp gate.xlsx gate.xlsm`, the whole recipe: xlsm's container format IS xlsx's
+    /// (a zip of OOXML parts) with an OPTIONAL macro part, and a macro-free `.xlsm` is byte-for-byte
+    /// what this file already is under its real name. `gate.odg` is HAND-AUTHORED flat ODF —
+    /// `two-slide.fodp`'s own precedent (T8), adapted to `office:mimetype=".graphics"` and an
+    /// `office:drawing`/`draw:page` body instead of `office:presentation`. Proves two things at
+    /// once: LOK's own content-sniffing accepts flat-XML content under the PACKAGED `.odg` extension
+    /// (not only its native `.fodg` — the office-legacy-probe spike's own `open` mode confirmed both
+    /// names independently before this test existed), and `getDocumentType()` genuinely reports
+    /// `DRAWING` (`LOK_DOCTYPE_DRAWING = 3`) for it, a document kind none of the original six ever
+    /// exercised (`OfficeDocumentKind.drawing`, added ahead of need at Task 3, first proven live
+    /// here).
+    func testWidenedLegacyFormatsXlsmAndOdgOpenWithSaneTypePartsAndSize() async throws {
+        try skipUnlessVendorPresent()
+        let helper = try await spawnLiveHelper()
+
+        struct Expectation {
+            let fixture: String; let type: OfficeDocumentKind; let parts: Int
+            let widthTwips: Int64; let heightTwips: Int64
+        }
+        // Same tolerance-free pins as the six-format matrix: `gate.xlsm` is `gate.xlsx`'s own bytes,
+        // so its dimensions match that fixture's own EXACT pin, not the tolerance-banded `.ods` one.
+        let expectations: [Expectation] = [
+            Expectation(fixture: "gate.xlsm", type: .spreadsheet, parts: 1, widthTwips: 26593, heightTwips: 13005),
+            Expectation(fixture: "gate.odg", type: .drawing, parts: 1, widthTwips: 12241, heightTwips: 15841),
+        ]
+        for expectation in expectations {
+            let path = Self.fixturesRoot.appendingPathComponent(expectation.fixture).path
+            let docId = UUID().uuidString
+            let metadata = try await helper.client.open(docId: docId, path: path)
+            XCTAssertEqual(metadata.type, expectation.type, "\(expectation.fixture): type")
+            XCTAssertEqual(metadata.parts, expectation.parts, "\(expectation.fixture): parts")
+            XCTAssertEqual(metadata.sizeTwips.widthTwips, expectation.widthTwips, "\(expectation.fixture): widthTwips")
+            XCTAssertEqual(metadata.sizeTwips.heightTwips, expectation.heightTwips, "\(expectation.fixture): heightTwips")
+            print("[legacy widening matrix] \(expectation.fixture): type=\(metadata.type) parts=\(metadata.parts) "
+                    + "size=\(metadata.sizeTwips.widthTwips)x\(metadata.sizeTwips.heightTwips)")
+            try await helper.client.close(docId: docId)
+        }
+    }
+
+    /// **The three formats the widening decision REJECTED — a known, disclosed limitation, pinned
+    /// the same way `testKnownLimitationOOXMLExportIsNotAvailableInThisVendorBuildWhileODFExportWorks`
+    /// already pins the export-side gap, so a future vendor rebuild that fixes this is caught by a
+    /// RED test here, not silently missed.** All three fixtures are committed, genuinely-produced
+    /// legacy binary (OLE2/CFB) documents — never fabricated garbage bytes (`testGarbageFileOpen
+    /// FailsAndHelperSurvives`'s own well-known caveat: LOK's content-sniffing is lenient enough
+    /// that arbitrary bytes rarely reproduce a REAL format-specific failure).
+    ///
+    /// `legacy-doc.doc` — macOS's own `textutil -convert doc` (built in, no LOK involved at all;
+    /// exact recipe: `echo '<text>' > x.txt && textutil -convert doc x.txt -output legacy-doc.doc`),
+    /// a genuine "Composite Document File V2 Document" per `file(1)`. Two independent source texts
+    /// (plain ASCII and a richer RTF import) both produced the IDENTICAL failure while writing this
+    /// test — not a content-specific fluke.
+    ///
+    /// `legacy-xls.xls`/`legacy-ppt.ppt` — LOK's OWN `saveAs`, called directly against the bare
+    /// extension (bypassing this app's `OfficeSaveFormat` table entirely, which has no case for
+    /// either), via the `spikes/office-legacy-probe` C spike this task added (`saveas` mode) —
+    /// `gate.ods`/`gate.odp` in, `.xls`/`.ppt` out. **The export half of that round trip SUCCEEDED
+    /// cleanly** — genuine, non-crashing writes, disproving the advisor's own pre-registered guess
+    /// that legacy export would crash the same way OOXML export does (`ooxml-export-investigation
+    /// .md`'s own missing-`libsal_textenclo.dylib` mechanism does not reach these filters). **Only
+    /// the READ-BACK half fails** — the exact inverse of the six original formats' own OOXML
+    /// situation (there, EXPORT was the gap and IMPORT always worked; here, IMPORT is the gap and
+    /// EXPORT works), which is why this vendor build's own trim is the more likely explanation than
+    /// any inherent legacy-binary limitation: something the IMPORT-side filter registration needs
+    /// is missing from this trimmed product-set, distinct from whatever the export-side filter needs.
+    ///
+    /// **`legacy-xls.xls` fails CLEANLY** — `documentLoad` returns `NULL`,
+    /// `OfficeHelperServer`'s own "the helper always survives" design holds exactly as it does for
+    /// the six original formats' own `testGarbageFileOpenFailsAndHelperSurvives`: a catchable
+    /// `LoadError`, a normal `openFailed` reply, `helper.process.isRunning` stays `true`.
+    ///
+    /// **`legacy-doc.doc` and `legacy-ppt.ppt` do NOT fail cleanly — they take the whole helper
+    /// process down.** Live-caught, not assumed: the FIRST cut of this test expected a clean
+    /// `openFailed` for both (mirroring `.xls`) and failed with `OfficeHelperClientError.timedOut`
+    /// instead — `expectReply`'s own `nextFrame(timeout:)` returning `nil` early (a genuine 15s
+    /// network stall would not resolve in ~2s) because the CONNECTION closed out from under it, not
+    /// because nothing answered in time. The standalone `office-legacy-probe` spike (no Swift/ObjC
+    /// exception layer at all) independently reproduces the identical shape for both: LOK prints its
+    /// own generic UNO fallback string, `"Unspecified Application Error"`, then the PROCESS EXITS
+    /// (`exit(1)`, confirmed via the spike's own `$?` — not a signal-raised crash: no entry lands in
+    /// `~/Library/Logs/DiagnosticReports/` for it). A direct libc `exit()`/`_Exit()` call from deep
+    /// inside LO's own C++ import path bypasses Swift's `try`/`catch` entirely — `OfficeHelperServer`'s
+    /// "never a crash" design (`LoadError`'s own doc) assumes every LOK failure surfaces as a
+    /// catchable return value, which holds for `.xls`'s own `NULL`-returning failure but not for
+    /// whatever internal condition `.doc`/`.ppt` import hits here. Asserted the same way
+    /// `testKnownLimitationOOXMLExportIsNotAvailableInThisVendorBuildWhileODFExportWorks` already
+    /// asserts ITS OWN helper-dies case: fire the open, poll `!helper.process.isRunning`.
+    func testKnownLimitationLegacyBinaryImportDoesNotOpenInThisVendorBuild() async throws {
+        try skipUnlessVendorPresent()
+
+        // The clean-failure case — mirrors testGarbageFileOpenFailsAndHelperSurvives exactly.
+        do {
+            let helper = try await spawnLiveHelper()
+            let path = Self.fixturesRoot.appendingPathComponent("legacy-xls.xls").path
+            do {
+                _ = try await helper.client.open(docId: UUID().uuidString, path: path)
+                XCTFail("legacy-xls.xls: expected the KNOWN legacy-import limitation to reproduce (an "
+                        + "openFailed) — if this succeeded instead, the limitation was fixed; widen "
+                        + "\"xls\" in officeFileExtensions (PanelEditorTab.swift) and delete this row")
+            } catch OfficeHelperClientError.openFailed(let reason) {
+                XCTAssertTrue(reason.contains("loadComponentFromURL returned an empty reference"),
+                              "legacy-xls.xls: reason was \"\(reason)\" — if this is a DIFFERENT "
+                              + "failure than the one this test pinned, the underlying cause may have "
+                              + "changed; re-verify before assuming the limitation is unchanged")
+            }
+            XCTAssertTrue(helper.process.isRunning, "legacy-xls.xls: a failed legacy import must not "
+                          + "take the helper down with it — same survival bar as any other openFailed")
+        }
+
+        // The helper-dies case — mirrors testKnownLimitationOOXMLExportIsNotAvailableInThisVendorBuild
+        // WhileODFExportWorks's own OOXML-export death detection, one process per fixture (a fixture
+        // that kills its own helper must never abort the matrix for its sibling).
+        for fixture in ["legacy-doc.doc", "legacy-ppt.ppt"] {
+            let helper = try await spawnLiveHelper()
+            let path = Self.fixturesRoot.appendingPathComponent(fixture).path
+            Task { _ = try? await helper.client.open(docId: UUID().uuidString, path: path) }
+            let died = await waitUntil(timeout: 15.0) { !helper.process.isRunning }
+            XCTAssertTrue(died, "\(fixture): expected the KNOWN legacy-import limitation to reproduce "
+                          + "(the helper process dying) — if this timed out instead, either the "
+                          + "limitation was fixed (update this test to assert a clean openFailed, or "
+                          + "success, and widen officeFileExtensions accordingly) or something NEW "
+                          + "broke import for legacy binary formats specifically")
+        }
+    }
+
     // MARK: - Garbage-file survival
 
     /// Task 3 finding, empirical, disclosed in the report — TWO escalating attempts before this

@@ -88,11 +88,59 @@ func panelFilesDoorShown(sessionId: String?, rows: [SessionSummary]) -> Bool {
 
 // MARK: - office-plumbing Task 7: the file-open router (PURE)
 
+/// **Office Stage B Task 9 — the six formats with a genuine SAVE story.** Exactly `LOKBridge
+/// .OfficeSaveFormat`'s own six cases, mirrored here as a second, INTENTIONAL copy: the app target
+/// has no visibility into `NormaOfficeHelper`'s own module (`OfficeSaveFormat` lives in
+/// `Sources/OfficeHelper`, excluded from the app's own sources sweep — `OfficeDocumentBridge`'s own
+/// header in `OfficeHelperServer.swift` explains why), so there is no way to import it directly.
+/// Read this as the boundary `officeDocumentIsReadOnlyFormat` draws, not as a router — nothing
+/// routes tab KIND off this set; `officeFileExtensions` below (the wider set) still owns that.
+let officeReadWriteExtensions: Set<String> = ["xlsx", "ods", "pptx", "odp", "docx", "odt"]
+
 /// The extensions that make a file an OFFICE document rather than something the code editor should
 /// try to render as text — spreadsheets (`xlsx`/`ods`), presentations (`pptx`/`odp`), documents
-/// (`docx`/`odt`). Stage A's fixture set (`gate.*`, Task 1's own manifest) names exactly these six.
+/// (`docx`/`odt`). Stage A's fixture set (`gate.*`, Task 1's own manifest) named exactly these six.
 /// One set — `panelTabKind(forFilePath:)`'s own doc names the drift a second copy of it would be.
-let officeFileExtensions: Set<String> = ["xlsx", "ods", "pptx", "odp", "docx", "odt"]
+///
+/// **Office Stage B Task 9 — widened by two, empirically, against the real vendored LOK.** `xlsm`
+/// (a macro-enabled spreadsheet — content-identical to `xlsx` when it carries no macro part, which
+/// is exactly what `gate.xlsm`'s own fixture recipe produces) and `odg` (ODF drawing) both OPEN and
+/// RENDER cleanly (`OfficeHelperLiveTests.testLegacyFormatsProbe...`, this task's own live proof).
+/// Three siblings were tried and REJECTED, empirically, not by assumption: `xls`/`doc`/`ppt` (binary
+/// 97-2003) all FAIL to open in this vendor build — via two independent routes each (a real
+/// externally-generated file AND, where LOK's own `saveAs` would produce one, a round-tripped
+/// LOK-native file) — see `testKnownLimitationLegacyBinaryImportIsNotAvailableInThisVendorBuild`'s
+/// own header for the exact failures. `xlsb` could not even be SOURCED — LOK's own `saveAs`
+/// answers "no output filter found for provided suffix" for it in this build, and no other route to
+/// genuine `xlsb` bytes existed within this task's scope; left OUT, honestly undecided rather than
+/// silently assumed either way.
+///
+/// **Every widened extension here is also, unconditionally, a `officeDocumentIsReadOnlyFormat`
+/// path** (see that predicate's own header) — `OfficeSaveFormat` has no `xlsm`/`odg` case, so a
+/// `saveAs` for either would fail outright; Stage B's v1 decision is to never let the buffer BECOME
+/// dirty in the first place rather than surface that failure reactively.
+let officeFileExtensions: Set<String> = officeReadWriteExtensions.union(["xlsm", "odg"])
+
+/// Office Stage B Task 9 — **is `path`'s own extension one `officeFileExtensions` recognizes but
+/// `officeReadWriteExtensions` does not?** The v1 answer to the save story T2's own review left
+/// open for every widened format: rather than let `OfficeSaveFormat`'s own "unsupported format"
+/// failure surface reactively (a `saveFailed` banner reading exactly that, after the user has
+/// already typed something into a buffer that was never going to persist), this predicate is
+/// consulted BEFORE any of that can happen — see its three call sites: `officeSaveMenuTarget`
+/// (⌘S disabled), `officeDocumentIsDirty` (no dirty dot, ever, for this path — see that function's
+/// own doc for why this is not merely cosmetic), and `OfficeRuntime`'s own mutation-verb guards
+/// (`postKeyEvent` and its siblings — the input side, which is what makes the dirty-tracking half
+/// of this decision honest rather than a UI-only illusion: if keystrokes still reached LOK, the
+/// canvas would visibly "accept" edits that vanish, silently, the instant the tab closes with no
+/// dirty dot ever having shown to prompt a save the format could not honor anyway).
+///
+/// `path == nil` (a tab with nothing pointed at it — unreachable through any shipped door, mirrors
+/// `officeDocumentIsDirty`'s own `path` handling) answers `false`: nothing to be read-only ABOUT.
+func officeDocumentIsReadOnlyFormat(path: String?) -> Bool {
+    guard let path else { return false }
+    let ext = (path as NSString).pathExtension.lowercased()
+    return officeFileExtensions.contains(ext) && !officeReadWriteExtensions.contains(ext)
+}
 
 /// PURE: **the ONE router every file-open door calls** — office-plumbing Task 7's answer to the
 /// predicate-unify lesson `editorTabSessionRoots`'s own doc already paid for once (wave-8 item 2): a

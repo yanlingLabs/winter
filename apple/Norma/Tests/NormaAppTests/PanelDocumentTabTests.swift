@@ -713,6 +713,52 @@ final class PanelDocumentTabTests: XCTestCase {
                        "a path with no document entry at all is never dirty")
     }
 
+    // MARK: - Office Stage B Task 9: the read-only-viewer decision
+
+    /// PURE: exactly the eight extensions `officeFileExtensions` recognizes split two ways — the
+    /// original six (a genuine `OfficeSaveFormat` case, read-write) and the two Task 9 widened in
+    /// (no case, read-only) — plus the boundary cases (`nil`, an extension outside either set, case
+    /// sensitivity).
+    func testOfficeDocumentIsReadOnlyFormatIsTrueOnlyForTheWidenedNonNativeSaveExtensions() {
+        for ext in ["xlsx", "ods", "pptx", "odp", "docx", "odt"] {
+            XCTAssertFalse(officeDocumentIsReadOnlyFormat(path: "/a.\(ext)"), "\(ext): has a genuine "
+                           + "OfficeSaveFormat case — read-write")
+        }
+        for ext in ["xlsm", "odg"] {
+            XCTAssertTrue(officeDocumentIsReadOnlyFormat(path: "/a.\(ext)"), "\(ext): widened in with "
+                          + "no native save story")
+        }
+        XCTAssertTrue(officeDocumentIsReadOnlyFormat(path: "/a.XLSM"), "case-insensitive, mirroring "
+                      + "panelTabKind(forFilePath:)'s own NSString.pathExtension read")
+        XCTAssertFalse(officeDocumentIsReadOnlyFormat(path: "/a.txt"), "outside officeFileExtensions "
+                       + "entirely — not an office document at all, so not read-only ABOUT one either")
+        XCTAssertFalse(officeDocumentIsReadOnlyFormat(path: nil), "nothing to be read-only about")
+    }
+
+    /// PURE: ⌘S is unreachable for a widened-format tab even though it is otherwise the active
+    /// document tab with a real path — `officeSaveMenuTarget`'s own read-only gate.
+    func testOfficeSaveMenuTargetIsNilForAWidenedReadOnlyFormatEvenWhenOtherwiseEligible() {
+        let readOnly = PanelTab(tabId: "t1", kind: .document, url: "/a.xlsm", title: "a.xlsm")
+        XCTAssertNil(officeSaveMenuTarget(tabs: [readOnly], activeTabId: "t1"), "xlsm has no "
+                     + "OfficeSaveFormat case — ⌘S must never reach a saveRequested for it")
+
+        let readWrite = PanelTab(tabId: "t2", kind: .document, url: realGatePath, title: "gate.xlsx")
+        XCTAssertNotNil(officeSaveMenuTarget(tabs: [readWrite], activeTabId: "t2"), "sanity — an "
+                        + "ordinary read-write document tab is unaffected")
+    }
+
+    /// PURE: even a document LOK itself reports as modified never shows dirty when its own path is
+    /// a widened, read-only format — the predicate's own header explains why this must be true, not
+    /// merely cosmetically hidden: `OfficeRuntime`'s input-verb guards mean this state is actually
+    /// unreachable in practice, but the VIEW-LAYER predicate must hold regardless of how `dirty`
+    /// got set, since it is the one thing standing between a stray `true` and a shown dot.
+    func testOfficeDocumentIsDirtyIsAlwaysFalseForAWidenedReadOnlyFormatEvenIfDirtyIsSomehowTrue() {
+        var state = documentState(path: "/a.xlsm")
+        state.documents["/a.xlsm"]?.dirty = true
+        XCTAssertFalse(officeDocumentIsDirty(state: state, path: "/a.xlsm"), "xlsm never shows dirty, "
+                       + "regardless of what the underlying DocumentEntry says")
+    }
+
     /// The host half of the menu door: it reads the panel it is showing NOW, and it never mints an
     /// office runtime just to ask whether there is something to save — mirrors `EditorSaveTests
     /// .testTheHostResolvesTheActiveCodeTabAndSavesThroughTheExistingRuntimeOnly`'s exact shape.

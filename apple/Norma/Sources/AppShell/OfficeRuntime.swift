@@ -1430,7 +1430,13 @@ final class OfficeRuntime: ObservableObject {
     /// `open`/`close`/`subscribeTiles` — never sequence off this call returning; observe
     /// `state.documents[path].dirty` and `state.documentBanners[path]` instead. A no-op for a path
     /// with no open document (mirrors `.subscribeRequested`'s own reducer guard).
+    ///
+    /// **Task 9 — a no-op for a read-only-format path too, defense-in-depth.** `officeSaveMenuTarget`
+    /// (`PanelDocumentTab.swift`) is the one reachable door today and already refuses this case, but
+    /// gating the runtime door itself means a future SECOND caller can never bypass it by construction
+    /// — the same posture every input verb below (`postKeyEvent` and its siblings) already takes.
     func save(_ path: String) {
+        guard !officeDocumentIsReadOnlyFormat(path: path) else { return }
         perform(dispatch(.saveRequested(path: path)))
     }
 
@@ -1465,8 +1471,12 @@ final class OfficeRuntime: ObservableObject {
     /// without ever registering a waiter, whenever dispatching `.saveRequested` produces no `.save`
     /// effect (not `.ready`, or no open document for `path`) — read from the dispatch's own returned
     /// effects rather than a hand-duplicated copy of the reducer's guard, so the two can never drift.
+    /// Task 9 — a read-only-format path answers `.noModel` immediately, never registering a waiter:
+    /// same reasoning as `save(_:)`'s own gate, in the identical shape this function's own doc
+    /// already uses for "no `.save` effect exists" (there never was a model here to save).
     func saveAndAwaitOutcome(_ path: String) async -> SaveOutcome {
-        await withCheckedContinuation { continuation in
+        guard !officeDocumentIsReadOnlyFormat(path: path) else { return .noModel }
+        return await withCheckedContinuation { continuation in
             let effects = dispatch(.saveRequested(path: path))
             guard case .save(_, let docId, _)? = effects.first else {
                 perform(effects) // always `[]` here, but keeps the dispatch/perform pairing uniform
@@ -1589,8 +1599,17 @@ final class OfficeRuntime: ObservableObject {
     /// to. (There is no analogous "part closed/reloaded out from under it" case the way a `docId`
     /// can go stale — a part number is just an index; the helper's own `docNotOpen` still covers the
     /// `docId`-level staleness this shares with `postKeyEvent`'s existing guard.)
+    /// **Office Stage B Task 9 — the read-only-viewer gate, applied here (and at every OTHER
+    /// mutation verb below) rather than only in the UI.** `officeDocumentIsDirty`'s own header has
+    /// the full argument for why this is required, not merely a defensive extra: without it, a
+    /// read-only-format document would still accept keystrokes at the LOK layer (visibly, on the
+    /// canvas) while the UI silently refuses to ever show a dirty dot or offer ⌘S — a user could
+    /// type, watch it render, and lose it without warning the instant the tab closes. Gating HERE
+    /// means the buffer never actually diverges from disk in the first place, which is what makes
+    /// "no dirty tracking" an honest description rather than a UI-only illusion. `postClipboardCopy`
+    /// is the one sibling that does NOT gate — copying out is a pure read, not a mutation.
     func postKeyEvent(path: String, type: OfficeKeyEventType, charCode: Int, keyCode: Int) {
-        guard let doc = state.documents[path] else { return }
+        guard let doc = state.documents[path], !officeDocumentIsReadOnlyFormat(path: path) else { return }
         let docId = doc.docId
         let part = doc.activePart
         let previous = inputChainTail
@@ -1602,6 +1621,14 @@ final class OfficeRuntime: ObservableObject {
 
     /// Office Stage B Task 4 — same door, same ordering chain, for `postMouseEvent`. See
     /// `postKeyEvent`'s own header for the full reasoning; this is not independently re-explained.
+    /// **Task 9 — deliberately NOT gated on `officeDocumentIsReadOnlyFormat`, unlike `postKeyEvent`
+    /// and the other mutation verbs below.** Mouse events only ever move the caret or extend a
+    /// selection in LOK's own model — no click/drag alone mutates document content (that requires a
+    /// subsequent key/IME/paste event, all of which ARE gated) — so leaving this door open is what
+    /// lets a read-only viewer still support click-to-position and click-drag-to-select, the
+    /// mechanism `postClipboardCopy`'s own un-gated door depends on to have anything to copy.
+    /// Blocking mouse input here would make the canvas inert (no visible caret, no selection ever
+    /// possible) for no corresponding safety gain.
     func postMouseEvent(path: String, type: OfficeMouseEventType, xTwips: Int64, yTwips: Int64,
                         count: Int, buttons: Int, modifiers: Int) {
         guard let doc = state.documents[path] else { return }
@@ -1624,8 +1651,10 @@ final class OfficeRuntime: ObservableObject {
     /// two independent chains would let LOK see them in an order that does not match how the user
     /// actually produced them, the identical corruption `postKeyEvent`'s own header names as the
     /// reason a hand-rolled chain exists at all rather than one `Task` per call.
+    /// Task 9: same read-only-format gate as `postKeyEvent`'s own — an IME commit mutates content
+    /// exactly like an ordinary keystroke does, so it is gated on the identical terms.
     func postExtTextInput(path: String, type: OfficeExtTextInputType, text: String) {
-        guard let doc = state.documents[path] else { return }
+        guard let doc = state.documents[path], !officeDocumentIsReadOnlyFormat(path: path) else { return }
         let docId = doc.docId
         let part = doc.activePart
         let previous = inputChainTail
@@ -1662,8 +1691,10 @@ final class OfficeRuntime: ObservableObject {
 
     /// Same door, same chain, same "write inside the chained task" reasoning as `postClipboardCopy`
     /// above — for Cut.
+    /// Task 9: gated, unlike `postClipboardCopy` immediately above — Cut MUTATES (it is a copy
+    /// followed by a delete), the same reason it is not grouped with Copy's own un-gated posture.
     func postClipboardCut(path: String) {
-        guard let doc = state.documents[path] else { return }
+        guard let doc = state.documents[path], !officeDocumentIsReadOnlyFormat(path: path) else { return }
         let docId = doc.docId
         let part = doc.activePart
         let previous = inputChainTail
@@ -1682,8 +1713,10 @@ final class OfficeRuntime: ObservableObject {
     /// user pressed ⌘V and when this call's own turn in the chain arrives; reading at gesture time
     /// is what makes "what gets pasted" match what the user actually saw on the pasteboard when
     /// they asked.
+    /// Task 9: same read-only-format gate as `postKeyEvent`'s own — Paste mutates exactly like
+    /// typing does.
     func postClipboardPaste(path: String, text: String) {
-        guard let doc = state.documents[path] else { return }
+        guard let doc = state.documents[path], !officeDocumentIsReadOnlyFormat(path: path) else { return }
         let docId = doc.docId
         let part = doc.activePart
         let previous = inputChainTail
@@ -1695,8 +1728,12 @@ final class OfficeRuntime: ObservableObject {
 
     /// Office Stage B Task 6 — `.uno:Undo`, same door, same chain: an undo racing ahead of a
     /// queued keystroke would undo the wrong (not-yet-landed) edit.
+    /// Task 9: same read-only-format gate as `postKeyEvent`'s own. Largely redundant in practice —
+    /// with typing/paste/cut all gated too, a read-only-format document's own LOK-side undo stack
+    /// never has anything mutating pushed onto it in the first place — but kept for the same
+    /// consistency and defense-in-depth every OTHER mutation verb here gets.
     func postUndo(path: String) {
-        guard let doc = state.documents[path] else { return }
+        guard let doc = state.documents[path], !officeDocumentIsReadOnlyFormat(path: path) else { return }
         let docId = doc.docId
         let previous = inputChainTail
         inputChainTail = Task { [driver] in
@@ -1707,7 +1744,7 @@ final class OfficeRuntime: ObservableObject {
 
     /// `.uno:Redo`, same posture as `postUndo` above.
     func postRedo(path: String) {
-        guard let doc = state.documents[path] else { return }
+        guard let doc = state.documents[path], !officeDocumentIsReadOnlyFormat(path: path) else { return }
         let docId = doc.docId
         let previous = inputChainTail
         inputChainTail = Task { [driver] in

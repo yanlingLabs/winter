@@ -203,9 +203,17 @@ func panelDocumentTabAction(tabs: [PanelTab], path: String, openFailures: Set<St
 /// (`PanelEditorTab.swift`) exactly, filtered to `.document` instead of `.code`. Lives here, not
 /// there, because THIS file is document-tab territory (`panelDocumentTabAction`'s own precedent one
 /// section up: the `.document`-kind filter is this file's own recurring idiom, never borrowed).
+///
+/// **Office Stage B Task 9 — the read-only-viewer gate.** A widened format
+/// (`officeDocumentIsReadOnlyFormat`) has no genuine save story (`OfficeSaveFormat` covers only the
+/// original six) — `nil` here disables the ⌘S menu item outright, which is BOTH of this door's two
+/// reads (`ShellSessionHost.activeDocumentTabPath`'s own doc: "once to decide whether the menu item
+/// is enabled, once when it fires"), so this one change closes the door completely, not merely
+/// grays it out cosmetically.
 func officeSaveMenuTarget(tabs: [PanelTab], activeTabId: String?) -> PanelTab? {
     guard let activeTabId, let tab = tabs.first(where: { $0.tabId == activeTabId }) else { return nil }
     guard tab.kind == .document, let url = tab.url, !url.isEmpty else { return nil }
+    guard !officeDocumentIsReadOnlyFormat(path: url) else { return nil }
     return tab
 }
 
@@ -213,8 +221,17 @@ func officeSaveMenuTarget(tabs: [PanelTab], activeTabId: String?) -> PanelTab? {
 /// runtime's state (`documents[path].dirty`, driven purely by LOK's own `.uno:ModifiedStatus`
 /// callback, via `OfficeRuntime.handle(documentEvent:docId:)` — never inferred here). A path with no
 /// open document is not dirty; neither is a session with no runtime.
+///
+/// **Office Stage B Task 9 — read-only formats never show dirty, by construction.** Not merely
+/// cosmetic: `OfficeRuntime`'s own input-verb guards (`postKeyEvent` and its siblings) refuse to
+/// forward keystrokes/mouse-edits/paste/undo/redo for a read-only-format path in the first place,
+/// so LOK's own buffer for one of these documents never actually diverges from disk — this dot
+/// reading `false` is reporting a true fact, not hiding a real one. Were it the other way around
+/// (dot suppressed while edits still reached LOK), a user could type, watch it render, and lose it
+/// silently on close with no warning ever shown — exactly the "one click from data loss" shape this
+/// codebase's own reviews (T3, T7) have repeatedly refused to ship.
 func officeDocumentIsDirty(state: OfficeRuntimeState?, path: String?) -> Bool {
-    guard let state, let path else { return false }
+    guard let state, let path, !officeDocumentIsReadOnlyFormat(path: path) else { return false }
     return state.documents[path]?.dirty == true
 }
 
@@ -642,6 +659,23 @@ struct PanelDocumentChrome: View {
                     .fill(Theme.accent)
                     .frame(width: panelEditorDirtyDotSize, height: panelEditorDirtyDotSize)
                     .accessibilityLabel("Unsaved changes")
+            }
+
+            // Office Stage B Task 9 — the read-only viewer's own chip: a widened format
+            // (`officeDocumentIsReadOnlyFormat`) never shows the dirty dot above (it can never
+            // become dirty — see that predicate's own header), so this is never drawn alongside it;
+            // both read the identical fact, mutually exclusive by construction, not by a shared
+            // `if`/`else`. Deliberately subtle — this file's own `OfficeDocumentBannerView` tokens
+            // (`Theme.hairline`/`Theme.textMuted`), a thin outline rather than a filled badge, so it
+            // reads as informational chrome, not a warning.
+            if officeDocumentIsReadOnlyFormat(path: model.path) {
+                Text("Read-only")
+                    .font(Typography.captionMono())
+                    .foregroundStyle(Theme.textMuted)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .overlay(Capsule().stroke(Theme.hairline, lineWidth: 1))
+                    .accessibilityLabel("Read-only document")
             }
 
             Spacer(minLength: panelEditorChromeGap)

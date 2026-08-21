@@ -275,6 +275,13 @@ final class OfficeHelperClient {
     /// are "unused by the app but drilled"; only the live characterization drill
     /// (`OfficeRuntimeLiveTests`) ever calls this, talking directly to this client, the same
     /// raw-probe precedent Task 5's ext-text-input investigation already set.
+    ///
+    /// **Task 9's own producer sweep, for the record**: the read-only-viewer decision
+    /// (`officeDocumentIsReadOnlyFormat`, `PanelEditorTab.swift`) gates every mutation door
+    /// `OfficeRuntime` exposes (`postKeyEvent` and its siblings) — this pair is UNGATED, because
+    /// there is nothing yet to gate it FROM (no app-side caller exists). Whichever Stage C task
+    /// wires a real caller onto this must ALSO thread that same gate through it, or an agent could
+    /// type into a widened-format document's second view with no save story behind it at all.
     func createAgentView(docId: String) async throws -> Int32 {
         let seq = seqAllocator.nextSeq()
         try await connection.send(.createView(seq: seq, docId: docId))
