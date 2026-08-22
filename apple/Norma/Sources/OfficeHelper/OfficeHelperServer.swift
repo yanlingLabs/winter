@@ -178,6 +178,20 @@ public protocol OfficeDocumentBridge: AnyObject {
     /// Posts a key event through the agent view specifically. Throws `SaveError.noAgentView` if
     /// `createAgentView` was never called for this docId.
     func agentKeyEvent(docId: String, part: Int, type: OfficeKeyEventType, charCode: Int, keyCode: Int) throws
+
+    // MARK: - office-agent-tools T3: sheets info/read
+
+    /// Sheet names, each one's used range, and the active sheet's name. Read-only. Throws only on a
+    /// `docId` this bridge has no handle for, or one that is not a spreadsheet — both composed
+    /// entirely from this bridge's own words (never LOK-thrown text), matching `saveAsFailed`'s own
+    /// posture where the reason genuinely does come from LOK versus the ones that don't.
+    func sheetsInfo(docId: String) throws -> (sheets: [OfficeSheetInfo], activeSheet: String)
+    /// A value or formula grid over one already-validated, already-formatted A1 `range` on ONE named
+    /// sheet — see `OfficeWireFrame.sheetsRead`'s own header for why `range` arrives pre-formatted
+    /// rather than as column/row integers. `sheet` is resolved to a part index HERE. Throws
+    /// `SaveError.sheetNotFound` (carrying the real sheet list) for an unknown name, or the same
+    /// existence/kind errors `sheetsInfo` throws.
+    func sheetsRead(docId: String, sheet: String, range: String, formulas: Bool) throws -> [[String]]
 }
 
 /// The result of a successful `OfficeDocumentBridge.paintTile` call — helper-internal (never
@@ -363,6 +377,29 @@ public final class FakeOfficeDocumentBridge: OfficeDocumentBridge {
         guard hasAgentView else {
             throw OfficeHelperServerError.posix("fake bridge: docId has no agent view: \(docId)")
         }
+    }
+
+    /// office-agent-tools T3 — wire-level dispatch is what the fixture-backed tests exercise here,
+    /// never real sheet content (same reasoning as every other stub above): one synthetic sheet named
+    /// "Sheet1", reporting a fixed, non-empty used range so a wire-level test can assert on a REAL
+    /// (if fake) value rather than the wholly-empty sentinel by accident.
+    public func sheetsInfo(docId: String) throws -> (sheets: [OfficeSheetInfo], activeSheet: String) {
+        lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
+        guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
+        return ([OfficeSheetInfo(name: "Sheet1", usedEndColumn: 2, usedEndRow: 9)], "Sheet1")
+    }
+    /// office-agent-tools T3 — same existence-only posture as `sheetsInfo` above. Refuses any sheet
+    /// name other than "Sheet1" (mirroring the ONE sheet `sheetsInfo` reports) so a wire-level test
+    /// can exercise the `sheetNotFound` refusal path without real LOK. A deterministic, small grid —
+    /// never real content — with `formulas` folded into the one cell that differs, so a wire-level
+    /// test CAN tell the two request shapes apart without needing real LOK to compute anything.
+    public func sheetsRead(docId: String, sheet: String, range: String, formulas: Bool) throws -> [[String]] {
+        lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
+        guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
+        guard sheet == "Sheet1" else {
+            throw OfficeHelperServerError.posix("fake bridge: no sheet named \"\(sheet)\" in \(docId) — this workbook has: Sheet1")
+        }
+        return [["fake", formulas ? "=FAKE()" : "42"]]
     }
 
     /// A small, deterministic, key-dependent pixel pattern (never blank, never identical across
@@ -1173,6 +1210,35 @@ public final class OfficeHelperServer {
             do {
                 try documentBridge.agentKeyEvent(docId: docId, part: part, type: type, charCode: charCode, keyCode: keyCode)
                 writeReply(.agentKeyEventOk(seq: seq, docId: docId), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.sheetsInfo(let seq, let docId)):
+            // office-agent-tools T3 — same existence-check posture as `clipboardCopy`/`undo` above
+            // (any connection touching an already-open doc may read it; this is a read, not a
+            // destructive operation the way `close` is).
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                let result = try documentBridge.sheetsInfo(docId: docId)
+                writeReply(.sheetsInfoOk(seq: seq, docId: docId, sheets: result.sheets, activeSheet: result.activeSheet),
+                           writer: writer)
+            } catch {
+                // `SaveError.notSpreadsheet`/`.docNotOpen` are already house-voice, composed entirely
+                // from this bridge's own words (see that enum's own doc) — `"\(error)"` carries them
+                // through unchanged, the same posture every other verb on this switch already takes.
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.sheetsRead(let seq, let docId, let sheet, let range, let formulas)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                let rows = try documentBridge.sheetsRead(docId: docId, sheet: sheet, range: range, formulas: formulas)
+                writeReply(.sheetsReadOk(seq: seq, docId: docId, rows: rows), writer: writer)
             } catch {
                 writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
             }
