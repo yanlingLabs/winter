@@ -831,6 +831,24 @@ final class ShellSessionHost: ObservableObject {
     /// The session's office runtime **if it already has one** — mirrors `existingEditorRuntime`.
     func existingOfficeRuntime(for sessionId: String) -> OfficeRuntime? { officeRuntimes[sessionId] }
 
+    /// office-agent-tools T2 — the agent's own document broker, reached through this host's existing
+    /// `existingOfficeRuntime`/`officeRuntime(for:)` doors, never a new path to a runtime. One per
+    /// host, lazily minted on first use (mirrors `officeHelperSupervisor`'s own "never in `init`"
+    /// reasoning — most hosts across the test suite never touch office at all, and this costs nothing
+    /// until the first verb does).
+    ///
+    /// `[weak self]` throughout: a broker call outliving this host (a session torn down mid-call) is
+    /// the one case `OfficeAgentBroker.Host`'s optional-returning doors exist for — see that type's
+    /// own doc. `workingDirectories` reads `directory.rows` fresh on every call, never cached, the
+    /// same "read fresh from the directory" convention `resolvedFilePath`/`editorTabSessionRoots`
+    /// already follow for this exact field.
+    private(set) lazy var officeAgentBroker: OfficeAgentBroker = OfficeAgentBroker(host: .init(
+        existingRuntime: { [weak self] sessionId in self?.existingOfficeRuntime(for: sessionId) },
+        runtime: { [weak self] sessionId in self?.officeRuntime(for: sessionId) },
+        workingDirectories: { [weak self] sessionId in
+            self?.directory.rows.first(where: { $0.sessionId == sessionId })?.dirs
+        }))
+
     private func ensureOfficeHelperSupervisor() -> OfficeHelperSupervisor {
         if let existing = officeHelperSupervisor { return existing }
         let supervisor = makeOfficeHelperSupervisor()
