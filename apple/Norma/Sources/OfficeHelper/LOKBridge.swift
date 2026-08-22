@@ -1726,7 +1726,7 @@ final class LOKBridge: OfficeDocumentBridge {
     /// an adopted tab's own visible sheet, which a read-only probe must not do. See
     /// `pumpDedicatedThreadForPendingDispatch` for the call itself and why it is not
     /// `paintTileOnDedicatedThread`.
-    private func selectionTextOnDedicatedThread(_ doc: OpenDocument, viewId: Int32, part: Int, range: String, formulas: Bool) -> String {
+    private func selectionTextOnDedicatedThread(_ doc: OpenDocument, docId: String, viewId: Int32, part: Int, range: String, formulas: Bool) -> String {
         // **Order is load-bearing: the formula toggle MUST run BEFORE `.uno:GoToCell`, not after —
         // live-drill-caught, not reasoned in advance.** The first working version of this function
         // toggled AFTER selecting (select the range, then flip Show Formulas, then read) and got the
@@ -1737,9 +1737,38 @@ final class LOKBridge: OfficeDocumentBridge {
         // first, so the selection itself is built under formula mode, is what actually works — this
         // task's own live drill (`OfficeSheetsCommandTests.testLiveSheetsReadFormulasReturnsFormula
         // TextNotTheComputedValue`) is the regression tripwire for this exact ordering.
+        //
+        // **Fix round 4 (review I5) — the restore is now GUARANTEED (`defer`, not a second plain
+        // statement at the tail), matching the SAME "fire-and-forget is not trustworthy" lesson fix
+        // round 2 already learned for `.uno:GoToCell` — this command rides the identical
+        // `postUnoCommand` contract, so the same distrust applies to whether it DISPATCHES at all on
+        // every exit path. `defer` is registered unconditionally on entry (Swift's own rule: a
+        // `defer` inside `if formulas` would only run if that branch executed, but this one must
+        // ALWAYS pair with the ON-toggle above, so the condition is checked again inside the
+        // deferred block, not by conditioning the registration itself).
+        //
+        // **NOT independently verified that the restore has LANDED before this function returns —
+        // disclosed, not silently assumed solved.** A first attempt at this fix tried to verify it
+        // the same way `.uno:GoToCell` is verified (poll a flag set from a `LOK_CALLBACK_STATE_
+        // CHANGED` handler) on the reviewer's own claim that this command fires one synchronously.
+        // Falsified by this task's own follow-up drill: a complete, unconditional raw-callback trace
+        // for a full seed-then-read-formulas cycle never mentions `ToggleFormula` in ANY callback of
+        // ANY type — see `toggleFormulaOnDedicatedThread`'s own header for the full account. No
+        // signal exists to poll, so none is polled; this function guarantees DISPATCH, not landing.
+        //
+        // **Disclosed, not fixed: this toggle is `rDoc`-scoped (document-wide View > Show Formulas),
+        // not per-view — the agent view does NOT isolate it.** Unlike the selection/part isolation
+        // `sheetsReadOnDedicatedThread`'s own agent-view switch provides, an adopted tab's user CAN
+        // see a brief, real flash to formula display and back for the duration of one `formulas:
+        // true` read — genuinely unavoidable with this mechanism (confirmed: `getCommandValues`'s
+        // full dispatch table, read directly from the pinned source, has no read-only formula-text
+        // query this bridge could use instead).
         if formulas {
-            ".uno:ToggleFormula".withCString { commandPtr in
-                doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, nil, false)
+            toggleFormulaOnDedicatedThread(doc)
+        }
+        defer {
+            if formulas {
+                toggleFormulaOnDedicatedThread(doc)
             }
         }
 
@@ -1798,12 +1827,35 @@ final class LOKBridge: OfficeDocumentBridge {
                 "[LOKBridge sheets] GoToCell(\(range)) needed \(attempts) attempt(s) before the selection changed (or the budget was exhausted)\n".utf8))
         }
 
-        if formulas {
-            ".uno:ToggleFormula".withCString { commandPtr in
-                doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, nil, false)
-            }
-        }
+        // The formula-toggle restore (fix round 4, review I5) is registered as a `defer` above,
+        // right after the ON-toggle — it runs here, guaranteed, on every exit from this function,
+        // not repeated as a plain statement at this tail.
         return text
+    }
+
+    /// office-agent-tools T3 review (I5) — dispatches `.uno:ToggleFormula`. The name deliberately
+    /// does NOT say "AndVerify" — an earlier version of this fix attempted exactly that
+    /// (`OpenDocument.formulaToggleStateChangedSeen`, set from a `LOK_CALLBACK_STATE_CHANGED`
+    /// handler, polled the same way `.uno:GoToCell`'s own race is verified), on the reviewer's own
+    /// claim that this command fires `STATE_CHANGED` synchronously. **Falsified by this task's own
+    /// follow-up drill, not merely unconfirmed**: the COMPLETE, unconditional raw-callback trace for
+    /// a full seed-then-read-formulas cycle (every callback of every type this bridge receives,
+    /// already logged unconditionally by `handleCallback` — 64 lines for one real test run) never
+    /// once mentions `ToggleFormula`, in a `STATE_CHANGED` payload or any other callback type. This
+    /// build's engine gives NO observable signal for this command's own completion — full stop, not
+    /// "sometimes fires, sometimes doesn't" the way `.uno:GoToCell` does.
+    ///
+    /// Given no signal exists to poll, this does not poll. What it DOES still fix, correctly and
+    /// independently of any signal: the caller wraps this in `defer` (`selectionTextOnDedicatedThread`
+    /// above), so the OFF-toggle is GUARANTEED to dispatch on every exit from that function — a real,
+    /// structural improvement over the original plain-statement-at-the-tail shape, which a future
+    /// throwing call added between the ON-toggle and the tail could have skipped. "Guaranteed to
+    /// dispatch" and "guaranteed to have landed by the time this returns" are different properties;
+    /// only the first is achievable here, and this comment does not claim the second.
+    private func toggleFormulaOnDedicatedThread(_ doc: OpenDocument) {
+        ".uno:ToggleFormula".withCString { commandPtr in
+            doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, nil, false)
+        }
     }
 
     /// The one place this bridge calls `getTextSelection` — `selectionTextOnDedicatedThread`'s
@@ -1857,13 +1909,16 @@ final class LOKBridge: OfficeDocumentBridge {
     private static let pumpTilePixelSize = 64
     private static let pumpTileByteCount = 64 * 64 * 4
 
-    /// `selectionTextOnDedicatedThread`'s own poll budget — small deliberately, not generous:
-    /// `sheetsInfoOnDedicatedThread` pays this cost once per sheet, and a genuinely EMPTY sheet
-    /// legitimately burns the FULL budget every time (`""` read equals `""` baseline, so the loop
-    /// never sees a difference to stop early on) — a large budget would make `info` on a many-sheet,
-    /// mostly-empty workbook slow for no correctness benefit. Each attempt is a real, if cheap, LOK
-    /// call (a 64x64 tile paint), not a clock tick, so this is a real cost per attempt, unlike a
-    /// bounded wall-clock retry would be.
+    /// `selectionTextOnDedicatedThread`'s own `.uno:GoToCell` poll budget — the ONE
+    /// `postUnoCommand` this file still verifies via a poll loop (`.uno:ToggleFormula`'s own attempt
+    /// at the identical pattern was tried and abandoned — see `toggleFormulaOnDedicatedThread`'s own
+    /// header for why no signal exists for it to poll). Small deliberately, not generous:
+    /// `sheetsInfoOnDedicatedThread`'s `(0, 0)` disambiguation fallback pays this cost for a
+    /// genuinely empty sheet (`""` read equals `""` baseline, so the loop never sees a difference to
+    /// stop early on and burns the full budget every time) — a large budget would make that fallback
+    /// slow for no correctness benefit on exactly the sheets most likely to trigger it. Each attempt
+    /// is a real, if cheap, LOK call (a 64x64 tile paint), not a clock tick, so this is a real cost
+    /// per attempt, unlike a bounded wall-clock retry would be.
     private static let goToCellVerificationAttempts = 4
 
     /// Splits `getTextSelection`'s own TSV shape (rows joined by `"\n"`, cells within a row joined by
@@ -1989,7 +2044,7 @@ final class LOKBridge: OfficeDocumentBridge {
         let agentViewId = try ensureAgentViewOnDedicatedThread(docId: docId)
         doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
         doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(part))
-        let text = selectionTextOnDedicatedThread(doc, viewId: agentViewId, part: part, range: "A1", formulas: false)
+        let text = selectionTextOnDedicatedThread(doc, docId: docId, viewId: agentViewId, part: part, range: "A1", formulas: false)
         return !text.isEmpty
     }
 
@@ -2021,7 +2076,7 @@ final class LOKBridge: OfficeDocumentBridge {
         doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
         doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(part))
 
-        let text = selectionTextOnDedicatedThread(doc, viewId: agentViewId, part: part, range: range, formulas: formulas)
+        let text = selectionTextOnDedicatedThread(doc, docId: docId, viewId: agentViewId, part: part, range: range, formulas: formulas)
         return parseTSVGrid(text)
     }
 
