@@ -2455,6 +2455,46 @@ final class OfficeRuntimeWatcherTests: XCTestCase {
                        + "reach the banner either")
     }
 
+    /// **Whole-branch review I1 — the SAVE-side needle, pinned on the exact raw text Task 11
+    /// measured through the real helper.** The sibling above proves the mapping mechanism works for
+    /// an open-side shape; this proves the one save-side shape a user can actually hit is IN the
+    /// table. Before the needle existed, `houseErrorSentenceForSaveFailure`'s deliberate
+    /// return-unrecognized-reasons-verbatim rule (which the `"disk full"` contract below requires)
+    /// carried `SfxBaseModel::impl_store ... 0xc10(Error Area:Io Class:Write Code:16)` straight into
+    /// the user's banner — exactly the class T9's F1 fix existed to eliminate.
+    ///
+    /// The raw string is the one `OfficeHelperLiveTests.testXlsxDocxPptxSaveRoundTripThroughTheReal
+    /// HelperAfterTheR3VendorRecut` pins, reproduced here verbatim rather than reduced to the needle
+    /// — a needle asserted against itself would pass no matter how the real text drifts.
+    func testSaveAndAwaitOutcomeMapsTheRealLOKStoreWriteFailureToHouseVoiceRatherThanLeakingIt() async throws {
+        let rawLOKText = "SfxBaseModel::impl_store <file:///tmp/x.docx> failed: "
+                       + "0xc10(Error Area:Io Class:Write Code:16)"
+        let path = try scratchFile(contents: "one")
+        let runtime = OfficeRuntime(sessionId: "S1", driver: makeDriver(save: { _, _ in
+            throw OfficeHelperClientError.saveFailed(reason: rawLOKText)
+        }))
+        runtimes.append(runtime)
+        runtime.open(path)
+        _ = await waitUntil { runtime.stateSnapshot.documents[path] != nil }
+
+        let outcome = await runtime.saveAndAwaitOutcome(path)
+
+        guard case .failed(let reason) = outcome else {
+            return XCTFail("expected .failed, got \(outcome)")
+        }
+        XCTAssertTrue(reason.contains("the office engine failed while writing the file"),
+                      "the observed store-write shape must map to house voice: \(reason)")
+        for leak in ["SfxBaseModel", "impl_store", "0xc10", "Error Area"] {
+            XCTAssertFalse(reason.contains(leak), "raw LO internals (\(leak)) must never survive into "
+                           + "the outcome: \(reason)")
+            XCTAssertEqual(runtime.stateSnapshot.documentBanners[path]?.contains(leak), false,
+                           "nor into the banner (\(leak)) — the raw text belongs in the log only")
+        }
+        XCTAssertEqual(runtime.stateSnapshot.documentBanners[path]?
+                        .contains("the office engine failed while writing the file"), true,
+                       "and the banner carries the same mapped sentence")
+    }
+
     /// The driver's own `save` succeeds (a real temp path comes back) but the ATOMIC PLACE fails —
     /// the inner catch, `performSave`'s own distinct exit from the driver-throws case above. A
     /// nonexistent temp path is enough: `placeAtomically`'s `copyItem` throws ENOENT before ever

@@ -3187,10 +3187,13 @@ final class OfficeRuntime: ObservableObject {
 
     /// **Office Stage B Task 9 — LOK's raw `getError()`/exception text, mapped to a short,
     /// house-voice sentence: sentence case, no exclamation, actionable where possible.** Every
-    /// entry here is a shape this task actually OBSERVED against the real vendored LOK
-    /// (`OfficeHelperLiveTests.testSyntheticLegacyFixturesOpenAsTextAfterR3RecutXlsStillFailsCleanly`'s
-    /// own legacy-format matrix — the `xls` leg specifically; the `doc`/`ppt` legs stopped erroring
-    /// at Task 11, see that test's own header), never a guess at LOK's possible vocabulary — the Stage A concern
+    /// entry here is a shape actually OBSERVED against the real vendored LOK, never a guess at
+    /// LOK's possible vocabulary. Two live tests are the sources, and each entry's own comment says
+    /// which: `OfficeHelperLiveTests.testSyntheticLegacyFixturesOpenAsTextAfterR3RecutXlsStillFails
+    /// Cleanly`'s legacy-format matrix for the OPEN-side shapes (the `xls` leg specifically; the
+    /// `doc`/`ppt` legs stopped erroring at Task 11, see that test's own header), and
+    /// `...testXlsxDocxPptxSaveRoundTripThroughTheRealHelperAfterTheR3VendorRecut` for the one
+    /// SAVE-side shape (whole-branch review I1). The Stage A concern
     /// this closes is specifically "LOK's raw getError strings surface verbatim in openFailures
     /// banners," not every error string this file can produce (see `describe(_:)`'s own header for
     /// where the line is drawn). Matched by case-insensitive substring, not exact equality: LOK's
@@ -3208,6 +3211,31 @@ final class OfficeRuntime: ObservableObject {
         ("refused before documentLoad: legacy OLE2/CFB binary content under a modern Office extension",
          "This file's contents don't match its extension — it looks like an older binary Office "
        + "format and can't be opened here."),
+        // **Whole-branch review I1 — the one SAVE-side shape in this table, and the gap that let raw
+        // LibreOffice internals reach a user's banner.** Task 11 pinned the observed text through the
+        // real helper (`OfficeHelperLiveTests.testXlsxDocxPptxSaveRoundTripThroughTheRealHelperAfter
+        // TheR3VendorRecut`): `SfxBaseModel::impl_store ... failed: 0xc10(Error Area:Io Class:Write
+        // Code:16)`. No needle matched it, and `houseErrorSentenceForSaveFailure` returns an
+        // unrecognized reason VERBATIM by design — so the banner read `Couldn't save Report.docx:
+        // SfxBaseModel::impl_store ... 0xc10(...)`. That is precisely the class T9's own F1 fix
+        // existed to eliminate; the mechanism shipped, the needle did not, because T11 discovered
+        // the shape after this table was written.
+        //
+        // **The sentence is deliberately format-neutral.** `0xc10` is `ERRCODE_IO_CANTWRITE` /
+        // `SVSTREAM_WRITE_ERROR` — LO's GENERIC store-write failure, not a docx-specific code — and
+        // after review I2 no shipped door can reach a docx save at all (`.docx` is held read-only),
+        // so a sentence naming Word would be both unprovable and unreachable. What IS true of every
+        // reason carrying this needle: the failure happened inside the helper's own `saveAs`, before
+        // the app's `placeAtomically` ever ran, so the real file was never touched.
+        //
+        // Matching only `SfxBaseModel::impl_store` — not the `0xc10` code — on purpose: the code is
+        // the part most likely to vary between LO's own error areas for the same user-visible
+        // outcome, while the frame name is the stable core this table's own header describes. Safe
+        // in the shared table: `impl_store` is the STORE path by construction, so it cannot
+        // plausibly appear in an `.openFailed` reason routed through `houseErrorSentence`.
+        ("SfxBaseModel::impl_store",
+         "This document couldn't be saved — the office engine failed while writing the file. "
+       + "Nothing on disk was changed."),
         // legacy-xls.xls's own observed failure — documentLoad returns NULL cleanly, no crash.
         ("loadComponentFromURL returned an empty reference",
          "This file couldn't be opened — it may be corrupted or in a format the office viewer doesn't support."),
