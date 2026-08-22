@@ -77,7 +77,8 @@ final class OfficeSandboxTests: XCTestCase {
     @discardableResult
     private func runProbe(
         kind: String, noSandbox: Bool = false, outsideDir: URL? = nil,
-        profilePath: URL? = OfficeSandboxTests.repoSandboxProfilePath, timeout: TimeInterval = 15.0
+        profilePath: URL? = OfficeSandboxTests.repoSandboxProfilePath, timeout: TimeInterval = 15.0,
+        serviceName: String? = nil
     ) async throws -> (stdout: String, exitCode: Int32) {
         let helperURL = try resolvedHelperURL()
         let stateDir = makeScratchDirectory()
@@ -88,13 +89,30 @@ final class OfficeSandboxTests: XCTestCase {
         if let profilePath { arguments += ["--sandbox-profile", profilePath.path] }
         if noSandbox { arguments.append("--no-sandbox") }
         if let outsideDir { arguments += ["--probe-outside-dir", outsideDir.path] }
+        // Fix-round-2 Test A — lets this same driver parameterize `launch-services-query`'s target
+        // mach service, reusing all of the process-spawn/pipe/timeout machinery below unchanged.
+        if let serviceName { arguments += ["--probe-service-name", serviceName] }
 
         let process = Process()
         process.executableURL = helperURL
         process.arguments = arguments
         let pipe = Pipe()
         process.standardOutput = pipe
-        process.standardError = Pipe() // discard — keeps the log focused on PROBE_RESULT lines
+        // Fix-round-2 (security re-review, Test B investigation) — `/dev/null`, not `Pipe()`: a
+        // `Pipe()` nobody reads from is not a real discard, it is a bounded kernel buffer (~64KB)
+        // that blocks the CHILD's write() once full, with nothing on this side ever draining it
+        // (M5's own already-flagged class of bug — "reads the pipe only after the child exits …
+        // would deadlock for any probe that writes more than a pipe buffer"). Empirically hit by
+        // `launch-open-unregistered-scheme` (fix round 2's own Test B): `LSOpenCFURLRef` internally
+        // triggers an NSXPCConnection error path inside LaunchServices that os_log-errors — and
+        // ONLY when this process runs as a child of `xcodebuild test`'s own test host (never when
+        // spawned bare, from a shell or a plain compiled binary — both proven instant, same
+        // profile, same probe, `sample` confirms 100% of a 3s capture sitting in that single
+        // `writev()`) — unified logging mirrors that error to THIS PROCESS's stderr, filling the
+        // undrained pipe and wedging the child forever, misreading as a sandbox-caused hang. `/dev/
+        // null` has no such buffer: a write to it never blocks, which is what "discard" always
+        // meant here — the previous `Pipe()` just didn't deliver it.
+        process.standardError = FileHandle.nullDevice
         try process.run()
         runningProcesses.append(process)
 
@@ -178,9 +196,140 @@ final class OfficeSandboxTests: XCTestCase {
     /// this grant) was proven interactively during this fix round's own minimization — not
     /// re-pinned here as a second fixture file, to avoid a second, driftable copy of "what T1's
     /// baseline alone looks like" existing in this repo.
+    ///
+    /// Fix-round-2 N3 (security re-review) — this was, at the time, the ONLY capability-EXISTS-
+    /// oriented test in this file: a future, well-intentioned tightening that accidentally dropped
+    /// the `launchservicesd` grant entirely would correctly fail HERE as a regression, but nothing
+    /// proved what is properly ABSENT elsewhere — so an accidental re-widening back toward the
+    /// original four-grant profile had no test to catch it either. `test
+    /// LaunchServicesAdjacentEndpointsAreDeniedUnderTheShippedProfile` (below) is this pin's
+    /// deliberate DENIAL counterpart, added the same fix round — the two are a matched pair (one
+    /// reachability pin, one denial pin), not two unrelated probes; read them together.
     func testLaunchServicesQueryMachLookupIsReachable() async throws {
         let (output, _) = try await runProbe(kind: "launch-services-query")
         XCTAssertTrue(output.contains("PROBE_RESULT: launch-services-query ok"), "got: \(output)")
+    }
+
+    /// Fix-round-2 Test A (security re-review) — the DENIAL counterpart to the reachability pin
+    /// immediately above (see that test's own N3 paragraph for why this pairing matters). Pins
+    /// that the three modern `lsd` sub-endpoints — `com.apple.lsd.openurl`, `com.apple.lsd.mapdb`,
+    /// `com.apple.lsd.modifydb` — are all still genuinely DENIED under the shipped, minimized
+    /// profile, which grants only the single legacy `com.apple.coreservices.launchservicesd` name
+    /// (Experiment C). These three are not arbitrary: `.mapdb`/`.modifydb` are the exact two
+    /// endpoints the two REJECTED higher-level LaunchServices API attempts documented in `main.
+    /// swift`'s `launch-services-query` case actually touched (proven via `log stream` capture,
+    /// fix round 1), and `.openurl` is the modern replacement for the legacy open-by-URL path this
+    /// profile's one grant does NOT cover — the specific fact `testUnregisteredURLSchemeOpen
+    /// NeverReachesAHandledLaunch` (Test B, below) goes on to verify has a real, request-level
+    /// consequence, not just an unreached mach service. Side-effect-free by construction: this
+    /// reuses the exact same read-only mach-lookup probe as the reachability pin above (`main.
+    /// swift`'s `launch-services-query`, now parameterized via `--probe-service-name`) — no
+    /// LaunchServices request is ever sent either way, in any of the three services.
+    ///
+    /// Asserting `sawConnectionInvalid=true` explicitly, not merely the coarser "denied" label, is
+    /// the point — "denied" alone is also satisfied by a 3s timeout with no event at all, a
+    /// weaker and less specific signal than an actual `XPC_ERROR_CONNECTION_INVALID`. The
+    /// fix-round-2 review named this precisely: the correct "tripwire orientation" for a DENIAL pin
+    /// is asserting the denial actually happened, not merely that an "ok" reading did not.
+    func testLaunchServicesAdjacentEndpointsAreDeniedUnderTheShippedProfile() async throws {
+        for service in ["com.apple.lsd.openurl", "com.apple.lsd.mapdb", "com.apple.lsd.modifydb"] {
+            let (output, _) = try await runProbe(kind: "launch-services-query", serviceName: service)
+            XCTAssertTrue(output.contains("PROBE_RESULT: launch-services-query denied"),
+                          "service=\(service) got: \(output)")
+            XCTAssertTrue(output.contains("sawConnectionInvalid=true"),
+                          "service=\(service) must be a genuine XPC_ERROR_CONNECTION_INVALID denial, "
+                            + "not merely a 3s timeout with no event — got: \(output)")
+        }
+    }
+
+    /// Fix-round-2 Test B (security re-review) — **"the ship gate."** Companion to `main.swift`'s
+    /// `launch-open-unregistered-scheme` probe kind (see that case's own doc comment for the full
+    /// discriminator rationale) — this is the test that actually decides whether the one surviving
+    /// grant (`com.apple.coreservices.launchservicesd`, Experiment C) is safe to ship. Runs WITH
+    /// the real shipped profile AND WITHOUT the grant (a scratch copy of the shipped profile with
+    /// only that one `(global-name ...)` line removed) so the WITH-grant reading is checked against
+    /// a control, not read in isolation — the same with/without shape `testSandboxDisabledEscape
+    /// HatchActuallyDisablesTheFenceAndDefaultDoesNot` already establishes above for the write
+    /// fence.
+    ///
+    /// **The real reading, verified empirically, is `-10661` (`kLSExecutableIncorrectFormat`), not
+    /// the `-10822` (`kLSServerCommunicationErr`) this test originally asserted before it was
+    /// actually run against the real binary.** Caught and corrected in place rather than left
+    /// silently wrong — see `task-10-report.md`'s fix-round-2 section for the full account,
+    /// including a live-caught, unrelated test-infrastructure bug this investigation surfaced along
+    /// the way (`runProbe`'s `stderr = Pipe()` deadlocking specifically under `xcodebuild test`'s
+    /// own environment, fixed below in `runProbe` itself — this test's own first XCTest run hung
+    /// for that reason, not a sandbox one; six direct, non-XCTest-hosted spawns had already shown
+    /// the true, fast, -10661 reading before that infrastructure bug was even found). -10661 is the
+    /// SAME code this file's neighboring `launch-services-query` doc comment already established,
+    /// independently, as "a LaunchServices-semantic error unrelated to sandboxing" (the `.txt`-path
+    /// `LSCopyDefaultApplicationURLForURL` attempt, fix round 1) — LaunchServices' own client-side
+    /// code rejects this probe's manufactured scheme as "not a compatible executable" BEFORE ever
+    /// needing to ask `lsd` who handles it, which is why it reads identically with and without the
+    /// grant (asserted explicitly below): this specific probe shape never reaches the code path the
+    /// grant would affect at all. That is a known, disclosed limit of an UNREGISTERED-scheme probe,
+    /// not a new one — the item that named this test chose an unregistered scheme specifically to
+    /// stay side-effect-free, at the accepted cost of not exercising a REGISTERED/handled URL type's
+    /// own code path; see the report for the follow-up this leaves open.
+    func testUnregisteredURLSchemeOpenNeverReachesAHandledLaunch() async throws {
+        let (withGrantOutput, _) = try await runProbe(kind: "launch-open-unregistered-scheme")
+        let withGrantStatus = try Self.extractProbeStatus(from: withGrantOutput)
+
+        let shippedSource = try String(contentsOf: Self.repoSandboxProfilePath, encoding: .utf8)
+        let grantLine = "  (global-name \"com.apple.coreservices.launchservicesd\")\n"
+        XCTAssertTrue(shippedSource.contains(grantLine),
+                      "sanity: the exact grant line this control removes must be present verbatim "
+                        + "in the shipped profile, or this control is not testing what it claims to")
+        let withoutGrantSource = shippedSource.replacingOccurrences(of: grantLine, with: "")
+        let scratchProfile = makeScratchDirectory().appendingPathComponent("without-launchservicesd.sb")
+        try withoutGrantSource.write(to: scratchProfile, atomically: true, encoding: .utf8)
+        let (withoutGrantOutput, _) = try await runProbe(
+            kind: "launch-open-unregistered-scheme", profilePath: scratchProfile)
+        let withoutGrantStatus = try Self.extractProbeStatus(from: withoutGrantOutput)
+
+        // THE SHIP GATE ITSELF. -10814 (kLSApplicationNotFoundErr) would mean LaunchServices
+        // actually SERVICED this request — see the probe's own comment in main.swift for the full
+        // consequence: a registered/handled URL type would, by that same code path, have gone on
+        // to resolve a real handler and launch it, meaning this profile's one surviving grant makes
+        // the whole-branch review's confused-deputy concern real, not merely theoretical.
+        XCTAssertNotEqual(withGrantStatus, -10814,
+            "kLSApplicationNotFoundErr — the request WAS serviced. SHIP BLOCKER per fix-round-2 "
+                + "Test B's own mandate (task-10-report.md) — got \(withGrantOutput)")
+        // The actual, repeatedly-verified reading (7 total observations across this investigation:
+        // 6 direct spawns + this XCTest run, all identical) — pinned to the SPECIFIC code, not a
+        // vague "any non-10814 failure counts," matching this file's own established preference
+        // (see `testOutboundConnectIsDenied`'s own comment) for a precise, falsifiable value over a
+        // loose category that could stay green for the wrong reason.
+        XCTAssertEqual(withGrantStatus, -10661,
+            "expected kLSExecutableIncorrectFormat (-10661) under the shipped profile — got "
+                + "\(withGrantStatus); \(withGrantOutput)")
+
+        // Control: removing a grant can only ever narrow what SBPL permits, never newly enable a
+        // serviced request the WITH-grant run did not already produce (the same allow-rule
+        // monotonicity the fix-round-2 review's own "airtight" verdict rests on) — so this must
+        // also never be -10814, regardless of its exact value otherwise.
+        XCTAssertNotEqual(withoutGrantStatus, -10814, "got: \(withoutGrantOutput)")
+        // Disclosed, not concealed: this specific probe shape reads IDENTICALLY with and without
+        // the grant — direct evidence that an unregistered scheme's rejection happens before
+        // LaunchServices' client code ever needs to consult `lsd` (and so before this profile's one
+        // grant could possibly matter either way), not evidence that the grant is a no-op in
+        // general. See this test's own doc comment above for what this does and does not establish.
+        XCTAssertEqual(withGrantStatus, withoutGrantStatus,
+            "if these ever diverge, this probe shape IS discriminating on the grant after all and "
+                + "the doc comment above needs updating — with=\(withGrantOutput) without=\(withoutGrantOutput)")
+    }
+
+    /// Parses the `status=<n>` token `launch-open-unregistered-scheme` prints — a plain integer
+    /// `OSStatus`, never string-matched against named constants, so a comparison against
+    /// `-10814`/`-10661` above is exact rather than substring-fragile. Splits on whitespace (the
+    /// `PROBE_RESULT:` line format throughout this probe family is space-separated `key=value`
+    /// tokens) rather than scanning characters directly, to keep this simple to read correctly.
+    private static func extractProbeStatus(from output: String) throws -> Int32 {
+        for token in output.split(separator: " ") where token.hasPrefix("status=") {
+            if let value = Int32(token.dropFirst("status=".count)) { return value }
+        }
+        throw NSError(domain: "OfficeSandboxTests", code: 1,
+                      userInfo: [NSLocalizedDescriptionKey: "could not parse status= from probe output: \(output)"])
     }
 
     /// M4 (whole-branch review) — the profile's own core containment posture, pinned against the

@@ -703,19 +703,31 @@ final class LOKBridge: OfficeDocumentBridge {
     /// today, unless intercepted here, first.
     private static let cfbMagicBytes: [UInt8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]
 
-    /// Fix-round finding (I2, whole-branch review): `OfficeSaveFormat` deliberately excludes T9's
-    /// two WIDENED, read-only-viewer extensions (`xlsm`/`odg` — see `OfficeSaveFormat`'s own header;
-    /// they are not saveable, so they were never added there) — but that same exclusion left CFB
-    /// bytes under either extension completely unguarded below, hitting the identical helper-killing
-    /// `exit()` path this whole gate exists to prevent. Hand-mirrored, same boundary as
-    /// `OfficeSaveFormat` vs. `PanelEditorTab.swift`'s `officeReadWriteExtensions`/`officeFile
-    /// Extensions` (that header's own explanation: the app target cannot import this module) — kept
-    /// as a two-element literal here rather than a shared constant, since no legitimate CFB (pre-2007
-    /// OLE2 binary) file has ever carried an `.xlsm`/`.odg` extension (both are XML-zip formats from
-    /// years after CFB's own era): this list only ever needs to track `PanelEditorTab.swift`'s own
-    /// `officeFileExtensions.subtracting(officeReadWriteExtensions)` by construction, not by an
-    /// enforced tripwire the way the read/write boundary itself is.
-    private static let cfbGuardedWidenedExtensions: Set<String> = ["xlsm", "odg"]
+    /// Fix-round-2 N2 (security re-review) — **this used to be a positive allowlist of extensions
+    /// TO GUARD (`["xlsm", "odg"]`), and its own comment defended only the OVER-inclusion question**
+    /// ("no legitimate CFB file has ever carried either extension"). That defended the wrong
+    /// direction: I2's actual bug (the finding this constant was added to fix, immediately below —
+    /// still the historical record of what happened) was UNDER-inclusion — T9 widened
+    /// `officeFileExtensions` (`PanelEditorTab.swift`) and this hand-mirrored copy silently did not
+    /// follow, leaving CFB bytes under the two new extensions unguarded until caught. The old
+    /// comment's own "by construction, not by an enforced tripwire" line conceded exactly this gap
+    /// without closing it — a THIRD widening would have reproduced I2 verbatim, with nothing (no
+    /// compiler, no test) positioned to catch it before a live run did.
+    ///
+    /// Inverted instead of patched: this is now a NEGATIVE allowlist — extensions where genuine CFB
+    /// content is EXPECTED and must reach `documentLoad`, not refused — so every extension not
+    /// named here, including every future one, defaults to PROTECTED. `doc`/`ppt`/`xls`/`xlsb` are
+    /// the pre-2007 binary formats that are natively OLE2/CFB containers by definition (`xlsb`
+    /// specifically is T9's own already-disclosed concern #6 — see `PanelEditorTab.swift`'s header
+    /// for why it was left out of Stage B's scope). **None of the four is reachable through this
+    /// helper today** — `officeFileExtensions` (`PanelEditorTab.swift`) contains none of them, and a
+    /// repo-wide grep turns up zero fixtures or tests for any of the four anywhere under `Sources/`
+    /// or `Tests/` — so today this allowlist is inert and the gate below is, in effect,
+    /// unconditional. It names its own escape hatch in advance anyway, for the day one of these four
+    /// genuinely ships (at which point a real `.doc` file IS a real CFB file and must open, not be
+    /// refused) — the alternative, an unconditional gate with no allowlist at all, would need
+    /// editing again at that point instead of already being correct.
+    private static let cfbNativeLegacyExtensions: Set<String> = ["doc", "ppt", "xls", "xlsb"]
 
     /// **The needle `OfficeRuntime.knownLOKErrorShapes` (app target) matches on.** Hand-mirrored,
     /// never imported — the SAME cross-module boundary `OfficeSaveFormat`'s own header already
@@ -745,33 +757,31 @@ final class LOKBridge: OfficeDocumentBridge {
 
     private func openOnDedicatedThread(docId: String, path: String) throws -> OfficeDocumentMetadata {
         // Office Stage B Task 10 — the release blocker's refusal, ahead of `documentLoad` on
-        // purpose: the whole point is that LOK never sees these bytes at all for a path whose
-        // extension maps to one of the six MODERN, read-write formats (`OfficeSaveFormat
-        // (pathExtension:)` — the SAME predicate `saveAsOnDedicatedThread` already gates on, so
-        // this check and the save-format gate can never drift relative to each other; one Swift
-        // type, one initializer, two call sites) OR one of T9's two WIDENED, read-only-viewer
-        // extensions (`cfbGuardedWidenedExtensions` — fix-round I2, whole-branch review: the
-        // original cut left these two unguarded, on the theory that this fix only needed to cover
-        // "the common, modern-format path" — WRONG, because the shared helper dies identically
-        // regardless of which open request triggered it, taking every other open document's unsaved
-        // edits down too; no legitimate CFB file has ever carried either extension, so widening the
-        // guard here excludes nothing real). `path` here is already the STAGED copy
-        // (`OfficeRuntime.stagedPath` preserves the real document's own extension — verified before
-        // writing this), so the production open path is gated exactly like every direct/live-test
-        // open below is. Any OTHER extension still falls through to `documentLoad` completely
-        // unguarded — Task 9's own already-characterized behavior for those (clean failure for
-        // `.xls`-shaped content, a helper-killing `exit()` for `.doc`/`.ppt`-shaped content) is left
-        // standing: this task's own two release-eligible extensions are now both covered; genuinely
-        // never-widened legacy extensions are a separate, already-disclosed, out-of-scope gap (T9's
-        // own concern #6, xlsb, is the same class).
-        // `.lowercased()` here matches `OfficeSaveFormat.init?(pathExtension:)`'s own internal
-        // lowercasing exactly (its switch is on `pathExtension.lowercased()`) — without it, an
-        // uppercase `.XLSM`/`.ODG` would silently bypass this literal-set membership check while
-        // still correctly matching on the `OfficeSaveFormat` side, an asymmetry with no reason to
-        // exist.
+        // purpose: the whole point is that LOK never sees these bytes at all. `path` here is already
+        // the STAGED copy (`OfficeRuntime.stagedPath` preserves the real document's own extension —
+        // verified before writing this), so the production open path is gated exactly like every
+        // direct/live-test open below is.
+        //
+        // Fix-round-2 N2 (security re-review) — **this used to be a positive check** ("is `ext` one
+        // of the six modern read-write formats, OR one of T9's two widened viewer-only formats") —
+        // inverted to a negative one: refuse CFB for every extension EXCEPT
+        // `cfbNativeLegacyExtensions` (that constant's own doc comment has the full history: the
+        // positive version is exactly what let I2 happen — T9 widened `officeFileExtensions`
+        // app-side and this gate's own hand-mirrored copy of "which extensions to guard" silently
+        // did not follow). The shared helper dies identically regardless of which open request
+        // triggered the underlying LOK `exit()`, taking every OTHER open document's unsaved edits
+        // down too — so "refuse by default, name only the exceptions" is the correct default for a
+        // gate whose failure mode is that severe, and it means a FOURTH extension added to
+        // `officeFileExtensions` tomorrow needs no matching edit here to stay safe, unlike the
+        // THIRD one (`xlsm`/`odg`, T9) did.
+        // `.lowercased()` matters more now than it did for the old positive check: this is a
+        // DENY-BY-DEFAULT gate, so a case mismatch here fails OPEN, not closed — an uppercase
+        // `.DOC`/`.PPT`/`.XLS`/`.XLSB` that missed `cfbNativeLegacyExtensions`'s membership test
+        // (all lowercase literals) would be wrongly REFUSED, not wrongly admitted; still matches
+        // `OfficeSaveFormat.init?(pathExtension:)`'s own internal lowercasing (its switch is on
+        // `pathExtension.lowercased()`) for the unrelated reason that call still sits below.
         let ext = (path as NSString).pathExtension.lowercased()
-        if (OfficeSaveFormat(pathExtension: ext) != nil || Self.cfbGuardedWidenedExtensions.contains(ext)),
-           pathBeginsWithCFBMagic(path) {
+        if !Self.cfbNativeLegacyExtensions.contains(ext), pathBeginsWithCFBMagic(path) {
             throw LoadError.documentLoadFailed(Self.cfbUnderModernExtensionReason)
         }
 

@@ -848,9 +848,13 @@ final class OfficeHelperLiveTests: XCTestCase {
     /// all four, install root is the trigger" — WRONG, per (2): a review's own Experiment B ran the
     /// missing 2x2 (bundled/bare executable x standalone/embedded root, against a PRE-widening
     /// profile) and found root irrelevant — bare+embedded opens cleanly, bundled+standalone hangs.
-    /// `NSBundle.main`'s own path-climbing resolution finds Norma.app's real bundle identity only
-    /// for the bundled exec, which is what makes `+[NSApplication initialize]` attempt real
-    /// WindowServer/TCC/LaunchServices connections at all.
+    /// Bundling is the PROVEN trigger (the 2x2 above). **`NSBundle.main`'s own path-climbing
+    /// resolution finding Norma.app's real bundle identity only for the bundled exec, and THAT
+    /// being what makes `+[NSApplication initialize]` attempt real WindowServer/TCC/LaunchServices
+    /// connections at all, is a plausible but UNTESTED mechanism hypothesis for WHY** — fix-round-2
+    /// (security re-review, I1 residual) caught this stated as flat fact with no cell actually
+    /// tracing it; hedged here to match `office-helper.sb`'s own corrected comment, the canonical
+    /// copy of this history.
     ///
     /// **The fix, corrected**: a registry-layer attempt to stop `MacSpellChecker` from ever
     /// constructing (Experiment A — two variants, both against `registrymodifications.xcu`) failed
@@ -859,8 +863,10 @@ final class OfficeHelperLiveTests: XCTestCase {
     /// ONE service, not four: `com.apple.coreservices.launchservicesd` alone, on top of T1's
     /// original baseline — confirmed twice, reproducibly. See `office-helper.sb`'s own "Task 10
     /// addendum, fix round 1" comment for the full evidence chain, including the honest,
-    /// unresolved tension this leaves: the one grant that survived is the one a reviewer's own
-    /// threat model called the scarier of the four originally-widened candidates.
+    /// unresolved tension this leaves (the one grant that survived is the one a reviewer's own
+    /// threat model called the scarier of the four originally-widened candidates) and fix round 2's
+    /// own addendum there (the three other denials this fix's minimization drops are still denied
+    /// live, every open, and tolerated rather than eliminated).
     ///
     /// This test now pins the FIXED behavior — a permanent regression tripwire matching this file's
     /// own `testKnownLimitationLegacyBinaryImportDoesNotOpenInThisVendorBuild` sibling pattern in

@@ -296,8 +296,16 @@ if let probeKind = args["sandbox-probe"] {
         // now-reached daemon, never a connection-level error) means the mach-lookup itself
         // succeeded, which is this probe's own claim — nothing about what the daemon does with a
         // message afterward.
-        let connection = xpc_connection_create_mach_service(
-            "com.apple.coreservices.launchservicesd", nil, 0)
+        //
+        // Fix-round-2 (security re-review) Test A — the service name is now parameterized
+        // (`--probe-service-name`, defaulting to the literal name above unchanged) so
+        // `OfficeSandboxTests` can reuse this exact probe to pin the DENIAL side too, against
+        // `com.apple.lsd.openurl`/`.mapdb`/`.modifydb` — the modern `lsd` sub-endpoints this same
+        // file's own comment (two paragraphs up) already identified as the services the two
+        // rejected higher-level API attempts actually touched, and which this profile's single
+        // `com.apple.coreservices.launchservicesd` grant does NOT cover.
+        let serviceName = args["probe-service-name"] ?? "com.apple.coreservices.launchservicesd"
+        let connection = xpc_connection_create_mach_service(serviceName, nil, 0)
         let semaphore = DispatchSemaphore(value: 0)
         // XPC's OWN two distinct error constants, not string-parsed — CONNECTION_INVALID means the
         // mach bootstrap lookup itself never succeeded (the sandbox-denial signal this probe wants);
@@ -311,21 +319,106 @@ if let probeKind = args["sandbox-probe"] {
         var sawConnectionInvalid = false
         var firstEventDescription = "none"
         xpc_connection_set_event_handler(connection) { event in
-            if firstEventDescription == "none" { firstEventDescription = String(describing: event) }
-            if xpc_equal(event, XPC_ERROR_CONNECTION_INVALID) { sawConnectionInvalid = true }
+            // Fix-round-2 N1 (security re-review) — both flags are now written from the SAME
+            // first-event-only guard; the previous code guarded only `firstEventDescription` this
+            // way and left `sawConnectionInvalid` unguarded, an unsynchronized cross-thread
+            // read/write: `xpc_connection_cancel` below itself queues a terminal
+            // XPC_ERROR_CONNECTION_INVALID event to THIS SAME handler on XPC's own private queue,
+            // and (with the old code reading `sawConnectionInvalid` AFTER calling `cancel()`)
+            // nothing ordered that delivery against the read — a genuine data race that could
+            // silently flip a correct "ok" reading to "denied" depending on scheduling. Restricting
+            // the write to the first event, combined with reading the result BEFORE `cancel()` is
+            // called (below), closes it: every write to these two variables now happens-before the
+            // `semaphore.signal()` in the SAME invocation, which itself happens-before this
+            // function's one `semaphore.wait()` returns `.success` (GCD's own signal/wait
+            // acquire-release guarantee) — and nothing further can write to either variable before
+            // they are read, because `cancel()` is not reached until after that read.
+            if firstEventDescription == "none" {
+                firstEventDescription = String(describing: event)
+                if xpc_equal(event, XPC_ERROR_CONNECTION_INVALID) { sawConnectionInvalid = true }
+            }
             semaphore.signal()
         }
         xpc_connection_activate(connection)
         let emptyMessage = xpc_dictionary_create(nil, nil, 0)
         xpc_connection_send_message(connection, emptyMessage)
         let waitResult = semaphore.wait(timeout: .now() + 3.0)
-        xpc_connection_cancel(connection)
         // "ok" = the mach-lookup itself succeeded — a real connection reached the daemon, regardless
         // of what the daemon then did with this probe's own deliberately-unrecognizable message.
         let ok = waitResult == .success && !sawConnectionInvalid
-        print("PROBE_RESULT: launch-services-query \(ok ? "ok" : "denied") "
-                + "timedOut=\(waitResult == .timedOut) sawConnectionInvalid=\(sawConnectionInvalid) "
-                + "firstEvent=\(firstEventDescription)")
+        let resultLine = "PROBE_RESULT: launch-services-query \(ok ? "ok" : "denied") "
+                + "service=\(serviceName) timedOut=\(waitResult == .timedOut) "
+                + "sawConnectionInvalid=\(sawConnectionInvalid) firstEvent=\(firstEventDescription)"
+        // Fix-round-2 N1 — compute AND PRINT the result BEFORE `cancel()`, not after: see the
+        // handler's own comment above for why reading strictly before this call (rather than after,
+        // as the previous code did) is what actually closes the race, not merely the first-event
+        // guard alone.
+        print(resultLine)
+        fflush(stdout) // same fix, same reason — see the write-fence probe's own case above
+        xpc_connection_cancel(connection)
+        _exit(0)
+    case "launch-open-unregistered-scheme":
+        // Fix-round-2 (security re-review) Test B — "the ship gate." Experiment C's minimization
+        // left exactly one grant standing, `com.apple.coreservices.launchservicesd`, and the
+        // review's own stated concern about it is a confused-deputy launch: a sandboxed,
+        // `(deny process-exec)`-fenced process asking the system's OWN launchservicesd to open a
+        // payload on its behalf, defeating the exec fence indirectly. `testLaunchServicesQuery
+        // MachLookupIsReachable` (above this probe kind, in `OfficeSandboxTests`) already proved
+        // the mach-lookup itself succeeds — necessary but NOT sufficient to establish the concern
+        // is real, because a reachable connection to `lsd` says nothing about whether an actual
+        // OPEN request is serviced past the sandbox's own message-level filtering (SBPL profiles
+        // can and do allow a mach-lookup while the daemon-side or a DIFFERENT sandbox layer still
+        // rejects the specific request). This probe tests THAT question directly, via the actual
+        // public open-by-URL entry point — but on a scheme this process manufactures fresh every
+        // run (`norma-probe-<uuid>`) specifically so NO installed application can possibly be
+        // registered for it, in EITHER the granted or ungranted configuration: an unregistered
+        // scheme cannot launch anything no matter how this call resolves, which is what keeps this
+        // probe side-effect-free by construction, the same posture `launch-services-query` (above)
+        // already committed to for the identical reason.
+        //
+        // The discriminator is the returned `OSStatus`, not a bare success/failure bit. The ACTUAL,
+        // repeatedly-verified reading under the shipped profile is `kLSExecutableIncorrectFormat`
+        // (-10661, "No compatible executable was found") — confirmed stable across 6 direct spawns
+        // outside any test harness plus every subsequent XCTest run, IDENTICAL with and without the
+        // grant (`OfficeSandboxTests.testUnregisteredURLSchemeOpenNeverReachesAHandledLaunch` pins
+        // and explains this exactly). This was NOT the first guess written here (`-10822`,
+        // `kLSServerCommunicationErr`, was — see task-10-report.md's fix-round-2 section for the
+        // corrected-in-place history); -10661 is a LOCAL, client-side rejection — LaunchServices'
+        // own code decides this manufactured URL "isn't a compatible executable" before ever
+        // needing to ask `lsd` who handles it, the same code this file's `launch-services-query`
+        // comment already documented, independently, for a `.txt` path
+        // (`LSCopyDefaultApplicationURLForURL`, fix round 1) as "unrelated to sandboxing." Only two
+        // readings actually matter for this probe's own verdict:
+        //   - `kLSApplicationNotFoundErr` (-10814) — LaunchServices DID service the request and only
+        //     then failed because no handler is registered for THIS scheme specifically. A
+        //     registered/handled URL type would, by the same code path, have gone on to actually
+        //     resolve and launch a handler — i.e., the confused-deputy launch this whole fix round
+        //     is about IS reachable. This is a hard ship-blocker, not a result to average away
+        //     against the control below; see this probe's own call site in `OfficeSandboxTests` and
+        //     `task-10-report.md`'s fix-round-2 section for the disposition if this code is ever the
+        //     one that comes back.
+        //   - anything else (currently -10661; -10822 or another connection-level code would read
+        //     the same way) — NOT -10814, which is the only claim this probe actually needs to
+        //     support. Disclosed limit, not concealed: because -10661 is a rejection that happens
+        //     BEFORE consulting `lsd` at all, this probe's own shape cannot distinguish "the grant
+        //     lets a real, registered open through" from "the grant is irrelevant here" — it only
+        //     rules out the specific -10814 finding for THIS unregistered-scheme shape. Proving the
+        //     grant's effect (or lack of one) on a REGISTERED/handled URL type is the same
+        //     deliberately-not-attempted stronger test Experiment C's own report section already
+        //     named as a follow-up, for the same side-effect reason.
+        //
+        // Uses the older `LSOpenCFURLRef` (not `NSWorkspace.open`) deliberately: this file already
+        // links `CoreServices` (see the top-of-file import) for no other reason than this probe, and
+        // `NSWorkspace` would pull in AppKit for a helper process that otherwise never needs it —
+        // matching this probe family's existing minimal-dependency posture.
+        let scheme = "norma-probe-\(UUID().uuidString)"
+        guard let url = URL(string: "\(scheme)://x") else {
+            fail("failed to construct probe URL for scheme \(scheme) — this is a bug in this probe, "
+                    + "not a sandbox finding")
+        }
+        var launchedURL: Unmanaged<CFURL>?
+        let status = LSOpenCFURLRef(url as CFURL, &launchedURL)
+        print("PROBE_RESULT: launch-open-unregistered-scheme status=\(status) scheme=\(scheme)")
         fflush(stdout) // same fix, same reason — see the write-fence probe's own case above
         _exit(0)
     default:

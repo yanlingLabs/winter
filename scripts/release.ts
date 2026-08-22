@@ -389,19 +389,30 @@ assertSigned(
 // the helper is fail-closed on a missing/unreadable profile (that file's own `fail(...)` call at
 // boot, verified live by `OfficeSandboxTests.testHelperRefusesToBootWhenSandboxProfileIsMissing`):
 // a release that ships without it does not ship a less-safe office feature, it ships NO office
-// feature at all, silently, since the helper refuses to serve any document. Two things a release
-// must be able to trust here, both asserted:
+// feature at all, silently, since the helper refuses to serve any document. Three things a release
+// must be able to trust here, all asserted:
 //   1. PRESENT — existsSync, deliberately NOT folded into assertSigned's own check above: codesign
 //      --verify --deep --strict (already run, unconditionally, earlier in this section) validates
 //      that everything the signed manifest RECORDS matches its hash — it has no opinion about a
 //      file that was simply never embedded in the first place (an absent postCompileScript step
 //      leaves no trace in that manifest to fail against), which is exactly the failure mode this
 //      existence check exists to catch and that check cannot.
-//   2. VERIFIED — already covered: the same "codesign --verify --deep --strict" a few lines above
-//      this walks the FULL Resources tree (this file included, once present) against the signed
-//      manifest's own recorded hashes and would already have failed this script closed had that
-//      check found office-helper.sb tampered or corrupted — re-running it here would only repeat
-//      an identical, already-passed check at real pipeline cost, not add coverage.
+//   2. UNMODIFIED SINCE SIGNING — already covered: the same "codesign --verify --deep --strict" a
+//      few lines above this walks the FULL Resources tree (this file included, once present)
+//      against the signed manifest's own recorded hashes and would already have failed this script
+//      closed had that check found office-helper.sb tampered or corrupted since it was embedded —
+//      re-running it here would only repeat an identical, already-passed check at real pipeline
+//      cost, not add coverage.
+//   3. RESTRICTIVE — M4 (whole-branch review, fix round 2): (1) and (2) both prove things RELATIVE
+//      TO WHAT WAS SIGNED — neither has any opinion on whether the embedded copy equals the
+//      repository source at apple/Norma/Sources/OfficeHelper/office-helper.sb. A stale project.yml
+//      build-phase reference (e.g. a cached copy, or a bad merge that left a weaker profile on disk
+//      pre-embed) would copy happily, sign happily, and pass both checks above while shipping a
+//      materially weaker sandbox. Read the embedded file's own content directly, below, and fail on
+//      the two load-bearing containment lines. `OfficeSandboxTests.
+//      testDenyDefaultAndDenyNetworkArePresentInTheSourceProfile` already pins these two clauses
+//      against the SOURCE file; this is the missing embedded-side half of that same pin — turning
+//      "a file exists here" into "a restrictive profile ships here."
 const officeSandboxProfile = join(app, "Contents", "Resources", "office-helper.sb");
 if (!existsSync(officeSandboxProfile)) {
   fail(
@@ -413,8 +424,24 @@ if (!existsSync(officeSandboxProfile)) {
       `"Embed NormaOfficeHelper" postCompileScript actually ran for this configuration.`,
   );
 }
-console.log(`office-helper.sb present at ${officeSandboxProfile} (integrity already covered by the ` +
-  `codesign --verify --deep --strict run above, over the app's full Resources tree).`);
+const officeSandboxProfileContent = readFileSync(officeSandboxProfile, "utf8");
+for (const requiredClause of ["(deny default)", "(deny network*)"]) {
+  if (!officeSandboxProfileContent.includes(requiredClause)) {
+    fail(
+      `office-helper.sb at ${officeSandboxProfile} is missing the required clause ` +
+        `${JSON.stringify(requiredClause)} — the EMBEDDED copy's content does not match what this ` +
+        `repository ships. codesign --verify --deep --strict (already run above) only proves this ` +
+        `file is unmodified SINCE SIGNING; it has no opinion on whether the embedded copy equals the ` +
+        `repo source, so a stale build-phase reference to an old/weaker profile would sign and verify ` +
+        `successfully while shipping a containment regression. Check project.yml's "Embed ` +
+        `NormaOfficeHelper" postCompileScript is copying from ` +
+        `apple/Norma/Sources/OfficeHelper/office-helper.sb, not a stale cached copy.`,
+    );
+  }
+}
+console.log(`office-helper.sb present at ${officeSandboxProfile}, unmodified since signing ` +
+  `(codesign --verify --deep --strict above), and its embedded content still carries ` +
+  `(deny default) and (deny network*).`);
 
 // --- CEF (panel-cef Task 5) -------------------------------------------------
 // The framework, its five dlopen'd dylibs, and the five helper bundles. `--deep --strict` above

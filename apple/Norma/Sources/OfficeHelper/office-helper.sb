@@ -93,12 +93,39 @@
 ;; `BUILT_PRODUCTS_DIR` product with no enclosing Info.plist) independently of install-root — every
 ;; "embedded root" test used a bundled executable, every "standalone root" test used a bare one. The
 ;; missing 2x2 cells (run against a PRE-WIDENING profile, T1's original four services only) settled
-;; it: bare+embedded-root OPENS CLEANLY; bundled+standalone-root HANGS. Install root is irrelevant —
-;; `NSBundle.main`'s own resolution (it walks up from the running executable's own path looking for
-;; a `Contents/Info.plist`) finds Norma.app's real bundle identity ONLY for the bundled exec, which
-;; is what makes `+[NSApplication initialize]` behave like a real windowed app attempting real
-;; WindowServer/TCC/LaunchServices connections in the first place — the bare exec has no such
-;; identity to find, and `+[NSApplication initialize]` takes a different, non-blocking path.
+;; it: bare+embedded-root OPENS CLEANLY; bundled+standalone-root HANGS. Install root is irrelevant.
+;;
+;; Fix-round-2 I1 residual (security re-review) — **the sentence that WAS here next asserted a
+;; specific MECHANISM for that result** ("`NSBundle.main`'s own resolution … finds Norma.app's real
+;; bundle identity ONLY for the bundled exec, which is what makes `+[NSApplication initialize]`
+;; behave like a real windowed app … the bare exec has no such identity to find, and takes a
+;; different, non-blocking path") **as flat fact, with no cell that actually traces it.** The 2x2
+;; above licenses "bundling is the trigger," a correlation between one binary property and the
+;; open/hang outcome — it does not license any claim about WHAT INSIDE `+[NSApplication
+;; initialize]` reads that property or branches on it; no trace (log capture, symbolicated stack, or
+;; otherwise) was ever captured for either bare-exec cell, only their black-box outcome (opens
+;; cleanly). Restated honestly: bundling is the PROVEN trigger; `NSBundle.main` resolution driving
+;; `+[NSApplication initialize]`'s own internal branching is a PLAUSIBLE, UNTESTED hypothesis for
+;; WHY, offered because it is the most obvious mechanism a bundled-vs-bare distinction could act
+;; through, not because anything here traced it directly.
+;;
+;; **Also disclosed here, not only in the report — the fix above is narrower than "no denials
+;; occur."** Re-verified live for this fix round (`log stream --predicate 'eventMessage contains
+;; "deny"'` around a real four-format open under this exact, current, minimized profile):
+;; `com.apple.pasteboard.1`, `com.apple.tccd.system`, and `com.apple.windowserver.active` are ALL
+;; STILL DENIED, on every single open, every fixture — `+[NSApplication initialize]`'s own later
+;; steps (per the captured trace above: CFPasteboardCreate, then TCC/WindowServer connection
+;; attempts, all AFTER the LaunchServices step this fix's one grant unblocks) keep firing and keep
+;; getting denied, same as before this fix round. The open still succeeds anyway. What Experiment C
+;; proved is narrower than "these three are safe to deny" — it proved "these three are not
+;; NECESSARY for THIS specific hang," full stop; it says nothing about whether some OTHER code path
+;; (LOK's spellchecker actually invoked during editing, not just probed at open time — see the
+;; `mul-xpc` `findMisspelledWordInString` denial this same re-verification run also observed, live,
+;; a fifth and previously uncatalogued denied service, tolerated the same way) depends on one of
+;; them succeeding in a way this task's own fixture matrix never exercises. Tolerated, not
+;; eliminated — the same distinction this profile already draws for TCC/pasteboard/WindowServer
+;; being denied in the FIRST place (v1's own baseline containment posture), just made explicit here
+;; for the three specific services this fix round's own minimization touched.
 ;;
 ;; **Experiment A (whole-branch review) — tried, failed, does not change the fix.** Hypothesis:
 ;; seed `registrymodifications.xcu` (the SAME mechanism `disableDocumentLockFile` above already
