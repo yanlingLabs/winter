@@ -327,11 +327,24 @@ struct OfficeRuntimeState: Equatable {
     /// deliberate, not an oversight: bumping on close/reload alone is already sufficient to
     /// distinguish every interleaving that matters (a close moves the counter forward, so a fresh
     /// re-open minted AFTER that close reads a strictly newer ticket than whatever open was in
-    /// flight before it — see `OfficeRuntimeReducerTests`' own two-rapid-open-close-open row), and
-    /// NOT bumping keeps two ordinary concurrent opens of the same never-yet-opened path (a double
-    /// click, both racing the identical `documents[path] == nil` guard) sharing one ticket, so
-    /// neither is spuriously cancelled — whichever `.opened` lands second still resolves through the
-    /// PRE-EXISTING `previousEntry.docId != docId` compensating-close logic one arm below, unchanged.
+    /// flight before it — see `OfficeRuntimeReducerTests`' own two-rapid-open-close-open row).
+    ///
+    /// **Correction, T2 broker-review F2 (2026-08-22): the paragraph below is no longer how two
+    /// ordinary concurrent opens of the same never-yet-opened path are handled — kept for the
+    /// historical record, not as current behavior.** It used to read: "NOT bumping keeps two ordinary
+    /// concurrent opens of the same never-yet-opened path (a double click, both racing the identical
+    /// `documents[path] == nil` guard) sharing one ticket, so neither is spuriously cancelled —
+    /// whichever `.opened` lands second still resolves through the PRE-EXISTING `previousEntry.docId
+    /// != docId` compensating-close logic one arm below, unchanged." That was true, and was FINE for
+    /// its own caller at the time (a UI element that re-reads `$state` reactively, so it never
+    /// matters which of two docIds survives). It stopped being fine the moment a caller could snapshot
+    /// a docId once and act on it later without re-reading `$state` — `OfficeAgentBroker.awaitOpen`
+    /// does exactly that, and the loser's docId can be the one it is actively holding when the second
+    /// landing compensating-closes it out from under an in-progress action. `opensInFlight` (this
+    /// state's own next field) now suppresses the SECOND `.openRequested` entirely — the two-callers-
+    /// share-one-ticket situation this paragraph described can no longer arise for a never-before-open
+    /// path, because there is no longer a second dispatch to share the ticket with. See that field's
+    /// own header for the full account, including why it is cleared where it is and not elsewhere.
     ///
     /// **Fix round 1 (review F2) — a fresh open's CAPTURE is also RECORDED, not only read.** Both
     /// sites that mint a `.helperOpen` ticket for a path with no bump of its own (the `.ready`-phase
@@ -395,6 +408,54 @@ struct OfficeRuntimeState: Equatable {
     /// construction (a session's very first runtime) is the only place this dict is legitimately
     /// empty; every other boundary now strictly advances it.
     var pathGenerations: [String: Int] = [:]
+
+    /// **T2 broker-review F2 (2026-08-22) — per-path in-flight-open marker.** Deliberately tagged
+    /// with the review that found it, not bare "F2": `pathGenerations`' own header a few paragraphs
+    /// up already carries an UNRELATED, earlier "review F2" (Office Stage B Task 9's own death/
+    /// teardown-bump review) — the identical short name for two different findings cost real time to
+    /// untangle once already; do not repeat that.
+    ///
+    /// **What this closes.** `.openRequested`'s `.ready` arm used to guard ONLY on
+    /// `documents[path] == nil` — "is this path already open" — with nothing recording "is an open
+    /// for this path already DISPATCHED but not yet landed." Two independent callers asking to open
+    /// the SAME never-before-open path close together (a tab's own open racing `OfficeAgentBroker`'s,
+    /// or simply a double click) both read `documents[path] == nil`, both captured the SAME ticket
+    /// (a fresh open deliberately does not bump — see `pathGenerations`' own header), and both
+    /// dispatched their OWN `.helperOpen`. `pathGenerations`' own header used to defend this as fine:
+    /// "whichever `.opened` lands second still resolves through the PRE-EXISTING `previousEntry.docId
+    /// != docId` compensating-close logic... unchanged" — true for a caller that re-reads `$state`
+    /// reactively (a tab), false for `OfficeAgentBroker`, which snapshots a docId ONCE
+    /// (`awaitOpen`) and keeps using it: the loser's docId can be the one a caller is actively
+    /// holding when it gets compensating-closed out from under it, mid-action or mid-`defer`. See
+    /// `task-2-report.md`'s fix-round section for the full account, including the residual this field
+    /// alone does not close (the broker's own `runOnce` also has to treat "already in flight" as
+    /// adoption — this field only stops the SECOND `.helperOpen` from ever being dispatched, which is
+    /// necessary but not sufficient on its own).
+    ///
+    /// **Written at BOTH sites that emit a fresh `.helperOpen` with no bump of their own** — the
+    /// `.ready`-phase immediate dispatch, and `.helperBecameReady`'s queue flush. Omitting the second
+    /// would leave the race alive through the boot path (the daemon's very first office call is
+    /// exactly the queued-then-flushed shape).
+    ///
+    /// **Cleared in exactly three places — and the choice of which three is the load-bearing part:**
+    /// `.closeRequested`'s own unconditional block (alongside `pendingOpens`/`openFailures`/the
+    /// banner dicts — same "treat the close as authoritative immediately" posture those already
+    /// take), and the NON-STALE (ticket-matches-current) branch of `.opened` and of `.openFailed`.
+    /// **Deliberately NOT cleared in either's STALE-DROP branch.** Trace why: open₁ (ticket 0, marker
+    /// set) → close (bumps to 1, marker cleared) → open₂ (ticket 1, marker set again) → open₁'s own
+    /// now-stale `.opened` lands. If the stale-drop ALSO cleared the marker, it would empty it WHILE
+    /// open₂ is still genuinely in flight — reopening the exact guard this field exists to hold shut,
+    /// one interleaving deeper. The invariant that makes "clear only on close + non-stale landing"
+    /// correct: while a path sits in this set, the only thing that can have bumped its generation out
+    /// (making some OTHER attempt's landing stale) is `.closeRequested`, which already cleared this
+    /// field itself when it did so — reload/restore bump generations too, but both require
+    /// `documents[path]` to already exist, which is disjoint from this field by construction (nothing
+    /// is ever inserted here except from the `documents[path] == nil` branch). So a stale landing
+    /// arriving while the marker is STILL set can only mean a NEWER attempt is the one holding it —
+    /// never itself, never a ghost. Proven both directions by
+    /// `OfficeRuntimeReducerTests.testAStaleOpenedLandingWhileAReplacementIsStillInFlightMustNot
+    /// ReopenTheGuard`.
+    var opensInFlight: Set<String> = []
 }
 
 /// Office Stage B Task 7 — one path's own recovery offer: a sidecar this runtime found newer than
@@ -793,7 +854,13 @@ enum OfficeRuntimeReducer {
                 // way Editor's one CEF browser is — T6 gives every open document its OWN tab and tile
                 // canvas). An already-open path is simply left alone; T6's tab layer owns dedupe/
                 // activate against ITS OWN already-open tab, mirroring `openFileTab`'s contract.
-                guard state.documents[path] == nil else { return (next, []) }
+                // T2 broker-review F2 (2026-08-22) — also guard on `opensInFlight`: a path someone
+                // ELSE already asked to open (dispatched, not yet landed) must be JOINED, not given a
+                // second, independent `.helperOpen` — see that field's own header for the corruption
+                // this closes and why. `documents[path] == nil` alone used to be the only test.
+                guard state.documents[path] == nil, !state.opensInFlight.contains(path) else {
+                    return (next, [])
+                }
                 // Office Stage B Task 9 — CAPTURES the current per-path ticket, never bumps it (see
                 // `OfficeRuntimeState.pathGenerations`'s own header for why a fresh open is the one
                 // attempt kind that reads rather than advances this counter). Fix round 1 (review
@@ -802,6 +869,10 @@ enum OfficeRuntimeReducer {
                 // existing (see the field header's own account).
                 let ticket = state.pathGenerations[path, default: 0]
                 next.pathGenerations[path] = ticket
+                // T2 broker-review F2 — mark this path in flight; cleared by `.closeRequested` or by
+                // this exact attempt's own non-stale `.opened`/`.openFailed` landing (see
+                // `opensInFlight`'s own header for why NOT in a stale-drop).
+                next.opensInFlight.insert(path)
                 return (next, [.helperOpen(path: path, pathGeneration: ticket)])
             }
 
@@ -824,6 +895,11 @@ enum OfficeRuntimeReducer {
             for path in queued {
                 let ticket = next.pathGenerations[path, default: 0]
                 next.pathGenerations[path] = ticket
+                // T2 broker-review F2 — the SAME marker the `.ready`-phase immediate open sets, for
+                // the identical reason: without it the race survives through the boot path (a queued
+                // open flushed here, then a second `.openRequested` for the same path landing right
+                // after the flush but before this attempt's own `.opened`, would still double-dispatch).
+                next.opensInFlight.insert(path)
                 effects.append(.helperOpen(path: path, pathGeneration: ticket))
             }
             return (next, effects)
@@ -860,9 +936,16 @@ enum OfficeRuntimeReducer {
             // by a per-path ticket mismatch instead of a docId mismatch. No `.unwatchFile`: a dropped
             // attempt never reached the `.watchFile` emission below, so there is nothing watching to
             // stop.
+            // T2 broker-review F2 — deliberately NOT `next.opensInFlight.remove(path)` here. See
+            // `opensInFlight`'s own header for the full invariant; short version: while this path is
+            // marked in flight, the only thing that can have made THIS landing stale is a close, and a
+            // close already cleared the marker itself — so if the marker is still set at this exact
+            // instant, it belongs to a NEWER attempt, not this dropped one, and clearing it here would
+            // wrongly let a third request slip past a still-genuinely-in-flight open.
             guard pathGeneration == state.pathGenerations[path, default: 0] else {
                 return (next, [.helperClose(docId: docId), .deleteStagedCopy(docId: docId)])
             }
+            next.opensInFlight.remove(path) // T2 broker-review F2 — THIS attempt is the current one; done.
             next.openFailures.removeValue(forKey: path)
             // office-plumbing Task 8: a document that just (re)opened cannot still be saying it was
             // deleted — the reload success path is what answers a deleted-then-restored file.
@@ -912,7 +995,10 @@ enum OfficeRuntimeReducer {
             // has the full account). A stale failure has nothing left to compensate (nothing was ever
             // opened on the helper for a FAILED attempt) — dropping it is a plain no-op, `next`
             // untouched, unlike `.opened`'s own drop.
+            // T2 broker-review F2 — same "do not clear on a stale drop" discipline as `.opened`'s own
+            // identical guard just above; see `opensInFlight`'s own header for the invariant.
             guard pathGeneration == state.pathGenerations[path, default: 0] else { return (next, []) }
+            next.opensInFlight.remove(path) // T2 broker-review F2 — a failed open must not wedge the path shut.
             next.openFailures[path] = reason
             let basename = (path as NSString).lastPathComponent
             return (next, [.emitBanner(reason: "Couldn't open \(basename): \(reason)")])
@@ -924,6 +1010,12 @@ enum OfficeRuntimeReducer {
             // `OfficeRuntimeState.pathGenerations`'s own header names as exactly why a docId-keyed
             // guard alone could never catch this case). Every other line in this arm is unchanged.
             next.pathGenerations[path, default: 0] += 1
+            // T2 broker-review F2 — cleared HERE, unconditionally, same posture as every other dict
+            // in this block: a close is authoritative immediately, not "eventually once whatever was
+            // in flight gets around to landing." This is what keeps a close-then-immediate-reopen
+            // (the ordinary "two rapid open/close/open" shape a few lines below already covers for
+            // `pathGenerations`) from wedging shut waiting on an attempt this close already superseded.
+            next.opensInFlight.remove(path)
             next.pendingOpens.removeAll { $0 == path }
             next.openFailures.removeValue(forKey: path)
             next.documentBanners.removeValue(forKey: path) // Task 8: no path to still be a document about

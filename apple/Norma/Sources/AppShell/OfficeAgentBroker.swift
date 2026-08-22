@@ -14,41 +14,61 @@ import NormaKit
 /// (`OfficeRuntime.stageDocument`), `placeAtomically`, the save waiters (`saveAndAwaitOutcome`),
 /// `officeDocumentIsDirty`, the read-only-format predicate, and the request queue's no-nesting rule
 /// are all `OfficeRuntime`'s own, called through its existing public doors (`open`/`close`/
-/// `saveAndAwaitOutcome`/`$state`) — this file adds no new call into the helper, no new LOK call, and
-/// no change to `OfficeRuntime.swift` at all. Two genuinely new pieces of machinery live here:
-/// `awaitOpen(_:path:)`, a bridge over `open`'s existing fire-and-forget contract, and
-/// `drainDirty(_:path:)`, a bridge over the gap between "the save landed" and "LOK's own bookkeeping
-/// caught up" — see each one's own header for why it has to live here rather than as a new
-/// `OfficeRuntime` method.
+/// `saveAndAwaitOutcome`/`$state`) — this file adds no new call into the helper and no new LOK call.
+/// **Correction, coordinator review F2 (2026-08-22): "no change to `OfficeRuntime.swift` at all" was
+/// true through the first fix round and is no longer true.** Closing the double-open race below
+/// required a genuine reducer-state addition (`OfficeRuntimeState.opensInFlight`) — see that field's
+/// own header in `OfficeRuntime.swift` for why the fix could not stay broker-side alone. Two genuinely
+/// new pieces of machinery still live entirely in THIS file: `awaitOpen(_:path:)`, a bridge over
+/// `open`'s existing fire-and-forget contract, and `drainDirty(_:path:)`, a bridge over the gap
+/// between "the save landed" and "LOK's own bookkeeping caught up" — see each one's own header for why
+/// it has to live here rather than as a new `OfficeRuntime` method.
 ///
 /// **The five rules, briefly — each one's own reasoning lives at its call site in `runOnce` below:**
-/// 1. Adopt or open (`runOnce`'s branch on `existingRuntime(sessionId)`).
-/// 2. Close only what you opened (`runOnce`'s `defer`, gated on `!adopted`).
+/// 1. Adopt or open (`runOnce`'s branch on `existingRuntime(sessionId)`) — INCLUDING joining a path
+///    someone else's open already has in flight (coordinator review F2 fix round; see rule 2's own
+///    line and `runOnce`'s own comment at that branch).
+/// 2. Close only what you opened (`runOnce`'s `defer`, gated on `!adopted`, now also re-verifying the
+///    docId it opened is still the one on record before closing by path — F2 fix round, cheap belt
+///    behind rule 1's own fix, not a replacement for it).
 /// 3. Dirty refusal, write-only, adopted-only (`runOnce`'s `officeDocumentIsDirty` check).
 /// 4. Save-through with a real awaited outcome, AND a drain of LOK's own post-save bookkeeping before
 ///    returning or closing (`runOnce`'s `saveAndAwaitOutcome` switch, `.saved`'s own `drainDirty`
 ///    call) — the drain was added after this task's own live drills measured its absence killing the
 ///    shared office helper; see `drainDirty`'s own header for the full account.
-/// 5. Fence (`officeAgentResolvedPathWithinFence`, checked before anything else runs).
+/// 5. Fence (`officeAgentResolvedPathWithinFence`, checked before anything else runs) — v1 controller
+///    ruling (coordinator review F4, 2026-08-22): agent office tools, read OR write, are limited to
+///    the session's working directories; this is now a deliberate scope decision, not a disclosed
+///    narrowing awaiting a follow-up. See that function's own header.
 ///
-/// ## The double-mutation story: option (a), an idempotency token, memoizing the WHOLE outcome
+/// **A sixth check, not one of the five but load-bearing (coordinator review F3, 2026-08-22):
+/// read-only-format refusal now runs BEFORE rule 1 even opens or adopts anything, write-access only.**
+/// It used to be consulted only inside rule 4's `.noModel` arm — AFTER `action` had already mutated an
+/// ADOPTED document that can never be saved, leaving the user's own tab holding an agent edit with no
+/// way to persist it and no rollback. The predicate is pure (path-only), so checking it this early
+/// costs nothing and never opens a document a write verb was always going to be refused on. See
+/// `runOnce`'s own comment at that check.
 ///
-/// The task's own hard requirement: a timeout can never honestly mean "it did not happen" (the app
-/// may still be mid-`stageDocument`/queued behind unrelated FIFO work/mid-`placeAtomically` when the
-/// daemon's deadline fires), so a non-idempotent write (`insert_rows`, `append`, `add_slide`) must
-/// never be double-applied when the agent retries. This broker's answer is a caller-supplied
-/// `requestId`: `perform(...)` memoizes its ENTIRE outcome — success or any refusal — keyed by that
-/// token, and a repeat of the same token returns the FIRST attempt's outcome without touching
-/// `OfficeRuntime` a second time.
+/// ## The double-mutation story: option (a), an idempotency token — what it actually covers
 ///
-/// **Memoizing an in-flight `Task`, not a completed `Result`, is the load-bearing detail.** The
-/// canonical retry this guards against arrives WHILE attempt 1 is still running (that is exactly why
-/// the daemon's deadline fired — the app was genuinely still working), so a cache that is only
-/// populated on completion would still race: the retry would find nothing cached yet and launch a
-/// second `open`+action+save concurrently with the first, the exact double-apply this exists to
-/// prevent. Caching the `Task` itself closes that: `perform` checks-and-inserts into `inFlight` in
-/// one synchronous stretch (this class is `@MainActor`; nothing can observe the dictionary between
-/// the check and the insert), so a same-token call arriving at any point — before, during, or after
+/// **Corrected, coordinator review F1 (2026-08-22): read this before wiring a real verb's
+/// `requestId` (task 3+). The paragraphs below originally presented this memo as the answer to "the
+/// agent retries after a daemon timeout." It is not that, and cannot be, with today's wire — see the
+/// plain statement two paragraphs down before relying on it for anything.**
+///
+/// What the memo genuinely does: a non-idempotent write (`insert_rows`, `append`, `add_slide`) must
+/// never be double-applied on a DUPLICATE DELIVERY of one already-dispatched command inside this app
+/// process — a re-broadcast landing twice, two consumers, a re-entrant route. This broker's answer is
+/// a caller-supplied `requestId`: `perform(...)` memoizes its ENTIRE outcome — success or any
+/// refusal — keyed by that token, and a repeat of the same token returns the FIRST attempt's outcome
+/// without touching `OfficeRuntime` a second time. That mechanism is real and is proven below.
+///
+/// **Memoizing an in-flight `Task`, not a completed `Result`, is the load-bearing detail.** A retry
+/// that arrives WHILE attempt 1 is still running must not find an empty cache and launch a second
+/// `open`+action+save concurrently with the first — the exact double-apply this exists to prevent.
+/// Caching the `Task` itself closes that: `perform` checks-and-inserts into `inFlight` in one
+/// synchronous stretch (this class is `@MainActor`; nothing can observe the dictionary between the
+/// check and the insert), so a same-token call arriving at any point — before, during, or after
 /// attempt 1 — joins the SAME task and gets the SAME outcome. An already-finished `Task` resolves an
 /// `await` immediately with its stored result, which is what makes "the whole outcome, refusals
 /// included" fall out of this one structure for free, with no separate completed-outcome cache to
@@ -57,12 +77,27 @@ import NormaKit
 /// the broken (completed-outcome-only) design just as easily as on this one, which is why that test
 /// gates attempt 1 mid-ACTION and starts attempt 2 while attempt 1 is still blocked there.
 ///
-/// **The token's contract, for whoever wires a real verb's `requestId` (task 3+): mint one per
-/// LOGICAL attempt, and reuse it ONLY across a blind retry of that exact same attempt.** A token
-/// derived purely from the verb's own operands (a hash of path+range+values, say) would make a
-/// REFUSAL sticky forever — a dirty-refusal replayed verbatim even after the user saves the tab,
-/// because the memo never expires and never re-checks. The token has to come from the CALL, not from
-/// what the call contains.
+/// **The plain statement, against the case the task's own hard requirement actually names — "a
+/// timeout can never honestly mean 'it did not happen,' so a non-idempotent write must never be
+/// double-applied when the AGENT retries": this memo does NOT cover that case, and no token can, with
+/// today's wire.** `PanelCommandRegistry.dispatch` mints `commandId` PER DISPATCH
+/// (`packages/core/src/panel/commands.ts`, "never supplied by the caller"); the daemon does not
+/// retry on its own; so "the agent retries after a timeout" means a fresh tool call → a fresh
+/// dispatch → a fresh `commandId` → a fresh `panel_command`. Nothing on the wire carries continuity
+/// from the first attempt to the second, so no `requestId` task 3 chooses to pass here can ever
+/// repeat across that boundary, and this memo's check will never hit for it. **The real contract for
+/// that case is task 3's own obligation, not this broker's: on a timeout, the tool must report
+/// OUTCOME UNKNOWN and verify (re-read) before ever retrying, because the write may well have
+/// already landed.** That requirement is being written into task 3's own brief; this comment exists
+/// so whoever implements it does not mistake THIS memo for having already solved it.
+///
+/// **The token's contract THIS memo does satisfy, for whoever wires a real verb's `requestId` (task
+/// 3+): mint one per LOGICAL attempt, and reuse it ONLY across a blind retry of that exact same
+/// attempt WITHIN one app process.** A token derived purely from the verb's own operands (a hash of
+/// path+range+values, say) would make a REFUSAL sticky forever — a dirty-refusal replayed verbatim
+/// even after the user saves the tab, because the memo never expires and never re-checks. The token
+/// has to come from the CALL, not from what the call contains — but see the paragraph above for what
+/// that buys you and what it does not.
 @MainActor
 final class OfficeAgentBroker {
 
@@ -155,12 +190,36 @@ final class OfficeAgentBroker {
             throw OfficeAgentBrokerError.outOfFence(path: path)
         }
 
+        // Coordinator review F3 (2026-08-22) — read-only-format refusal, WRITE-only, before ANYTHING
+        // opens or adopts. Previously this predicate (`officeDocumentIsReadOnlyFormat`) was consulted
+        // only inside rule 4's `.noModel` arm, AFTER `action` had already mutated an ADOPTED document
+        // that can never be saved — leaving the user's own open tab carrying an agent edit with no way
+        // to persist it and no rollback, reported as a save failure rather than an up-front refusal.
+        // The predicate is pure (path-only, no runtime needed), so checking it here costs nothing and
+        // refuses before rule 1 even opens/adopts anything. Reads are unaffected — a read-only format
+        // is still perfectly readable, and rule 3's own dirty check already never fires on one either
+        // (`officeDocumentIsReadOnlyFormat`'s own header explains why: nothing can ever make such a
+        // document dirty in the first place), same reasoning extended here. The `.noModel` arm below
+        // keeps its own identical check as a second, defensive layer — believed unreachable for a
+        // WRITE now that this runs first, but kept rather than deleted: this file's own posture
+        // elsewhere is layered belts, not a single trusted gate (rule 2's own re-verify a few lines
+        // down is the identical instinct).
+        if access == .write, officeDocumentIsReadOnlyFormat(path: resolvedPath) {
+            throw OfficeAgentBrokerError.saveFailed(path: resolvedPath, reason:
+                "this format can't be saved by Norma's office tools — only ODF and Office Open XML "
+                + "formats are writable.")
+        }
+
         // Rule 1 — adopt or open. `existingRuntime` first, always (this type's own header, "never
-        // mint just to read"); `runtime` (the minting door) is reached only in the `else`.
+        // mint just to read"); `runtime` (the minting door) is reached only in the `else`. Asked
+        // exactly ONCE (fix-round F2 review — the first draft of the branch below called this door a
+        // SECOND time in its own `else if`, breaking `testOpeningAskAsExistingFirstThenMints`'s call-
+        // COUNT proof of the single-lookup design this comment already claimed).
+        let existingRuntime = host.existingRuntime(sessionId)
         let runtime: OfficeRuntime
         let docId: String
         let adopted: Bool
-        if let existing = host.existingRuntime(sessionId),
+        if let existing = existingRuntime,
            let entry = existing.stateSnapshot.documents[resolvedPath] {
             runtime = existing
             docId = entry.docId
@@ -172,6 +231,57 @@ final class OfficeAgentBroker {
             if access == .write, officeDocumentIsDirty(state: existing.stateSnapshot, path: resolvedPath) {
                 throw OfficeAgentBrokerError.documentDirty(path: resolvedPath)
             }
+        } else if let existing = existingRuntime,
+                  existing.stateSnapshot.opensInFlight.contains(resolvedPath)
+                    || existing.stateSnapshot.pendingOpens.contains(resolvedPath) {
+            // Coordinator review F2 (2026-08-22) — the other half of the double-open fix.
+            // `OfficeRuntimeState.opensInFlight` (added this fix round) stops a SECOND `.helperOpen`
+            // from ever being dispatched, but that alone does not make this call's OWN ownership
+            // decision correct: without this branch, a path someone ELSE is already opening (a tab's
+            // own open racing this call) would still fall to the `else` below, `adopted` would still
+            // land `false`, and the `defer` below would still close the document THE OTHER CALLER
+            // opened once this call finishes — rule 2's own failure mode, surviving the reducer fix
+            // untouched. Joining an in-flight open counts as adoption: `awaitOpen`'s own `open(path)`
+            // call is now a harmless no-op under the reducer's new guard (nothing dispatches a second
+            // time), and its subscription rides whichever landing — this attempt's own or the one
+            // already in flight — resolves `documents[resolvedPath]` first, exactly as it always has.
+            //
+            // **`|| pendingOpens.contains(...)`, added catching this same fix round — the BOOT-PATH
+            // gap `opensInFlight` alone leaves open.** `opensInFlight` is written only from `.ready`
+            // (the immediate-dispatch arm) or from `.helperBecameReady`'s flush — never from
+            // `.starting` itself. `OfficeRuntime.perform`'s own `.ensureHelperReady` handler has a
+            // documented "late-joiner" fast path: if the shared helper is ALREADY running, the WHOLE
+            // idle→starting→ready→flush→helperOpen cascade folds SYNCHRONOUSLY, so `opensInFlight` is
+            // in practice the only state a concurrent second caller ever observes — this is the
+            // common case (the helper outlives any one document) and is what
+            // `testBrokerJoinsAnAlreadyInFlightOpenAsAdoptionRatherThanMintingASecondOne` drills. But
+            // on a genuine COLD BOOT — the app's very FIRST office call, helper not yet started —
+            // `.starting` persists for real wall-clock time (an actual process spawn), and a path
+            // sitting in `pendingOpens` during that window is invisible to `opensInFlight` alone:
+            // without this clause, a broker call for that same path would still fall through to
+            // "mint fresh," `adopted = false`, and close it once the flush eventually lands. Safe to
+            // join the identical way: `awaitOpen`'s own redundant `open(path)` call is *already* a
+            // no-op against `.starting`'s own pre-existing dedup (`if !pendingOpens.contains(path) {
+            // append }`), so nothing new is needed there. **Not independently live-drilled**: this
+            // file's fake driver reports `.ready` synchronously (the same shape as the common case
+            // above), so no test here forces a real `.starting` window to observe — disclosed in
+            // `task-2-report.md`'s fix-round section rather than built, given the added machinery a
+            // driver with a genuinely-delayed readiness would cost for one narrow, structurally-
+            // reasoned window.
+            //
+            // **Residual, disclosed not solved (see `task-2-report.md`'s fix-round section): the
+            // MIRROR interleaving still exists.** If THIS call's own open is the one in flight and a
+            // tab's open joins IT instead, this call still correctly believes `adopted == false` (it
+            // really did initiate the open) and its own `defer` still correctly closes what it opened
+            // per rule 2's own contract — but the tab that joined in the meantime loses its view when
+            // that close fires. Pre-fix that interleaving silently corrupted (a wrong or dead docId);
+            // post-fix it is a visible, recoverable close (reopen shows the same content) rather than
+            // corruption — a real improvement, not a full fix. A complete fix needs multi-owner
+            // reference counting for one open document, which is a design question above this
+            // broker's pay grade, not a fix-round patch.
+            runtime = existing
+            docId = try await awaitOpen(existing, path: resolvedPath)
+            adopted = true
         } else {
             guard let opened = host.runtime(sessionId) else {
                 throw OfficeAgentBrokerError.hostGone
@@ -185,9 +295,18 @@ final class OfficeAgentBroker {
         // save fails, or plain success) because `defer` does not distinguish — which is exactly
         // right: whatever happened, a document this call opened must not be left dangling open with
         // no tab watching it, and a document this call merely adopted must never be closed out from
-        // under the tab that owns it.
+        // under the tab that owns it. Coordinator review F2 — also re-verifies the docId this call
+        // actually opened is STILL the one `documents[resolvedPath]` names before closing it: cheap
+        // belt behind rule 1's own in-flight-join fix above, for whatever THAT fix does not cover (a
+        // reload/resurrection replacing the entry between this call's own open and this `defer`
+        // running) — closing blindly BY PATH in that window would close a document this call never
+        // touched. Does not close the residual named in rule 1's own comment above (a re-verify on a
+        // docId that legitimately IS still this call's own does not stop rule 2 from correctly, and
+        // now visibly, closing it out from under a caller who merely joined).
         defer {
-            if !adopted { runtime.close(resolvedPath) }
+            if !adopted, runtime.stateSnapshot.documents[resolvedPath]?.docId == docId {
+                runtime.close(resolvedPath)
+            }
         }
 
         let result = try await action(runtime, docId)
@@ -218,6 +337,11 @@ final class OfficeAgentBroker {
             // concerns.
             throw OfficeAgentBrokerError.saveFailed(path: resolvedPath, reason: reason)
         case .noModel:
+            // Defensive second layer, coordinator review F3 — believed unreachable for a WRITE now
+            // that the identical check runs up front, before rule 1, before `action` ever gets a
+            // chance to mutate an adopted document this could never save. Kept rather than deleted
+            // (see the pre-check's own comment for why); if it DOES fire, the wording is identical to
+            // what the pre-check would have said, so a caller sees the same sentence either way.
             if officeDocumentIsReadOnlyFormat(path: resolvedPath) {
                 throw OfficeAgentBrokerError.saveFailed(path: resolvedPath, reason:
                     "this format can't be saved by Norma's office tools — only ODF and Office Open "
@@ -351,15 +475,24 @@ final class OfficeAgentBroker {
 
 // MARK: - Rule 5: the fence
 
-/// PURE: rule 5's containment check. A Swift, app-side BACKSTOP behind the daemon's own fence
-/// (`resolveWithinAny`, `packages/core/src/agent/paths.ts`) — not a replacement for it, and
-/// deliberately narrower than that function's full `writableRoots` (which also folds in the
-/// session's tmp/outputs directories, persisted per-project edit-path grants, and one-shot approval
-/// grants — daemon-only state this app has no wire visibility into today). This checks exactly what
-/// the brief names: "the session's working directories," i.e. `SessionSummary.dirs`, the one piece
-/// of that broader set the app actually has. A legitimate write the daemon approved into one of those
-/// OTHER roots would still refuse here — a known, disclosed scope limit (`task-2-report.md`), not a
-/// bug, and no worse than the status quo: before this task, NO office write had any fence at all.
+/// PURE: rule 5's containment check.
+///
+/// **v1 controller ruling (coordinator review F4, 2026-08-22): agent office tools — read or write —
+/// are working-directories-only. This is a settled scope DECISION, not a disclosed narrowing pending
+/// a follow-up.** The prior account below is kept because the mechanics it describes are unchanged;
+/// what changed is the status: this used to be framed as "narrower than the daemon's own fence, a gap
+/// to close later." A whole-branch review found that framing understated it — it does not merely
+/// narrow spec §5 (which routes an office write outside the working dirs through the existing
+/// approval flow, card → approved → proceed), it CONFLICTS with it, since a daemon-APPROVED write
+/// into a tmp/outputs root or a persisted grant would still be refused here. The ruling resolves the
+/// conflict in this direction, deliberately: the app has no wire visibility into daemon grants today,
+/// and narrowing what a file-writing tool may touch is the safe direction to err in. **Task 3 must
+/// not build a grants channel to widen this** — the spec is being amended to match this ruling, not
+/// the other way around.
+///
+/// A Swift, app-side BACKSTOP behind the daemon's own fence (`resolveWithinAny`,
+/// `packages/core/src/agent/paths.ts`) regardless — not a replacement for it. This checks exactly
+/// `SessionSummary.dirs`, the session's working directories.
 ///
 /// Mirrors `resolveWithinAny`'s semantics, not merely its message: a RELATIVE `path` resolves against
 /// `dirs.first` (the primary), exactly as `resolveWithinAny` resolves against `roots[0]`; an ABSOLUTE
@@ -410,9 +543,13 @@ func officeAgentResolvedPathWithinFence(_ path: String, dirs: [SessionDirEntry]?
 /// eventually) surface `.message` verbatim, the same "never re-derive wording" posture
 /// `OfficeCommandConsumer`'s own refusal table already takes.
 enum OfficeAgentBrokerError: Error, Equatable {
-    /// Rule 5. Wording mirrors `resolveWithinAny`'s own thrown message verbatim (`path is outside
-    /// the allowed directories: <path>`) — the brief's own instruction ("the same language `write`
-    /// uses"), and `path` here is the CALLER's original argument, exactly as TS's own `p` is.
+    /// Rule 5. `.message`'s FIRST sentence mirrors `resolveWithinAny`'s own thrown message verbatim
+    /// (`path is outside the allowed directories: <path>`) — the brief's own instruction ("the same
+    /// language `write` uses") — and `path` here is the CALLER's original argument, exactly as TS's
+    /// own `p` is. A second sentence, added coordinator review F4 (2026-08-22), states the v1 scope
+    /// decision plainly: worded access-NEUTRAL ("office tools," not "writes") because this refusal
+    /// fires on a read verb outside the fence exactly as it does on a write — see
+    /// `officeAgentResolvedPathWithinFence`'s own header for the ruling this states.
     case outOfFence(path: String)
     /// Rule 3.
     case documentDirty(path: String)
@@ -430,7 +567,8 @@ enum OfficeAgentBrokerError: Error, Equatable {
     var message: String {
         switch self {
         case .outOfFence(let path):
-            return "path is outside the allowed directories: \(path)"
+            return "path is outside the allowed directories: \(path). Norma's office tools are "
+                + "limited to the session's working directories."
         case .documentDirty(let path):
             let name = (path as NSString).lastPathComponent
             return "\(name) has unsaved changes in an open tab — the agent will not overwrite them. "

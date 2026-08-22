@@ -98,12 +98,26 @@ final class OfficeAgentBrokerTests: XCTestCase {
             get { lock.lock(); defer { lock.unlock() }; return _defaultMetadata }
             set { lock.lock(); _defaultMetadata = newValue; lock.unlock() }
         }
+        /// Coordinator review F2 (2026-08-22) — an OPTIONAL gate awaited as `open`'s own FIRST line,
+        /// before `_openCalls` is even appended to. Unset (the default, every OTHER test in this
+        /// file), `open` behaves exactly as before. Set, it lets a test hold an open GENUINELY,
+        /// deterministically suspended — not "probably still running" the way a bare `Task.sleep` race
+        /// would be — so a test can assert the runtime is OBSERVABLY still mid-open (in
+        /// `opensInFlight`, not yet in `documents`) rather than hoping for a lucky Task-scheduling
+        /// order. `Driver.open` is already `async throws` (Stage B's own signature, unrelated to this
+        /// fix), so this needs no new async machinery — only something for the closure to `await`.
+        private var _openGate: (@Sendable () async -> Void)?
+        var openGate: (@Sendable () async -> Void)? {
+            get { lock.lock(); defer { lock.unlock() }; return _openGate }
+            set { lock.lock(); _openGate = newValue; lock.unlock() }
+        }
 
         var driver: OfficeRuntime.Driver {
             OfficeRuntime.Driver(
                 helperState: { .ready },
                 startHelper: { },
                 open: { [unowned self] docId, path in
+                    if let gate = self.openGate { await gate() }
                     self.lock.lock(); self._openCalls.append((docId, path)); self.lock.unlock()
                     return self.defaultMetadata
                 },
@@ -285,6 +299,29 @@ final class OfficeAgentBrokerTests: XCTestCase {
         XCTAssertEqual(counting.mintCalls, 0)
     }
 
+    /// Coordinator review F4 (2026-08-22) — the v1 scope ruling must be stated PLAINLY in the
+    /// refusal, and worded ACCESS-NEUTRAL: the fence refuses a READ exactly as it refuses a WRITE (this
+    /// very test uses `.read`), so wording it "agent office writes are limited to..." would misdescribe
+    /// what just happened to THIS call.
+    func testFenceRefusalMessageStatesTheWorkingDirectoriesScopeAccessNeutrally() async {
+        let counting = CountingHost()
+        counting.dirsAnswer = [SessionDirEntry(path: "/repo", locked: true)]
+        let broker = OfficeAgentBroker(host: counting.host)
+
+        do {
+            _ = try await broker.perform(sessionId: "S1", path: "/etc/passwd", access: .read,
+                                         requestId: UUID().uuidString) { _, _ in "unreached" }
+            XCTFail("an out-of-fence path must refuse")
+        } catch let error as OfficeAgentBrokerError {
+            XCTAssertTrue(error.message.contains("working directories"), "must state the v1 scope "
+                          + "plainly: \(error.message)")
+            XCTAssertFalse(error.message.lowercased().contains("write"), "must be access-neutral — this "
+                          + "call was a READ: \(error.message)")
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+    }
+
     func testAdoptionNeverReachesTheMintingDoor() async throws {
         let scratch = makeScratchDirectory()
         let path = scratch.appendingPathComponent("a.xlsx").path
@@ -325,6 +362,90 @@ final class OfficeAgentBrokerTests: XCTestCase {
 
         XCTAssertEqual(counting.callOrder, ["existing", "mint"],
                        "the existing-runtime door must be asked before the minting door")
+    }
+
+    // MARK: - Coordinator review F2 (2026-08-22): joining an in-flight open counts as adoption
+
+    /// **The other half of the double-open fix — the broker's own ownership decision, not the
+    /// reducer's dispatch guard.** `OfficeRuntimeState.opensInFlight` (this fix round) stops a SECOND
+    /// `.helperOpen` from ever being dispatched, but that alone does not make THIS call's `adopted`
+    /// decision correct: without the broker-side branch this test pins, a path someone ELSE is already
+    /// opening would still fall to the "mint fresh" `else`, `adopted` would still land `false`, and the
+    /// `defer` would still close the document the OTHER caller opened once this call finishes — rule
+    /// 2's own failure mode, surviving the reducer fix untouched.
+    ///
+    /// **Made fully deterministic with a GATED driver `open`, not a hopeful `Task.sleep` race.** The
+    /// runtime is driven into "opening, not yet open" by a DIRECT `runtime.open(path)` call (bypassing
+    /// the broker entirely — simulating a tab's own open) whose underlying driver call is held open on
+    /// an explicit continuation this test controls; `perform` is then started, and — because nothing
+    /// can resolve the shared open until this test releases the gate — the assertions made BEFORE
+    /// release are not probabilistic, they are things that are logically impossible to be false yet.
+    func testBrokerJoinsAnAlreadyInFlightOpenAsAdoptionRatherThanMintingASecondOne() async throws {
+        let scratch = makeScratchDirectory()
+        let path = scratch.appendingPathComponent("inflight.xlsx").path
+        writeDummyFile(at: path)
+        let office = BrokerOfficeDriverRecorder()
+        let host = makeHost(office: office, dirs: [SessionDirEntry(path: scratch.path, locked: true)])
+        await host.directory.refresh()
+
+        final class Gate: @unchecked Sendable {
+            private let lock = NSLock()
+            private var release: (() -> Void)?
+            func hold() -> @Sendable () async -> Void {
+                { await withCheckedContinuation { continuation in
+                    self.lock.lock(); self.release = { continuation.resume() }; self.lock.unlock()
+                } }
+            }
+            func open() {
+                lock.lock(); let r = release; release = nil; lock.unlock()
+                r?()
+            }
+        }
+        let gate = Gate()
+        office.openGate = gate.hold()
+
+        let runtime = host.officeRuntime(for: "S1")
+        runtime.open(path) // someone else's (a tab's) open — deliberately NOT through the broker
+        // `opensInFlight`, not `pendingOpens`, is what lands here, synchronously, with THIS fake
+        // driver — `OfficeRuntime.perform`'s own `.ensureHelperReady` handler has a documented
+        // "late-joiner" fast path that folds the WHOLE idle→starting→ready→flush→helperOpen cascade
+        // synchronously whenever `driver.helperState()` already reports `.ready` (this recorder's
+        // own `helperState: { .ready }`), which is also the common REAL-WORLD case (the shared
+        // helper outlives any one document). Only a genuine cold boot (helper not yet started)
+        // leaves `pendingOpens` observable for real wall-clock time — see the broker's own comment at
+        // its `pendingOpens` join clause for that half, which this fake driver's always-ready shape
+        // cannot exercise.
+        XCTAssertTrue(runtime.stateSnapshot.opensInFlight.contains(path), "setup: never registered "
+                      + "in-flight")
+        XCTAssertNil(runtime.stateSnapshot.documents[path], "setup: must not have landed yet — the "
+                     + "gate holds the driver's own open shut")
+
+        final class ResultBox: @unchecked Sendable { var value: String? }
+        let resultBox = ResultBox()
+        let performTask = Task<String, Error> { @MainActor in
+            let value = try await host.officeAgentBroker.perform(
+                sessionId: "S1", path: path, access: .read, requestId: UUID().uuidString
+            ) { _, docId in "read \(docId)" }
+            resultBox.value = value
+            return value
+        }
+
+        // The gate has not been released, so the shared open CANNOT have resolved — `perform` cannot
+        // possibly have returned yet. This is not a timing guess; it is a logical consequence of the
+        // gate still being held.
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertNil(resultBox.value, "perform must still be waiting on the shared, still-gated open")
+
+        gate.open()
+
+        let result = try await performTask.value
+        XCTAssertTrue(result.hasPrefix("read "))
+        let closed = await waitUntil(timeout: 0.3) { office.closeCalls.count > 0 }
+        XCTAssertFalse(closed, "joining an in-flight open must never close it — it was not this call's "
+                       + "own to open")
+        XCTAssertEqual(office.openCalls.count, 1, "only ONE open may ever reach the driver — the "
+                       + "broker's own redundant `open()` call (inside `awaitOpen`) must be suppressed "
+                       + "by the reducer's in-flight guard, not produce a second driver call")
     }
 
     // MARK: - Rule 3: dirty refusal
@@ -388,6 +509,89 @@ final class OfficeAgentBrokerTests: XCTestCase {
         ) { _, _ in "read the dirty in-memory state" }
 
         XCTAssertEqual(result, "read the dirty in-memory state", "reads must proceed on a dirty document")
+    }
+
+    // MARK: - Coordinator review F3 (2026-08-22): read-only-format refusal runs before the action
+
+    /// Mirrors `testFenceRefusalNeverTouchesAnyRuntimeDoor`'s own shape and reasoning: the read-only
+    /// check is pure and path-only, so it must refuse before EITHER runtime door is ever consulted —
+    /// there is nothing to adopt or open a write verb was always going to be refused on.
+    func testReadOnlyFormatRefusalOnAWriteNeverTouchesAnyRuntimeDoor() async {
+        let counting = CountingHost()
+        counting.dirsAnswer = [SessionDirEntry(path: "/repo", locked: true)]
+        let broker = OfficeAgentBroker(host: counting.host)
+
+        do {
+            _ = try await broker.perform(sessionId: "S1", path: "/repo/locked.xlsm", access: .write,
+                                         requestId: UUID().uuidString) { _, _ in "unreached" }
+            XCTFail("a write on a read-only format must refuse")
+        } catch let error as OfficeAgentBrokerError {
+            guard case .saveFailed(let path, let reason) = error else {
+                return XCTFail("expected .saveFailed, got \(error)")
+            }
+            XCTAssertEqual(path, "/repo/locked.xlsm")
+            XCTAssertTrue(reason.contains("can't be saved"), "unexpected reason: \(reason)")
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+        XCTAssertEqual(counting.existingRuntimeCalls, 0, "the read-only refusal must run before any "
+                       + "runtime door — nothing to adopt or open here")
+        XCTAssertEqual(counting.mintCalls, 0)
+    }
+
+    /// **The scenario the review actually named**: an ADOPTED read-only-format document (already open
+    /// in the user's own tab) must refuse a write BEFORE `action` runs — pre-fix, this predicate was
+    /// consulted only after `action` had already mutated the adopted document with no way to persist
+    /// or roll back the edit.
+    func testRefusesAWriteOnAnAdoptedReadOnlyFormatDocumentBeforeTheActionRuns() async throws {
+        let scratch = makeScratchDirectory()
+        let path = scratch.appendingPathComponent("locked.xlsm").path
+        writeDummyFile(at: path)
+        let office = BrokerOfficeDriverRecorder()
+        let host = makeHost(office: office, dirs: [SessionDirEntry(path: scratch.path, locked: true)])
+        await host.directory.refresh()
+
+        let runtime = host.officeRuntime(for: "S1")
+        runtime.open(path)
+        let opened = await waitUntil { runtime.stateSnapshot.documents[path] != nil }
+        XCTAssertTrue(opened, "setup")
+        XCTAssertEqual(office.openCalls.count, 1, "setup sanity")
+
+        var actionRan = false
+        do {
+            _ = try await host.officeAgentBroker.perform(
+                sessionId: "S1", path: path, access: .write, requestId: UUID().uuidString
+            ) { _, _ in actionRan = true; return "should not run" }
+            XCTFail("a write on a read-only-format document must refuse")
+        } catch let error as OfficeAgentBrokerError {
+            guard case .saveFailed(let refusedPath, let reason) = error else {
+                return XCTFail("expected .saveFailed, got \(error)")
+            }
+            XCTAssertEqual(refusedPath, path)
+            XCTAssertTrue(reason.contains("can't be saved"), "unexpected reason: \(reason)")
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+        XCTAssertFalse(actionRan, "the action must never run once a read-only format is refused")
+        XCTAssertEqual(office.saveCalls.count, 0, "a refused write must never reach save-through")
+        XCTAssertEqual(office.closeCalls.count, 0, "an adopted document must never be closed by the agent")
+        XCTAssertEqual(office.openCalls.count, 1, "adoption must never open a second time")
+    }
+
+    /// Reads are unaffected — a read-only format is still perfectly readable.
+    func testAllowsAReadOnAReadOnlyFormatDocument() async throws {
+        let scratch = makeScratchDirectory()
+        let path = scratch.appendingPathComponent("locked.odg").path
+        writeDummyFile(at: path)
+        let office = BrokerOfficeDriverRecorder()
+        let host = makeHost(office: office, dirs: [SessionDirEntry(path: scratch.path, locked: true)])
+        await host.directory.refresh()
+
+        let result = try await host.officeAgentBroker.perform(
+            sessionId: "S1", path: path, access: .read, requestId: UUID().uuidString
+        ) { _, _ in "read a read-only format" }
+
+        XCTAssertEqual(result, "read a read-only format")
     }
 
     // MARK: - Rule 4: save-through
@@ -970,6 +1174,76 @@ final class OfficeAgentBrokerTests: XCTestCase {
                        "a fresh reopen of the saved bytes starts clean")
 
         runtime.close(docPath)
+        _ = host.teardownAllOfficeRuntimesAndStopHelper()
+    }
+
+    /// **M4 (coordinator review, 2026-08-22): the self-opened READ close path had no live coverage.**
+    /// Every `info`/read verb on a not-currently-open document does open → action → IMMEDIATE close,
+    /// with no save and no drain — the same undrained-close SHAPE the drain fix exists for, but on a
+    /// path the report's own mechanism (LOK's pending post-save `ModifiedStatus=false`) says should be
+    /// safe: nothing was ever saved, so there is nothing pending left to race. This drill confirms that
+    /// reasoning empirically instead of leaving it asserted. **Proof mirrors how the drain bug was
+    /// actually caught**: not the close returning cleanly (it always did, even under the original bug),
+    /// but a SUBSEQUENT open of a DIFFERENT document succeeding afterward, on the SAME shared helper —
+    /// run repeatedly in isolation before trusting it, given this task's own history of a coincidence
+    /// (build 4's single pass) being misread as proof (`task-2-report.md`'s evidence table).
+    func testLiveASelfOpenedReadClosesImmediatelyWithNoDrainAndTheHelperSurvives() async throws {
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent()
+            .appendingPathComponent("NormaOfficeHelper")
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
+                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                        + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
+        let vendorRoot = Self.vendorProductSetRoot
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
+                      "LibreOffice vendor tree not present at \(vendorRoot.path) — run "
+                        + "`bun run libreoffice:fetch` from the repo root.")
+        let fixturePath = Self.fixturesRoot.appendingPathComponent("gate.ods").path
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: fixturePath), "gate.ods fixture missing")
+
+        let stateDir = makeScratchDirectory()
+        let scratch = makeScratchDirectory()
+        let firstPath = scratch.appendingPathComponent("read-close-live.ods").path
+        let secondPath = scratch.appendingPathComponent("read-close-live-2.ods").path
+        try Data(contentsOf: URL(fileURLWithPath: fixturePath)).write(to: URL(fileURLWithPath: firstPath))
+        try Data(contentsOf: URL(fileURLWithPath: fixturePath)).write(to: URL(fileURLWithPath: secondPath))
+
+        let directory = SessionDirectory(lister: { [] })
+        let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        host.makeOfficeHelperSupervisor = {
+            OfficeHelperSupervisor(configuration: OfficeHelperSupervisor.Configuration(
+                helperExecutableURL: helperURL,
+                socketDirectory: stateDir,
+                extraArguments: ["--lok-root", vendorRoot.path, "--sandbox-profile", Self.sandboxProfilePath.path]))
+        }
+
+        let broker = OfficeAgentBroker(host: .init(
+            existingRuntime: { host.existingOfficeRuntime(for: $0) },
+            runtime: { host.officeRuntime(for: $0) },
+            workingDirectories: { _ in [SessionDirEntry(path: scratch.path, locked: true)] }))
+
+        // The read verb this drill targets: open → action (no mutation) → immediate close, no save.
+        let result = try await broker.perform(
+            sessionId: "S1", path: firstPath, access: .read, requestId: UUID().uuidString
+        ) { _, docId in "read \(docId)" }
+        XCTAssertTrue(result.hasPrefix("read "))
+
+        let runtime = try XCTUnwrap(host.existingOfficeRuntime(for: "S1"), "opening must have minted a runtime")
+        XCTAssertNil(runtime.stateSnapshot.documents[firstPath], "a self-opened read must close immediately")
+
+        // The actual proof: the SAME shared helper opens a SECOND, different document afterward —
+        // exactly how the drain bug was originally caught (a subsequent open failing on a helper the
+        // prior close had silently killed).
+        runtime.open(secondPath)
+        let reopened = await waitUntilLive(timeout: 90) {
+            runtime.stateSnapshot.documents[secondPath] != nil || runtime.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(reopened, "the second document never opened — phase \(runtime.stateSnapshot.phase)")
+        XCTAssertNotNil(runtime.stateSnapshot.documents[secondPath],
+                        "the shared helper did not survive an immediate close after a self-opened READ "
+                          + "— phase=\(runtime.stateSnapshot.phase) reason="
+                          + "\(runtime.stateSnapshot.openFailures[secondPath] ?? "no reason recorded")")
+
+        runtime.close(secondPath)
         _ = host.teardownAllOfficeRuntimesAndStopHelper()
     }
 }
