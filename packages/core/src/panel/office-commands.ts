@@ -58,22 +58,19 @@ export const OFFICE_WRITE_ACTIONS = OFFICE_COMMAND_ACTIONS.filter(
  * Per-verb deadlines, in milliseconds — the office half of `BROWSER_DEADLINES_MS`'s job: how long
  * the daemon's pending entry waits for the app's answer before the agent is told nothing is known.
  *
- * **Fix round 1 (review I-1) recomputed both numbers below from scratch — the ORIGINAL numbers
- * (35 000 / 45 000) were unsafe, not merely tight, and here is the failure they invited:** they
- * covered ONE 30s handshake wait and nothing past it. The REAL worst case is a helper that is
- * genuinely starting up (its 3-attempt retry loop, not one attempt) followed by every discrete
- * request the verb then sends, each carrying ITS OWN independent 30s timeout. A deadline sized for
- * only the first of those legs times out on the daemon side WHILE the app is still honestly working
- * — the agent is told "nothing is known", and if it retries a NON-IDEMPOTENT write
- * (`insert_rows`/`append`/`add_slide`, …) the app can complete the FIRST attempt's write after the
- * daemon already gave up on it, so the retry's write lands on top — the document is mutated twice for
- * one agent intent. **Fail-safe direction is therefore GENEROUS, not tight**: a too-long deadline
- * costs the agent latency waiting on a helper that is, worst case, still legitimately trying; a
- * too-short one corrupts a user's document. The numbers below are deliberately large for exactly this
- * reason — see `office-commands.test.ts`'s own deadline-arithmetic test, which recomputes both totals
- * from the same named constants below and fails if either drifts under its real worst case again.
+ * **Fix round 1 (review I-1) recomputed both numbers below from scratch** — the ORIGINAL numbers
+ * (35 000 / 45 000) covered ONE 30s handshake wait and nothing past it, which is unsafe rather than
+ * merely tight (a too-short deadline reports "timed out" while the app is still honestly working; if
+ * the agent retries a NON-IDEMPOTENT write — `insert_rows`/`append`/`add_slide`, … — on that false
+ * signal, the first attempt's write can land AFTER the daemon gave up on it, so the retry's write
+ * lands on top and the document is mutated twice for one agent intent).
  *
- * **The arithmetic, leg by leg, every constant named and cited:**
+ * **Fix round 2 (review, a second Important) went further: named legs are not the WHOLE worst case,
+ * and this comment must say what it does and does not cover, plainly, rather than imply a guarantee
+ * the numbers cannot back.** What follows is split into the part that is COUNTED (§A) and the part
+ * that is NOT (§B) — §B is not smaller than §A, and no fixed number bounds it.
+ *
+ * ## §A — what H + nR actually counts, every constant named and cited
  *
  *  1. **The helper spawn/handshake, WITH its retry loop** — not one attempt.
  *     `OfficeHelperSupervisor.Configuration` (`apple/Norma/Sources/AppShell/OfficeHelperSupervisor.swift:399-401`):
@@ -102,34 +99,92 @@ export const OFFICE_WRITE_ACTIONS = OFFICE_COMMAND_ACTIONS.filter(
  *     own edit request (again not yet built, again R-bounded by the same client): **3 requests**,
  *     open + edit + save, not one.
  *
- * **Totals: H + 2R for reads, H + 3R for writes**, plus a flat ~4.5s margin for everything the
- * arithmetic above does not itemize (the emit, the socket, the hub fan-out, the app's own
- * scheduling, the result's encode and its trip home — the same category `BROWSER_WAIT_MAX_TIMEOUT_MS`
- * reserves headroom for, in `browser.ts`):
+ * **§A's totals: H + 2R for reads, H + 3R for writes**, plus a flat ~4.5s margin for
+ * emit/socket/fan-out/scheduling/encode overhead (the category `BROWSER_WAIT_MAX_TIMEOUT_MS` reserves
+ * headroom for, in `browser.ts` — explicitly NOT file I/O; §B below is a different category entirely):
  *
  *   read:  90 500 + 2×30 000 = 150 500 ms  → **155 000 ms** (155s)
  *   write: 90 500 + 3×30 000 = 180 500 ms  → **185 000 ms** (185s)
  *
- * **In the common case these numbers are never approached** — a helper that is already running and a
- * document that is already open answer in a small fraction of either bound; both are WORST-CASE
- * ceilings for a cold start, not the expected latency of an ordinary call. They are deliberately far
- * larger than any browser deadline (`BROWSER_DEADLINES_MS`'s ceiling is 30s): a browser command waits
- * on CDP, already running in an always-live renderer process; an office command may have to bring an
- * entire LibreOfficeKit process up from nothing, retry that boot up to three times, and then pay for
- * up to three more independently-timed requests — categorically heavier, and the two are not
- * comparable numbers.
+ * ## §B — what sits OUTSIDE every term above, named rather than estimated
+ *
+ * Three real legs of the true worst case have no named term in §A, and none of them is bounded by
+ * `handshakeTimeout`, `requestTimeout`, or anything else this file could multiply into R:
+ *
+ *  - **`stageDocument`** (`OfficeRuntime.swift:2827`, called at `:2323`) copies the real document
+ *    INTO the helper's jail BEFORE `driver.open` is even called (`:2325`, one line later) — every
+ *    verb pays this, not only writes. Its own header names the cost precisely: `copyfile(3)` with
+ *    `COPYFILE_CLONE` is an instant copy-on-write clone when source and destination share an APFS
+ *    volume (the common case), but "transparently falls back to an ordinary full byte copy otherwise
+ *    (a different volume, an external drive, a network share, a filesystem without clone support)" —
+ *    at that point the cost is real disk I/O scaling with document size, on hardware this code does
+ *    not control.
+ *  - **`placeAtomically`** (`OfficeRuntime.swift:2741`, called at `:2435`) runs AFTER `driver.save`
+ *    returns (`:2402`) and BEFORE the save waiters resolve (`resumeSaveWaiters(.saved)`, `:2483`) —
+ *    write-only, but on the hot path of every write. It always does a real `FileManager.copyItem`
+ *    (never a clone — the destination is a fresh sibling file, not `stageDocument`'s jailed copy),
+ *    an `fsync`, and a `rename(2)`: a full byte copy plus a flush, whatever the volume.
+ *  - **`OfficeHelperRequestQueue`** (`OfficeRuntime.swift:3449-3469`, the ONE instance at
+ *    `ShellSessionHost.swift:799`) is an app-wide FIFO — literally one `tail: Task` every Driver call
+ *    chains behind, across EVERY open document and EVERY session, not scoped to the verb's own
+ *    document. A verb's whole H + nR budget does not even START until every call enqueued ahead of it
+ *    (from a completely unrelated document, in a completely unrelated session) has finished. Nothing
+ *    in this file, or in the supervisor, bounds how long that queue is at the moment a new verb
+ *    enqueues behind it.
+ *
+ * All three scale with facts this constant cannot see at define time (document size, storage
+ * hardware, how many other office verbs happen to be in flight) — which is exactly why §B has no
+ * number: bounding the unboundable would be inventing a number, not deriving one, and the fail-safe
+ * direction from fix round 1 (generous, not tight) does not license that — a generous GUESS is still
+ * a guess.
+ *
+ * ## What this makes true, and what a caller must therefore do
+ *
+ * **`OFFICE_READ_DEADLINE_MS`/`OFFICE_WRITE_DEADLINE_MS` are a PRACTICAL bound, not a proof.** They
+ * are sized to comfortably outlast §A's real, countable worst case (with the 4.5s margin), and in the
+ * overwhelming common case — helper already running, document already open, local SSD, nothing else
+ * queued — they outlast §B too, by a wide margin. But §B is real and unbounded, so a deadline expiry
+ * is not evidence the verb failed, or even that it is still running slowly; it is evidence of exactly
+ * one thing, which `PanelCommandOutcome`'s own `timeout` kind already exists to say honestly
+ * (`packages/core/src/panel/commands.ts`): **nothing is known**. Never "did not happen" — the write
+ * may have landed on disk after the daemon stopped waiting for the app's answer, precisely because
+ * §B's legs can outlast even a generous §A-plus-margin bound.
+ *
+ * **The durable protection this fact demands does not live in these two numbers, and cannot — no
+ * finite deadline turns an unbounded tail into a bounded one.** It lives downstream, at whichever
+ * layer decides whether to retry a timed-out write: a non-idempotent office write
+ * (`insert_rows`/`append`/`add_slide`/… — anything in `OFFICE_WRITE_ACTIONS`) must never be
+ * blind-retried on a bare timeout, because the ORIGINAL attempt may still complete after the retry is
+ * sent, and the ORDER those two writes land in is not controlled by anything here. The coordinator is
+ * carrying this as a hard requirement into the broker task and the write-verb task; this comment
+ * exists so whoever builds either finds the contract stated here rather than re-deriving this whole
+ * analysis from scratch. See the two constants' own trailing comments below for the one-line version
+ * of this same pointer, placed where a reader reaching for a deadline value will actually see it.
+ *
+ * They are deliberately far larger than any browser deadline (`BROWSER_DEADLINES_MS`'s ceiling is
+ * 30s) for the §A reason alone, before §B is even considered: a browser command waits on CDP, already
+ * running in an always-live renderer process; an office command may have to bring an entire
+ * LibreOfficeKit process up from nothing, retry that boot up to three times, and then pay for up to
+ * three more independently-timed requests — categorically heavier, and the two are not comparable
+ * numbers.
  *
  * **These numbers are still UNEXERCISED by this task's own behaviour, and that remains by design.**
  * T1's `OfficeCommandConsumer` answers every verb SYNCHRONOUSLY with a refusal — no verb here ever
- * waits long enough for either deadline to matter yet. A later task that discovers these are wrong
- * for a REAL run should change the two constants below (and the arithmetic in this comment, in the
- * same change) rather than invent a 23rd per-verb number — the read/write REQUEST-COUNT split is the
- * fact that varies; the handshake cost (H) and the per-request cost (R) do not.
+ * waits long enough for either deadline, or §B's uncounted legs, to matter yet. A later task that
+ * discovers §A's numbers are wrong for a REAL run should change the two constants below (and the
+ * arithmetic in this comment, in the same change) rather than invent a 23rd per-verb number — the
+ * read/write REQUEST-COUNT split is the fact that varies within §A; H and R do not, and §B is not a
+ * number to begin with.
  *
  * Not settings, for the same reason `BROWSER_DEADLINES_MS` gives: nothing here is a knob a user would
  * turn.
  */
+// A timeout on either of these is OUTCOME UNKNOWN, never "did not happen" (see §B above) — a
+// non-idempotent write (anything in OFFICE_WRITE_ACTIONS) must NEVER be blind-retried on one.
 export const OFFICE_READ_DEADLINE_MS = 155_000;
+// Same caveat as OFFICE_READ_DEADLINE_MS above: a practical bound, not a proof — §B's uncounted legs
+// (stageDocument, placeAtomically, the shared OfficeHelperRequestQueue) can outlast it. The retry
+// discipline this demands belongs to the broker/write-verb tasks, not to this constant.
 export const OFFICE_WRITE_DEADLINE_MS = 185_000;
 
 function deadlinesFor<A extends readonly OfficeCommandAction[]>(
