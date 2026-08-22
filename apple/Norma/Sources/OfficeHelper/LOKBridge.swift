@@ -1600,6 +1600,34 @@ final class LOKBridge: OfficeDocumentBridge {
         return viewId
     }
 
+    /// office-agent-tools T3 review (I1) — get-or-mint variant of `createAgentViewOnDedicatedThread`
+    /// above, for `sheetsRead`'s own need: a read must never fail merely because SOMETHING ELSE (the
+    /// two-writer `createAgentView` wire door, or an earlier read in this same document's lifetime)
+    /// already minted the agent view — reusing the SAME view is exactly what a read wants (no reason
+    /// to mint a THIRD view per document). The wire-level `createAgentView`'s own strict
+    /// refusal-on-second-call (`SaveError.agentViewAlreadyExists`) is untouched by this — this is a
+    /// separate, internal-only entry point `sheetsReadOnDedicatedThread` alone calls, never reachable
+    /// from the wire.
+    ///
+    /// **Why reads need a second view at all**: Calc's selection, cursor, and part are PER-VIEW
+    /// state (confirmed by this whole mechanism's own precedent — `agentKeyEventOnDedicatedThread`,
+    /// right below, exists for the identical reason on the write side). `sheetsRead`'s own
+    /// `.uno:GoToCell` + `getTextSelection` mechanism moves and reads a SELECTION — on the PRIMARY
+    /// view, that is the user's own live selection on an adopted tab. Reading on the agent view
+    /// instead makes that side effect moot by construction: nothing this bridge does to the agent
+    /// view's own selection/part is ever visible to the user, so there is no residual to disclose
+    /// and no restore to get right, unlike the two-round `setPart` restore dance this task's own
+    /// earlier fix round needed before this change (see `sheetsReadOnDedicatedThread`'s own git
+    /// history for that superseded design).
+    private func ensureAgentViewOnDedicatedThread(docId: String) throws -> Int32 {
+        guard var doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        if let existing = doc.agentViewId { return existing }
+        let viewId = doc.handle.pointee.pClass.pointee.createView?(doc.handle) ?? -1
+        doc.agentViewId = viewId
+        documents[docId] = doc
+        return viewId
+    }
+
     /// `postKeyEvent`, IDENTICAL shape to `postKeyOnDedicatedThread`, except the `setView` prefix
     /// targets `doc.agentViewId` (the second view) instead of `doc.viewId` (the primary one) — the
     /// only way to actually PRODUCE an edit "as" the agent view, needed to drive the two-writer
@@ -1698,7 +1726,7 @@ final class LOKBridge: OfficeDocumentBridge {
     /// an adopted tab's own visible sheet, which a read-only probe must not do. See
     /// `pumpDedicatedThreadForPendingDispatch` for the call itself and why it is not
     /// `paintTileOnDedicatedThread`.
-    private func selectionTextOnDedicatedThread(_ doc: OpenDocument, part: Int, range: String, formulas: Bool) -> String {
+    private func selectionTextOnDedicatedThread(_ doc: OpenDocument, viewId: Int32, part: Int, range: String, formulas: Bool) -> String {
         // **Order is load-bearing: the formula toggle MUST run BEFORE `.uno:GoToCell`, not after —
         // live-drill-caught, not reasoned in advance.** The first working version of this function
         // toggled AFTER selecting (select the range, then flip Show Formulas, then read) and got the
@@ -1759,7 +1787,7 @@ final class LOKBridge: OfficeDocumentBridge {
         var text = readSelectionTextOnDedicatedThread(doc)
         var attempts = 1
         while text == baseline && attempts < Self.goToCellVerificationAttempts {
-            pumpDedicatedThreadForPendingDispatch(doc, part: part)
+            pumpDedicatedThreadForPendingDispatch(doc, viewId: viewId, part: part)
             text = readSelectionTextOnDedicatedThread(doc)
             attempts += 1
         }
@@ -1801,16 +1829,23 @@ final class LOKBridge: OfficeDocumentBridge {
     /// `OpenDocument.lastKnownPart` (autosave's own "what part is the user looking at" signal, see
     /// that field's own header) and this is a read probe, which must never perturb it. `part` is
     /// always the SAME part the caller already asserted via `setPart` before calling into
-    /// `selectionTextOnDedicatedThread` in the first place (`sheetsInfoOnDedicatedThread`'s
-    /// per-sheet loop, `sheetsReadOnDedicatedThread`'s target-sheet switch) — passed straight
-    /// through rather than re-derived, so this call's own `nPart` argument always matches
-    /// `doc_getPart(pThis)` already. That equality is what keeps this call out of
-    /// `paintTileOnDedicatedThread`'s own documented `getAlternativeViewForPaint` hazard (fix round
-    /// 3 there): that unfiltered bystander-view search only triggers on a part/mode MISMATCH, which
-    /// passing the already-current part structurally avoids without needing that method's own
-    /// type-gated `setPart` prefix here.
-    private func pumpDedicatedThreadForPendingDispatch(_ doc: OpenDocument, part: Int) {
-        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+    /// `selectionTextOnDedicatedThread` in the first place — passed straight through rather than
+    /// re-derived, so this call's own `nPart` argument always matches `doc_getPart(pThis)` already.
+    /// That equality is what keeps this call out of `paintTileOnDedicatedThread`'s own documented
+    /// `getAlternativeViewForPaint` hazard (fix round 3 there): that unfiltered bystander-view
+    /// search only triggers on a part/mode MISMATCH, which passing the already-current part
+    /// structurally avoids without needing that method's own type-gated `setPart` prefix here.
+    ///
+    /// **`viewId` fix (review I1) — no longer hardcodes `doc.viewId` (the primary view).**
+    /// `sheetsReadOnDedicatedThread` now polls on the AGENT view, not the primary one (see
+    /// `ensureAgentViewOnDedicatedThread`'s own header for why); a pump that unconditionally
+    /// asserted the primary view would silently switch the process-global current view AWAY from
+    /// the agent view mid-poll, on every retry — clobbering the very isolation the agent-view
+    /// switch exists to provide, and reading the USER's own selection instead of the agent's from
+    /// that point on. The caller always passes the SAME view it already asserted before dispatching
+    /// `.uno:GoToCell` in the first place, so this is never a new assertion, only a repeated one.
+    private func pumpDedicatedThreadForPendingDispatch(_ doc: OpenDocument, viewId: Int32, part: Int) {
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, viewId)
         var buffer = [UInt8](repeating: 0, count: Self.pumpTileByteCount)
         buffer.withUnsafeMutableBufferPointer { rawBuffer in
             doc.handle.pointee.pClass.pointee.paintPartTile?(
@@ -1847,83 +1882,100 @@ final class LOKBridge: OfficeDocumentBridge {
     }
 
     /// office-agent-tools T3 — sheet names, each one's used range, and the active sheet's name.
-    /// Read-only: no `postUnoCommand` that mutates content, only the ones the used-range probe below
-    /// issues (a SELECTION move, not an edit).
+    /// Genuinely read-only, not just read-only in intent: no view but the PRIMARY one is touched
+    /// (`getDataArea` needs a current view resolved — see below — but never a selection move or a
+    /// part switch), so there is nothing here to restore.
     ///
-    /// **The used-range probe is NOT `getDataArea`, after this task's own live drills measured it
-    /// wrong.** `getDataArea` was the original design (see git history/`task-3-report.md`'s own
-    /// account): live-tested against `two-sheet.ods` — a fixture with KNOWN, verified content
-    /// (`OfficeRuntimeLiveTests`' own live drill already proved B1="42" there) — it reported "A1:A1"
-    /// (i.e. `(0,0)`) for a sheet a REAL read of the same document, moments later, showed to actually
-    /// span at least A1:B2 ("NORMA GATE" / "42" / "office stage A embed probe" / ""). Whatever
-    /// `getDataArea` measures in this LOK build, it is not "the used range" this feature needs, and no
-    /// further characterization was attempted — the report names this as a live, falsified assumption
-    /// rather than a debugged root cause. **Replaced with the SAME mechanism `sheetsRead` already
-    /// proves correct**: select a generously large range
-    /// (`usedRangeProbeBound`, below) via `selectionTextOnDedicatedThread` and let Calc's own
-    /// `getTextSelection` do the trimming — proven empirically (this task's own live drill) to trim a
-    /// selection down to exactly the rows/columns that actually have content, never padding to the
-    /// full requested rectangle. A wholly-empty answer is now UNAMBIGUOUSLY the empty-sheet sentinel
-    /// (`-1, -1`) — no separate A1-content disambiguation probe needed, unlike `getDataArea`'s own
-    /// undocumented `(0,0)` ambiguity this replaces.
+    /// **Fix round 3 (review C1/C2) — `getDataArea` IS the used-range probe after all, now that the
+    /// header ABI bug is fixed.** This function's own PREVIOUS design replaced `getDataArea` with a
+    /// large-bound-range `getTextSelection` probe, reasoning that live drills had "measured
+    /// `getDataArea` wrong" (`(0,0)`/"A1:A1" for a sheet proven to have real content through B2).
+    /// The true root cause, found by this review: `getDataArea`'s header slot was silently reading
+    /// `getEditMode` instead (see `LOKBridge.swift`'s own `nSize` tripwire, and
+    /// `LibreOfficeKit.h`'s three phantom-member removals) — the function was never actually called
+    /// at all. With the ABI fixed, `getDataArea` is the CORRECT probe: it reads `ScTable::
+    /// GetCellArea` off the document MODEL directly (`sc/source/ui/unoobj/docuno.cxx`'s
+    /// `ScModelObj::getDataArea`, confirmed by reading the pinned source), taking `nPart` as a
+    /// direct argument — no `setPart`, no selection, no `.uno:GoToCell`, no poll-and-pump, and (per
+    /// this fix) no per-sheet part-restore dance either.
+    ///
+    /// **One view call IS still required, and this review's own first-pass guidance
+    /// ("no view at all") undersold it** — checked against the pinned source, not assumed:
+    /// `ScModelObj::getDataArea` resolves via `ScDocShell::GetViewData()`, the SAME static,
+    /// process-global-current-view accessor `setPart`/`getPart` use (`OpenDocument.viewId`'s own
+    /// header has the full citation chain) — this codebase already independently confirmed the
+    /// identical hazard for `getDocumentSize` (`openOnDedicatedThread`'s own fix-round-3 comment).
+    /// A wrong or absent current view does not throw here — `ScModelObj::getDataArea` silently
+    /// returns its own default `Size(1, 1)` — so `setView(doc.viewId)` once at the top, before the
+    /// per-sheet loop, is required for correctness, just not per-sheet the way `setPart` used to be.
+    ///
+    /// **The `(0, 0)` ambiguity is real, confirmed by reading `ScTable::GetCellArea`
+    /// (`sc/source/core/data/table1.cxx`) directly — not resolved by the ABI fix, and not
+    /// resolvable from the C API alone.** `GetCellArea` computes a real `bool bFound` (true content
+    /// existed) alongside `rEndCol`/`rEndRow`, but `ScModelObj::getDataArea` calls it and DISCARDS
+    /// the returned bool entirely — `(0, 0)` is what BOTH a genuinely empty sheet AND a sheet with
+    /// content confined to cell A1 alone report, indistinguishably, at the LOK C API layer. Resolved
+    /// here with a narrow, disclosed exception: ONLY when `getDataArea` answers `(0, 0)` does this
+    /// function fall back to a single-cell content check on A1 (`sheetHasA1ContentOnDedicatedThread`,
+    /// below) to decide between the empty-sheet sentinel (`-1, -1`) and "content confined to A1"
+    /// (`0, 0`, i.e. `A1:A1`) — on the AGENT view, never the primary one, so even this narrow
+    /// fallback never touches the user's own selection. Every OTHER sheet (the overwhelming common
+    /// case) never pays this cost at all.
     private func sheetsInfoOnDedicatedThread(docId: String) throws -> (sheets: [OfficeSheetInfo], activeSheet: String) {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
         guard doc.kind == .spreadsheet else { throw SaveError.notSpreadsheet(docId: docId, kind: doc.kind) }
         doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
 
         let names = sheetNamesOnDedicatedThread(doc)
-
-        // **Fix round 2 (CRITICAL, review-caught) — captured BEFORE the per-sheet probe loop
-        // below, not after.** The loop calls `setPart` once per sheet to probe each one's used
-        // range in turn, so reading `getPart()` AFTER that loop always answers with the LAST
-        // sheet probed — never the sheet the caller (an adopted tab's own live view, most of the
-        // time) was actually looking at when this request arrived. The original version of this
-        // function read `getPart()` after the loop and passed its OWN live test
-        // (`two-sheet.ods`, active Sheet2 — the fixture's last sheet) for the wrong reason: with
-        // exactly two sheets, "last sheet probed" and "the fixture's real active sheet" happen to
-        // coincide. They do not for a document parked on any sheet OTHER than its last.
-        let originalPart = Int(doc.handle.pointee.pClass.pointee.getPart?(doc.handle) ?? 0)
+        let activeIndex = Int(doc.handle.pointee.pClass.pointee.getPart?(doc.handle) ?? 0)
+        let activeSheet = (activeIndex >= 0 && activeIndex < names.count) ? names[activeIndex] : (names.first ?? "")
 
         var sheets: [OfficeSheetInfo] = []
         sheets.reserveCapacity(names.count)
         for (part, name) in names.enumerated() {
-            doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(part))
-            let text = selectionTextOnDedicatedThread(doc, part: part, range: Self.usedRangeProbeBound, formulas: false)
-            let grid = parseTSVGrid(text)
-            guard !grid.isEmpty else {
-                sheets.append(OfficeSheetInfo(name: name, usedEndColumn: -1, usedEndRow: -1))
-                continue
+            var lastCol: Int = 0
+            var lastRow: Int = 0
+            doc.handle.pointee.pClass.pointee.getDataArea?(doc.handle, part, &lastCol, &lastRow)
+            if lastCol == 0 && lastRow == 0 {
+                let hasA1Content = try sheetHasA1ContentOnDedicatedThread(docId: docId, part: part)
+                sheets.append(OfficeSheetInfo(name: name,
+                                               usedEndColumn: hasA1Content ? 0 : -1,
+                                               usedEndRow: hasA1Content ? 0 : -1))
+            } else {
+                sheets.append(OfficeSheetInfo(name: name, usedEndColumn: lastCol, usedEndRow: lastRow))
             }
-            let usedEndRow = grid.count - 1
-            let usedEndColumn = (grid.map(\.count).max() ?? 1) - 1
-            sheets.append(OfficeSheetInfo(name: name, usedEndColumn: usedEndColumn, usedEndRow: usedEndRow))
         }
-
-        // Restored, not left on whatever sheet the probe loop happened to visit last — `info` is
-        // read-only in INTENT (this function's own header above), so it must never be the reason
-        // an adopted tab's live view jumps to a different sheet than the one the user had open.
-        // `setPart` is ungated here (unlike `postKeyOnDedicatedThread`'s own `.text` guard
-        // elsewhere in this file) because this whole function already requires `doc.kind ==
-        // .spreadsheet` above — the caret-move hazard `OpenDocument.kind` exists to gate around
-        // does not apply to a document this function would even reach.
-        doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(originalPart))
-
-        let activeSheet = (originalPart >= 0 && originalPart < names.count) ? names[originalPart] : (names.first ?? "")
         return (sheets, activeSheet)
     }
 
-    /// The used-range probe's own ceiling (`sheetsInfoOnDedicatedThread`'s own header explains why
-    /// this exists instead of `getDataArea`) — generous enough for any ordinary real-world sheet
-    /// (26 columns, the entire alphabet's worth of single-letter columns, x 5,000 rows = 130,000
-    /// cells), bounded so a pathological or malicious document cannot make `info` scan without limit.
-    /// A sheet with real content PAST this bound under-reports its own used range — a disclosed
-    /// limitation, not a silent one (see task-3-report.md's concerns).
-    private static let usedRangeProbeBound = "A1:Z5000"
+    /// The narrow `(0, 0)` disambiguation `sheetsInfoOnDedicatedThread` falls back to — see that
+    /// function's own header for why it is needed and why it is rare. Reuses
+    /// `selectionTextOnDedicatedThread` (the SAME proven, pump-and-poll-verified mechanism `read`
+    /// uses) on the AGENT view, so this never touches the primary view's own selection even in this
+    /// fallback path.
+    private func sheetHasA1ContentOnDedicatedThread(docId: String, part: Int) throws -> Bool {
+        guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        let agentViewId = try ensureAgentViewOnDedicatedThread(docId: docId)
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
+        doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(part))
+        let text = selectionTextOnDedicatedThread(doc, viewId: agentViewId, part: part, range: "A1", formulas: false)
+        return !text.isEmpty
+    }
 
     /// office-agent-tools T3 — a value or formula grid over one already-validated, already-formatted
     /// A1 `range` on ONE named sheet. `sheet` is resolved to a part index HERE (never by the caller —
     /// see `OfficeWireFrame.sheetsRead`'s own header for why this MUST live helper-side), refusing
     /// with the workbook's real sheet list on no match.
+    ///
+    /// **Fix round 3 (review I1) — reads on the AGENT view, not the primary one.** The previous
+    /// design read on `doc.viewId` (the user's own primary view) and restored `setPart` afterward
+    /// to undo the sheet switch — necessary because Calc's part is per-view state, but leaving a
+    /// residual this review named directly: `.uno:GoToCell`'s own SELECTION move on the primary
+    /// view was never restorable (no mechanism existed to recall the prior selection), disclosed
+    /// as an open concern in `task-3-report.md`. Reading on the agent view instead — minted or
+    /// reused via `ensureAgentViewOnDedicatedThread` — makes the whole class of residual moot: the
+    /// agent view's part and selection are never the user's own, so nothing needs restoring, and
+    /// there is nothing left to disclose about a live-tab side effect.
     private func sheetsReadOnDedicatedThread(docId: String, sheet: String, range: String, formulas: Bool) throws -> [[String]] {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
         guard doc.kind == .spreadsheet else { throw SaveError.notSpreadsheet(docId: docId, kind: doc.kind) }
@@ -1934,18 +1986,11 @@ final class LOKBridge: OfficeDocumentBridge {
             throw SaveError.sheetNotFound(docId: docId, sheet: sheet, available: names)
         }
 
-        // Restored after the read, below — `read` names ONE sheet to read FROM, not a standing
-        // "switch the adopted tab to this sheet" request. Without this, a `read` naming a sheet
-        // other than the one the user has open would silently move their live view to it (mirrors
-        // `sheetsInfoOnDedicatedThread`'s own restore, immediately above this function, for the
-        // identical reason).
-        let originalPart = Int(doc.handle.pointee.pClass.pointee.getPart?(doc.handle) ?? 0)
+        let agentViewId = try ensureAgentViewOnDedicatedThread(docId: docId)
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
         doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(part))
 
-        let text = selectionTextOnDedicatedThread(doc, part: part, range: range, formulas: formulas)
-
-        doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(originalPart))
-
+        let text = selectionTextOnDedicatedThread(doc, viewId: agentViewId, part: part, range: range, formulas: formulas)
         return parseTSVGrid(text)
     }
 

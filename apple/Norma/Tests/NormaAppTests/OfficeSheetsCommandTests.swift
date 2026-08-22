@@ -215,6 +215,16 @@ final class OfficeSheetsCommandTests: XCTestCase {
         print("[live sheets info] two-sheet.ods ->\n\(result)")
         XCTAssertTrue(result.contains("2 sheets"), result)
 
+        // **Used range asserted literally (review I2) — not eyeballed from a print() line.**
+        // Sheet1's real content is "NORMA GATE"/"42" (row 1) and "office stage A embed probe"/""
+        // (row 2), spanning A1:B2. Sheet2's real content ("SHEET TWO SEED"/84, "office stage B
+        // sheet two probe"/"") spans A1:B2 too — checked directly against the fixture's own
+        // content.xml, not assumed. Neither sheet exercises `sheetsInfoOnDedicatedThread`'s own
+        // `(0, 0)` disambiguation fallback (see `testLiveASingleCellSheetAndAnEmptySheetBothReport
+        // CorrectlyThroughTheZeroZeroFallback` for that path, which THIS fixture cannot reach).
+        XCTAssertTrue(result.contains("\"Sheet1\" (active): A1:B2"), result)
+        XCTAssertTrue(result.contains("\"Sheet2\": A1:B2"), result)
+
         // **The active sheet is a genuine, independently-verified fact, not "contains the word
         // active."** `two-sheet.ods`'s own `settings.xml` has NO `ActiveTable` config item at all
         // (checked directly against the fixture's own bytes, once, while diagnosing the bug below) —
@@ -250,6 +260,46 @@ final class OfficeSheetsCommandTests: XCTestCase {
         let resultAgain = try XCTUnwrap(sentAgain.result)
         XCTAssertTrue(resultAgain.contains("(active: \"Sheet1\")"),
                       "a read naming Sheet2, or info's own probe loop, left the document parked away from Sheet1: \(resultAgain)")
+    }
+
+    /// office-agent-tools T3 review (I2/C2) — `sheetsInfoOnDedicatedThread`'s own `(0, 0)`
+    /// disambiguation fallback, exercised deliberately (`two-sheet.ods` cannot reach this path —
+    /// both its sheets span A1:B2, confirmed live above). `sparse-sheets.ods` is a purpose-built
+    /// fixture (authored by editing `two-sheet.ods`'s own `content.xml` via `zipfile`, same
+    /// technique this task used to inspect the fixture's `settings.xml`): Sheet1 has real content
+    /// confined to exactly cell A1 ("SOLO CELL", no other cell anywhere carries a value-type or
+    /// text), Sheet2 is genuinely empty (no cell anywhere carries a value-type or text). Both
+    /// report `getDataArea() == (0, 0)` — the fixture's whole point — so this is the regression
+    /// pin for the single-cell-content-vs-A1 disambiguation itself, not merely for `getDataArea`'s
+    /// ordinary case (already covered above).
+    func testLiveASingleCellSheetAndAnEmptySheetBothReportCorrectlyThroughTheZeroZeroFallback() async throws {
+        try requireLiveEngine()
+        let path = try makeWritableCopy(of: "sparse-sheets.ods")
+        let stateDir = makeScratchDirectory()
+        let host = makeLiveHost(stateDir: stateDir, dirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)])
+        await host.directory.refresh()
+
+        let sent = await send(command("office.sheets.info", args: ["path": path], sessionId: "S1",
+                                       commandId: "pcmd-sparse-info"), through: host)
+        XCTAssertTrue(sent.ok, "\(sent)")
+        let result = try XCTUnwrap(sent.result)
+        print("[live sheets info] sparse-sheets.ods ->\n\(result)")
+
+        XCTAssertTrue(result.contains("\"Sheet1\" (active): A1:A1"),
+                      "a sheet with real content confined to A1 alone must report A1:A1, not empty: \(result)")
+        XCTAssertTrue(result.contains("\"Sheet2\": empty"),
+                      "a genuinely empty sheet must report empty, not A1:A1 (the (0,0) ambiguity mapped the wrong way): \(result)")
+
+        // The disambiguation fallback (`sheetHasA1ContentOnDedicatedThread`) reads on the AGENT
+        // view — confirm it never perturbed the document's own real state: `read` against Sheet1's
+        // real A1 content must still see it afterward. Distinct commandId — the broker's own
+        // requestId-keyed memoization (Task 2's deliberate design) would otherwise return this
+        // `info` call's own cached result verbatim for a second call sharing its default id.
+        let read = await send(command("office.sheets.read",
+                                       args: ["path": path, "sheet": "Sheet1", "range": "A1:A1"],
+                                       sessionId: "S1", commandId: "pcmd-sparse-read"), through: host)
+        XCTAssertTrue(read.ok, "\(read)")
+        XCTAssertTrue(try XCTUnwrap(read.result).contains("SOLO CELL"), "\(read)")
     }
 
     /// `sheets read` VALUES against `two-sheet.ods`'s own KNOWN, documented content

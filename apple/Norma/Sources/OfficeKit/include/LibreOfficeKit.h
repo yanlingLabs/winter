@@ -582,8 +582,9 @@ struct _LibreOfficeKitDocumentClass
     // remaining members — read individually, live, via `pClass->pointee.<name>` on a real open
     // document, and resolved through `dladdr` back to a symbol name — names EXACTLY the function the
     // compiled engine actually put there: `doc_<sameName>`, with zero exceptions and zero omissions.
-    // `MemoryLayout<LibreOfficeKitDocumentClass>.size` (648 bytes with one phantom still present,
-    // 656 with all three) now equals the engine's own self-reported `pClass->nSize` (632 bytes)
+    // `MemoryLayout<LibreOfficeKitDocumentClass>.size` (648 bytes with two of the three phantoms
+    // still present, 656 with all three) now equals the engine's own self-reported `pClass->nSize`
+    // (632 bytes)
     // exactly — the tripwire right after `documentLoad` in `LOKBridge.openOnDedicatedThread` asserts
     // this on every document open, not just this one investigation.
 
