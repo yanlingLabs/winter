@@ -85,6 +85,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// item that silently stops working. `nil` until the first `summonAppWindow` (before that there
     /// is no panel, so no code tab to save).
     private(set) var editorSaveMenuCommand: EditorSaveMenuCommand?
+
+    /// One-shot guard for `reassertMainMenuItems`'s activation observer — the standing belt is
+    /// registered on the first summon and lives for the process, so repeated summons do not stack
+    /// observers that would each re-run the same idempotent installs.
+    private var mainMenuActivationObserverInstalled = false
     /// SP2b T5: owns this Mac's `RemoteHost` (lazily constructed — nothing starts until either a
     /// pairing window is requested or, autostart follow-up below, this Mac already has ≥1 paired
     /// device). Constructed unconditionally in `boot()` (cheap — it does no I/O of its own; only
@@ -430,12 +435,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// resolves to a log + no-op, never a crash or a half-wired window.
     func summonAppWindow(navigatingTo destination: ShellDestination? = nil) {
         if let appWindow {
-            // **Re-asserted on EVERY summon, not only the first** (editor-product T8 fix round 1).
-            // Installing once meant that a main menu SwiftUI rebuilt — or one that simply did not
-            // exist yet at the first summon — took the ⌘S trigger away permanently and silently.
-            // The install is idempotent (it replaces its own item), so re-asserting costs nothing.
-            installEditorSaveMenuItem(host: appWindow.host)
+            // **Re-asserted on EVERY summon, not only the first** (editor-product T8 fix round 1),
+            // and **AFTER the summon, never before** (live-gate fix, 2026-08-22 — see
+            // `reassertMainMenuItems`). Installing once meant that a main menu SwiftUI rebuilt — or
+            // one that simply did not exist yet at the first summon — took the ⌘S trigger away
+            // permanently and silently. Both installs are idempotent, so re-asserting costs nothing.
             appWindow.summon(navigatingTo: destination)
+            reassertMainMenuItems(host: appWindow.host)
             return
         }
         guard let model = appModel else {
@@ -519,9 +525,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.browserSignals?.setRenderingActive(active)
         }
         appWindow = controller
-        installEditorSaveMenuItem(host: host)
-        installOfficeCanvasMenuItems()
         controller.summon(navigatingTo: destination)
+        reassertMainMenuItems(host: host)
+    }
+
+    /// **Put this app's own menu items back after SwiftUI has finished building its menu.**
+    ///
+    /// Live-gate fix (2026-08-22), and the bug it closes was total, not cosmetic: on a freshly
+    /// launched app the File menu did not exist at all, so ⌘S had nothing to bind to and the
+    /// keystroke fell through the responder chain to the system beep. Measured on the running app
+    /// with the window up: the menu bar read `Apple, Norma Dev, Edit, View, Window, Help` — no
+    /// File — and `View` held only `Enter Full Screen`, so BOTH of this app's injected sets (Save,
+    /// and Zoom In/Out/Actual Size) were gone while SwiftUI's own stock items stood.
+    ///
+    /// The cause is ordering. This app is `LSUIElement`: the first `summon` promotes it to
+    /// `.regular` and instantiates the scene, and SwiftUI (re)builds `NSApp.mainMenu` as part of
+    /// that — discarding anything already injected. Both installs used to run BEFORE the summon,
+    /// so the very act of showing the window erased them. A LATER summon installed into a menu
+    /// SwiftUI had already settled, which is why this only ever bit a fresh launch and why the
+    /// earlier "re-assert on every summon" round did not catch it.
+    ///
+    /// Three passes, because SwiftUI's rebuild is not guaranteed to be synchronous with `summon`:
+    /// now, on the next main-queue turn, and once more shortly after. Every install is idempotent
+    /// (`EditorSaveMenuCommand.install` replaces its own item; `OfficeCanvasMenuInstaller` matches
+    /// on action selector), so repeating is free and cannot produce a second ⌘S. The activation
+    /// observer below covers rebuilds that happen later still.
+    private func reassertMainMenuItems(host: ShellSessionHost?) {
+        let apply: () -> Void = { [weak self, weak host] in
+            guard let self else { return }
+            self.installEditorSaveMenuItem(host: host)
+            self.installOfficeCanvasMenuItems()
+        }
+        apply()
+        DispatchQueue.main.async(execute: apply)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: apply)
+        guard !mainMenuActivationObserverInstalled else { return }
+        mainMenuActivationObserverInstalled = true
+        // The standing belt: any later rebuild (SwiftUI reacting to a scene change, the app being
+        // re-activated after another app owned the menu bar) is repaired the next time this app
+        // becomes active — which is necessarily before the user can press ⌘S in it again.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            self.installEditorSaveMenuItem(host: self.appWindow?.host)
+            self.installOfficeCanvasMenuItems()
+        }
     }
 
     /// **editor-product Task 8: ⌘S in the main menu.**
