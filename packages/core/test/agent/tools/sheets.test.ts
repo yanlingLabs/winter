@@ -70,6 +70,21 @@ describe("registration", () => {
     expect(h.registry.namesForMode("dispatch").has("sheets")).toBe(true);
     expect(h.registry.namesForMode("chat").has("sheets")).toBe(false);
   });
+
+  // office-agent-tools T3 review (I6) — `sheets`' verb enum is pinned literally, rendered through
+  // the SAME z.toJSONSchema path a real model actually sees (ToolRegistry.specFor), not a raw zod
+  // import that could drift from what's really offered. `gate.ts`'s own READ_ONLY classification
+  // is name-keyed (`"sheets"`, not per-verb) — Task 4's write verbs (`set`, `insert_rows`, …) will
+  // land as NEW cases in this SAME enum and inherit READ_ONLY silently unless that classification
+  // is revisited then. This test's own failure message names that file directly: the day this
+  // enum grows, it fails here first, before a write verb ever ships gated as if it only read.
+  test("the verb enum is exactly [\"info\", \"read\"] — Task 4 must revisit gate.ts's READ_ONLY classification when this grows", () => {
+    const h = makeHarness();
+    const spec = h.registry.specFor("sheets", WORKDIR, "code");
+    const parameters = spec?.parameters as { properties?: { verb?: { enum?: string[] } } } | undefined;
+    const verbEnum = parameters?.properties?.verb?.enum;
+    expect(verbEnum).toEqual(["info", "read"]);
+  });
 });
 
 // ================================================================================================
