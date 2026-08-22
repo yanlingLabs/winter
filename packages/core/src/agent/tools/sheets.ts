@@ -259,7 +259,11 @@ export function registerSheetsTool(r: ToolRegistry, deps: SheetsToolDeps): void 
       + "a range whose only real content sits away from its top-left corner comes back without "
       + "leading blank rows/columns, so a value's position in the returned grid does not necessarily "
       + "match its real cell position. For precise positioning, request a tightly-scoped range (a "
-      + "single cell or a range you already know is fully populated) rather than relying on padding.",
+      + "single cell or a range you already know is fully populated) rather than relying on padding.\n"
+      + "A cell whose own content contains a tab or a literal \" is wrapped in \"...\" with internal "
+      + "\" doubled (the same convention CSV/TSV files use) so it can't be confused with a real "
+      + "column boundary — that quoting is an ENCODING, not part of the cell's real value: "
+      + "say \"hi\" round-trips as \"say \"\"hi\"\"\", not as the literal text between the quotes.",
     modes: ["code", "dispatch"],
     args: SheetsArgs,
     async run(a: SheetsArgs, ctx) {

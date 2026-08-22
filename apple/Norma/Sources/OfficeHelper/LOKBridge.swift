@@ -349,6 +349,17 @@ final class LOKBridge: OfficeDocumentBridge {
         /// Office Stage B Task 6 — `agentKeyEvent` requested for a docId `createAgentView` was
         /// never called for.
         case noAgentView(String)
+        /// office-agent-tools T3 re-review (Minor #4) — `createView()` returned LOK's own "no view"
+        /// sentinel (`-1`, or the optional closure itself never fired) inside
+        /// `ensureAgentViewOnDedicatedThread`. Thrown, never cached: the ORIGINAL code stored `-1`
+        /// into `OpenDocument.agentViewId` via `?? -1` and returned it as if it were a real view —
+        /// `agentViewId` being non-nil short-circuits every FUTURE call into returning that same
+        /// `-1` without ever retrying `createView`, and `SfxLokHelper::setView` (`sfx2/source/view/
+        /// lokhelper.cxx`, its own `getViewOfId` lookup) returns SILENTLY for an unknown id rather
+        /// than erroring — meaning every subsequent "agent view" read would have silently run on
+        /// whatever view was ALREADY current (in practice, the primary one), defeating I1's entire
+        /// isolation guarantee with no error anywhere in the chain.
+        case agentViewCreationFailed(String)
         /// office-agent-tools T3 — `sheetsInfo`/`sheetsRead` requested for a document that is not a
         /// spreadsheet. Distinct from every OTHER refusal on this enum: it is composed ENTIRELY from
         /// this bridge's own words, never a LOK-thrown string, so it is already house-voice by
@@ -369,6 +380,7 @@ final class LOKBridge: OfficeDocumentBridge {
             case .pasteFailed(let docId): return "paste() failed for docId: \(docId)"
             case .agentViewAlreadyExists(let docId): return "docId already has an agent view: \(docId)"
             case .noAgentView(let docId): return "docId has no agent view: \(docId)"
+            case .agentViewCreationFailed(let docId): return "createView() failed to mint an agent view for docId: \(docId)"
             case .notSpreadsheet(let docId, let kind):
                 let noun: String
                 switch kind {
@@ -1667,7 +1679,14 @@ final class LOKBridge: OfficeDocumentBridge {
     private func ensureAgentViewOnDedicatedThread(docId: String) throws -> Int32 {
         guard var doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
         if let existing = doc.agentViewId { return existing }
-        let viewId = doc.handle.pointee.pClass.pointee.createView?(doc.handle) ?? -1
+        // Re-review fix (Minor #4) — a failed/absent `createView()` throws here, on THIS call,
+        // rather than caching `-1` into `agentViewId` (which would silently short-circuit every
+        // future call into returning that same unusable id — see `SaveError.agentViewCreationFailed`'s
+        // own header for the full failure chain this closes). `doc.agentViewId` is left `nil` on
+        // this path, so a LATER call for the same docId gets a fresh chance to mint a real view.
+        guard let viewId = doc.handle.pointee.pClass.pointee.createView?(doc.handle), viewId >= 0 else {
+            throw SaveError.agentViewCreationFailed(docId)
+        }
         doc.agentViewId = viewId
         documents[docId] = doc
         return viewId
@@ -1792,14 +1811,24 @@ final class LOKBridge: OfficeDocumentBridge {
         // ALWAYS pair with the ON-toggle above, so the condition is checked again inside the
         // deferred block, not by conditioning the registration itself).
         //
-        // **NOT independently verified that the restore has LANDED before this function returns —
-        // disclosed, not silently assumed solved.** A first attempt at this fix tried to verify it
-        // the same way `.uno:GoToCell` is verified (poll a flag set from a `LOK_CALLBACK_STATE_
-        // CHANGED` handler) on the reviewer's own claim that this command fires one synchronously.
-        // Falsified by this task's own follow-up drill: a complete, unconditional raw-callback trace
-        // for a full seed-then-read-formulas cycle never mentions `ToggleFormula` in ANY callback of
-        // ANY type — see `toggleFormulaOnDedicatedThread`'s own header for the full account. No
-        // signal exists to poll, so none is polled; this function guarantees DISPATCH, not landing.
+        // **NOT independently VERIFIED that the restore has landed before this function returns —
+        // but it IS pumped, which is a different and real property, not conflated with the first
+        // any more.** A first attempt at this fix tried to verify landing the same way
+        // `.uno:GoToCell` is verified (poll a flag set from a `LOK_CALLBACK_STATE_CHANGED` handler)
+        // on the claim this command fires one synchronously. Falsified by this task's own
+        // follow-up drill: a complete, unconditional raw-callback trace for a full
+        // seed-then-read-formulas cycle never mentions `ToggleFormula` in ANY callback of ANY type
+        // — see `toggleFormulaOnDedicatedThread`'s own header for the full account. No signal
+        // exists to poll, so none is polled — VERIFICATION is genuinely unavailable. But a
+        // re-review caught that the OFF-toggle, as first shipped after that finding, had NO PUMP
+        // at all — meaning `postUnoCommand`'s own queued restore could sit unprocessed for an
+        // UNBOUNDED interval, not the "brief flash" this comment used to claim, until some
+        // unrelated LOK call happened to pump it (a save landing in that window would persist the
+        // formula-display state into `settings.xml` — the exact harm this whole mechanism exists
+        // to avoid). The `defer` below now passes `pump:` to `toggleFormulaOnDedicatedThread` for
+        // the OFF-toggle specifically, reusing the SAME proven pump `.uno:GoToCell`'s own poll
+        // trusts — real help for LANDING, still no way to PROVE it landed, and this comment no
+        // longer says otherwise in either direction.
         //
         // **Disclosed, not fixed: this toggle is `rDoc`-scoped (document-wide View > Show Formulas),
         // not per-view — the agent view does NOT isolate it.** Unlike the selection/part isolation
@@ -1813,7 +1842,7 @@ final class LOKBridge: OfficeDocumentBridge {
         }
         defer {
             if formulas {
-                toggleFormulaOnDedicatedThread(doc)
+                toggleFormulaOnDedicatedThread(doc, pump: (viewId: viewId, part: part))
             }
         }
 
@@ -1847,9 +1876,9 @@ final class LOKBridge: OfficeDocumentBridge {
         //
         // **Exhaustion returns the last read rather than throwing.** When `range`'s real content
         // genuinely EQUALS `baseline` — a freshly-opened document's default A1 selection, probed
-        // for a sheet whose only content IS at A1 (this task's own `two-sheet.ods` Sheet2 fixture,
-        // read via `sheetsInfo`'s A1:Z5000 probe from a default cursor, is exactly this case; so is
-        // every genuinely EMPTY sheet, which legitimately reads `""` both before and after) —
+        // for a sheet whose only content IS at A1 (`sparse-sheets.ods`'s own Sheet1 fixture, added
+        // for `sheetsInfo`'s `(0, 0)` disambiguation fallback, is exactly this case for `read` too;
+        // so is every genuinely EMPTY sheet, which legitimately reads `""` both before and after) —
         // "stale" and "correct" are indistinguishable by this detector's own construction, and
         // throwing here would wrongly fail a read that in fact succeeded. The undetectable residual
         // (GoToCell never actually lands within the attempt budget AND the requested range's real
@@ -1897,9 +1926,28 @@ final class LOKBridge: OfficeDocumentBridge {
     /// throwing call added between the ON-toggle and the tail could have skipped. "Guaranteed to
     /// dispatch" and "guaranteed to have landed by the time this returns" are different properties;
     /// only the first is achievable here, and this comment does not claim the second.
-    private func toggleFormulaOnDedicatedThread(_ doc: OpenDocument) {
+    ///
+    /// **Re-review fix — pumped, not left in the async queue unpumped.** "Guarantees dispatch, not
+    /// landing" (this function's own header, above) was correct about VERIFICATION being
+    /// unavailable but, as originally shipped, conflated that with LANDING: with no pump at all
+    /// after the OFF-toggle, `postUnoCommand`'s own queued command could sit unprocessed for an
+    /// UNBOUNDED interval — not the "brief flash" this file's own caller-side comment
+    /// (`selectionTextOnDedicatedThread`) claimed — until some UNRELATED LOK call happened to pump
+    /// it. A save landing inside that window would persist `SetViewOptions`' formula-display state
+    /// into `settings.xml`, the exact harm this whole fix exists to prevent. `pump`, when true,
+    /// calls the SAME throwaway `paintPartTile` `.uno:GoToCell`'s own poll already trusts to give
+    /// LOK's internal dispatcher a turn — proven to help LANDING (this file's own measured
+    /// evidence), even though (unchanged from above) nothing here can PROVE it landed before
+    /// returning. The ON-toggle does not need its own explicit pump: the poll loop immediately
+    /// following it in `selectionTextOnDedicatedThread` already pumps multiple times as part of
+    /// verifying `.uno:GoToCell`, which pumps this command's own landing for free; only the
+    /// OFF-toggle, in that function's `defer`, has nothing after it to pump on its behalf.
+    private func toggleFormulaOnDedicatedThread(_ doc: OpenDocument, pump: (viewId: Int32, part: Int)? = nil) {
         ".uno:ToggleFormula".withCString { commandPtr in
             doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, nil, false)
+        }
+        if let pump {
+            pumpDedicatedThreadForPendingDispatch(doc, viewId: pump.viewId, part: pump.part)
         }
     }
 

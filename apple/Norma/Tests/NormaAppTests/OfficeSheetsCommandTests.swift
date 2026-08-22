@@ -488,6 +488,50 @@ final class OfficeSheetsCommandTests: XCTestCase {
                        "the formulas toggle must never leave the document dirty on its own")
     }
 
+    /// office-agent-tools T3 re-review (Minor #5) — selection isolation, DRILLED directly rather
+    /// than inferred from part isolation alone. The earlier info->read(Sheet2)->info regression pin
+    /// (`testLiveSheetsInfoOnAnAdoptedOdsDocumentReportsRealSheetsAndUsedRange`) only ever proved
+    /// the document's PART is restored — it says nothing about the primary view's own SELECTION,
+    /// which is the actual claim I1's whole agent-view redesign rests on.
+    ///
+    /// Moves the PRIMARY view's own cursor to a known cell via a real click (the SAME "(100, 100)
+    /// twips lands on a real, editable cell" coordinate this file's own `typeFormulaOnePlusOne`
+    /// already proves), captures what's selected there via `clipboardCopy` — which does
+    /// `setView(doc.viewId)` (the PRIMARY view, unconditionally) then `getTextSelection`, the exact
+    /// mechanism a real adopted tab's own UI would show — runs a full agent `sheets read` through
+    /// the real wire naming a DIFFERENT sheet and range, then captures the primary's own clipboard
+    /// selection again. Byte-identical before and after is the whole claim.
+    func testLiveAgentReadNeverTouchesThePrimaryViewsOwnSelection() async throws {
+        try requireLiveEngine()
+        let path = try makeWritableCopy(of: "two-sheet.ods")
+        let stateDir = makeScratchDirectory()
+        let host = makeLiveHost(stateDir: stateDir, dirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)])
+        await host.directory.refresh()
+
+        let runtime = host.officeRuntime(for: "S1")
+        runtime.open(path)
+        let opened = await waitUntilLive { runtime.stateSnapshot.documents[path] != nil || runtime.stateSnapshot.phase == .failed }
+        XCTAssertTrue(opened, "setup: two-sheet.ods never settled")
+        let docId = try XCTUnwrap(runtime.stateSnapshot.documents[path]?.docId)
+
+        guard let client = host.officeHelperSupervisor?.client else {
+            return XCTFail("no live client to drive the primary cursor through")
+        }
+
+        try await click(client: client, docId: docId, xTwips: 100, yTwips: 100)
+        let beforeSelection = try await client.clipboardCopy(docId: docId, part: 0)
+        XCTAssertFalse(beforeSelection.isEmpty, "setup: the primary click did not land on real content")
+
+        let sent = await send(command("office.sheets.read",
+                                       args: ["path": path, "sheet": "Sheet2", "range": "A1:B1"],
+                                       sessionId: "S1"), through: host)
+        XCTAssertTrue(sent.ok, "\(sent)")
+
+        let afterSelection = try await client.clipboardCopy(docId: docId, part: 0)
+        XCTAssertEqual(beforeSelection, afterSelection,
+                       "an agent read moved the PRIMARY view's own selection — the whole point of reading on the agent view instead")
+    }
+
     /// A path outside every working directory gets the FENCE refusal — live, through the real broker
     /// (not the fake-driver unit tests `OfficeCommandConsumerTests` already cover this with), proving
     /// the daemon-independent Swift fence refuses before ever reaching the real helper.
@@ -558,7 +602,7 @@ final class OfficeSheetsCommandTests: XCTestCase {
         await host.directory.refresh()
 
         let sent = await send(command("office.sheets.read",
-                                       args: ["path": path, "sheet": "Sheet1", "range": "A1:B1"],
+                                       args: ["path": path, "sheet": "Sheet1", "range": "A1:C1"],
                                        sessionId: "S1"), through: host)
         XCTAssertTrue(sent.ok, "\(sent)")
         let result = try XCTUnwrap(sent.result)
@@ -575,5 +619,15 @@ final class OfficeSheetsCommandTests: XCTestCase {
         XCTAssertFalse(result.contains("tabbed\nlinetwo"), "an embedded line break must never surface as a real row split: \(result)")
         XCTAssertEqual(result.components(separatedBy: "\n").count, 2, // header line + exactly one content row
                        "A1's embedded delimiters must never manufacture an extra row: \(result)")
+
+        // office-agent-tools T3 re-review (Important #3) — the quoting itself is an ENCODING, not
+        // silent to the model: C1's real content is `say "hi"` (an ORDINARY cell, a literal quote
+        // character a user typed, nothing to do with A1's own tab/newline mechanism). Calc's
+        // plain-text export passes a literal `"` straight through unescaped — this bridge's own
+        // `quotedIfNeededForTSV` (`OfficeCommandConsumer.swift`) is what wraps it, doubling the
+        // inner quotes, exactly as it would for a tab. Pinned here against C1 specifically so a
+        // regression in that quoting is caught by a cell that has NOTHING to do with A1's own
+        // tab/newline fixture content.
+        XCTAssertTrue(result.contains("\"say \"\"hi\"\"\""), result)
     }
 }
