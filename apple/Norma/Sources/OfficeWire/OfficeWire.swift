@@ -229,6 +229,30 @@ public enum OfficeWireFrame: Equatable, Sendable {
     /// every Stage-A caller subscribes first to learn which keys exist.
     case tileRequest(seq: UInt64, docId: String, keys: [TileKey])
 
+    // MARK: office-agent-tools T3 — sheets info/read, the agent's first real verbs
+
+    /// Asks for `docId`'s sheet names, each one's used range, and which part is currently active.
+    /// Read-only — never mutates the document, never touches `dirty`. `setView` prefix (unconditional,
+    /// same discipline `save`/`clipboardCopy` already carry) because `getPart()` (the active-part
+    /// query) is genuinely view-dependent the same way `getTextSelection` is; no `setPart` at all —
+    /// `sheetsInfo` reads EVERY part regardless of which one is current (`getPartName`/`getDataArea`
+    /// are both `nPart`-addressed, not current-view-addressed), the same "no setPart needed" shape
+    /// `undo`/`redo` already have for the identical reason (a call with nothing view-current-scoped
+    /// to assert).
+    case sheetsInfo(seq: UInt64, docId: String)
+    /// Asks for a value or formula grid over one rectangular range on ONE named sheet. `sheet` is a
+    /// NAME, resolved to a part index on the helper side (never the app side — sheet-name lookup
+    /// needs `getPartName`, a LOK call this wire's client half has no other reason to make) so an
+    /// unknown name can be refused with the workbook's own real sheet list rather than a bare index
+    /// out of range. `startColumn`/`startRow`/`endColumn`/`endRow` are 0-based and INCLUSIVE on every
+    /// edge — `OfficeCellRange`'s own shape (`PanelDocumentTab.swift`), already normalized and
+    /// cell-count-capped by the caller BEFORE this frame is ever built (`officeReadRangeMaxCells`) —
+    /// this wire carries only an already-validated request, never raw user text. `formulas` selects
+    /// which of the two extraction mechanisms the helper uses; see `LOKBridge`'s own implementation
+    /// header for what each one actually does to the document's view/selection state.
+    case sheetsRead(seq: UInt64, docId: String, sheet: String, startColumn: Int, startRow: Int,
+                     endColumn: Int, endRow: Int, formulas: Bool)
+
     // MARK: Responses (helper -> client)
 
     /// `hello` succeeded: `token` matched. `lokVersion` is now (Task 3) the REAL
@@ -389,6 +413,18 @@ public enum OfficeWireFrame: Equatable, Sendable {
     /// tile coordinates those rects touched. Both are sent — see `OfficeHelperServer.routeDocumentEvent`.
     case invalidated(seq: UInt64, docId: String, keys: [TileKey])
 
+    // MARK: office-agent-tools T3 — sheets info/read replies
+
+    /// Answers a successful `sheetsInfo`. `activeSheet` is the NAME of the part `getPart()` reports
+    /// current at the moment this ran (never an index — the caller already has names via `sheets`,
+    /// and a bare index would make it re-derive the mapping this frame already computed once).
+    case sheetsInfoOk(seq: UInt64, docId: String, sheets: [OfficeSheetInfo], activeSheet: String)
+    /// Answers a successful `sheetsRead`: one string per cell, laid out `rows[row][column]`, ALWAYS
+    /// `(endRow-startRow+1)` rows of `(endColumn-startColumn+1)` strings each — a wholly empty cell is
+    /// `""`, never an absent element, so a caller can index this by the SAME 0-based offsets it sent
+    /// without re-deriving the range's own shape from the reply.
+    case sheetsReadOk(seq: UInt64, docId: String, rows: [[String]])
+
     /// The wire vocabulary, in frame-declaration order. A test walks this list the same way
     /// `EditorBridgeInbound.wireTypes`'s own test does — one fixture per name, decode, assert the
     /// case names itself the same way — so this array and `decode`/`wireType` cannot drift apart
@@ -402,12 +438,15 @@ public enum OfficeWireFrame: Equatable, Sendable {
         // Office Stage B Task 6 — clipboard, undo/redo, the second ("agent") view.
         "clipboardCopy", "clipboardCut", "clipboardPaste", "undo", "redo", "createView", "agentKeyEvent",
         "subscribeTiles", "unsubscribe", "tileRequest",
+        // office-agent-tools T3 — sheets info/read.
+        "sheetsInfo", "sheetsRead",
         "helloOk", "refused", "pong", "opened", "openFailed", "closed", "saved", "saveFailed",
         "keyEventOk", "mouseEventOk", "extTextInputEventOk",
         "clipboardCopyOk", "clipboardCutOk", "clipboardPasteOk", "undoOk", "redoOk",
         "agentViewReady", "agentKeyEventOk",
         "error", "documentEvent",
         "subscribed", "unsubscribed", "tileRequestAccepted", "tile", "tileFailed", "invalidated",
+        "sheetsInfoOk", "sheetsReadOk",
     ]
 
     public var wireType: String {
@@ -430,6 +469,8 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .subscribeTiles: return "subscribeTiles"
         case .unsubscribe: return "unsubscribe"
         case .tileRequest: return "tileRequest"
+        case .sheetsInfo: return "sheetsInfo"
+        case .sheetsRead: return "sheetsRead"
         case .helloOk: return "helloOk"
         case .refused: return "refused"
         case .pong: return "pong"
@@ -456,6 +497,8 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .tile: return "tile"
         case .tileFailed: return "tileFailed"
         case .invalidated: return "invalidated"
+        case .sheetsInfoOk: return "sheetsInfoOk"
+        case .sheetsReadOk: return "sheetsReadOk"
         }
     }
 
@@ -479,6 +522,8 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .subscribeTiles(let seq, _, _, _, _): return seq
         case .unsubscribe(let seq, _): return seq
         case .tileRequest(let seq, _, _): return seq
+        case .sheetsInfo(let seq, _): return seq
+        case .sheetsRead(let seq, _, _, _, _, _, _, _): return seq
         case .helloOk(let seq, _): return seq
         case .refused(let seq, _): return seq
         case .pong(let seq): return seq
@@ -505,6 +550,8 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .tile(let seq, _, _, _, _, _, _): return seq
         case .tileFailed(let seq, _, _, _): return seq
         case .invalidated(let seq, _, _): return seq
+        case .sheetsInfoOk(let seq, _, _, _): return seq
+        case .sheetsReadOk(let seq, _, _): return seq
         }
     }
 
@@ -605,6 +652,23 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .tileRequest(_, let docId, let keys):
             payload["docId"] = docId
             payload["keys"] = keys.map { $0.jsonObject() }
+        case .sheetsInfo(_, let docId):
+            payload["docId"] = docId
+        case .sheetsRead(_, let docId, let sheet, let startColumn, let startRow, let endColumn, let endRow, let formulas):
+            payload["docId"] = docId
+            payload["sheet"] = sheet
+            payload["startColumn"] = startColumn
+            payload["startRow"] = startRow
+            payload["endColumn"] = endColumn
+            payload["endRow"] = endRow
+            payload["formulas"] = formulas
+        case .sheetsInfoOk(_, let docId, let sheets, let activeSheet):
+            payload["docId"] = docId
+            payload["sheets"] = sheets.map { $0.jsonObject() }
+            payload["activeSheet"] = activeSheet
+        case .sheetsReadOk(_, let docId, let rows):
+            payload["docId"] = docId
+            payload["rows"] = rows
         case .subscribed(_, let docId, let keys), .invalidated(_, let docId, let keys):
             payload["docId"] = docId
             payload["keys"] = keys.map { $0.jsonObject() }
@@ -678,6 +742,65 @@ public enum OfficeWireFrame: Equatable, Sendable {
             keys.append(key)
         }
         return keys
+    }
+
+    /// office-agent-tools T3 — `sheetsInfoOk.sheets`.
+    static func decodeSheetInfos(_ object: Any?) -> [OfficeSheetInfo]? {
+        guard let array = object as? [[String: Any]] else { return nil }
+        var sheets: [OfficeSheetInfo] = []
+        sheets.reserveCapacity(array.count)
+        for item in array {
+            guard let sheet = OfficeSheetInfo.decode(item) else { return nil }
+            sheets.append(sheet)
+        }
+        return sheets
+    }
+
+    /// office-agent-tools T3 — `sheetsReadOk.rows`, a plain `[[String]]`: every element of the
+    /// outer array must itself be an array of strings, never mixed types — `as? [[String]]` alone
+    /// would accept `[[String: Any]]`'s sibling shapes too loosely under `JSONSerialization`'s own
+    /// bridging, so this walks and re-validates one level deep rather than trusting a single cast.
+    static func decodeRows(_ object: Any?) -> [[String]]? {
+        guard let array = object as? [[Any]] else { return nil }
+        var rows: [[String]] = []
+        rows.reserveCapacity(array.count)
+        for row in array {
+            guard let strings = row as? [String] else { return nil }
+            rows.append(strings)
+        }
+        return rows
+    }
+}
+
+/// office-agent-tools T3 — one sheet's own facts, as `sheetsInfoOk` reports them: its name, and its
+/// used range's bottom-right corner (0-based, INCLUSIVE — `(usedEndColumn: -1, usedEndRow: -1)` is
+/// the wholly-empty-sheet sentinel: `getDataArea`'s own raw output cannot distinguish "nothing used"
+/// from "only A1 used" any other way, and `-1` composes correctly with `OfficeCellRange`-style
+/// inclusive-end arithmetic — a caller who blindly adds 1 to get a count sees `0`, the right answer,
+/// rather than special-casing `(0,0)` twice for two different meanings).
+public struct OfficeSheetInfo: Equatable, Sendable {
+    public let name: String
+    public let usedEndColumn: Int
+    public let usedEndRow: Int
+    public init(name: String, usedEndColumn: Int, usedEndRow: Int) {
+        self.name = name
+        self.usedEndColumn = usedEndColumn
+        self.usedEndRow = usedEndRow
+    }
+
+    /// Manual JSON encode/decode, matching this file's own established discipline (`TileKey`'s own
+    /// header) rather than introducing `Codable` for just this one type.
+    func jsonObject() -> [String: Any] {
+        ["name": name, "usedEndColumn": usedEndColumn, "usedEndRow": usedEndRow]
+    }
+
+    static func decode(_ object: [String: Any]) -> OfficeSheetInfo? {
+        guard let name = object["name"] as? String,
+              let usedEndColumn = intValue(object["usedEndColumn"]),
+              let usedEndRow = intValue(object["usedEndRow"]) else {
+            return nil
+        }
+        return OfficeSheetInfo(name: name, usedEndColumn: usedEndColumn, usedEndRow: usedEndRow)
     }
 }
 
@@ -1674,6 +1797,33 @@ public enum OfficeWireCodec {
                 return .rejected(seq: seq, reason: "malformed")
             }
             return .frame(.invalidated(seq: seq, docId: docId, keys: keys))
+        case "sheetsInfo":
+            guard let docId = object["docId"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.sheetsInfo(seq: seq, docId: docId))
+        case "sheetsRead":
+            guard let docId = object["docId"] as? String, let sheet = object["sheet"] as? String,
+                  let startColumn = intValue(object["startColumn"]), let startRow = intValue(object["startRow"]),
+                  let endColumn = intValue(object["endColumn"]), let endRow = intValue(object["endRow"]),
+                  let formulas = object["formulas"] as? Bool else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.sheetsRead(seq: seq, docId: docId, sheet: sheet, startColumn: startColumn,
+                                       startRow: startRow, endColumn: endColumn, endRow: endRow, formulas: formulas))
+        case "sheetsInfoOk":
+            guard let docId = object["docId"] as? String,
+                  let sheets = OfficeWireFrame.decodeSheetInfos(object["sheets"]),
+                  let activeSheet = object["activeSheet"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.sheetsInfoOk(seq: seq, docId: docId, sheets: sheets, activeSheet: activeSheet))
+        case "sheetsReadOk":
+            guard let docId = object["docId"] as? String,
+                  let rows = OfficeWireFrame.decodeRows(object["rows"]) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.sheetsReadOk(seq: seq, docId: docId, rows: rows))
         default:
             // The type itself is unrecognized — the brief's exact case: error{seq,reason:"unknown"}.
             return .rejected(seq: seq, reason: "unknown")

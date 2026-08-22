@@ -131,6 +131,21 @@ final class OfficeWireCodecTests: XCTestCase {
                 TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0),
                 TileKey(part: 1, zoomPPT: 2000, tileX: -3, tileY: 7), // negative index + a second part/zoom
             ]),
+            // office-agent-tools T3 — sheets info/read.
+            .sheetsInfo(seq: 68, docId: "doc-1"),
+            .sheetsRead(seq: 69, docId: "doc-1", sheet: "Sheet1", startColumn: 0, startRow: 0,
+                        endColumn: 2, endRow: 9, formulas: false),
+            .sheetsRead(seq: 70, docId: "doc-1", sheet: "Q1 Recap", startColumn: 1, startRow: 5,
+                        endColumn: 1, endRow: 5, formulas: true), // one-cell range, formulas:true, a name with a space
+            .sheetsInfoOk(seq: 71, docId: "doc-1", sheets: [
+                OfficeSheetInfo(name: "Sheet1", usedEndColumn: 2, usedEndRow: 9),
+                OfficeSheetInfo(name: "Empty Sheet", usedEndColumn: -1, usedEndRow: -1), // the wholly-empty sentinel
+            ], activeSheet: "Sheet1"),
+            .sheetsReadOk(seq: 72, docId: "doc-1", rows: [
+                ["42", "Hello", ""],       // "" — a genuinely empty cell, never an absent element
+                ["1", "=SUM(A1:B1)", "3"],
+            ]),
+            .sheetsReadOk(seq: 73, docId: "doc-1", rows: []), // a range whose sheet turned out to have nothing there
         ]
         for frame in samples {
             let line = try XCTUnwrap(String(data: frame.encodedLine(), encoding: .utf8))
@@ -220,6 +235,11 @@ final class OfficeWireCodecTests: XCTestCase {
             "tile": #"{"type":"tile","seq":1,"docId":"d","key":{"part":0,"zoomPPT":1000,"tileX":0,"tileY":0},"generation":0,"width":512,"height":512,"byteCount":0}"#,
             "tileFailed": #"{"type":"tileFailed","seq":1,"docId":"d","key":{"part":0,"zoomPPT":1000,"tileX":0,"tileY":0},"reason":"r"}"#,
             "invalidated": #"{"type":"invalidated","seq":1,"docId":"d","keys":[]}"#,
+            // office-agent-tools T3 — sheets info/read.
+            "sheetsInfo": #"{"type":"sheetsInfo","seq":1,"docId":"d"}"#,
+            "sheetsRead": #"{"type":"sheetsRead","seq":1,"docId":"d","sheet":"Sheet1","startColumn":0,"startRow":0,"endColumn":0,"endRow":0,"formulas":false}"#,
+            "sheetsInfoOk": #"{"type":"sheetsInfoOk","seq":1,"docId":"d","sheets":[],"activeSheet":"Sheet1"}"#,
+            "sheetsReadOk": #"{"type":"sheetsReadOk","seq":1,"docId":"d","rows":[]}"#,
         ]
         XCTAssertEqual(Set(fixtures.keys), Set(OfficeWireFrame.wireTypes),
                        "fixtures must cover exactly OfficeWireFrame.wireTypes, no more, no less")
@@ -291,6 +311,11 @@ final class OfficeWireCodecTests: XCTestCase {
         XCTAssertEqual(OfficeWireFrame.tile(seq: 118, docId: "d", key: tileKey, generation: 0, width: 512, height: 512, pixels: Data()).seq, 118)
         XCTAssertEqual(OfficeWireFrame.tileFailed(seq: 119, docId: "d", key: tileKey, reason: "r").seq, 119)
         XCTAssertEqual(OfficeWireFrame.invalidated(seq: 120, docId: "d", keys: []).seq, 120)
+        XCTAssertEqual(OfficeWireFrame.sheetsInfo(seq: 146, docId: "d").seq, 146)
+        XCTAssertEqual(OfficeWireFrame.sheetsRead(seq: 147, docId: "d", sheet: "Sheet1", startColumn: 0, startRow: 0,
+                                                   endColumn: 0, endRow: 0, formulas: false).seq, 147)
+        XCTAssertEqual(OfficeWireFrame.sheetsInfoOk(seq: 148, docId: "d", sheets: [], activeSheet: "Sheet1").seq, 148)
+        XCTAssertEqual(OfficeWireFrame.sheetsReadOk(seq: 149, docId: "d", rows: []).seq, 149)
     }
 
     // MARK: - The brief's literal pin: unknown type -> error{seq,reason:"unknown"}
