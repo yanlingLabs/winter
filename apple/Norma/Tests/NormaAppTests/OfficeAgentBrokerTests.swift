@@ -448,6 +448,98 @@ final class OfficeAgentBrokerTests: XCTestCase {
                        + "by the reducer's in-flight guard, not produce a second driver call")
     }
 
+    // MARK: - Coordinator re-review, 2026-08-22, finding 2: the docId-mismatch belt's own leak
+
+    /// **Pins the re-review's own finding, does not fix it** — see the `defer`'s own comment in
+    /// `OfficeAgentBroker.runOnce` for the full disclosure. The docId re-verify at that `defer` exists
+    /// to stop rule 2 from closing a document THIS call never opened (the mirror-interleaving/reload
+    /// race); this test proves the flip side of that same correctness: on a genuine mismatch, the
+    /// REPLACEMENT document is never closed by anyone afterward — not by this call (correctly, it is
+    /// not this call's to close), and not by whatever replaced it either (nothing here re-runs rule
+    /// 1). Session-bounded, not corrupting — this call's own action result is unaffected — but a real
+    /// resource hold with no active cleanup path.
+    func testDocIdMismatchOnDeferSkipsTheCloseAndLeavesTheReplacementDocumentOpen() async throws {
+        let scratch = makeScratchDirectory()
+        let path = scratch.appendingPathComponent("mismatch.xlsx").path
+        writeDummyFile(at: path)
+        let office = BrokerOfficeDriverRecorder()
+        let host = makeHost(office: office, dirs: [SessionDirEntry(path: scratch.path, locked: true)])
+        await host.directory.refresh()
+        let runtime = host.officeRuntime(for: "S1")
+
+        final class Gate: @unchecked Sendable {
+            private let lock = NSLock()
+            private var release: (() -> Void)?
+            func hold() -> @Sendable () async -> Void {
+                { await withCheckedContinuation { continuation in
+                    self.lock.lock(); self.release = { continuation.resume() }; self.lock.unlock()
+                } }
+            }
+            func open() {
+                lock.lock(); let r = release; release = nil; lock.unlock()
+                r?()
+            }
+        }
+        let actionGate = Gate()
+        let heldAction = actionGate.hold()
+
+        final class ResultBox: @unchecked Sendable { var value: String? }
+        let resultBox = ResultBox()
+        let performTask = Task<String, Error> { @MainActor in
+            let value = try await host.officeAgentBroker.perform(
+                sessionId: "S1", path: path, access: .read, requestId: UUID().uuidString
+            ) { _, docId in
+                await heldAction()
+                return "read \(docId)"
+            }
+            resultBox.value = value
+            return value
+        }
+
+        // Wait for this call's own open (D1) to land — `action` cannot be running before it does.
+        let opened = await waitUntil { runtime.stateSnapshot.documents[path] != nil }
+        XCTAssertTrue(opened, "setup: this call's own open never landed")
+        let d1 = try XCTUnwrap(runtime.stateSnapshot.documents[path]?.docId)
+
+        // Simulate the re-review's own named trigger — an external change during the action window
+        // causing a reload — as a manual close+reopen of the SAME path. The broker's own call is
+        // parked inside `action`, gated, and does not observe or drive any of this: from its point of
+        // view this happens "while it wasn't looking," exactly as an external reload would.
+        runtime.close(path)
+        let reclosedLanded = await waitUntil { runtime.stateSnapshot.documents[path] == nil }
+        XCTAssertTrue(reclosedLanded, "setup: the manual close of D1 never landed")
+        runtime.open(path)
+        let reopenLanded = await waitUntil { runtime.stateSnapshot.documents[path] != nil }
+        XCTAssertTrue(reopenLanded, "setup: the manual reopen (D2) never landed")
+        let d2 = try XCTUnwrap(runtime.stateSnapshot.documents[path]?.docId)
+        XCTAssertNotEqual(d1, d2, "setup: the reopen must mint a DIFFERENT docId, or this test proves "
+                          + "nothing")
+
+        // Release `action` — it returns, `perform` reaches the `defer`, which now finds
+        // `documents[path]?.docId == d2`, not `d1` (this call's own docId), and must skip its close.
+        actionGate.open()
+        let result = try await performTask.value
+        XCTAssertEqual(result, "read \(d1)", "the action itself is unaffected — it already captured D1's "
+                       + "own docId before any of this happened")
+
+        // Bounded negative wait, not an immediate check — a wrongful close (if the guard were broken)
+        // runs through the same async effect performer every OTHER close in this file already has to
+        // wait for; an immediate count check could go green while it is still in flight. Mirrors
+        // `testBrokerJoinsAnAlreadyInFlightOpenAsAdoptionRatherThanMintingASecondOne`'s own idiom for
+        // the identical reason.
+        let wrongfullyClosed = await waitUntil(timeout: 0.3) { office.closeCalls.count > 1 }
+        XCTAssertFalse(wrongfullyClosed, "the mismatch must suppress the close — D2 is not this call's "
+                       + "to close")
+        XCTAssertEqual(office.closeCalls, [d1], "exactly the test's OWN manual close of D1, never a "
+                       + "second one — from the defer — closing D2")
+
+        // The leak itself, checked AFTER the negative-wait window above, not merely immediately after
+        // `perform` returns: D2 is still open, with no owner — nobody closed it, and nothing here
+        // adopted it either.
+        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.docId, d2, "the replacement document must "
+                       + "still be open — this is the leak the re-review found, disclosed, not fixed")
+    }
+
     // MARK: - Rule 3: dirty refusal
 
     func testRefusesAWriteOnADirtyAdoptedDocumentNamingTheTab() async throws {

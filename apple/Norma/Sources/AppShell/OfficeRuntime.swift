@@ -446,13 +446,20 @@ struct OfficeRuntimeState: Equatable {
     /// now-stale `.opened` lands. If the stale-drop ALSO cleared the marker, it would empty it WHILE
     /// open₂ is still genuinely in flight — reopening the exact guard this field exists to hold shut,
     /// one interleaving deeper. The invariant that makes "clear only on close + non-stale landing"
-    /// correct: while a path sits in this set, the only thing that can have bumped its generation out
-    /// (making some OTHER attempt's landing stale) is `.closeRequested`, which already cleared this
-    /// field itself when it did so — reload/restore bump generations too, but both require
-    /// `documents[path]` to already exist, which is disjoint from this field by construction (nothing
-    /// is ever inserted here except from the `documents[path] == nil` branch). So a stale landing
-    /// arriving while the marker is STILL set can only mean a NEWER attempt is the one holding it —
-    /// never itself, never a ghost. Proven both directions by
+    /// correct: while a path sits in this set, the only things that can have bumped its generation out
+    /// (making some OTHER attempt's landing stale) are `.closeRequested`, which already cleared this
+    /// field itself when it did so, and the three whole-runtime resets — `.helperDied`,
+    /// `.helperUnavailable`, and `.teardownRequested` — each of which bumps EVERY existing path's own
+    /// ticket (`fresh.pathGenerations = state.pathGenerations.mapValues { $0 + 1 }`) while ALSO
+    /// resetting to a brand-new `OfficeRuntimeState()` that starts this set EMPTY and never copies the
+    /// old one forward. So any path this set held going into one of those three is bumped AND evicted
+    /// from the set in that same transition, not bumped-while-still-present — the invariant survives
+    /// them, but not for free, and is named here rather than left to be rediscovered against
+    /// `pathGenerations`' own header (coordinator re-review, 2026-08-22). Reload/restore bump
+    /// generations too, but both require `documents[path]` to already exist, which is disjoint from
+    /// this field by construction (nothing is ever inserted here except from the `documents[path] ==
+    /// nil` branch). So a stale landing arriving while the marker is STILL set can only mean a NEWER
+    /// attempt is the one holding it — never itself, never a ghost. Proven both directions by
     /// `OfficeRuntimeReducerTests.testAStaleOpenedLandingWhileAReplacementIsStillInFlightMustNot
     /// ReopenTheGuard`.
     var opensInFlight: Set<String> = []

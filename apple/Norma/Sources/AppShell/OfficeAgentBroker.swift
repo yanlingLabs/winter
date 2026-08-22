@@ -88,8 +88,10 @@ import NormaKit
 /// repeat across that boundary, and this memo's check will never hit for it. **The real contract for
 /// that case is task 3's own obligation, not this broker's: on a timeout, the tool must report
 /// OUTCOME UNKNOWN and verify (re-read) before ever retrying, because the write may well have
-/// already landed.** That requirement is being written into task 3's own brief; this comment exists
-/// so whoever implements it does not mistake THIS memo for having already solved it.
+/// already landed.** That requirement is recorded in this feature's own design spec, in its own
+/// failure-handling section — which outlives this task's own SDD ledger, unlike a task brief — not
+/// implemented here; this comment exists so whoever implements it does not mistake THIS memo for
+/// having already solved it.
 ///
 /// **The token's contract THIS memo does satisfy, for whoever wires a real verb's `requestId` (task
 /// 3+): mint one per LOGICAL attempt, and reuse it ONLY across a blind retry of that exact same
@@ -275,10 +277,19 @@ final class OfficeAgentBroker {
             // really did initiate the open) and its own `defer` still correctly closes what it opened
             // per rule 2's own contract — but the tab that joined in the meantime loses its view when
             // that close fires. Pre-fix that interleaving silently corrupted (a wrong or dead docId);
-            // post-fix it is a visible, recoverable close (reopen shows the same content) rather than
-            // corruption — a real improvement, not a full fix. A complete fix needs multi-owner
-            // reference counting for one open document, which is a design question above this
-            // broker's pay grade, not a fix-round patch.
+            // post-fix there is no corruption, but **what the tab actually shows is not a recoverable
+            // state — verified against `officeDocumentViewportPlan`/`requestOpenIfNeeded`
+            // (`PanelDocumentTab.swift`), not assumed (coordinator re-review, 2026-08-22):**
+            // `documents[resolvedPath]` going nil from this close falls the tab through every named
+            // case to `.renderState(.booting)` — an indefinite spinner, no error text, no Reopen
+            // affordance (only `.failed` renders one) — and `requestOpenIfNeeded`'s own gate
+            // (`openRequestedPaths`, at most one `open()` per (runtime, path) for this model's whole
+            // lifetime) never fires again for this path on this runtime, so nothing here self-heals.
+            // The tab is stuck until the user closes it and reopens the file, which mints a fresh
+            // `PanelDocumentTabModel` with an empty gate. A real improvement over silent corruption,
+            // not a full fix. A complete fix needs multi-owner reference counting for one open
+            // document, which is a design question above this broker's pay grade, not a fix-round
+            // patch.
             runtime = existing
             docId = try await awaitOpen(existing, path: resolvedPath)
             adopted = true
@@ -303,6 +314,25 @@ final class OfficeAgentBroker {
         // touched. Does not close the residual named in rule 1's own comment above (a re-verify on a
         // docId that legitimately IS still this call's own does not stop rule 2 from correctly, and
         // now visibly, closing it out from under a caller who merely joined).
+        //
+        // **Disclosed, not fixed (coordinator re-review, 2026-08-22): the mismatch branch — the docId
+        // check above failing — leaks the REPLACEMENT document for the rest of the session.** On a
+        // mismatch, this `defer` correctly skips closing (that is the whole point of the re-verify:
+        // the entry at `resolvedPath` now belongs to whatever replaced this call's own open, most
+        // likely a reload triggered by an external change to the file during `action`'s own window),
+        // but nothing else closes the replacement either — this call never opened it, so it is not
+        // this call's to close, and rule 1's own adopt-or-open logic only ever runs at the START of a
+        // NEW broker call, never in reaction to a mismatch discovered here. The result: the
+        // replacement's helper-side handle, its staged copy, and its armed file-watcher all stay
+        // resident, and `documents[resolvedPath]` keeps a live entry pointing at it, until some LATER
+        // call for the SAME path happens along and adopts it (rule 1's own `existingRuntime` branch)
+        // — folding it back into ordinary lifecycle at that point, but only then. Bounded by the
+        // session (it dies with the runtime at teardown) and never corrupting (the replacement is a
+        // perfectly valid, live document the whole time) — but a real, silent resource hold with no
+        // active cleanup path of its own. Pinned, not fixed, by
+        // `testDocIdMismatchOnDeferSkipsTheCloseAndLeavesTheReplacementDocumentOpen` — a full fix
+        // needs multi-owner reference counting for one open document (the same design gap rule 1's
+        // own mirror-interleaving comment above already names), not a defer-site patch.
         defer {
             if !adopted, runtime.stateSnapshot.documents[resolvedPath]?.docId == docId {
                 runtime.close(resolvedPath)
@@ -489,6 +519,15 @@ final class OfficeAgentBroker {
 /// and narrowing what a file-writing tool may touch is the safe direction to err in. **Task 3 must
 /// not build a grants channel to widen this** — the spec is being amended to match this ruling, not
 /// the other way around.
+///
+/// **Reads are fenced by this SAME check, for a different reason (settled alongside the ruling above,
+/// coordinator re-review, 2026-08-22) — not swept in as an accident of write-side reasoning.** This
+/// function has always run before `runOnce`'s own read/write branch (rule 5, the very first thing
+/// checked), so a read was never actually exempt in practice; what the ruling adds is the WHY: an
+/// office read is not an ordinary byte read the standing unrestricted-reads rule already governs
+/// (`read`/`glob`/`grep`/`ls`, untouched by any of this) — it COPIES the target file into the
+/// helper's own state directory and parses it with LibreOffice, an ingest, not an inspection, and the
+/// same reasoning that keeps a write inside the session's own directories applies to it identically.
 ///
 /// A Swift, app-side BACKSTOP behind the daemon's own fence (`resolveWithinAny`,
 /// `packages/core/src/agent/paths.ts`) regardless — not a replacement for it. This checks exactly
