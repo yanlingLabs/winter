@@ -409,7 +409,7 @@ final class OfficeHelperLiveTests: XCTestCase {
     /// **The three formats the widening decision REJECTED — a known, disclosed limitation, pinned
     /// the same way `testXlsxDocxPptxSaveRoundTripThroughTheRealHelperAfterTheR3VendorRecut` pins
     /// the (now largely fixed) export-side gap and
-    /// `testSyntheticLegacyFixturesOpenAsTextAfterR3RecutXlsStillFailsCleanly` pins this import-side
+    /// `testRealLegacyBinaryFixturesOpenAsTextAfterR3RecutXlsStillFailsCleanly` pins this import-side
     /// one, so a future vendor rebuild that fixes this further is caught by a RED test here, not
     /// silently missed.** All three fixtures are committed, genuinely-produced
     /// legacy binary (OLE2/CFB) documents — never fabricated garbage bytes (`testGarbageFileOpen
@@ -466,9 +466,9 @@ final class OfficeHelperLiveTests: XCTestCase {
     /// returns cleanly instead of the process dying. The test below no longer polls
     /// `!helper.process.isRunning` for `.doc`/`.ppt` — it asserts the actual, successful
     /// `OfficeDocumentMetadata` returned, matching what was measured. See this test's own header
-    /// above the `for` loop for what this does and does not prove (a synthetic-fixture result, not
-    /// a verdict on real legacy documents).
-    func testSyntheticLegacyFixturesOpenAsTextAfterR3RecutXlsStillFailsCleanly() async throws {
+    /// above the `for` loop for what this does and does not prove (two real legacy binaries opening
+    /// via LOK's lenient TEXT fallback, which is not a verdict on legacy import working).
+    func testRealLegacyBinaryFixturesOpenAsTextAfterR3RecutXlsStillFailsCleanly() async throws {
         try skipUnlessVendorPresent()
 
         // The clean-failure case — unaffected by the r3 vendor re-cut, unchanged from the original
@@ -491,28 +491,46 @@ final class OfficeHelperLiveTests: XCTestCase {
                           + "take the helper down with it — same survival bar as any other openFailed")
         }
 
-        // doc/ppt: CHANGED by the r3 vendor re-cut, discovered as a side effect of this task, not
-        // pursued as its own goal. These are Task 10's own synthetic CFB-magic-bytes fixtures (8
-        // bytes of real OLE2 signature, minimal/degenerate content behind it — see
-        // task-10-report.md), not realistic Word/PowerPoint documents. Pre-r3, opening either one
-        // took the whole helper down with it — a direct libc exit() deep inside LO's import path,
-        // the same class of crash ooxml-export-investigation.md diagnosed for xlsx EXPORT: legacy
-        // binary formats store text with a Windows-codepage-tagged encoding, and IMPORTING it needs
-        // the identical rtl_getBestWindowsCharsetFromTextEncoding lookup libsal_textenclo.dylib's
-        // absence broke. Post-r3 (measured directly, not assumed — a diagnostic pass through the
-        // real client, not the detached-Task/isRunning-poll shape this test used pre-r3), the crash
-        // is GONE for these two synthetic fixtures: both open cleanly, sniffed by LOK's own lenient
-        // content-detection fallback as plain TEXT documents — never spreadsheet/presentation, and
-        // with implausibly high part counts (9, 135) for anything but degenerate synthetic content
-        // — i.e. this is LOK finding "readable bytes" and never reaching real binary-format
-        // parsing, not evidence the real xls/doc/ppt importers work end to end.
+        // doc/ppt: CHANGED by the r3 vendor re-cut, discovered as a side effect of Task 11, not
+        // pursued as its own goal.
         //
-        // **Does NOT reopen Task 9's read-only-viewer decision.** `PanelEditorTab.swift`'s own
-        // header cites a SECOND, independent test route for that decision (real externally-
-        // generated files AND round-tripped LOK-native files) that this task did not re-run — only
-        // this one synthetic-fixture route is proven changed here. Flagged as a named follow-up in
-        // task-11-report.md: re-evaluate the legacy read-only-viewer posture with real .doc/.xls/
-        // .ppt content now the missing-dylib mechanism is understood, not decided in this task.
+        // **Provenance — corrected at the whole-branch review (I3).** Task 11's first version of
+        // this comment called these "Task 10's own synthetic CFB-magic-bytes fixtures (8 bytes of
+        // real OLE2 signature, minimal/degenerate content behind it — see task-10-report.md)". That
+        // was wrong in every clause, and contradicted this very test's own header 70 lines up. They
+        // are TASK 9's, added by 9fabfa6b — the same commit that made the widening decision — and
+        // they are genuine legacy binaries, not stubs: `file(1)` reports Composite Document File V2
+        // for both, legacy-doc.doc is 19KB with real `WordDocument`/`1Table` streams carrying its
+        // own body sentences (macOS `textutil -convert doc`, no LOK involved), legacy-ppt.ppt is
+        // 458KB with `PowerPoint Document`/`Pictures`/`Current User`/`___PPT10` streams carrying
+        // placeholder text and font tables (LOK's OWN saveAs from gate.odp). task-10-report.md's F2
+        // — the cited source — verified the CFB MAGIC is real and never called the content
+        // synthetic; it says the opposite of what it was cited for.
+        //
+        // Pre-r3, opening either one took the whole helper down with it — a direct libc exit() deep
+        // inside LO's import path, the same class of crash ooxml-export-investigation.md diagnosed
+        // for xlsx EXPORT: legacy binary formats store text with a Windows-codepage-tagged encoding,
+        // and IMPORTING it needs the identical rtl_getBestWindowsCharsetFromTextEncoding lookup
+        // libsal_textenclo.dylib's absence broke. Post-r3 (measured directly, not assumed — a
+        // diagnostic pass through the real client, not the detached-Task/isRunning-poll shape this
+        // test used pre-r3), the crash is GONE for both: they open cleanly, sniffed by LOK's own
+        // lenient content-detection fallback as plain TEXT documents. That is a MORE surprising
+        // result now the provenance is stated correctly, not a less surprising one — and the reason
+        // to still read it as the fallback rather than as working importers is the part counts,
+        // which the assertions below pin: 135 parts for a genuine one-slide-shaped .ppt is not a
+        // presentation being imported (a real one reports .presentation, not .text), and 9 parts
+        // for a .doc whose entire body is two short sentences is consistent with LOK paginating the
+        // raw 19KB container as text rather than parsing the Word streams.
+        //
+        // **Does NOT reopen Task 9's read-only-viewer decision — but NOT for the reason the first
+        // version of this comment gave.** There is no untouched "second route" holding the decision
+        // up: for .ppt these fixtures are the WHOLE of Task 9's evidence (its only route was this
+        // LOK-native round trip), and for .doc the only thing not re-run is the second source TEXT
+        // Task 9 fed the same textutil recipe. What actually holds the decision up is the outcome
+        // itself: a real legacy binary opening as many-part mojibake is worse for a user than
+        // today's clean refusal, so it argues against widening, not for it. `xls` is separately
+        // confirmed unchanged above. Re-evaluating the posture with more real legacy content stays a
+        // named follow-up (task-11-report.md), not something decided here.
         //
         // Still the load-bearing exerciser of Task 10's CFB `cfbNativeLegacyExtensions` allowlist
         // (`LOKBridge.swift`) — opens all three fixtures by their REAL, native extensions, which
@@ -528,10 +546,13 @@ final class OfficeHelperLiveTests: XCTestCase {
             let docId = UUID().uuidString
             let metadata = try await helper.client.open(docId: docId, path: path)
             XCTAssertEqual(metadata.type, .text, "\(fixture): expected LOK's lenient fallback to sniff "
-                          + "this synthetic fixture as a text document — if this is a DIFFERENT type, "
-                          + "either LOK's sniffing changed or this is no longer the fallback path")
+                          + "this genuine legacy binary as a text document — if this is a DIFFERENT "
+                          + "type, either LOK's sniffing changed or this is no longer the fallback "
+                          + "path (a .presentation here would mean the real ppt importer now works)")
             XCTAssertEqual(metadata.parts, expectedParts, "\(fixture): part count changed — re-verify "
-                          + "before assuming the same fallback shape still applies")
+                          + "before assuming the same fallback shape still applies. This count is "
+                          + "the load-bearing evidence that this is the fallback and not a working "
+                          + "importer: neither fixture's real content could produce it")
             XCTAssertEqual(metadata.sizeTwips.widthTwips, Int64(widthTwips), "\(fixture): widthTwips")
             XCTAssertEqual(metadata.sizeTwips.heightTwips, Int64(heightTwips), "\(fixture): heightTwips")
             XCTAssertTrue(helper.process.isRunning, "\(fixture): expected a clean, successful open "
@@ -553,7 +574,7 @@ final class OfficeHelperLiveTests: XCTestCase {
     /// scratch path, never a repo fixture (the interesting fact is the RENAME, not new content).
     ///
     /// **Pre-fix, this reproduced the historical helper-death mode
-    /// `testSyntheticLegacyFixturesOpenAsTextAfterR3RecutXlsStillFailsCleanly`'s `.doc`/`.ppt` legs
+    /// `testRealLegacyBinaryFixturesOpenAsTextAfterR3RecutXlsStillFailsCleanly`'s `.doc`/`.ppt` legs
     /// used to pin** (that test's own name and assertions changed at Task 11 — the missing-dylib
     /// crash those two legs pinned is gone — but THIS gate's refusal, below, is unaffected either
     /// way: it fires before LOK ever sees the bytes) — confirmed live, once, before `LOKBridge`'s CFB
@@ -574,7 +595,7 @@ final class OfficeHelperLiveTests: XCTestCase {
             _ = try await helper.client.open(docId: UUID().uuidString, path: renamed.path)
             XCTFail("renamed-legacy.docx: expected the CFB refusal to fire — if this succeeded, "
                     + "either the sniff regressed or documentLoad itself no longer needs guarding "
-                    + "against this content (re-verify testSyntheticLegacyFixturesOpenAsTextAfter"
+                    + "against this content (re-verify testRealLegacyBinaryFixturesOpenAsTextAfter"
                     + "R3RecutXlsStillFailsCleanly's own .doc leg before assuming either)")
         } catch OfficeHelperClientError.openFailed(let reason) {
             XCTAssertEqual(reason, "refused before documentLoad: legacy OLE2/CFB binary content "
@@ -928,7 +949,7 @@ final class OfficeHelperLiveTests: XCTestCase {
     /// live, every open, and tolerated rather than eliminated).
     ///
     /// This test now pins the FIXED behavior — a permanent regression tripwire matching this file's
-    /// own `testSyntheticLegacyFixturesOpenAsTextAfterR3RecutXlsStillFailsCleanly` sibling pattern in
+    /// own `testRealLegacyBinaryFixturesOpenAsTextAfterR3RecutXlsStillFailsCleanly` sibling pattern in
     /// spirit (pin what's actually true today so a future regression is caught RED, not silently
     /// reintroduced) but inverted, since here "true today" is success, not failure.
     func testImpressAndWriterDocumentsOpenSuccessfullyViaTheEmbeddedInstallRootMatchingCalcAndTheStandaloneLokRoot() async throws {

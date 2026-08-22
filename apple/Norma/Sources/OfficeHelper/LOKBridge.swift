@@ -724,11 +724,11 @@ final class LOKBridge: OfficeDocumentBridge {
     /// underneath every legacy MS Office binary format (`.doc`/`.xls`/`.ppt`). Content-sniffed, not
     /// path-sniffed, because the crash this closes is ITSELF content-sniffed: LOK's own importer
     /// dispatches off the BYTES, never the extension
-    /// (`OfficeHelperLiveTests.testSyntheticLegacyFixturesOpenAsTextAfterR3RecutXlsStillFailsCleanly`'s
+    /// (`OfficeHelperLiveTests.testRealLegacyBinaryFixturesOpenAsTextAfterR3RecutXlsStillFailsCleanly`'s
     /// own `legacy-doc.doc`/`legacy-ppt.ppt` — PRE-Task-11, a direct libc `exit()` deep inside LO's
     /// C++ import path that bypassed Swift's `try`/`catch` entirely, taking every OTHER open
     /// document's unsaved edits down with the one shared helper; Task 11's vendor re-cut fixed the
-    /// underlying missing-dylib mechanism for these two synthetic fixtures specifically — see that
+    /// underlying missing-dylib mechanism for these two fixtures specifically — see that
     /// test's own header for what is, and is not, proven by that fix). A user's genuine `.doc`
     /// renamed `.docx` (or any CFB file placed under a modern extension, accidentally or not) is
     /// exactly the scenario this gate exists to intercept regardless of whether the LOK-side import
@@ -759,7 +759,7 @@ final class LOKBridge: OfficeDocumentBridge {
     /// FALSE, not merely unverified.** `git ls-files` returns three committed fixtures —
     /// `Tests/NormaAppTests/Fixtures/office/legacy-doc.doc`, `legacy-ppt.ppt`, `legacy-xls.xls`, each
     /// beginning with the real CFB magic bytes (`d0cf11e0a1b11ae1`, verified via `xxd`) — and
-    /// `OfficeHelperLiveTests.testSyntheticLegacyFixturesOpenAsTextAfterR3RecutXlsStillFailsCleanly`
+    /// `OfficeHelperLiveTests.testRealLegacyBinaryFixturesOpenAsTextAfterR3RecutXlsStillFailsCleanly`
     /// opens all three through THIS exact helper. Application routing being closed is a fact about
     /// `PanelEditorTab.swift`, not about this test file, which calls `spawnLiveHelper()` directly and
     /// bypasses that routing entirely — the allowlist is LOAD-BEARING TODAY, precisely, not inert:

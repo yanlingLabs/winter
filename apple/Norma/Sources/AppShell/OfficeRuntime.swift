@@ -3189,7 +3189,7 @@ final class OfficeRuntime: ObservableObject {
     /// house-voice sentence: sentence case, no exclamation, actionable where possible.** Every
     /// entry here is a shape actually OBSERVED against the real vendored LOK, never a guess at
     /// LOK's possible vocabulary. Two live tests are the sources, and each entry's own comment says
-    /// which: `OfficeHelperLiveTests.testSyntheticLegacyFixturesOpenAsTextAfterR3RecutXlsStillFails
+    /// which: `OfficeHelperLiveTests.testRealLegacyBinaryFixturesOpenAsTextAfterR3RecutXlsStillFails
     /// Cleanly`'s legacy-format matrix for the OPEN-side shapes (the `xls` leg specifically; the
     /// `doc`/`ppt` legs stopped erroring at Task 11, see that test's own header), and
     /// `...testXlsxDocxPptxSaveRoundTripThroughTheRealHelperAfterTheR3VendorRecut` for the one

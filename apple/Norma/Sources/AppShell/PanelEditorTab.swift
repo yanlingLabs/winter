@@ -131,24 +131,42 @@ let officeReadWriteExtensions: Set<String> = ["xlsx", "ods", "pptx", "odp", "odt
 /// is exactly what `gate.xlsm`'s own fixture recipe produces) and `odg` (ODF drawing) both OPEN and
 /// RENDER cleanly (`OfficeHelperLiveTests.testLegacyFormatsProbe...`, this task's own live proof).
 /// Three siblings were tried and REJECTED, empirically, not by assumption: `xls`/`doc`/`ppt` (binary
-/// 97-2003) all FAIL to open in this vendor build — via two independent routes each (a real
-/// externally-generated file AND, where LOK's own `saveAs` would produce one, a round-tripped
-/// LOK-native file) — see `testSyntheticLegacyFixturesOpenAsTextAfterR3RecutXlsStillFailsCleanly`'s
-/// own header for the exact failures. `xlsb` could not even be SOURCED — LOK's own `saveAs`
+/// 97-2003) all FAILED to open in this vendor build, each against a genuinely-produced legacy binary
+/// — `.doc` from macOS's own `textutil -convert doc` (no LOK involved, and two independent source
+/// texts gave the identical failure), `.xls`/`.ppt` round-tripped out of LOK's OWN `saveAs` via the
+/// `spikes/office-legacy-probe` C spike. `testRealLegacyBinaryFixturesOpenAsTextAfterR3RecutXls
+/// StillFailsCleanly`'s own header has the per-format recipes and the exact failures; the committed
+/// fixtures ARE those files. `xlsb` could not even be SOURCED — LOK's own `saveAs`
 /// answers "no output filter found for provided suffix" for it in this build, and no other route to
 /// genuine `xlsb` bytes existed within this task's scope; left OUT, honestly undecided rather than
 /// silently assumed either way.
 ///
-/// **Task 11 side-finding, NOT a re-decision of this widening**: the vendor re-cut that fixed xlsx
-/// OOXML export also fixed the crash on ONE of `doc`/`ppt`'s two test routes above (Task 10's own
-/// synthetic CFB-magic-bytes fixtures, `legacy-doc.doc`/`legacy-ppt.ppt` — degenerate content behind
-/// a real OLE2 signature, not realistic documents; they now open, but sniffed by LOK's lenient
-/// fallback as plain TEXT, not as real Word/PowerPoint content). The OTHER route this widening
-/// decision also rests on (real externally-generated files / round-tripped LOK-native files) was not
-/// re-run, and `xls` itself is confirmed UNCHANGED (still a clean `openFailed`) — so this widening
-/// decision stands exactly as made. Re-evaluating it with real `.doc`/`.ppt` content, now that the
-/// missing-dylib mechanism behind the original crash is understood, is a named follow-up
-/// (`task-11-report.md`), not something this comment or Task 11 decided.
+/// **Task 11 side-finding, NOT a re-decision of this widening** — restated honestly at the
+/// whole-branch review (I3), because the version this comment first shipped rested on a false
+/// premise. It claimed `legacy-doc.doc`/`legacy-ppt.ppt` were "Task 10's own synthetic
+/// CFB-magic-bytes fixtures, degenerate content behind a real OLE2 signature." Every clause of that
+/// was wrong: they are TASK 9's, added by the very commit that made this widening decision
+/// (`9fabfa6b`), and they are the genuinely-produced legacy binaries described one paragraph up —
+/// `file(1)` reports Composite Document File V2 for both, and their UTF-16LE directory trees carry
+/// real streams with real content (`WordDocument`/`1Table` plus this fixture's own body sentences;
+/// `PowerPoint Document`/`Pictures`/`Current User`/`___PPT10` plus placeholder text and font
+/// tables). The cited source said the opposite of what it was cited for: `task-10-report.md`'s F2
+/// verified the CFB MAGIC is real and never called the content synthetic.
+///
+/// What actually happened: the r3 re-cut removed the crash for both fixtures, and they now open —
+/// but sniffed by LOK's own lenient content-detection fallback as plain TEXT, with part counts (9,
+/// 135) far beyond anything their real content could justify, which is consistent with LOK reading
+/// the raw container bytes rather than with either real importer working. For `.ppt` in particular
+/// this is the WHOLE of Task 9's evidence, not one route of two — so "a second, untouched route
+/// still holds the decision up" was never available as a reassurance and is not offered here.
+///
+/// **The widening decision nevertheless stands, on a ground that survives the correction**: opening
+/// a real PowerPoint/Word binary as a many-part TEXT document is not an importer working, it is
+/// mojibake — strictly worse for a user than today's clean refusal, and no reason to add either
+/// extension to this set. `xls` is separately confirmed UNCHANGED (still a clean `openFailed`).
+/// Re-evaluating the posture with more real legacy content, now that the missing-dylib mechanism
+/// behind the original crash is understood, remains a named follow-up (`task-11-report.md`) — not
+/// something this comment or Task 11 decided.
 ///
 /// **Every extension named in the `union` here is also, unconditionally, a
 /// `officeDocumentIsReadOnlyFormat` path** (see that predicate's own header) — that is precisely
