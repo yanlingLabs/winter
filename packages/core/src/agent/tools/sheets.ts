@@ -84,9 +84,11 @@ const SheetsArgs = z.object({
    *  reason to duplicate it just to move a refusal a few hundred milliseconds earlier for the one
    *  case (a syntactically valid but oversized range) this daemon-side check cannot catch anyway. */
   range: z.string().min(1).max(64).optional(),
-  /** The one genuinely OPTIONAL operand (spec §2's own table: `formulas?`) — absent or any
-   *  non-boolean value defaults to `false` (values), never refused; this is the sole deliberate
-   *  exception to "missing required operand is malformed." */
+  /** The one genuinely OPTIONAL operand (spec §2's own table only says `formulas?` — no default-
+   *  on-invalid behavior is specified). Absent → `false` (values); this is the sole deliberate
+   *  exception to "missing required operand is malformed." A PRESENT non-boolean is not silently
+   *  coerced — `z.boolean().optional()` refuses it as malformed at the schema, the same as any
+   *  other type mismatch this tool's args would produce. */
   formulas: z.boolean().optional(),
 });
 type SheetsArgs = z.infer<typeof SheetsArgs>;
