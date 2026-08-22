@@ -1605,19 +1605,44 @@ final class LOKBridge: OfficeDocumentBridge {
     /// own live drills are what confirm it also accepts a two-corner span) and reads the selection
     /// back via `getTextSelection`, the SAME mechanism `clipboardCopyOnDedicatedThread` already uses
     /// and this codebase's own live tests already trust. `setPart` is the CALLER's job (both
-    /// `sheetsInfoOnDedicatedThread`'s A1-emptiness probe and `sheetsReadOnDedicatedThread` need a
-    /// specific part asserted first, and asserting it here a second time would be redundant, not
+    /// `sheetsInfoOnDedicatedThread`'s used-range probe and `sheetsReadOnDedicatedThread` itself need
+    /// a specific part asserted first, and asserting it here a second time would be redundant, not
     /// wrong, but this keeps the "one assertion per dedicated-thread job" shape the rest of this file
     /// already has).
     ///
-    /// **`formulas` selects Calc's own View > Show Formula mode (`.uno:ShowFormula`) around the SAME
-    /// read, toggled on immediately before and off immediately after** — a display-mode toggle, not a
-    /// document mutation (the same category as zoom or a split-pane position), so it is not expected
-    /// to touch `ModifiedStatus`; this task's own live drills assert that directly rather than
-    /// trusting the category alone. Toggled unconditionally both ways (never queried first): a UNO
-    /// toggle command flips whatever the CURRENT state is, so flip-read-flip returns to the original
-    /// state regardless of what it was, without this bridge needing to ask what it started as.
+    /// **`formulas` selects Calc's own View > Show Formulas mode around the SAME read, toggled on
+    /// immediately before and off immediately after.** **The command is `.uno:ToggleFormula`, NOT the
+    /// more guessable `.uno:ShowFormula`** — this task's own first live drill against real content
+    /// (`two-sheet.ods`, known cells) proved `.uno:ShowFormula` a silent no-op: no
+    /// `LOK_CALLBACK_STATE_CHANGED` ever fired for it (every OTHER real toggle command in this LOK
+    /// build's own callback trace does), and a formula read came back as the COMPUTED value ("2"),
+    /// never the formula text ("=1+1"). The real name was found in the vendored product's own
+    /// `Resources/registry/calc.xcd` (`grep -o 'uno:[A-Za-z]*Formula[A-Za-z]*'`), whose
+    /// `.uno:ToggleFormula` entry carries the label "Show Formulas" — confirmed correct by the SAME
+    /// live drill afterward, which then read back the seeded `=1+1` verbatim.
+    ///
+    /// A display-mode toggle, not a document mutation (the same category as zoom or a split-pane
+    /// position), so it is not expected to touch `ModifiedStatus`; this task's own live drills assert
+    /// that directly rather than trusting the category alone. Toggled unconditionally both ways
+    /// (never queried first): a UNO toggle command flips whatever the CURRENT state is, so
+    /// flip-read-flip returns to the original state regardless of what it was, without this bridge
+    /// needing to ask what it started as.
     private func selectionTextOnDedicatedThread(_ doc: OpenDocument, range: String, formulas: Bool) -> String {
+        // **Order is load-bearing: the formula toggle MUST run BEFORE `.uno:GoToCell`, not after —
+        // live-drill-caught, not reasoned in advance.** The first working version of this function
+        // toggled AFTER selecting (select the range, then flip Show Formulas, then read) and got the
+        // COMPUTED VALUE back every time ("2" for a seeded "=1+1"), even once `.uno:ToggleFormula`
+        // was confirmed the right command name (below) — `getTextSelection`'s own per-cell display
+        // string is evidently computed AT SELECTION TIME, from whatever display mode was active
+        // then, not recomputed at copy/read time from the mode active at that later moment. Toggling
+        // first, so the selection itself is built under formula mode, is what actually works — this
+        // task's own live drill (`OfficeSheetsCommandTests.testLiveSheetsReadFormulasReturnsFormula
+        // TextNotTheComputedValue`) is the regression tripwire for this exact ordering.
+        if formulas {
+            ".uno:ToggleFormula".withCString { commandPtr in
+                doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, nil, false)
+            }
+        }
         let gotoPayload: [String: Any] = ["ToPoint": ["type": "string", "value": range]]
         if let gotoData = try? JSONSerialization.data(withJSONObject: gotoPayload),
            let gotoString = String(data: gotoData, encoding: .utf8) {
@@ -1625,11 +1650,6 @@ final class LOKBridge: OfficeDocumentBridge {
                 gotoString.withCString { argsPtr in
                     doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, argsPtr, false)
                 }
-            }
-        }
-        if formulas {
-            ".uno:ShowFormula".withCString { commandPtr in
-                doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, nil, false)
             }
         }
         let text: String
@@ -1642,16 +1662,48 @@ final class LOKBridge: OfficeDocumentBridge {
             text = ""
         }
         if formulas {
-            ".uno:ShowFormula".withCString { commandPtr in
+            ".uno:ToggleFormula".withCString { commandPtr in
                 doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, nil, false)
             }
         }
         return text
     }
 
+    /// Splits `getTextSelection`'s own TSV shape (rows joined by `"\n"`, cells within a row joined by
+    /// `"\t"`) into a grid — the ONE place both `sheetsInfo` and `sheetsRead` turn that raw string into
+    /// `[[String]]`, so the two can never disagree about the shape. A wholly-empty selection answers
+    /// `""`, which `.split` on an empty string with `omittingEmptySubsequences: false` would otherwise
+    /// turn into ONE spurious empty row — guarded explicitly rather than trusted to fall out of the
+    /// split, since a genuinely single BLANK cell ("\t"-free, content-free) must still come back as
+    /// `[[""]]`, not `[]`. A trailing `"\n"` (there almost always is one — LOK's own convention for a
+    /// Calc selection copy) would otherwise produce one spurious wholly-empty trailing row; every
+    /// OTHER embedded newline is a real row boundary and must survive.
+    private func parseTSVGrid(_ text: String) -> [[String]] {
+        guard !text.isEmpty else { return [] }
+        let trimmed = text.hasSuffix("\n") ? String(text.dropLast()) : text
+        return trimmed.components(separatedBy: "\n").map { $0.components(separatedBy: "\t") }
+    }
+
     /// office-agent-tools T3 — sheet names, each one's used range, and the active sheet's name.
-    /// Read-only: no `postUnoCommand` that mutates content, only the ones `selectionTextOnDedicated
-    /// Thread`'s A1-emptiness probe issues (a SELECTION move, not an edit).
+    /// Read-only: no `postUnoCommand` that mutates content, only the ones the used-range probe below
+    /// issues (a SELECTION move, not an edit).
+    ///
+    /// **The used-range probe is NOT `getDataArea`, after this task's own live drills measured it
+    /// wrong.** `getDataArea` was the original design (see git history/`task-3-report.md`'s own
+    /// account): live-tested against `two-sheet.ods` — a fixture with KNOWN, verified content
+    /// (`OfficeRuntimeLiveTests`' own live drill already proved B1="42" there) — it reported "A1:A1"
+    /// (i.e. `(0,0)`) for a sheet a REAL read of the same document, moments later, showed to actually
+    /// span at least A1:B2 ("NORMA GATE" / "42" / "office stage A embed probe" / ""). Whatever
+    /// `getDataArea` measures in this LOK build, it is not "the used range" this feature needs, and no
+    /// further characterization was attempted — the report names this as a live, falsified assumption
+    /// rather than a debugged root cause. **Replaced with the SAME mechanism `sheetsRead` already
+    /// proves correct**: select a generously large range
+    /// (`usedRangeProbeBound`, below) via `selectionTextOnDedicatedThread` and let Calc's own
+    /// `getTextSelection` do the trimming — proven empirically (this task's own live drill) to trim a
+    /// selection down to exactly the rows/columns that actually have content, never padding to the
+    /// full requested rectangle. A wholly-empty answer is now UNAMBIGUOUSLY the empty-sheet sentinel
+    /// (`-1, -1`) — no separate A1-content disambiguation probe needed, unlike `getDataArea`'s own
+    /// undocumented `(0,0)` ambiguity this replaces.
     private func sheetsInfoOnDedicatedThread(docId: String) throws -> (sheets: [OfficeSheetInfo], activeSheet: String) {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
         guard doc.kind == .spreadsheet else { throw SaveError.notSpreadsheet(docId: docId, kind: doc.kind) }
@@ -1662,29 +1714,29 @@ final class LOKBridge: OfficeDocumentBridge {
         sheets.reserveCapacity(names.count)
         for (part, name) in names.enumerated() {
             doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(part))
-            var lastCol: CLong = 0
-            var lastRow: CLong = 0
-            doc.handle.pointee.pClass.pointee.getDataArea?(doc.handle, CLong(part), &lastCol, &lastRow)
-            // `getDataArea`'s own C signature has no separate "is this sheet empty at all" out-param
-            // (unlike the internal `ScDocument::GetCellArea` it almost certainly wraps), so (0,0) is
-            // genuinely ambiguous between "wholly empty" and "only A1 has anything" from this call
-            // alone. Disambiguated with one targeted probe rather than guessed: read A1 itself
-            // (`selectionTextOnDedicatedThread`, the SAME mechanism `sheetsRead` uses) and treat a
-            // truly blank answer as the wholly-empty sentinel.
-            if lastCol == 0, lastRow == 0 {
-                let a1 = selectionTextOnDedicatedThread(doc, range: "A1", formulas: false)
-                if a1.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    sheets.append(OfficeSheetInfo(name: name, usedEndColumn: -1, usedEndRow: -1))
-                    continue
-                }
+            let text = selectionTextOnDedicatedThread(doc, range: Self.usedRangeProbeBound, formulas: false)
+            let grid = parseTSVGrid(text)
+            guard !grid.isEmpty else {
+                sheets.append(OfficeSheetInfo(name: name, usedEndColumn: -1, usedEndRow: -1))
+                continue
             }
-            sheets.append(OfficeSheetInfo(name: name, usedEndColumn: Int(lastCol), usedEndRow: Int(lastRow)))
+            let usedEndRow = grid.count - 1
+            let usedEndColumn = (grid.map(\.count).max() ?? 1) - 1
+            sheets.append(OfficeSheetInfo(name: name, usedEndColumn: usedEndColumn, usedEndRow: usedEndRow))
         }
 
         let activeIndex = Int(doc.handle.pointee.pClass.pointee.getPart?(doc.handle) ?? 0)
         let activeSheet = (activeIndex >= 0 && activeIndex < names.count) ? names[activeIndex] : (names.first ?? "")
         return (sheets, activeSheet)
     }
+
+    /// The used-range probe's own ceiling (`sheetsInfoOnDedicatedThread`'s own header explains why
+    /// this exists instead of `getDataArea`) — generous enough for any ordinary real-world sheet
+    /// (26 columns, the entire alphabet's worth of single-letter columns, x 5,000 rows = 130,000
+    /// cells), bounded so a pathological or malicious document cannot make `info` scan without limit.
+    /// A sheet with real content PAST this bound under-reports its own used range — a disclosed
+    /// limitation, not a silent one (see task-3-report.md's concerns).
+    private static let usedRangeProbeBound = "A1:Z5000"
 
     /// office-agent-tools T3 — a value or formula grid over one already-validated, already-formatted
     /// A1 `range` on ONE named sheet. `sheet` is resolved to a part index HERE (never by the caller —
@@ -1702,17 +1754,7 @@ final class LOKBridge: OfficeDocumentBridge {
         doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(part))
 
         let text = selectionTextOnDedicatedThread(doc, range: range, formulas: formulas)
-        // `getTextSelection`'s own TSV shape: rows joined by "\n", cells within a row joined by "\t".
-        // A wholly-empty selection answers `""`, which `.split` on an empty string with
-        // `omittingEmptySubsequences: false` would otherwise turn into ONE spurious empty row —
-        // guarded explicitly rather than trusted to fall out of the split, since a genuinely single
-        // BLANK cell ("\t"-free, content-free) must still come back as `[[""]]`, not `[]`.
-        guard !text.isEmpty else { return [] }
-        // A trailing "\n" (there almost always is one — LOK's own convention for a Calc selection
-        // copy) would otherwise produce one spurious wholly-empty trailing row; every OTHER embedded
-        // newline is a real row boundary and must survive.
-        let trimmed = text.hasSuffix("\n") ? String(text.dropLast()) : text
-        return trimmed.components(separatedBy: "\n").map { $0.components(separatedBy: "\t") }
+        return parseTSVGrid(text)
     }
 
     // MARK: - Callback translation
