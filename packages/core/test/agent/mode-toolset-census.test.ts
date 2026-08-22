@@ -94,7 +94,10 @@ describe("daemon tool census (R-T3 whole-branch review FIX 1): real registration
   // chat's schema carrying only the read verbs — is invisible to `namesForMode` (which reports
   // ELIGIBILITY, exactly as the dispatch block below records for deferral) and is pinned separately
   // in test/agent/tools/browser.test.ts.
-  test("code mode is offered EXACTLY the full daemon tool surface (36 tools)", async () => {
+  // office-agent-tools T3: ADDED "sheets" (SANCTIONED pin move — sheets.ts registers `modes:
+  // ["code", "dispatch"]`, matching bash/computer/schedule/lsp's own shape: available in both, not
+  // chat, which has no filesystem-shaped surface by construction).
+  test("code mode is offered EXACTLY the full daemon tool surface (37 tools)", async () => {
     const d = await boot();
     expect(d.registry).not.toBeNull();
     const offered = [...d.registry!.namesForMode("code", { builtinDeferral: true })];
@@ -122,6 +125,7 @@ describe("daemon tool census (R-T3 whole-branch review FIX 1): real registration
         "list_mcp_resources", "read_mcp_resource",
         "Workflow",
         "browser",
+        "sheets",
       ].sort(),
     );
   });
@@ -155,14 +159,16 @@ describe("daemon tool census (R-T3 whole-branch review FIX 1): real registration
   //   ELIGIBILITY, not deferred-vs-immediate (registry.ts's own doc comment — see the task_stop
   //   describe block below for the axis this list structurally can't see); the eligible-vs-loadable
   //   distinction is pinned separately, in dispatch-deferred.test.ts.
-  test("dispatch mode is offered EXACTLY this set (17 tools)", async () => {
+  // office-agent-tools T3: ADDED "sheets" here too — `modes: ["code", "dispatch"]`, the identical
+  // reasoning as the code-mode pin just above.
+  test("dispatch mode is offered EXACTLY this set (18 tools)", async () => {
     const d = await boot();
     const offered = [...d.registry!.namesForMode("dispatch", { builtinDeferral: true })];
     expect(offered.sort()).toEqual(
       [
         "Search", "ReadPage", "ToolSearch", "AskQuestion", "bash", "computer", "glob", "grep", "ls",
         "push_notification", "read", "send_message", "session_spawn", "task_stop",
-        "list_sessions", "manage_session", "browser",
+        "list_sessions", "manage_session", "browser", "sheets",
       ].sort(),
     );
   });

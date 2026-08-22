@@ -49,6 +49,7 @@ import { registerWebTools } from "./agent/tools/web";
 import { registerSearchTool } from "./agent/tools/search";
 import { registerReadPageTool } from "./agent/tools/read-page";
 import { registerBrowserTool } from "./agent/tools/browser";
+import { registerSheetsTool } from "./agent/tools/sheets";
 import { PageCache } from "./agent/tools/page-core";
 import { createResearchRunner } from "./agent/research";
 import { registerComputerTool } from "./agent/tools/computer";
@@ -732,6 +733,20 @@ export async function startDaemon(opts: {
       dispatch: (cmd) => panelCommands.dispatch(cmd),
       harnesses: (sid) => hub.attachedHarnesses(sid),
       dangerousDomainsAdded,
+    });
+    // office-agent-tools T3: sheets — the same `panelCommands`/`hub` doors as `browser` above, plus
+    // ONE more: `dirsOf`. `store.dirs(sid)` — never `writableRoots`/`ctx.roots` — is deliberate: it
+    // is the EXACT function `session.list`'s own handler calls to populate the wire `dirs` field the
+    // Mac app reads (`ipc/server.ts`, the `const dirs = opts.store.dirs(s.sessionId)` line), so the
+    // daemon's own fence (`sheets.ts`'s `officeSheetsResolvedPathWithinFence`) agrees with the app's
+    // independent one (`OfficeAgentBroker`'s Swift fence) on what "this session's working
+    // directories" means — `writableRoots` is a WIDER set (folds in `Edit(<path>)`-declared dirs and
+    // any dirGrant-adopted directory), which would let this tool accept a path the app-side broker
+    // was always going to refuse anyway.
+    registerSheetsTool(registry, {
+      dispatch: (cmd) => panelCommands.dispatch(cmd),
+      harnesses: (sid) => hub.attachedHarnesses(sid),
+      dirsOf: (sid) => store.dirs(sid),
     });
     const agents = new AgentStore({
       normaHome, trust: trustStore, baseInstructions: SYSTEM_PROMPT,

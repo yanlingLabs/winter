@@ -95,7 +95,19 @@ export type SessionApprovalPolicy = "plan" | "dont-ask" | "ask" | "accept-edits"
 // (dispatch's own default — server.ts's session.dispatch) — a card a headless coordinator can never
 // answer, so in practice a silent hang/timeout-deny on every real call. Same fix shape as
 // task_stop's own entry above.
-const READ_ONLY = new Set(["read", "glob", "grep", "ls", "bash_output", "Skill", "ToolSearch", "ask_user", "AskQuestion", "task_create", "task_update", "task_list", "task_get", "exit_plan_mode", "enter_plan_mode", "spawn_agent", "send_message", "task_stop", "agent_list", "agent_output", "lsp", "push_notification", "list_sessions", "manage_session"]);
+// office-agent-tools T3: `sheets` (today: info/read only — Task 4 adds write verbs to the SAME tool
+// name, which will need ITS OWN reclassification then, not a silent free ride on this entry).
+// READ_ONLY, not NETWORK: the class boundary this file draws (LOW-2's own comment on `NETWORK`,
+// above) is CALLER-DIRECTED EGRESS to a destination the daemon does not already trust (a url, an
+// external endpoint) versus "the local filesystem the user already controls" — `sheets` opens a
+// path that must ALREADY resolve inside this session's own working directories (its own fence,
+// `sheets.ts`'s `officeSheetsResolvedPathWithinFence`, refuses anything else before dispatch), never
+// a caller-supplied destination outside that. A spreadsheet cell COULD carry adversarial text, but
+// that is the identical risk `read`/`glob`/`grep` already accept without a NETWORK-style
+// classification (this file's own words: "the local filesystem the user already controls") — the
+// document is local, fenced, and already inside the boundary the user granted Norma, unlike a url a
+// model could point at anything.
+const READ_ONLY = new Set(["read", "glob", "grep", "ls", "bash_output", "Skill", "ToolSearch", "ask_user", "AskQuestion", "task_create", "task_update", "task_list", "task_get", "exit_plan_mode", "enter_plan_mode", "spawn_agent", "send_message", "task_stop", "agent_list", "agent_output", "lsp", "push_notification", "list_sessions", "manage_session", "sheets"]);
 // `computer` (Phase 5 CU) is MUTATING: a computer-use action drives real mouse/keyboard/screen, so
 // it must pass the gate on EVERY call (spec §4.6: "every CU action passes the permission gate") —
 // ask → per-action approval card, auto → allow, plan → deny (CU makes changes). Note this is the
