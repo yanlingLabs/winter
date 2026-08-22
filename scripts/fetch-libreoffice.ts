@@ -102,19 +102,30 @@ import { ROOT } from "./version-lib";
 // the packaging account's username/group in every entry's tar header (bsdtar's default owner
 // recording) -- confirmed by measurement against the live, cold-downloaded -r2 asset. -r3's tar is
 // built with explicit owner/group suppression and re-scanned uncompressed before upload. The live
+// RE-CUT (2026-08-22, second of the day): -r4 adds ONE more dylib on top of -r3's product-set,
+// from the same instdir at the same pin, no rebuild -- `libmswordlo.dylib`. Writer's OOXML export
+// is implemented by `com.sun.star.comp.Writer.DocxExport`, which `services.rdb` places in that
+// library and the service manager `dlopen`s BY NAME at export time; absent, storing returned false
+// with no error set and `SfxBaseModel::impl_store` synthesised `ERRCODE_IO_CANTWRITE` -- a
+// misleading "can't write" that was never a write denial. Same omission class as -r3's
+// `libsal_textenclo.dylib`: a runtime `dlopen` on a path the closure recipe's import+paint dyld
+// trace never exercised. `.docx` save works from -r4 on (RTF export rides the same library and is
+// fixed incidentally). The tag deviates from the date-only convention because -r3 already holds
+// the plain date. Note the -r3 asset stays published and unmodified for the same reason the -r2
+// note below gives.
 // -r2 asset was left published, unmodified (a GitHub release asset is maintainer-replaceable at
 // the same URL -- re-publishing scrubbed bytes under the same name is exactly the silent-swap
 // hazard the ASSET_URL comment below warns about); flagged on both release pages as an open item.
 const GH_REPO = "yanlingLabs/norma";
-const RELEASE_TAG = "vendor-libreoffice-20260822";
-const ASSET_NAME = "libreoffice-headless-macos-arm64-11482c8f-r3.tar.zst";
+const RELEASE_TAG = "vendor-libreoffice-20260822-r4";
+const ASSET_NAME = "libreoffice-headless-macos-arm64-11482c8f-r4.tar.zst";
 const ASSET_URL = buildAssetUrl({ repo: GH_REPO, tag: RELEASE_TAG, assetName: ASSET_NAME });
 // Hand-pinned at package time from an independent `shasum -a 256` of the actual uploaded file,
 // then re-verified against a fresh public download before being transcribed here (see the
 // release notes at https://github.com/yanlingLabs/norma/releases/tag/vendor-libreoffice-20260822
 // for that verification run). See header comment for why this single pin (not a belt-and-braces
 // live check) is nonetheless load-bearing here.
-const PINNED_SHA256 = "02e73e7e3caab598d0e47cb40ce835920e9ebc78eff5a01aafd4cf3bccd13945";
+const PINNED_SHA256 = "0113f0e7781f66c7299fc83e2aaf399a11d81847f8490b67281e4b463ac21b42";
 if (!isValidSha256Hex(PINNED_SHA256)) {
   throw new Error(`PINNED_SHA256 is not a well-formed 64-char lowercase hex string: ${PINNED_SHA256}`);
 }

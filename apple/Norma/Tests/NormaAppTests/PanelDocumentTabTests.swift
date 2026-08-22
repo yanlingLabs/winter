@@ -738,18 +738,18 @@ final class PanelDocumentTabTests: XCTestCase {
     // MARK: - Office Stage B Task 9: the read-only-viewer decision
 
     /// PURE: exactly the eight extensions `officeFileExtensions` recognizes split two ways — the
-    /// five this build can genuinely write, and the three it can open but not write — plus the
+    /// six this build can genuinely write, and the two it can open but not write — plus the
     /// boundary cases (`nil`, an extension outside either set, case sensitivity).
     ///
-    /// The read-only three arrive by two independent routes, deliberately asserted in one place
-    /// because every call site acts on the answer, not the route: `xlsm`/`odg` have no
-    /// `OfficeSaveFormat` case at all (Task 9's widening), and `docx` has one that this vendor
-    /// build's Writer OOXML export fails behind (whole-branch review I2 — `officeReadWriteExtensions`'
-    /// own header has the account, and the live docx leg of
-    /// `OfficeHelperLiveTests.testXlsxDocxPptxSaveRoundTripThroughTheRealHelperAfterTheR3VendorRecut`
-    /// is the tripwire for reversing it).
+    /// **One route into read-only, again, as of the r4 vendor re-cut**: `xlsm`/`odg` have no
+    /// `OfficeSaveFormat` case at all (Task 9's widening). Whole-branch review I2 had briefly added
+    /// a second route — `docx`, which HAS a case that the r3 vendor tree's missing DOCX export
+    /// service failed behind — and this test pinned it here. r4 supplies that service
+    /// (`libmswordlo.dylib`; `officeReadWriteExtensions`' own header has the account), so `docx`
+    /// moves back into the read-write loop below and its live proof is the docx leg of
+    /// `OfficeHelperLiveTests.testXlsxDocxPptxSaveRoundTripThroughTheRealHelperAfterTheR4VendorRecut`.
     func testOfficeDocumentIsReadOnlyFormatIsTrueOnlyForTheFormatsThisBuildCannotWrite() {
-        for ext in ["xlsx", "ods", "pptx", "odp", "odt"] {
+        for ext in ["xlsx", "ods", "pptx", "odp", "odt", "docx"] {
             XCTAssertFalse(officeDocumentIsReadOnlyFormat(path: "/a.\(ext)"), "\(ext): a genuine "
                            + "OfficeSaveFormat case AND a save this build actually lands — read-write")
         }
@@ -757,8 +757,6 @@ final class PanelDocumentTabTests: XCTestCase {
             XCTAssertTrue(officeDocumentIsReadOnlyFormat(path: "/a.\(ext)"), "\(ext): widened in with "
                           + "no native save story")
         }
-        XCTAssertTrue(officeDocumentIsReadOnlyFormat(path: "/a.docx"), "docx: read-only until the "
-                      + "Writer/OOXML export defect is fixed — the case exists, the save does not")
         XCTAssertTrue(officeDocumentIsReadOnlyFormat(path: "/a.XLSM"), "case-insensitive, mirroring "
                       + "panelTabKind(forFilePath:)'s own NSString.pathExtension read")
         XCTAssertFalse(officeDocumentIsReadOnlyFormat(path: "/a.txt"), "outside officeFileExtensions "
@@ -766,26 +764,32 @@ final class PanelDocumentTabTests: XCTestCase {
         XCTAssertFalse(officeDocumentIsReadOnlyFormat(path: nil), "nothing to be read-only about")
     }
 
-    /// **Whole-branch review I2 — `.docx`'s read-only posture, at the three doors that enforce it.**
-    /// The honest successor to what a docx test used to assert here (that it was read-WRITE): the
-    /// point of the demotion is that a user can never invest a page of edits into a buffer this
-    /// build cannot write, so these are the assertions that actually carry it. `.docx` staying an
-    /// office document at all is the fourth, and is pinned separately by
-    /// `panelTabKind(forFilePath:)`'s own round (a Word document must not fall through to a Monaco
-    /// code tab and render as binary mojibake).
-    func testDocxIsAReadOnlyViewerAtEveryDoorButStillOpensAsADocumentTab() {
+    /// **`.docx` is a full read-WRITE document tab at every door — the reversal of whole-branch
+    /// review I2's demotion, asserted at the same three doors that used to carry it.** This test has
+    /// now flipped twice, and that history is the point of keeping it as one named test rather than
+    /// folding it into the loop above: it asserted read-write originally, read-ONLY after I2 (when
+    /// the r3 vendor tree could not export docx at all), and read-write again now that the r4 re-cut
+    /// supplies the missing DOCX export service. Each flip is a real product decision, and this is
+    /// where a reviewer can see which one is currently in force. `.docx` routing to a document tab
+    /// at all was never in question through any of it (a Word document must not fall through to a
+    /// Monaco code tab and render as binary mojibake) and is pinned here as well as by
+    /// `panelTabKind(forFilePath:)`'s own round.
+    func testDocxIsAFullReadWriteDocumentTabAtEveryDoorAfterTheR4VendorRecut() {
         XCTAssertEqual(panelTabKind(forFilePath: "/report.docx"), .document,
-                       "still an office document — the demotion is about SAVING, not about routing")
+                       "an office document, unchanged through both flips of the save decision")
+
+        XCTAssertFalse(officeDocumentIsReadOnlyFormat(path: "/report.docx"),
+                       "the predicate every other door reads — docx is writable again")
 
         let docx = PanelTab(tabId: "t1", kind: .document, url: "/report.docx", title: "report.docx")
-        XCTAssertNil(officeSaveMenuTarget(tabs: [docx], activeTabId: "t1"),
-                     "⌘S is genuinely disabled — the menu item's target resolver returns nil")
+        XCTAssertNotNil(officeSaveMenuTarget(tabs: [docx], activeTabId: "t1"),
+                        "⌘S resolves a real target — the menu item is live for a Word document")
 
         var state = documentState(path: "/report.docx")
         state.documents["/report.docx"]?.dirty = true
-        XCTAssertFalse(officeDocumentIsDirty(state: state, path: "/report.docx"),
-                       "no dirty dot, ever — and not merely hidden: OfficeRuntime's input-verb guards "
-                       + "mean this state is unreachable, since keystrokes never reach LOK at all")
+        XCTAssertTrue(officeDocumentIsDirty(state: state, path: "/report.docx"),
+                      "the dirty dot shows for real — the mask that used to suppress it unconditionally "
+                      + "for docx is gone, and OfficeRuntime's input verbs forward keystrokes again")
     }
 
     /// PURE: ⌘S is unreachable for a widened-format tab even though it is otherwise the active

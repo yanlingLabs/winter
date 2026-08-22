@@ -432,9 +432,11 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// helper dispatch, atomic place, suppression, dirty tracking) — was fully proven by the ODF pair
     /// regardless; the OOXML gap was a vendored-binary completeness problem, not a defect in anything
     /// this task built. **Task 11 update**: the r3 vendor re-cut fixed the xlsx half of that gap
-    /// (added `product-set/Frameworks/libsal_textenclo.dylib` — see `ooxml-export-investigation.md`);
-    /// docx still does not save, now via a different, non-crashing mechanism (`SVSTREAM_WRITE_ERROR`)
-    /// — see `OfficeHelperLiveTests.testXlsxDocxPptxSaveRoundTripThroughTheRealHelperAfterTheR3VendorRecut`
+    /// (added `product-set/Frameworks/libsal_textenclo.dylib` — see `ooxml-export-investigation.md`).
+    /// **r4 update**: the docx half is fixed too, by the same CLASS of gap one library over
+    /// (`libmswordlo.dylib`, which holds the `com.sun.star.comp.Writer.DocxExport` service
+    /// `services.rdb` always pointed at) — all three OOXML formats now export. See
+    /// `OfficeHelperLiveTests.testXlsxDocxPptxSaveRoundTripThroughTheRealHelperAfterTheR4VendorRecut`
     /// for the current, per-format, live-proven truth. This test's own ODF choice was never about
     /// avoiding a permanent limitation, only the crash that existed when it was written, so it is
     /// left as `.ods`/`.odt` rather than migrated to OOXML fixtures now.
@@ -2284,6 +2286,162 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         _ = host.teardownAllOfficeRuntimesAndStopHelper()
     }
 
+    // MARK: - The r4 vendor re-cut: .docx is a read-WRITE format again, end to end
+
+    /// **The docx drill the read-only demotion existed in place of.** Whole-branch review I2 held
+    /// `.docx` read-only because the r3 vendor tree could not export it at all; the r4 re-cut adds
+    /// the missing DOCX export service (`libmswordlo.dylib`, holding
+    /// `com.sun.star.comp.Writer.DocxExport` — `PanelEditorTab.swift`'s `officeReadWriteExtensions`
+    /// has the mechanism), and this is the drill that has to be green before that demotion may be
+    /// lifted. `OfficeHelperLiveTests.testXlsxDocxPptxSaveRoundTripThroughTheRealHelperAfterTheR4
+    /// VendorRecut`'s own docx leg proves the HELPER can render the bytes into `<state-path>/saves/`;
+    /// this proves the whole app-side pipeline behind it — real staged copy, real typed edit through
+    /// the real wire, real ⌘S door, `placeAtomically` onto the USER'S OWN PATH, reopen — which is
+    /// the part a helper-only test structurally cannot see.
+    ///
+    /// **Three proofs, deliberately layered** (a file merely changing size proves none of them):
+    /// 1. **Placement** — the bytes land at `docPath` itself, the staged copy's ORIGINAL location,
+    ///    not in the helper's `saves/` scratch. Asserted by dumping the entry out of the real path.
+    /// 2. **Dumped bytes** — `word/document.xml` at that path carries BOTH the typed marker and the
+    ///    fixture's own seed text, so the save persisted the edited document rather than re-writing
+    ///    the original (the failure mode a stat/mtime check cannot distinguish), and
+    ///    `[Content_Types].xml` declares the WordprocessingML main-document part, so what landed is
+    ///    a genuine DOCX and not an ODF payload wearing a `.docx` name (the exact substitution T7's
+    ///    autosave fallback used to make on purpose).
+    /// 3. **Reopen** — LOK re-parses those same bytes as a `.text` document, and the repainted tile
+    ///    differs from the pre-edit one.
+    ///
+    /// Same real-helper/real-seatbelt setup as
+    /// `testSaveThroughTheRealEditDoorThenCloseThenReopenPersistsRealContentAcrossTwoFormats` above
+    /// (which stayed on its ODF pair on purpose — see its own header). Kept as its own named drill
+    /// rather than a third loop iteration there because the dumped-bytes assertions are
+    /// OOXML-specific and because this one leg is a product decision's gate, not one more format.
+    func testDocxSaveThroughTheRealEditDoorLandsOnTheUsersOwnPathWithTheTypedTextInsideIt() async throws {
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent()
+            .appendingPathComponent("NormaOfficeHelper")
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
+                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                        + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
+        let vendorRoot = Self.vendorProductSetRoot
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
+                      "LibreOffice vendor tree not present at \(vendorRoot.path) — run "
+                        + "`bun run libreoffice:fetch` from the repo root.")
+        let fixturePath = Self.fixturesRoot.appendingPathComponent("gate.docx").path
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: fixturePath), "gate.docx fixture missing")
+
+        let stateDir = makeScratchDirectory()
+        let directory = SessionDirectory(lister: { [] })
+        let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        host.makeOfficeHelperSupervisor = {
+            OfficeHelperSupervisor(configuration: OfficeHelperSupervisor.Configuration(
+                helperExecutableURL: helperURL,
+                socketDirectory: stateDir,
+                extraArguments: ["--lok-root", vendorRoot.path, "--sandbox-profile", Self.sandboxProfilePath.path]))
+        }
+        let runtime = host.officeRuntime(for: "S1")
+        defer { _ = host.teardownAllOfficeRuntimesAndStopHelper() }
+
+        let zoomPPT = 1000
+        let key = TileKey(part: 0, zoomPPT: zoomPPT, tileX: 0, tileY: 0)
+        let viewport = officeViewportTwips(scrollOrigin: .zero, visibleSize: CGSize(width: 256, height: 256), zoomPPT: zoomPPT)
+
+        // A WRITABLE copy — the checked-in Fixtures directory is never itself a save target.
+        let scratchDir = makeScratchDirectory()
+        let docPath = scratchDir.appendingPathComponent("editable-gate.docx").path
+        try Data(contentsOf: URL(fileURLWithPath: fixturePath)).write(to: URL(fileURLWithPath: docPath))
+
+        // The product gate itself, asserted before anything else runs: if this predicate ever says
+        // read-only again, every mutation door below is a no-op and the rest of this drill would
+        // fail for a confusing reason instead of this clear one.
+        XCTAssertFalse(officeDocumentIsReadOnlyFormat(path: docPath), "setup: .docx must be a "
+                       + "read-write format for this drill to mean anything — see "
+                       + "PanelEditorTab.swift's officeReadWriteExtensions")
+
+        runtime.open(docPath)
+        let settled = await waitUntil(timeout: 90) {
+            runtime.stateSnapshot.documents[docPath] != nil || runtime.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(settled, "gate.docx never settled — phase: \(runtime.stateSnapshot.phase)")
+        guard let doc = runtime.stateSnapshot.documents[docPath] else {
+            return XCTFail("gate.docx did not open: "
+                           + "\(runtime.stateSnapshot.openFailures[docPath] ?? "no reason recorded")")
+        }
+        let originalDocId = doc.docId
+        XCTAssertEqual(doc.type, .text, "setup: a Word document opens as a Writer text document")
+        XCTAssertEqual(doc.dirty, false, "setup: a freshly opened document reports clean")
+
+        runtime.subscribeTiles(path: docPath, part: 0, zoomPPT: zoomPPT, viewportTwips: viewport)
+        let paintedBefore = await waitUntil(timeout: 30) { runtime.tileStore.tile(docId: originalDocId, key: key) != nil }
+        XCTAssertTrue(paintedBefore, "the pre-edit tile never arrived")
+        let pixelsBefore = try XCTUnwrap(runtime.tileStore.tile(docId: originalDocId, key: key)).pixels
+
+        guard let client = host.officeHelperSupervisor?.client else {
+            return XCTFail("no live client to drive the real edit door through")
+        }
+        try await postRealEdit(client: client, docId: originalDocId, marker: "T4EDIT")
+
+        // Dirty tracking for a docx was UNREACHABLE under the I2 demotion (the input verbs were
+        // gated, so LOK never fired ModifiedStatus at all). That it fires now is itself part of
+        // what the reversal restores.
+        let becameDirty = await waitUntil(timeout: 15) { runtime.stateSnapshot.documents[docPath]?.dirty == true }
+        XCTAssertTrue(becameDirty, "the real edit's own `.uno:ModifiedStatus=true` never reached "
+                      + "documents[path].dirty — under the read-only demotion this was gated off "
+                      + "entirely, so a failure here means the gate is somehow still in force")
+        XCTAssertEqual(runtime.stateSnapshot.documents[docPath]?.docId, originalDocId,
+                       "docId changed BEFORE save was requested — something reloaded")
+
+        let beforeSaveStat = officeFileStat(atPath: docPath)
+        runtime.save(docPath)
+        let fileChanged = await waitUntil(timeout: 30) { officeFileStat(atPath: docPath) != beforeSaveStat }
+        XCTAssertTrue(fileChanged, "the real document path never changed — the save never landed "
+                      + "(banner=\(runtime.stateSnapshot.documentBanners[docPath] ?? "nil") "
+                      + "phase=\(runtime.stateSnapshot.phase))")
+        XCTAssertNil(runtime.stateSnapshot.documentBanners[docPath], "no save-failed banner — a "
+                     + "`SfxBaseModel::impl_store` reason here is the r3 failure returning")
+
+        // PROOF 1+2 — dumped bytes, read back out of the USER'S OWN PATH.
+        let documentXML = try readODFEntry(atPath: docPath, entry: "word/document.xml")
+        XCTAssertTrue(documentXML.contains("T4EDIT"), "the typed marker is missing from the SAVED "
+                      + "real file's own word/document.xml — the edit never reached disk")
+        XCTAssertTrue(documentXML.contains("NORMA GATE"), "the fixture's own seed text is missing "
+                      + "— the save wrote something other than this document")
+        // `[Content_Types].xml` — the brackets MUST be backslash-escaped: `unzip -p` treats its
+        // filename argument as a shell-style PATTERN, so a bare `[Content_Types].xml` parses as a
+        // character class and matches nothing ("filename not matched", empty output, an assertion
+        // that fails for a reason that has nothing to do with the document).
+        let contentTypes = try readODFEntry(atPath: docPath, entry: #"\[Content_Types\].xml"#)
+        XCTAssertTrue(contentTypes.contains("wordprocessingml.document.main+xml"),
+                      "what landed at the user's path is not a real WordprocessingML package — a "
+                      + "silent ODF-under-a-.docx-name substitution is exactly what this asserts against")
+
+        let becameCleanAfterSave = await waitUntil(timeout: 15) { runtime.stateSnapshot.documents[docPath]?.dirty == false }
+        XCTAssertTrue(becameCleanAfterSave, "dirty never cleared after a successful docx save")
+
+        // PROOF 3 — reopen the bytes that actually landed.
+        runtime.close(docPath)
+        runtime.open(docPath)
+        let reopened = await waitUntil(timeout: 90) {
+            runtime.stateSnapshot.documents[docPath] != nil || runtime.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(reopened, "the saved file never reopened — phase: \(runtime.stateSnapshot.phase)")
+        guard let reopenedDoc = runtime.stateSnapshot.documents[docPath] else {
+            return XCTFail("reopen failed — the save corrupted the file: "
+                           + "\(runtime.stateSnapshot.openFailures[docPath] ?? "no reason recorded")")
+        }
+        XCTAssertEqual(reopenedDoc.type, .text, "format preserved — LOK re-parsed the saved bytes "
+                       + "as the same document kind")
+        XCTAssertNotEqual(reopenedDoc.docId, originalDocId, "sanity: a reopen always mints a fresh docId")
+
+        runtime.subscribeTiles(path: docPath, part: 0, zoomPPT: zoomPPT, viewportTwips: viewport)
+        let paintedAfter = await waitUntil(timeout: 30) { runtime.tileStore.tile(docId: reopenedDoc.docId, key: key) != nil }
+        XCTAssertTrue(paintedAfter, "the post-reopen tile never arrived")
+        let pixelsAfter = try XCTUnwrap(runtime.tileStore.tile(docId: reopenedDoc.docId, key: key)).pixels
+        XCTAssertNotEqual(pixelsBefore, pixelsAfter, "the reopened document renders identically to "
+                          + "before the edit — the round trip may have persisted the ORIGINAL bytes")
+
+        runtime.close(docPath)
+    }
+
     /// **Whole-branch review C1 — a save that fails at the PLACE step leaves the document DIRTY, and
     /// both raw consumers of that flag see it.** The live half of the fix; the interleavings are
     /// pinned as reducer rows (`OfficeRuntimeReducerTests`' own C1 section).
@@ -4129,7 +4287,16 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// the old ODF-fallback mapping for xlsx without updating this test, the assertions below would
     /// fail loudly (not a SIGABRT anymore — the crash this originally guarded against is gone — but
     /// a real, silent behavior regression this test still exists to catch).
-    func testXlsxAutosaveSidecarWritesNativelyAndTheHelperSurvives() async throws {
+    ///
+    /// **Widened to two formats at the r4 re-cut.** `.docx` was the LAST format still on Task 7's
+    /// ODF fallback, and Task 11 kept it there for a good reason on its own evidence (a native docx
+    /// sidecar would have failed every fire, leaving a dirty document with no sidecar at all). r4
+    /// supplies the missing DOCX export service, `autosaveFormat`'s `.docx` arm narrows to native
+    /// alongside it, and this drill is what proves that arm rather than asserting it in a comment —
+    /// the same real-typed-edit, unattended-repeating-timer shape, run for both formats against one
+    /// helper. Nothing in `autosaveFormat` falls back to ODF any more, so the `other` column below
+    /// is a NEGATIVE pin in both rows: it names the sidecar that must NOT appear.
+    func testXlsxAndDocxAutosaveSidecarsWriteNativelyAndTheHelperSurvives() async throws {
         let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
                       "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
@@ -4138,8 +4305,6 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
                       "LibreOffice vendor tree not present at \(vendorRoot.path) — run "
                         + "`bun run libreoffice:fetch` from the repo root.")
-        let fixturePath = Self.fixturesRoot.appendingPathComponent("gate.xlsx").path
-        try XCTSkipIf(!FileManager.default.fileExists(atPath: fixturePath), "gate.xlsx fixture missing")
 
         let stateDir = makeScratchDirectory()
         let directory = SessionDirectory(lister: { [] })
@@ -4150,59 +4315,72 @@ final class OfficeRuntimeLiveTests: XCTestCase {
                 extraArguments: ["--lok-root", vendorRoot.path, "--sandbox-profile", Self.sandboxProfilePath.path]))
         }
         let runtime = host.officeRuntime(for: "S1")
+        defer { _ = host.teardownAllOfficeRuntimesAndStopHelper() }
 
-        let scratchDir = makeScratchDirectory()
-        let docPath = scratchDir.appendingPathComponent("fallback-drill.xlsx").path
-        try Data(contentsOf: URL(fileURLWithPath: fixturePath)).write(to: URL(fileURLWithPath: docPath))
+        // (fixture, the extension the sidecar MUST land at, the ODF extension it must NOT fall back
+        // to). Both rows are native as of r4 — the second column is the whole point of the drill.
+        let rows: [(fixture: String, nativeExt: String, forbiddenODFExt: String)] = [
+            ("gate.xlsx", "xlsx", "ods"),
+            ("gate.docx", "docx", "odt"),
+        ]
+        for row in rows {
+            let fixturePath = Self.fixturesRoot.appendingPathComponent(row.fixture).path
+            try XCTSkipIf(!FileManager.default.fileExists(atPath: fixturePath), "\(row.fixture) fixture missing")
 
-        runtime.open(docPath)
-        let opened = await waitUntil(timeout: 90) {
-            runtime.stateSnapshot.documents[docPath] != nil || runtime.stateSnapshot.phase == .failed
+            let scratchDir = makeScratchDirectory()
+            let docPath = scratchDir.appendingPathComponent("native-sidecar-drill.\(row.nativeExt)").path
+            try Data(contentsOf: URL(fileURLWithPath: fixturePath)).write(to: URL(fileURLWithPath: docPath))
+
+            runtime.open(docPath)
+            let opened = await waitUntil(timeout: 90) {
+                runtime.stateSnapshot.documents[docPath] != nil || runtime.stateSnapshot.phase == .failed
+            }
+            XCTAssertTrue(opened, "\(row.fixture): never opened — phase: \(runtime.stateSnapshot.phase)")
+            guard let docId = runtime.stateSnapshot.documents[docPath]?.docId else {
+                return XCTFail("\(row.fixture) did not open: \(runtime.stateSnapshot.openFailures[docPath] ?? "no reason recorded")")
+            }
+            guard let client = host.officeHelperSupervisor?.client else {
+                return XCTFail("no live client to type through")
+            }
+            try await client.postMouse(docId: docId, part: 0, type: .buttonDown, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+            try await client.postMouse(docId: docId, part: 0, type: .buttonUp, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+            try await postRawUppercaseMarker(client: client, docId: docId, marker: "FALLBACK")
+            // Return: commits a pending Calc cell edit; a harmless paragraph break for Writer.
+            try await client.postKey(docId: docId, part: 0, type: .keyInput, charCode: 0, keyCode: 1280)
+            try await client.postKey(docId: docId, part: 0, type: .keyUp, charCode: 0, keyCode: 1280)
+
+            let becameDirty = await waitUntil(timeout: 15) { runtime.stateSnapshot.documents[docPath]?.dirty == true }
+            XCTAssertTrue(becameDirty, "\(row.fixture): the typed edit's own ModifiedStatus=true never "
+                          + "reached documents[path].dirty")
+
+            guard let helperPID = host.officeHelperSupervisor?.process?.processIdentifier else {
+                return XCTFail("no live helper process to check")
+            }
+            let autosaveDir = stateDir.appendingPathComponent("autosave", isDirectory: true)
+            let forbiddenSidecarPath = autosaveDir.appendingPathComponent("\(docId).\(row.forbiddenODFExt)").path
+            let nativeSidecarPath = autosaveDir.appendingPathComponent("\(docId).\(row.nativeExt)").path
+
+            let nativeSidecarAppeared = await waitUntil(timeout: 30) { FileManager.default.fileExists(atPath: nativeSidecarPath) }
+            XCTAssertTrue(nativeSidecarAppeared, "\(row.fixture): the autosave sidecar never appeared "
+                          + "NATIVELY at \(nativeSidecarPath) — the vendor re-cut's export fix or the "
+                          + "narrowed autosaveFormat mapping may have regressed")
+            XCTAssertFalse(FileManager.default.fileExists(atPath: forbiddenSidecarPath), "\(row.fixture): "
+                           + "must NOT fall back to ODF anymore (xlsx export fixed at the r3 re-cut, docx "
+                           + "at r4); an ODF sidecar here means autosaveFormat was reverted without "
+                           + "updating this test")
+            XCTAssertTrue(isProcessAlive(helperPID), "\(row.fixture): the helper must survive writing "
+                          + "its own native autosave sidecar")
+
+            // A SECOND fire, past the first — the brief's own concern is specifically an UNATTENDED,
+            // REPEATING timer; one clean fire alone does not rule out a crash on the next one.
+            let beforeSecondFire = officeFileStat(atPath: nativeSidecarPath)
+            let secondFireLanded = await waitUntil(timeout: 15) { officeFileStat(atPath: nativeSidecarPath) != beforeSecondFire }
+            XCTAssertTrue(secondFireLanded, "\(row.fixture): the timer never fired a second time")
+            XCTAssertTrue(isProcessAlive(helperPID), "\(row.fixture): the helper must survive a SECOND "
+                          + "native autosave fire too")
+
+            runtime.close(docPath)
         }
-        XCTAssertTrue(opened, "never opened — phase: \(runtime.stateSnapshot.phase)")
-        guard let docId = runtime.stateSnapshot.documents[docPath]?.docId else {
-            _ = host.teardownAllOfficeRuntimesAndStopHelper()
-            return XCTFail("gate.xlsx did not open: \(runtime.stateSnapshot.openFailures[docPath] ?? "no reason recorded")")
-        }
-        guard let client = host.officeHelperSupervisor?.client else {
-            _ = host.teardownAllOfficeRuntimesAndStopHelper()
-            return XCTFail("no live client to type through")
-        }
-        try await client.postMouse(docId: docId, part: 0, type: .buttonDown, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
-        try await client.postMouse(docId: docId, part: 0, type: .buttonUp, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
-        try await postRawUppercaseMarker(client: client, docId: docId, marker: "FALLBACK")
-        try await client.postKey(docId: docId, part: 0, type: .keyInput, charCode: 0, keyCode: 1280) // Return, commits the Calc cell
-        try await client.postKey(docId: docId, part: 0, type: .keyUp, charCode: 0, keyCode: 1280)
-
-        let becameDirty = await waitUntil(timeout: 15) { runtime.stateSnapshot.documents[docPath]?.dirty == true }
-        XCTAssertTrue(becameDirty, "the typed edit's own ModifiedStatus=true never reached documents[path].dirty")
-
-        guard let helperPID = host.officeHelperSupervisor?.process?.processIdentifier else {
-            _ = host.teardownAllOfficeRuntimesAndStopHelper()
-            return XCTFail("no live helper process to check")
-        }
-        let autosaveDir = stateDir.appendingPathComponent("autosave", isDirectory: true)
-        let odsSidecarPath = autosaveDir.appendingPathComponent("\(docId).ods").path
-        let xlsxSidecarPath = autosaveDir.appendingPathComponent("\(docId).xlsx").path
-
-        let xlsxSidecarAppeared = await waitUntil(timeout: 30) { FileManager.default.fileExists(atPath: xlsxSidecarPath) }
-        XCTAssertTrue(xlsxSidecarAppeared, "the xlsx document's own autosave sidecar never appeared "
-                      + "NATIVELY at \(xlsxSidecarPath) — the r3 vendor re-cut's fix or the narrowed "
-                      + "autosaveFormat mapping may have regressed")
-        XCTAssertFalse(FileManager.default.fileExists(atPath: odsSidecarPath), "must NOT fall back to "
-                       + "ODF anymore — xlsx export is fixed as of the r3 vendor re-cut (Task 11); an "
-                       + "ODF sidecar here means autosaveFormat was reverted without updating this test")
-        XCTAssertTrue(isProcessAlive(helperPID), "the helper must survive writing an xlsx document's "
-                      + "own autosave sidecar")
-
-        // A SECOND fire, past the first — the brief's own concern is specifically an UNATTENDED,
-        // REPEATING timer; one clean fire alone does not rule out a crash on the next one.
-        let beforeSecondFire = officeFileStat(atPath: xlsxSidecarPath)
-        let secondFireLanded = await waitUntil(timeout: 15) { officeFileStat(atPath: xlsxSidecarPath) != beforeSecondFire }
-        XCTAssertTrue(secondFireLanded, "the timer never fired a second time")
-        XCTAssertTrue(isProcessAlive(helperPID), "the helper must survive a SECOND xlsx autosave fire too")
-
-        _ = host.teardownAllOfficeRuntimesAndStopHelper()
     }
 
     // MARK: - Office Stage B Task 8: the formula bar's own live drill (ref + content, as the caret moves)

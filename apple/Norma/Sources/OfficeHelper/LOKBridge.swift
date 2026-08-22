@@ -54,12 +54,13 @@ private enum LOKCallbackType {
 /// **Office Stage B Task 9, fix round 1 (review F4) — back-pointer.** The app target cannot import
 /// this module (`OfficeDocumentBridge`'s own header in `OfficeHelperServer.swift` explains why), so
 /// `PanelEditorTab.swift`'s `officeReadWriteExtensions` is a deliberate, hand-maintained SECOND
-/// list — the boundary `officeDocumentIsReadOnlyFormat` draws. It is **no longer a mirror of these
-/// six cases**: whole-branch review I2 removed `docx` from it, on the ground that having a case
-/// here is necessary but not sufficient — this build's Writer OOXML export fails at `impl_store`
-/// even though the filter resolution below is correct (that set's own header has the full account,
-/// and the failure is pinned live by `OfficeHelperLiveTests.testXlsxDocxPptxSaveRoundTripThroughThe
-/// RealHelperAfterTheR3VendorRecut`). So the two lists relate as: app-side read-write ⊂ cases here.
+/// list — the boundary `officeDocumentIsReadOnlyFormat` draws. It is an **exact mirror of these six
+/// cases again** as of the r4 vendor re-cut. It was not, between whole-branch review I2 and that
+/// re-cut: I2 removed `docx` from it on the ground that having a case here is necessary but not
+/// sufficient — the r3 vendor tree's Writer OOXML export failed at `impl_store` even though the
+/// filter resolution below was correct. r4 adds the one missing library that export service lives
+/// in (`libmswordlo.dylib`; that set's own header has the mechanism), so the two lists are equal
+/// once more, and the relationship to hold going forward is: app-side read-write ⊆ cases here.
 ///
 /// **Adding a case here does NOT automatically widen that list or lift its read-only gates** — no
 /// compile-time tripwire can exist across this module boundary; the drift signal is empirical
@@ -118,17 +119,15 @@ enum OfficeSaveFormat: Equatable {
     /// whether that is a fallback away from this document's own real format. `saveAsSidecar`
     /// (below) is this table's only caller.
     ///
-    /// **Narrowed at Task 11 (the r3 vendor re-cut) from Task 7's original "all three OOXML
-    /// formats fall back, uniformly" judgment call — this is the deliberate revisit that decision's
-    /// own header asked for.** Task 7's blanket fallback was a disclosed, evidence-light judgment
-    /// call: only xlsx had a confirmed crash mechanism at the time; docx and pptx were folded in on
-    /// the reasoning that an unattended, repeating autosave timer makes "one unnecessary ODF
-    /// conversion" a far cheaper mistake than "the crash-protection feature itself crashes the
-    /// helper, silently, while a document is dirty." Task 11's vendor re-cut
-    /// (`libsal_textenclo.dylib` added to `product-set/Frameworks/` — see
-    /// `ooxml-export-investigation.md` + `task-11-brief.md`) replaced that judgment call with direct
-    /// evidence, live-tested through the real helper
-    /// (`OfficeHelperLiveTests.testXlsxDocxPptxSaveRoundTripThroughTheRealHelperAfterTheR3VendorRecut`):
+    /// **Narrowed in two steps — Task 11 (the r3 re-cut) took two of the three OOXML formats off
+    /// Task 7's original "all three fall back, uniformly" judgment call; the r4 re-cut takes the
+    /// third.** Task 7's blanket fallback was a disclosed, evidence-light judgment call: only xlsx
+    /// had a confirmed crash mechanism at the time; docx and pptx were folded in on the reasoning
+    /// that an unattended, repeating autosave timer makes "one unnecessary ODF conversion" a far
+    /// cheaper mistake than "the crash-protection feature itself crashes the helper, silently, while
+    /// a document is dirty." Both re-cuts replaced judgment with direct evidence, live-tested
+    /// through the real helper
+    /// (`OfficeHelperLiveTests.testXlsxDocxPptxSaveRoundTripThroughTheRealHelperAfterTheR4VendorRecut`):
     ///
     /// - **`.xlsx`** — the confirmed crash is FIXED (proven: real save, real reopen, seed content
     ///   survives). No longer falls back; autosave writes native `.xlsx` sidecars.
@@ -138,34 +137,33 @@ enum OfficeSaveFormat: Equatable {
     ///   format that was never actually proven broken — that caution's own justification (the crash
     ///   risk) no longer applies now the crash mechanism is understood and gone for the one format
     ///   that DID exhibit it. Autosave writes native `.pptx` sidecars.
-    /// - **`.docx`** — re-investigated fresh for Task 11 (the original investigation's own docx
-    ///   capture was inconclusive). STILL fails, honestly reproduced twice on independent clean
-    ///   profiles — but the missing-dylib abort is gone; the failure is now a clean, non-fatal
-    ///   `SfxBaseModel::impl_store` exception (`SVSTREAM_WRITE_ERROR` / `ERRCODE_IO_CANTWRITE`), a
-    ///   distinct, still-open Writer/OOXML-export defect unrelated to this re-cut. A native-format
-    ///   sidecar attempt for docx would therefore simply fail every single autosave fire — no
-    ///   sidecar at all, ever, for a dirty docx document, which is a strictly worse data-protection
-    ///   outcome than a working ODF fallback. `.docx` STAYS on the ODF fallback; this is not a
-    ///   parking of Task 7's caution, it is confirmation that the caution was correct for this one
-    ///   format specifically.
+    /// - **`.docx`** — the last format still on the fallback after Task 11, and **narrowed to
+    ///   native by the r4 vendor re-cut.** Task 11's reasoning for keeping it was sound on the
+    ///   evidence it had: docx `saveAs` failed on every attempt with a clean, non-fatal
+    ///   `SfxBaseModel::impl_store` exception, so a native-format sidecar attempt would have failed
+    ///   every single autosave fire — no sidecar at all, ever, for a dirty docx document, strictly
+    ///   worse for data protection than a working ODF fallback. r4 removes the premise rather than
+    ///   the caution: the failure was the DOCX export service's own library missing from the
+    ///   product-set (`libmswordlo.dylib`, holding `com.sun.star.comp.Writer.DocxExport`), not a
+    ///   defect in the export code, and with it present docx `saveAs` lands for real. A native
+    ///   `.docx` sidecar is now both writable AND the strictly better recovery artifact — recovery
+    ///   hands the user back their own format instead of an ODF conversion.
     ///
     /// `.odt`/`.ods`/`.odp` are excluded on different, solid ground, not by exemption: they are
     /// already ODF, so a sidecar `saveAs` for them never reaches the OOXML export filter code path
     /// at all — there is no unproven mechanism here to guess about.
     ///
-    /// **Whole-branch review I2 — the `.docx` arm is now app-UNREACHABLE, and is kept deliberately.**
-    /// The app holds `.docx` read-only (`PanelEditorTab.swift`'s `officeReadWriteExtensions`), so its
-    /// input verbs never forward a keystroke, LOK never fires `modified=true`, and
-    /// `OfficeAutosaveScheduler` therefore never arms a docx timer — nothing in the shipped app can
-    /// reach this arm today. It stays because this is helper-side code with its own contract: any
-    /// caller that opens a docx and marks it dirty (a future app door, a test, Stage C) must still
-    /// get a sidecar that can actually be written, and because the day the Writer defect is fixed
-    /// this arm is one of the two decisions to revisit — narrow it to native then, in the same
-    /// change that lifts the app-side read-only gate.
+    /// **Nothing in this table falls back any more, so `isODFFallback` is `false` on every arm
+    /// today — and the flag is deliberately KEPT rather than deleted.** It is threaded end to end
+    /// (`OfficeRuntime`'s reducer, `OfficeWire`'s codec, `PanelDocumentTab`'s recovery banner) as a
+    /// generic boolean, and the next format this table gains (`.rtf`, a legacy binary, anything
+    /// Stage C adds) is exactly as likely to need it as the three OOXML formats were. Deleting the
+    /// plumbing now would have to be re-derived then, and the banner copy it drives is the one thing
+    /// standing between "recovered your work" and "recovered your work, in a different format."
     var autosaveFormat: (format: OfficeSaveFormat, isODFFallback: Bool) {
         switch self {
         case .odt, .ods, .odp: return (self, false)
-        case .docx: return (.odt, true)
+        case .docx: return (self, false)
         case .xlsx: return (self, false)
         case .pptx: return (self, false)
         }
@@ -1157,12 +1155,12 @@ final class LOKBridge: OfficeDocumentBridge {
     }
 
     /// Office Stage B Task 7 — the autosave sidecar write: `<state-path>/autosave/<docId>.<ext>`,
-    /// `ext` from `OfficeSaveFormat.autosaveFormat`. **Native for five of the six formats**; `.docx`
-    /// alone falls back to `.odt`, because it is the one format this build genuinely cannot export.
-    /// Task 7 originally fell back for all three OOXML formats uniformly; Task 11's r3 re-cut
-    /// replaced that evidence-light caution with per-format measurement and narrowed it to docx —
-    /// see that property's own header for the per-format results and for why the docx arm is kept
-    /// even though the app now holds docx read-only.
+    /// `ext` from `OfficeSaveFormat.autosaveFormat`. **Native for all six formats** as of the r4
+    /// vendor re-cut. Task 7 originally fell back to ODF for all three OOXML formats uniformly;
+    /// Task 11's r3 re-cut replaced that evidence-light caution with per-format measurement and
+    /// narrowed it to `.docx` alone; r4 fixes the DOCX export service gap that kept it there — see
+    /// that property's own header for the per-format results and for why `isODFFallback` is kept
+    /// plumbed even though nothing sets it today.
     ///
     /// **Bare `saveAs`, deliberately no `.uno:Save` follow-up** — the ONE structural difference
     /// from `saveAsOnDedicatedThread` immediately above, and the reason this is its own method
