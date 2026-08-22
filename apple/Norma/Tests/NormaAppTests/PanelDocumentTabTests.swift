@@ -175,6 +175,139 @@ final class PanelDocumentTabTests: XCTestCase {
         XCTAssertEqual(officeCellReference(column: 26, row: 99), "AA100")
     }
 
+    // MARK: - Pure: officeColumnIndex(fromLetters:) / officeParseCellReference / officeParseRange
+    // (office-agent-tools T3 — the INVERSE of officeColumnLetters/officeCellReference above, needed
+    // to turn `sheets read`'s own A1-string `range` operand into 0-based indices LOK can use.
+    // "Reuse the A1 conversion Stage B T8 already built, do not write a second one" — this is that
+    // reuse: every boundary pinned here is the identical bijective-base-26 boundary the forward
+    // conversion already pins, walked backwards.)
+
+    func testOfficeColumnIndexInvertsOfficeColumnLettersAtEveryBoundary() {
+        XCTAssertEqual(officeColumnIndex(fromLetters: "A"), 0)
+        XCTAssertEqual(officeColumnIndex(fromLetters: "B"), 1)
+        XCTAssertEqual(officeColumnIndex(fromLetters: "Z"), 25)
+        XCTAssertEqual(officeColumnIndex(fromLetters: "AA"), 26)
+        XCTAssertEqual(officeColumnIndex(fromLetters: "AB"), 27)
+        XCTAssertEqual(officeColumnIndex(fromLetters: "AZ"), 51)
+        XCTAssertEqual(officeColumnIndex(fromLetters: "BA"), 52)
+        XCTAssertEqual(officeColumnIndex(fromLetters: "ZZ"), 701)
+        XCTAssertEqual(officeColumnIndex(fromLetters: "AAA"), 702)
+    }
+
+    /// Round-trips a wide sample through BOTH directions — the strongest single proof that the
+    /// inverse actually inverts, not just that the two happen to agree at the hand-picked boundaries
+    /// above.
+    func testOfficeColumnIndexRoundTripsWithOfficeColumnLettersAcrossAWideRange() {
+        for column in 0..<1500 {
+            let letters = officeColumnLetters(column)
+            XCTAssertEqual(officeColumnIndex(fromLetters: letters), column,
+                           "officeColumnLetters(\(column)) = \"\(letters)\" must invert back to \(column)")
+        }
+    }
+
+    func testOfficeColumnIndexIsCaseInsensitive() {
+        XCTAssertEqual(officeColumnIndex(fromLetters: "aa"), 26)
+        XCTAssertEqual(officeColumnIndex(fromLetters: "Az"), 51)
+    }
+
+    func testOfficeColumnIndexRejectsNonLetters() {
+        XCTAssertNil(officeColumnIndex(fromLetters: ""))
+        XCTAssertNil(officeColumnIndex(fromLetters: "1"))
+        XCTAssertNil(officeColumnIndex(fromLetters: "A1"))
+        XCTAssertNil(officeColumnIndex(fromLetters: "A-B"))
+        XCTAssertNil(officeColumnIndex(fromLetters: "A "))
+    }
+
+    func testOfficeParseCellReferenceInvertsOfficeCellReference() {
+        XCTAssertEqual(officeParseCellReference("A1")?.column, 0)
+        XCTAssertEqual(officeParseCellReference("A1")?.row, 0)
+        XCTAssertEqual(officeParseCellReference("B1")?.column, 1)
+        XCTAssertEqual(officeParseCellReference("A10")?.row, 9)
+        XCTAssertEqual(officeParseCellReference("AA100")?.column, 26)
+        XCTAssertEqual(officeParseCellReference("AA100")?.row, 99)
+    }
+
+    func testOfficeParseCellReferenceIsCaseInsensitiveOnTheLetters() {
+        let lower = officeParseCellReference("aa100")
+        XCTAssertEqual(lower?.column, 26)
+        XCTAssertEqual(lower?.row, 99)
+    }
+
+    /// Malformed shapes: wire strictness applied to the ONE place this file owns real A1 semantics
+    /// (the daemon only validates the wire SHAPE of `range`, never defaults a bad one) — every one
+    /// of these must refuse, never guess.
+    func testOfficeParseCellReferenceRejectsMalformedInput() {
+        XCTAssertNil(officeParseCellReference(""))
+        XCTAssertNil(officeParseCellReference("1A"))          // digits before letters
+        XCTAssertNil(officeParseCellReference("A"))            // no row at all
+        XCTAssertNil(officeParseCellReference("1"))            // no column at all
+        XCTAssertNil(officeParseCellReference("A0"))           // row 0 does not exist (rows are 1-based)
+        XCTAssertNil(officeParseCellReference("A-1"))          // signed row
+        XCTAssertNil(officeParseCellReference("A1B2"))         // letters resume after digits
+        XCTAssertNil(officeParseCellReference(" A1"))          // leading whitespace
+        XCTAssertNil(officeParseCellReference("A1 "))          // trailing whitespace
+    }
+
+    func testOfficeParseRangeAcceptsASingleCellAsAOneCellRange() {
+        let range = officeParseRange("B2")
+        XCTAssertEqual(range?.startColumn, 1)
+        XCTAssertEqual(range?.startRow, 1)
+        XCTAssertEqual(range?.endColumn, 1)
+        XCTAssertEqual(range?.endRow, 1)
+        XCTAssertEqual(range?.cellCount, 1)
+    }
+
+    func testOfficeParseRangeParsesATwoCornerSpan() {
+        let range = officeParseRange("A1:C10")
+        XCTAssertEqual(range?.startColumn, 0)
+        XCTAssertEqual(range?.startRow, 0)
+        XCTAssertEqual(range?.endColumn, 2)
+        XCTAssertEqual(range?.endRow, 9)
+        XCTAssertEqual(range?.columnCount, 3)
+        XCTAssertEqual(range?.rowCount, 10)
+        XCTAssertEqual(range?.cellCount, 30)
+    }
+
+    /// A range given "backwards" (bottom-right : top-left) normalizes identically to the same span
+    /// given the ordinary way — a caller (model-authored, not UI-driven) has no reason to always get
+    /// reading order right, and LOK's own Name Box accepts either order.
+    func testOfficeParseRangeNormalizesAReversedCornerOrder() {
+        XCTAssertEqual(officeParseRange("C10:A1"), officeParseRange("A1:C10"))
+    }
+
+    func testOfficeParseRangeRejectsMalformedShapes() {
+        XCTAssertNil(officeParseRange(""))
+        XCTAssertNil(officeParseRange("A1:B2:C3"))     // more than one colon
+        XCTAssertNil(officeParseRange("A1:"))           // empty second half
+        XCTAssertNil(officeParseRange(":A1"))           // empty first half
+        XCTAssertNil(officeParseRange("A1:B0"))         // a malformed corner poisons the whole range
+        XCTAssertNil(officeParseRange("Sheet1!A1"))     // sheet-qualification is the `sheet` operand's job, not range's
+    }
+
+    /// office-agent-tools T3 — the cell-count ceiling `sheets read` enforces BEFORE any LOK work.
+    /// Sized so a worst-realistic-case grid of moderately long text cells still lands comfortably
+    /// under `PanelCommandConsumer.resultMaxLength` (64 KiB, mirroring the wire's own
+    /// `PANEL_COMMAND_RESULT_MAX_LENGTH`) — measured here directly, not merely asserted, so a future
+    /// change to either number is caught by arithmetic rather than trusted by comment.
+    func testOfficeReadRangeMaxCellsKeepsAWorstRealisticGridUnderTheResultCap() {
+        let cellsAtCap = officeReadRangeMaxCells
+        let longestOrdinaryCellText = String(repeating: "x", count: 20) // a realistic "long-ish" text cell
+        let syntheticGridBytes = (longestOrdinaryCellText.utf8.count + 1) * cellsAtCap // +1 per cell for its separator
+        XCTAssertLessThan(syntheticGridBytes, PanelCommandConsumer.resultMaxLength,
+                          "officeReadRangeMaxCells (\(cellsAtCap)) is too large: a grid of "
+                          + "\(cellsAtCap) 20-character cells would already be \(syntheticGridBytes) "
+                          + "bytes, at or past PanelCommandConsumer.resultMaxLength "
+                          + "(\(PanelCommandConsumer.resultMaxLength))")
+    }
+
+    func testOfficeParseRangeRefusesARangeLargerThanTheCap() {
+        let tooManyRows = officeReadRangeMaxCells + 1
+        let range = officeParseRange("A1:A\(tooManyRows)")
+        XCTAssertEqual(range?.cellCount, tooManyRows, "setup: this range's cell count must actually "
+                       + "exceed the cap for this test to mean anything")
+        XCTAssertGreaterThan(range!.cellCount, officeReadRangeMaxCells)
+    }
+
     // MARK: - Pure: officeFormulaBarReference / officeFormulaBarContent (advisor review, Task 8:
     // the bar's own display-gating decisions, extracted out of the SwiftUI view so they can be
     // pinned directly)

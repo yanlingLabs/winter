@@ -149,6 +149,97 @@ func officeCellReference(column: Int, row: Int) -> String {
     "\(officeColumnLetters(column))\(row + 1)"
 }
 
+// MARK: - Pure: the INVERSE of the pair above (office-agent-tools T3 — `sheets` needs to turn the
+// agent's own A1-string operands back into 0-based indices; "reuse the A1 conversion Stage B T8
+// already built and tested — do not write a second one" means walking these boundaries backwards,
+// not re-deriving them)
+
+/// The inverse of `officeColumnLetters`: bijective base-26 letters ("A", "AA", "AAA", …) back to a
+/// 0-based column index. Case-insensitive (the agent's own `range` operand may arrive in either
+/// case) and otherwise strict — `nil` for anything that is not one or more consecutive ASCII letters
+/// (empty, digits, punctuation, whitespace).
+///
+/// Each place value is `letter - 'A' + 1` before multiplying by 26, the SAME "subtract one before
+/// dividing" bijective-numeration construction `officeColumnLetters`'s own header explains (there is
+/// no digit for zero in this system) — walked in the opposite direction: that function peels off the
+/// LEAST-significant letter first by repeated division; this one folds the string left-to-right,
+/// which is the natural direction for the same place-value arithmetic when the letters already have
+/// their significance order (most-significant first, exactly as written).
+func officeColumnIndex(fromLetters letters: String) -> Int? {
+    guard !letters.isEmpty else { return nil }
+    var value = 0
+    for scalar in letters.unicodeScalars {
+        let upper: UInt32
+        switch scalar.value {
+        case 65...90: upper = scalar.value        // 'A'...'Z'
+        case 97...122: upper = scalar.value - 32   // 'a'...'z' -> 'A'...'Z'
+        default: return nil
+        }
+        value = value * 26 + Int(upper - 65 + 1)
+    }
+    return value - 1
+}
+
+/// The inverse of `officeCellReference`: an A1-style cell reference ("A1", "aa100") to a 0-based
+/// `(column, row)` pair. Case-insensitive on the letters (upcased before `officeColumnIndex`); the
+/// row must be a bare positive decimal integer — no sign, no leading/trailing whitespace, no digits
+/// before the letters, nothing after. `nil` for anything else: this is the one place real A1
+/// SEMANTICS live for the agent's own operands (the daemon tool validates `range`'s wire SHAPE only
+/// — a bare non-empty string — never its meaning), so wire strictness applies here: a malformed cell
+/// reference refuses, it is never guessed at or clamped to something nearby.
+func officeParseCellReference(_ reference: String) -> (column: Int, row: Int)? {
+    let letters = reference.prefix(while: { $0.isASCII && $0.isLetter })
+    let rest = reference[letters.endIndex...]
+    guard !letters.isEmpty, !rest.isEmpty, rest.allSatisfy({ $0.isASCII && $0.isNumber }) else { return nil }
+    guard let column = officeColumnIndex(fromLetters: letters.uppercased()) else { return nil }
+    guard let oneBasedRow = Int(rest), oneBasedRow >= 1 else { return nil }
+    return (column: column, row: oneBasedRow - 1)
+}
+
+/// A resolved `sheets read` range: 0-based, INCLUSIVE on every edge, always normalized to
+/// (top-left, bottom-right) regardless of which corner order the caller gave — `officeParseRange`
+/// is the only producer.
+struct OfficeCellRange: Equatable {
+    var startColumn: Int
+    var startRow: Int
+    var endColumn: Int
+    var endRow: Int
+    var columnCount: Int { endColumn - startColumn + 1 }
+    var rowCount: Int { endRow - startRow + 1 }
+    var cellCount: Int { columnCount * rowCount }
+}
+
+/// Parses `sheets read`'s own `range` operand: either one cell ("A1", a one-cell range) or an
+/// A1:A1-style span ("A1:C10"). Order-independent — "C10:A1" normalizes identically to "A1:C10",
+/// since a model-authored caller has no particular reason to always give reading-order corners the
+/// way a human dragging a mouse would. `nil` for anything malformed, INCLUDING a syntactically
+/// plausible but semantically bad half (a bad corner poisons the whole range — never defaulted to
+/// whatever half DID parse). Sheet-qualification ("Sheet1!A1") is deliberately rejected here — that
+/// is the `sheet` operand's own job, kept as a separate, required field (spec §2's own table) rather
+/// than folded into range syntax.
+func officeParseRange(_ range: String) -> OfficeCellRange? {
+    let parts = range.split(separator: ":", omittingEmptySubsequences: false)
+    guard parts.count == 1 || parts.count == 2 else { return nil }
+    guard let first = officeParseCellReference(String(parts[0])) else { return nil }
+    guard let second = parts.count == 2 ? officeParseCellReference(String(parts[1])) : first else { return nil }
+    return OfficeCellRange(
+        startColumn: min(first.column, second.column), startRow: min(first.row, second.row),
+        endColumn: max(first.column, second.column), endRow: max(first.row, second.row))
+}
+
+/// office-agent-tools T3 — the cell-count ceiling `sheets read` enforces BEFORE any LOK work, at
+/// range-parse time, in `OfficeCommandConsumer`. Not a UI nicety: an unbounded grid becomes a WORSE
+/// failure than an honest refusal would be. `PanelCommandConsumer.resultMaxLength` (64 KiB, mirroring
+/// the wire's `PANEL_COMMAND_RESULT_MAX_LENGTH`) refuses an over-cap `result` WHOLE at the daemon's
+/// `parseParams`; the app's `try?` on that send swallows the rejection; the command then silently
+/// expires on `OFFICE_READ_DEADLINE_MS` (155s) — the agent is told "timed out" (OUTCOME UNKNOWN, per
+/// this feature's own spec) for a range that could have been refused, correctly, in under a second.
+/// 2,000 keeps even a worst-realistic-case grid of 20-character text cells comfortably under the
+/// wire cap (`PanelDocumentTabTests.testOfficeReadRangeMaxCellsKeepsAWorstRealisticGridUnderThe
+/// ResultCap` measures this directly rather than trusting the arithmetic in this comment) while
+/// still covering every ordinary read — a 40-column x 50-row report, a 10-column x 200-row export.
+let officeReadRangeMaxCells = 2_000
+
 /// PURE: the formula bar's own ref-display decision, extracted from `OfficeFormulaBar.referenceText`
 /// (advisor review, this task) so it can be pinned directly, independent of SwiftUI/`@Published`
 /// timing. Blank when `part != activePart` (a stale part — mirrors
