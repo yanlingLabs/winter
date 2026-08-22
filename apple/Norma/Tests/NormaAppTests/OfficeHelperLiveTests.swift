@@ -400,9 +400,11 @@ final class OfficeHelperLiveTests: XCTestCase {
     }
 
     /// **The three formats the widening decision REJECTED — a known, disclosed limitation, pinned
-    /// the same way `testKnownLimitationOOXMLExportIsNotAvailableInThisVendorBuildWhileODFExportWorks`
-    /// already pins the export-side gap, so a future vendor rebuild that fixes this is caught by a
-    /// RED test here, not silently missed.** All three fixtures are committed, genuinely-produced
+    /// the same way `testXlsxDocxPptxSaveRoundTripThroughTheRealHelperAfterTheR3VendorRecut` pins
+    /// the (now largely fixed) export-side gap and
+    /// `testSyntheticLegacyFixturesOpenAsTextAfterR3RecutXlsStillFailsCleanly` pins this import-side
+    /// one, so a future vendor rebuild that fixes this further is caught by a RED test here, not
+    /// silently missed.** All three fixtures are committed, genuinely-produced
     /// legacy binary (OLE2/CFB) documents — never fabricated garbage bytes (`testGarbageFileOpen
     /// FailsAndHelperSurvives`'s own well-known caveat: LOK's content-sniffing is lenient enough
     /// that arbitrary bytes rarely reproduce a REAL format-specific failure).
@@ -431,26 +433,39 @@ final class OfficeHelperLiveTests: XCTestCase {
     /// the six original formats' own `testGarbageFileOpenFailsAndHelperSurvives`: a catchable
     /// `LoadError`, a normal `openFailed` reply, `helper.process.isRunning` stays `true`.
     ///
-    /// **`legacy-doc.doc` and `legacy-ppt.ppt` do NOT fail cleanly — they take the whole helper
-    /// process down.** Live-caught, not assumed: the FIRST cut of this test expected a clean
-    /// `openFailed` for both (mirroring `.xls`) and failed with `OfficeHelperClientError.timedOut`
-    /// instead — `expectReply`'s own `nextFrame(timeout:)` returning `nil` early (a genuine 15s
-    /// network stall would not resolve in ~2s) because the CONNECTION closed out from under it, not
-    /// because nothing answered in time. The standalone `office-legacy-probe` spike (no Swift/ObjC
-    /// exception layer at all) independently reproduces the identical shape for both: LOK prints its
-    /// own generic UNO fallback string, `"Unspecified Application Error"`, then the PROCESS EXITS
-    /// (`exit(1)`, confirmed via the spike's own `$?` — not a signal-raised crash: no entry lands in
+    /// **HISTORICAL (Task 9, pre-r3) — `legacy-doc.doc` and `legacy-ppt.ppt` did NOT fail cleanly —
+    /// they took the whole helper process down.** Live-caught, not assumed, at the time: the FIRST
+    /// cut of this test expected a clean `openFailed` for both (mirroring `.xls`) and failed with
+    /// `OfficeHelperClientError.timedOut` instead — `expectReply`'s own `nextFrame(timeout:)`
+    /// returning `nil` early (a genuine 15s network stall would not resolve in ~2s) because the
+    /// CONNECTION closed out from under it, not because nothing answered in time. The standalone
+    /// `office-legacy-probe` spike (no Swift/ObjC exception layer at all) independently reproduced
+    /// the identical shape for both: LOK printed its own generic UNO fallback string,
+    /// `"Unspecified Application Error"`, then the PROCESS EXITED (`exit(1)`, confirmed via the
+    /// spike's own `$?` — not a signal-raised crash: no entry landed in
     /// `~/Library/Logs/DiagnosticReports/` for it). A direct libc `exit()`/`_Exit()` call from deep
-    /// inside LO's own C++ import path bypasses Swift's `try`/`catch` entirely — `OfficeHelperServer`'s
+    /// inside LO's own C++ import path bypassed Swift's `try`/`catch` entirely — `OfficeHelperServer`'s
     /// "never a crash" design (`LoadError`'s own doc) assumes every LOK failure surfaces as a
-    /// catchable return value, which holds for `.xls`'s own `NULL`-returning failure but not for
-    /// whatever internal condition `.doc`/`.ppt` import hits here. Asserted the same way
-    /// `testKnownLimitationOOXMLExportIsNotAvailableInThisVendorBuildWhileODFExportWorks` already
-    /// asserts ITS OWN helper-dies case: fire the open, poll `!helper.process.isRunning`.
-    func testKnownLimitationLegacyBinaryImportDoesNotOpenInThisVendorBuild() async throws {
+    /// catchable return value, which held for `.xls`'s own `NULL`-returning failure but not for
+    /// whatever internal condition `.doc`/`.ppt` import hit here at the time.
+    ///
+    /// **Task 11 update — this mechanism is the SAME missing-`libsal_textenclo.dylib` gap
+    /// `ooxml-export-investigation.md` diagnosed for xlsx EXPORT, reached here on the IMPORT side
+    /// instead** (legacy binary formats store text with a Windows-codepage-tagged encoding;
+    /// resolving it on import needs the identical `rtl_getBestWindowsCharsetFromTextEncoding`
+    /// lookup the missing dylib broke). The r3 vendor re-cut that added the dylib for xlsx export
+    /// also closed this import-side crash for these two fixtures — measured directly (a diagnostic
+    /// pass through the real client, not assumed from the export-side fix alone): `open()` now
+    /// returns cleanly instead of the process dying. The test below no longer polls
+    /// `!helper.process.isRunning` for `.doc`/`.ppt` — it asserts the actual, successful
+    /// `OfficeDocumentMetadata` returned, matching what was measured. See this test's own header
+    /// above the `for` loop for what this does and does not prove (a synthetic-fixture result, not
+    /// a verdict on real legacy documents).
+    func testSyntheticLegacyFixturesOpenAsTextAfterR3RecutXlsStillFailsCleanly() async throws {
         try skipUnlessVendorPresent()
 
-        // The clean-failure case — mirrors testGarbageFileOpenFailsAndHelperSurvives exactly.
+        // The clean-failure case — unaffected by the r3 vendor re-cut, unchanged from the original
+        // pin. Mirrors testGarbageFileOpenFailsAndHelperSurvives exactly.
         do {
             let helper = try await spawnLiveHelper()
             let path = Self.fixturesRoot.appendingPathComponent("legacy-xls.xls").path
@@ -469,19 +484,53 @@ final class OfficeHelperLiveTests: XCTestCase {
                           + "take the helper down with it — same survival bar as any other openFailed")
         }
 
-        // The helper-dies case — mirrors testKnownLimitationOOXMLExportIsNotAvailableInThisVendorBuild
-        // WhileODFExportWorks's own OOXML-export death detection, one process per fixture (a fixture
-        // that kills its own helper must never abort the matrix for its sibling).
-        for fixture in ["legacy-doc.doc", "legacy-ppt.ppt"] {
+        // doc/ppt: CHANGED by the r3 vendor re-cut, discovered as a side effect of this task, not
+        // pursued as its own goal. These are Task 10's own synthetic CFB-magic-bytes fixtures (8
+        // bytes of real OLE2 signature, minimal/degenerate content behind it — see
+        // task-10-report.md), not realistic Word/PowerPoint documents. Pre-r3, opening either one
+        // took the whole helper down with it — a direct libc exit() deep inside LO's import path,
+        // the same class of crash ooxml-export-investigation.md diagnosed for xlsx EXPORT: legacy
+        // binary formats store text with a Windows-codepage-tagged encoding, and IMPORTING it needs
+        // the identical rtl_getBestWindowsCharsetFromTextEncoding lookup libsal_textenclo.dylib's
+        // absence broke. Post-r3 (measured directly, not assumed — a diagnostic pass through the
+        // real client, not the detached-Task/isRunning-poll shape this test used pre-r3), the crash
+        // is GONE for these two synthetic fixtures: both open cleanly, sniffed by LOK's own lenient
+        // content-detection fallback as plain TEXT documents — never spreadsheet/presentation, and
+        // with implausibly high part counts (9, 135) for anything but degenerate synthetic content
+        // — i.e. this is LOK finding "readable bytes" and never reaching real binary-format
+        // parsing, not evidence the real xls/doc/ppt importers work end to end.
+        //
+        // **Does NOT reopen Task 9's read-only-viewer decision.** `PanelEditorTab.swift`'s own
+        // header cites a SECOND, independent test route for that decision (real externally-
+        // generated files AND round-tripped LOK-native files) that this task did not re-run — only
+        // this one synthetic-fixture route is proven changed here. Flagged as a named follow-up in
+        // task-11-report.md: re-evaluate the legacy read-only-viewer posture with real .doc/.xls/
+        // .ppt content now the missing-dylib mechanism is understood, not decided in this task.
+        //
+        // Still the load-bearing exerciser of Task 10's CFB `cfbNativeLegacyExtensions` allowlist
+        // (`LOKBridge.swift`) — opens all three fixtures by their REAL, native extensions, which
+        // that allowlist explicitly passes through to `documentLoad` rather than refusing; dropping
+        // `doc`/`ppt` from it would make these two hit the CFB-refusal `openFailed` instead of the
+        // clean, successful open asserted below, so this still catches that regression.
+        for (fixture, expectedParts, widthTwips, heightTwips) in [
+            ("legacy-doc.doc", 9, 12808, 145400),
+            ("legacy-ppt.ppt", 135, 12808, 2177024),
+        ] {
             let helper = try await spawnLiveHelper()
             let path = Self.fixturesRoot.appendingPathComponent(fixture).path
-            Task { _ = try? await helper.client.open(docId: UUID().uuidString, path: path) }
-            let died = await waitUntil(timeout: 15.0) { !helper.process.isRunning }
-            XCTAssertTrue(died, "\(fixture): expected the KNOWN legacy-import limitation to reproduce "
-                          + "(the helper process dying) — if this timed out instead, either the "
-                          + "limitation was fixed (update this test to assert a clean openFailed, or "
-                          + "success, and widen officeFileExtensions accordingly) or something NEW "
-                          + "broke import for legacy binary formats specifically")
+            let docId = UUID().uuidString
+            let metadata = try await helper.client.open(docId: docId, path: path)
+            XCTAssertEqual(metadata.type, .text, "\(fixture): expected LOK's lenient fallback to sniff "
+                          + "this synthetic fixture as a text document — if this is a DIFFERENT type, "
+                          + "either LOK's sniffing changed or this is no longer the fallback path")
+            XCTAssertEqual(metadata.parts, expectedParts, "\(fixture): part count changed — re-verify "
+                          + "before assuming the same fallback shape still applies")
+            XCTAssertEqual(metadata.sizeTwips.widthTwips, Int64(widthTwips), "\(fixture): widthTwips")
+            XCTAssertEqual(metadata.sizeTwips.heightTwips, Int64(heightTwips), "\(fixture): heightTwips")
+            XCTAssertTrue(helper.process.isRunning, "\(fixture): expected a clean, successful open "
+                          + "after the r3 vendor re-cut — if the helper died instead, the re-cut's "
+                          + "fix for this fixture's own crash mechanism regressed")
+            try await helper.client.close(docId: docId)
         }
     }
 
@@ -496,10 +545,13 @@ final class OfficeHelperLiveTests: XCTestCase {
     /// this test exists to prove is now intercepted) — copied byte-for-byte to a `.docx`-named
     /// scratch path, never a repo fixture (the interesting fact is the RENAME, not new content).
     ///
-    /// **Pre-fix, this reproduces `testKnownLimitationLegacyBinaryImportDoesNotOpenInThisVendorBuild`'s
-    /// own helper-death mode** — confirmed live, once, before `LOKBridge`'s CFB sniff landed (see
-    /// task-10-report.md for the transcript: the open never replies, `helper.process.isRunning`
-    /// goes false, identical to that test's own `.doc`/`.ppt` legs). **Post-fix**, the refusal below
+    /// **Pre-fix, this reproduced the historical helper-death mode
+    /// `testSyntheticLegacyFixturesOpenAsTextAfterR3RecutXlsStillFailsCleanly`'s `.doc`/`.ppt` legs
+    /// used to pin** (that test's own name and assertions changed at Task 11 — the missing-dylib
+    /// crash those two legs pinned is gone — but THIS gate's refusal, below, is unaffected either
+    /// way: it fires before LOK ever sees the bytes) — confirmed live, once, before `LOKBridge`'s CFB
+    /// sniff landed (see task-10-report.md for the transcript: the open never replies,
+    /// `helper.process.isRunning` goes false). **Post-fix**, the refusal below
     /// fires INSIDE `openOnDedicatedThread`, strictly before `documentLoad` is ever called, so LOK
     /// never sees these bytes at all and the crash path is never reached.
     func testCFBBytesUnderAModernExtensionRefuseCleanlyAndTheHelperStaysAlive() async throws {
@@ -515,8 +567,8 @@ final class OfficeHelperLiveTests: XCTestCase {
             _ = try await helper.client.open(docId: UUID().uuidString, path: renamed.path)
             XCTFail("renamed-legacy.docx: expected the CFB refusal to fire — if this succeeded, "
                     + "either the sniff regressed or documentLoad itself no longer needs guarding "
-                    + "against this content (re-verify testKnownLimitationLegacyBinaryImportDoesNot"
-                    + "OpenInThisVendorBuild's own .doc leg before assuming either)")
+                    + "against this content (re-verify testSyntheticLegacyFixturesOpenAsTextAfter"
+                    + "R3RecutXlsStillFailsCleanly's own .doc leg before assuming either)")
         } catch OfficeHelperClientError.openFailed(let reason) {
             XCTAssertEqual(reason, "refused before documentLoad: legacy OLE2/CFB binary content "
                             + "under a modern Office extension",
@@ -869,7 +921,7 @@ final class OfficeHelperLiveTests: XCTestCase {
     /// live, every open, and tolerated rather than eliminated).
     ///
     /// This test now pins the FIXED behavior — a permanent regression tripwire matching this file's
-    /// own `testKnownLimitationLegacyBinaryImportDoesNotOpenInThisVendorBuild` sibling pattern in
+    /// own `testSyntheticLegacyFixturesOpenAsTextAfterR3RecutXlsStillFailsCleanly` sibling pattern in
     /// spirit (pin what's actually true today so a future regression is caught RED, not silently
     /// reintroduced) but inverted, since here "true today" is success, not failure.
     func testImpressAndWriterDocumentsOpenSuccessfullyViaTheEmbeddedInstallRootMatchingCalcAndTheStandaloneLokRoot() async throws {
@@ -2178,92 +2230,144 @@ final class OfficeHelperLiveTests: XCTestCase {
         return rep.representation(using: .png, properties: [:])
     }
 
-    // MARK: - Office Stage B Task 2: a vendor-build limitation, found and pinned
+    // MARK: - Office Stage B Task 11: the r3 vendor re-cut — OOXML export, proven per format
 
-    /// **Found while building Task 2's own live round-trip test, isolated by direct bisection
-    /// (task-2-report.md has the full transcript): this vendored, from-source LibreOffice build's
-    /// XLSX EXPORT filter does not work — `saveAs` against an xlsx destination `abort()`s the WHOLE
-    /// HELPER PROCESS, independent of the seatbelt (reproduced identically with `--no-sandbox`),
-    /// independent of any edit (reproduced on a completely untouched, freshly-opened document —
-    /// `saveAs` alone is enough), and independent of the destination FORMAT STRING tried (`saveAs`'s
-    /// own `pFormat`, both a literal LOK filter name and the bare-extension form `doc_saveAs`
-    /// actually expects both reached this same crash once past the filter-resolution stage). ODF
-    /// export (`calc8`/`writer8`/`impress8` — i.e. `.ods`/`.odt`/`.odp`) is unaffected — a real save,
-    /// through this exact wire dispatch, produces a real, valid archive.
+    /// **Direct successor to the deleted `testKnownLimitationOOXMLExportIsNotAvailableInThis
+    /// VendorBuildWhileODFExportWorks`** (Task 2/2b; see git history for its full text). That test
+    /// pinned xlsx's helper-killing `SIGABRT` as the known, accepted state, with its own doc comment
+    /// warning it should be DELETED, not fixed, the day OOXML export starts working — this is that
+    /// day. The vendor re-cut (`.superpowers/sdd/2026-08-20-office-editable/
+    /// ooxml-export-investigation.md` + `task-11-brief.md`) added the one dylib the crash traced to
+    /// (`libsal_textenclo.dylib`, `sal`'s lazily-`dlopen`'d full text-encoding table, absent from the
+    /// vendored product-set because it is reached only via a runtime `dlopen` on the export code
+    /// path the closure recipe's own dyld-trace workload never exercised). This test proves, through
+    /// the REAL helper — not the investigation's own standalone LOK probe harness — the honest,
+    /// per-format result of that fix:
     ///
-    /// **Root cause, corrected post-Task-2b (`ooxml-export-investigation.md` has the full
-    /// backtrace): a missing dylib, not an unanswerable dialog.** The original write-up above
-    /// attributed the crash to a LOK "Information" window callback this headless embedding has no
-    /// way to answer — that theory is FALSIFIED: no window/dialog callback fires before the abort.
-    /// The real mechanism is `product-set/Frameworks/` shipping without `libsal_textenclo.dylib`
-    /// (59 dylibs present, none by that name), reached via a runtime `dlopen()` — not a link-time
-    /// dependency, so it never showed up in a closure-recipe trace — inside the xlsx export path:
-    /// `abort` -> `FullTextEncodingData::FullTextEncodingData()` -> `Impl_getTextEncodingData` ->
-    /// `rtl_getBestWindowsCharsetFromTextEncoding` -> `XclFontData::FillFromVclFont` -> ... ->
-    /// `doc_saveAs`. Also corrected: **`.pptx` export actually works** — confirmed via a different
-    /// code path than xlsx's, never affected by the missing dylib above; only xlsx is pinned as
-    /// reliably reproducing below, and this test's own scope was never "every OOXML format," only
-    /// the ones it could verify (see the docx note ahead of the loop for why docx stays unpinned).
-    ///
-    /// This is a GAP IN THE VENDORED BINARY, not a bug in this task's own code — Stage A's own
-    /// import-side testing (`testSixFormatsOpenWithSaneTypePartsAndSize`) never exercised export at
-    /// all, so nothing before Task 2 had a reason to notice OOXML export specifically was never
-    /// wired into whatever minimal LO module subset this vendor tree's from-source build selected.
-    /// Task 2's own live round-trip test (`OfficeRuntimeLiveTests`) uses `.ods`/`.odt` — the two
-    /// formats this environment can actually prove a save against — and this test is what PINS the
-    /// limitation for the OOXML trio, so a future vendor tree rebuild that adds the missing filter
-    /// module is a test going from skip-worthy-red to green, not a silent, unnoticed fix.
-    ///
-    /// **A pin, not an `XCTExpectFailure`**: this test asserts the CURRENT, real, disclosed behavior
-    /// — ODF saves succeed, OOXML saves crash the helper — as a green test, the same posture this
-    /// suite already takes toward the gate-table pixel hashes and the `gate.ods` width tolerance.
-    /// The day a vendor tree rebuild adds a working OOXML export filter, the OOXML half of this test
-    /// starts failing LOUDLY (the helper stays alive, `save` returns instead of the process dying),
-    /// which is the correct trigger for a human to update this test's own claim, not a silent gap.
-    func testKnownLimitationOOXMLExportIsNotAvailableInThisVendorBuildWhileODFExportWorks() async throws {
+    /// - **`.xlsx` — FIXED.** Was the confirmed, symbolicated crash (`abort` inside `sal`'s
+    ///   `FullTextEncodingData` constructor, reached from the Excel export filter's font/style-table
+    ///   code); now saves for real, reopens as the same kind, and the fixture's own seed text
+    ///   survives the round trip — dumped from the saved archive's own `xl/sharedStrings.xml`, not
+    ///   inferred from exit codes or file size alone.
+    /// - **`.pptx` — regression check.** Already worked before this fix (Impress's OOXML export is a
+    ///   different internal code path, `oox::ppt`, that never called into the missing dylib); still
+    ///   does, same round-trip shape, so a future vendor change that breaks it will be caught here.
+    /// - **`.docx` — STILL fails, honestly re-investigated for this task.** The original
+    ///   investigation never independently confirmed docx's mechanism (one capture hit the
+    ///   already-known, unrelated `SwDLL` exit-time teardown abort instead; another showed a raw
+    ///   `LOK_CALLBACK_ERROR`). Re-probed fresh, with the dylib present, on two independent clean
+    ///   profiles (see `task-11-report.md`): the missing-dylib abort is GONE — no crash of any kind
+    ///   — but `saveAs` now fails cleanly with `SfxBaseModel::impl_store ... failed:
+    ///   0xc10(Error Area:Io Class:Write Code:16)`, i.e. `ERRCODE_IO_CANTWRITE` /
+    ///   `SVSTREAM_WRITE_ERROR` (`include/comphelper/errcode.hxx:300` in this build's own pinned
+    ///   commit) — a distinct, still-open Writer/OOXML-export defect, unrelated to the charset-table
+    ///   gap this re-cut fixes. Production code already handles this correctly end to end (LOK's
+    ///   `saveAs` returning false → `LOKBridge.SaveError.saveAsFailed` →
+    ///   `OfficeHelperClientError.saveFailed`), so this is pinned as a clean, catchable, non-fatal
+    ///   failure — a real improvement over the crash the old test (and, less reliably, this same
+    ///   fixture before Task 11) used to hit, and this task's own honest answer to "does docx export
+    ///   work with the dylib present?": no, but it now fails safely.
+    func testXlsxDocxPptxSaveRoundTripThroughTheRealHelperAfterTheR3VendorRecut() async throws {
         try skipUnlessVendorPresent()
 
-        // ODF: the real proof this task's own wire dispatch (save -> LOK saveAs -> a real file)
-        // works end to end.
-        for (fixture, format) in [("gate.ods", "ods"), ("gate.odt", "odt")] {
+        // xlsx: the headline fix. Save round-trip through the real wire dispatch, content preserved,
+        // reopens as the same kind.
+        do {
             let helper = try await spawnLiveHelper()
             let scratchDir = makeScratchDirectory()
-            let docPath = scratchDir.appendingPathComponent("editable-\(fixture)").path
-            try Data(contentsOf: Self.fixturesRoot.appendingPathComponent(fixture)).write(to: URL(fileURLWithPath: docPath))
-            let docId = "odf-probe"
+            let docPath = scratchDir.appendingPathComponent("roundtrip-gate.xlsx").path
+            try Data(contentsOf: Self.fixturesRoot.appendingPathComponent("gate.xlsx")).write(to: URL(fileURLWithPath: docPath))
+            let docId = "xlsx-roundtrip"
             _ = try await helper.client.open(docId: docId, path: docPath)
-            let tempPath = try await helper.client.save(docId: docId, part: 0)
-            XCTAssertTrue(FileManager.default.fileExists(atPath: tempPath), "\(fixture): saveAs must produce a real file")
-            XCTAssertTrue(tempPath.hasSuffix(".\(format)"), "\(fixture): saved under its own format's extension")
-            let size = (try? FileManager.default.attributesOfItem(atPath: tempPath)[.size] as? Int) ?? nil
-            XCTAssertNotEqual(size, 0, "\(fixture): the saved file must have real content, not an empty stub")
+            let savedPath = try await helper.client.save(docId: docId, part: 0)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: savedPath), "xlsx: saveAs must produce a real file")
+            XCTAssertTrue(savedPath.hasSuffix(".xlsx"), "xlsx: saved under its own format's extension")
+            let savedSize = (try? FileManager.default.attributesOfItem(atPath: savedPath)[.size] as? Int) ?? nil
+            XCTAssertNotEqual(savedSize, 0, "xlsx: the saved file must have real content, not an empty stub")
+            XCTAssertTrue(helper.process.isRunning, "xlsx: the helper must survive its own save")
+
+            // Dumped bytes — the fixture's own seed text must survive the round trip.
+            let sharedStrings = try readOOXMLEntry(atPath: savedPath, entry: "xl/sharedStrings.xml")
+            XCTAssertTrue(sharedStrings.contains("NORMA GATE"), "xlsx: seed text must survive the save")
+
+            // Reopen as a genuinely valid, re-loadable xlsx — not merely non-empty bytes.
+            let reopenHelper = try await spawnLiveHelper()
+            let reopenDocId = "xlsx-roundtrip-reopen"
+            let metadata = try await reopenHelper.client.open(docId: reopenDocId, path: savedPath)
+            XCTAssertEqual(metadata.type, .spreadsheet, "xlsx: the saved file must reopen as a spreadsheet")
+            try await reopenHelper.client.close(docId: reopenDocId)
         }
 
-        // OOXML: the known, accepted gap — the helper process itself dies handling `saveAs`. Fired
-        // as a detached Task (a synchronous `await` here would block on the client's own 15s
-        // per-request timeout) and observed via `process.isRunning` instead, which is both faster
-        // and the more direct claim ("the helper died"), matching this file's OWN established death-
-        // detection idiom (`isProcessAlive`-style `kill(pid, 0)` polling used throughout this suite).
-        //
-        // `gate.xlsx` only — verified reliably (repeatedly, by hand, while isolating this finding:
-        // task-2-report.md) to die within ~2s every time. `gate.docx` was observed inconsistently
-        // (its own `saveAs` sometimes reports a real LOK-level `ERROR` callback rather than dying
-        // outright within this test's own budget) — pinning an unreliable timing claim would make
-        // this regression test itself flaky, which is worse than a narrower, fully-verified pin.
-        for fixture in ["gate.xlsx"] {
+        // pptx: regression check — already worked before this fix, must still work after.
+        do {
             let helper = try await spawnLiveHelper()
             let scratchDir = makeScratchDirectory()
-            let docPath = scratchDir.appendingPathComponent("editable-\(fixture)").path
-            try Data(contentsOf: Self.fixturesRoot.appendingPathComponent(fixture)).write(to: URL(fileURLWithPath: docPath))
-            let docId = "ooxml-probe"
+            let docPath = scratchDir.appendingPathComponent("roundtrip-gate.pptx").path
+            try Data(contentsOf: Self.fixturesRoot.appendingPathComponent("gate.pptx")).write(to: URL(fileURLWithPath: docPath))
+            let docId = "pptx-roundtrip"
             _ = try await helper.client.open(docId: docId, path: docPath)
-            Task { _ = try? await helper.client.save(docId: docId, part: 0) }
-            let died = await waitUntil(timeout: 15.0) { !helper.process.isRunning }
-            XCTAssertTrue(died, "\(fixture): expected the KNOWN OOXML-export limitation to reproduce "
-                          + "(the helper process dying) — if this timed out instead, either the "
-                          + "limitation was fixed (update this test to assert success) or something "
-                          + "NEW broke saveAs for OOXML formats specifically")
+            let savedPath = try await helper.client.save(docId: docId, part: 0)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: savedPath), "pptx: saveAs must produce a real file")
+            XCTAssertTrue(savedPath.hasSuffix(".pptx"), "pptx: saved under its own format's extension")
+            XCTAssertTrue(helper.process.isRunning, "pptx: the helper must survive its own save")
+
+            // Dumped bytes — the fixture's own seed shape (a filled rectangle, no text run) must
+            // survive the save.
+            let slide1 = try readOOXMLEntry(atPath: savedPath, entry: "ppt/slides/slide1.xml")
+            XCTAssertTrue(slide1.contains("FF6600"), "pptx: the seed shape's fill color must survive the save")
+
+            let reopenHelper = try await spawnLiveHelper()
+            let reopenDocId = "pptx-roundtrip-reopen"
+            let metadata = try await reopenHelper.client.open(docId: reopenDocId, path: savedPath)
+            XCTAssertEqual(metadata.type, .presentation, "pptx: the saved file must reopen as a presentation")
+            try await reopenHelper.client.close(docId: reopenDocId)
         }
+
+        // docx: the honest current state — still fails, but cleanly (no crash) since the r3 fix.
+        do {
+            let helper = try await spawnLiveHelper()
+            let scratchDir = makeScratchDirectory()
+            let docPath = scratchDir.appendingPathComponent("roundtrip-gate.docx").path
+            try Data(contentsOf: Self.fixturesRoot.appendingPathComponent("gate.docx")).write(to: URL(fileURLWithPath: docPath))
+            let docId = "docx-roundtrip"
+            _ = try await helper.client.open(docId: docId, path: docPath)
+            do {
+                _ = try await helper.client.save(docId: docId, part: 0)
+                XCTFail("docx: expected OfficeHelperClientError.saveFailed — if this now succeeds, the "
+                        + "Writer/OOXML-export defect (SVSTREAM_WRITE_ERROR / ERRCODE_IO_CANTWRITE, "
+                        + "documented in this test's own header and the r3 VERSION-PIN addendum) has "
+                        + "been independently fixed: update this test to assert success and revisit "
+                        + "T7's ODF-autosave-fallback scope for docx.")
+            } catch OfficeHelperClientError.saveFailed(let reason) {
+                // Expected — see this test's own header for the exact mechanism. Reason-string
+                // check (matching this suite's own house convention, e.g. legacy-xls.xls's pin
+                // below) so a FUTURE docx failure for a genuinely different cause is caught as a
+                // pin mismatch, not silently absorbed by a bare case match.
+                XCTAssertTrue(reason.contains("impl_store"), "docx: reason was \"\(reason)\" — if "
+                              + "this is a DIFFERENT failure than SfxBaseModel::impl_store's "
+                              + "SVSTREAM_WRITE_ERROR, the underlying cause may have changed; "
+                              + "re-verify before assuming the same mechanism")
+            }
+            XCTAssertTrue(helper.process.isRunning, "docx: the helper must survive a failed save — this "
+                          + "is the whole point of the r3 fix: the missing-dylib SIGABRT that used to "
+                          + "kill the process here is gone; this is now a clean, catchable failure")
+        }
+    }
+
+    /// `unzip -p` for a single entry inside a saved OOXML (zip-based) document — mirrors
+    /// `OfficeRuntimeLiveTests.readODFEntry`'s own shape (shell out to a well-understood system tool
+    /// rather than reimplement zip reading), kept as a local copy rather than shared across test
+    /// classes per this suite's existing per-file-helper convention.
+    private func readOOXMLEntry(atPath path: String, entry: String) throws -> String {
+        let unzip = Process()
+        unzip.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+        unzip.arguments = ["-p", path, entry]
+        let pipe = Pipe()
+        unzip.standardOutput = pipe
+        try unzip.run()
+        unzip.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        return try XCTUnwrap(String(data: data, encoding: .utf8), "\(entry) was not valid UTF-8")
     }
 
     // MARK: - Task 5: caret/selection/cell-cursor raw callback probe (the T4-lesson, applied again)

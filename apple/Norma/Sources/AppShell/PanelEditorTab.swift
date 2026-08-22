@@ -109,11 +109,22 @@ let officeReadWriteExtensions: Set<String> = ["xlsx", "ods", "pptx", "odp", "doc
 /// Three siblings were tried and REJECTED, empirically, not by assumption: `xls`/`doc`/`ppt` (binary
 /// 97-2003) all FAIL to open in this vendor build — via two independent routes each (a real
 /// externally-generated file AND, where LOK's own `saveAs` would produce one, a round-tripped
-/// LOK-native file) — see `testKnownLimitationLegacyBinaryImportIsNotAvailableInThisVendorBuild`'s
+/// LOK-native file) — see `testSyntheticLegacyFixturesOpenAsTextAfterR3RecutXlsStillFailsCleanly`'s
 /// own header for the exact failures. `xlsb` could not even be SOURCED — LOK's own `saveAs`
 /// answers "no output filter found for provided suffix" for it in this build, and no other route to
 /// genuine `xlsb` bytes existed within this task's scope; left OUT, honestly undecided rather than
 /// silently assumed either way.
+///
+/// **Task 11 side-finding, NOT a re-decision of this widening**: the vendor re-cut that fixed xlsx
+/// OOXML export also fixed the crash on ONE of `doc`/`ppt`'s two test routes above (Task 10's own
+/// synthetic CFB-magic-bytes fixtures, `legacy-doc.doc`/`legacy-ppt.ppt` — degenerate content behind
+/// a real OLE2 signature, not realistic documents; they now open, but sniffed by LOK's lenient
+/// fallback as plain TEXT, not as real Word/PowerPoint content). The OTHER route this widening
+/// decision also rests on (real externally-generated files / round-tripped LOK-native files) was not
+/// re-run, and `xls` itself is confirmed UNCHANGED (still a clean `openFailed`) — so this widening
+/// decision stands exactly as made. Re-evaluating it with real `.doc`/`.ppt` content, now that the
+/// missing-dylib mechanism behind the original crash is understood, is a named follow-up
+/// (`task-11-report.md`), not something this comment or Task 11 decided.
 ///
 /// **Every widened extension here is also, unconditionally, a `officeDocumentIsReadOnlyFormat`
 /// path** (see that predicate's own header) — `OfficeSaveFormat` has no `xlsm`/`odg` case, so a

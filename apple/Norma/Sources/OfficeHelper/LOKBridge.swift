@@ -111,24 +111,36 @@ enum OfficeSaveFormat: Equatable {
     /// whether that is a fallback away from this document's own real format. `saveAsSidecar`
     /// (below) is this table's only caller.
     ///
-    /// **All three OOXML formats fall back to their ODF sibling — not only xlsx/docx, the two the
-    /// vendor investigation actually reproduced a crash for** (`ooxml-export-investigation.md`'s
-    /// own verdict: SIGABRT in sal's `FullTextEncodingData` — `libsal_textenclo.dylib` is lazily
-    /// `dlopen`'d BY NAME for full charset tables, first touched by the xlsx export filter's font
-    /// code, and is simply ABSENT from this trimmed 59-dylib product-set; docx "fails less
-    /// reliably, mechanism unconfirmed"; pptx export worked in that investigation's one pass).
-    /// That mechanism is CONTENT-DEPENDENT and PATH-DEPENDENT, not merely format-dependent — one
-    /// clean pptx export proves the trace workload's own font code path was avoided ONCE, for ONE
-    /// document, not that every real pptx a user ever autosaves will avoid it too. Autosave calls
-    /// this on an UNATTENDED, REPEATING timer against whatever the user happens to be editing, for
-    /// as long as a session stays dirty — the cost of guessing wrong here is not "one failed
-    /// export," it is "the crash-protection feature crashes the helper," silently, exactly while a
-    /// document is dirty (the one moment autosave exists to protect). Given that asymmetry, this
-    /// table treats "OOXML" as one category, uniformly, rather than trusting a single investigation
-    /// run as exhaustive proof for the one format it happened to come back clean on. Documented as
-    /// a deliberate, disclosed judgment call for the task 7 review — see task-7-report.md; relaxing
-    /// pptx back to native once it has its OWN dedicated crash-investigation (not a side note in
-    /// xlsx's) is a reasonable, narrow follow-up, not a correction of this one.
+    /// **Narrowed at Task 11 (the r3 vendor re-cut) from Task 7's original "all three OOXML
+    /// formats fall back, uniformly" judgment call — this is the deliberate revisit that decision's
+    /// own header asked for.** Task 7's blanket fallback was a disclosed, evidence-light judgment
+    /// call: only xlsx had a confirmed crash mechanism at the time; docx and pptx were folded in on
+    /// the reasoning that an unattended, repeating autosave timer makes "one unnecessary ODF
+    /// conversion" a far cheaper mistake than "the crash-protection feature itself crashes the
+    /// helper, silently, while a document is dirty." Task 11's vendor re-cut
+    /// (`libsal_textenclo.dylib` added to `product-set/Frameworks/` — see
+    /// `ooxml-export-investigation.md` + `task-11-brief.md`) replaced that judgment call with direct
+    /// evidence, live-tested through the real helper
+    /// (`OfficeHelperLiveTests.testXlsxDocxPptxSaveRoundTripThroughTheRealHelperAfterTheR3VendorRecut`):
+    ///
+    /// - **`.xlsx`** — the confirmed crash is FIXED (proven: real save, real reopen, seed content
+    ///   survives). No longer falls back; autosave writes native `.xlsx` sidecars.
+    /// - **`.pptx`** — confirmed still working, unaffected by the missing-dylib mechanism (a
+    ///   different internal export code path, `oox::ppt`, never reached it) or by this fix. No
+    ///   longer folded into the OOXML-as-one-category treatment Task 7 applied out of caution for a
+    ///   format that was never actually proven broken — that caution's own justification (the crash
+    ///   risk) no longer applies now the crash mechanism is understood and gone for the one format
+    ///   that DID exhibit it. Autosave writes native `.pptx` sidecars.
+    /// - **`.docx`** — re-investigated fresh for Task 11 (the original investigation's own docx
+    ///   capture was inconclusive). STILL fails, honestly reproduced twice on independent clean
+    ///   profiles — but the missing-dylib abort is gone; the failure is now a clean, non-fatal
+    ///   `SfxBaseModel::impl_store` exception (`SVSTREAM_WRITE_ERROR` / `ERRCODE_IO_CANTWRITE`), a
+    ///   distinct, still-open Writer/OOXML-export defect unrelated to this re-cut. A native-format
+    ///   sidecar attempt for docx would therefore simply fail every single autosave fire — no
+    ///   sidecar at all, ever, for a dirty docx document, which is a strictly worse data-protection
+    ///   outcome than a working ODF fallback. `.docx` STAYS on the ODF fallback; this is not a
+    ///   parking of Task 7's caution, it is confirmation that the caution was correct for this one
+    ///   format specifically.
     ///
     /// `.odt`/`.ods`/`.odp` are excluded on different, solid ground, not by exemption: they are
     /// already ODF, so a sidecar `saveAs` for them never reaches the OOXML export filter code path
@@ -137,8 +149,8 @@ enum OfficeSaveFormat: Equatable {
         switch self {
         case .odt, .ods, .odp: return (self, false)
         case .docx: return (.odt, true)
-        case .xlsx: return (.ods, true)
-        case .pptx: return (.odp, true)
+        case .xlsx: return (self, false)
+        case .pptx: return (self, false)
         }
     }
 }
@@ -695,12 +707,16 @@ final class LOKBridge: OfficeDocumentBridge {
     /// underneath every legacy MS Office binary format (`.doc`/`.xls`/`.ppt`). Content-sniffed, not
     /// path-sniffed, because the crash this closes is ITSELF content-sniffed: LOK's own importer
     /// dispatches off the BYTES, never the extension
-    /// (`OfficeHelperLiveTests.testKnownLimitationLegacyBinaryImportDoesNotOpenInThisVendorBuild`'s
-    /// own `legacy-doc.doc`/`legacy-ppt.ppt` — a direct libc `exit()` deep inside LO's C++ import
-    /// path that bypasses Swift's `try`/`catch` entirely, taking every OTHER open document's
-    /// unsaved edits down with the one shared helper). A user's genuine `.doc` renamed `.docx` (or
-    /// any CFB file placed under a modern extension, accidentally or not) hits that identical path
-    /// today, unless intercepted here, first.
+    /// (`OfficeHelperLiveTests.testSyntheticLegacyFixturesOpenAsTextAfterR3RecutXlsStillFailsCleanly`'s
+    /// own `legacy-doc.doc`/`legacy-ppt.ppt` — PRE-Task-11, a direct libc `exit()` deep inside LO's
+    /// C++ import path that bypassed Swift's `try`/`catch` entirely, taking every OTHER open
+    /// document's unsaved edits down with the one shared helper; Task 11's vendor re-cut fixed the
+    /// underlying missing-dylib mechanism for these two synthetic fixtures specifically — see that
+    /// test's own header for what is, and is not, proven by that fix). A user's genuine `.doc`
+    /// renamed `.docx` (or any CFB file placed under a modern extension, accidentally or not) is
+    /// exactly the scenario this gate exists to intercept regardless of whether the LOK-side import
+    /// crashes or not — untrusted, mislabeled CFB content reaching `documentLoad` unguarded is the
+    /// hazard, not merely "does it crash today."
     private static let cfbMagicBytes: [UInt8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]
 
     /// Fix-round-2 N2 (security re-review) — **this used to be a positive allowlist of extensions
@@ -726,16 +742,21 @@ final class LOKBridge: OfficeDocumentBridge {
     /// FALSE, not merely unverified.** `git ls-files` returns three committed fixtures —
     /// `Tests/NormaAppTests/Fixtures/office/legacy-doc.doc`, `legacy-ppt.ppt`, `legacy-xls.xls`, each
     /// beginning with the real CFB magic bytes (`d0cf11e0a1b11ae1`, verified via `xxd`) — and
-    /// `OfficeHelperLiveTests.testKnownLimitationLegacyBinaryImportDoesNotOpenInThisVendorBuild` opens
-    /// all three through THIS exact helper. Application routing being closed is a fact about
+    /// `OfficeHelperLiveTests.testSyntheticLegacyFixturesOpenAsTextAfterR3RecutXlsStillFailsCleanly`
+    /// opens all three through THIS exact helper. Application routing being closed is a fact about
     /// `PanelEditorTab.swift`, not about this test file, which calls `spawnLiveHelper()` directly and
     /// bypasses that routing entirely — the allowlist is LOAD-BEARING TODAY, precisely, not inert:
     ///   - Drop `xls` → CFB bytes under `.xls` would hit THIS gate's own refusal instead of reaching
     ///     `documentLoad` → the test's pinned failure reason ("loadComponentFromURL returned an empty
     ///     reference") would no longer match → RED.
-    ///   - Drop `doc`/`ppt` → a clean gate refusal means the helper SURVIVES the open — but that
-    ///     test's own "helper-dies case" asserts the process DIES for exactly these two fixtures
-    ///     (`XCTAssertTrue(died, …)`) → surviving instead of dying → RED.
+    ///   - Drop `doc`/`ppt` → **updated at Task 11**: a clean gate refusal means `open()` throws
+    ///     `OfficeHelperClientError.openFailed` with the CFB-refusal reason string INSTEAD of
+    ///     returning the clean `OfficeDocumentMetadata` (`type: .text`, specific `parts`/`sizeTwips`)
+    ///     that test now asserts for these two fixtures (Task 11's vendor re-cut fixed the crash
+    ///     that used to make this bullet's OLD point — "surviving instead of dying" — the
+    ///     discriminator; the allowlist itself never changed, only what happens once content passes
+    ///     through it) → a thrown error where the test expects a typed, successful open → RED either
+    ///     way.
     ///
     /// `xlsb` was removed from this allowlist here (it was present through fix round 2): F5, same
     /// re-review. `.xlsb` (Excel Binary Workbook) is a POST-2007 OPC/ZIP package — BIFF12 binary

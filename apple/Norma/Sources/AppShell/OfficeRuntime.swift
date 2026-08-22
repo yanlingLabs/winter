@@ -3104,8 +3104,9 @@ final class OfficeRuntime: ObservableObject {
     /// **Office Stage B Task 9 — LOK's raw `getError()`/exception text, mapped to a short,
     /// house-voice sentence: sentence case, no exclamation, actionable where possible.** Every
     /// entry here is a shape this task actually OBSERVED against the real vendored LOK
-    /// (`OfficeHelperLiveTests.testKnownLimitationLegacyBinaryImportDoesNotOpenInThisVendorBuild`'s
-    /// own legacy-format matrix), never a guess at LOK's possible vocabulary — the Stage A concern
+    /// (`OfficeHelperLiveTests.testSyntheticLegacyFixturesOpenAsTextAfterR3RecutXlsStillFailsCleanly`'s
+    /// own legacy-format matrix — the `xls` leg specifically; the `doc`/`ppt` legs stopped erroring
+    /// at Task 11, see that test's own header), never a guess at LOK's possible vocabulary — the Stage A concern
     /// this closes is specifically "LOK's raw getError strings surface verbatim in openFailures
     /// banners," not every error string this file can produce (see `describe(_:)`'s own header for
     /// where the line is drawn). Matched by case-insensitive substring, not exact equality: LOK's

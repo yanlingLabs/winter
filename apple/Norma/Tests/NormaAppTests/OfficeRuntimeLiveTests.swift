@@ -424,15 +424,20 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// would multiply this test's own cold-boot cost for no added proof).
     ///
     /// **The two formats are `.ods`/`.odt`, not the brief's own `.uno:EnterString`-suggested
-    /// spreadsheet pairing — a live-test-caught, disclosed substitution
-    /// (`OfficeHelperLiveTests.testKnownLimitationOOXMLExportIsNotAvailableInThisVendorBuildWhile
-    /// ODFExportWorks` pins the reason): this vendored, from-source LibreOffice build's OOXML EXPORT
-    /// filter does not work at all — `saveAs` against ANY xlsx/docx destination crashes the whole
-    /// helper process, independent of the seatbelt, independent of any edit, independent of the
-    /// `pFormat` string tried. ODF export (`.ods`/`.odt`/`.odp`) is unaffected. This task's own job —
-    /// the save PIPELINE (wire, helper dispatch, atomic place, suppression, dirty tracking) — is
-    /// fully proven by the ODF pair; the OOXML gap is a vendored-binary completeness problem, not a
-    /// defect in anything this task built.
+    /// spreadsheet pairing — a live-test-caught, disclosed substitution.** At the time this test was
+    /// written, this vendored, from-source LibreOffice build's OOXML EXPORT filter did not work at
+    /// all — `saveAs` against ANY xlsx/docx destination crashed the whole helper process, independent
+    /// of the seatbelt, independent of any edit, independent of the `pFormat` string tried. ODF
+    /// export (`.ods`/`.odt`/`.odp`) was unaffected. This task's own job — the save PIPELINE (wire,
+    /// helper dispatch, atomic place, suppression, dirty tracking) — was fully proven by the ODF pair
+    /// regardless; the OOXML gap was a vendored-binary completeness problem, not a defect in anything
+    /// this task built. **Task 11 update**: the r3 vendor re-cut fixed the xlsx half of that gap
+    /// (added `product-set/Frameworks/libsal_textenclo.dylib` — see `ooxml-export-investigation.md`);
+    /// docx still does not save, now via a different, non-crashing mechanism (`SVSTREAM_WRITE_ERROR`)
+    /// — see `OfficeHelperLiveTests.testXlsxDocxPptxSaveRoundTripThroughTheRealHelperAfterTheR3VendorRecut`
+    /// for the current, per-format, live-proven truth. This test's own ODF choice was never about
+    /// avoiding a permanent limitation, only the crash that existed when it was written, so it is
+    /// left as `.ods`/`.odt` rather than migrated to OOXML fixtures now.
     ///
     /// **What "content matches" can actually MEAN here, and why**: Stage A/B ships no wire verb that
     /// reads cell/paragraph text back (no `getTextSelection`-equivalent exposed over
@@ -3953,18 +3958,22 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         _ = host.teardownAllOfficeRuntimesAndStopHelper()
     }
 
-    // MARK: - Office Stage B Task 7 — the OOXML-fallback decision's own empirical proof
+    // MARK: - Office Stage B Task 7/11 — the OOXML-fallback decision's own empirical proof
 
-    /// **The single most valuable proof of the ODF-fallback decision** (advisor review): opens a
-    /// REAL xlsx, dirties it, lets the (shortened) autosave timer fire against REAL LOK, and asserts
-    /// two things directly — the sidecar lands at `.ods`, never `.xlsx` (the fallback actually
-    /// applied), and the helper process is STILL ALIVE afterward. Without this test, "xlsx autosave
-    /// falls back to ODF" is a claim resting entirely on `OfficeSaveFormat.autosaveFormat`'s own
-    /// (pure, LOK-free) unit coverage — which proves the TABLE maps xlsx->ods, never that saving
-    /// actually AVOIDS the real crash the table exists to dodge. This is that proof: if the fallback
-    /// table were ever reverted to native xlsx, this test would SIGABRT the whole test process the
-    /// same way `OfficeHelperLiveTests`' own permanent xlsx-export-crash regression pin already does.
-    func testXlsxAutosaveSidecarFallsBackToODFAndTheHelperSurvives() async throws {
+    /// **Inverted at Task 11 (the r3 vendor re-cut).** Originally
+    /// `testXlsxAutosaveSidecarFallsBackToODFAndTheHelperSurvives` — proved xlsx autosave fell back
+    /// to `.ods` because native `.xlsx` export was the exact path proven to SIGABRT the helper (Task
+    /// 2/2b). Task 11's vendor re-cut fixed that crash (added `libsal_textenclo.dylib` to
+    /// `product-set/Frameworks/` — see `ooxml-export-investigation.md` + `task-11-brief.md`);
+    /// `OfficeSaveFormat.autosaveFormat` was narrowed accordingly (see that property's own header
+    /// for the full per-format evidence) so xlsx no longer falls back at all. This is the direct
+    /// successor, proving the OPPOSITE claim through the same real, dirtied, unattended-timer shape
+    /// that made the original proof valuable: the sidecar now lands NATIVELY at `.xlsx`, never
+    /// `.ods`, and the helper is still alive afterward. If `autosaveFormat` were ever reverted to
+    /// the old ODF-fallback mapping for xlsx without updating this test, the assertions below would
+    /// fail loudly (not a SIGABRT anymore — the crash this originally guarded against is gone — but
+    /// a real, silent behavior regression this test still exists to catch).
+    func testXlsxAutosaveSidecarWritesNativelyAndTheHelperSurvives() async throws {
         let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
                       "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
@@ -4020,19 +4029,20 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         let odsSidecarPath = autosaveDir.appendingPathComponent("\(docId).ods").path
         let xlsxSidecarPath = autosaveDir.appendingPathComponent("\(docId).xlsx").path
 
-        let odsSidecarAppeared = await waitUntil(timeout: 30) { FileManager.default.fileExists(atPath: odsSidecarPath) }
-        XCTAssertTrue(odsSidecarAppeared, "the xlsx document's own autosave sidecar never appeared "
-                      + "in ODS format at \(odsSidecarPath)")
-        XCTAssertFalse(FileManager.default.fileExists(atPath: xlsxSidecarPath), "must NEVER write a "
-                       + "native-xlsx sidecar — that is the exact export path proven to crash")
+        let xlsxSidecarAppeared = await waitUntil(timeout: 30) { FileManager.default.fileExists(atPath: xlsxSidecarPath) }
+        XCTAssertTrue(xlsxSidecarAppeared, "the xlsx document's own autosave sidecar never appeared "
+                      + "NATIVELY at \(xlsxSidecarPath) — the r3 vendor re-cut's fix or the narrowed "
+                      + "autosaveFormat mapping may have regressed")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: odsSidecarPath), "must NOT fall back to "
+                       + "ODF anymore — xlsx export is fixed as of the r3 vendor re-cut (Task 11); an "
+                       + "ODF sidecar here means autosaveFormat was reverted without updating this test")
         XCTAssertTrue(isProcessAlive(helperPID), "the helper must survive writing an xlsx document's "
-                      + "own autosave sidecar — a crash here means the ODF-fallback decision failed "
-                      + "at the one thing it exists to prevent")
+                      + "own autosave sidecar")
 
         // A SECOND fire, past the first — the brief's own concern is specifically an UNATTENDED,
         // REPEATING timer; one clean fire alone does not rule out a crash on the next one.
-        let beforeSecondFire = officeFileStat(atPath: odsSidecarPath)
-        let secondFireLanded = await waitUntil(timeout: 15) { officeFileStat(atPath: odsSidecarPath) != beforeSecondFire }
+        let beforeSecondFire = officeFileStat(atPath: xlsxSidecarPath)
+        let secondFireLanded = await waitUntil(timeout: 15) { officeFileStat(atPath: xlsxSidecarPath) != beforeSecondFire }
         XCTAssertTrue(secondFireLanded, "the timer never fired a second time")
         XCTAssertTrue(isProcessAlive(helperPID), "the helper must survive a SECOND xlsx autosave fire too")
 
