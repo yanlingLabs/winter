@@ -515,6 +515,41 @@ final class OfficeSheetsCommandTests: XCTestCase {
     /// `sparse-sheets.ods` was) has A1 = `<text:tab/>`-and-two-`<text:p>`-paragraph content, B1 an
     /// ordinary cell — one REAL cell boundary for A1's own embedded delimiters to be confused with,
     /// if the fix were wrong.
+    /// office-agent-tools T3 review — the "leading empties" cannot-verify, closed. Confirmed live,
+    /// not assumed: `getTextSelection` trims a LEADING empty row/column exactly the way
+    /// `testLiveARangeSpanningPastTheUsedAreaReturnsOnlyRealContent` already proved it trims a
+    /// TRAILING one. `offset-content.ods`'s only real content is at B2 (A1, A2, B1 all genuinely
+    /// empty); reading `A1:C3` — a range that fully contains that offset — returns bare
+    /// `"OFFSETVALUE"`, with NO leading empty row or column at all, not even a single leading tab.
+    ///
+    /// **This is a REAL, disclosed positional-fidelity gap, not merely characterized and accepted.**
+    /// A model asking for `A1:C3` expecting a 3x3 grid gets back a 1x1 one with no signal of WHERE
+    /// within the requested range the value actually sits. It is not fixable by padding the grid
+    /// back to the requested range's own shape: that would require knowing exactly how many leading
+    /// rows/columns were trimmed, and no LOK mechanism this task found exposes that. `getDataArea`
+    /// (`sheetsInfoOnDedicatedThread`'s own C2 mechanism) only ever answers the LAST used row/column
+    /// (`ScTable::GetCellArea`'s own `nMaxX`/`nMaxY` — read directly at the pin) — it has no
+    /// `nMinX`/`nMinY` counterpart, so there is no cheap way to recover the trimmed leading extent
+    /// from information this bridge already has. The tool's own description (`sheets.ts`) warns
+    /// callers explicitly rather than leaving this to be discovered by a silently-misaligned read.
+    func testLiveARangeWithLeadingEmptyContentIsTrimmedNotPadded() async throws {
+        try requireLiveEngine()
+        let path = try makeWritableCopy(of: "offset-content.ods")
+        let stateDir = makeScratchDirectory()
+        let host = makeLiveHost(stateDir: stateDir, dirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)])
+        await host.directory.refresh()
+
+        let sent = await send(command("office.sheets.read",
+                                       args: ["path": path, "sheet": "Sheet1", "range": "A1:C3"],
+                                       sessionId: "S1"), through: host)
+        XCTAssertTrue(sent.ok, "\(sent)")
+        let result = try XCTUnwrap(sent.result)
+        XCTAssertTrue(result.contains("OFFSETVALUE"), result)
+        XCTAssertEqual(result.components(separatedBy: "\n").count, 2, // header line + exactly one content row
+                       "leading empty rows must trim away, not manufacture blank rows: \(result)")
+        XCTAssertFalse(result.contains("\t"), "leading empty COLUMNS must trim away too — no tab-padded blank cell before the real value: \(result)")
+    }
+
     func testLiveACellWithAnEmbeddedTabAndLineBreakRoundTripsTheTabAndQuotesTheCell() async throws {
         try requireLiveEngine()
         let path = try makeWritableCopy(of: "embedded-delimiters.ods")

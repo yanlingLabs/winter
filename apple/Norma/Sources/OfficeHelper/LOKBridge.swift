@@ -1957,6 +1957,16 @@ final class LOKBridge: OfficeDocumentBridge {
     /// The wire-level RE-ambiguity this reintroduces (a cell's OWN value now containing a real tab,
     /// same as `formatSheetsRead`'s own join separator) is closed one layer up, at the point that
     /// join actually happens — see `OfficeCommandConsumer.formatSheetsRead`'s own quoting.
+    ///
+    /// **A separate, confirmed-live limitation this function inherits rather than causes: LEADING
+    /// empty rows/columns trim away exactly like trailing ones do** (`offset-content.ods`'s own
+    /// live drill — real content only at B2, `A1:C3` returns bare content with no leading blank row
+    /// or column at all). Disclosed in the tool's own description (`sheets.ts`) rather than padded
+    /// back to the requested rectangle's shape: correct padding would require knowing exactly how
+    /// many leading rows/columns were trimmed, and `getDataArea` (`sheetsInfoOnDedicatedThread`'s
+    /// own mechanism) only ever answers the LAST used row/column — `ScTable::GetCellArea` has no
+    /// `nMinX`/`nMinY` counterpart (checked directly against the pinned source) — so there is no
+    /// cheap way to recover the trimmed leading extent from information this bridge already has.
     private func parseTSVGrid(_ text: String) -> [[String]] {
         guard !text.isEmpty else { return [] }
         let trimmed = text.hasSuffix("\n") ? String(text.dropLast()) : text

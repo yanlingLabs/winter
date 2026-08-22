@@ -254,7 +254,12 @@ export function registerSheetsTool(r: ToolRegistry, deps: SheetsToolDeps): void 
       + "unrestricted-reads rule does not cover it.\n"
       + "The Mac app has to be running and showing this session, or nothing here can work — info's own "
       + "refusal tells you if that's the problem.\n"
-      + "A very large range is refused outright rather than silently truncated — ask for a smaller one.",
+      + "A very large range is refused outright rather than silently truncated — ask for a smaller one.\n"
+      + "read's grid is trimmed to the range's REAL content, not padded to the requested rectangle — "
+      + "a range whose only real content sits away from its top-left corner comes back without "
+      + "leading blank rows/columns, so a value's position in the returned grid does not necessarily "
+      + "match its real cell position. For precise positioning, request a tightly-scoped range (a "
+      + "single cell or a range you already know is fully populated) rather than relying on padding.",
     modes: ["code", "dispatch"],
     args: SheetsArgs,
     async run(a: SheetsArgs, ctx) {
