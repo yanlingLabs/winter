@@ -165,21 +165,24 @@ final class PanelCommandConsumer {
     /// it already models exactly "a one-shot timer at an absolute date, and its canceller", and one
     /// clock per subsystem is what lets a test drive a deadline without waiting for it.
     private let scheduler: BrowserRuntime.Scheduler
-    /// office-agent-tools T1 — the office half of this bridge (`OfficeCommandConsumer.swift`'s own
-    /// header). Constructed HERE, reusing the SAME `sendResult` this type already received, rather
-    /// than threaded through as a fourth `init` parameter: both consumers answer through the
-    /// identical `panel.commandResult` mechanism, and T1 has nothing else for an office command to
-    /// need from this type (no `runtime`, no `scheduler` — see that file's header for why). Keeping
-    /// construction internal is what leaves `AppDelegate`'s `PanelCommandConsumer(runtime:sendResult:)`
-    /// call site untouched by this task.
+    /// office-agent-tools T1/T3 — the office half of this bridge (`OfficeCommandConsumer.swift`'s own
+    /// header). Constructed HERE, reusing the SAME `sendResult` this type already received (T1's own
+    /// reasoning, unchanged: both consumers answer through the identical `panel.commandResult`
+    /// mechanism, and this file has nothing else `OfficeCommandConsumer` needs — no `runtime`, no
+    /// `scheduler`). **T3 correction**: T1's own comment here claimed this kept `AppDelegate`'s
+    /// `PanelCommandConsumer(runtime:sendResult:)` call site untouched "by this task" — true for T1,
+    /// no longer true once a verb needs the office runtime. T3 adds ONE more init parameter,
+    /// `officeAgentBroker`, forwarded straight through to `OfficeCommandConsumer`'s own — the single
+    /// thing `info`/`read` need that `sendResult` alone cannot supply.
     private let officeCommands: OfficeCommandConsumer
 
     init(runtime: BrowserRuntime, sendResult: @escaping ResultSender,
-         scheduler: BrowserRuntime.Scheduler = .production) {
+         scheduler: BrowserRuntime.Scheduler = .production,
+         officeAgentBroker: @escaping (_ sessionId: String) -> OfficeAgentBroker? = { _ in nil }) {
         self.runtime = runtime
         self.sendResult = sendResult
         self.scheduler = scheduler
-        self.officeCommands = OfficeCommandConsumer(sendResult: sendResult)
+        self.officeCommands = OfficeCommandConsumer(sendResult: sendResult, officeAgentBroker: officeAgentBroker)
     }
 
     // MARK: - One command's life

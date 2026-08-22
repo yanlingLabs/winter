@@ -85,6 +85,15 @@ final class OfficeCommandConsumerTests: XCTestCase {
         "office.docs.insert", "office.docs.append",
     ]
 
+    /// T3 — the 20 that are STILL T1's own refusal shell (`allOfficeVerbsAsOfT1` minus the two
+    /// `sheets` reads T3 made real). Every pre-existing test below that needs "an office verb that
+    /// still answers synchronously with the not-implemented refusal, for ANY verb" now picks from
+    /// this list rather than hand-naming `office.sheets.read`/`office.sheets.info`, which would
+    /// otherwise silently start asserting on ASYNC behaviour these tests were never built to await.
+    static let stillStubOfficeVerbs = allOfficeVerbsAsOfT1.filter {
+        $0 != "office.sheets.info" && $0 != "office.sheets.read"
+    }
+
     // MARK: - isOfficeAction
 
     func testIsOfficeActionIsAPrefixTestNotAMembershipList() {
@@ -103,10 +112,10 @@ final class OfficeCommandConsumerTests: XCTestCase {
 
     func testEveryOfficeVerbAnswersNotImplementedRatherThanSilence() {
         let consumer = makeConsumer()
-        for (index, action) in Self.allOfficeVerbsAsOfT1.enumerated() {
+        for (index, action) in Self.stillStubOfficeVerbs.enumerated() {
             consumer.handle(command(action, commandId: "pcmd_\(index)"))
         }
-        XCTAssertEqual(sent.count, Self.allOfficeVerbsAsOfT1.count, "every verb must answer exactly once")
+        XCTAssertEqual(sent.count, Self.stillStubOfficeVerbs.count, "every still-stub verb must answer exactly once")
         XCTAssertTrue(sent.allSatisfy { $0.ok == false }, "\(sent)")
         XCTAssertTrue(sent.allSatisfy { $0.imageBase64 == nil })
         XCTAssertTrue(sent.allSatisfy { ($0.result?.isEmpty ?? true) == false }, "\(sent)")
@@ -116,11 +125,11 @@ final class OfficeCommandConsumerTests: XCTestCase {
 
     func testTheRefusalNamesTheToolAndVerbSeparately() {
         let consumer = makeConsumer()
-        consumer.handle(command("office.sheets.read"))
+        consumer.handle(command("office.sheets.set"))
         XCTAssertEqual(sent.count, 1)
         XCTAssertEqual(sent.first?.ok, false)
         XCTAssertTrue(sent.first?.result?.contains("sheets") == true, "\(sent)")
-        XCTAssertTrue(sent.first?.result?.contains("read") == true, "\(sent)")
+        XCTAssertTrue(sent.first?.result?.contains("set") == true, "\(sent)")
         let lower = sent.first?.result?.lowercased() ?? ""
         XCTAssertTrue(lower.contains("not implemented") || lower.contains("not yet implement"), "\(sent)")
     }
@@ -148,7 +157,7 @@ final class OfficeCommandConsumerTests: XCTestCase {
     /// the test pins the observable behaviour rather than the implementation detail.
     func testAnOfficeCommandWithNoTabIdStillAnswers() {
         let consumer = makeConsumer()
-        consumer.handle(command("office.sheets.info", tabId: nil))
+        consumer.handle(command("office.docs.info", tabId: nil))
         XCTAssertEqual(sent.count, 1)
         XCTAssertEqual(sent.first?.ok, false)
     }
@@ -170,15 +179,21 @@ final class OfficeCommandConsumerTests: XCTestCase {
     // bounded on purpose") — the one way a "not implemented" shell could silently regress into the
     // exact silent-timeout bug its own answer path exists to avoid.
 
-    /// `args` is never read by this consumer at all (`OfficeCommandConsumer.handle`'s body only ever
-    /// touches `command.sessionId`/`command.commandId`/`command.action`) — so a huge `args.path`
-    /// cannot reach the message, structurally, not merely by discipline. This test pins the OBSERVABLE
-    /// guarantee rather than the implementation choice, so it stays meaningful if a later task adds
-    /// real per-verb behaviour here and starts reading `args` for the first time.
+    /// `args` is never read by this consumer's STUB verbs at all (`OfficeCommandConsumer.handle`'s
+    /// synchronous `default:` branch only ever touches `command.sessionId`/`command.commandId`/
+    /// `command.action`) — so a huge `args.path` cannot reach a STUB verb's message, structurally, not
+    /// merely by discipline. **T3 correction**: this test originally used `office.sheets.read` as its
+    /// example, which read as "args is never read AT ALL" — no longer true now that `sheets.read` is
+    /// real and genuinely needs `args`. Switched to `office.sheets.set` (still a stub) to keep this
+    /// test's own claim honest; the EQUIVALENT guarantee for the two REAL verbs — a huge/malicious
+    /// operand still cannot grow the ANSWER past a bound, even though it genuinely gets read — is
+    /// `testASheetsReadResultIsCappedNotAllowedToGrowUnbounded` below, a different mechanism
+    /// (`sheetsResultMaxLength`, checked on the BUILT result) proving the equivalent property for a
+    /// verb that must read `args` to do its job at all.
     func testTheRefusalNeverGrowsWithArgs() {
         let consumer = makeConsumer()
         let hugePath = String(repeating: "x", count: 100_000)
-        consumer.handle(command("office.sheets.read", args: ["path": hugePath, "sheet": "S"]))
+        consumer.handle(command("office.sheets.set", args: ["path": hugePath, "sheet": "S"]))
         XCTAssertEqual(sent.count, 1)
         XCTAssertFalse(sent.first?.result?.contains(hugePath) == true)
         XCTAssertLessThan(sent.first?.result?.count ?? Int.max, 1_000,

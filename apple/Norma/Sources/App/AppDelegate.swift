@@ -488,7 +488,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             sendResult: { [weak host] sessionId, commandId, ok, result, imageBase64 in
                 host?.sendPanelCommandResult(sessionId: sessionId, commandId: commandId, ok: ok,
                                              result: result, imageBase64: imageBase64)
-            })
+            },
+            // office-agent-tools T3 — the one door `sheets info`/`read` need onto real office
+            // behaviour: `host.officeAgentBroker`, the SAME single, lazily-minted, app-wide broker
+            // instance Task 2 built (`ShellSessionHost.officeAgentBroker`) — never a second path to
+            // `OfficeRuntime`. `[weak host]`, matching every other closure this construction site
+            // already captures `host` with.
+            officeAgentBroker: { [weak host] _ in host?.officeAgentBroker })
         panelCommands = commands
         host.onPanelCommand = { [weak commands] command in commands?.handle(command) }
         let controller = AppWindowController(
