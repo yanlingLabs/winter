@@ -4615,13 +4615,25 @@ final class ShellSessionHostTests: XCTestCase {
     /// AFTER it. `saveTempPaths` points at a REAL file with real bytes — `OfficeRuntime.placeAtomically`
     /// copies FROM it, so a nonexistent temp would fail the save (`testSaveAndAwaitOutcomeReturnsFailed
     /// WhenThePlaceCannotFindTheHelpersTempFile`'s own case, deliberately not this one).
+    ///
+    /// **dirty-close-helper-kill fix — this test now also simulates LOK's own real, separate
+    /// `.uno:ModifiedStatus=false` callback** (`runtime.handle(documentEvent: .modifiedChanged(false),
+    /// docId:)`) after the save resolves, exactly as production's real helper eventually delivers one
+    /// round trip after `saveAs` completes (`OfficeRuntime.drainUntilClean`'s own doc comment has the
+    /// full mechanism). Without it, this fake driver's save — which, faithfully, never touches `dirty`
+    /// on its own, see `OfficeDriverRecorder.save`'s own closure — would leave `path` dirty forever,
+    /// and `resolveDirtyDocumentTabClose`'s post-fix drain would run out its full timeout on every
+    /// run of this test rather than proceeding promptly. The test that actually PINS the drain's own
+    /// wait — proving close is withheld while dirty stays `true`, not merely that it eventually
+    /// happens — is the one immediately below, which deliberately does NOT deliver this event before
+    /// its first assertion.
     func testRequestCloseTabOnADirtyDocumentTabSaveChoiceThatSucceedsClosesAfterSaving() async throws {
         let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
         let (host, factory, mgmt) = await makeHostWithManagement(rows: rows)
         defer { host.deselect() }
         let office = officeFactory()
         host.makeOfficeRuntime = office.make
-        let (_, path, docId) = try await makeDirtyDocumentTab(
+        let (runtime, path, docId) = try await makeDirtyDocumentTab(
             host: host, factory: factory, sessionId: "S1", tabId: "t1", scratchPrefix: "savesucceed")
         let renderedPath = FileManager.default.temporaryDirectory
             .appendingPathComponent("rendered-\(UUID().uuidString).xlsx").path
@@ -4631,9 +4643,101 @@ final class ShellSessionHostTests: XCTestCase {
 
         host.requestCloseTab("t1")
 
+        await officeWaitUntil(timeout: 2) { office.recorder.saveCalls.contains(docId) }
+        runtime.handle(documentEvent: .modifiedChanged(false), docId: docId) // LOK's own real, separate callback
+
         await feedWaitUntil { mgmt.methods.contains("panel.closeTab") }
         XCTAssertEqual(try? String(contentsOfFile: path, encoding: .utf8), "rendered",
                        "a successful save must land on the real path before the tab closes")
+        try? FileManager.default.removeItem(atPath: path)
+    }
+
+    /// **The wiring pin — this is the test that would have caught the shipped bug.** The task this
+    /// fix implements names it exactly: "closing a dirty office document tab and choosing Save kills
+    /// the shared LibreOffice helper process roughly 4 times out of 5"
+    /// (`.superpowers/sdd/2026-08-22-office-editable/dirty-close-helper-kill-fix-report.md`,
+    /// `task-2-report.md` §6/§7 concern 1 for the original diagnosis).
+    ///
+    /// Real LOK behaviour, restated at `OfficeRuntime.drainUntilClean`'s own doc comment: an ORDINARY
+    /// successful save does NOT clear `dirty` — LOK's own SEPARATE `.uno:ModifiedStatus=false`
+    /// callback does, later, as its own event. `OfficeDriverRecorder.save` mirrors that split
+    /// faithfully (it records the call and resolves `saveAndAwaitOutcome`, and touches nothing about
+    /// `dirty`) — so DELIBERATELY not delivering the clear event here, unlike the test just above,
+    /// is what makes this test able to observe the gap pre-fix would have raced through.
+    ///
+    /// Pre-fix, `resolveDirtyDocumentTabClose` called `closePanelTab` the INSTANT `saveAndAwaitOutcome`
+    /// resolved `.saved`, never once reading `dirty` again — so this asserts the tab is STILL OPEN a
+    /// beat after the save resolves (this is the RED case: reverting the drain call in
+    /// `ShellSessionHost.resolveDirtyDocumentTabClose` back to a bare `self?.closePanelTab(tabId)`
+    /// makes the first `XCTAssertFalse` below fail, immediately, deterministically — no live helper,
+    /// no flake, no repetition needed to see it, unlike the real mechanism this fake driver stands in
+    /// for) — and only closes once LOK's own callback is simulated.
+    func testRequestCloseTabOnADirtyDocumentTabSaveChoiceThatSucceedsWaitsForLOKsOwnDirtyClearBeforeClosing() async throws {
+        let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+        let (host, factory, mgmt) = await makeHostWithManagement(rows: rows)
+        defer { host.deselect() }
+        let office = officeFactory()
+        host.makeOfficeRuntime = office.make
+        let (runtime, path, docId) = try await makeDirtyDocumentTab(
+            host: host, factory: factory, sessionId: "S1", tabId: "t1", scratchPrefix: "savedrain")
+        let renderedPath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rendered-\(UUID().uuidString).xlsx").path
+        try Data("rendered".utf8).write(to: URL(fileURLWithPath: renderedPath))
+        office.recorder.saveTempPaths[docId] = renderedPath
+        host.presentDirtyCloseSheet = { _, _, respond in respond(.save) }
+
+        host.requestCloseTab("t1")
+
+        await officeWaitUntil(timeout: 2) { office.recorder.saveCalls.contains(docId) }
+        // Give a premature close every chance to race ahead if the drain were ever dropped — the
+        // exact beat pre-fix code did not wait through.
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertFalse(mgmt.methods.contains("panel.closeTab"), "a successful save must not close the "
+                       + "tab while LOK still reports it dirty — this is the exact sequence that "
+                       + "killed the shared helper roughly 4 times out of 5")
+        XCTAssertNotNil(runtime.stateSnapshot.documents[path], "the document must still be open, mid-drain")
+        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.dirty, true, "setup/sanity: still dirty "
+                       + "— this fake driver's save never clears it on its own")
+
+        runtime.handle(documentEvent: .modifiedChanged(false), docId: docId) // LOK's own real, separate callback
+
+        await feedWaitUntil { mgmt.methods.contains("panel.closeTab") }
+        XCTAssertNil(runtime.stateSnapshot.documents[path], "once LOK's own callback lands, the drain "
+                     + "resolves and the close proceeds")
+        try? FileManager.default.removeItem(atPath: path)
+    }
+
+    /// **Honesty obligation (dirty-close-helper-kill fix, task item 3): a drain that never clears
+    /// must still proceed, not hang forever or turn a landed save into a reported failure.** Calls
+    /// `OfficeRuntime.drainUntilClean` directly (bypassing the tab-close gate, whose own default
+    /// 15s bound would make this test slow for no added proof) with a short `timeout` and dirty
+    /// pinned permanently `true` — nothing in this test ever delivers a clearing event, mirroring a
+    /// helper that is genuinely still unstable, or a `.failed` save's `saveFailedPendingSave` (whole-
+    /// branch review C1) with no LOK callback ever coming. Asserts the call RETURNS (does not hang)
+    /// within a small multiple of `timeout`, and that its own `@discardableResult` answers `false` —
+    /// the caller-facing signal that this was a timeout, not a genuine clear, which
+    /// `resolveDirtyDocumentTabClose` deliberately still ignores (closes anyway) per the same
+    /// function's own doc comment: the write already landed, so a stalled drain must not become a
+    /// reported save failure.
+    func testDrainUntilCleanTimesOutAndProceedsRatherThanHangingWhenDirtyNeverClears() async throws {
+        let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+        let (host, factory, _) = await makeHostWithManagement(rows: rows)
+        defer { host.deselect() }
+        let office = officeFactory()
+        host.makeOfficeRuntime = office.make
+        let (runtime, path, _) = try await makeDirtyDocumentTab(
+            host: host, factory: factory, sessionId: "S1", tabId: "t1", scratchPrefix: "draintimeout")
+
+        let start = Date()
+        let drained = await runtime.drainUntilClean(path, timeout: 0.2)
+        let elapsed = Date().timeIntervalSince(start)
+
+        XCTAssertFalse(drained, "a drain that never sees dirty clear must report it timed out, not "
+                       + "that it succeeded")
+        XCTAssertGreaterThanOrEqual(elapsed, 0.2, "must actually wait out the bound, not return early")
+        XCTAssertLessThan(elapsed, 5.0, "must not hang well past its own bound")
+        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.dirty, true, "unchanged by the timeout — "
+                       + "this function only ever OBSERVES dirty, never clears it itself")
         try? FileManager.default.removeItem(atPath: path)
     }
 

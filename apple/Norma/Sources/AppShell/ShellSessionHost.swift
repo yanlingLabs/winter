@@ -1417,6 +1417,23 @@ final class ShellSessionHost: ObservableObject {
     /// header states for every other door on that object — a session that departed WHILE the sheet was
     /// up retains its dirty runtime (this task's own `releaseOfficeRuntimeIfClean` fix), so the runtime
     /// this resolves is the SAME one the sheet was originally shown for, not a fresh mint.
+    ///
+    /// **The `.saved` leg drains before it closes — this is the fix for a live, shipped bug, not
+    /// belt-and-braces.** Pre-fix, this method called `closePanelTab(tabId)` the INSTANT
+    /// `saveAndAwaitOutcome` resolved `.saved`, without ever checking whether LOK's own bookkeeping
+    /// had caught up — a diagnostic matrix measured that sequence killing the shared, app-wide office
+    /// helper roughly 4 times out of 5 (full account: `OfficeRuntime.drainUntilClean`'s own doc
+    /// comment, and `.superpowers/sdd/2026-08-22-office-agent-tools/task-2-report.md` §6/§7 concern
+    /// 1). `drainUntilClean` is a no-op the instant `path` is not dirty — which covers BOTH outcomes
+    /// `dirtyCloseActionAfterSave` maps to `.close` here: a genuine `.saved` that already caught up by
+    /// the time this runs, and `.noModel` (nothing was ever open to be dirty about). It also covers
+    /// the silent, non-sheet close path one level up in `requestCloseTab` — a CLEAN tab's `×` never
+    /// reaches this method at all, so ⌘S-then-× (save, wait for the dot to clear by hand, then close
+    /// on an already-clean tab) was never at risk and needs no separate treatment; this fix is only
+    /// for the sheet's own Save button, which is the one door that used to save and close in the same
+    /// breath. `.failed` cannot reach this arm at all — see the `case .keepOpen, .awaitSave` comment
+    /// below and `drainUntilClean`'s own doc comment for why that is safe even in a hypothetical
+    /// future where it did.
     private func resolveDirtyDocumentTabClose(tabId: String, choice: DirtyCloseChoice) {
         switch dirtyCloseAction(dirty: true, choice: choice) {
         case .close:
@@ -1430,11 +1447,18 @@ final class ShellSessionHost: ObservableObject {
                 let outcome = await runtime.saveAndAwaitOutcome(path)
                 switch dirtyCloseActionAfterSave(outcome) {
                 case .close:
+                    await runtime.drainUntilClean(path)
                     self?.closePanelTab(tabId)
                 case .keepOpen, .awaitSave:
                     // `.failed`: the reducer's own `.saveFailed` arm already wrote the sentence into
                     // `documentBanners[path]` (`OfficeRuntimeReducer`'s own doc) — the tab simply stays,
-                    // mirroring the editor's identical posture toward T9's banner.
+                    // mirroring the editor's identical posture toward T9's banner. Pinned, not merely
+                    // true by omission: `dirtyCloseActionAfterSave(.failed) == .keepOpen`
+                    // (`EditorTabTests`' own exhaustive truth table) means a failed save can NEVER
+                    // reach the `.close` arm above through this door — so the one save outcome the
+                    // diagnostic matrix never exercised (task-2-report.md §7 concern 8: "the matrix
+                    // only exercised the success path") is also the one outcome that structurally
+                    // never asks anything to drain or close here at all.
                     break
                 }
             }

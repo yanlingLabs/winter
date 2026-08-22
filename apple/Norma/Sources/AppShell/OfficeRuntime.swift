@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import Combine
 import CryptoKit
 #if canImport(Darwin)
 import Darwin
@@ -1697,6 +1698,90 @@ final class OfficeRuntime: ObservableObject {
         let remaining = waiters.filter { $0.docId != docId }
         if remaining.isEmpty { saveWaiters.removeValue(forKey: path) } else { saveWaiters[path] = remaining }
         for waiter in matching { waiter.continuation.resume(returning: outcome) }
+    }
+
+    // MARK: - The dirty-close sheet's missing half: draining LOK's own post-save bookkeeping
+
+    /// **Added after a live diagnostic matrix measured its absence killing the shared, app-wide
+    /// office helper roughly 4 times out of 5 on an ordinary "dirty tab, choose Save, close" —
+    /// full account: `.superpowers/sdd/2026-08-22-office-agent-tools/task-2-report.md` §6's evidence
+    /// table and §7 concern 1; the call site this exists for is `ShellSessionHost
+    /// .resolveDirtyDocumentTabClose`, whose own doc comment cross-references this function.**
+    ///
+    /// **Why closing right after `.saved` is not safe.** `saveAndAwaitOutcome`'s `.saved` resolves the
+    /// instant `placeAtomically` lands the bytes on disk — but an ORDINARY successful save leaves
+    /// `dirty` untouched (`DocumentEntry.dirty`'s own header: only the two app-held exceptions,
+    /// `restoredPendingSave`/`saveFailedPendingSave`, are cleared synchronously inside
+    /// `.saveSucceeded`). `dirty` stays `true` until LOK's own SEPARATE, later
+    /// `.uno:ModifiedStatus=false` callback arrives, one more round trip through the helper. Closing
+    /// the document in that gap is what the diagnostic matrix caught happening: the helper's own last
+    /// line before death was LibreOffice's `Unspecified Application Error`, consistent with this
+    /// codebase's own already-documented case of LOK calling libc `exit()` from inside its own C++
+    /// code (`LOKBridge.openOnDedicatedThread`'s CFB-refusal comment — a different trigger, the same
+    /// mechanism class: an internal LOK exit that bypasses Swift's `try`/`catch` entirely and takes
+    /// every OTHER open document down with it, since `OfficeHelperRequestQueue` is one FIFO shared by
+    /// every session's documents, not a per-document resource).
+    ///
+    /// **The fix: wait for `dirty` to actually clear (or the document to vanish) before the caller is
+    /// allowed to close.** Returns immediately, `true`, if `path` is not currently dirty at all — the
+    /// ordinary case for every OTHER caller of `requestCloseTab` (a clean tab, or one already past
+    /// this drain) costs one dictionary read, not a subscription. Otherwise subscribes to `$state` and
+    /// resolves the instant `documents[path]?.dirty` is anything other than `true` — deliberately
+    /// `!= true`, not `== false`: a document that DISAPPEARED mid-drain (a session tearing down
+    /// concurrently) has just as little left to wait for as one that genuinely went clean, and waiting
+    /// out the full timeout over a runtime that already moved on would only make this function itself
+    /// the reason a departing session hangs.
+    ///
+    /// **Bounded, and honest about the bound rather than silent.** `timeout` defaults to 15s (this
+    /// file's own established live-wait convention — `OfficeAgentBroker.drainDirty`, the office-agent
+    /// branch's independently-shaped answer to the identical problem in a different file, uses the
+    /// same figure, arrived at separately rather than shared). On timeout this returns `false` and
+    /// logs — it does NOT throw, and a caller must NOT turn that into a reported save failure: the
+    /// write already genuinely landed (`saveAndAwaitOutcome` confirmed the bytes are on disk before
+    /// this ever runs), and turning a landed write into a reported failure because the CLEANUP took
+    /// too long would be a worse lie than the one this function exists to prevent. A helper still
+    /// unstable this long after a successful save is a real, undiagnosed condition this absorbs
+    /// rather than solves (named, not hidden, by the log line and by this comment).
+    ///
+    /// **`.failed` saves never reach this, and do not need a special case here to stay safe.**
+    /// `dirtyCloseActionAfterSave(.failed) == .keepOpen` (pinned by `EditorTabTests`' own exhaustive
+    /// truth table, shared verbatim by both tab kinds) means `resolveDirtyDocumentTabClose` structurally
+    /// never calls this after a failed save — but if some future caller ever did, the answer would
+    /// still be safe, only slow: `saveFailedPendingSave` pins `dirty` `true` with no LOK callback ever
+    /// coming to clear it (that field's own header), so this would simply run out the clock and return
+    /// `false`, exactly like the disappeared-document case's timeout path — never hangs forever.
+    ///
+    /// Mirrors `OfficeAgentBroker.drainDirty`'s own `resolved`-flag/explicit-cancel shape (no `await`
+    /// between checking `resolved` and setting it in either the sink or the timeout task, so only one
+    /// of the two can ever resume the continuation) — simpler here than that function's version
+    /// because this already IS the `OfficeRuntime` instance: no `Host` indirection is needed to reach
+    /// `$state`.
+    @discardableResult
+    func drainUntilClean(_ path: String, timeout: TimeInterval = 15) async -> Bool {
+        guard state.documents[path]?.dirty == true else { return true }
+        let sessionId = self.sessionId
+        return await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            var resolved = false
+            var cancellable: AnyCancellable?
+            let timeoutTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: UInt64(max(timeout, 0) * 1_000_000_000))
+                guard !resolved else { return }
+                resolved = true
+                cancellable?.cancel()
+                NSLog("[OfficeRuntime] \(sessionId): drainUntilClean(\(path)) timed out after "
+                      + "\(timeout)s — the save already landed; proceeding to close anyway rather "
+                      + "than report a landed write as a failure")
+                continuation.resume(returning: false)
+            }
+            cancellable = $state.sink { state in
+                guard !resolved else { return }
+                guard state.documents[path]?.dirty != true else { return }
+                resolved = true
+                timeoutTask.cancel()
+                cancellable?.cancel()
+                continuation.resume(returning: true)
+            }
+        }
     }
 
     /// Office Stage B Task 2b — the conflict banner's "Reload from disk": discard my edits, re-stage
