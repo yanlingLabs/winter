@@ -905,6 +905,46 @@ final class LOKBridge: OfficeDocumentBridge {
             throw LoadError.documentLoadFailed(reason)
         }
 
+        // office-agent-tools T3 review (C1) — the permanent ABI tripwire. `nSize` is the ENGINE's
+        // own report of how many bytes of `LibreOfficeKitDocumentClass` it actually populated
+        // (`LIBREOFFICEKIT_DOCUMENT_HAS`'s own `offsetof(...) < nSize` feature-detection macro
+        // relies on this same field for the identical purpose). Comparing it against what THIS
+        // BUILD's Swift compilation believes the struct's size to be, from the vendored header
+        // alone, is a single cheap integer check that would have caught the real bug this task's
+        // own investigation found: three phantom members (`sendDialogEvent`,
+        // `setAllowChangeComments`, `setAllowManageRedlines`) the vendored header declared that
+        // this compiled engine's struct does not actually have, silently shifting every
+        // subsequent field's computed offset — proven root cause of `getDataArea` (before this
+        // fix) actually invoking `doc_getEditMode`, discovered by dladdr-resolving the raw
+        // function pointer at that field's position on a real open document, not by inference.
+        //
+        // Verified empirically, exhaustively, not just at this boot-time size check: after
+        // removing all three phantoms, EVERY ONE of the struct's 78 remaining members — read
+        // individually via `pClass->pointee.<name>` on a real open document and resolved through
+        // `dladdr` back to a symbol — names exactly the function the engine actually put there,
+        // with zero exceptions (the investigation's own full sweep; not repeated here as
+        // production code, since this one size check already re-derives the same fact on every
+        // boot going forward).
+        //
+        // **Deliberately not mirrored for `LibreOfficeKitClass` (the office-level boot struct,
+        // `self.kit` above)** — per this review's own explicit warning, a size-only check there
+        // would falsely pass even if that struct drifted the same way, so it would be a check
+        // that looks like coverage without providing it; a real tripwire for that struct would
+        // need the same per-member dladdr sweep this investigation did here, not attempted as
+        // part of this task's scope (nothing in this codebase currently calls far enough into
+        // `LibreOfficeKitClass` for that struct's own tail to matter the way `getDataArea` did
+        // here).
+        //
+        // A `precondition` (fires in Release too, not just Debug) because a real mismatch means
+        // this bridge is either about to call the wrong function outright or pass arguments a
+        // real function never declared — continuing past that is unsafe, not merely incorrect.
+        precondition(
+            rawDoc.pointee.pClass.pointee.nSize == MemoryLayout<LibreOfficeKitDocumentClass>.size,
+            "LibreOfficeKit ABI mismatch: engine reports nSize=\(rawDoc.pointee.pClass.pointee.nSize) but "
+                + "this build's LibreOfficeKit.h describes a \(MemoryLayout<LibreOfficeKitDocumentClass>.size)-byte "
+                + "struct — the vendored header no longer matches the compiled engine and every LOK call in this "
+                + "file needs re-verifying against the real ABI before this assertion is loosened.")
+
         // Register BEFORE initializeForRendering so any invalidation LOK fires synchronously
         // during that call is captured, not missed.
         let context = DocumentCallbackContext(bridge: self, docId: docId)

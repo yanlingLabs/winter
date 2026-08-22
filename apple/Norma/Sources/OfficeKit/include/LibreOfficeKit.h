@@ -458,11 +458,16 @@ struct _LibreOfficeKitDocumentClass
                                int nBefore,
                                int nAfter);
 
-    /// @see lok::Document::sendDialogEvent
-    void (*sendDialogEvent) (LibreOfficeKitDocument* pThis,
-                            unsigned long long int nLOKWindowId,
-                            const char* pArguments);
-
+    // office-agent-tools T3 review (C1) — `sendDialogEvent` REMOVED. This build's actual compiled
+    // engine (`libmergedlo.dylib`/`libsclo.dylib`) has no such member: dladdr-resolving the RAW
+    // function pointer this bridge read through this slot's old declared position, on a real open
+    // document, returned `doc_renderFontOrientation` — the NEXT function this header declares —
+    // not any `doc_sendDialogEvent` symbol (which does not exist anywhere in this dylib). Declaring
+    // a phantom member here shifted every subsequent field's computed offset one pointer-width past
+    // where the real engine actually put it, for as long as this header has existed uncorrected
+    // (Stage A, `807a8b78`) — see `LOKBridge.swift`'s `nSize` tripwire, right after `documentLoad`
+    // in `openOnDedicatedThread`, for the boot-time assertion that now catches this class of drift
+    // instead of a silent, wrong-function call.
     /// @see lok::Document::renderFontOrientation().
     unsigned char* (*renderFontOrientation) (LibreOfficeKitDocument* pThis,
                        const char* pFontName,
@@ -539,8 +544,10 @@ struct _LibreOfficeKitDocumentClass
     /// @see lok::Document::setViewReadOnly().
     void (*setViewReadOnly) (LibreOfficeKitDocument* pThis, int nId, const bool readOnly);
 
-    /// @see lok::Document::setAllowChangeComments().
-    void (*setAllowChangeComments) (LibreOfficeKitDocument* pThis, int nId, const bool allow);
+    // office-agent-tools T3 review (C1) — `setAllowChangeComments` REMOVED, same evidence and
+    // mechanism as `sendDialogEvent`'s removal above: dladdr on the raw pointer this slot's old
+    // position read resolved to `doc_getPresentationInfo` (the NEXT declared field), and no
+    // `doc_setAllowChangeComments` symbol exists anywhere in this dylib's resolved trace.
 
     /// @see lok::Document::getPresentationInfo
     char* (*getPresentationInfo) (LibreOfficeKitDocument* pThis);
@@ -565,8 +572,20 @@ struct _LibreOfficeKitDocumentClass
     /// @see lok::Document::setColorPreviewState().
     void (*setColorPreviewState) (LibreOfficeKitDocument* pThis, int nId, bool nEnabled);
 
-    /// @see lok::Document::setAllowManageRedlines().
-    void (*setAllowManageRedlines)(LibreOfficeKitDocument* pThis, int nId, bool allow);
+    // office-agent-tools T3 review (C1) — `setAllowManageRedlines` REMOVED, same evidence and
+    // mechanism as the two removals above: this was the LAST declared member, and dladdr on the raw
+    // pointer its old position read resolved to nil (past the real struct's populated region,
+    // `nSize` bytes from the start) — no `doc_setAllowManageRedlines` symbol exists in this dylib.
+    //
+    // **Verified end to end, not just at this one edit.** After all three removals
+    // (`sendDialogEvent`, `setAllowChangeComments`, this one), every one of this struct's 78
+    // remaining members — read individually, live, via `pClass->pointee.<name>` on a real open
+    // document, and resolved through `dladdr` back to a symbol name — names EXACTLY the function the
+    // compiled engine actually put there: `doc_<sameName>`, with zero exceptions and zero omissions.
+    // `MemoryLayout<LibreOfficeKitDocumentClass>.size` (648 bytes with one phantom still present,
+    // 656 with all three) now equals the engine's own self-reported `pClass->nSize` (632 bytes)
+    // exactly — the tripwire right after `documentLoad` in `LOKBridge.openOnDedicatedThread` asserts
+    // this on every document open, not just this one investigation.
 
 #endif // defined LOK_USE_UNSTABLE_API || defined LIBO_INTERNAL_ONLY
 };
