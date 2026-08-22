@@ -165,12 +165,21 @@ final class PanelCommandConsumer {
     /// it already models exactly "a one-shot timer at an absolute date, and its canceller", and one
     /// clock per subsystem is what lets a test drive a deadline without waiting for it.
     private let scheduler: BrowserRuntime.Scheduler
+    /// office-agent-tools T1 — the office half of this bridge (`OfficeCommandConsumer.swift`'s own
+    /// header). Constructed HERE, reusing the SAME `sendResult` this type already received, rather
+    /// than threaded through as a fourth `init` parameter: both consumers answer through the
+    /// identical `panel.commandResult` mechanism, and T1 has nothing else for an office command to
+    /// need from this type (no `runtime`, no `scheduler` — see that file's header for why). Keeping
+    /// construction internal is what leaves `AppDelegate`'s `PanelCommandConsumer(runtime:sendResult:)`
+    /// call site untouched by this task.
+    private let officeCommands: OfficeCommandConsumer
 
     init(runtime: BrowserRuntime, sendResult: @escaping ResultSender,
          scheduler: BrowserRuntime.Scheduler = .production) {
         self.runtime = runtime
         self.sendResult = sendResult
         self.scheduler = scheduler
+        self.officeCommands = OfficeCommandConsumer(sendResult: sendResult)
     }
 
     // MARK: - One command's life
@@ -239,6 +248,20 @@ final class PanelCommandConsumer {
             NSLog("[PanelCommandConsumer] quiesced — dropping \(command.action) "
                   + "(\(Self.brief(command.commandId))); the daemon will time it out")
             return
+        }
+
+        // office-agent-tools T1 — route OFFICE verbs to the office consumer, AFTER the quiescent
+        // guard above rather than before it. `isQuiescent` reads as CEF-specific at a glance (it is
+        // `BrowserRuntime`'s own flag), but its MEANING is not: it is the app's terminal beat, and its
+        // own comment gives two reasons that are subsystem-agnostic — a refusal now and a timeout
+        // describe the SAME fact when the app stops existing next tick, and the beat must stay empty
+        // of *socket writes*, which an office refusal is one of. One teardown discipline for every
+        // verb this file routes, browser or office, rather than a second one office would otherwise
+        // need to invent for itself. (What "never a throw, never silence" governs is this file's
+        // handling of a verb IN OPERATION — the browser verbs below accept silence in the quit beat
+        // by the same design, for the same reason.)
+        guard !OfficeCommandConsumer.isOfficeAction(command.action) else {
+            return officeCommands.handle(command)
         }
 
         // **WHO OWNS "does this tabId belong to this sessionId?" — the daemon's browser tool, not

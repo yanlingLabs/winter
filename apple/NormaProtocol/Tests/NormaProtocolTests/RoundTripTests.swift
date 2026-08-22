@@ -4,7 +4,7 @@ import XCTest
 final class RoundTripTests: XCTestCase {
     func fixtureURLs() throws -> [URL] {
         let urls = Bundle.module.urls(forResourcesWithExtension: "json", subdirectory: "Fixtures") ?? []
-        XCTAssertEqual(urls.count, 68, "expected 68 fixtures — regenerate via pnpm protocol:generate")
+        XCTAssertEqual(urls.count, 69, "expected 69 fixtures — regenerate via pnpm protocol:generate")
         return urls
     }
 
@@ -248,6 +248,40 @@ final class RoundTripTests: XCTestCase {
         }
         XCTAssertEqual(v.action, "drag")
         XCTAssertEqual(v.args?["from"], .string("#a"))
+    }
+
+    /// office-agent-tools T1 — the first OFFICE verb on the wire, decoded through the exact same
+    /// `PanelCommand` type the browser verbs above use. This is the evidence for T1's no-kit-tag
+    /// claim, made concrete rather than argued from the type declaration alone: a namespaced action
+    /// string (`office.sheets.read`) this build's Swift source has never spelled out ANYWHERE decodes
+    /// with no `NormaProtocol` change, for the identical reason `testUnknownPanelCommandVerbStillDecodes`
+    /// above already proves for `"drag"` — `PanelCommand.action` stayed a plain `String` through B2's
+    /// own 1-to-9 verb growth (its own doc comment: "this type deliberately did not have to change for
+    /// it"), and T1 spends exactly that design margin rather than extending it.
+    ///
+    /// The second fact this fixture is the ONLY one that pins: `tabId` absent. Every browser
+    /// `panel_command` fixture carries one; an office command addresses a document by `path` (in
+    /// `args`), not an existing panel tab (design doc §3) — so this is also live proof that
+    /// `PanelCommand.tabId` staying optional (unchanged by this task) was the right call, not merely
+    /// a convenient one.
+    func testOfficeVerbDecodesWithNoProtocolChange() throws {
+        guard let url = Bundle.module.url(forResource: "panel_command_office", withExtension: "json", subdirectory: "Fixtures") else {
+            return XCTFail("missing panel_command_office.json fixture")
+        }
+        guard case .panelCommand(let v) = try JSONDecoder().decode(SessionEvent.self, from: try Data(contentsOf: url)) else {
+            return XCTFail("an office verb must decode through the same PanelCommand type as a browser verb")
+        }
+        XCTAssertEqual(v.action, "office.sheets.read")
+        XCTAssertNil(v.tabId, "an office command addresses a document by path, not an existing tab")
+        XCTAssertEqual(v.args?["path"], .string("/tmp/fixture.ods"))
+        XCTAssertEqual(v.args?["sheet"], .string("Sheet1"))
+        XCTAssertEqual(v.args?["range"], .string("A1:B2"))
+        XCTAssertEqual(v.deadlineMs, 35000)
+
+        let reencoded = try JSONEncoder().encode(SessionEvent.panelCommand(v))
+        guard case .panelCommand(let redecoded) = try JSONDecoder().decode(SessionEvent.self, from: reencoded) else { return XCTFail() }
+        XCTAssertEqual(v, redecoded)
+        XCTAssertEqual(redecoded.args?.count, 3, "args must survive a re-encode, not just a decode")
     }
 
     /// diff-tabs T4: `tool_result.fileDiff` is additive/optional — mirrors

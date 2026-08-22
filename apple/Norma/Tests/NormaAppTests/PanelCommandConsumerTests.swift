@@ -150,6 +150,44 @@ final class PanelCommandConsumerTests: XCTestCase {
         XCTAssertEqual(cef.log, [])
     }
 
+    /// office-agent-tools T1 — **the routing proof.** `OfficeCommandConsumerTests` exercises
+    /// `OfficeCommandConsumer` directly; this is the one test in THIS file that proves
+    /// `PanelCommandConsumer.handle` actually reaches it for an office action, rather than falling
+    /// into the `default:` branch just above (which would answer "does not know the browser verb
+    /// `office.sheets.read`" — a true-sounding but WRONG message, since this build does know the
+    /// verb by name, it simply hasn't implemented it yet). The two messages are asserted to differ so
+    /// a future edit that accidentally deletes the routing guard reds here even if it still produces
+    /// *some* refusal.
+    ///
+    /// Also proves the thing `OfficeCommandConsumerTests` cannot: that CEF is never touched and no
+    /// deadline timer is armed for an office verb, because routing happens before this file's own
+    /// `Call`/`arm` machinery ever sees the command.
+    func testOfficeActionsRouteToTheOfficeConsumerRatherThanTheUnknownVerbBranch() {
+        let world = makeWorld()
+        world.consumer.handle(command("office.sheets.read"))
+        XCTAssertEqual(sent.count, 1)
+        XCTAssertEqual(sent.first?.ok, false)
+        let result = sent.first?.result ?? ""
+        XCTAssertFalse(result.contains("does not know the browser verb"), "\(sent)")
+        XCTAssertTrue(result.contains("sheets"), "\(sent)")
+        XCTAssertTrue(result.contains("read"), "\(sent)")
+        XCTAssertEqual(cef.log, [], "an office verb must never reach CEF")
+        XCTAssertEqual(clock.liveTimers.count, 0, "an office verb arms no browser-side deadline")
+    }
+
+    /// The quiescent guard is checked BEFORE routing (this file's `handle`), so an office command
+    /// arriving during the app's terminal beat is silent, exactly like a browser command — see
+    /// `PanelCommandConsumer.swift`'s routing comment for why office does not get its own carve-out
+    /// here. `testCommandsArrivingDuringTheQuitBeatDoNothingAtAll` below pins this for browser verbs;
+    /// this is the identical pin for an office one, since the two share one guard and this is the
+    /// only file positioned to prove they share it.
+    func testOfficeCommandsArrivingDuringTheQuitBeatAreSilentTooSameAsBrowserOnes() {
+        let world = makeWorld()
+        world.runtime.quiesce()
+        world.consumer.handle(command("office.sheets.read"))
+        XCTAssertEqual(sent.count, 0, "a quiesced app must send nothing, office or browser")
+    }
+
     // MARK: - The fifth door
 
     /// **THE FIFTH DOOR.** `panel_command.url` is capped on the wire but deliberately not

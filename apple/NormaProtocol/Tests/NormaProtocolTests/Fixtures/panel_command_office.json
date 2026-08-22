@@ -1,0 +1,14 @@
+{
+  "seq": 7,
+  "sessionId": "s_fixture",
+  "ts": 1781270000000,
+  "type": "panel_command",
+  "commandId": "cmd_4",
+  "action": "office.sheets.read",
+  "args": {
+    "path": "/tmp/fixture.ods",
+    "sheet": "Sheet1",
+    "range": "A1:B2"
+  },
+  "deadlineMs": 35000
+}
