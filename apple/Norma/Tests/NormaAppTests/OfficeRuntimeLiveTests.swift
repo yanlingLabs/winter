@@ -2304,10 +2304,14 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// isolate the drain as the one variable — open, real typed edit, `saveAndAwaitOutcome`, drain,
     /// close, repeated — reproduced here as a permanent regression tripwire rather than the temporary
     /// diagnostic methods that report's own Appendix says were "deleted before the final commit."
-    /// `ShellSessionHostTests.testRequestCloseTabOnADirtyDocumentTabSaveChoiceThatSucceedsWaitsForLOKs
-    /// OwnDirtyClearBeforeClosing` is this fix's OTHER half — the fast, always-run wiring pin that
-    /// catches a regression at the call site alone; this test instead proves the underlying MECHANISM
-    /// truly holds against real LOK, which a fake-driver test cannot.
+    /// `ShellSessionHostTests.testRequestCloseTabOnADirtyDocumentTabSaveChoiceThatSucceedsWaitsForThe
+    /// DrainRoundTripBeforeClosing` (plus its own
+    /// `...SaveRetryThatSucceedsAfterAnEarlierFailureStillWaitsForTheDrain` sibling, added at the
+    /// fix-round review that found the drain's first `dirty`-gated version unsound — see
+    /// `OfficeRuntime.drainUntilClean`'s own doc comment) is this fix's OTHER half — the fast,
+    /// always-run wiring pin that catches a regression at the call site alone, against a fake driver
+    /// whose `clipboardCopy` a test can suspend on demand; this test instead proves the underlying
+    /// MECHANISM truly holds against real LOK's own `clipboardCopy`, which a fake driver cannot.
     ///
     /// **Looped 5 times on ONE runtime/helper, not 5 independent helpers** — the bug is specifically
     /// that closing ONE document kills the process every OTHER open document also depends on

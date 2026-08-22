@@ -1420,20 +1420,20 @@ final class ShellSessionHost: ObservableObject {
     ///
     /// **The `.saved` leg drains before it closes — this is the fix for a live, shipped bug, not
     /// belt-and-braces.** Pre-fix, this method called `closePanelTab(tabId)` the INSTANT
-    /// `saveAndAwaitOutcome` resolved `.saved`, without ever checking whether LOK's own bookkeeping
-    /// had caught up — a diagnostic matrix measured that sequence killing the shared, app-wide office
-    /// helper roughly 4 times out of 5 (full account: `OfficeRuntime.drainUntilClean`'s own doc
-    /// comment, and `.superpowers/sdd/2026-08-22-office-agent-tools/task-2-report.md` §6/§7 concern
-    /// 1). `drainUntilClean` is a no-op the instant `path` is not dirty — which covers BOTH outcomes
-    /// `dirtyCloseActionAfterSave` maps to `.close` here: a genuine `.saved` that already caught up by
-    /// the time this runs, and `.noModel` (nothing was ever open to be dirty about). It also covers
-    /// the silent, non-sheet close path one level up in `requestCloseTab` — a CLEAN tab's `×` never
-    /// reaches this method at all, so ⌘S-then-× (save, wait for the dot to clear by hand, then close
-    /// on an already-clean tab) was never at risk and needs no separate treatment; this fix is only
-    /// for the sheet's own Save button, which is the one door that used to save and close in the same
-    /// breath. `.failed` cannot reach this arm at all — see the `case .keepOpen, .awaitSave` comment
-    /// below and `drainUntilClean`'s own doc comment for why that is safe even in a hypothetical
-    /// future where it did.
+    /// `saveAndAwaitOutcome` resolved `.saved`, without ever checking whether the helper's own
+    /// bookkeeping had caught up — a diagnostic matrix measured that sequence killing the shared,
+    /// app-wide office helper roughly 4 times out of 5 (full account: `OfficeRuntime.drainUntilClean`'s
+    /// own doc comment, and `.superpowers/sdd/2026-08-22-office-agent-tools/task-2-report.md` §6/§7
+    /// concern 1). `drainUntilClean` is a no-op the instant `path` has no OPEN document at all — which
+    /// covers `.noModel` (nothing was ever open to be dirty about) and the silent, non-sheet close path
+    /// one level up in `requestCloseTab` (a CLEAN tab's `×` never reaches this method at all, so
+    /// ⌘S-then-× was never at risk and needs no separate treatment). **It is deliberately NOT gated on
+    /// `dirty`** — fix-round review IMPORTANT-1 found that gate unsound (the reducer can clear `dirty`
+    /// synchronously with no real callback behind it, on the recovery-restore and failed-save-retry
+    /// paths specifically — both ordinary, reachable sequences), so the drain instead performs a real
+    /// awaited round trip to the helper every time a document is open here, regardless of what `dirty`
+    /// happens to read; see that function's own doc comment for the full mechanism. `.failed` cannot
+    /// reach this arm at all — see the `case .keepOpen, .awaitSave` comment below.
     private func resolveDirtyDocumentTabClose(tabId: String, choice: DirtyCloseChoice) {
         switch dirtyCloseAction(dirty: true, choice: choice) {
         case .close:

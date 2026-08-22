@@ -1709,78 +1709,103 @@ final class OfficeRuntime: ObservableObject {
     /// .resolveDirtyDocumentTabClose`, whose own doc comment cross-references this function.**
     ///
     /// **Why closing right after `.saved` is not safe.** `saveAndAwaitOutcome`'s `.saved` resolves the
-    /// instant `placeAtomically` lands the bytes on disk — but an ORDINARY successful save leaves
-    /// `dirty` untouched (`DocumentEntry.dirty`'s own header: only the two app-held exceptions,
-    /// `restoredPendingSave`/`saveFailedPendingSave`, are cleared synchronously inside
-    /// `.saveSucceeded`). `dirty` stays `true` until LOK's own SEPARATE, later
-    /// `.uno:ModifiedStatus=false` callback arrives, one more round trip through the helper. Closing
-    /// the document in that gap is what the diagnostic matrix caught happening: the helper's own last
-    /// line before death was LibreOffice's `Unspecified Application Error`, consistent with this
-    /// codebase's own already-documented case of LOK calling libc `exit()` from inside its own C++
-    /// code (`LOKBridge.openOnDedicatedThread`'s CFB-refusal comment — a different trigger, the same
+    /// instant `placeAtomically` lands the bytes on disk — but the helper itself may still be doing
+    /// LOK-internal work related to the save for a beat after that (`.uno:ModifiedStatus=false`'s own
+    /// later, separate callback is the OBSERVABLE symptom of that window, not its cause). Closing in
+    /// that gap is what the diagnostic matrix caught happening: the helper's own last line before
+    /// death was LibreOffice's `Unspecified Application Error`, consistent with this codebase's own
+    /// already-documented case of LOK calling libc `exit()` from inside its own C++ code
+    /// (`LOKBridge.openOnDedicatedThread`'s CFB-refusal comment — a different trigger, the same
     /// mechanism class: an internal LOK exit that bypasses Swift's `try`/`catch` entirely and takes
     /// every OTHER open document down with it, since `OfficeHelperRequestQueue` is one FIFO shared by
     /// every session's documents, not a per-document resource).
     ///
-    /// **The fix: wait for `dirty` to actually clear (or the document to vanish) before the caller is
-    /// allowed to close.** Returns immediately, `true`, if `path` is not currently dirty at all — the
-    /// ordinary case for every OTHER caller of `requestCloseTab` (a clean tab, or one already past
-    /// this drain) costs one dictionary read, not a subscription. Otherwise subscribes to `$state` and
-    /// resolves the instant `documents[path]?.dirty` is anything other than `true` — deliberately
-    /// `!= true`, not `== false`: a document that DISAPPEARED mid-drain (a session tearing down
-    /// concurrently) has just as little left to wait for as one that genuinely went clean, and waiting
-    /// out the full timeout over a runtime that already moved on would only make this function itself
-    /// the reason a departing session hangs.
+    /// **Fix-round review IMPORTANT-1 — the first version of this function gated on `dirty ==
+    /// true`, and that proxy is UNSOUND, not merely imprecise.** `OfficeRuntimeReducer`'s own
+    /// `.saveSucceeded` arm clears `dirty` SYNCHRONOUSLY, with no LOK callback involved at all,
+    /// whenever `restoredPendingSave` or `saveFailedPendingSave` is set (`DocumentEntry.dirty`'s own
+    /// header names both exceptions) — and that reducer dispatch runs, and the mutated state is
+    /// already live, BEFORE `resumeSaveWaiters` ever resolves `saveAndAwaitOutcome`'s continuation
+    /// (`performSave`'s own ordering: `dispatch(.saveSucceeded(...))` then `resumeSaveWaiters`). So by
+    /// the time this function used to read `state.documents[path]?.dirty`, it could already read
+    /// `false` for a save that JUST landed with NEITHER exception's own real justification holding: a
+    /// sheet-Save on a just-restored document (any crash or Quit Anyway offers Restore — an ordinary
+    /// path), or a sheet-Save RETRY that succeeds after an earlier failure on the same tab (equally
+    /// ordinary), would see the entry guard no-op immediately and run the EXACT pre-fix sequence this
+    /// function exists to prevent, silently, with zero wait — not the bounded, logged wait the old doc
+    /// comment claimed for `.failed`-adjacent cases. Named and independently reproduced against the
+    /// reducer's own code before being closed here, not merely asserted.
+    ///
+    /// **The fix: stop trusting `dirty` as a proxy for "the helper is done" and ask the helper
+    /// directly, via a real awaited round trip, whether it still is one.** Every `Driver` call is
+    /// already an `async` round trip to the shared helper, and — the fact that makes ANY of them work
+    /// as this proof — `LOKBridge`'s own dedicated worker thread (`thread.sync`, the same mechanism
+    /// `open`/`close`/`save`/`saveAsSidecar`/`clipboardCopy`/every other LOK entry point already uses)
+    /// serializes EVERY LOK call for the WHOLE helper process onto that one thread, not merely per
+    /// docId. A `clipboardCopy` issued for this `docId` right after this save's own `.uno:Save`
+    /// completed cannot be serviced until whatever LOK-internal work the save's own completion left
+    /// queued on that same thread has run — so waiting for this call's reply is waiting for that work,
+    /// genuinely, not by proxy. `clipboardCopy` specifically: read-only (never mutates the document —
+    /// no undo-history/selection risk the way `undo`/`redo`/`clipboardCut` would carry), never throws
+    /// to the caller (`Driver.clipboardCopy`'s own doc: answers `nil` on any failure, `""` is a legal
+    /// "no selection" reply), and calling `driver.clipboardCopy` directly — never `postClipboardCopy`
+    /// — means this reads LOK's selection and discards it without writing anything to the system
+    /// pasteboard (`postClipboardCopy`'s own header: the pasteboard write happens in ITS wrapper, not
+    /// in the driver call itself) and without joining `inputChainTail`'s user-input ordering chain,
+    /// which has nothing to do with this function's own question.
+    ///
+    /// Returns immediately, `true`, if `path` has no open document at all — nothing left to protect,
+    /// and no `docId` left to round-trip against. This also folds in the "document disappeared mid-
+    /// drain" case the first version handled via a state-transition predicate: a session tearing down
+    /// concurrently leaves nothing here to close either, by the same construction, with no separate
+    /// check needed for it.
     ///
     /// **Bounded, and honest about the bound rather than silent.** `timeout` defaults to 15s (this
-    /// file's own established live-wait convention — `OfficeAgentBroker.drainDirty`, the office-agent
-    /// branch's independently-shaped answer to the identical problem in a different file, uses the
-    /// same figure, arrived at separately rather than shared). On timeout this returns `false` and
-    /// logs — it does NOT throw, and a caller must NOT turn that into a reported save failure: the
-    /// write already genuinely landed (`saveAndAwaitOutcome` confirmed the bytes are on disk before
-    /// this ever runs), and turning a landed write into a reported failure because the CLEANUP took
-    /// too long would be a worse lie than the one this function exists to prevent. A helper still
-    /// unstable this long after a successful save is a real, undiagnosed condition this absorbs
-    /// rather than solves (named, not hidden, by the log line and by this comment).
+    /// file's own established live-wait convention). On timeout this returns `false` and logs — it
+    /// does NOT throw, and a caller must NOT turn that into a reported save failure: the write already
+    /// genuinely landed (`saveAndAwaitOutcome` confirmed the bytes are on disk before this ever runs),
+    /// and turning a landed write into a reported failure because the CLEANUP took too long would be a
+    /// worse lie than the one this function exists to prevent. A helper still unresponsive this long
+    /// after a successful save is a real, undiagnosed condition this absorbs rather than solves (named,
+    /// not hidden, by the log line and by this comment) — true for EVERY caller now, including the two
+    /// exception cases above: there is no longer a direction that gets zero wait.
     ///
-    /// **`.failed` saves never reach this, and do not need a special case here to stay safe.**
+    /// **`.failed` saves never reach this at all**, exception cases or not.
     /// `dirtyCloseActionAfterSave(.failed) == .keepOpen` (pinned by `EditorTabTests`' own exhaustive
-    /// truth table, shared verbatim by both tab kinds) means `resolveDirtyDocumentTabClose` structurally
-    /// never calls this after a failed save — but if some future caller ever did, the answer would
-    /// still be safe, only slow: `saveFailedPendingSave` pins `dirty` `true` with no LOK callback ever
-    /// coming to clear it (that field's own header), so this would simply run out the clock and return
-    /// `false`, exactly like the disappeared-document case's timeout path — never hangs forever.
+    /// truth table, shared verbatim by both tab kinds) means `resolveDirtyDocumentTabClose`
+    /// structurally never calls this after a failed save — the tab stays open with the failure banner
+    /// instead. Not relevant to the fix above (which is about what happens once this DOES run, on the
+    /// success/retry-success paths), stated here only so the two are not conflated.
     ///
-    /// Mirrors `OfficeAgentBroker.drainDirty`'s own `resolved`-flag/explicit-cancel shape (no `await`
-    /// between checking `resolved` and setting it in either the sink or the timeout task, so only one
-    /// of the two can ever resume the continuation) — simpler here than that function's version
-    /// because this already IS the `OfficeRuntime` instance: no `Host` indirection is needed to reach
-    /// `$state`.
+    /// Same `resolved`-flag/explicit-cancel discipline as the first version (no `await` between
+    /// checking `resolved` and setting it in either the probe or the timeout task, so only one of the
+    /// two can ever resume the continuation) — the mechanism changed, the single-resume shape did not.
     @discardableResult
     func drainUntilClean(_ path: String, timeout: TimeInterval = 15) async -> Bool {
-        guard state.documents[path]?.dirty == true else { return true }
+        guard let doc = state.documents[path] else { return true }
+        let docId = doc.docId
+        let part = doc.activePart
         let sessionId = self.sessionId
+        let driver = self.driver
         return await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
             var resolved = false
-            var cancellable: AnyCancellable?
+            let probeTask = Task { @MainActor in
+                _ = await driver.clipboardCopy(docId, part)
+                guard !resolved else { return }
+                resolved = true
+                continuation.resume(returning: true)
+            }
             let timeoutTask = Task { @MainActor in
                 try? await Task.sleep(nanoseconds: UInt64(max(timeout, 0) * 1_000_000_000))
                 guard !resolved else { return }
                 resolved = true
-                cancellable?.cancel()
-                NSLog("[OfficeRuntime] \(sessionId): drainUntilClean(\(path)) timed out after "
-                      + "\(timeout)s — the save already landed; proceeding to close anyway rather "
-                      + "than report a landed write as a failure")
+                probeTask.cancel()
+                NSLog("[OfficeRuntime] \(sessionId): drainUntilClean(\(path)) round trip timed out "
+                      + "after \(timeout)s — the save already landed; proceeding to close anyway "
+                      + "rather than report a landed write as a failure")
                 continuation.resume(returning: false)
             }
-            cancellable = $state.sink { state in
-                guard !resolved else { return }
-                guard state.documents[path]?.dirty != true else { return }
-                resolved = true
-                timeoutTask.cancel()
-                cancellable?.cancel()
-                continuation.resume(returning: true)
-            }
+            _ = timeoutTask
         }
     }
 
