@@ -186,13 +186,18 @@ struct OfficeRuntimeState: Equatable {
         /// re-running the live drill (`OfficeRuntimeLiveTests.testASaveThatFailsAtThePlaceStepLeaves
         /// TheDocumentDirtyAndBothQuitGatesSeeIt`):
         ///
-        /// 1. **That `modified=false` reaches the APP after `.saveFailed`, not before it.** The
-        ///    helper-side clear is early, but its delivery is a separate, later round trip (the
-        ///    `.uno:Save` follow-up is posted fire-and-forget), while the failure comes straight out
-        ///    of `performSave`'s own `catch`. Measured: with only `.saveFailed`'s restore in place
-        ///    and this hold absent, the drill watches the document go clean again a beat later —
-        ///    under a second after the failed save. So the `false` direction must be held, not just
-        ///    overwritten once.
+        /// 1. **That `modified=false` can reach the APP after `.saveFailed`, so a one-shot restore
+        ///    would be undone.** The helper-side clear is early, but its delivery is a separate
+        ///    round trip (the `.uno:Save` follow-up is posted fire-and-forget) while the failure
+        ///    comes straight out of `performSave`'s own `catch` — which of the two lands first is
+        ///    racy, and nothing here pins it. Measured, with BOTH lines of the `.saveFailed` arm
+        ///    deleted: the drill watches `dirty` (still true from the user's own edit) go FALSE
+        ///    under a second after the failed save — so that event really does arrive late, and it
+        ///    really does clear the dot. That a bare `dirty = true` with no hold would then be
+        ///    undone by it is the one short inference in this note, not a separate measurement.
+        ///    The reducer covers both orders regardless: this direction by
+        ///    `testALateModifiedStatusFalseAfterAFailedSaveDoesNotClearDirty`, the other by the
+        ///    `openedSavedCleanThenSaveFailed` fixture.
         /// 2. **Nothing will ever clear the dot again on LOK's own.** It will not re-fire
         ///    `modified=true` (nothing re-modifies the buffer), and a successful RETRY produces no
         ///    second `modified=false` either — `STATE_CHANGED` is transition-driven and LOK has
@@ -1024,8 +1029,11 @@ enum OfficeRuntimeReducer {
             // Fixed at the STATE rather than at each consumer: masking the reads could not help,
             // because the flag itself was wrong.
             //
-            // Masked exactly like `.modifiedStatusChanged`'s own writer below (T9's F3 posture —
-            // every write to `dirty` is masked, no exceptions). Unreachable for a read-only-format
+            // Masked exactly like `.modifiedStatusChanged`'s own writer below — T9's F3 posture,
+            // stated precisely: both LOK-DRIVEN writers of `dirty` are masked. (`.recoveryRestored`
+            // is a third writer and is NOT; it is safe by reachability instead — the three-writer
+            // note at `.modifiedStatusChanged` has the full account and the condition under which
+            // that stops holding.) Unreachable for a read-only-format
             // path through any shipped door (`save(_:)`/`saveAndAwaitOutcome` both refuse before a
             // `.save` effect can exist), so this is defense-in-depth, and it keeps the read-only
             // viewers' "no dirty dot, ever" guarantee true by construction rather than by audit.

@@ -378,9 +378,17 @@ final class OfficeRuntimeReducerTests: XCTestCase {
     // right. The rows below drive the real interleavings; `openedSavedCleanThenSaveFailed` reproduces
     // the exact ordering rather than asserting against a hand-built entry.
 
-    /// The C1 fixture — the REAL ordering, not a shortcut: open, type (LOK fires `modified=true`),
-    /// the helper's own `saveAs` completes and LOK fires `modified=false`, and only THEN the app's
-    /// `placeAtomically` fails and `.saveFailed` lands.
+    /// The C1 fixture — ONE of the two orderings, driven end to end rather than hand-built: open,
+    /// type (LOK fires `modified=true`), the helper's own `saveAs` completes and its
+    /// `modified=false` is applied, and only THEN the app's `placeAtomically` fails and
+    /// `.saveFailed` lands.
+    ///
+    /// **Which of the two arrives first is racy and is deliberately not pinned anywhere.** The
+    /// helper clears `ModifiedStatus` early, but its delivery to the app is a separate round trip;
+    /// the live drill measured the OTHER order (clean landing after the failure), and this fixture
+    /// drives clean-before-failure. Both are covered on purpose — this row and
+    /// `testALateModifiedStatusFalseAfterAFailedSaveDoesNotClearDirty` are the same bug approached
+    /// from the two sides, and the fix has to hold for either.
     private func openedSavedCleanThenSaveFailed(path: String = "/a.xlsx", docId: String = "doc-a",
                                                 reason: String = "disk full") -> OfficeRuntimeState {
         let dirty = openedAndDirty(path: path, docId: docId)
