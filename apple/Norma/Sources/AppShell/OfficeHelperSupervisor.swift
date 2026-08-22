@@ -281,7 +281,7 @@ final class OfficeHelperClient {
     /// `OfficeRuntime` exposes (`postKeyEvent` and its siblings) — this pair is UNGATED, because
     /// there is nothing yet to gate it FROM (no app-side caller exists). Whichever Stage C task
     /// wires a real caller onto this must ALSO thread that same gate through it, or an agent could
-    /// type into a widened-format document's second view with no save story behind it at all.
+    /// type into a read-only-format document's second view with no save story behind it at all.
     func createAgentView(docId: String) async throws -> Int32 {
         let seq = seqAllocator.nextSeq()
         try await connection.send(.createView(seq: seq, docId: docId))

@@ -369,9 +369,16 @@ final class OfficeHelperLiveTests: XCTestCase {
     /// has to account for, so this can assert synchronously rather than polling for a process death.
     /// **The day `OfficeSaveFormat` gains a case for either format, this test goes red** (the save
     /// would succeed instead of throwing) — the signal that `officeReadWriteExtensions`' own hand-
-    /// mirrored copy (`PanelDocumentTabTests.testOfficeDocumentIsReadOnlyFormatIsTrueOnlyForTheWidened
-    /// NonNativeSaveExtensions` pins the copy against ITSELF, not against the original — exactly the
-    /// gap this test closes) is now stale and the read-only gates it drives need lifting.
+    /// maintained list (`PanelDocumentTabTests.testOfficeDocumentIsReadOnlyFormatIsTrueOnlyForThe
+    /// FormatsThisBuildCannotWrite` pins that list against ITSELF, not against the original —
+    /// exactly the gap this test closes) is now stale and the read-only gates it drives need lifting.
+    ///
+    /// **Scope, after whole-branch review I2:** this test covers the `no OfficeSaveFormat case` route
+    /// into read-only, which is `xlsm`/`odg` only. `docx` is read-only by a SECOND, independent route
+    /// — it has a case, and this build's Writer OOXML export fails anyway — so it is deliberately not
+    /// in the loop below (a `saveAs` for it fails with `impl_store`, not `unsupportedFormat`, and
+    /// asserting the wrong wording here would pin the wrong mechanism). Its tripwire is the docx leg
+    /// of `testXlsxDocxPptxSaveRoundTripThroughTheRealHelperAfterTheR3VendorRecut`.
     func testWidenedFormatsXlsmAndOdgFailSaveWithUnsupportedFormatTheDriftTripwireForOfficeReadWriteExtensions() async throws {
         try skipUnlessVendorPresent()
         let helper = try await spawnLiveHelper()
@@ -2252,6 +2259,13 @@ final class OfficeHelperLiveTests: XCTestCase {
     /// - **`.pptx` — regression check.** Already worked before this fix (Impress's OOXML export is a
     ///   different internal code path, `oox::ppt`, that never called into the missing dylib); still
     ///   does, same round-trip shape, so a future vendor change that breaks it will be caught here.
+    /// **Whole-branch review I2 — this test is now the tripwire for a PRODUCT decision, not only a
+    /// vendor fact.** Because docx save can never succeed in this build, the app holds `.docx`
+    /// read-only (`PanelEditorTab.swift`'s `officeReadWriteExtensions`, whose own header carries the
+    /// reasoning): no dirty tracking, ⌘S disabled, a "Read-only" chip. This test is the ONLY thing
+    /// that will notice the day that stops being necessary — its docx leg's own `XCTFail` message
+    /// lists everything to reverse.
+    ///
     /// - **`.docx` — STILL fails, honestly re-investigated for this task.** The original
     ///   investigation never independently confirmed docx's mechanism (one capture hit the
     ///   already-known, unrelated `SwDLL` exit-time teardown abort instead; another showed a raw
@@ -2336,8 +2350,13 @@ final class OfficeHelperLiveTests: XCTestCase {
                 XCTFail("docx: expected OfficeHelperClientError.saveFailed — if this now succeeds, the "
                         + "Writer/OOXML-export defect (SVSTREAM_WRITE_ERROR / ERRCODE_IO_CANTWRITE, "
                         + "documented in this test's own header and the r3 VERSION-PIN addendum) has "
-                        + "been independently fixed: update this test to assert success and revisit "
-                        + "T7's ODF-autosave-fallback scope for docx.")
+                        + "been independently fixed. THREE things to do, in one change: (1) update "
+                        + "this test to assert success; (2) REVERSE the read-only demotion — move "
+                        + "\"docx\" back into officeReadWriteExtensions and out of the "
+                        + "officeFileExtensions union (PanelEditorTab.swift; both, or .docx stops "
+                        + "being an office document at all and routes to a Monaco code tab), and "
+                        + "re-point the doc comments there and on OfficeSaveFormat.autosaveFormat; "
+                        + "(3) narrow T7's ODF-autosave-fallback scope for docx to native.")
             } catch OfficeHelperClientError.saveFailed(let reason) {
                 // Expected — see this test's own header for the exact mechanism. Reason-string
                 // check (matching this suite's own house convention, e.g. legacy-xls.xls's pin

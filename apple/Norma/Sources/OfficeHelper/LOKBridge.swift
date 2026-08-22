@@ -53,14 +53,21 @@ private enum LOKCallbackType {
 ///
 /// **Office Stage B Task 9, fix round 1 (review F4) — back-pointer.** The app target cannot import
 /// this module (`OfficeDocumentBridge`'s own header in `OfficeHelperServer.swift` explains why), so
-/// `PanelEditorTab.swift`'s `officeReadWriteExtensions` is a deliberate, hand-mirrored SECOND copy of
-/// these six cases — the boundary `officeDocumentIsReadOnlyFormat` draws. **Adding a case here does
-/// NOT automatically widen that copy or lift its read-only gates** — no compile-time tripwire can
-/// exist across this module boundary; the drift signal is empirical instead:
-/// `OfficeHelperLiveTests.testWidenedFormatsXlsmAndOdgFailSaveWithUnsupportedFormatTheDriftTripwire
-/// ForOfficeReadWriteExtensions` goes RED the day `xlsm`/`odg` gain a case here, because the `saveAs`
-/// it currently asserts fails would start succeeding. If you add a case for a DIFFERENT extension,
-/// that test says nothing — update `officeReadWriteExtensions` by hand, in the same change.
+/// `PanelEditorTab.swift`'s `officeReadWriteExtensions` is a deliberate, hand-maintained SECOND
+/// list — the boundary `officeDocumentIsReadOnlyFormat` draws. It is **no longer a mirror of these
+/// six cases**: whole-branch review I2 removed `docx` from it, on the ground that having a case
+/// here is necessary but not sufficient — this build's Writer OOXML export fails at `impl_store`
+/// even though the filter resolution below is correct (that set's own header has the full account,
+/// and the failure is pinned live by `OfficeHelperLiveTests.testXlsxDocxPptxSaveRoundTripThroughThe
+/// RealHelperAfterTheR3VendorRecut`). So the two lists relate as: app-side read-write ⊂ cases here.
+///
+/// **Adding a case here does NOT automatically widen that list or lift its read-only gates** — no
+/// compile-time tripwire can exist across this module boundary; the drift signal is empirical
+/// instead: `OfficeHelperLiveTests.testWidenedFormatsXlsmAndOdgFailSaveWithUnsupportedFormatTheDrift
+/// TripwireForOfficeReadWriteExtensions` goes RED the day `xlsm`/`odg` gain a case here, because the
+/// `saveAs` it currently asserts fails would start succeeding. If you add a case for a DIFFERENT
+/// extension, that test says nothing — update `officeReadWriteExtensions` by hand, in the same
+/// change, and only after proving the save actually lands.
 enum OfficeSaveFormat: Equatable {
     case odt, docx, ods, xlsx, odp, pptx
 
@@ -145,6 +152,16 @@ enum OfficeSaveFormat: Equatable {
     /// `.odt`/`.ods`/`.odp` are excluded on different, solid ground, not by exemption: they are
     /// already ODF, so a sidecar `saveAs` for them never reaches the OOXML export filter code path
     /// at all — there is no unproven mechanism here to guess about.
+    ///
+    /// **Whole-branch review I2 — the `.docx` arm is now app-UNREACHABLE, and is kept deliberately.**
+    /// The app holds `.docx` read-only (`PanelEditorTab.swift`'s `officeReadWriteExtensions`), so its
+    /// input verbs never forward a keystroke, LOK never fires `modified=true`, and
+    /// `OfficeAutosaveScheduler` therefore never arms a docx timer — nothing in the shipped app can
+    /// reach this arm today. It stays because this is helper-side code with its own contract: any
+    /// caller that opens a docx and marks it dirty (a future app door, a test, Stage C) must still
+    /// get a sidecar that can actually be written, and because the day the Writer defect is fixed
+    /// this arm is one of the two decisions to revisit — narrow it to native then, in the same
+    /// change that lifts the app-side read-only gate.
     var autosaveFormat: (format: OfficeSaveFormat, isODFFallback: Bool) {
         switch self {
         case .odt, .ods, .odp: return (self, false)

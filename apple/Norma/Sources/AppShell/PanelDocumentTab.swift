@@ -204,9 +204,10 @@ func panelDocumentTabAction(tabs: [PanelTab], path: String, openFailures: Set<St
 /// there, because THIS file is document-tab territory (`panelDocumentTabAction`'s own precedent one
 /// section up: the `.document`-kind filter is this file's own recurring idiom, never borrowed).
 ///
-/// **Office Stage B Task 9 — the read-only-viewer gate.** A widened format
-/// (`officeDocumentIsReadOnlyFormat`) has no genuine save story (`OfficeSaveFormat` covers only the
-/// original six) — `nil` here disables the ⌘S menu item outright, which is BOTH of this door's two
+/// **Office Stage B Task 9 — the read-only-viewer gate.** A read-only format
+/// (`officeDocumentIsReadOnlyFormat` — three extensions today, by two different routes; see that
+/// predicate's own header) has no save this build can land — `nil` here disables the ⌘S menu item
+/// outright, which is BOTH of this door's two
 /// reads (`ShellSessionHost.activeDocumentTabPath`'s own doc: "once to decide whether the menu item
 /// is enabled, once when it fires"), so this one change closes the door completely, not merely
 /// grays it out cosmetically.
@@ -661,7 +662,7 @@ struct PanelDocumentChrome: View {
                     .accessibilityLabel("Unsaved changes")
             }
 
-            // Office Stage B Task 9 — the read-only viewer's own chip: a widened format
+            // Office Stage B Task 9 — the read-only viewer's own chip: a read-only format
             // (`officeDocumentIsReadOnlyFormat`) never shows the dirty dot above (it can never
             // become dirty — see that predicate's own header), so this is never drawn alongside it;
             // both read the identical fact, mutually exclusive by construction, not by a shared
