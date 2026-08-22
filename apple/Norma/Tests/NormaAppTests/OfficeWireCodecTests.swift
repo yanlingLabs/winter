@@ -133,10 +133,8 @@ final class OfficeWireCodecTests: XCTestCase {
             ]),
             // office-agent-tools T3 — sheets info/read.
             .sheetsInfo(seq: 68, docId: "doc-1"),
-            .sheetsRead(seq: 69, docId: "doc-1", sheet: "Sheet1", startColumn: 0, startRow: 0,
-                        endColumn: 2, endRow: 9, formulas: false),
-            .sheetsRead(seq: 70, docId: "doc-1", sheet: "Q1 Recap", startColumn: 1, startRow: 5,
-                        endColumn: 1, endRow: 5, formulas: true), // one-cell range, formulas:true, a name with a space
+            .sheetsRead(seq: 69, docId: "doc-1", sheet: "Sheet1", range: "A1:C10", formulas: false),
+            .sheetsRead(seq: 70, docId: "doc-1", sheet: "Q1 Recap", range: "B6", formulas: true), // one-cell range, formulas:true, a name with a space
             .sheetsInfoOk(seq: 71, docId: "doc-1", sheets: [
                 OfficeSheetInfo(name: "Sheet1", usedEndColumn: 2, usedEndRow: 9),
                 OfficeSheetInfo(name: "Empty Sheet", usedEndColumn: -1, usedEndRow: -1), // the wholly-empty sentinel
@@ -237,7 +235,7 @@ final class OfficeWireCodecTests: XCTestCase {
             "invalidated": #"{"type":"invalidated","seq":1,"docId":"d","keys":[]}"#,
             // office-agent-tools T3 — sheets info/read.
             "sheetsInfo": #"{"type":"sheetsInfo","seq":1,"docId":"d"}"#,
-            "sheetsRead": #"{"type":"sheetsRead","seq":1,"docId":"d","sheet":"Sheet1","startColumn":0,"startRow":0,"endColumn":0,"endRow":0,"formulas":false}"#,
+            "sheetsRead": #"{"type":"sheetsRead","seq":1,"docId":"d","sheet":"Sheet1","range":"A1","formulas":false}"#,
             "sheetsInfoOk": #"{"type":"sheetsInfoOk","seq":1,"docId":"d","sheets":[],"activeSheet":"Sheet1"}"#,
             "sheetsReadOk": #"{"type":"sheetsReadOk","seq":1,"docId":"d","rows":[]}"#,
         ]
@@ -312,8 +310,7 @@ final class OfficeWireCodecTests: XCTestCase {
         XCTAssertEqual(OfficeWireFrame.tileFailed(seq: 119, docId: "d", key: tileKey, reason: "r").seq, 119)
         XCTAssertEqual(OfficeWireFrame.invalidated(seq: 120, docId: "d", keys: []).seq, 120)
         XCTAssertEqual(OfficeWireFrame.sheetsInfo(seq: 146, docId: "d").seq, 146)
-        XCTAssertEqual(OfficeWireFrame.sheetsRead(seq: 147, docId: "d", sheet: "Sheet1", startColumn: 0, startRow: 0,
-                                                   endColumn: 0, endRow: 0, formulas: false).seq, 147)
+        XCTAssertEqual(OfficeWireFrame.sheetsRead(seq: 147, docId: "d", sheet: "Sheet1", range: "A1", formulas: false).seq, 147)
         XCTAssertEqual(OfficeWireFrame.sheetsInfoOk(seq: 148, docId: "d", sheets: [], activeSheet: "Sheet1").seq, 148)
         XCTAssertEqual(OfficeWireFrame.sheetsReadOk(seq: 149, docId: "d", rows: []).seq, 149)
     }

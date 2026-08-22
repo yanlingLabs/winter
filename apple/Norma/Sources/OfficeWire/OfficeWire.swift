@@ -244,14 +244,21 @@ public enum OfficeWireFrame: Equatable, Sendable {
     /// NAME, resolved to a part index on the helper side (never the app side — sheet-name lookup
     /// needs `getPartName`, a LOK call this wire's client half has no other reason to make) so an
     /// unknown name can be refused with the workbook's own real sheet list rather than a bare index
-    /// out of range. `startColumn`/`startRow`/`endColumn`/`endRow` are 0-based and INCLUSIVE on every
-    /// edge — `OfficeCellRange`'s own shape (`PanelDocumentTab.swift`), already normalized and
-    /// cell-count-capped by the caller BEFORE this frame is ever built (`officeReadRangeMaxCells`) —
-    /// this wire carries only an already-validated request, never raw user text. `formulas` selects
-    /// which of the two extraction mechanisms the helper uses; see `LOKBridge`'s own implementation
-    /// header for what each one actually does to the document's view/selection state.
-    case sheetsRead(seq: UInt64, docId: String, sheet: String, startColumn: Int, startRow: Int,
-                     endColumn: Int, endRow: Int, formulas: Bool)
+    /// out of range.
+    ///
+    /// **`range` is an ALREADY-FORMATTED A1 string ("A1:C10"), not column/row integers — a deliberate
+    /// cross-target constraint, not a style choice.** `NormaOfficeHelper` (this frame's receiving
+    /// target) compiles `Sources/OfficeWire` + `Sources/OfficeHelper` only (`project.yml`) — it never
+    /// sees `Sources/AppShell/PanelDocumentTab.swift`, where Stage B T8's
+    /// `officeColumnLetters`/`officeCellReference` (and this task's own inverse,
+    /// `officeParseRange`/`officeReadRangeMaxCells`) live. The APP resolves and cell-count-caps the
+    /// operand into an `OfficeCellRange` (`OfficeCommandConsumer`, before this frame is ever built)
+    /// and formats its two corners back into the A1 string LOK's own `.uno:GoToCell` `ToPoint`
+    /// argument wants — the helper never re-derives column math from integers, it passes this string
+    /// straight through. This is "reuse T8's conversion, don't write a second one" applied literally:
+    /// writing a column-letters function inside `Sources/OfficeHelper` to satisfy this frame would BE
+    /// the second implementation the brief forbids, even in a different language boundary.
+    case sheetsRead(seq: UInt64, docId: String, sheet: String, range: String, formulas: Bool)
 
     // MARK: Responses (helper -> client)
 
@@ -523,7 +530,7 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .unsubscribe(let seq, _): return seq
         case .tileRequest(let seq, _, _): return seq
         case .sheetsInfo(let seq, _): return seq
-        case .sheetsRead(let seq, _, _, _, _, _, _, _): return seq
+        case .sheetsRead(let seq, _, _, _, _): return seq
         case .helloOk(let seq, _): return seq
         case .refused(let seq, _): return seq
         case .pong(let seq): return seq
@@ -654,13 +661,10 @@ public enum OfficeWireFrame: Equatable, Sendable {
             payload["keys"] = keys.map { $0.jsonObject() }
         case .sheetsInfo(_, let docId):
             payload["docId"] = docId
-        case .sheetsRead(_, let docId, let sheet, let startColumn, let startRow, let endColumn, let endRow, let formulas):
+        case .sheetsRead(_, let docId, let sheet, let range, let formulas):
             payload["docId"] = docId
             payload["sheet"] = sheet
-            payload["startColumn"] = startColumn
-            payload["startRow"] = startRow
-            payload["endColumn"] = endColumn
-            payload["endRow"] = endRow
+            payload["range"] = range
             payload["formulas"] = formulas
         case .sheetsInfoOk(_, let docId, let sheets, let activeSheet):
             payload["docId"] = docId
@@ -1804,13 +1808,10 @@ public enum OfficeWireCodec {
             return .frame(.sheetsInfo(seq: seq, docId: docId))
         case "sheetsRead":
             guard let docId = object["docId"] as? String, let sheet = object["sheet"] as? String,
-                  let startColumn = intValue(object["startColumn"]), let startRow = intValue(object["startRow"]),
-                  let endColumn = intValue(object["endColumn"]), let endRow = intValue(object["endRow"]),
-                  let formulas = object["formulas"] as? Bool else {
+                  let range = object["range"] as? String, let formulas = object["formulas"] as? Bool else {
                 return .rejected(seq: seq, reason: "malformed")
             }
-            return .frame(.sheetsRead(seq: seq, docId: docId, sheet: sheet, startColumn: startColumn,
-                                       startRow: startRow, endColumn: endColumn, endRow: endRow, formulas: formulas))
+            return .frame(.sheetsRead(seq: seq, docId: docId, sheet: sheet, range: range, formulas: formulas))
         case "sheetsInfoOk":
             guard let docId = object["docId"] as? String,
                   let sheets = OfficeWireFrame.decodeSheetInfos(object["sheets"]),
