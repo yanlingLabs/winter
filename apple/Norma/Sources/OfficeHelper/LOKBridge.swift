@@ -634,6 +634,51 @@ final class LOKBridge: OfficeDocumentBridge {
         }
         self.kit = rawKit
         self.lokVersionString = buildId
+
+        // office-agent-tools T3 review (C1-split) — the permanent office-class ABI guard.
+        //
+        // **A size check alone cannot guard `LibreOfficeKitClass` the way it guards
+        // `LibreOfficeKitDocumentClass` above.** This class's own real drift (found by this same
+        // review, live-verified before fixing — see `LibreOfficeKit.h`'s `sendDialogEvent`-removal
+        // and `registerFileSaveDialogCallback`-addition comments in this same struct) was a NET-ZERO
+        // swap: one phantom member the header declared but the engine never had, exactly cancelling
+        // one real tail member the header never declared but the engine did have. Declared-member
+        // COUNT stayed the same on both sides throughout (26), so `nSize == MemoryLayout.size` held
+        // true (216 == 216) on the UNFIXED header, even while every member from the phantom's
+        // position onward silently called the wrong function. Confirmed empirically: the boot-time
+        // size probe below passed before this fix, not just after.
+        precondition(
+            rawKit.pointee.pClass.pointee.nSize == MemoryLayout<LibreOfficeKitClass>.size,
+            "LibreOfficeKit office-class ABI mismatch: engine reports nSize=\(rawKit.pointee.pClass.pointee.nSize) "
+                + "but this build's LibreOfficeKit.h describes a \(MemoryLayout<LibreOfficeKitClass>.size)-byte "
+                + "struct.")
+
+        // The guard the size check cannot provide: resolve this struct's own LAST declared member
+        // and assert its REAL symbol name still contains what the header calls it. A net-zero
+        // future drift (a different member added and a different one removed, or this exact member
+        // itself silently renamed upstream) would still be caught here, because this checks WHAT IS
+        // ACTUALLY THERE by address, not merely how much of it there is.
+        let lastOfficeMemberSymbol = Self.resolvedSymbolName(
+            unsafeBitCast(rawKit.pointee.pClass.pointee.registerFileSaveDialogCallback, to: UnsafeRawPointer?.self))
+        precondition(
+            lastOfficeMemberSymbol.contains("registerFileSaveDialogCallback"),
+            "LibreOfficeKit office-class ABI mismatch: this struct's own last declared member "
+                + "(registerFileSaveDialogCallback) resolved to \"\(lastOfficeMemberSymbol)\" instead — the header "
+                + "no longer matches the compiled engine's real member order.")
+    }
+
+    /// office-agent-tools T3 review (C1-split) — `dladdr`-resolves a raw function pointer back to
+    /// its real, compiled symbol name. The one general-purpose version of the ad hoc `symbolName`
+    /// helper this task's own investigation used repeatedly (document-class sweep, office-class
+    /// sweep) — kept as a real method, not deleted with the diagnostics that used it, because
+    /// `init`'s own permanent office-class tripwire (above) needs the identical resolution.
+    private static func resolvedSymbolName(_ raw: UnsafeRawPointer?) -> String {
+        guard let raw else { return "<nil>" }
+        var info = Dl_info()
+        guard dladdr(raw, &info) != 0, let sname = info.dli_sname else {
+            return "<unresolved @ \(raw)>"
+        }
+        return String(cString: sname)
     }
 
     // MARK: - OfficeDocumentBridge

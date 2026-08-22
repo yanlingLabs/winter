@@ -28,6 +28,15 @@ typedef void (*LibreOfficeKitWakeCallback)(void* pData);
 /// @see lok::Office::registerAnyInputCallback()
 typedef bool (*LibreOfficeKitAnyInputCallback)(void* pData, int nMostUrgentPriority);
 
+/// office-agent-tools T3 review (C1-split) — RESTORED. Missing from this vendored copy (Stage A,
+/// never updated) even though the real compiled engine's `_LibreOfficeKitClass` has the member
+/// that uses it (`registerFileSaveDialogCallback`, `LibreOfficeKit.h`'s own struct) — see that
+/// member's own header in `LibreOfficeKit.h` for the live-verified evidence (dladdr resolution
+/// against a real running kit, not assumed from this header's own prior omission).
+/// @see lok::Office::registerFileSaveDialogCallback()
+typedef void (*LibreOfficeKitFileSaveDialogCallback)(const char* pSuggestedUri, char* pResultUri,
+                                                      size_t nResultUri);
+
 #ifdef __cplusplus
 }
 #endif

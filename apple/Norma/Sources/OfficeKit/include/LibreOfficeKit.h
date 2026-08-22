@@ -115,11 +115,21 @@ struct _LibreOfficeKitClass
                      LibreOfficeKitWakeCallback pWakeCallback,
                      void* pData);
 
-    /// @see lok::Office::sendDialogEvent
-    void (*sendDialogEvent) (LibreOfficeKit* pThis,
-                            unsigned long long int nLOKWindowId,
-                            const char* pArguments);
-
+    // office-agent-tools T3 review (C1-split) — `sendDialogEvent` REMOVED from the OFFICE class,
+    // same evidence and mechanism as the document-class fix above: the compiled engine has no such
+    // member here either. dladdr-resolving the raw pointer this slot's old declared position read,
+    // on a REAL BOOTED kit (not a document — this struct's own instance, `LOKBridge.kit`), returned
+    // `lo_setOption` — the NEXT function this class declares — not any `lo_sendDialogEvent` symbol.
+    //
+    // **This one is NOT caught by a size-only tripwire, unlike the document class.** The document
+    // class had three NET phantom members (79 declared vs 78 real); this class had exactly ONE
+    // phantom (`sendDialogEvent`, here) AND was separately missing exactly one REAL tail member
+    // (`registerFileSaveDialogCallback`, added below) — the two cancel in COUNT (26 declared either
+    // way), so `MemoryLayout<LibreOfficeKitClass>.size` matched `pClass->nSize` (216 == 216) even
+    // WHILE genuinely misaligned. Confirmed live before fixing, not assumed: the boot-time size
+    // probe passed on the UNFIXED header. See `LOKBridge.init`'s own named-symbol tripwire, right
+    // after `self.kit` is set, for the guard that actually catches this class of drift — a size
+    // check structurally cannot.
     /// @see lok::Office::setOption
     void (*setOption) (LibreOfficeKit* pThis, const char* pOption, const char* pValue);
 
@@ -165,6 +175,15 @@ struct _LibreOfficeKitClass
 
     /// @see lok::Office::getDocsCount().
     int (*getDocsCount) (LibreOfficeKit* pThis);
+
+    // office-agent-tools T3 review (C1-split) — ADDED. The real compiled engine's tail member this
+    // vendored copy was missing (confirmed live: dladdr on the raw pointer at this class's own LAST
+    // declared position, before this fix, resolved to `lo_registerFileSaveDialogCallback`, not
+    // `lo_getDocsCount` — the header's own prior last member). See `sendDialogEvent`'s own removal
+    // above, in this same struct, for why the two together did not move `nSize`.
+    /// @see lok::Office::registerFileSaveDialogCallback()
+    void (*registerFileSaveDialogCallback)(LibreOfficeKit* pThis,
+            LibreOfficeKitFileSaveDialogCallback pCallback);
 };
 
 #define LIBREOFFICEKIT_DOCUMENT_HAS(pDoc,member) LIBREOFFICEKIT_HAS_MEMBER(LibreOfficeKitDocumentClass,member,(pDoc)->pClass->nSize)
