@@ -211,8 +211,15 @@ func panelDocumentTabAction(tabs: [PanelTab], path: String, openFailures: Set<St
 /// reads (`ShellSessionHost.activeDocumentTabPath`'s own doc: "once to decide whether the menu item
 /// is enabled, once when it fires"), so this one change closes the door completely, not merely
 /// grays it out cosmetically.
+///
+/// **`panelShownTab`, mirroring `editorSaveMenuTarget`'s own live-gate fix** — see that function's
+/// header for the mechanism. Short version: the panel renders `panelShownTab`, so reading
+/// `activeTabId` raw disagreed with the screen in the two cases that id is nil (a session whose log
+/// predates the daemon's `panel.openTab` fix; the beat after the active tab closes), leaving ⌘S
+/// dead on a document the user could see, had just edited, and was offered a save for by the very
+/// close button beside it.
 func officeSaveMenuTarget(tabs: [PanelTab], activeTabId: String?) -> PanelTab? {
-    guard let activeTabId, let tab = tabs.first(where: { $0.tabId == activeTabId }) else { return nil }
+    guard let tab = panelShownTab(tabs: tabs, activeTabId: activeTabId) else { return nil }
     guard tab.kind == .document, let url = tab.url, !url.isEmpty else { return nil }
     guard !officeDocumentIsReadOnlyFormat(path: url) else { return nil }
     return tab

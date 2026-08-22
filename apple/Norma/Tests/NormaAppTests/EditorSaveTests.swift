@@ -561,8 +561,26 @@ final class EditorSaveTests: XCTestCase {
         XCTAssertNil(editorSaveMenuTarget(tabs: [code, web], activeTabId: "t2"),
                      "a web tab in front is not a file to save — never reach past it to a code tab")
         XCTAssertNil(editorSaveMenuTarget(tabs: [code, pathless], activeTabId: "t3"))
-        XCTAssertNil(editorSaveMenuTarget(tabs: [code], activeTabId: nil))
         XCTAssertNil(editorSaveMenuTarget(tabs: [], activeTabId: "t1"))
+    }
+
+    /// **The live-gate ⌘S bug — the code-tab half, which had it first and longest.**
+    ///
+    /// The nil-`activeTabId` line here used to assert `nil`, pinning the defect. `panelShownTab` —
+    /// what `ShellPanel` actually renders — falls back to the first tab when the id is absent, and
+    /// its doc names why absence is permanent for older sessions: their logs carry
+    /// `panel_tab_opened` with no `panel_tab_activated` and sessions are user-delete-only. So ⌘S
+    /// has been dead on code tabs in those sessions since the editor arc shipped; the office work
+    /// inherited the same raw lookup and the user found it there first.
+    func testEditorSaveMenuTargetFollowsTheSHOWNTabWhenNoActiveIdWasEverRecorded() {
+        let code = PanelTab(tabId: "t1", kind: .code, url: Self.file, title: "engine.ts")
+        let web = PanelTab(tabId: "t2", kind: .web, url: "https://example.com", title: "Example")
+
+        XCTAssertEqual(editorSaveMenuTarget(tabs: [code], activeTabId: nil)?.tabId, "t1",
+                       "the only tab is the shown tab — ⌘S must save it")
+        XCTAssertEqual(editorSaveMenuTarget(tabs: [code, web], activeTabId: nil)?.tabId, "t1")
+        XCTAssertNil(editorSaveMenuTarget(tabs: [web, code], activeTabId: nil),
+                     "the shown tab is the web tab; ⌘S must not reach past it")
     }
 
     /// The host half of the menu door: it reads the panel it is showing NOW, and it never mints an

@@ -379,8 +379,18 @@ func editorTabDisplayPath(path: String?, fallbackTitle: String) -> String {
 /// `url` carries the absolute path on a `.code` tab (the wire fact since Stage A), so a code tab
 /// without one — unreachable through every shipped door, and rendered as "This tab has no file" —
 /// is likewise nothing to save.
+///
+/// **`panelShownTab`, not a raw `activeTabId` lookup — the live-gate bug.** "The tab the user is
+/// looking at" is exactly what `panelShownTab` answers, and it is what `ShellPanel` renders and
+/// what the strip highlights; reading `activeTabId` directly asks a narrower question that
+/// disagrees with the screen whenever that id is nil. Its own doc names both such cases: a session
+/// whose log predates the daemon's `panel.openTab` fix carries `panel_tab_opened` with no
+/// `panel_tab_activated` — permanently, since sessions are user-delete-only — and the beat after
+/// the active tab closes, where `foldPanelTabs` clears the id by design. In either one the panel
+/// still shows a file, its close button still offers to save it (that door is handed the shown
+/// tab's own id), and the dirty dot still shows — while ⌘S alone resolved `nil` and sat disabled.
 func editorSaveMenuTarget(tabs: [PanelTab], activeTabId: String?) -> PanelTab? {
-    guard let activeTabId, let tab = tabs.first(where: { $0.tabId == activeTabId }) else { return nil }
+    guard let tab = panelShownTab(tabs: tabs, activeTabId: activeTabId) else { return nil }
     guard tab.kind == .code, let url = tab.url, !url.isEmpty else { return nil }
     return tab
 }

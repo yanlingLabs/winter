@@ -692,8 +692,30 @@ final class PanelDocumentTabTests: XCTestCase {
         XCTAssertNil(officeSaveMenuTarget(tabs: [document, code], activeTabId: "t2"),
                      "a code tab in front is not a document to save — never reach past it")
         XCTAssertNil(officeSaveMenuTarget(tabs: [document, pathless], activeTabId: "t3"))
-        XCTAssertNil(officeSaveMenuTarget(tabs: [document], activeTabId: nil))
         XCTAssertNil(officeSaveMenuTarget(tabs: [], activeTabId: "t1"))
+    }
+
+    /// **The live-gate ⌘S bug, pinned in the direction that was actually reported.**
+    ///
+    /// This assertion previously read `XCTAssertNil(… activeTabId: nil)` — it pinned the defect as
+    /// correct. A nil `activeTabId` does not mean "no tab is in front"; it means the id is absent,
+    /// which `panelShownTab` (what `ShellPanel` renders and the strip highlights) resolves to the
+    /// first tab. Its own doc names the two ways that happens, and the first is permanent: a
+    /// session whose log predates the daemon's `panel.openTab` fix carries `panel_tab_opened` with
+    /// no `panel_tab_activated`, and sessions are user-delete-only. The user hit exactly that — the
+    /// document rendered, its dirty dot showed, the close button offered to save it, and ⌘S alone
+    /// did nothing, because the menu item's target resolved `nil` and the item stayed disabled.
+    func testOfficeSaveMenuTargetFollowsTheSHOWNTabWhenNoActiveIdWasEverRecorded() {
+        let document = PanelTab(tabId: "t1", kind: .document, url: realGatePath, title: "gate.xlsx")
+        let web = PanelTab(tabId: "t2", kind: .web, url: "https://example.com", title: "Example")
+
+        XCTAssertEqual(officeSaveMenuTarget(tabs: [document], activeTabId: nil)?.tabId, "t1",
+                       "the only tab is the shown tab — ⌘S must save it")
+        XCTAssertEqual(officeSaveMenuTarget(tabs: [document, web], activeTabId: nil)?.tabId, "t1",
+                       "the fallback is the FIRST tab, which is what the panel renders")
+        XCTAssertNil(officeSaveMenuTarget(tabs: [web, document], activeTabId: nil),
+                     "when the shown tab is a web tab, ⌘S still reaches past nothing")
+        XCTAssertNil(officeSaveMenuTarget(tabs: [], activeTabId: nil))
     }
 
     /// PURE: the chrome's dirty dot — driven purely from `documents[path].dirty`, mirroring
