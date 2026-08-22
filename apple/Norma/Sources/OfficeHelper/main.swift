@@ -1,3 +1,4 @@
+import CoreServices
 import Foundation
 
 // Fix round 1, M1 — ignore SIGPIPE process-wide, unconditionally, as the very first thing this
@@ -256,6 +257,75 @@ if let probeKind = args["sandbox-probe"] {
         let capturedErrno = errno // read IMMEDIATELY — before close()
         close(fd)
         print("PROBE_RESULT: connect-outbound \(rc == 0 ? "ok" : "denied") errno=\(capturedErrno)")
+        fflush(stdout) // same fix, same reason — see the write-fence probe's own case above
+        _exit(0)
+    case "launch-services-query":
+        // Fix-round Experiment C (whole-branch review) — the ONE grant that survived minimization
+        // (`com.apple.coreservices.launchservicesd`) is exactly the one the review's own rationale
+        // flagged as the scarier of the four: "plausibly defeats (deny process-exec)/(deny
+        // network*) by asking another daemon to open a payload written into the in-fence TMPDIR."
+        // This probe tests the FIRST necessary condition for that concern to be real — can this
+        // sandboxed process get a MEANINGFUL answer out of launchservicesd at all, or does the
+        // daemon do its own authorization on behalf of a sandboxed caller regardless of the mach
+        // connection succeeding — via a READ-ONLY query, never an actual open/launch call: this
+        // probe deliberately does NOT test whether an ACTUAL launch also succeeds, to avoid a real,
+        // visible application opening as a side effect of an automated diagnostic run — that
+        // stronger test is named as a follow-up, not performed here.
+        //
+        // Two higher-level LaunchServices API attempts were tried and REJECTED, empirically, before
+        // this one — disclosed rather than silently swapped out, since the failure mode itself is
+        // informative: (1) `LSCopyDefaultApplicationURLForURL` on a `.txt` path failed IDENTICALLY
+        // with and without the grant (`kLSExecutableIncorrectFormat`, a LaunchServices-semantic
+        // error unrelated to sandboxing). (2) `LSCopyApplicationURLsForBundleIdentifier("com.apple.
+        // finder")` ALSO failed identically both ways — and a `/usr/bin/log stream --predicate
+        // 'eventMessage contains "deny"'` capture around both runs explained why: that call's own
+        // denials were `com.apple.lsd.mapdb`/`com.apple.lsd.modifydb` — NEITHER run ever touched
+        // `com.apple.coreservices.launchservicesd` at all. LaunchServices is not one mach service;
+        // modern query APIs route through `lsd`'s own sub-endpoints, while the ORIGINAL crash
+        // trace's `+[NSApplication initialize]` bootstrap reaches the older, literal
+        // `com.apple.coreservices.launchservicesd` bootstrap name specifically — a different service
+        // neither higher-level API exercises. A THIRD attempt, the raw BSD-layer `bootstrap_look_up`
+        // (matching the captured crash trace's own `_xpc_connection_bootstrap_look_up_slow` frame
+        // most directly), does not exist in Swift's Darwin overlay at all (`cannot find
+        // 'bootstrap_look_up' in scope` — a real, empirically-discovered limitation, not guessed
+        // around). Settled on the modern XPC-layer equivalent of the SAME primitive: attempt to
+        // stand up a raw `xpc_connection_t` against the literal service name and ACTIVATE it (mach
+        // bootstrap lookup happens at activation, not at `xpc_connection_create_mach_service`'s own
+        // call, which never fails synchronously) — an `XPC_TYPE_ERROR` event before any reply is the
+        // sandbox-denial signal; a real reply (even an XPC-protocol-level rejection FROM the
+        // now-reached daemon, never a connection-level error) means the mach-lookup itself
+        // succeeded, which is this probe's own claim — nothing about what the daemon does with a
+        // message afterward.
+        let connection = xpc_connection_create_mach_service(
+            "com.apple.coreservices.launchservicesd", nil, 0)
+        let semaphore = DispatchSemaphore(value: 0)
+        // XPC's OWN two distinct error constants, not string-parsed — CONNECTION_INVALID means the
+        // mach bootstrap lookup itself never succeeded (the sandbox-denial signal this probe wants);
+        // CONNECTION_INTERRUPTED means a real connection WAS established and the peer (a real,
+        // reached daemon) then closed it — exactly what a correctly-functioning `lsd` does upon
+        // receiving this probe's own deliberately-empty, protocol-mismatched message, and NOT a
+        // sandbox denial. First live run (both configs) confirmed this distinction empirically: WITH
+        // the grant, "Connection interrupted"; WITHOUT it, "Connection invalid" — different XPC
+        // error objects, not the same coarse "an error happened" outcome an early cut of this probe
+        // conflated.
+        var sawConnectionInvalid = false
+        var firstEventDescription = "none"
+        xpc_connection_set_event_handler(connection) { event in
+            if firstEventDescription == "none" { firstEventDescription = String(describing: event) }
+            if xpc_equal(event, XPC_ERROR_CONNECTION_INVALID) { sawConnectionInvalid = true }
+            semaphore.signal()
+        }
+        xpc_connection_activate(connection)
+        let emptyMessage = xpc_dictionary_create(nil, nil, 0)
+        xpc_connection_send_message(connection, emptyMessage)
+        let waitResult = semaphore.wait(timeout: .now() + 3.0)
+        xpc_connection_cancel(connection)
+        // "ok" = the mach-lookup itself succeeded — a real connection reached the daemon, regardless
+        // of what the daemon then did with this probe's own deliberately-unrecognizable message.
+        let ok = waitResult == .success && !sawConnectionInvalid
+        print("PROBE_RESULT: launch-services-query \(ok ? "ok" : "denied") "
+                + "timedOut=\(waitResult == .timedOut) sawConnectionInvalid=\(sawConnectionInvalid) "
+                + "firstEvent=\(firstEventDescription)")
         fflush(stdout) // same fix, same reason — see the write-fence probe's own case above
         _exit(0)
     default:

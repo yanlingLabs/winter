@@ -167,6 +167,34 @@ final class OfficeSandboxTests: XCTestCase {
         XCTAssertTrue(output.contains("PROBE_RESULT: connect-outbound denied errno=\(EPERM)"), "got: \(output)")
     }
 
+    /// Fix-round Experiment C (whole-branch review) — the ONE mach-lookup this profile grants
+    /// beyond T1's original baseline, and the one the review's own rationale flagged as the
+    /// scarier of the four originally-widened candidates (a potential `(deny process-exec)`/
+    /// `(deny network*)` bypass via a confused-deputy launch request, not merely data exfiltration).
+    /// Against the REAL, shipped profile (this test's own default `profilePath`), the mach-lookup
+    /// must be genuinely reachable — proving the office-helper.sb comment's own claim empirically,
+    /// the same "do not trust a remembered value, pin it behaviorally" methodology this file's own
+    /// two-sided `sandbox_check` pin above already established. The reverse case (denied without
+    /// this grant) was proven interactively during this fix round's own minimization — not
+    /// re-pinned here as a second fixture file, to avoid a second, driftable copy of "what T1's
+    /// baseline alone looks like" existing in this repo.
+    func testLaunchServicesQueryMachLookupIsReachable() async throws {
+        let (output, _) = try await runProbe(kind: "launch-services-query")
+        XCTAssertTrue(output.contains("PROBE_RESULT: launch-services-query ok"), "got: \(output)")
+    }
+
+    /// M4 (whole-branch review) — the profile's own core containment posture, pinned against the
+    /// SOURCE file directly (never the embedded copy: the release pipeline's own `codesign --verify
+    /// --deep --strict` already covers embed-time integrity — see `scripts/release.ts`'s office-
+    /// helper.sb existence check and its own comment for why that is a byte-copy guarantee, not
+    /// something this test needs to re-prove). A future edit that accidentally loosens either line
+    /// fails here first, not in a live probe run.
+    func testDenyDefaultAndDenyNetworkArePresentInTheSourceProfile() throws {
+        let source = try String(contentsOf: Self.repoSandboxProfilePath, encoding: .utf8)
+        XCTAssertTrue(source.contains("(deny default)"), "the profile's own default-deny posture is missing")
+        XCTAssertTrue(source.contains("(deny network*)"), "the profile's own explicit network denial is missing")
+    }
+
     // MARK: - Fail-closed: a missing/unreadable profile refuses to serve, in EITHER config
     //
     // Advisor-suggested cheap drill: exercises the fail-closed branch (`fail(...)` on an unreadable

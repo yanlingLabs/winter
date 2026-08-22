@@ -829,29 +829,38 @@ final class OfficeHelperLiveTests: XCTestCase {
 
     // MARK: - Embedded root (carry #1: at least one test against the REAL built app)
 
-    /// **FIXED, office-editable Task 10 — was a known limitation, now a permanent regression pin.**
-    /// Impress (`pptx`/`odp`) and Writer (`docx`/`odt`) documents used to fail to open (helper-
-    /// killing hang/timeout) specifically via the embedded install-root resolution
-    /// (`resolveInstallRoot()`'s no-`--lok-root`-override branch — exactly what every real user's
-    /// build takes). Root-caused, not merely worked around: an advisor-flagged gap in the original
-    /// four discriminators (all of which only ever varied embedded-vs-standalone root, never
-    /// sandboxed-vs-not) led to a fifth — the SAME fixtures via the embedded root with the DEBUG
-    /// `--no-sandbox` escape hatch — which opened CLEANLY, isolating the seatbelt itself, not the
-    /// install root, as the actual variable. Capturing `/usr/bin/log stream --predicate
-    /// 'eventMessage contains "deny"'` (T1's own `sender == "Sandbox"` predicate produces zero lines
-    /// on this OS build) around a live reproduction caught the `office-helper.lok` thread blocked
-    /// inside `SvxShapeText::setString → LinguServiceManager::create →
-    /// LngSvcMgr::GetAvailableSpellSvcs_Impl → MacSpellChecker::MacSpellChecker() →
-    /// NSApplicationLoad() → +[NSApplication initialize]`, denied `mach-lookup` on
-    /// `com.apple.pasteboard.1`/`com.apple.tccd.system`/`com.apple.windowserver.active`/
-    /// `com.apple.coreservices.launchservicesd` in turn — LOK's own unconditional, vendor-internal
-    /// probe of macOS's native spellchecker availability the first time a document's editable
-    /// shape/text-frame model is built (Impress shapes, Writer text frames; Calc's pure grid-cell
-    /// path never reaches `SvxShapeText::setString`, which is exactly why it was always unaffected).
-    /// Fixed in `office-helper.sb` (see its own "Task 10 addendum" comment for the full evidence
-    /// chain and the honest capability-grant trade-off) by allow-listing those four mach services —
-    /// bisected, not guessed: a pasteboard-only build reproduced the SAME failure, confirming all
-    /// four are independently load-bearing, not defensive padding.
+    /// **FIXED, office-editable Task 10 — was a known limitation, now a permanent regression pin,
+    /// corrected once more by a whole-branch review's own fix round.** Impress (`pptx`/`odp`) and
+    /// Writer (`docx`/`odt`) documents used to fail to open (helper-killing hang/timeout) via this
+    /// exact configuration — the bundled, embedded-in-`<app>` helper executable, the production
+    /// shape every real user's build takes.
+    ///
+    /// **Two readings of the root cause, in sequence, each corrected by running a matrix the
+    /// PREVIOUS reading never had:** (1) First cut: a live `/usr/bin/log stream` capture (T1's own
+    /// `sender == "Sandbox"` predicate produces zero lines on this OS build; `eventMessage contains
+    /// "deny"` does not) caught the `office-helper.lok` thread blocked inside `SvxShapeText::
+    /// setString → LinguServiceManager::create → LngSvcMgr::GetAvailableSpellSvcs_Impl →
+    /// MacSpellChecker::MacSpellChecker() → NSApplicationLoad() → +[NSApplication initialize]`,
+    /// denied four mach-lookups in turn — LOK's own unconditional, vendor-internal probe of macOS's
+    /// native spellchecker availability, reached only when a document's editable shape/text-frame
+    /// model is built (Impress shapes, Writer text frames; Calc's pure grid-cell path never reaches
+    /// `SvxShapeText::setString`, which is exactly why it was always unaffected). Shipped as "grant
+    /// all four, install root is the trigger" — WRONG, per (2): a review's own Experiment B ran the
+    /// missing 2x2 (bundled/bare executable x standalone/embedded root, against a PRE-widening
+    /// profile) and found root irrelevant — bare+embedded opens cleanly, bundled+standalone hangs.
+    /// `NSBundle.main`'s own path-climbing resolution finds Norma.app's real bundle identity only
+    /// for the bundled exec, which is what makes `+[NSApplication initialize]` attempt real
+    /// WindowServer/TCC/LaunchServices connections at all.
+    ///
+    /// **The fix, corrected**: a registry-layer attempt to stop `MacSpellChecker` from ever
+    /// constructing (Experiment A — two variants, both against `registrymodifications.xcu`) failed
+    /// both times, consistent with B's own finding in hindsight (construction was never the
+    /// problem). Experiment C's sequential drop-one minimization found the true minimal grant is
+    /// ONE service, not four: `com.apple.coreservices.launchservicesd` alone, on top of T1's
+    /// original baseline — confirmed twice, reproducibly. See `office-helper.sb`'s own "Task 10
+    /// addendum, fix round 1" comment for the full evidence chain, including the honest,
+    /// unresolved tension this leaves: the one grant that survived is the one a reviewer's own
+    /// threat model called the scarier of the four originally-widened candidates.
     ///
     /// This test now pins the FIXED behavior — a permanent regression tripwire matching this file's
     /// own `testKnownLimitationLegacyBinaryImportDoesNotOpenInThisVendorBuild` sibling pattern in
