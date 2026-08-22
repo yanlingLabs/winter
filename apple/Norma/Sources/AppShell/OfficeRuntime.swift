@@ -151,9 +151,17 @@ struct OfficeRuntimeState: Equatable {
         /// successful save, the same "nothing here clears a dirty dot" posture
         /// `EditorSaveCoordinator`'s own header states for the editor's identical dot. Defaults
         /// `false`: a document that just opened has nothing unsaved yet.
+        ///
+        /// **TWO deliberate exceptions, both declared at their own fields immediately below**
+        /// (`restoredPendingSave`, Task 7; `saveFailedPendingSave`, whole-branch review C1). Both are
+        /// cases where LOK's `ModifiedStatus` and the actual disk have come apart in a way only this
+        /// side can know about, so waiting for a LOK transition that is never coming would leave the
+        /// dot lying. Read those two headers before adding a third: the bar each of them met is a
+        /// mechanism proving no genuine callback can supply the truth, not merely "it would be
+        /// convenient to set the flag here."
         var dirty: Bool = false
-        /// **Office Stage B Task 7 — the ONE deliberate exception to `dirty`'s own "mirrors LOK and
-        /// nothing else" doctrine, stated two lines up.** Set `true` in the SAME beat `.recoveryRestored`
+        /// **Office Stage B Task 7 — the FIRST of `dirty`'s two deliberate exceptions to its own
+        /// "mirrors LOK and nothing else" doctrine, stated just above.** Set `true` in the SAME beat `.recoveryRestored`
         /// forces `dirty = true` (a restore loads the sidecar's content into a FRESH LOK document
         /// that, from LOK's own point of view, was never edited — nothing will ever make it fire a
         /// genuine `.uno:ModifiedStatus` callback on its own). Without this, a user who restores and
@@ -161,9 +169,42 @@ struct OfficeRuntimeState: Equatable {
         /// `saveAsOnDedicatedThread`'s own `.uno:Save` follow-up runs unconditionally, it does not
         /// gate on the modified flag) but a dirty dot that never clears, because LOK never has a
         /// true->false transition to report for a document it always considered clean. `.saveSucceeded`
-        /// checks this flag and, ONLY when it is set, clears `dirty` directly alongside it — the one
-        /// place in this file a save's own success is allowed to touch `dirty` at all.
+        /// checks this flag and, ONLY when it (or its C1 sibling below) is set, clears `dirty`
+        /// directly alongside it — that arm is the one place in this file a save's own success is
+        /// allowed to touch `dirty` at all.
         var restoredPendingSave: Bool = false
+        /// **Whole-branch review C1 — the SECOND deliberate exception to `dirty`'s "mirrors LOK and
+        /// nothing else" doctrine, and the reason that doctrine's own header above says "two", not
+        /// "one".** Set `true` in the same beat `.saveFailed` forces `dirty = true`.
+        ///
+        /// Why it has to exist rather than just writing `dirty` once: LOK's `ModifiedStatus=false`
+        /// fires helper-side the instant the helper's OWN `saveAs` completes — *before*
+        /// `performSave`'s `placeAtomically` ever runs on this side (`saveAndAwaitOutcome`'s own
+        /// header states the mechanism at length). So a save that fails at the PLACE step has
+        /// already driven `dirty` false through a perfectly genuine `.modifiedStatusChanged(false)`,
+        /// while the buffer differs from disk. Restoring `dirty` alone would not hold: (1) that same
+        /// `modified=false` can arrive AFTER `.saveFailed` (two independent round trips — the
+        /// callback over the document-event channel, the failure out of `performSave`'s own `catch`)
+        /// and would re-clear it a beat later; and (2) LOK will never re-fire `modified=true` on its
+        /// own, and a successful RETRY produces no second `modified=false` either (STATE_CHANGED
+        /// fires on transitions, and LOK has considered this document clean since the first
+        /// `saveAs`) — so nothing but `.saveSucceeded` can ever honestly clear the dot again.
+        ///
+        /// So while this is set: `.modifiedStatusChanged(false)` may NOT clear `dirty` (LOK's
+        /// "clean" means "matches the save that never reached disk"), and `.saveSucceeded` clears
+        /// both — exactly the treatment `restoredPendingSave` above already gets, for the same
+        /// underlying reason (LOK's truth and the disk's truth have come apart, and only this side
+        /// knows it).
+        ///
+        /// **Residual, disclosed not solved**: the in-flight window itself is still not modelled. A
+        /// save that has cleared `ModifiedStatus` but has not yet reached `placeAtomically`'s
+        /// success or failure reads as clean for those few milliseconds, so a quit landing exactly
+        /// there still sees a clean document. Closing that would mean a per-path in-flight-save
+        /// counter, and `OfficeRuntime.save` deliberately has no per-path coalescing (two ⌘S on one
+        /// path are two independent saves — see the suppression bag's own header for what overlapping
+        /// saves cost this file already); the window is bounded by one `placeAtomically`, whereas the
+        /// bug this field fixes was unbounded in time once entered.
+        var saveFailedPendingSave: Bool = false
     }
 
     var phase: Phase = .idle
@@ -932,14 +973,23 @@ enum OfficeRuntimeReducer {
             // hold exactly this buffer, which is precisely as strong a "resolved" as the conflict
             // clear immediately above.
             next.documentRecoveryCandidates.removeValue(forKey: path)
-            // **`restoredPendingSave`'s own header has the full account** — the ONE place this
-            // reducer lets a save's own success touch `dirty` directly, because a document loaded
-            // from a recovery sidecar was never actually "modified" from LOK's own point of view and
-            // will never fire the real `.uno:ModifiedStatus=false` this dot ordinarily waits for.
-            if next.documents[path]?.restoredPendingSave == true {
+            // **The ONE place this reducer lets a save's own success touch `dirty` directly — for
+            // either of the two app-held cases, and only those.** Both exist because LOK's truth and
+            // the disk's truth have come apart in a way only this side knows about, so no genuine
+            // `.uno:ModifiedStatus=false` transition is ever coming to clear the dot:
+            //   * `restoredPendingSave` (Task 7) — a document loaded from a recovery sidecar was
+            //     never "modified" from LOK's own point of view in the first place.
+            //   * `saveFailedPendingSave` (whole-branch review C1) — LOK went clean at the FAILED
+            //     save's own helper-side `saveAs`, and STATE_CHANGED fires on transitions, so this
+            //     successful retry produces no second `modified=false` to wait for.
+            // Each field's own header has the full account. An ordinary edit-then-save is untouched
+            // by this: neither flag is set, and the dot still clears on LOK's own real callback.
+            if next.documents[path]?.restoredPendingSave == true
+                || next.documents[path]?.saveFailedPendingSave == true {
                 next.documents[path]?.dirty = false
             }
             next.documents[path]?.restoredPendingSave = false
+            next.documents[path]?.saveFailedPendingSave = false
             // Task 7 — the ownership rule (`.clearAutosave`'s own header): the real path now
             // PROVABLY carries this docId's content (`placeAtomically` already ran, or this dispatch
             // would not exist), so any sidecar it may have been growing is redundant. Unconditional,
@@ -952,6 +1002,31 @@ enum OfficeRuntimeReducer {
 
         case .saveFailed(let path, let docId, let reason):
             guard state.phase == .ready, state.documents[path]?.docId == docId else { return (next, []) }
+            // **Whole-branch review C1 — the document is DIRTY, whatever LOK currently thinks.**
+            // A save that failed did not reach the real path, so the buffer differs from disk: this
+            // is the honest state, not a workaround. It has to be written here because LOK's own
+            // `ModifiedStatus=false` has, in the place-failure case, ALREADY fired (helper-side, the
+            // instant the helper's `saveAs` completed — `saveAndAwaitOutcome`'s own header) and
+            // driven `dirty` false through a perfectly ordinary `.modifiedStatusChanged`. Before
+            // this, the tab showed a save-failure banner AND no dirty dot at once, the quit gate
+            // (`officeDirtyFilePaths`) did not name the document, and a mere session hop
+            // (`releaseOfficeRuntimeIfClean`) tore the runtime down — silent, unprompted loss.
+            // Fixed at the STATE rather than at each consumer: masking the reads could not help,
+            // because the flag itself was wrong.
+            //
+            // Masked exactly like `.modifiedStatusChanged`'s own writer below (T9's F3 posture —
+            // every write to `dirty` is masked, no exceptions). Unreachable for a read-only-format
+            // path through any shipped door (`save(_:)`/`saveAndAwaitOutcome` both refuse before a
+            // `.save` effect can exist), so this is defense-in-depth, and it keeps the read-only
+            // viewers' "no dirty dot, ever" guarantee true by construction rather than by audit.
+            //
+            // `saveFailedPendingSave` is what makes it STICK — see that field's own header: a
+            // straggling `modified=false` for this same failed save must not re-clear the dot, and
+            // nothing but a successful save ever may.
+            if !officeDocumentIsReadOnlyFormat(path: path) {
+                next.documents[path]?.dirty = true
+                next.documents[path]?.saveFailedPendingSave = true
+            }
             let basename = (path as NSString).lastPathComponent
             let message = "Couldn't save \(basename): \(reason)"
             // Reuses `documentBanners` verbatim — that field's own Task 8 doc comment foretold
@@ -978,7 +1053,16 @@ enum OfficeRuntimeReducer {
             // `modified` (harmless for a read-only path: no candidate can exist there in the first
             // place, per the autosave chain's own two-layer fail-closed walk — `saveAsSidecar` throws
             // `unsupportedFormat` before any manifest is ever written).
-            next.documents[path]?.dirty = modified && !officeDocumentIsReadOnlyFormat(path: path)
+            //
+            // **Whole-branch review C1 — the one thing LOK is NOT allowed to say.** While a failed
+            // save is outstanding (`saveFailedPendingSave`), a `modified == false` firing means only
+            // "the buffer matches the save that never reached disk" — it is not evidence the file on
+            // disk holds this content, which is the only thing this dot is about. So the `false`
+            // direction is held; the `true` direction is untouched (typing on after a failed save
+            // agrees with the hold, and must not release it — only `.saveSucceeded` does that).
+            let heldByFailedSave = !modified && state.documents[path]?.saveFailedPendingSave == true
+            next.documents[path]?.dirty = (modified || heldByFailedSave)
+                && !officeDocumentIsReadOnlyFormat(path: path)
             // **Task 7 (advisor review) — a standing recovery offer must not survive the FIRST real
             // edit after it was raised.** The banner's "Restore" replaces the whole buffer with the
             // sidecar's own (older) content — leaving it standing over a document the user has since

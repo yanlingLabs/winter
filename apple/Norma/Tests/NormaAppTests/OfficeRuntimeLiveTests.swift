@@ -2284,6 +2284,158 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         _ = host.teardownAllOfficeRuntimesAndStopHelper()
     }
 
+    /// **Whole-branch review C1 — a save that fails at the PLACE step leaves the document DIRTY, and
+    /// both raw consumers of that flag see it.** The live half of the fix; the interleavings are
+    /// pinned as reducer rows (`OfficeRuntimeReducerTests`' own C1 section).
+    ///
+    /// The bug this reproduces: LOK clears `ModifiedStatus` helper-side the instant the helper's OWN
+    /// `saveAs` completes — before `performSave`'s `placeAtomically` ever runs on the app side. So a
+    /// place failure used to leave `dirty == false` while the buffer differed from disk, and the two
+    /// consumers that read the flag raw both discarded the buffer with no prompt: `officeDirtyFilePaths`
+    /// did not name the document at quit, and `releaseOfficeRuntimeIfClean` tore the runtime down on a
+    /// mere session hop. Both are asserted below against the REAL post-failure state.
+    ///
+    /// **The failure is made genuinely real, not simulated** — no fake driver, no injected error. The
+    /// document's own DIRECTORY is chmod'd `0555` between the edit and the save, so `placeAtomically`'s
+    /// sibling-temp `copyItem` (`.\(name).norma-save-<uuid>`, created beside the destination) fails
+    /// with `EACCES`. That is the right lever for two independent reasons: it fails INSIDE
+    /// `placeAtomically`, after the helper's own `saveAs` has already succeeded and already cleared
+    /// `ModifiedStatus` (the exact ordering C1 is about); and a 0444 *file* would NOT reproduce it —
+    /// `rename(2)` needs only directory write permission, and T2b separately proved 0444 documents
+    /// round-trip cleanly. `defer` restores the mode so the scratch tree is always removable.
+    ///
+    /// The retry leg matters as much as the failure leg: LOK has considered this document clean since
+    /// the FIRST `saveAs`, and `STATE_CHANGED` fires on transitions, so a successful retry produces no
+    /// second `modified=false` callback at all. Without `.saveSucceeded` clearing the app-held flag
+    /// directly, the dot would strand `true` forever after any failed save.
+    func testASaveThatFailsAtThePlaceStepLeavesTheDocumentDirtyAndBothQuitGatesSeeIt() async throws {
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent()
+            .appendingPathComponent("NormaOfficeHelper")
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
+                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                        + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
+        let vendorRoot = Self.vendorProductSetRoot
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
+                      "LibreOffice vendor tree not present at \(vendorRoot.path) — run "
+                        + "`bun run libreoffice:fetch` from the repo root.")
+        // Mode bits do not fence root, so the whole mechanism this drill rests on would silently not
+        // reproduce — skip honestly rather than pass vacuously.
+        try XCTSkipIf(getuid() == 0, "running as root: a 0555 directory does not deny writes, so the "
+                        + "place-failure this drill needs cannot be produced.")
+
+        let stateDir = makeScratchDirectory()
+        let directory = SessionDirectory(lister: { [] })
+        let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        host.makeOfficeHelperSupervisor = {
+            OfficeHelperSupervisor(configuration: OfficeHelperSupervisor.Configuration(
+                helperExecutableURL: helperURL,
+                socketDirectory: stateDir,
+                extraArguments: ["--lok-root", vendorRoot.path, "--sandbox-profile", Self.sandboxProfilePath.path]))
+        }
+        let runtime = host.officeRuntime(for: "S1")
+        defer { _ = host.teardownAllOfficeRuntimesAndStopHelper() }
+
+        let scratchDir = makeScratchDirectory()
+        let docPath = scratchDir.appendingPathComponent("place-failure.ods").path
+        try Data(contentsOf: Self.fixturesRoot.appendingPathComponent("gate.ods"))
+            .write(to: URL(fileURLWithPath: docPath))
+        // Always restore, whatever this test does — a 0555 scratch directory would otherwise defeat
+        // the harness's own cleanup.
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scratchDir.path) }
+
+        let zoomPPT = 1000
+        let key = TileKey(part: 0, zoomPPT: zoomPPT, tileX: 0, tileY: 0)
+        let viewport = officeViewportTwips(scrollOrigin: .zero, visibleSize: CGSize(width: 256, height: 256), zoomPPT: zoomPPT)
+
+        runtime.open(docPath)
+        let settled = await waitUntil(timeout: 90) {
+            runtime.stateSnapshot.documents[docPath] != nil || runtime.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(settled, "never settled — phase: \(runtime.stateSnapshot.phase)")
+        let docId = try XCTUnwrap(runtime.stateSnapshot.documents[docPath]?.docId,
+                                  "did not open: \(runtime.stateSnapshot.openFailures[docPath] ?? "no reason recorded")")
+
+        // A first paint before typing — T2's own methodological finding, still binding: type-8
+        // STATE_CHANGED callbacks (which is how `dirty` ever becomes true) only start arriving after
+        // the document's first tile paint.
+        runtime.subscribeTiles(path: docPath, part: 0, zoomPPT: zoomPPT, viewportTwips: viewport)
+        let painted = await waitUntil(timeout: 30) { runtime.tileStore.tile(docId: docId, key: key) != nil }
+        XCTAssertTrue(painted, "the pre-edit tile never arrived")
+
+        let client = try XCTUnwrap(host.officeHelperSupervisor?.client, "no live client to type through")
+        // Marker chars restricted to `postRealEdit`'s own small test-local keyCode table (T/E/D/I/4).
+        try await postRealEdit(client: client, docId: docId, marker: "EDITED")
+        let becameDirty = await waitUntil(timeout: 15) { runtime.stateSnapshot.documents[docPath]?.dirty == true }
+        XCTAssertTrue(becameDirty, "setup: the real edit's own ModifiedStatus=true never reached "
+                      + "documents[path].dirty")
+
+        // The lever. From here the helper's own saveAs still succeeds (it renders into its own
+        // state-path, untouched by this) — only the app-side place can fail.
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: scratchDir.path)
+        let beforeFailedSave = officeFileStat(atPath: docPath)
+
+        let outcome = await runtime.saveAndAwaitOutcome(docPath)
+        guard case .failed(let reason) = outcome else {
+            XCTFail("expected the place to fail with the document's directory at 0555, got \(outcome) "
+                    + "— if the place SUCCEEDED, this drill's whole mechanism has stopped reproducing "
+                    + "(check placeAtomically's sibling-temp location) and the C1 assertions below "
+                    + "would be vacuous")
+            return
+        }
+        XCTAssertEqual(officeFileStat(atPath: docPath), beforeFailedSave,
+                       "the real file must be byte-and-inode untouched by a save that failed to place")
+
+        // **C1 itself.** Measured, not assumed: at this vendor pin the LOK clean event does NOT beat
+        // the save reply — `saveAsOnDedicatedThread` posts its `.uno:Save` follow-up fire-and-forget
+        // (`bNotifyWhenFinished: false`), so `ModifiedStatus=false` comes back on a LATER round trip,
+        // AFTER `.saveFailed` has already been dispatched. That makes the straggler the live shape of
+        // this bug, and "dirty is true at this instant" far too weak an assertion to catch it: the
+        // pre-fix build passes that one and then goes silently clean a beat later. So the pin is a
+        // bounded negative wait — dirty must not merely be true now, it must SURVIVE the arrival of
+        // LOK's own contradicting event.
+        //
+        // **Deletion-red measured, not assumed.** With the reducer's `.saveFailed` restore deleted and
+        // nothing else changed, this exact drill fails on all three assertions below — the document
+        // goes clean, `officeDirtyFilePaths` returns `[]`, and `officeRuntimeReleasedOnDeparture` says
+        // release — with the whole test still finishing in ~2.3s, i.e. the flip lands well under a
+        // second after the failed save. The budget is nonetheless the same 15s this file already
+        // allows for this very event in the SUCCESS case (`becameCleanAfterSave`, the save round-trip
+        // test above): a shorter one would risk passing vacuously under load, which for a data-loss
+        // pin is the expensive direction to be wrong in. A green run pays this wait in full, by
+        // construction — a negative wait cannot exit early.
+        let wentCleanAnyway = await waitUntil(timeout: 15) {
+            runtime.stateSnapshot.documents[docPath]?.dirty == false
+        }
+        XCTAssertFalse(wentCleanAnyway, "the document went CLEAN after a save that never reached disk "
+                       + "— reason was \"\(reason)\"; LOK's own ModifiedStatus=false for this failed "
+                       + "save must not be allowed to clear the dot (its \"clean\" only means \"matches "
+                       + "the save that never landed\")")
+        XCTAssertNotNil(runtime.stateSnapshot.documentBanners[docPath],
+                        "and the failure is disclosed above the canvas, alongside the dot")
+
+        // The two consumers that read the flag raw — the doors that used to discard the buffer.
+        XCTAssertEqual(officeDirtyFilePaths(runtimeStates: [runtime.stateSnapshot]), [docPath],
+                       "the QUIT gate must name this document — it did not, before C1")
+        XCTAssertFalse(officeRuntimeReleasedOnDeparture(
+                        dirtyDocuments: runtime.stateSnapshot.documents.values.filter(\.dirty).count),
+                       "and a SESSION HOP must retain the runtime rather than tear it down — merely "
+                       + "hopping sessions discarded the buffer, before C1")
+
+        // The retry: with the directory writable again the same buffer places for real, and the
+        // app-held flag is released by the one arm allowed to release it.
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scratchDir.path)
+        let retry = await runtime.saveAndAwaitOutcome(docPath)
+        XCTAssertEqual(retry, .saved, "the retry must land once the place can succeed")
+        XCTAssertNotEqual(officeFileStat(atPath: docPath), beforeFailedSave, "the retry really wrote the file")
+        XCTAssertEqual(runtime.stateSnapshot.documents[docPath]?.dirty, false,
+                       "and the dot clears — LOK has considered this document clean since the FIRST "
+                       + "saveAs and will never fire a second modified=false, so .saveSucceeded's own "
+                       + "direct clear is the ONLY thing that can unstick it")
+        XCTAssertNil(runtime.stateSnapshot.documentBanners[docPath], "the failure banner goes with the failure")
+
+        runtime.close(docPath)
+    }
+
     /// Office Stage B Task 5 — **the raw-wire probe for the IME mark/commit/cancel mechanism,
     /// BEFORE `NSTextInputClient` exists at all** (that is Stage 4b of this task — see
     /// `OfficeTileCanvasView`'s own header once it lands). Drives `OfficeHelperClient

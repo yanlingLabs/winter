@@ -365,6 +365,124 @@ final class OfficeRuntimeReducerTests: XCTestCase {
         XCTAssertEqual(effects, [])
     }
 
+    // MARK: - Whole-branch review C1: a failed save leaves the document DIRTY
+    //
+    // The seam no single-task reviewer could see. LOK clears `ModifiedStatus` helper-side the
+    // instant the helper's OWN `saveAs` completes — BEFORE `performSave`'s `placeAtomically` runs on
+    // the app side (`saveAndAwaitOutcome`'s own header states the mechanism). So by the time a place
+    // failure reaches `.saveFailed`, `dirty` has ALREADY been driven false by a genuine
+    // `.modifiedStatusChanged(false)`, while the buffer differs from disk. T3 closed this for the
+    // close-sheet door it owned (`saveAndAwaitOutcome` resolves authoritatively inside `performSave`
+    // rather than watching `dirty`) — but the quit gate (`officeDirtyFilePaths`) and the session
+    // departure (`releaseOfficeRuntimeIfClean`) both read the flag raw, so the state itself has to be
+    // right. The rows below drive the real interleavings; `openedSavedCleanThenSaveFailed` reproduces
+    // the exact ordering rather than asserting against a hand-built entry.
+
+    /// The C1 fixture — the REAL ordering, not a shortcut: open, type (LOK fires `modified=true`),
+    /// the helper's own `saveAs` completes and LOK fires `modified=false`, and only THEN the app's
+    /// `placeAtomically` fails and `.saveFailed` lands.
+    private func openedSavedCleanThenSaveFailed(path: String = "/a.xlsx", docId: String = "doc-a",
+                                                reason: String = "disk full") -> OfficeRuntimeState {
+        let dirty = openedAndDirty(path: path, docId: docId)
+        let (lokWentClean, _) = reduce(dirty, [.modifiedStatusChanged(docId: docId, modified: false)])
+        XCTAssertEqual(lokWentClean.documents[path]?.dirty, false,
+                       "fixture precondition: LOK's helper-side ModifiedStatus clear lands BEFORE the "
+                       + "place — this false is exactly what makes C1 a silent-loss bug")
+        return reduce(lokWentClean, [.saveFailed(path: path, docId: docId, reason: reason)]).0
+    }
+
+    func testSaveFailedRestoresDirtyBecauseTheBufferGenuinelyDiffersFromDisk() {
+        let state = openedSavedCleanThenSaveFailed()
+        XCTAssertEqual(state.documents["/a.xlsx"]?.dirty, true,
+                       "the place never landed, so the buffer differs from disk — this is the honest "
+                       + "state, not a workaround")
+        XCTAssertEqual(state.documents["/a.xlsx"]?.saveFailedPendingSave, true,
+                       "app-held, because LOK will never re-fire modified=true on its own")
+    }
+
+    /// **The straggler row.** LOK's own `modified=false` for the save that failed can land AFTER
+    /// `.saveFailed` (two independent round trips: the callback comes over the document-event
+    /// channel, the failure from `performSave`'s own `catch`). Without the hold, that late event
+    /// re-clears `dirty` and reopens the hole a beat later.
+    func testALateModifiedStatusFalseAfterAFailedSaveDoesNotClearDirty() {
+        let dirty = openedAndDirty(path: "/a.xlsx", docId: "doc-a")
+        let (failed, _) = reduce(dirty, [.saveFailed(path: "/a.xlsx", docId: "doc-a", reason: "disk full")])
+        XCTAssertEqual(failed.documents["/a.xlsx"]?.dirty, true, "sanity")
+
+        let (state, _) = reduce(failed, [.modifiedStatusChanged(docId: "doc-a", modified: false)])
+        XCTAssertEqual(state.documents["/a.xlsx"]?.dirty, true,
+                       "LOK's \"clean\" here means \"matches the save that never reached disk\" — only "
+                       + "a successful place may clear this dot")
+        XCTAssertEqual(state.documents["/a.xlsx"]?.saveFailedPendingSave, true, "still held")
+    }
+
+    /// Typing on after a failed save: `dirty` was already true, and the hold must NOT be released by
+    /// LOK agreeing with it — only a save that actually lands resolves it.
+    func testModifiedStatusTrueAfterAFailedSaveKeepsBothDirtyAndTheHold() {
+        let failed = openedSavedCleanThenSaveFailed()
+        let (state, _) = reduce(failed, [.modifiedStatusChanged(docId: "doc-a", modified: true)])
+        XCTAssertEqual(state.documents["/a.xlsx"]?.dirty, true)
+        XCTAssertEqual(state.documents["/a.xlsx"]?.saveFailedPendingSave, true)
+    }
+
+    /// **The retry.** LOK's `ModifiedStatus` is already `false` from the FIRST save's own helper-side
+    /// clear, and STATE_CHANGED fires on transitions — so a successful retry produces no second
+    /// `modified=false` callback. `.saveSucceeded` therefore has to clear the dot directly, exactly
+    /// the treatment `restoredPendingSave` already gets.
+    func testASuccessfulRetryAfterAFailedSaveClearsDirtyAndTheHold() {
+        let failed = openedSavedCleanThenSaveFailed()
+        let (state, effects) = reduce(failed, [.saveSucceeded(path: "/a.xlsx", docId: "doc-a")])
+        XCTAssertEqual(state.documents["/a.xlsx"]?.dirty, false,
+                       "the bytes are on disk now — and no LOK transition is coming to say so")
+        XCTAssertEqual(state.documents["/a.xlsx"]?.saveFailedPendingSave, false)
+        XCTAssertNil(state.documentBanners["/a.xlsx"], "the failure banner goes with the failure")
+        XCTAssertEqual(effects, [.clearAutosave(path: "/a.xlsx", docId: "doc-a", alsoClearManifestOwner: true)])
+    }
+
+    /// A reload/re-stage mints a fresh `DocumentEntry` — the hold must not survive into a document
+    /// whose buffer came straight off disk.
+    func testAReloadAfterAFailedSaveStartsCleanWithNoHold() {
+        let failed = openedSavedCleanThenSaveFailed()
+        let (state, _) = reduce(failed, [.opened(path: "/a.xlsx", docId: "doc-new", stagedPath: "/staged/doc-new",
+                                                 metadata: metadata, pathGeneration: 0)])
+        XCTAssertEqual(state.documents["/a.xlsx"]?.dirty, false)
+        XCTAssertEqual(state.documents["/a.xlsx"]?.saveFailedPendingSave, false)
+    }
+
+    /// **Every write to `dirty` is masked, no exceptions** — T9's F3 posture, applied to this new
+    /// writer too. Unreachable through any shipped door (`save(_:)`/`saveAndAwaitOutcome` both refuse
+    /// a read-only-format path before a `.save` effect can exist), so this is defense-in-depth in the
+    /// same shape `.modifiedStatusChanged`'s own mask already takes.
+    func testSaveFailedForAReadOnlyFormatPathLeavesDirtyFalse() {
+        let open = readyWithOpenDocument(path: "/a.xlsm", docId: "doc-a")
+        let (state, _) = reduce(open, [.saveFailed(path: "/a.xlsm", docId: "doc-a", reason: "disk full")])
+        XCTAssertEqual(state.documents["/a.xlsm"]?.dirty, false)
+        XCTAssertEqual(state.documents["/a.xlsm"]?.saveFailedPendingSave, false)
+    }
+
+    /// **C1's three consumers of the flag, driven off the real post-failure state.** Two of them
+    /// read it raw and are the doors that discarded the buffer silently: the quit gate did not name
+    /// the document, and a mere session hop tore the runtime down. The third is the dirty-close
+    /// sheet's own predicate — T3 made the sheet's SAVE arm authoritative, but whether the sheet
+    /// FIRES at all is still this masked read of `dirty`, so before C1 a second click on × after a
+    /// failed save closed the tab with no prompt. All three inherit the fix for free, which is the
+    /// whole argument for fixing the state rather than each consumer — pinned here so a regression
+    /// in the reducer arm is caught at the level a user actually feels it.
+    func testAFailedSaveIsNamedByTheQuitGateFiresTheCloseSheetAndRetainsTheRuntimeAcrossASessionHop() {
+        let state = openedSavedCleanThenSaveFailed()
+        XCTAssertEqual(officeDirtyFilePaths(runtimeStates: [state]), ["/a.xlsx"],
+                       "the quit gate must name a document whose save never reached disk")
+
+        XCTAssertTrue(officeDocumentIsDirty(state: state, path: "/a.xlsx"),
+                      "and the dirty-close sheet must fire for it — this predicate is what decides "
+                      + "whether the tab even asks before closing")
+
+        let dirtyCount = state.documents.values.filter(\.dirty).count
+        XCTAssertFalse(officeRuntimeReleasedOnDeparture(dirtyDocuments: dirtyCount),
+                       "a session hop must RETAIN this runtime — releasing it discards the buffer "
+                       + "with no prompt at all")
+    }
+
     func testModifiedStatusChangedTrueSetsDirtyOnTheMatchingDocumentFoundByDocId() {
         let open = readyWithOpenDocument(path: "/a.xlsx", docId: "doc-a")
         let (state, effects) = reduce(open, [.modifiedStatusChanged(docId: "doc-a", modified: true)])
