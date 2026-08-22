@@ -177,18 +177,28 @@ struct OfficeRuntimeState: Equatable {
         /// nothing else" doctrine, and the reason that doctrine's own header above says "two", not
         /// "one".** Set `true` in the same beat `.saveFailed` forces `dirty = true`.
         ///
-        /// Why it has to exist rather than just writing `dirty` once: LOK's `ModifiedStatus=false`
-        /// fires helper-side the instant the helper's OWN `saveAs` completes — *before*
-        /// `performSave`'s `placeAtomically` ever runs on this side (`saveAndAwaitOutcome`'s own
-        /// header states the mechanism at length). So a save that fails at the PLACE step has
-        /// already driven `dirty` false through a perfectly genuine `.modifiedStatusChanged(false)`,
-        /// while the buffer differs from disk. Restoring `dirty` alone would not hold: (1) that same
-        /// `modified=false` can arrive AFTER `.saveFailed` (two independent round trips — the
-        /// callback over the document-event channel, the failure out of `performSave`'s own `catch`)
-        /// and would re-clear it a beat later; and (2) LOK will never re-fire `modified=true` on its
-        /// own, and a successful RETRY produces no second `modified=false` either (STATE_CHANGED
-        /// fires on transitions, and LOK has considered this document clean since the first
-        /// `saveAs`) — so nothing but `.saveSucceeded` can ever honestly clear the dot again.
+        /// Why it has to exist rather than just writing `dirty` once. The helper's OWN `saveAs`
+        /// completing clears LOK's `ModifiedStatus` — a save that fails at the PLACE step therefore
+        /// has its `dirty` driven false by a perfectly genuine `.modifiedStatusChanged(false)`,
+        /// while the buffer differs from disk (`saveAndAwaitOutcome`'s own header states the
+        /// mechanism at length). Restoring `dirty` in `.saveFailed` alone would not hold, for two
+        /// reasons, both MEASURED rather than reasoned — each by deleting the corresponding arm and
+        /// re-running the live drill (`OfficeRuntimeLiveTests.testASaveThatFailsAtThePlaceStepLeaves
+        /// TheDocumentDirtyAndBothQuitGatesSeeIt`):
+        ///
+        /// 1. **That `modified=false` reaches the APP after `.saveFailed`, not before it.** The
+        ///    helper-side clear is early, but its delivery is a separate, later round trip (the
+        ///    `.uno:Save` follow-up is posted fire-and-forget), while the failure comes straight out
+        ///    of `performSave`'s own `catch`. Measured: with only `.saveFailed`'s restore in place
+        ///    and this hold absent, the drill watches the document go clean again a beat later —
+        ///    under a second after the failed save. So the `false` direction must be held, not just
+        ///    overwritten once.
+        /// 2. **Nothing will ever clear the dot again on LOK's own.** It will not re-fire
+        ///    `modified=true` (nothing re-modifies the buffer), and a successful RETRY produces no
+        ///    second `modified=false` either — `STATE_CHANGED` is transition-driven and LOK has
+        ///    considered the document clean since the first `saveAs`. Measured too: with
+        ///    `.saveSucceeded`'s direct clear deleted, the drill's retry leg lands the bytes on disk
+        ///    for real and the dot stays stuck `true`. So `.saveSucceeded` must clear this directly.
         ///
         /// So while this is set: `.modifiedStatusChanged(false)` may NOT clear `dirty` (LOK's
         /// "clean" means "matches the save that never reached disk"), and `.saveSucceeded` clears
@@ -1051,8 +1061,8 @@ enum OfficeRuntimeReducer {
             // the two existing masked predicates become belt rather than the only guard. Only the
             // assignment is gated, not an early return — the recovery-offer clear below stays
             // unconditional on `modified` (harmless for a read-only path: no candidate can exist
-            // there in the first place, per the autosave chain's own two-layer fail-closed walk —
-            // `saveAsSidecar` throws `unsupportedFormat` before any manifest is ever written).
+            // there in the first place — see the two mechanisms below, which are NOT the same one
+            // for all three read-only extensions).
             //
             // **Precisely which writers, since F3's original wording said "this single writer" and
             // that was already imprecise then** (whole-branch review sweep). `dirty` has THREE
@@ -1061,10 +1071,20 @@ enum OfficeRuntimeReducer {
             //   * `.saveFailed` (whole-branch review C1) — mask-gated identically;
             //   * `.recoveryRestored` — forces `true` and is NOT mask-gated. Safe for a different
             //     reason, which is worth stating rather than leaving to be re-derived: a read-only
-            //     path can never reach it at all, because a recovery candidate can never exist for
-            //     one (the same two-layer fail-closed autosave walk cited above). It is
-            //     reachability-guarded, not mask-guarded — so if a future change ever gives a
-            //     read-only format a sidecar, that arm needs the mask too.
+            //     path can never reach it at all, because no recovery candidate can ever exist for
+            //     one. **Two different mechanisms deliver that, and the distinction is new** (review
+            //     I2 put `docx` in the read-only set):
+            //       - `xlsm`/`odg` — `OfficeSaveFormat` has no case, so `saveAsSidecar` throws
+            //         `unsupportedFormat` before any sidecar or manifest is ever written.
+            //       - `docx` — that guard does NOT apply (it has a case, and an ODF autosave
+            //         fallback that would happily write). What holds instead is one step earlier:
+            //         this file's own input-verb gates mean no keystroke ever reaches LOK for a
+            //         docx, so LOK never fires `modified=true`, so the helper's autosave scheduler
+            //         never arms for it (`OfficeHelperServer.routeDocumentEvent` — `markDirty` runs
+            //         only on that firing). No timer, no sidecar, no manifest, no candidate.
+            //     So this arm is reachability-guarded, not mask-guarded — and the reachability
+            //     argument now has a docx-shaped leg that a future change could break without
+            //     touching `OfficeSaveFormat` at all. Give it the mask if that ever happens.
             // `.saveSucceeded` also touches `dirty`, but only to CLEAR it, and only for the two
             // app-held flags — clearing needs no mask.
             //

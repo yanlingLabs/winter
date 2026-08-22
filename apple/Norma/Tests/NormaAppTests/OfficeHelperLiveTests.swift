@@ -517,8 +517,9 @@ final class OfficeHelperLiveTests: XCTestCase {
         // lenient content-detection fallback as plain TEXT documents. That is a MORE surprising
         // result now the provenance is stated correctly, not a less surprising one — and the reason
         // to still read it as the fallback rather than as working importers is the part counts,
-        // which the assertions below pin: 135 parts for a genuine one-slide-shaped .ppt is not a
-        // presentation being imported (a real one reports .presentation, not .text), and 9 parts
+        // which the assertions below pin: 135 parts for a .ppt exported from a single-slide gate.odp
+        // is not a presentation being imported (and a real one would report .presentation, not
+        // .text, which is the stronger half of this leg's evidence), and 9 parts
         // for a .doc whose entire body is two short sentences is consistent with LOK paginating the
         // raw 19KB container as text rather than parsing the Word streams.
         //

@@ -2304,10 +2304,14 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// `rename(2)` needs only directory write permission, and T2b separately proved 0444 documents
     /// round-trip cleanly. `defer` restores the mode so the scratch tree is always removable.
     ///
-    /// The retry leg matters as much as the failure leg: LOK has considered this document clean since
-    /// the FIRST `saveAs`, and `STATE_CHANGED` fires on transitions, so a successful retry produces no
-    /// second `modified=false` callback at all. Without `.saveSucceeded` clearing the app-held flag
-    /// directly, the dot would strand `true` forever after any failed save.
+    /// The retry leg matters as much as the failure leg, and it is this drill that MEASURES the claim
+    /// behind it rather than reasoning to it: LOK produces no second `modified=false` for a
+    /// successful retry (`STATE_CHANGED` is transition-driven, and it has considered the document
+    /// clean since the first `saveAs`). Deleting `.saveSucceeded`'s own direct clear and re-running
+    /// reddens exactly the retry assertion below — the bytes land on disk for real and the dot stays
+    /// stuck `true` — so without that arm the dot would strand forever after any failed save. Both
+    /// C1 arms are deletion-red-proven by this one drill; `saveFailedPendingSave`'s own header pairs
+    /// them up.
     func testASaveThatFailsAtThePlaceStepLeavesTheDocumentDirtyAndBothQuitGatesSeeIt() async throws {
         let helperURL = Bundle.main.bundleURL.deletingLastPathComponent()
             .appendingPathComponent("NormaOfficeHelper")
