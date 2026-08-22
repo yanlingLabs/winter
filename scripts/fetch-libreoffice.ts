@@ -85,19 +85,36 @@ import { ROOT } from "./version-lib";
 // RE-CUT (2026-08-19): the original vendor-libreoffice-20260818 release was DELETED after a
 // privacy leak was found by measurement in its product-set (builder account name plaintext in
 // 8/66 dylibs' compiled-in build paths, plus Resources/versionrc and Resources/registry/main.xcd's
-// vendor fields) -- see this replacement release's own page for the scrub applied and the
-// zero-hit re-scan proof. This -r2 asset is a straight re-cut from the same pinned commit/flags,
+// vendor fields) -- see that replacement release's own page for the scrub applied and the
+// zero-hit re-scan proof. The -r2 asset was a straight re-cut from the same pinned commit/flags,
 // nothing else about the engine changed (six-fixture pixel hashes are identical to the original).
+//
+// RE-CUT (2026-08-22, Office Stage B Task 11): -r3 adds ONE dylib on top of -r2's own product-set
+// (from the same instdir, no rebuild) -- `libsal_textenclo.dylib`, absent from -r2's 66-dylib
+// closure because it is reached only via a runtime `dlopen` on the xlsx export path (never a
+// link-time dependency the closure recipe's trace+otool safety net could see). Fixes the crash on
+// `saveAs` to `.xlsx` (SIGABRT in sal's text-encoding subsystem, `abort()`-ing when the lazy
+// dlopen fails); see .superpowers/sdd/2026-08-20-office-editable/ooxml-export-investigation.md
+// and this release's own VERSION-PIN R3 ADDENDUM for the full mechanism, the empirical proof, and
+// the honest per-format result (`.pptx` already worked and is unaffected; `.docx` still does not
+// save, but via a different, non-crashing engine defect unrelated to this fix). -r3 also fixes a
+// privacy gap -r2 did NOT have: -r2's tarball container itself (not its file contents) recorded
+// the packaging account's username/group in every entry's tar header (bsdtar's default owner
+// recording) -- confirmed by measurement against the live, cold-downloaded -r2 asset. -r3's tar is
+// built with explicit owner/group suppression and re-scanned uncompressed before upload. The live
+// -r2 asset was left published, unmodified (a GitHub release asset is maintainer-replaceable at
+// the same URL -- re-publishing scrubbed bytes under the same name is exactly the silent-swap
+// hazard the ASSET_URL comment below warns about); flagged on both release pages as an open item.
 const GH_REPO = "yanlingLabs/norma";
-const RELEASE_TAG = "vendor-libreoffice-20260819";
-const ASSET_NAME = "libreoffice-headless-macos-arm64-11482c8f-r2.tar.zst";
+const RELEASE_TAG = "vendor-libreoffice-20260822";
+const ASSET_NAME = "libreoffice-headless-macos-arm64-11482c8f-r3.tar.zst";
 const ASSET_URL = buildAssetUrl({ repo: GH_REPO, tag: RELEASE_TAG, assetName: ASSET_NAME });
 // Hand-pinned at package time from an independent `shasum -a 256` of the actual uploaded file,
 // then re-verified against a fresh public download before being transcribed here (see the
-// release notes at https://github.com/yanlingLabs/norma/releases/tag/vendor-libreoffice-20260819
+// release notes at https://github.com/yanlingLabs/norma/releases/tag/vendor-libreoffice-20260822
 // for that verification run). See header comment for why this single pin (not a belt-and-braces
 // live check) is nonetheless load-bearing here.
-const PINNED_SHA256 = "38cc143c1b689a273f38d031a1eb0ecadf1a43d241e1d62b6ebe4bc6d80dcb39";
+const PINNED_SHA256 = "02e73e7e3caab598d0e47cb40ce835920e9ebc78eff5a01aafd4cf3bccd13945";
 if (!isValidSha256Hex(PINNED_SHA256)) {
   throw new Error(`PINNED_SHA256 is not a well-formed 64-char lowercase hex string: ${PINNED_SHA256}`);
 }

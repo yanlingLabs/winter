@@ -378,6 +378,76 @@ assertSigned(
   join(app, "Contents", "Resources", "LibreOffice", "Frameworks", "libmergedlo.dylib"),
   "LibreOffice (libmergedlo.dylib, team-ID probe only)",
 );
+// office-editable Task 1's dispatch note, discharged here: the helper's own sandbox profile,
+// verified as its own pin — the release blocker's enforcement point. `office-helper.sb` is a bare
+// SBPL text file, never a Mach-O (assertSigned's TeamIdentifier/Timestamp probe does not apply to
+// it), embedded by project.yml's "Embed NormaOfficeHelper" postCompileScript at
+// Contents/Resources/office-helper.sb — a SIBLING of Contents/Resources/LibreOffice, never inside
+// NormaOfficeHelper's own bundle (it is a bare `type: tool` product with no Resources directory of
+// its own). This is the EXACT path `main.swift`'s `resolveSandboxProfilePath()` reads by default —
+// the only resolution production ever takes (no `--sandbox-profile` override outside DEBUG) — and
+// the helper is fail-closed on a missing/unreadable profile (that file's own `fail(...)` call at
+// boot, verified live by `OfficeSandboxTests.testHelperRefusesToBootWhenSandboxProfileIsMissing`):
+// a release that ships without it does not ship a less-safe office feature, it ships NO office
+// feature at all, silently, since the helper refuses to serve any document. Three things a release
+// must be able to trust here, all asserted:
+//   1. PRESENT — existsSync, deliberately NOT folded into assertSigned's own check above: codesign
+//      --verify --deep --strict (already run, unconditionally, earlier in this section) validates
+//      that everything the signed manifest RECORDS matches its hash — it has no opinion about a
+//      file that was simply never embedded in the first place (an absent postCompileScript step
+//      leaves no trace in that manifest to fail against), which is exactly the failure mode this
+//      existence check exists to catch and that check cannot.
+//   2. UNMODIFIED SINCE SIGNING — already covered: the same "codesign --verify --deep --strict" a
+//      few lines above this walks the FULL Resources tree (this file included, once present)
+//      against the signed manifest's own recorded hashes and would already have failed this script
+//      closed had that check found office-helper.sb tampered or corrupted since it was embedded —
+//      re-running it here would only repeat an identical, already-passed check at real pipeline
+//      cost, not add coverage.
+//   3. VERBATIM — M4 (whole-branch review, fix round 2; tightened fix round 3, F3): (1) and (2)
+//      both prove things RELATIVE TO WHAT WAS SIGNED — neither has any opinion on whether the
+//      embedded copy equals the repository source at apple/Norma/Sources/OfficeHelper/office-helper
+//      .sb. A stale project.yml build-phase reference (e.g. a cached copy, or a bad merge that left
+//      a weaker profile on disk pre-embed) would copy happily, sign happily, and pass both checks
+//      above while shipping a materially weaker sandbox. Fix round 2's own first cut here checked
+//      only two substrings, `(deny default)`/`(deny network*)` — F3 (fix round 3) found that check
+//      satisfiable by COMMENT text: this very file's own prose, a few paragraphs up, literally
+//      contains the substring `(deny network*)` inside a sentence describing a THEORETICAL risk, not
+//      the functional directive — a stale embed that kept that comment but lost or weakened the real
+//      directive elsewhere would still have passed. Replaced with a full BYTE-IDENTITY comparison
+//      against the repo source instead of augmenting the substring list: this subsumes the two
+//      clauses entirely (any drift at all is caught, not just those two specific strings), and the
+//      SOURCE-side content is already covered by `OfficeSandboxTests.
+//      testDenyDefaultAndDenyNetworkArePresentInTheSourceProfile` — this check exists purely to prove
+//      "the embedded copy IS the source," turning "a file exists here" into "the exact file this
+//      repository ships is what's here," not merely "a restrictive-looking file is here."
+const officeSandboxProfile = join(app, "Contents", "Resources", "office-helper.sb");
+if (!existsSync(officeSandboxProfile)) {
+  fail(
+    `office-helper.sb not found at ${officeSandboxProfile} — the office helper's own sandbox profile ` +
+      `was not embedded into this build. resolveSandboxProfilePath() resolves exactly this path by ` +
+      `default in production (no --sandbox-profile override outside DEBUG); NormaOfficeHelper refuses ` +
+      `to boot without it (fail-closed, main.swift). A release built this way does not ship a weaker ` +
+      `office feature — it ships NO office feature: every open silently fails. Check project.yml's ` +
+      `"Embed NormaOfficeHelper" postCompileScript actually ran for this configuration.`,
+  );
+}
+const officeSandboxProfileSourcePath = join(APPLE_DIR, "Sources", "OfficeHelper", "office-helper.sb");
+const officeSandboxProfileEmbedded = readFileSync(officeSandboxProfile);
+const officeSandboxProfileSource = readFileSync(officeSandboxProfileSourcePath);
+if (!officeSandboxProfileEmbedded.equals(officeSandboxProfileSource)) {
+  fail(
+    `office-helper.sb at ${officeSandboxProfile} is NOT byte-identical to the repository source at ` +
+      `${officeSandboxProfileSourcePath} — the EMBEDDED copy's content does not match what this ` +
+      `repository ships. codesign --verify --deep --strict (already run above) only proves this ` +
+      `file is unmodified SINCE SIGNING; it has no opinion on whether the embedded copy equals the ` +
+      `repo source, so a stale build-phase reference to an old/weaker profile would sign and verify ` +
+      `successfully while shipping a containment regression. Check project.yml's "Embed ` +
+      `NormaOfficeHelper" postCompileScript is copying from ${officeSandboxProfileSourcePath}, not a ` +
+      `stale cached copy.`,
+  );
+}
+console.log(`office-helper.sb present at ${officeSandboxProfile}, unmodified since signing ` +
+  `(codesign --verify --deep --strict above), and byte-identical to the repository source.`);
 
 // --- CEF (panel-cef Task 5) -------------------------------------------------
 // The framework, its five dlopen'd dylibs, and the five helper bundles. `--deep --strict` above

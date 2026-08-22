@@ -66,13 +66,23 @@ final class TileRenderer {
     /// BGRA-canonicalized to RGBA in place if `getTileMode()` reported BGRA — the spike's own
     /// proven swap (`spikes/office-lok-gate/main.c`'s in-place R/B exchange), so every payload
     /// this module ever produces is RGBA regardless of what a given LOK build happens to report.
-    /// `nPart` is passed DIRECTLY to `paintPartTile` (never a separate `setPart` call first) —
-    /// deliberately, so interleaved requests for different parts never need to coordinate a shared
-    /// "current part" mutation between them; `nMode` is `LOK_PARTMODE_SLIDES` (0) — Stage A has no
-    /// notes view. `nTilePosX/Y`/`nTileWidth/Height` are twips, truncated to `Int32` defensively
-    /// (`paintPartTile`'s own C signature) — never observed to matter for Stage A's fixtures
-    /// (twips values in the tens of thousands, nowhere near `Int32.max`), but a truncating
-    /// conversion rather than a crashing one costs nothing and avoids a pathological-document trap.
+    /// `nPart` is passed DIRECTLY to `paintPartTile` (never a separate `setPart` call first) — this
+    /// bridge's own wire-level call never coordinates a shared "current part" mutation itself.
+    /// `nMode` is `LOK_PARTMODE_SLIDES` (0) — Stage A has no notes view. `nTilePosX/Y`/
+    /// `nTileWidth/Height` are twips, truncated to `Int32` defensively (`paintPartTile`'s own C
+    /// signature) — never observed to matter for Stage A's fixtures (twips values in the tens of
+    /// thousands, nowhere near `Int32.max`), but a truncating conversion rather than a crashing one
+    /// costs nothing and avoids a pathological-document trap.
+    ///
+    /// **Fix round 2 correction** — an earlier version of the paragraph above claimed this made
+    /// painting immune to a shared-mutation hazard entirely; that overstated it. `paintPartTile`'s
+    /// OWN internal implementation (`desktop/source/lib/init.cxx`'s `doc_paintPartTile`, confirmed by
+    /// reading it) falls back to the SAME `doc_setPartImpl` `setPart` uses when it cannot find an
+    /// existing "alternative view" already at the target part — and that fallback resolves through
+    /// the process-global current view, not this call's own `pThis`. The caller of `paint(key:)`
+    /// (`LOKBridge.paintTileOnDedicatedThread`) is what actually closes this — a `setView` prefix,
+    /// asserting `handle`'s own view current before EVERY paint, not a change here. See that call
+    /// site's own header for the full mechanism and the live drills that found it.
     private func renderRaw(key: TileKey) throws -> Data {
         let size = TileMath.tilePixelSize
         guard let bounds = TileMath.tileBoundsTwips(tileX: key.tileX, tileY: key.tileY, zoomPPT: key.zoomPPT) else {

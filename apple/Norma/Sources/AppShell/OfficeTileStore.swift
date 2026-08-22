@@ -51,14 +51,55 @@ import Foundation
 /// something else independently touches that key: another `invalidate` covering it, LRU pressure
 /// evicting it, or the whole docId being evicted (`evictAll`).
 ///
-/// A full per-key ledger (reject any arrival at or below an invalidated generation, closing even the
-/// one stale frame) was considered and set aside: Stage A never calls `invalidate` at all, so there is
-/// no live call site to justify the extra bookkeeping against yet — this is deliberately the cheaper
-/// half of the review's own either/or. Whenever that ledger is built (Stage B), mind `ingest`'s own
-/// unconditional `inFlight.remove(k)` above: a rejected arrival would still clear the in-flight marker
-/// regardless of whether it is accepted, handing `keysNeedingRequest` a key that reads as immediately
-/// re-askable — `markRequested`'s own header closes this same duplicate-request window on the SEND
-/// side; a naive reject-and-return-false rule here would reopen its receive-side mirror.
+/// **Office Stage B Task 4 — the ledger IS built now: `invalidatedWhileInFlight`, one shot per key.**
+/// The paragraph above used to end "considered and set aside... no live call site to justify it
+/// yet" — Task 4 is that live call site, the first real edit-triggered `invalidate` this store has
+/// ever actually received. The design below is the resolution the paragraph above already warned
+/// any future ledger would have to reckon with: **`ingest`'s own unconditional `inFlight.remove(k)`
+/// is what a naive reject-and-return-false rule would have reopened.**
+///
+/// The mechanism: `invalidate`, on a key that IS currently in flight, does two things — evicts the
+/// cached entry (unchanged) and marks the key `invalidatedWhileInFlight`, but does **NOT** clear
+/// `inFlight` for it. `keysNeedingRequest` therefore still reads the key as "already asked for" —
+/// a SECOND request is refused, not merely discouraged — for as long as the one outstanding request
+/// remains unresolved. `ingest` checks `invalidatedWhileInFlight` FIRST, before its generation
+/// check: if the key is marked, this arrival is rejected outright (not cached, `false` returned),
+/// the one-shot marker is consumed (removed), and — only now — `inFlight` is cleared too, letting
+/// the NEXT ask through. `markFailed` (the request resolves via `.tileFailed` instead of `.tile`)
+/// clears the SAME marker for the SAME reason: either resolution consumes the one-shot state.
+///
+/// **This is NOT the pre-T8 bug returning under a new name — the two are opposite in exactly the
+/// way that matters.** The pre-T8 bug left `inFlight` set by OMISSION, forever, with nothing in
+/// this store ever scheduled to clear it — a genuine permanent wedge. Task 4's design leaves
+/// `inFlight` set DELIBERATELY, for the bounded window until the one already-in-flight request
+/// resolves (typically milliseconds — see the liveness argument below), at which point `ingest`/
+/// `markFailed` clear it unconditionally as part of normal resolution handling, the same call
+/// shape every other key's resolution already goes through. Same OBSERVABLE state for a few
+/// milliseconds; categorically different GUARANTEE.
+///
+/// **Why NOT clear `inFlight` immediately at invalidate time (the obvious-looking alternative, and
+/// this type's own prior behavior)**: it reopens exactly the duplicate-request ambiguity this
+/// header already named as the risk. If a second request for the SAME key were allowed to go out
+/// before the first (now-stale) one resolves, this store would have TWO logically distinct replies
+/// converging on ONE `Key` with no request-id to tell them apart. Whichever arrives FIRST cannot be
+/// told "stale" from "fresh" by inspection alone — a naive one-shot-reject-the-next-arrival rule
+/// would, in the ordering where the FRESH reply lands first, reject the correct pixels and then
+/// accept the actually-stale ones right after: worse than doing nothing. Blocking re-asks until the
+/// one guaranteed resolution lands (refuse-never-ignore, per key, is the wire's own contract) keeps
+/// exactly one reply in flight per key at all times, so "the next arrival" is never ambiguous about
+/// which request it answers.
+///
+/// **The liveness argument — this does not reintroduce a permanent wedge.** The paragraph two above
+/// this one already worried about that shape (the pre-T8 bug this store's own history opens with).
+/// Three independent guarantees close it here: (1) refuse-never-ignore means a genuinely-sent
+/// request gets EXACTLY ONE of `onTile`/`onTileFailed`, so the one-shot marker's consuming
+/// resolution is always coming, typically within milliseconds (this store's own prior-paragraph
+/// observation about the DEFAULT ordering, unchanged); (2) `markFailed` clears the marker exactly
+/// like `ingest`'s rejection path does, so a failed (not merely stale) resolution still unblocks
+/// the key; (3) `evictAll`/`evictEverything` (the connection-died/document-closed safety nets
+/// `keysNeedingRequest`'s own header already leans on for the identical reason) sweep
+/// `invalidatedWhileInFlight` alongside `inFlight` — a request that will NEVER resolve because its
+/// whole connection died cannot leave a key wedged either.
 ///
 /// The RELOAD path's own version of "a reply arrives for something this store has moved on from" is
 /// closed differently, and completely, by construction rather than by a ledger: a reload always mints
@@ -130,6 +171,12 @@ final class OfficeTileStore {
     /// key), and swept wholesale by `evictAll`/`evictEverything` for the cases where an outcome can
     /// no longer be trusted to arrive at all (a closed document, a dead helper — see their own doc).
     private var inFlight: Set<Key> = []
+    /// Office Stage B Task 4 — the one-shot rejection set: a key currently in `inFlight` that a
+    /// real `invalidate` ALSO touched. See this type's own header for the full mechanism and why
+    /// this deliberately does NOT clear `inFlight` for the key it names — `ingest`/`markFailed` are
+    /// the only two places that ever remove an entry, each consuming it as part of resolving the
+    /// one outstanding request the marker exists to distrust.
+    private var invalidatedWhileInFlight: Set<Key> = []
 
     /// Coalesced arrival signal — accumulated per `docId` between run-loop turns and flushed once,
     /// mirroring `EditorViewportHostView.applyAfterUpdate`'s own `DispatchQueue.main.async` +
@@ -170,6 +217,9 @@ final class OfficeTileStore {
     var cachedCountForTesting: Int { entries.count }
     var inFlightCountForTesting: Int { inFlight.count }
     var lruOrderForTesting: [Key] { lruOrder }
+    /// Office Stage B Task 4 — test/debug visibility only, mirrors `inFlightCountForTesting`'s own
+    /// posture for the new one-shot set.
+    var invalidatedWhileInFlightCountForTesting: Int { invalidatedWhileInFlight.count }
 
     // MARK: - Writes
 
@@ -193,13 +243,37 @@ final class OfficeTileStore {
         for key in keys { inFlight.insert(Key(docId: docId, tileKey: key)) }
     }
 
-    /// A tile's pixels arrived (`OfficeHelperClient.onTile`). `false`, and nothing recorded, when
-    /// `generation` is STALE — strictly less than an already-cached entry's own — which the wire's
-    /// single ordered connection should never actually produce (see this type's own header), but
-    /// costs nothing to guard: never let an out-of-order arrival regress what is on screen.
+    /// A tile's pixels arrived (`OfficeHelperClient.onTile`). Office Stage B Task 4 — checks the
+    /// one-shot `invalidatedWhileInFlight` marker FIRST, before the (unchanged) generation check:
+    /// if this key was invalidated while THIS reply was still outstanding, the arrival is a known-
+    /// stale frame — rejected outright (`false`, not cached), the marker consumed, and `inFlight`
+    /// cleared as part of the SAME resolution (see this type's own header for why `inFlight`
+    /// deliberately stayed set until exactly this moment). `false` also, unchanged from before this
+    /// task, when `generation` is STALE relative to an already-cached entry — the wire's single
+    /// ordered connection should never actually produce that shape (see this type's own header),
+    /// but costs nothing to guard: never let an out-of-order arrival regress what is on screen.
+    ///
+    /// **Fix round 1, F1 (CRITICAL — a real bug, found by review, not hardening): the marker-
+    /// consumption branch used to return `false` WITHOUT calling `markDirty`.** Clearing `inFlight`
+    /// makes the key askable again (`keysNeedingRequest` would include it), but nothing downstream
+    /// ever LEARNS that — no `tilesArrived` signal fires, so `OfficeTileCanvasView.handleTilesArrived`
+    /// never runs again for this key, so `OfficeRuntime.refetchInvalidatedTiles` is never called to
+    /// actually re-ask. On a static viewport (typing) the key is left "not cached, not in flight, but
+    /// nobody is asking" — permanently, until an unrelated scroll/zoom/part-switch happens to touch
+    /// it. Near-deterministic under key auto-repeat (~30ms) racing a real paint round trip: keystroke
+    /// N's invalidate fires while keystroke N-1's own re-fetch is still outstanding, marking THAT
+    /// reply stale; when it lands, this branch used to go quiet instead of asking again. Fixed by
+    /// signaling `markDirty` HERE — the caller's own `handleTilesArrived` re-fetch loop is what
+    /// actually issues the next ask; this store only needs to say "something about this key changed
+    /// again," the same shape `invalidate` itself already uses for the identical purpose.
     @discardableResult
     func ingest(docId: String, key: TileKey, generation: Int, pixels: Data) -> Bool {
         let k = Key(docId: docId, tileKey: key)
+        if invalidatedWhileInFlight.remove(k) != nil {
+            inFlight.remove(k)
+            markDirty(docId: docId, key: key)
+            return false
+        }
         inFlight.remove(k)
         if let existing = entries[k], existing.generation > generation { return false }
         entries[k] = Entry(generation: generation, pixels: pixels)
@@ -210,27 +284,50 @@ final class OfficeTileStore {
     }
 
     /// A tile request came back refused (`OfficeHelperClient.onTileFailed`) — nothing to cache, but
-    /// the key is resolved and must stop blocking a future request for it.
+    /// the key is resolved and must stop blocking a future request for it. Office Stage B Task 4:
+    /// also consumes `invalidatedWhileInFlight` for the SAME reason `ingest`'s rejection path does
+    /// — a failed resolution is still A resolution, and must unblock the key exactly as a
+    /// successful-but-rejected one does.
+    ///
+    /// **Fix round 1, F1 — signals `markDirty`, but ONLY when a marker was actually consumed.** The
+    /// SAME gap `ingest`'s rejection branch had (see that method's own doc): clearing `inFlight`
+    /// alone does not tell anything to re-ask. But this must NOT signal unconditionally on every
+    /// ordinary failure — an ordinary `.tileFailed` (a bad key, a transient LOK error, nothing to do
+    /// with an invalidation racing it) is not a case where a fresh, DIFFERENT pixel state is known to
+    /// be waiting; signaling every time would build a request storm on a key that keeps failing for
+    /// its own, unrelated reason (ask, fail, signal, ask again, fail again, ...), which is exactly
+    /// the corner this store's own `keysNeedingRequest` throttle-tick reasoning warns against
+    /// elsewhere. Gated on `wasMarked` — the SAME condition that makes `ingest`'s rejection branch
+    /// fire — because that is the one case where THIS store itself knows something changed (an
+    /// invalidation) independent of the failure, and owes a re-ask; an ordinary failure with no
+    /// marker owes nothing beyond unblocking the key for whatever asks next on its own terms
+    /// (a scroll, a zoom, a retry).
     func markFailed(docId: String, key: TileKey) {
-        inFlight.remove(Key(docId: docId, tileKey: key))
+        let k = Key(docId: docId, tileKey: key)
+        let wasMarked = invalidatedWhileInFlight.remove(k) != nil
+        inFlight.remove(k)
+        if wasMarked { markDirty(docId: docId, key: key) }
     }
 
     /// Server-pushed invalidation (`OfficeHelperClient.onInvalidated`) — evict the matching entries
     /// (their pixels are stale; the canvas returns to the placeholder tone until a fresh paint
-    /// arrives) and signal the change. Stage A never actually fires this (T4/T5.5's own honest null —
-    /// no edit verbs exist yet) but the store implements it faithfully rather than leaving it as a
-    /// TODO, since Stage B's first live edit needs exactly this behavior already proven.
+    /// arrives) and signal the change. First fires for real in Office Stage B Task 4 (a genuine
+    /// edit-triggered `INVALIDATE_TILES`) — the store's own header has the full account of what
+    /// changed here versus Stage A's honest, never-exercised implementation.
     func invalidate(docId: String, keys: [TileKey]) {
         var changed: Set<TileKey> = []
         for key in keys {
             let k = Key(docId: docId, tileKey: key)
             let hadEntry = entries.removeValue(forKey: k) != nil
             if hadEntry { lruOrder.removeAll { $0 == k } }
-            // office-plumbing Task 8 (the store header's own correction, above): a key can be
-            // invalidated while a request for it is still outstanding, with NOTHING cached yet
-            // (`hadEntry == false`) — clearing the marker here is what lets the NEXT viewport pass
-            // ask for it again instead of believing, forever, that an ask is still in flight.
-            let wasInFlight = inFlight.remove(k) != nil
+            // Office Stage B Task 4 (this type's own header has the full mechanism and the
+            // liveness argument): a key currently in flight is marked `invalidatedWhileInFlight`
+            // and DELIBERATELY left in `inFlight` — a second, ambiguous request for the same key
+            // must not go out before the one already-outstanding reply resolves. A key that was
+            // NOT in flight (nothing outstanding to distrust) is unaffected by this marker either
+            // way; `changed` below still fires for it exactly as it always has, off `hadEntry`.
+            let wasInFlight = inFlight.contains(k)
+            if wasInFlight { invalidatedWhileInFlight.insert(k) }
             if hadEntry || wasInFlight { changed.insert(key) }
         }
         guard !changed.isEmpty else { return }
@@ -246,6 +343,12 @@ final class OfficeTileStore {
         entries = entries.filter { $0.key.docId != docId }
         lruOrder.removeAll { $0.docId == docId }
         inFlight = inFlight.filter { $0.docId != docId }
+        // Office Stage B Task 4 — the identical liveness reasoning `evictEverything`'s own header
+        // states just below: a closed docId's in-flight request will never resolve for THIS store
+        // to observe, so a key it left `invalidatedWhileInFlight` must not stay poisoned forever
+        // against a docId that no longer exists (moot for THIS docId specifically, but a leaked
+        // entry here is still dead weight this sweep already exists to release).
+        invalidatedWhileInFlight = invalidatedWhileInFlight.filter { $0.docId != docId }
         pendingArrivals.removeValue(forKey: docId)
     }
 
@@ -256,11 +359,14 @@ final class OfficeTileStore {
     /// PERMANENT wedge: an in-flight key whose connection just died will never receive its
     /// `onTile`/`onTileFailed` resolution (the guarantee `keysNeedingRequest`'s own header leans on),
     /// so without this sweep that key would sit "in flight" forever and its tile would never be
-    /// re-requested even after a fresh open.
+    /// re-requested even after a fresh open. Office Stage B Task 4 — `invalidatedWhileInFlight` is
+    /// the SAME shape of liveness hazard (a marker whose only clearing path is a resolution that
+    /// can now never arrive) and gets the identical sweep, for the identical reason.
     func evictEverything() {
         entries.removeAll()
         lruOrder.removeAll()
         inFlight.removeAll()
+        invalidatedWhileInFlight.removeAll()
         pendingArrivals.removeAll()
     }
 

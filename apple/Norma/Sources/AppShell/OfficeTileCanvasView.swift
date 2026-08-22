@@ -28,6 +28,19 @@ func officeViewportTwips(scrollOrigin: CGPoint, visibleSize: CGSize, zoomPPT: In
         height: TileMath.pixelsToTwips(heightPixels, zoomPPT: zoomPPT))
 }
 
+/// Office Stage B Task 4 — the INVERSE unit chain from `officeViewportTwips`: a point in this
+/// view's own bounds-space (already flipped top-down, matching document space directly — see
+/// `OfficeTileCanvasView.isFlipped`) -> the document-space twips coordinate `postMouseEvent` wants.
+/// `viewPoint` is offset by `scrollOrigin` FIRST (the view's own content offset), exactly mirroring
+/// `officeViewportTwips`'s own origin handling, before the same points -> 2x-scale-pixels -> twips
+/// conversion every other coordinate in this file already goes through.
+func officePointToTwips(viewPoint: CGPoint, scrollOrigin: CGPoint, zoomPPT: Int) -> (x: Int64, y: Int64) {
+    let documentXPixels = Int(((viewPoint.x + scrollOrigin.x) * officeFixedDeviceScale).rounded())
+    let documentYPixels = Int(((viewPoint.y + scrollOrigin.y) * officeFixedDeviceScale).rounded())
+    return (x: TileMath.pixelsToTwips(documentXPixels, zoomPPT: zoomPPT),
+            y: TileMath.pixelsToTwips(documentYPixels, zoomPPT: zoomPPT))
+}
+
 /// A `TileKey`'s on-screen rectangle, in view-space POINTS — the inverse unit chain of
 /// `officeViewportTwips`. `nil` for a key `TileMath.tileBoundsTwips` itself refuses (a
 /// hostile/invalid key; TileMath never traps, and a key this function cannot place is simply not
@@ -47,6 +60,43 @@ func officeTileScreenRect(key: TileKey, zoomPPT: Int, scrollOrigin: CGPoint) -> 
                  y: CGFloat(originYPixels) / officeFixedDeviceScale - scrollOrigin.y,
                  width: sidePoints, height: sidePoints)
 }
+
+// MARK: - Office Stage B Task 5: caret/selection/cell-cursor overlay geometry
+//
+// The SAME unit chain `officeTileScreenRect` already establishes for a `TileKey`'s bounds, applied
+// to an ARBITRARY twips rect instead — every overlay this task adds (caret, selection, cell-cursor)
+// positions itself through this ONE function, so a tile and the caret sitting on top of it can never
+// visually disagree about where the document's own twips-space maps to view-space points.
+
+/// A twips-space rect -> view-space POINTS, the exact inverse chain `officeTileScreenRect` already
+/// uses for a tile's own bounds (scroll offset, then zoom, then the fixed 2x device-scale pin) —
+/// factored out here because a caret/selection/cell-cursor rect is NOT tile-grid-aligned the way a
+/// `TileKey`'s bounds always are. Total: a degenerate (zero-or-negative width/height) input still
+/// produces a valid (if empty-looking) `CGRect` rather than `nil` — unlike `officeTileScreenRect`,
+/// there is no `TileMath.tileBoundsTwips` sane-bounds refusal in this path, since the input here is
+/// never a hostile wire-decoded tile index, only a LOK-reported rect this app already trusts enough
+/// to have parsed (Task 5's own probe-verified parsers). A caret rect's own `width == 0` (every real
+/// firing observed) is exactly this "degenerate but legitimate" case — a caret is a LINE, not a box,
+/// and must still position and size correctly (as a hairline).
+func officeTwipsRectToScreenRect(_ rectTwips: OfficeTwipsRect, zoomPPT: Int, scrollOrigin: CGPoint) -> CGRect {
+    let originXPixels = TileMath.twipsToPixels(rectTwips.x, zoomPPT: zoomPPT)
+    let originYPixels = TileMath.twipsToPixels(rectTwips.y, zoomPPT: zoomPPT)
+    let widthPixels = TileMath.twipsToPixels(rectTwips.width, zoomPPT: zoomPPT)
+    let heightPixels = TileMath.twipsToPixels(rectTwips.height, zoomPPT: zoomPPT)
+    return CGRect(x: CGFloat(originXPixels) / officeFixedDeviceScale - scrollOrigin.x,
+                 y: CGFloat(originYPixels) / officeFixedDeviceScale - scrollOrigin.y,
+                 width: CGFloat(widthPixels) / officeFixedDeviceScale,
+                 height: CGFloat(heightPixels) / officeFixedDeviceScale)
+}
+
+/// The caret's own rendered width, in POINTS — a real caret rect's `width` is always `0` twips
+/// (every firing this task's own live probe observed), which `officeTwipsRectToScreenRect` alone
+/// would draw as an invisible zero-width box. A fixed 1.5pt hairline, matching the house's own
+/// "visible but not heavy" caret convention (`EditorTheme`'s Monaco cursor is a comparable
+/// thin-line width) — independent of zoom, since a caret's on-screen THICKNESS is a UI affordance,
+/// not a document measurement, the same reasoning `Self.subscribeMarginPoints` already applies to a
+/// UI-space constant elsewhere in this file.
+let officeCaretWidthPoints: CGFloat = 1.5
 
 // MARK: - Pure: the zoom ladder (obligation 9: 50%..400%)
 
@@ -261,7 +311,7 @@ private final class OfficeTileLayer: CALayer {
 ///
 /// **Owns viewport math end to end**, including part switches (`OfficeDocumentCanvasHost
 /// .setActivePart`) — see that protocol's own header for why the model does not.
-final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
+final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost, NSTextInputClient, NSMenuItemValidation {
     private let runtime: OfficeRuntime
     private let path: String
     /// **office-plumbing Task 8 (T6 review F4): mutable, not `let`, as of this task.** A reload
@@ -309,6 +359,52 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
     private var isMounted = false
     private var tilesArrivedSink: AnyCancellable?
     private var tileLayers: [TileKey: CALayer] = [:]
+
+    // MARK: - Office Stage B Task 5: caret/selection/cell-cursor overlays
+    //
+    // Reuses `OfficeTileLayer` directly (the SAME null-action CALayer subclass tile layers already
+    // use, not a second copy of the identical 5 lines) — nothing about that class is tile-specific,
+    // and the "OVERLAYS MUST NEVER ANIMATE" mandate applies with equal force here: a hand-added
+    // sublayer's `hidden`/`opacity`/`backgroundColor`/`borderColor`/`frame` changes (every property
+    // this section's own code below touches) all fall back to bare CALayer's default implicit-action
+    // table once genuinely presented, exactly the mechanism `OfficeTileLayer`'s own header explains.
+
+    /// The blinking text caret — created once in `mount()`, torn down in `unmount()`, repositioned/
+    /// shown/hidden by `layoutOverlays()`. `zPosition = 2` — ABOVE both tiles (default 0, unset) and
+    /// the selection fill (1): a caret minted before a tile that happens to paint later must not be
+    /// silently buried under it (`addSublayer` always appends to the top of z-order at insertion
+    /// time — a tile minted by a later `relayoutVisibleTiles` pass would otherwise stack above an
+    /// EARLIER-inserted caret layer with no explicit `zPosition` to say otherwise).
+    private var caretLayer: OfficeTileLayer?
+    /// A pool of selection-fill layers, one per rect in the CURRENT selection — mirrors `tileLayers`'
+    /// own reuse discipline, with one deliberate simplification: this pool only ever GROWS, never
+    /// shrinks (`layoutSelectionLayers` hides surplus layers past the current rect count rather than
+    /// removing them) — selections are bounded in practice (a handful of visual lines), and keeping a
+    /// hidden layer around costs far less than the churn of tearing one down and re-minting it the
+    /// next time the selection grows back. `zPosition = 1` — above tiles, below the caret.
+    private var selectionLayers: [OfficeTileLayer] = []
+    /// The Calc active-cell outline — an OUTLINE, not a fill (`borderWidth`/`borderColor`, no
+    /// `backgroundColor`), so the cell's own content stays fully legible underneath, matching every
+    /// spreadsheet app's own "active cell" convention. **Disclosed scope call, not a brief
+    /// requirement**: the brief's own file list requires PARSING `CELL_CURSOR` (`OfficeCursorStore`
+    /// already does), not necessarily drawing it — drawn anyway since it reuses this exact same
+    /// null-action-layer/twips-transform/part-hide machinery for near-zero extra cost or risk.
+    private var cellCursorLayer: OfficeTileLayer?
+
+    private var cursorChangedSink: AnyCancellable?
+
+    /// Caret blink — a plain `Timer`, ~530ms (`NSTextView`'s own long-established default interval;
+    /// not pinned to any LOK/AppKit-exposed constant, since neither exposes one). Added to `.common`
+    /// run-loop modes, not the timer's own default `.default` mode alone — AppKit suspends `.default`
+    /// -mode timers during UI tracking loops (a window resize drag, a menu open), and a caret that
+    /// visibly stops blinking mid-resize is exactly the kind of "looks broken" polish gap `.common`
+    /// exists to close. **Invalidated in `unmount()`** — a live, un-invalidated repeating `Timer`
+    /// keeps firing into a freed view's `[weak self]` closure forever otherwise (a real, if small,
+    /// per-tab leak of run-loop wakeups for the rest of the app's life), the same "explicit teardown,
+    /// never hope" posture `unmount()`'s own header already takes toward `tilesArrivedSink`.
+    private var caretBlinkTimer: Timer?
+    private var caretBlinkPhaseVisible = true
+    private static let caretBlinkInterval: TimeInterval = 0.53
 
     /// Leading-edge throttle, obligation 3: the FIRST viewport change in a burst asks immediately,
     /// then at most one more ask per `Self.subscribeThrottleInterval` for as long as more changes
@@ -488,6 +584,7 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
         // open" its own direct, reliably-testable trigger (every test in this file sets `frame`
         // BEFORE `mount()`) rather than depending solely on the indirect resize path below.
         evaluateResidencyIfNeeded()
+        mountCursorOverlays() // Office Stage B Task 5
     }
 
     /// SwiftUI is finished with this view. Unsubscribes (a hidden-but-still-open tab's tiles stop
@@ -507,6 +604,7 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
         tilesArrivedSink = nil
         runtime.unsubscribeTiles(path: path)
         if model?.canvasHost === self { model?.canvasHost = nil }
+        unmountCursorOverlays() // Office Stage B Task 5
     }
 
     override func viewDidMoveToWindow() {
@@ -526,6 +624,11 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
         super.viewDidChangeEffectiveAppearance()
         layer?.backgroundColor = resolvedPlaceholderColor()
         repaintAllVisibleTiles() // repaints every currently-placeholder tile in the new appearance's tone
+        // Office Stage B Task 5 — `layoutOverlays()` re-resolves `resolvedAccentColor()` fresh on
+        // EVERY call (never cached), so simply calling the standalone wrapper here is enough to pick
+        // up the new appearance's own accent rendering — the identical "never resolve once and
+        // cache" posture `resolvedPlaceholderColor()` one line up already established.
+        refreshOverlays()
     }
 
     // MARK: - OfficeDocumentCanvasHost (the part-strip's own door)
@@ -542,6 +645,13 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
         relayoutVisibleTiles()
         performSubscribe()
         evaluateResidencyIfNeeded() // office live-gate fix #3: a part switch is one of the brief's own triggers
+    }
+
+    /// Office Stage B Task 8 — the formula bar's own door: identical to what a real click on this
+    /// canvas already does (`mouseDown`'s own `window?.makeFirstResponder(self)`), reachable from a
+    /// SwiftUI sibling row that draws no `NSView` of its own to click ON directly.
+    func focusCanvas() {
+        window?.makeFirstResponder(self)
     }
 
     // MARK: - office-plumbing Task 8 (T6 review F4): the reload seam
@@ -738,19 +848,426 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
         scheduleThrottledSubscribe()
     }
 
+    // MARK: - Real input (Office Stage B Task 4 — the edit verbs: keyboard + mouse)
+
     /// **Scope disclosure**: bound to this view's own `keyDown`, not a main-menu command. The main
     /// menu is shared app-wide state this task did not want to touch mid-panel-work — a menu item
     /// with a key equivalent is the natural follow-up once a second surface needs the same shortcut.
     /// `acceptsFirstResponder`/the window-join `makeFirstResponder` above are what make this reach
     /// the view at all.
+    ///
+    /// **Office Stage B Task 4 — retires the beep.** The `default: super.keyDown(with: event)` arm
+    /// below is UNCHANGED — the ⌘-shortcut policy this task's brief names (app chrome keeps
+    /// ⌘S/⌘W/⌘±/⌘Z-family) is exactly "⌘± are the only Cmd-combos this view claims for itself;
+    /// everything else Cmd-held falls to `super`, which is how ⌘S/⌘W/⌘Z already reach whatever
+    /// ALREADY handles them further up the responder chain / as a main-menu key equivalent (checked
+    /// by AppKit's own `performKeyEquivalent:` BEFORE `keyDown:` dispatch ever reaches a first
+    /// responder at all, for any Cmd-combo that IS a registered menu item's key equivalent) — this
+    /// view was never in that path and this task does not put it there. The NEW behavior is the
+    /// `guard` itself: every key WITHOUT `.command` held — which is every printable character, every
+    /// arrow (shift-selection included, since Shift's own bit rides along in `modifierFlags`
+    /// unconditionally), Return/Tab/Delete/Escape, Option-modified characters, and a bare Control
+    /// combo — now reaches `forwardKeyEvent` instead of falling through to `super`'s terminal
+    /// `NSBeep()`.
+    ///
+    /// **Fix round 1, m6 (confirmed brief gap), CLOSED by Task 6.** ⌘C/⌘V/⌘X/⌘Z/⇧⌘Z are still not
+    /// claimed by this view's own `switch` below (only `+`/`=`/`-`/`_`/`0` are, unchanged) — they
+    /// still fall to `super.keyDown(with:)` exactly like ⌘S/⌘W always have. What changed is what is
+    /// WAITING for them further up: this view now implements `copy(_:)`/`cut(_:)`/`paste(_:)`/
+    /// `undo(_:)`/`redo(_:)` directly (below, `NSMenuItemValidation` conformance alongside), so the
+    /// SwiftUI-default Edit menu's own Copy/Cut/Paste/Undo/Redo items (`target: nil`, this app's own
+    /// `NormaApp: App` carries no `.commands` override, so SwiftUI's stock command set — including
+    /// these five — is what actually ships) now find a REAL, validated target the instant this view
+    /// is first responder. `performKeyEquivalent:` resolves the combo to that menu item's action
+    /// BEFORE `keyDown:` is ever reached — the exact mechanism this header already documents for
+    /// ⌘S/⌘W — so the fallthrough to `super.keyDown(with:)`/`NSBeep()` below is simply never
+    /// exercised for these five any more, not bypassed by a new switch case.
+    ///
+    /// **Disclosed, not verified under xctest**: whether THIS app's specific `LSUIElement` +
+    /// `Settings`-only Scene shape genuinely wires these five key equivalents through SwiftUI's
+    /// default command set can only be confirmed by a live gate — the test host never builds a real
+    /// main menu at all (`AppDelegate.installEditorSaveMenuItem`'s own `!isRunningUnitTests` gate),
+    /// the identical limitation that method's own header already states for ⌘S. This file's own
+    /// tests instead pin what IS unit-testable and load-bearing: the five `@objc` methods correctly
+    /// reach `runtime`'s own doors, and `validateMenuItem` answers correctly for a hand-built
+    /// `NSMenuItem` — exactly as if AppKit's own menu validation had asked.
     override func keyDown(with event: NSEvent) {
-        guard event.modifierFlags.contains(.command) else { return super.keyDown(with: event) }
+        guard event.modifierFlags.contains(.command) else {
+            // Office Stage B Task 5 — the seam Task 4 staged is now real: a text-generating keyDown
+            // routes through `interpretKeyEvents`, an `NSTextInputClient` conformance, so dead keys/
+            // composition/CJK input methods work — `insertText(_:replacementRange:)`/`setMarkedText
+            // (_:selectedRange:replacementRange:)` are what actually reach the wire from there, never
+            // this method posting directly. Navigation (arrows, Delete, Return, Tab, Escape, function
+            // keys) stays on the EXACT direct `forwardKeyEvent` path it always used — IME has no
+            // opinion about a key that produces no text, and `interpretKeyEvents` is a keyDown-only
+            // mechanism to begin with (see `keyUp`'s own header for why ITS text-generating case
+            // stays on this same direct path too, deliberately, not for symmetry's own sake).
+            if isTextGeneratingKeyEvent(event) {
+                resetCaretBlink()
+                interpretKeyEvents([event])
+            } else {
+                forwardKeyEvent(event, type: .keyInput)
+            }
+            return
+        }
         switch event.charactersIgnoringModifiers {
         case "+", "=": zoomStep(officeZoomIn(current: zoomPPT))
         case "-", "_": zoomStep(officeZoomOut(current: zoomPPT))
         case "0": zoomStep(1000)
         default: super.keyDown(with: event)
         }
+    }
+
+    /// Office Stage B Task 4 — the `keyDown` mirror LOK's own vocabulary always wanted a second half
+    /// for (`LOK_KEYEVENT_KEYUP`) but Stage A never had a door to send it through. Same Cmd-held
+    /// gate as `keyDown` — a Cmd-combo's own key-up is exactly as much "app chrome's business, not
+    /// LOK's" as its key-down half was.
+    ///
+    /// **Office Stage B Task 5 — deliberately UNCHANGED, for every key including text-generating
+    /// ones.** `keyDown`'s own text-generating arm now routes through `interpretKeyEvents`, but
+    /// `interpretKeyEvents` is a keyDown-only AppKit mechanism — there is no `NSTextInputClient`
+    /// counterpart for a key RELEASE, and none is needed: `insertText`/`setMarkedText` already posted
+    /// whatever this keystroke's own text was via the ext-text-input/postKey doors. This method keeps
+    /// calling `forwardKeyEvent(event, type: .keyUp)` for every key exactly as Task 4 left it — a
+    /// SECOND synthetic keyUp from `insertText` itself would be the double-delivery this task's own
+    /// seam exists to prevent (see `forwardKeyEvent`'s own header); the real, single keyUp AppKit
+    /// still delivers here for the SAME physical key is the only one LOK ever sees.
+    override func keyUp(with event: NSEvent) {
+        guard !event.modifierFlags.contains(.command) else {
+            super.keyUp(with: event)
+            return
+        }
+        forwardKeyEvent(event, type: .keyUp)
+    }
+
+    /// **The text-generating/navigation seam Task 4 staged and Task 5 now USES**, not merely keeps.
+    /// `keyDown`'s own guard means this method's `type == .keyInput` call is only ever reached for
+    /// NAVIGATION keys now (text-generating keyDowns take the `interpretKeyEvents` branch instead and
+    /// never call this at all) — but `keyUp` still calls this for EVERY key, text-generating included
+    /// (see that method's own header for why), so `isTextGenerating` below still matters: it decides
+    /// whether a keyUp's own wire payload carries a real charCode or `0`, exactly as before.
+    ///
+    /// **`.control` excluded, not just `.command` — a fix this task made, not merely documented.**
+    /// Control-held combos (Ctrl+A, emacs-style bindings AppKit maps to editing commands) report a
+    /// non-zero `charactersIgnoringModifiers` scalar (the base letter, not the C0 control code that
+    /// lands in `.characters` instead) — WITHOUT this exclusion, `isTextGeneratingKeyEvent` would
+    /// misclassify a Ctrl-held key as text-generating, and `keyDown` would route it into
+    /// `interpretKeyEvents`, which resolves it to `doCommand(by:)` (e.g.
+    /// `moveToBeginningOfParagraph:` for Ctrl+A) — this view's own `doCommand(by:)` is a no-op,
+    /// so an un-excluded Ctrl+A would simply stop reaching LOK at all, silently. See
+    /// `isTextGeneratingKeyEvent`'s own header for the shared classifier this fix lives in.
+    private func forwardKeyEvent(_ event: NSEvent, type: OfficeKeyEventType) {
+        // Office Stage B Task 5 — "blink pauses while typing": every forwarded key (text-generating
+        // OR navigation — an arrow key moving the caret is exactly as much "the user is actively
+        // paying attention to the caret right now" as a printed character) snaps the caret solidly
+        // visible and restarts the blink-off countdown, the standard macOS caret feel.
+        resetCaretBlink()
+        let keyCode = OfficeInputCodes.lokKeyCode(appKitKeyCode: event.keyCode, modifierFlags: event.modifierFlags)
+        if isTextGeneratingKeyEvent(event) {
+            let charCode = OfficeInputCodes.charCode(for: event.characters)
+            runtime.postKeyEvent(path: path, type: type, charCode: charCode, keyCode: keyCode)
+        } else {
+            runtime.postKeyEvent(path: path, type: type, charCode: 0, keyCode: keyCode)
+        }
+    }
+
+    /// Office Stage B Task 5 — "does this key event carry real, insertable text?" Shared by
+    /// `keyDown`'s own ROUTING decision (text-generating -> `interpretKeyEvents`, everything else ->
+    /// the direct `forwardKeyEvent` wire path) and `forwardKeyEvent`'s own charCode-vs-zero decision
+    /// (still reached for every `keyUp`, and for every NAVIGATION `keyDown`) — kept as ONE function
+    /// so the two can never disagree about which key is which. `.command` is excluded defensively
+    /// even though `keyDown`'s own call site already guarantees it false (its outer guard) —
+    /// `charactersIgnoringModifiers` is documented to still reflect Command's own remapping in some
+    /// layouts, so this stays a real, not merely decorative, exclusion. `.control` is excluded for
+    /// the reason `forwardKeyEvent`'s own header gives at length (the Ctrl+A silent-swallow trap).
+    private func isTextGeneratingKeyEvent(_ event: NSEvent) -> Bool {
+        !event.modifierFlags.contains(.command) && !event.modifierFlags.contains(.control)
+            && OfficeInputCodes.charCode(for: event.charactersIgnoringModifiers) != 0
+    }
+
+    // MARK: - Office Stage B Task 6: clipboard, undo/redo — the standard NSResponder actions
+    // `keyDown`'s own policy comment (above) has the full account of WHY implementing these five
+    // is the whole change needed to make ⌘C/⌘V/⌘X/⌘Z/⇧⌘Z live, with no new switch case here.
+
+    @objc func copy(_ sender: Any?) {
+        runtime.postClipboardCopy(path: path)
+    }
+
+    @objc func cut(_ sender: Any?) {
+        runtime.postClipboardCut(path: path)
+    }
+
+    /// Reads the system pasteboard SYNCHRONOUSLY, at gesture time — never from inside an async
+    /// door — and passes the string straight into `OfficeRuntime.postClipboardPaste`'s own chain.
+    /// See that method's own header for why: another app (or an earlier paste already queued
+    /// ahead of this one on the SAME chain) could change the pasteboard between now and this
+    /// call's own turn in the chain, and what gets pasted must match what the user actually saw on
+    /// the pasteboard at the moment they asked, never whatever is there later.
+    @objc func paste(_ sender: Any?) {
+        guard let text = NSPasteboard.general.string(forType: .string) else { return }
+        runtime.postClipboardPaste(path: path, text: text)
+    }
+
+    @objc func undo(_ sender: Any?) {
+        runtime.postUndo(path: path)
+    }
+
+    @objc func redo(_ sender: Any?) {
+        runtime.postRedo(path: path)
+    }
+
+    // MARK: - Office Stage B Task 6: the deferred menu pass — Zoom In/Out/Actual Size
+
+    /// The brief's own deferred menu items. ⌘±/⌘0 already zoom through `keyDown`'s own switch
+    /// (Stage B Task 4, unchanged) — these are the SAME `zoomStep`/`officeZoomIn`/`officeZoomOut`
+    /// calls, reached from a real, discoverable View-menu item too
+    /// (`OfficeCanvasMenuInstaller.install`, wired from `AppDelegate`), not merely a bare key
+    /// equivalent nobody can see or click without already knowing it exists.
+    @objc func zoomIn(_ sender: Any?) {
+        zoomStep(officeZoomIn(current: zoomPPT))
+    }
+
+    @objc func zoomOut(_ sender: Any?) {
+        zoomStep(officeZoomOut(current: zoomPPT))
+    }
+
+    @objc func actualSize(_ sender: Any?) {
+        zoomStep(1000)
+    }
+
+    // MARK: - NSMenuItemValidation
+
+    /// One switch covering every selector this view answers as a menu target (the 5 standard
+    /// actions above, plus the 3 zoom actions). Only Copy/Cut/Paste get a REAL state-based gate —
+    /// Copy/Cut on `OfficeCursorStore`'s own tracked selection (empty means nothing to copy),
+    /// Paste on whether the system pasteboard actually holds a string right now. Undo/Redo and the
+    /// 3 zoom actions are REACHABILITY-gated only (`true` in the `default` arm below — being asked
+    /// to validate AT ALL already means this view is somewhere in the responder chain, which is
+    /// the whole enabled-state question for them). A real `canUndo`/`canRedo` signal would need
+    /// LOK's own `.uno:Undo`/`.uno:Redo` command STATE_CHANGED payload parsed (Task 2's own live
+    /// transcript already saw `.uno:Undo` in that cascade, task-2-report.md) — named here as a
+    /// disclosed follow-up, not built, matching this task's own scope (`undo(_:)`/`redo(_:)` must
+    /// WORK; a precise enabled/disabled reflection of LOK's own stack state is a later refinement).
+    /// **Review fix round 1 (I-3) — the Copy/Cut gate now also accepts a live Calc cell cursor.**
+    /// `selectionRectsTwips` alone missed a real, common state: a Calc cell selected by a plain
+    /// click (no drag) never populates `TEXT_SELECTION` at all — T5's own probe found Calc's own
+    /// `TEXT_SELECTION` fires its undocumented bare `"EMPTY"` sentinel for exactly this case,
+    /// which `OfficeDocumentEvent`'s parser folds to `[]`, same as Writer's ordinary "no selection"
+    /// shape — while `CELL_CURSOR` is what actually carries the live cell state. This was a
+    /// concrete, proven-reachable bug, not a hypothetical: commit `73f89c9b`'s own
+    /// `testClipboardCopyOnACalcDocumentExercisesTheTypeGatedSetPartBranch` drives EXACTLY this
+    /// state (a plain click on A1, no drag) and its `clipboardCopy` call genuinely returns real
+    /// content — this gate, unfixed, would have reported Copy/Cut as DISABLED the whole time.
+    /// `cellCursor != nil` covers both of `OfficeCellCursor`'s own cases (`.at`/`.empty`) — a
+    /// disclosed, deliberate widening (`.empty` is LOK's own "in-cell edit mode" sentinel per T5's
+    /// probe, not literally "a cell is selected"), matching the SAME "reachability is close enough
+    /// to correct, not a perfect LOK-state mirror" posture this gate's own header already states
+    /// for Undo/Redo — a false-positive-enabled Copy on an empty cell is a copy of `""`, harmless;
+    /// the bug this fixes (false-negative-DISABLED Copy on a real selection) was the one that
+    /// actually broke a real, tested, working feature.
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        switch menuItem.action {
+        case #selector(copy(_:)), #selector(cut(_:)):
+            let state = runtime.cursorStore.state(docId: docId)
+            return !state.selectionRectsTwips.isEmpty || state.cellCursor != nil
+        case #selector(paste(_:)):
+            return NSPasteboard.general.string(forType: .string) != nil
+        default:
+            return true
+        }
+    }
+
+    /// A left-button press — positions LOK's own cursor/selection (there is no other door to do
+    /// this now that the DEBUG-only `.uno:GoToCell` is gone; a real click is how a real user, and
+    /// this task's own live typing drill, ever tell LOK where to start typing). Also re-asserts
+    /// first responder — `viewDidMoveToWindow` only claims it once, at window-join time, and a
+    /// click is the ordinary way a user moves keyboard focus BACK to this view after it visited
+    /// some other control (a toolbar field, a sibling panel) without this view ever leaving its
+    /// window.
+    ///
+    /// **Scope disclosure**: left button only (`mouseDown`/`mouseDragged`/`mouseUp`, AppKit's own
+    /// three-method family for it) — the brief's own file list. Right-click (a context menu) and
+    /// other pointing devices are `rightMouseDown`/`otherMouseDown`, neither overridden here; a
+    /// future task's scope, not retrofitted silently.
+    override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
+        resetCaretBlink() // Office Stage B Task 5 — a click repositions the caret; show it solidly
+        forwardMouseEvent(event, type: .buttonDown)
+    }
+
+    /// LOK's own `LOK_MOUSEEVENT_MOUSEMOVE` doc comment: "The mouse has moved while a button is
+    /// pressed" — exactly `mouseDragged`'s own AppKit contract (unlike `mouseMoved`, which requires
+    /// opting into `acceptsMouseMovedEvents` and fires with NO button held; this view does neither,
+    /// so there is no hover-move door to confuse this with).
+    override func mouseDragged(with event: NSEvent) {
+        forwardMouseEvent(event, type: .move)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        forwardMouseEvent(event, type: .buttonUp)
+    }
+
+    private func forwardMouseEvent(_ event: NSEvent, type: OfficeMouseEventType) {
+        let viewPoint = convert(event.locationInWindow, from: nil)
+        let twips = officePointToTwips(viewPoint: viewPoint, scrollOrigin: scrollOrigin, zoomPPT: zoomPPT)
+        let buttons = OfficeInputCodes.mouseButton(appKitButtonNumber: event.buttonNumber)
+        let modifiers = OfficeInputCodes.modifierMask(event.modifierFlags)
+        runtime.postMouseEvent(path: path, type: type, xTwips: twips.x, yTwips: twips.y,
+                               count: event.clickCount, buttons: buttons, modifiers: modifiers)
+    }
+
+    // MARK: - NSTextInputClient (Office Stage B Task 5 — IME)
+
+    /// The one piece of state this conformance needs: the text of the ACTIVE composition, or `nil`
+    /// when nothing is being composed. **Local bookkeeping only — never synced with LOK's own
+    /// document model.** This view has no text-buffer representation of the document at all (it is a
+    /// tile-pixel canvas; the document's real content lives entirely inside LOK, reachable only
+    /// through twips-space rects and rendered pixels) — `markedText` exists purely so
+    /// `hasMarkedText()`/`markedRange()`/`selectedRange()` can answer AppKit's own questions about
+    /// composition state without a wire round trip, and so `insertText`/`unmarkText` know whether
+    /// they are committing a REAL composition (ext-text-input door) or plain typed text (the
+    /// already-proven per-scalar `postKeyEvent` door). `nil`, not `""`, distinguishes "never started
+    /// composing" from "composing, but the marked run is momentarily empty" (a real IME state —
+    /// backspacing through a composition down to nothing does not end it).
+    private var markedText: String?
+
+    /// Commits text — called by `interpretKeyEvents` directly for a plain, non-composed key (the
+    /// common case: every ordinary US-layout letter/digit/punctuation, no dead key, no active IME),
+    /// or by the input method at the END of a real composition (a CJK candidate confirmed, an
+    /// option-e-then-e é resolved). Which one happened is exactly what `markedText` (above) already
+    /// tracks — no new state needed to tell them apart.
+    ///
+    /// **Composed commit** — `markedText != nil`: posts `text` as the FINAL marked run
+    /// (`LOK_EXT_TEXTINPUT`) immediately followed by the commit (`LOK_EXT_TEXTINPUT_END`, whose own
+    /// `text` argument is always sent empty — see `OfficeWireFrame.extTextInputEvent`'s own header:
+    /// LOK ignores it and commits whatever is CURRENTLY marked, which is why the mark must be posted
+    /// first, same call). This is the exact two-frame sequence `OfficeRuntimeLiveTests
+    /// .testExtTextInputMarksCommitsAndCancelsAgainstRealLOKThroughSaveAndReopen` already proved
+    /// against real LOK before this method existed.
+    ///
+    /// **Plain commit** — `markedText == nil`: the already-proven T4 path, one `postKeyEvent
+    /// (.keyInput)` per Unicode scalar in `text` (`OfficeInputCodes.charCodes(for:)`). Deliberately
+    /// posts ONLY `.keyInput`, never a paired synthetic `.keyUp` — the REAL `keyUp` AppKit still
+    /// delivers for the physical key that triggered this `insertText` call reaches `keyUp(with:)`
+    /// exactly like any other key (that method's own header explains why it stays unconditional) and
+    /// supplies the keyUp half; a synthetic one here would be exactly the double-delivery this
+    /// task's whole seam exists to prevent. `keyCode: 0` for every posted scalar — there is no real
+    /// physical key behind synthetic/composed text (é is not a physical US key), and `0` is LOK's own
+    /// documented "no physical key, charCode carries the meaning" value (`OfficeInputCodes.charCode`'s
+    /// own header: a non-zero charCode is unambiguously "insert this character," independent of
+    /// keyCode) — never a guessed value that might collide with a real key's meaning by accident.
+    func insertText(_ string: Any, replacementRange: NSRange) {
+        resetCaretBlink()
+        let text = (string as? String) ?? (string as? NSAttributedString)?.string ?? ""
+        guard !text.isEmpty else { return }
+        if markedText != nil {
+            runtime.postExtTextInput(path: path, type: .input, text: text)
+            runtime.postExtTextInput(path: path, type: .end, text: "")
+            markedText = nil
+        } else {
+            let keyCode = 0
+            for charCode in OfficeInputCodes.charCodes(for: text) {
+                runtime.postKeyEvent(path: path, type: .keyInput, charCode: charCode, keyCode: keyCode)
+            }
+        }
+    }
+
+    /// Preedit — called on every keystroke of a multi-stage compose (option-e, then e again: this
+    /// fires once for the accent-pending state, then `insertText` fires once with the resolved "é").
+    /// Forwards `string` verbatim as `LOK_EXT_TEXTINPUT` — proven, in the same live drill
+    /// `insertText`'s own header cites, to make LOK repaint the marked run with a distinct
+    /// (traditionally underlined) decoration; the empty-string case (an IME clearing its own marked
+    /// run without ending composition) is not special-cased — it is exactly `.input("")`, the SAME
+    /// frame this drill's own cancel phase already proved leaves no residue once followed by `.end`.
+    func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        resetCaretBlink()
+        let text = (string as? String) ?? (string as? NSAttributedString)?.string ?? ""
+        markedText = text
+        runtime.postExtTextInput(path: path, type: .input, text: text)
+    }
+
+    /// Ends composition WITHOUT going through `insertText` — AppKit's own door for "the input method
+    /// decided to just finish quietly" (focus change, a click elsewhere while composing). Same commit
+    /// mechanism as `insertText`'s own composed-commit arm: `.end` alone, text empty, committing
+    /// whatever is currently marked. A no-op when nothing is marked — matches `OfficeDocumentBridge
+    /// .postKey`'s own "fire-and-forget, but never a POINTLESS post" posture elsewhere in this file.
+    func unmarkText() {
+        guard markedText != nil else { return }
+        runtime.postExtTextInput(path: path, type: .end, text: "")
+        markedText = nil
+    }
+
+    /// **Deliberately local, fake state — this view owns no real text buffer to report a range
+    /// against.** The document's actual content lives entirely inside LOK; reporting a range "into"
+    /// it would require a text-model this canvas does not have and does not need for typing to work
+    /// (LOK already knows where the real caret/selection is — see `OfficeCursorStore`). This is the
+    /// same minimal-fake-buffer posture other canvas-rendered (non-`NSTextView`) text surfaces take:
+    /// a coordinate WITHIN the local `markedText` string, never into the document.
+    func selectedRange() -> NSRange {
+        guard let markedText else { return NSRange(location: 0, length: 0) }
+        return NSRange(location: markedText.count, length: 0)
+    }
+
+    func markedRange() -> NSRange {
+        guard let markedText else { return NSRange(location: NSNotFound, length: 0) }
+        return NSRange(location: 0, length: markedText.count)
+    }
+
+    func hasMarkedText() -> Bool { markedText != nil }
+
+    /// Always `nil` — this view has no text buffer to answer a "what text is at this range" query
+    /// against (see `selectedRange`'s own header). `nil` is a documented, legal answer for "no
+    /// substring available," not a crash or a refusal; the input methods this app targets (accent/
+    /// dead-key composition, CJK candidate windows) do not depend on reconversion working here.
+    func attributedSubstring(forProposedRange range: NSRange, actualRange: NSRangePointer?) -> NSAttributedString? {
+        actualRange?.pointee = NSRange(location: NSNotFound, length: 0)
+        return nil
+    }
+
+    /// No attributes — marked-text decoration (the underline) is drawn by LOK's own tile rendering
+    /// (the live drill this file's `insertText` header cites proves it, pixel-for-pixel), never by an
+    /// `NSAttributedString` this view would have to composite on top — a SECOND, Norma-drawn
+    /// rendering of the same marked text was considered and rejected for exactly this reason: LOK's
+    /// own model already contains it, so anything this view drew independently would double-render on
+    /// the next incidental repaint.
+    func validAttributesForMarkedText() -> [NSAttributedString.Key] { [] }
+
+    /// The brief's own named door: the IME candidate-window anchor point, answered from the SAME
+    /// tracked caret rect the caret overlay itself draws from (`OfficeCursorStore`, Task 5's own
+    /// Stage 3) — never a fresh LOK query (LOK has no "where would the candidate window go" concept
+    /// of its own; `LOK_EXT_TEXTINPUT_POS` is deliberately unmodeled, see `OfficeExtTextInputType`'s
+    /// own header, precisely because this local answer already covers the need).
+    /// `.zero` when there is no window (this view's own headless/unmounted test posture) or no
+    /// tracked caret rect yet, or when the tracked rect's own stamped part disagrees with this
+    /// canvas's current `part` — the SAME "never show a stale-part rect" discipline the caret overlay
+    /// itself already enforces (`layoutOverlays`'s own header).
+    func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect {
+        actualRange?.pointee = range
+        guard let window else { return .zero }
+        let state = runtime.cursorStore.state(docId: docId)
+        guard let caretRectTwips = state.caretRectTwips, state.caretPart == part else { return .zero }
+        let viewRect = officeTwipsRectToScreenRect(caretRectTwips, zoomPPT: zoomPPT, scrollOrigin: scrollOrigin)
+        let windowRect = convert(viewRect, to: nil)
+        return window.convertToScreen(windowRect)
+    }
+
+    /// Always `NSNotFound` — the inverse of `firstRect` (screen point -> document character index),
+    /// which needs the same text-model this view does not have. Used by AppKit for click-driven
+    /// reconversion UI this app's target input methods (accent/dead-key, CJK candidate windows) do
+    /// not exercise.
+    func characterIndex(for point: NSPoint) -> Int { NSNotFound }
+
+    /// **Expected UNREACHABLE in ordinary typing, by construction of `keyDown`'s own routing** — only
+    /// TEXT-GENERATING keys ever reach `interpretKeyEvents` (see `keyDown`'s own header), and for a
+    /// plain, non-composing key that always resolves to `insertText`, never this. A DEBUG-only log
+    /// canary, not a silent no-op: if some input method/layout combination DOES route a text-
+    /// generating key here (an edge case this task's own live drills did not surface), this is where
+    /// that would first become visible instead of silently swallowing a keystroke.
+    override func doCommand(by selector: Selector) {
+        #if DEBUG
+        NSLog("[OfficeTileCanvasView] doCommand(by:) unexpectedly reached: \(selector) — only "
+              + "text-generating keys route through interpretKeyEvents, so this should be unreachable")
+        #endif
     }
 
     private func zoomStep(_ target: Int) {
@@ -845,6 +1362,14 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
                 applyContents(to: tileLayer, key: key, placeholder: placeholder)
             }
         }
+        // Office Stage B Task 5 — INSIDE this same transaction, never a separate one: every
+        // scroll/zoom/part-switch/reload call site already routes through this one method, so
+        // hooking overlay repositioning in HERE (rather than adding a matching call at each of
+        // those call sites separately) is what keeps a caret/selection rect from ever visibly
+        // lagging a tile's own reposition by even one committed frame. `refreshOverlays()` (this
+        // method's own standalone counterpart, its own transaction) is for the case NOTHING here
+        // changed — a cursor event or a blink tick arriving on an otherwise-static viewport.
+        layoutOverlays()
     }
 
     private func clearVisibleTiles() {
@@ -855,11 +1380,34 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
     /// Only touches layers ALREADY in the visible pool — a key that arrived while scrolled away
     /// from it is simply not there to update, and the next `relayoutVisibleTiles` (triggered by
     /// whatever scroll/zoom eventually brings it back into view) reads the store fresh regardless.
+    ///
+    /// **Office Stage B Task 4 — also the door that makes a real edit's invalidation actually
+    /// REPAINT, not merely go blank.** `tilesArrived` fires for BOTH a fresh arrival (the store now
+    /// has pixels — `applyContents` below finds them) and an eviction (`OfficeTileStore.invalidate`
+    /// removed the entry — `applyContents` finds nothing and paints the placeholder tone). On a
+    /// STATIC viewport (the typing scenario: nothing scrolled, so `performSubscribe` never fires
+    /// again on its own), an evicted-but-still-visible key would otherwise sit at the placeholder
+    /// tone forever — nothing else in this file's own trigger list (mount/setActivePart/zoomStep/
+    /// the scroll throttle) covers "a push arrived for a key already on screen." Every key this
+    /// loop finds STILL uncached after `applyContents` (i.e. evicted, not filled) is collected and
+    /// handed to `OfficeRuntime.refetchInvalidatedTiles` — that call's own dedup
+    /// (`OfficeTileStore.keysNeedingRequest`) makes this safe to call unconditionally, including for
+    /// the ordinary "genuinely fresh pixels arrived" case, where the set is simply empty and the
+    /// `Task` below does nothing.
     private func handleTilesArrived(_ keys: Set<TileKey>) {
         let placeholder = resolvedPlaceholderColor()
+        var stillUncachedVisibleKeys: [TileKey] = []
         for key in keys {
             guard let tileLayer = tileLayers[key] else { continue }
             applyContents(to: tileLayer, key: key, placeholder: placeholder)
+            if runtime.tileStore.tile(docId: docId, key: key) == nil {
+                stillUncachedVisibleKeys.append(key)
+            }
+        }
+        guard !stillUncachedVisibleKeys.isEmpty else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            await self.runtime.refetchInvalidatedTiles(path: self.path, keys: stillUncachedVisibleKeys)
         }
     }
 
@@ -1083,5 +1631,197 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost {
             guard self.isMounted, self.prefetchGeneration == generation else { return }
             self.prefetchSweepIssuedForTesting = true
         }
+    }
+
+    // MARK: - Office Stage B Task 5: caret/selection/cell-cursor overlay lifecycle + layout
+
+    /// `mount()`'s own tail call — mints the two singleton overlay layers (caret, cell-cursor;
+    /// selection's own pool starts empty and grows on demand — see `selectionLayers`' header),
+    /// subscribes to `runtime.cursorStore.cursorChanged` (mirrors `tilesArrivedSink`'s own docId-
+    /// filtered sink one screen up), and starts the blink timer.
+    private func mountCursorOverlays() {
+        guard let hostLayer = layer else { return }
+
+        let caret = OfficeTileLayer()
+        caret.zPosition = 2
+        caret.isHidden = true
+        hostLayer.addSublayer(caret)
+        caretLayer = caret
+
+        let cellCursor = OfficeTileLayer()
+        cellCursor.zPosition = 1
+        cellCursor.isHidden = true
+        cellCursor.backgroundColor = nil // outline only — see this property's own header
+        cellCursor.borderWidth = 1.5
+        hostLayer.addSublayer(cellCursor)
+        cellCursorLayer = cellCursor
+
+        cursorChangedSink = runtime.cursorStore.cursorChanged.sink { [weak self] changedDocId in
+            guard let self, changedDocId == self.docId else { return }
+            self.refreshOverlays()
+        }
+
+        caretBlinkPhaseVisible = true
+        let timer = Timer(timeInterval: Self.caretBlinkInterval, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            self.caretBlinkPhaseVisible.toggle()
+            self.refreshOverlays()
+        }
+        RunLoop.main.add(timer, forMode: .common) // survives UI tracking loops — see the property's own header
+        caretBlinkTimer = timer
+
+        refreshOverlays() // an initial layout — harmless no-op if nothing is known yet (every overlay starts hidden)
+    }
+
+    /// `unmount()`'s own tail call — explicit teardown for every piece `mountCursorOverlays` created,
+    /// matching this file's own established "never hope deallocation alone is enough" posture.
+    private func unmountCursorOverlays() {
+        caretBlinkTimer?.invalidate()
+        caretBlinkTimer = nil
+        cursorChangedSink = nil
+        caretLayer?.removeFromSuperlayer()
+        caretLayer = nil
+        cellCursorLayer?.removeFromSuperlayer()
+        cellCursorLayer = nil
+        for selectionLayer in selectionLayers { selectionLayer.removeFromSuperlayer() }
+        selectionLayers = []
+    }
+
+    /// The standalone entry point: opens its OWN disabled-actions transaction, then calls
+    /// `layoutOverlays()`. Every caller that is NOT already inside `relayoutVisibleTiles`'s own
+    /// transaction uses this — the cursor-changed sink, a blink tick, and `viewDidChangeEffective
+    /// Appearance`'s own accent-recolor. Guarded on `isMounted`/`layer != nil` the same way
+    /// `performSubscribe` guards its own early callers — a blink tick or a cursor push arriving after
+    /// `unmount()` (the timer/sink are torn down there, but a already-in-flight Combine delivery or a
+    /// timer fire racing `unmount()` by a beat is not impossible) must be a harmless no-op, never a
+    /// crash reaching into a torn-down `hostLayer`.
+    private func refreshOverlays() {
+        guard isMounted, layer != nil else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layoutOverlays()
+        CATransaction.commit()
+    }
+
+    /// **Must run inside an already-open, disabled-actions `CATransaction`** — never called bare;
+    /// see `refreshOverlays()` and `relayoutVisibleTiles()`'s own call site for the two doors, and
+    /// `OfficeTileLayer`'s own header for why an undisabled reposition would implicitly animate.
+    ///
+    /// **Hides every overlay whose STAMPED part disagrees with this canvas's own current `part`** —
+    /// `OfficeCursorStore.State`'s own `caretPart`/`selectionPart`/`cellCursorPart` fields exist
+    /// PURELY for this check (see that type's own header: none of these three LOK callbacks carry a
+    /// part number of their own, so the store stamps one at fold time from whatever `activePart` was
+    /// current then) — a rect computed against a page/sheet the user has since navigated away from
+    /// must never be drawn as if it were the page/sheet on screen right now.
+    private func layoutOverlays() {
+        let state = runtime.cursorStore.state(docId: docId)
+
+        if let caretLayer {
+            if let rect = state.caretRectTwips, state.caretPart == part, caretBlinkPhaseVisible {
+                var screenRect = officeTwipsRectToScreenRect(rect, zoomPPT: zoomPPT, scrollOrigin: scrollOrigin)
+                // A PLAIN caret rect's own twips WIDTH is 0 (a caret is a line, not a box — Task 5's
+                // Stage 1 probe, every plain firing observed). **Not universally true**: the Stage 5
+                // é composition drill's own real trace showed a NON-zero width (346 twips) on every
+                // `INVALIDATE_VISIBLE_CURSOR` firing WHILE a preedit run is active — LOK reports the
+                // caret as spanning the marked text during composition, collapsing back to 0 the
+                // instant it commits. `officeCaretWidthPoints` forces BOTH cases to the same rendered
+                // hairline thickness — a real box (346-wide, mid-compose) would otherwise draw as a
+                // solid highlight instead of a caret, and a zero-width one would never show at all.
+                screenRect.size.width = officeCaretWidthPoints
+                caretLayer.frame = screenRect
+                caretLayer.backgroundColor = resolvedAccentColor()
+                caretLayer.isHidden = false
+            } else {
+                caretLayer.isHidden = true
+            }
+        }
+
+        layoutSelectionLayers(state)
+
+        if let cellCursorLayer {
+            if case .at(let rect, _, _) = state.cellCursor, state.cellCursorPart == part {
+                cellCursorLayer.frame = officeTwipsRectToScreenRect(rect, zoomPPT: zoomPPT, scrollOrigin: scrollOrigin)
+                cellCursorLayer.borderColor = resolvedAccentColor()
+                cellCursorLayer.isHidden = false
+            } else {
+                cellCursorLayer.isHidden = true
+            }
+        }
+    }
+
+    /// `layoutOverlays()`'s own selection half, split out for readability — same "must run inside an
+    /// open transaction" contract as its caller.
+    private func layoutSelectionLayers(_ state: OfficeCursorStore.State) {
+        guard let hostLayer = layer else { return }
+        guard state.selectionPart == part else {
+            for selectionLayer in selectionLayers { selectionLayer.isHidden = true }
+            return
+        }
+        let rects = state.selectionRectsTwips
+        // Grows to fit — never shrinks (see `selectionLayers`' own header on why: hidden surplus
+        // layers, below, cost less than the churn of tearing one down and re-minting it the next
+        // time the selection grows back to a similar size).
+        while selectionLayers.count < rects.count {
+            let newLayer = OfficeTileLayer()
+            newLayer.zPosition = 1
+            hostLayer.addSublayer(newLayer)
+            selectionLayers.append(newLayer)
+        }
+        // office live-gate fix #4, FIX 2's own reasoning, applied here: selection is drawn at LOW
+        // opacity (never a solid fill) — a full-opacity accent box would occlude the very text the
+        // selection is highlighting, which is the entire reason a user looks at a selection at all.
+        let fillColor = resolvedAccentColor(alpha: 0.25)
+        for (index, selectionLayer) in selectionLayers.enumerated() {
+            guard index < rects.count else {
+                selectionLayer.isHidden = true
+                continue
+            }
+            selectionLayer.frame = officeTwipsRectToScreenRect(rects[index], zoomPPT: zoomPPT, scrollOrigin: scrollOrigin)
+            selectionLayer.backgroundColor = fillColor
+            selectionLayer.isHidden = false
+        }
+    }
+
+    /// `Theme.accent`'s own `NSColor(named: "AccentColor")` source, resolved against THIS view's own
+    /// effective appearance — the identical pattern `resolvedPlaceholderColor()` already establishes
+    /// one section up, for the identical reason (a plain `.cgColor` read outside
+    /// `performAsCurrentDrawingAppearance` can resolve against whatever appearance happens to be
+    /// current globally at call time, not necessarily this view's).
+    private func resolvedAccentColor(alpha: CGFloat = 1.0) -> CGColor {
+        let base = NSColor(named: "AccentColor") ?? NSColor.controlAccentColor
+        let color = alpha < 1.0 ? base.withAlphaComponent(alpha) : base
+        var resolved = color.cgColor
+        effectiveAppearance.performAsCurrentDrawingAppearance { resolved = color.cgColor }
+        return resolved
+    }
+
+    /// "Blink pauses while typing" — snaps the caret solidly visible and restarts the blink-off
+    /// countdown. `.fireDate` reschedules an EXISTING repeating `Timer`'s next fire without
+    /// invalidating/re-creating it (cheaper, and avoids ever having a brief window with no timer at
+    /// all if this fires in rapid succession, as real typing does).
+    private func resetCaretBlink() {
+        caretBlinkPhaseVisible = true
+        caretBlinkTimer?.fireDate = Date().addingTimeInterval(Self.caretBlinkInterval)
+        refreshOverlays()
+    }
+
+    // MARK: - Test seams (Office Stage B Task 5)
+
+    /// Mirrors `tileLayerForTesting`'s own precedent exactly: lets a test inspect the REAL overlay
+    /// layer's frame/visibility/implicit-action behavior through the exact production mount/layout
+    /// path, rather than a hand-built `CALayer()` that would only prove the TEST's own layer never
+    /// animates.
+    var caretLayerForTesting: CALayer? { caretLayer }
+    var cellCursorLayerForTesting: CALayer? { cellCursorLayer }
+    var selectionLayersForTesting: [CALayer] { selectionLayers }
+
+    /// A synthetic `Timer` fire has no public, deterministic AppKit door — the same shape
+    /// `setScrollOriginForTesting`/`setZoomForTesting` already worked around for scroll/zoom. Toggles
+    /// the SAME phase flag and calls the SAME `refreshOverlays()` a real timer tick does, so a test
+    /// exercises the production layout path, not a parallel test-only one — the house "no arbitrary
+    /// sleeps" rule applied to a UI timer instead of a network/process wait.
+    func advanceCaretBlinkForTesting() {
+        caretBlinkPhaseVisible.toggle()
+        refreshOverlays()
     }
 }

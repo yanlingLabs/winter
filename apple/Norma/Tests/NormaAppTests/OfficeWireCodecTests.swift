@@ -19,12 +19,22 @@ final class OfficeWireCodecTests: XCTestCase {
     /// `testTileHeaderRoundTripsAndPayloadSurvivesSeparately` right below.
     func testEveryFrameTypeRoundTrips() throws {
         let size = OfficeDocumentSize(widthTwips: 26593, heightTwips: 13005)
+        // Office Stage B Task 4 — the DEBUG-only `debugEdit`/`debugEditOk` samples (which forced
+        // the `var`-plus-conditional-append shape this comment used to explain) are gone — real
+        // edit verbs replace them; back to a plain `let` array literal.
         let samples: [OfficeWireFrame] = [
             .hello(seq: 1, role: .app, token: "tok-app"),
             .hello(seq: 2, role: .agent, token: "tok-agent"),
             .ping(seq: 3),
             .open(seq: 4, docId: "doc-1", path: "/tmp/a spaced name.docx"),
             .close(seq: 5, docId: "doc-1"),
+            // Office Stage B Task 2 — the save round trip.
+            // Fix round 4 (NEW-2) — a NON-ZERO part, deliberately: a `save` sample pinned at
+            // part 0 would round-trip identically whether the field were carried or silently
+            // defaulted, which is exactly the drift this table exists to catch.
+            .save(seq: 30, docId: "doc-1", part: 2),
+            .saved(seq: 31, docId: "doc-1", tempPath: "/tmp/state/saves/doc-1-30.xlsx"),
+            .saveFailed(seq: 32, docId: "doc-1", reason: "disk full"),
             .helloOk(seq: 6, lokVersion: officeWireStageALOKVersionPlaceholder),
             .refused(seq: 7, reason: "token mismatch"),
             .pong(seq: 8),
@@ -43,6 +53,33 @@ final class OfficeWireCodecTests: XCTestCase {
             .documentEvent(seq: 17, docId: "doc-1", event: .modifiedChanged(true)),
             .documentEvent(seq: 18, docId: "doc-1", event: .modifiedChanged(false)),
             .documentEvent(seq: 19, docId: "doc-1", event: .closed),
+            // Task 5 — caret/selection/cell-cursor, one sample per new OfficeDocumentEvent case.
+            .documentEvent(seq: 41, docId: "doc-1", event: .caretRect(OfficeTwipsRect(x: 100, y: 200, width: 0, height: 300))),
+            .documentEvent(seq: 42, docId: "doc-1", event: .textSelection([
+                OfficeTwipsRect(x: 10, y: 20, width: 30, height: 40),
+                OfficeTwipsRect(x: 0, y: 60, width: 500, height: 40), // a second line — the multi-rect shape
+            ])),
+            .documentEvent(seq: 43, docId: "doc-1", event: .textSelection([])), // no selection
+            .documentEvent(seq: 44, docId: "doc-1", event: .textSelectionStart(OfficeTwipsRect(x: 10, y: 20, width: 0, height: 40))),
+            .documentEvent(seq: 45, docId: "doc-1", event: .textSelectionEnd(OfficeTwipsRect(x: 500, y: 60, width: 0, height: 40))),
+            .documentEvent(seq: 46, docId: "doc-1", event: .cellCursor(
+                .at(rectTwips: OfficeTwipsRect(x: 0, y: 0, width: 1265, height: 254), column: 2, row: 7))),
+            .documentEvent(seq: 47, docId: "doc-1", event: .cellCursor(.empty)),
+            // Task 8 — the formula bar's own content feed. A formula-shaped string (special
+            // characters `=`, `(`, `)`, `:` — real content, not just a plain literal) and the
+            // empty string (the real captured shape for an empty cell — see `parseCellFormula`'s
+            // own header) — the SAME two-samples-per-case discipline `cellCursor`'s `.at`/`.empty`
+            // pair above already uses.
+            .documentEvent(seq: 66, docId: "doc-1", event: .cellFormula("=SUM(A1:A2)")),
+            .documentEvent(seq: 67, docId: "doc-1", event: .cellFormula("")),
+            // Task 7 — the autosave sidecar push. Both `isODFFallback` values, and an `ext` that
+            // DIFFERS from what a bare boolean round-trip would still pass with a hardcoded value
+            // — a sample pinned at, say, `ext: "odt"` for the fallback row would round-trip
+            // identically whether `ext` were carried or silently defaulted to the document's own
+            // native extension, exactly the drift class this table exists to catch (mirrors the
+            // `save`/`part: 2` sample's own non-zero-on-purpose reasoning immediately above).
+            .documentEvent(seq: 48, docId: "doc-1", event: .autosaved(ext: "odt", isODFFallback: false)),
+            .documentEvent(seq: 49, docId: "doc-1", event: .autosaved(ext: "ods", isODFFallback: true)),
             // Task 4 — tile pipeline frames.
             .subscribeTiles(seq: 20, docId: "doc-1", part: 0, zoomPPT: 1000,
                              viewportTwips: OfficeTwipsRect(x: 0, y: 0, width: 10240, height: 5120)),
@@ -52,6 +89,38 @@ final class OfficeWireCodecTests: XCTestCase {
                 TileKey(part: 0, zoomPPT: 1000, tileX: 1, tileY: 0),
             ]),
             .tileRequest(seq: 23, docId: "doc-1", keys: []), // an empty key list is a legal (if pointless) request
+            // Office Stage B Task 4 — the real edit verbs.
+            .keyEvent(seq: 35, docId: "doc-1", part: 0, type: .keyInput, charCode: 65, keyCode: 512),
+            .keyEvent(seq: 36, docId: "doc-1", part: 0, type: .keyUp, charCode: 0, keyCode: 1026),
+            .keyEventOk(seq: 37, docId: "doc-1"),
+            .mouseEvent(seq: 38, docId: "doc-1", part: 0, type: .buttonDown, xTwips: 100, yTwips: 200,
+                        count: 1, buttons: 1, modifiers: 0),
+            .mouseEvent(seq: 39, docId: "doc-1", part: 0, type: .move, xTwips: -50, yTwips: 0,
+                        count: 0, buttons: 1, modifiers: 0x1000),
+            .mouseEventOk(seq: 40, docId: "doc-1"),
+            // Office Stage B Task 5 — the IME marked-text/commit verbs. `text: ""` on the `.end`
+            // sample is deliberate, not a placeholder — see `OfficeWireFrame.extTextInputEvent`'s own
+            // header: this bridge's own caller always sends `.end` with empty text (LOK's own
+            // `LOK_EXT_TEXTINPUT_END` ignores whatever text it's given anyway).
+            .extTextInputEvent(seq: 48, docId: "doc-1", part: 0, type: .input, text: "e"),
+            .extTextInputEvent(seq: 49, docId: "doc-1", part: 2, type: .end, text: ""),
+            .extTextInputEventOk(seq: 50, docId: "doc-1"),
+            // Office Stage B Task 6 — clipboard, undo/redo, the second ("agent") view.
+            .clipboardCopy(seq: 51, docId: "doc-1", part: 0),
+            .clipboardCopyOk(seq: 52, docId: "doc-1", text: "selected text"),
+            .clipboardCopyOk(seq: 53, docId: "doc-1", text: ""), // no selection
+            .clipboardCut(seq: 54, docId: "doc-1", part: 1),
+            .clipboardCutOk(seq: 55, docId: "doc-1", text: "cut text"),
+            .clipboardPaste(seq: 56, docId: "doc-1", part: 0, text: "pasted text"),
+            .clipboardPasteOk(seq: 57, docId: "doc-1"),
+            .undo(seq: 58, docId: "doc-1"),
+            .undoOk(seq: 59, docId: "doc-1"),
+            .redo(seq: 60, docId: "doc-1"),
+            .redoOk(seq: 61, docId: "doc-1"),
+            .createView(seq: 62, docId: "doc-1"),
+            .agentViewReady(seq: 63, docId: "doc-1", viewId: 2),
+            .agentKeyEvent(seq: 64, docId: "doc-1", part: 0, type: .keyInput, charCode: 65, keyCode: 512),
+            .agentKeyEventOk(seq: 65, docId: "doc-1"),
             .subscribed(seq: 24, docId: "doc-1", keys: [TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0)]),
             .unsubscribed(seq: 25, docId: "doc-1"),
             .tileRequestAccepted(seq: 26, docId: "doc-1"),
@@ -106,12 +175,36 @@ final class OfficeWireCodecTests: XCTestCase {
             "ping": #"{"type":"ping","seq":1}"#,
             "open": #"{"type":"open","seq":1,"docId":"d","path":"/p"}"#,
             "close": #"{"type":"close","seq":1,"docId":"d"}"#,
+            "save": #"{"type":"save","seq":1,"docId":"d","part":0}"#,
             "helloOk": #"{"type":"helloOk","seq":1,"lokVersion":"v"}"#,
             "refused": #"{"type":"refused","seq":1,"reason":"r"}"#,
             "pong": #"{"type":"pong","seq":1}"#,
             "opened": #"{"type":"opened","seq":1,"docId":"d","docType":"text","parts":1,"widthTwips":100,"heightTwips":200}"#,
             "openFailed": #"{"type":"openFailed","seq":1,"docId":"d","reason":"r"}"#,
             "closed": #"{"type":"closed","seq":1,"docId":"d"}"#,
+            "saved": #"{"type":"saved","seq":1,"docId":"d","tempPath":"/tmp/p"}"#,
+            "saveFailed": #"{"type":"saveFailed","seq":1,"docId":"d","reason":"r"}"#,
+            "keyEvent": #"{"type":"keyEvent","seq":1,"docId":"d","part":0,"eventType":0,"charCode":65,"keyCode":512}"#,
+            "mouseEvent": #"{"type":"mouseEvent","seq":1,"docId":"d","part":0,"eventType":0,"xTwips":0,"yTwips":0,"count":1,"buttons":1,"modifiers":0}"#,
+            "extTextInputEvent": #"{"type":"extTextInputEvent","seq":1,"docId":"d","part":0,"eventType":0,"text":"e"}"#,
+            "keyEventOk": #"{"type":"keyEventOk","seq":1,"docId":"d"}"#,
+            "mouseEventOk": #"{"type":"mouseEventOk","seq":1,"docId":"d"}"#,
+            "extTextInputEventOk": #"{"type":"extTextInputEventOk","seq":1,"docId":"d"}"#,
+            // Office Stage B Task 6 — clipboard, undo/redo, the second ("agent") view.
+            "clipboardCopy": #"{"type":"clipboardCopy","seq":1,"docId":"d","part":0}"#,
+            "clipboardCut": #"{"type":"clipboardCut","seq":1,"docId":"d","part":0}"#,
+            "clipboardPaste": #"{"type":"clipboardPaste","seq":1,"docId":"d","part":0,"text":"x"}"#,
+            "undo": #"{"type":"undo","seq":1,"docId":"d"}"#,
+            "redo": #"{"type":"redo","seq":1,"docId":"d"}"#,
+            "createView": #"{"type":"createView","seq":1,"docId":"d"}"#,
+            "agentKeyEvent": #"{"type":"agentKeyEvent","seq":1,"docId":"d","part":0,"eventType":0,"charCode":65,"keyCode":512}"#,
+            "clipboardCopyOk": #"{"type":"clipboardCopyOk","seq":1,"docId":"d","text":"x"}"#,
+            "clipboardCutOk": #"{"type":"clipboardCutOk","seq":1,"docId":"d","text":"x"}"#,
+            "clipboardPasteOk": #"{"type":"clipboardPasteOk","seq":1,"docId":"d"}"#,
+            "undoOk": #"{"type":"undoOk","seq":1,"docId":"d"}"#,
+            "redoOk": #"{"type":"redoOk","seq":1,"docId":"d"}"#,
+            "agentViewReady": #"{"type":"agentViewReady","seq":1,"docId":"d","viewId":2}"#,
+            "agentKeyEventOk": #"{"type":"agentKeyEventOk","seq":1,"docId":"d"}"#,
             "error": #"{"type":"error","seq":1,"reason":"r"}"#,
             "documentEvent": #"{"type":"documentEvent","seq":1,"docId":"d","kind":"closed"}"#,
             "subscribeTiles": #"{"type":"subscribeTiles","seq":1,"docId":"d","part":0,"zoomPPT":1000,"viewportTwips":{"x":0,"y":0,"width":1,"height":1}}"#,
@@ -155,6 +248,30 @@ final class OfficeWireCodecTests: XCTestCase {
         XCTAssertEqual(OfficeWireFrame.ping(seq: 101).seq, 101)
         XCTAssertEqual(OfficeWireFrame.open(seq: 102, docId: "d", path: "/p").seq, 102)
         XCTAssertEqual(OfficeWireFrame.close(seq: 103, docId: "d").seq, 103)
+        XCTAssertEqual(OfficeWireFrame.save(seq: 121, docId: "d", part: 1).seq, 121)
+        XCTAssertEqual(OfficeWireFrame.saved(seq: 122, docId: "d", tempPath: "/p").seq, 122)
+        XCTAssertEqual(OfficeWireFrame.saveFailed(seq: 123, docId: "d", reason: "r").seq, 123)
+        XCTAssertEqual(OfficeWireFrame.keyEvent(seq: 126, docId: "d", part: 0, type: .keyInput, charCode: 65, keyCode: 512).seq, 126)
+        XCTAssertEqual(OfficeWireFrame.mouseEvent(seq: 127, docId: "d", part: 0, type: .buttonDown, xTwips: 0, yTwips: 0,
+                                                   count: 1, buttons: 1, modifiers: 0).seq, 127)
+        XCTAssertEqual(OfficeWireFrame.keyEventOk(seq: 128, docId: "d").seq, 128)
+        XCTAssertEqual(OfficeWireFrame.mouseEventOk(seq: 129, docId: "d").seq, 129)
+        XCTAssertEqual(OfficeWireFrame.extTextInputEvent(seq: 130, docId: "d", part: 0, type: .input, text: "x").seq, 130)
+        XCTAssertEqual(OfficeWireFrame.extTextInputEventOk(seq: 131, docId: "d").seq, 131)
+        XCTAssertEqual(OfficeWireFrame.clipboardCopy(seq: 132, docId: "d", part: 0).seq, 132)
+        XCTAssertEqual(OfficeWireFrame.clipboardCopyOk(seq: 133, docId: "d", text: "x").seq, 133)
+        XCTAssertEqual(OfficeWireFrame.clipboardCut(seq: 134, docId: "d", part: 0).seq, 134)
+        XCTAssertEqual(OfficeWireFrame.clipboardCutOk(seq: 135, docId: "d", text: "x").seq, 135)
+        XCTAssertEqual(OfficeWireFrame.clipboardPaste(seq: 136, docId: "d", part: 0, text: "x").seq, 136)
+        XCTAssertEqual(OfficeWireFrame.clipboardPasteOk(seq: 137, docId: "d").seq, 137)
+        XCTAssertEqual(OfficeWireFrame.undo(seq: 138, docId: "d").seq, 138)
+        XCTAssertEqual(OfficeWireFrame.undoOk(seq: 139, docId: "d").seq, 139)
+        XCTAssertEqual(OfficeWireFrame.redo(seq: 140, docId: "d").seq, 140)
+        XCTAssertEqual(OfficeWireFrame.redoOk(seq: 141, docId: "d").seq, 141)
+        XCTAssertEqual(OfficeWireFrame.createView(seq: 142, docId: "d").seq, 142)
+        XCTAssertEqual(OfficeWireFrame.agentViewReady(seq: 143, docId: "d", viewId: 2).seq, 143)
+        XCTAssertEqual(OfficeWireFrame.agentKeyEvent(seq: 144, docId: "d", part: 0, type: .keyInput, charCode: 65, keyCode: 512).seq, 144)
+        XCTAssertEqual(OfficeWireFrame.agentKeyEventOk(seq: 145, docId: "d").seq, 145)
         XCTAssertEqual(OfficeWireFrame.helloOk(seq: 104, lokVersion: "v").seq, 104)
         XCTAssertEqual(OfficeWireFrame.refused(seq: 105, reason: "r").seq, 105)
         XCTAssertEqual(OfficeWireFrame.pong(seq: 106).seq, 106)
@@ -201,6 +318,24 @@ final class OfficeWireCodecTests: XCTestCase {
         }
     }
 
+    /// Fix round 1, F2 — `part` is now a REQUIRED field on `keyEvent`/`mouseEvent`, exactly like
+    /// every other required field on this wire: missing it is "malformed," never a silent default.
+    /// This is the wire-decode-level pin for F2's fix (the store/bridge/LOK-thread half is proven
+    /// live by `OfficeRuntimeLiveTests`' two-part drill).
+    func testKeyEventAndMouseEventMissingPartIsMalformed() {
+        let missingPartKeyEvent = #"{"type":"keyEvent","seq":1,"docId":"d","eventType":0,"charCode":65,"keyCode":512}"#
+        let missingPartMouseEvent = #"{"type":"mouseEvent","seq":1,"docId":"d","eventType":0,"xTwips":0,"yTwips":0,"count":1,"buttons":1,"modifiers":0}"#
+        for line in [missingPartKeyEvent, missingPartMouseEvent] {
+            switch OfficeWireCodec.decodeInbound(line) {
+            case .rejected(let seq, let reason):
+                XCTAssertEqual(seq, 1)
+                XCTAssertEqual(reason, "malformed", "expected malformed for: \(line)")
+            case .frame, .tilePending, .tileHeaderMalformed, .unreadable:
+                XCTFail("expected .rejected(seq: 1, reason: \"malformed\") for: \(line)")
+            }
+        }
+    }
+
     /// Task 3 — `opened`'s three new fields (`docType`/`parts`/`widthTwips`/`heightTwips`) are each
     /// required; missing any one is "malformed", not a partially-decoded frame with defaults.
     func testOpenedMissingAnyNewFieldIsMalformed() {
@@ -229,6 +364,15 @@ final class OfficeWireCodecTests: XCTestCase {
             #"{"type":"documentEvent","seq":1,"docId":"d","kind":"modifiedChanged"}"#, // missing "modified"
             #"{"type":"documentEvent","seq":1,"docId":"d","kind":"modifiedChanged","modified":1}"#, // NSNumber-boolean trap, inverted
             #"{"type":"documentEvent","seq":1,"kind":"closed"}"#,                     // missing docId (frame-level)
+            // Task 7 — autosaved: both fields required, wire-strictness house norm.
+            #"{"type":"documentEvent","seq":1,"docId":"d","kind":"autosaved"}"#,                       // missing both
+            #"{"type":"documentEvent","seq":1,"docId":"d","kind":"autosaved","ext":"odt"}"#,           // missing isODFFallback
+            #"{"type":"documentEvent","seq":1,"docId":"d","kind":"autosaved","isODFFallback":true}"#,  // missing ext
+            #"{"type":"documentEvent","seq":1,"docId":"d","kind":"autosaved","ext":"","isODFFallback":false}"#, // empty ext
+            #"{"type":"documentEvent","seq":1,"docId":"d","kind":"autosaved","ext":"odt","isODFFallback":1}"#, // NSNumber-boolean trap
+            // Task 8 — cellFormula: "text" required, wire-strictness (a missing field must never
+            // silently default to "" — indistinguishable from a real empty cell's own genuine payload).
+            #"{"type":"documentEvent","seq":1,"docId":"d","kind":"cellFormula"}"#, // missing text
         ]
         for line in lines {
             switch OfficeWireCodec.decodeInbound(line) {
@@ -362,9 +506,49 @@ final class OfficeWireCodecTests: XCTestCase {
         XCTAssertEqual(tight, size5, "no space after commas parses identically to the spaced form")
 
         XCTAssertEqual(OfficeDocumentEvent.parseInvalidateTiles("EMPTY"), .invalidated(rectsTwips: [], part: 0),
-                       "EMPTY means the whole document; part defaults to 0 — LOK's own EMPTY firing carries no part")
+                       "bare EMPTY (no part-in-invalidation feature) means the whole document; part defaults to 0")
         XCTAssertEqual(OfficeDocumentEvent.parseInvalidateTiles("  EMPTY  "), .invalidated(rectsTwips: [], part: 0),
                        "surrounding whitespace is trimmed before the EMPTY comparison")
+    }
+
+    /// Fix round 1, F3 (CRITICAL) — **the real wire shape, confirmed against LO core's own writer**
+    /// (`RectangleAndPart::toString()`, `desktop/inc/lib/init.hxx`): with
+    /// `LOK_FEATURE_PART_IN_INVALIDATION_CALLBACK` on (always, in `LOKBridge`), a whole-document
+    /// invalidation is NEVER bare `"EMPTY"` — it is always `"EMPTY, <part>, <mode>"`. The OLD parser
+    /// (`trimmed == "EMPTY"` exact match) rejected this outright: `parseInvalidateTiles` returned
+    /// `nil`, and the callback was silently dropped — a genuine whole-document invalidation that
+    /// never reached `TileCache.invalidate`, leaving stale pixels no scroll/zoom could ever correct.
+    /// This test is the one that would have failed against the pre-fix parser; the previous version
+    /// of `testParseInvalidateTilesRecognizedShapes` above only ever exercised bare `"EMPTY"`, which
+    /// is why this bug shipped past that table uncaught.
+    func testParseInvalidateTilesEmptyWithPartAndModeTheRealUpstreamShape() {
+        XCTAssertEqual(OfficeDocumentEvent.parseInvalidateTiles("EMPTY, 0, 0"), .invalidated(rectsTwips: [], part: 0),
+                       "the real shape RectangleAndPart::toString() emits for part 0 whole-document invalidation")
+        XCTAssertEqual(OfficeDocumentEvent.parseInvalidateTiles("EMPTY, 3, 0"), .invalidated(rectsTwips: [], part: 3),
+                       "part is fields[1]; mode (fields[2]) is parsed and discarded")
+        XCTAssertEqual(OfficeDocumentEvent.parseInvalidateTiles("EMPTY,0,0"), .invalidated(rectsTwips: [], part: 0),
+                       "no space after commas parses identically to the spaced form")
+    }
+
+    /// Fix round 1, F3 — LO's own READER (`RectangleAndPart::Create`, same file) tolerates mode
+    /// being absent even when part is present (`bHasMode = nSeparatorPos > 0`) — mirrored here even
+    /// though LO's own WRITER never actually emits this shape (`toString()` always appends both or
+    /// neither), the same "accept more than we ever expect to receive" leniency this parser already
+    /// takes for the numeric-rect branch's optional 5th field.
+    func testParseInvalidateTilesEmptyWithPartButNoModeStillParses() {
+        XCTAssertEqual(OfficeDocumentEvent.parseInvalidateTiles("EMPTY, 3"), .invalidated(rectsTwips: [], part: 3))
+    }
+
+    /// Fix round 1, F3 — LO reserves `-1` for "all parts" (`init.hxx`'s own `m_nPart(INT_MIN)`/
+    /// "-1 is reserved to mean 'all parts'" comment; `RectangleAndPart::toString()` serializes any
+    /// `m_nPart >= -1`, so `-1` legitimately reaches the wire on EITHER the EMPTY or the rect-
+    /// bearing shape). The parser passes it through unchanged in both cases — `Int` parses a
+    /// leading "-" the same as any other digit string; what actually HONORS `-1` is
+    /// `TileCache.invalidate`'s own fix-round update (`TileCacheTests`' own pin), not this parser.
+    func testParseInvalidateTilesPassesThroughLOKsAllPartsNegativeOneSentinelUnchanged() {
+        XCTAssertEqual(OfficeDocumentEvent.parseInvalidateTiles("EMPTY, -1, 0"), .invalidated(rectsTwips: [], part: -1))
+        XCTAssertEqual(OfficeDocumentEvent.parseInvalidateTiles("10, 20, 300, 400, -1"),
+                       .invalidated(rectsTwips: [OfficeTwipsRect(x: 10, y: 20, width: 300, height: 400)], part: -1))
     }
 
     func testParseInvalidateTilesMalformedPayloadsAreRejected() {
@@ -397,6 +581,151 @@ final class OfficeWireCodecTests: XCTestCase {
         // non-"true" suffix on an otherwise-matching prefix (including garbage, not just "false")
         // yields `.modifiedChanged(false)` rather than nil.
         XCTAssertEqual(OfficeDocumentEvent.parseModifiedStatus(".uno:ModifiedStatus=garbage"), .modifiedChanged(false))
+    }
+
+    // MARK: - Task 5: caret/selection/cell-cursor raw payload parsers, against REAL captured shapes
+    //
+    // Every literal string below is copied verbatim from
+    // `testRealLOKCallbackProbeCapturesCaretSelectionAndCellCursorRawPayloads`'s own printed output
+    // (a real, sandboxed, vendored-LOK run against gate.odt/gate.ods) — not hand-invented. See that
+    // test's own header, and `OfficeDocumentEvent.parseCaretRect`/`.parseCellCursor`'s own headers,
+    // for the full methodology and citations.
+
+    func testParseCaretRectRealCapturedShapes() {
+        // Writer body typing.
+        XCTAssertEqual(OfficeDocumentEvent.parseCaretRect("1418, 1418, 0, 552"),
+                       .caretRect(OfficeTwipsRect(x: 1418, y: 1418, width: 0, height: 552)))
+        // Calc in-cell edit — the SAME shape, confirmed live from a structurally different emitter
+        // (editeng, not vcl's document-window cursor) — see the parser's own header on why this
+        // cross-app agreement was checked rather than assumed.
+        XCTAssertEqual(OfficeDocumentEvent.parseCaretRect("2616, 1800, 0, 210"),
+                       .caretRect(OfficeTwipsRect(x: 2616, y: 1800, width: 0, height: 210)))
+    }
+
+    /// The header-documented JSON alternative — never observed live (see the parser's own header for
+    /// why), accepted defensively anyway. Uses the WELL-FORMED shape (`bControlEvent == true`'s own
+    /// branch, which properly closes every JSON string) — the malformed branch's own output is not
+    /// reproduced here since it is not valid JSON by construction and this parser makes no promise
+    /// about recovering meaning from broken JSON.
+    func testParseCaretRectAcceptsTheDocumentedJSONShapeAsAFallback() {
+        let json = "{ \"viewId\": \"0\", \"rectangle\": \"100, 200, 0, 300\", \"controlEvent\": true, \"windowId\": \"5\" }"
+        XCTAssertEqual(OfficeDocumentEvent.parseCaretRect(json),
+                       .caretRect(OfficeTwipsRect(x: 100, y: 200, width: 0, height: 300)))
+    }
+
+    func testParseCaretRectMalformedPayloadsAreRejected() {
+        for payload in ["", "not a rect", "1, 2, 3", "{ \"no rectangle field\": true }"] {
+            XCTAssertNil(OfficeDocumentEvent.parseCaretRect(payload), "expected nil for: \"\(payload)\"")
+        }
+    }
+
+    func testParseTextSelectionRealCapturedShapes() {
+        XCTAssertEqual(OfficeDocumentEvent.parseTextSelection(""), .textSelection([]),
+                       "LOK's documented empty-selection shape")
+        XCTAssertEqual(OfficeDocumentEvent.parseTextSelection("1764, 1418, 320, 551"),
+                       .textSelection([OfficeTwipsRect(x: 1764, y: 1418, width: 320, height: 551)]))
+        XCTAssertEqual(OfficeDocumentEvent.parseTextSelection("1418, 1418, 666, 551"),
+                       .textSelection([OfficeTwipsRect(x: 1418, y: 1418, width: 666, height: 551)]))
+    }
+
+    /// Calc's own undocumented divergence, found by reading `gridwin.cxx:7005` ahead of the probe —
+    /// the parser folds it to the SAME "no selection" outcome as the documented `""`.
+    func testParseTextSelectionCalcsBareEMPTYAlsoMeansNoSelection() {
+        XCTAssertEqual(OfficeDocumentEvent.parseTextSelection("EMPTY"), .textSelection([]))
+        XCTAssertEqual(OfficeDocumentEvent.parseTextSelection("  EMPTY  "), .textSelection([]),
+                       "surrounding whitespace is trimmed before the EMPTY comparison, mirroring parseInvalidateTiles")
+    }
+
+    /// The documented multi-rect shape — a selection spanning more than one visual line. Not itself
+    /// triggered by this task's own live probe (every real selection captured fit on one line — see
+    /// the parser's own header) but structurally supported and pinned here as a pure fixture.
+    func testParseTextSelectionMultiRectSemicolonJoinedShape() {
+        let result = OfficeDocumentEvent.parseTextSelection("10, 20, 30, 40; 0, 60, 500, 40")
+        XCTAssertEqual(result, .textSelection([
+            OfficeTwipsRect(x: 10, y: 20, width: 30, height: 40),
+            OfficeTwipsRect(x: 0, y: 60, width: 500, height: 40),
+        ]))
+    }
+
+    func testParseTextSelectionMalformedPayloadsAreRejected() {
+        for payload in ["10, 20, 30", "a, b, c, d", "10, 20, 30, 40; garbage"] {
+            XCTAssertNil(OfficeDocumentEvent.parseTextSelection(payload), "expected nil for: \"\(payload)\"")
+        }
+    }
+
+    func testParseTextSelectionStartAndEndRealCapturedShapes() {
+        XCTAssertEqual(OfficeDocumentEvent.parseTextSelectionStart("1764, 1418, 0, 551"),
+                       .textSelectionStart(OfficeTwipsRect(x: 1764, y: 1418, width: 0, height: 551)))
+        XCTAssertEqual(OfficeDocumentEvent.parseTextSelectionEnd("2084, 1418, 0, 551"),
+                       .textSelectionEnd(OfficeTwipsRect(x: 2084, y: 1418, width: 0, height: 551)))
+    }
+
+    func testParseTextSelectionStartAndEndMalformedPayloadsAreRejected() {
+        // Unlike parseTextSelection, START/END never fire with an empty payload at all (LO's own
+        // source returns no payload rather than ""), so "" is rejected here, not folded to anything.
+        for payload in ["", "1, 2, 3", "not a rect"] {
+            XCTAssertNil(OfficeDocumentEvent.parseTextSelectionStart(payload), "expected nil for: \"\(payload)\"")
+            XCTAssertNil(OfficeDocumentEvent.parseTextSelectionEnd(payload), "expected nil for: \"\(payload)\"")
+        }
+    }
+
+    func testParseCellCursorRealCapturedShapes() {
+        // A1.
+        XCTAssertEqual(OfficeDocumentEvent.parseCellCursor("0, 0, 1265, 254, 0, 0"),
+                       .cellCursor(.at(rectTwips: OfficeTwipsRect(x: 0, y: 0, width: 1265, height: 254), column: 0, row: 0)))
+        // A distant cell — column C (0-based index 2), row 8 (0-based index 7).
+        XCTAssertEqual(OfficeDocumentEvent.parseCellCursor("2533, 1785, 1265, 254, 2, 7"),
+                       .cellCursor(.at(rectTwips: OfficeTwipsRect(x: 2533, y: 1785, width: 1265, height: 254), column: 2, row: 7)))
+        // In-cell edit mode — the grid's own "current cell" concept does not apply.
+        XCTAssertEqual(OfficeDocumentEvent.parseCellCursor("EMPTY"), .cellCursor(.empty))
+    }
+
+    func testParseCellCursorMalformedPayloadsAreRejected() {
+        for payload in ["", "0, 0, 1265, 254", "0, 0, 1265, 254, notanumber, 0", "a, b, c, d, e, f"] {
+            XCTAssertNil(OfficeDocumentEvent.parseCellCursor(payload), "expected nil for: \"\(payload)\"")
+        }
+    }
+
+    /// Task 8 — `LOK_CALLBACK_CELL_FORMULA`'s real captured payloads (live probe against
+    /// `two-sheet.ods`, `OfficeHelperLiveTests
+    /// .testProbeInvestigatesWhetherCellFormulaCallbacksExistForTheFormulaBarsContent`): clicking
+    /// A1 ("NORMA GATE", a string cell) sent the literal string; clicking B2 (genuinely empty)
+    /// sent the EMPTY STRING, not a sentinel and not silence; clicking B1 (the number 42) sent
+    /// "42"; typing "X" without committing sent "X" — the live, in-progress edit-buffer text.
+    /// Unlike `CELL_CURSOR`, there is no structure to malform: this callback's whole payload IS
+    /// the formula-bar text, verbatim, so `parseCellFormula` never rejects anything — see its own
+    /// header.
+    func testParseCellFormulaRealCapturedShapes() {
+        XCTAssertEqual(OfficeDocumentEvent.parseCellFormula("NORMA GATE"), .cellFormula("NORMA GATE"))
+        XCTAssertEqual(OfficeDocumentEvent.parseCellFormula(""), .cellFormula(""), "a genuinely empty cell sends the empty string, not a sentinel")
+        XCTAssertEqual(OfficeDocumentEvent.parseCellFormula("42"), .cellFormula("42"))
+        XCTAssertEqual(OfficeDocumentEvent.parseCellFormula("X"), .cellFormula("X"), "the live, uncommitted in-progress edit-buffer text")
+    }
+
+    // MARK: - Office Stage B Task 5 — IME wire verb
+
+    /// **The advisor-flagged trap, pinned.** LOK declares `LOK_EXT_TEXTINPUT = 0`,
+    /// `LOK_EXT_TEXTINPUT_POS = 1`, `LOK_EXT_TEXTINPUT_END = 2` — `.end` MUST be `2`, not the naive
+    /// sequential `1`, or this bridge silently posts the candidate-window-positioning event instead
+    /// of a real commit and composition never lands. See `OfficeExtTextInputType`'s own header.
+    func testExtTextInputTypeRawValuesSkipTheUnmodeledPOSCase() {
+        XCTAssertEqual(OfficeExtTextInputType.input.rawValue, 0)
+        XCTAssertEqual(OfficeExtTextInputType.end.rawValue, 2, "must skip LOK_EXT_TEXTINPUT_POS (1) — see this type's own header")
+    }
+
+    func testExtTextInputEventMalformedPayloadsAreRejected() {
+        XCTAssertEqual(OfficeWireCodec.decodeInbound(
+            "{\"type\":\"extTextInputEvent\",\"seq\":1,\"docId\":\"d\",\"part\":0,\"eventType\":0}"), // missing text
+            .rejected(seq: 1, reason: "malformed"))
+        XCTAssertEqual(OfficeWireCodec.decodeInbound(
+            "{\"type\":\"extTextInputEvent\",\"seq\":2,\"docId\":\"d\",\"part\":0,\"text\":\"x\"}"), // missing eventType
+            .rejected(seq: 2, reason: "malformed"))
+        XCTAssertEqual(OfficeWireCodec.decodeInbound(
+            "{\"type\":\"extTextInputEvent\",\"seq\":3,\"docId\":\"d\",\"eventType\":0,\"text\":\"x\"}"), // missing part
+            .rejected(seq: 3, reason: "malformed"))
+        XCTAssertEqual(OfficeWireCodec.decodeInbound(
+            "{\"type\":\"extTextInputEvent\",\"seq\":4,\"docId\":\"d\",\"part\":0,\"eventType\":1,\"text\":\"x\"}"), // the unmodeled POS=1
+            .rejected(seq: 4, reason: "malformed"))
     }
 
     // MARK: - Shared CLI arg parser (both main.swifts)

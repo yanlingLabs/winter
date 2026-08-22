@@ -899,4 +899,113 @@ final class EditorSaveTests: XCTestCase {
             .appendingPathComponent("Resources/EditorAssets/app/\(name)")
         return [bundled, source].first { FileManager.default.fileExists(atPath: $0.path) }
     }
+
+    // MARK: - Office Stage B Task 6: the deferred zoom menu pass
+
+    /// Installed once, installed twice — one Zoom In/Zoom Out/Actual Size trio either way. Mirrors
+    /// `testInstallingTheMenuItemIsIdempotentAndCreatesTheFileMenuIfThereIsNone` above exactly, one
+    /// menu title over (`View`, not `File`) and matched by action selector rather than `target ===
+    /// self` — `OfficeCanvasMenuInstaller.install`'s own header states why (`target: nil`
+    /// throughout, no shared command object to compare against).
+    func testInstallingTheZoomMenuItemsIsIdempotentAndCreatesTheViewMenuIfThereIsNone() throws {
+        let mainMenu = NSMenu(title: "MainMenu")
+        mainMenu.addItem(withTitle: "Norma", action: nil, keyEquivalent: "").submenu = NSMenu(title: "Norma")
+
+        OfficeCanvasMenuInstaller.install(in: mainMenu)
+        OfficeCanvasMenuInstaller.install(in: mainMenu)
+
+        let view = try XCTUnwrap(mainMenu.items.first(where: { $0.title == "View" })?.submenu)
+        XCTAssertEqual(view.items.map(\.title), ["Zoom In", "Zoom Out", "Actual Size"],
+                       "exactly one of each, no duplicates from the second install")
+        XCTAssertEqual(mainMenu.items.filter { $0.title == "View" }.count, 1)
+        XCTAssertEqual(mainMenu.items.first?.title, "Norma", "the app menu stays first")
+
+        let zoomIn = try XCTUnwrap(view.items.first(where: { $0.title == "Zoom In" }))
+        XCTAssertEqual(zoomIn.keyEquivalent, "+")
+        XCTAssertEqual(zoomIn.keyEquivalentModifierMask, [.command])
+        XCTAssertNil(zoomIn.target, "target: nil — routes through the responder chain, never a command object")
+        let zoomOut = try XCTUnwrap(view.items.first(where: { $0.title == "Zoom Out" }))
+        XCTAssertEqual(zoomOut.keyEquivalent, "-")
+        let actualSize = try XCTUnwrap(view.items.first(where: { $0.title == "Actual Size" }))
+        XCTAssertEqual(actualSize.keyEquivalent, "0")
+
+        // An existing View menu is used rather than a second one being made, and whatever else
+        // lives in it survives untouched.
+        let withView = NSMenu(title: "MainMenu")
+        let viewItem = withView.addItem(withTitle: "View", action: nil, keyEquivalent: "")
+        viewItem.submenu = NSMenu(title: "View")
+        viewItem.submenu?.addItem(withTitle: "Show Sidebar", action: nil, keyEquivalent: "")
+        OfficeCanvasMenuInstaller.install(in: withView)
+        XCTAssertEqual(withView.items.count, 1)
+        XCTAssertEqual(viewItem.submenu?.items.map(\.title), ["Show Sidebar", "Zoom In", "Zoom Out", "Actual Size"])
+
+        OfficeCanvasMenuInstaller.install(in: nil)   // an app with no main menu: nothing to do, and no crash
+    }
+
+    // MARK: - Review fix round 1 (I-1): the Edit-menu belt
+
+    /// A bare main menu (no Edit submenu at all) gets a real one, with all five standard verbs.
+    func testEditActionsBeltCreatesTheEditMenuAndAddsAllFiveWhenNoneExist() throws {
+        let mainMenu = NSMenu(title: "MainMenu")
+        mainMenu.addItem(withTitle: "Norma", action: nil, keyEquivalent: "").submenu = NSMenu(title: "Norma")
+
+        OfficeCanvasMenuInstaller.installEditActionsIfAbsent(in: mainMenu)
+
+        let edit = try XCTUnwrap(mainMenu.items.first(where: { $0.title == "Edit" })?.submenu)
+        XCTAssertEqual(edit.items.map(\.title), ["Undo", "Redo", "Cut", "Copy", "Paste"])
+
+        let undo = try XCTUnwrap(edit.items.first(where: { $0.title == "Undo" }))
+        XCTAssertEqual(undo.action, #selector(OfficeTileCanvasView.undo(_:)))
+        XCTAssertEqual(undo.keyEquivalent, "z")
+        XCTAssertEqual(undo.keyEquivalentModifierMask, [.command])
+        XCTAssertNil(undo.target, "target: nil — routes through the responder chain")
+
+        let redo = try XCTUnwrap(edit.items.first(where: { $0.title == "Redo" }))
+        XCTAssertEqual(redo.action, #selector(OfficeTileCanvasView.redo(_:)))
+        XCTAssertEqual(redo.keyEquivalent, "z")
+        XCTAssertEqual(redo.keyEquivalentModifierMask, [.command, .shift], "⇧⌘Z, distinct from Undo's ⌘Z")
+
+        let copy = try XCTUnwrap(edit.items.first(where: { $0.title == "Copy" }))
+        XCTAssertEqual(copy.action, #selector(OfficeTileCanvasView.copy(_:)))
+        XCTAssertEqual(copy.keyEquivalent, "c")
+    }
+
+    /// **The load-bearing property**: a pre-existing item carrying the REAL `copy:` action — this
+    /// test's own stand-in for "SwiftUI already provided it" — must survive completely untouched
+    /// (same title, same object identity), while the four ABSENT verbs are filled in around it.
+    /// This is what distinguishes "install-if-absent" from `OfficeCanvasMenuInstaller.install`'s
+    /// own remove-then-add pattern for zoom items — see `installEditActionsIfAbsent`'s own header.
+    func testEditActionsBeltNeverReplacesAPreExistingItemForTheSameAction() throws {
+        let mainMenu = NSMenu(title: "MainMenu")
+        let editItem = mainMenu.addItem(withTitle: "Edit", action: nil, keyEquivalent: "")
+        let editSubmenu = NSMenu(title: "Edit")
+        editItem.submenu = editSubmenu
+        let swiftUICopy = NSMenuItem(title: "Copy", action: #selector(OfficeTileCanvasView.copy(_:)), keyEquivalent: "c")
+        swiftUICopy.keyEquivalentModifierMask = [.command]
+        editSubmenu.addItem(swiftUICopy)
+
+        OfficeCanvasMenuInstaller.installEditActionsIfAbsent(in: mainMenu)
+
+        XCTAssertTrue(editSubmenu.items.contains(where: { $0 === swiftUICopy }),
+                      "the pre-existing Copy item must survive as the SAME object, never removed/replaced")
+        XCTAssertEqual(editSubmenu.items.filter { $0.action == #selector(OfficeTileCanvasView.copy(_:)) }.count, 1,
+                       "exactly one Copy — the belt must not add a second, competing item for an action already present")
+        XCTAssertEqual(Set(editSubmenu.items.compactMap(\.title)),
+                       ["Copy", "Undo", "Redo", "Cut", "Paste"], "the four ABSENT verbs get filled in around it")
+    }
+
+    /// Installed once, installed twice — no duplicates, mirroring the zoom installer's own
+    /// idempotence test above (this one is naturally idempotent by construction — see the method's
+    /// own header — rather than by an explicit remove-then-add step).
+    func testEditActionsBeltIsANoOpOnceAllFiveAreAlreadyPresent() throws {
+        let mainMenu = NSMenu(title: "MainMenu")
+        OfficeCanvasMenuInstaller.installEditActionsIfAbsent(in: mainMenu)
+        OfficeCanvasMenuInstaller.installEditActionsIfAbsent(in: mainMenu)
+
+        let edit = try XCTUnwrap(mainMenu.items.first(where: { $0.title == "Edit" })?.submenu)
+        XCTAssertEqual(edit.items.map(\.title), ["Undo", "Redo", "Cut", "Copy", "Paste"], "no duplicates from the second call")
+        XCTAssertEqual(mainMenu.items.filter { $0.title == "Edit" }.count, 1, "no second Edit menu either")
+
+        OfficeCanvasMenuInstaller.installEditActionsIfAbsent(in: nil)   // no main menu: nothing to do, no crash
+    }
 }

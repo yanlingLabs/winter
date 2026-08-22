@@ -520,6 +520,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         appWindow = controller
         installEditorSaveMenuItem(host: host)
+        installOfficeCanvasMenuItems()
         controller.summon(navigatingTo: destination)
     }
 
@@ -546,12 +547,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // items whose target is ITSELF before adding its own, so a second command object would leave
         // the first one's item standing — two menu items sharing ⌘S, and the wrong one winning. Safe
         // to reuse because the app window (and therefore its host) is a process-lifetime singleton.
+        // Office Stage B Task 2 — the document-tab leg beside the code-tab one, both through the
+        // SAME menu item (there is exactly one ⌘S in the File menu; two triggers share it by
+        // trying the code tab FIRST, falling to the document tab only when there is none — the
+        // panel's active tab is one of the two kinds or neither, never both, so this ordering never
+        // hides a document tab behind a code tab that isn't actually front).
         let command = editorSaveMenuCommand ?? EditorSaveMenuCommand(
-            activePath: { [weak host] in host?.activeCodeTabPath },
+            activePath: { [weak host] in host?.activeCodeTabPath ?? host?.activeDocumentTabPath },
             performSave: { [weak host] _ in
                 // The path is re-resolved by the host at fire time; passing the validated one back
-                // in would be a second, staler answer to the same question.
-                Task { @MainActor in _ = await host?.saveActiveCodeTab() }
+                // in would be a second, staler answer to the same question. Same code-then-document
+                // order as `activePath` above — whichever one actually resolved a path is the one
+                // that fires; `saveActiveCodeTab`'s own `.noModel` fallback costs nothing when it is
+                // the document tab that is actually active, since it never asks the office runtime
+                // for anything in that case.
+                Task { @MainActor in
+                    guard let host else { return }
+                    if host.activeCodeTabPath != nil {
+                        _ = await host.saveActiveCodeTab()
+                    } else {
+                        host.saveActiveDocumentTab()
+                    }
+                }
             })
         editorSaveMenuCommand = command
         guard !Self.isRunningUnitTests else { return }
@@ -562,6 +579,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         command.install(in: mainMenu)
+    }
+
+    /// Office Stage B Task 6 — the deferred ⌘±/⌘0 menu items, alongside `installEditorSaveMenuItem`
+    /// right above (identical timing/gating reasoning: no menu bar exists until a window promotes
+    /// this `LSUIElement` app to `.regular`, and every summon re-asserts in case SwiftUI rebuilt
+    /// its own main menu underneath). Unlike that method, there is no per-instance command object
+    /// to reuse across calls — `OfficeCanvasMenuInstaller.install` is a pure function of the menu
+    /// tree, idempotent by matching on ACTION SELECTOR (see its own header for why `target === self`,
+    /// `EditorSaveMenuCommand`'s own comparison, does not apply here).
+    ///
+    /// **Review fix round 1 (I-1) — renamed from `installOfficeZoomMenuItems`, now a SECOND, separate
+    /// call**: `OfficeCanvasMenuInstaller.installEditActionsIfAbsent` (the belt for Copy/Cut/Paste/
+    /// Undo/Redo — see that method's own header for why it is a distinct call, not folded into
+    /// `install`). Same timing/gating as the zoom install right above it.
+    private func installOfficeCanvasMenuItems() {
+        guard !Self.isRunningUnitTests else { return }
+        guard let mainMenu = NSApp.mainMenu else {
+            OrbDebug.log("office menu items: no main menu to install Zoom/Edit fallbacks into")
+            return
+        }
+        OfficeCanvasMenuInstaller.install(in: mainMenu)
+        OfficeCanvasMenuInstaller.installEditActionsIfAbsent(in: mainMenu)
     }
 
     /// app-shell T9: the floating panel's click-through door — the exact call shape
@@ -787,9 +826,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // `quitDirtyFilePaths`, the same pure gather `EditorQuitGate` walks at quit —
                 // `dirtyEditors`'s own doc on `UpdaterCoordinatorDeps` for the full why.
                 //
-                // wave-8 item 4: the body itself is hoisted into `liveDirtyEditors()` below, an
-                // always-compiled method — see that method's own doc for why.
-                deps.dirtyEditors = { [weak self] in self?.liveDirtyEditors() ?? false }
+                // wave-8 item 4: the body itself is hoisted into `liveDirtyEditorsOrOfficeDocuments()`
+                // below, an always-compiled method — see that method's own doc for why.
+                //
+                // **Office Stage B Task 3 — the office leg lands here too, deliberately, beyond the
+                // task brief's own letter.** `updaterQuitting` (`terminateDecision`'s own third true-
+                // quit axis) answers `.terminateNow` and reaches `NSApp.terminate` WITHOUT ever going
+                // through `editorQuitGate` — Sparkle's own install-then-relaunch path is not a quit
+                // this gate's alert can intercept at all. Before this fix this closure's own name said
+                // "dirtyEditors" and meant exactly that: an auto-update installing over unsaved office
+                // edits with no deferral and no warning would be the same silent-data-loss failure
+                // class `releaseOfficeRuntimeIfClean`'s own Stage B fix closes for a hop/hide — just
+                // reached through Sparkle's door instead of the shell's.
+                deps.dirtyEditors = { [weak self] in self?.liveDirtyEditorsOrOfficeDocuments() ?? false }
             }
             let coordinator = UpdaterCoordinator(deps: deps)
             let controller = SPUStandardUpdaterController(
@@ -1297,18 +1346,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// **wave-8 item 4: hoisted out of `boot()`'s `#if !DEBUG` Sparkle block** so a Debug build
     /// actually TYPE-CHECKS this expression instead of never compiling it at all.
     ///
-    /// The body is unchanged — `appWindow?.host` walk → `quitDirtyFilePaths` — this is purely a
-    /// composition fix, not a behaviour one: Sparkle itself stays dist-only (DD-T4's own ruling), so
-    /// this method is still never CALLED under Debug. What changes is that it is now always
-    /// COMPILED, which is what closes the one CI-unchecked residue the whole-branch review found —
-    /// a `#if !DEBUG`-only closure body is invisible to Xcode's compiler under the Debug config CI
-    /// actually builds, so a change here that broke under Debug (a renamed property, a changed
-    /// signature) would only ever be caught by a Release build, which this repo's dev workflow does
-    /// not routinely run (`CLAUDE.md`'s own dev/dist rule: dev work never builds/launches Release).
-    private func liveDirtyEditors() -> Bool {
+    /// Sparkle itself stays dist-only (DD-T4's own ruling), so this method is still never CALLED
+    /// under Debug. What matters is that it is always COMPILED, which is what closes the one
+    /// CI-unchecked residue the whole-branch review found — a `#if !DEBUG`-only closure body is
+    /// invisible to Xcode's compiler under the Debug config CI actually builds, so a change here that
+    /// broke under Debug (a renamed property, a changed signature) would only ever be caught by a
+    /// Release build, which this repo's dev workflow does not routinely run (`CLAUDE.md`'s own
+    /// dev/dist rule: dev work never builds/launches Release).
+    ///
+    /// **Office Stage B Task 3 — renamed from `liveDirtyEditors`, and the office leg added, not left
+    /// for a second closure to duplicate.** `deps.dirtyEditors`'s own doc (the ONE call site below)
+    /// names the reason: `updaterQuitting` bypasses `editorQuitGate` entirely, so THIS is the only
+    /// place an in-flight Sparkle install ever asks "would proceeding lose someone's unsaved work" —
+    /// and since Stage B, office documents can hold exactly as much unsaved work as an editor model
+    /// can. Internal, not `private` — `AppLifecycleTests` (`@testable import Norma`) drives it
+    /// directly, the same door `testAppDelegateTeardownAllRuntimesClosureWalksBothRuntimeTables...`
+    /// already opened for `editorQuitGate.teardownAllRuntimes`.
+    func liveDirtyEditorsOrOfficeDocuments() -> Bool {
         guard let host = appWindow?.host else { return false }
-        let states = host.editorRuntimes.values.map(\.stateSnapshot)
-        return !quitDirtyFilePaths(runtimeStates: states).isEmpty
+        let editorStates = host.editorRuntimes.values.map(\.stateSnapshot)
+        let officeStates = host.officeRuntimes.values.map(\.stateSnapshot)
+        return !quitDirtyFilePaths(runtimeStates: editorStates).isEmpty
+            || !officeDirtyFilePaths(runtimeStates: officeStates).isEmpty
     }
 
     /// **The real wiring for `EditorQuitGate`** — `lazy`, on the same terms as `ShellSessionHost
@@ -1346,6 +1405,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         dirtyRuntimeStates: { [weak self] in
             guard let host = self?.appWindow?.host else { return [] }
             return host.editorRuntimes.values.map(\.stateSnapshot)
+        },
+        // Office Stage B Task 3: the alert-gathering leg's own office mirror — `dirtyRuntimeStates`
+        // just above reads `editorRuntimes`, this reads `officeRuntimes`, `EditorQuitGate.run()`
+        // combines both into the one alert. Separate from `teardownAllRuntimes` below, which already
+        // walked BOTH tables since office-plumbing Task 5 — that closure TEARS DOWN every runtime
+        // regardless of dirty state (obligation 1: clean ones too); this one only GATHERS what to ask
+        // the user about, which is why it needs its own read rather than reusing that one's walk.
+        dirtyOfficeRuntimeStates: { [weak self] in
+            guard let host = self?.appWindow?.host else { return [] }
+            return host.officeRuntimes.values.map(\.stateSnapshot)
         },
         teardownAllRuntimes: { [weak self] in
             guard let host = self?.appWindow?.host else { return 0 }
@@ -1543,6 +1612,16 @@ func quitDirtyFilePaths(runtimeStates: [EditorRuntimeState]) -> [String] {
     runtimeStates.flatMap { state in state.models.filter { $0.value.dirty }.map(\.key) }
 }
 
+/// Office Stage B Task 3: `quitDirtyFilePaths`' own `.document` mirror — same shape, same reasoning
+/// (reads ONLY `OfficeRuntimeState`, tolerates a daemon-deleted session by construction, a path open
+/// dirty in two sessions at once appears twice, disclosed not fixed), over `documents` instead of
+/// `models`. `EditorQuitGate.run()` concatenates this list with `quitDirtyFilePaths`' own rather than
+/// folding the two runtime kinds into one function — they are different `RuntimeState` types with no
+/// common supertype worth inventing for one call site.
+func officeDirtyFilePaths(runtimeStates: [OfficeRuntimeState]) -> [String] {
+    runtimeStates.flatMap { state in state.documents.filter { $0.value.dirty }.map(\.key) }
+}
+
 /// PURE: does the quit path need to ask? **This is the level obligation 6's pin lives at** — "zero
 /// dirty ⇒ terminate untouched" is a claim about this function answering `.proceedUntouched`, and
 /// about `EditorQuitGate.run()` never calling `presentAlert` for that answer. It is NOT a claim
@@ -1609,6 +1688,17 @@ func quitDirtyAlertFileList(dirtyPaths: [String]) -> String {
 @MainActor
 struct EditorQuitGate {
     var dirtyRuntimeStates: () -> [EditorRuntimeState]
+    /// Office Stage B Task 3: `dirtyRuntimeStates`' own office mirror — feeds `officeDirtyFilePaths`
+    /// exactly as the field above feeds `quitDirtyFilePaths`, and `run()` below concatenates the two
+    /// resulting path lists into the ONE "N unsaved files" alert. Defaulted to `{ [] }` — additive,
+    /// like `PanelTab.diffId`'s own default — so every pre-existing test construction of this struct
+    /// (none of which is about office) keeps compiling unchanged; `AppDelegate.editorQuitGate`'s real
+    /// wiring below is what actually reaches office, and its own real-host test
+    /// (`testAppDelegateEditorQuitGateDirtyOfficeRuntimeStatesReadsTheHostsOfficeRuntimes`) is the
+    /// pin that a default here alone would NOT be: the CLAUDE.md class of bug this guards against is
+    /// exactly "a new, defaulted field with no producer ever wired to it," and a default with no
+    /// wiring test would be indistinguishable from that bug until a live gate found it.
+    var dirtyOfficeRuntimeStates: () -> [OfficeRuntimeState] = { [] }
     /// Obligation 1: every live runtime, clean ones too. Returns how many it tore down — threaded to
     /// `proceedWithQuit` so production can decide whether the browser-sweep settle beat is owed
     /// (`quitReleasingBrowserViews`'s own `forceSettle` doc: `hasLiveBrowsers` never sees an editor's
@@ -1626,7 +1716,13 @@ struct EditorQuitGate {
     var cancelQuit: () -> Void
 
     func run() {
+        // Office Stage B Task 3: one alert, both sources — `quitDirtyAlertFileList` already SORTS
+        // its basenames for display, so which side's paths come first in this concatenation has no
+        // effect on what the user reads; it matters only for `presentAlert`'s own raw argument, which
+        // production never inspects positionally (`presentQuitDirtyAlert` reads `.count` and hands
+        // the whole array straight to that sort).
         let dirtyPaths = quitDirtyFilePaths(runtimeStates: dirtyRuntimeStates())
+            + officeDirtyFilePaths(runtimeStates: dirtyOfficeRuntimeStates())
         switch quitDirtyGateDecision(dirtyPaths: dirtyPaths) {
         case .proceedUntouched:
             proceedWithQuit(teardownAllRuntimes())

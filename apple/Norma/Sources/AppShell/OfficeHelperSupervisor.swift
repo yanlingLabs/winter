@@ -17,6 +17,12 @@ enum OfficeHelperClientError: Error, CustomStringConvertible, Equatable {
     /// connection/protocol" without string-matching `reason`. The brief's own garbage-survival test
     /// needs exactly this discrimination: assert THIS case, not merely "open() threw something."
     case openFailed(reason: String)
+    /// Office Stage B Task 2 — a document-shaped `saveAs` failure (an unsupported format, a genuine
+    /// disk problem under the helper's own `--state-path`), kept distinct from `.serverError` for
+    /// the same reason `.openFailed` is: a caller can tell "this save failed for a reason about the
+    /// DOCUMENT" apart from "something is wrong with the connection/protocol" without string-
+    /// matching `reason`.
+    case saveFailed(reason: String)
 
     var description: String {
         switch self {
@@ -24,6 +30,7 @@ enum OfficeHelperClientError: Error, CustomStringConvertible, Equatable {
         case .serverError(let reason): return "office helper refused: \(reason)"
         case .unexpectedReply(let frame): return "office helper sent an unexpected reply: \(frame)"
         case .openFailed(let reason): return "office helper could not open the document: \(reason)"
+        case .saveFailed(let reason): return "office helper could not save the document: \(reason)"
         }
     }
 }
@@ -131,6 +138,174 @@ final class OfficeHelperClient {
         }
     }
 
+    /// Office Stage B Task 2 — asks the helper to render `docId` to a temp file under ITS OWN
+    /// `--state-path` and returns that path. Placing those bytes onto the real document path is
+    /// entirely the CALLER's job (`OfficeRuntime.perform`'s `.save` effect) — this method's only
+    /// concern is the wire round trip, exactly as `open`'s only concern is the wire round trip for
+    /// loading a document.
+    ///
+    /// **Fix round 4 (NEW-2) — `part` added**, threaded straight onto the wire frame; see
+    /// `OfficeWireFrame.save`'s own header for what it means here (the USER's active part, asserted
+    /// onto LOK before the write) and `OfficeRuntimeReducer`'s `.saveRequested` for where it is
+    /// resolved.
+    func save(docId: String, part: Int) async throws -> String {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.save(seq: seq, docId: docId, part: part))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .saved(_, _, let tempPath): return tempPath
+        case .saveFailed(_, _, let reason): throw OfficeHelperClientError.saveFailed(reason: reason)
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    // MARK: - Task 4: real input
+
+    /// Office Stage B Task 4 — the real edit verb. Awaits only the immediate `keyEventOk` POST
+    /// acknowledgment, same posture `requestTiles` already has toward its own slow, async-pushed
+    /// effect: the actual edit (and whatever it invalidates) is observed later, through
+    /// `onDocumentEvent`/`onInvalidated`, never through this reply.
+    ///
+    /// **Fix round 1, F2 — `part` added, threaded straight onto the wire frame; see
+    /// `OfficeRuntime.postKeyEvent`'s own header for where it is resolved (at enqueue time, from
+    /// `activePart`, the same source `subscribeTiles` already uses).**
+    func postKey(docId: String, part: Int, type: OfficeKeyEventType, charCode: Int, keyCode: Int) async throws {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.keyEvent(seq: seq, docId: docId, part: part, type: type, charCode: charCode, keyCode: keyCode))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .keyEventOk: return
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    /// Office Stage B Task 4 — same posture as `postKey` above.
+    func postMouse(docId: String, part: Int, type: OfficeMouseEventType, xTwips: Int64, yTwips: Int64,
+                   count: Int, buttons: Int, modifiers: Int) async throws {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.mouseEvent(seq: seq, docId: docId, part: part, type: type, xTwips: xTwips, yTwips: yTwips,
+                                              count: count, buttons: buttons, modifiers: modifiers))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .mouseEventOk: return
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    /// Office Stage B Task 5 — same posture as `postKey`/`postMouse` above: awaits only the
+    /// immediate `extTextInputEventOk` POST acknowledgment, never a claim of effect.
+    func postExtTextInput(docId: String, part: Int, type: OfficeExtTextInputType, text: String) async throws {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.extTextInputEvent(seq: seq, docId: docId, part: part, type: type, text: text))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .extTextInputEventOk: return
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    // MARK: - Office Stage B Task 6: clipboard, undo/redo, the second ("agent") view
+
+    /// Reads the current text selection. `""` for "nothing selected" — never a distinct thrown
+    /// case; the caller decides whether an empty answer is worth writing to the system pasteboard.
+    func clipboardCopy(docId: String, part: Int) async throws -> String {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.clipboardCopy(seq: seq, docId: docId, part: part))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .clipboardCopyOk(_, _, let text): return text
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    /// Same read as `clipboardCopy`, but the selection is also deleted on the far side.
+    func clipboardCut(docId: String, part: Int) async throws -> String {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.clipboardCut(seq: seq, docId: docId, part: part))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .clipboardCutOk(_, _, let text): return text
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    func clipboardPaste(docId: String, part: Int, text: String) async throws {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.clipboardPaste(seq: seq, docId: docId, part: part, text: text))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .clipboardPasteOk: return
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    /// `.uno:Undo` against the document's own primary view. Answers once the command was
+    /// DISPATCHED, never a claim it changed anything — see `OfficeWireFrame.undoOk`'s own header.
+    func undo(docId: String) async throws {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.undo(seq: seq, docId: docId))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .undoOk: return
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    func redo(docId: String) async throws {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.redo(seq: seq, docId: docId))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .redoOk: return
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    /// The two-writer groundwork — mints a second ("agent") LOK view for `docId`, returning its
+    /// view id. Deliberately NOT reachable from `OfficeRuntime`/`Driver` — the brief's own words
+    /// are "unused by the app but drilled"; only the live characterization drill
+    /// (`OfficeRuntimeLiveTests`) ever calls this, talking directly to this client, the same
+    /// raw-probe precedent Task 5's ext-text-input investigation already set.
+    ///
+    /// **Task 9's own producer sweep, for the record**: the read-only-viewer decision
+    /// (`officeDocumentIsReadOnlyFormat`, `PanelEditorTab.swift`) gates every mutation door
+    /// `OfficeRuntime` exposes (`postKeyEvent` and its siblings) — this pair is UNGATED, because
+    /// there is nothing yet to gate it FROM (no app-side caller exists). Whichever Stage C task
+    /// wires a real caller onto this must ALSO thread that same gate through it, or an agent could
+    /// type into a read-only-format document's second view with no save story behind it at all.
+    func createAgentView(docId: String) async throws -> Int32 {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.createView(seq: seq, docId: docId))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .agentViewReady(_, _, let viewId): return viewId
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    /// Posts a key event through the agent view specifically — same drill-only reachability as
+    /// `createAgentView` above.
+    func agentKeyEvent(docId: String, part: Int, type: OfficeKeyEventType, charCode: Int, keyCode: Int) async throws {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.agentKeyEvent(seq: seq, docId: docId, part: part, type: type, charCode: charCode, keyCode: keyCode))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .agentKeyEventOk: return
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
     // MARK: - Task 4: tiles
 
     /// Registers this connection as a tile-push subscriber for `docId` (which must already be open
@@ -228,6 +403,13 @@ final class OfficeHelperSupervisor {
         /// helper keep its own 120s default — tests shorten this so a smoke test doesn't spend two
         /// real minutes proving idle-exit happens at all.
         var idleExitSeconds: Int?
+        /// Office Stage B Task 7 — forwarded to the helper as `--autosave-interval-seconds` when
+        /// set, the identical mirror of `idleExitSeconds` immediately above (same field shape
+        /// deliberately, `Double?` rather than `Int?` only because a live drill wants sub-second
+        /// headroom `Int` could not express, not a real design divergence). `nil` (production) lets
+        /// the helper keep its own 60s default (the brief's own cadence) — `OfficeRuntimeLiveTests`'
+        /// crash drill sets this so a sample does not cost a real minute-plus.
+        var autosaveIntervalSeconds: Double?
         /// Appended verbatim after the standard `--socket-path`/`--state-path`/`--token` (and
         /// optional `--idle-exit-seconds`) arguments. Empty in production — a pure testability
         /// seam so `OfficeSupervisorTests` can pass `NormaOfficeHelperFixture`'s `--mode` flag
@@ -263,6 +445,15 @@ final class OfficeHelperSupervisor {
     }
 
     private let configuration: Configuration
+
+    /// **Office Stage B Task 2b** — the shared helper's own `--state-path`, exposed for
+    /// `OfficeRuntime.Driver.stateDirectory` (`ShellSessionHost.officeDriver(for:)` reads this).
+    /// `configuration.socketDirectory` doubles as `--state-path` already (`attemptOnce`'s own
+    /// `arguments` array: `"--state-path", socketDirectory.path`) — this is the SAME directory,
+    /// under its own name, not a second, independently-computed one. Fixed for this supervisor's
+    /// whole lifetime (`configuration` is `let`), so — unlike `client` — safe to read at ANY time,
+    /// including before the first `start()`.
+    var statePath: URL { configuration.socketDirectory }
     private let eventsContinuation: AsyncStream<OfficeHelperEvent>.Continuation
     /// **Still single-consumer (T2/T3 carry, re-checked by Task 4 — deliberately NOT given a
     /// multicast wrapper here).** Task 4's own app-side tile plumbing (`OfficeHelperClient`'s
@@ -385,6 +576,9 @@ final class OfficeHelperSupervisor {
         var arguments = ["--socket-path", socketPath, "--state-path", socketDirectory.path, "--token", token]
         if let idleExitSeconds = configuration.idleExitSeconds {
             arguments += ["--idle-exit-seconds", String(idleExitSeconds)]
+        }
+        if let autosaveIntervalSeconds = configuration.autosaveIntervalSeconds {
+            arguments += ["--autosave-interval-seconds", String(autosaveIntervalSeconds)]
         }
         arguments += configuration.extraArguments
         process.arguments = arguments

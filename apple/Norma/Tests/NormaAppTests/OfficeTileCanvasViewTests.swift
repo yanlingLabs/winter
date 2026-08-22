@@ -11,6 +11,36 @@ import XCTest
 /// where things go, how zoom steps, and when it asks for tiles.
 @MainActor
 final class OfficeTileCanvasViewTests: XCTestCase {
+    /// **Office Stage B Task 2b test fallout**: `OfficeRuntime.open` now genuinely STAGES (copies)
+    /// its argument before ever calling into a driver — every test in this file that opens
+    /// `gatePath` needs a real, readable file there, or the copy fails and the document never
+    /// reaches `documents[path]` at all. Content is irrelevant to every test here (each driver
+    /// fabricates its own `OfficeDocumentMetadata`, never touching real bytes) — only existence
+    /// does. `gatePath`'s own last path component is `"gate.xlsx"`, the exact literal every test in
+    /// this file already used to key documents/views by, so nothing else needed to change.
+    private var scratchDir: URL!
+    private var gatePath: String { scratchDir.appendingPathComponent("gate.xlsx").path }
+    /// The driver's own staging destination — a SEPARATE scratch directory, mirroring how a real
+    /// `--state-path` is never the document's own directory.
+    private var stateDir: URL!
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        scratchDir = URL(fileURLWithPath: "/tmp/office-tilecanvas-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        try FileManager.default.createDirectory(at: scratchDir, withIntermediateDirectories: true)
+        try Data().write(to: URL(fileURLWithPath: gatePath))
+        stateDir = URL(fileURLWithPath: "/tmp/office-tilecanvas-state-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        try FileManager.default.createDirectory(at: stateDir, withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: scratchDir)
+        try? FileManager.default.removeItem(at: stateDir)
+        scratchDir = nil
+        stateDir = nil
+        try super.tearDownWithError()
+    }
+
     private func key(_ x: Int, _ y: Int, part: Int = 0, zoomPPT: Int = 1000) -> TileKey {
         TileKey(part: part, zoomPPT: zoomPPT, tileX: x, tileY: y)
     }
@@ -53,6 +83,43 @@ final class OfficeTileCanvasViewTests: XCTestCase {
         let viewport = officeViewportTwips(scrollOrigin: .zero, visibleSize: .zero, zoomPPT: 1000)
         XCTAssertEqual(viewport.width, 0)
         XCTAssertEqual(viewport.height, 0)
+    }
+
+    // MARK: - officePointToTwips (Office Stage B Task 4 — the mouse-event unit chain)
+
+    func testOriginPointAtZeroScrollIsTheDocumentOrigin() {
+        let twips = officePointToTwips(viewPoint: .zero, scrollOrigin: .zero, zoomPPT: 1000)
+        XCTAssertEqual(twips.x, 0)
+        XCTAssertEqual(twips.y, 0)
+    }
+
+    /// Same 100pt-of-scroll fixture `testScrollOriginTranslatesToTheViewportsTwipsOrigin` uses for
+    /// `officeViewportTwips` — a point at the view's own origin, once `scrollOrigin` is added in,
+    /// must land on the IDENTICAL twips coordinate that function already reports as the viewport's
+    /// own origin: both functions are the same unit chain, applied to different inputs (a whole
+    /// viewport vs. one point), and must never disagree about where "the view's origin, scrolled by
+    /// this much" sits in document space.
+    func testAPointAtTheViewOriginAgreesWithOfficeViewportTwipsOwnOriginForTheSameScroll() {
+        let scrollOrigin = CGPoint(x: 100, y: 50)
+        let viewport = officeViewportTwips(scrollOrigin: scrollOrigin, visibleSize: CGSize(width: 256, height: 256), zoomPPT: 1000)
+        let point = officePointToTwips(viewPoint: .zero, scrollOrigin: scrollOrigin, zoomPPT: 1000)
+        XCTAssertEqual(point.x, viewport.x)
+        XCTAssertEqual(point.y, viewport.y)
+    }
+
+    func testAPointOffsetFromTheOriginAddsItsOwnTwipsDistance() {
+        // 10pt right/down from the origin, at 2x scale and zoomPPT 1000 (1 twip == 0.1px): 10pt ==
+        // 20px == 200 twips.
+        let twips = officePointToTwips(viewPoint: CGPoint(x: 10, y: 10), scrollOrigin: .zero, zoomPPT: 1000)
+        XCTAssertEqual(twips.x, 200)
+        XCTAssertEqual(twips.y, 200)
+    }
+
+    func testHalfZoomDoublesTheTwipsDistanceForTheSamePointOffset() {
+        let full = officePointToTwips(viewPoint: CGPoint(x: 10, y: 10), scrollOrigin: .zero, zoomPPT: 1000)
+        let half = officePointToTwips(viewPoint: CGPoint(x: 10, y: 10), scrollOrigin: .zero, zoomPPT: 500)
+        XCTAssertEqual(half.x, full.x * 2)
+        XCTAssertEqual(half.y, full.y * 2)
     }
 
     // MARK: - officeTileScreenRect (the inverse unit chain)
@@ -265,12 +332,59 @@ final class OfficeTileCanvasViewTests: XCTestCase {
         var subscribeCalls: [(docId: String, part: Int, zoomPPT: Int, viewportTwips: OfficeTwipsRect)] {
             lock.lock(); defer { lock.unlock() }; return _subscribeCalls
         }
+        /// Office Stage B Task 5 — the IME tests below need to see WHICH door a given
+        /// `insertText`/`setMarkedText`/`unmarkText`/`keyDown` call actually reached: the already-
+        /// proven per-scalar `postKey` door, or the new `postExtTextInput` door. Additive — every
+        /// PRE-existing test in this file only ever reads `subscribeCalls`, never these two, so
+        /// recording more here cannot change any of their outcomes.
+        private var _postKeyCalls: [(docId: String, part: Int, type: OfficeKeyEventType, charCode: Int, keyCode: Int)] = []
+        var postKeyCalls: [(docId: String, part: Int, type: OfficeKeyEventType, charCode: Int, keyCode: Int)] {
+            lock.lock(); defer { lock.unlock() }; return _postKeyCalls
+        }
+        private var _postExtTextInputCalls: [(docId: String, part: Int, type: OfficeExtTextInputType, text: String)] = []
+        var postExtTextInputCalls: [(docId: String, part: Int, type: OfficeExtTextInputType, text: String)] {
+            lock.lock(); defer { lock.unlock() }; return _postExtTextInputCalls
+        }
+        /// Office Stage B Task 6 — the clipboard/undo/redo call sequences the canvas's own menu
+        /// pins need to see. Same additive-only reasoning as `postExtTextInputCalls` above: every
+        /// PRE-existing test in this file only reads the arrays it already knew about.
+        private var _clipboardCopyCalls: [(docId: String, part: Int)] = []
+        var clipboardCopyCalls: [(docId: String, part: Int)] {
+            lock.lock(); defer { lock.unlock() }; return _clipboardCopyCalls
+        }
+        private var _clipboardCutCalls: [(docId: String, part: Int)] = []
+        var clipboardCutCalls: [(docId: String, part: Int)] {
+            lock.lock(); defer { lock.unlock() }; return _clipboardCutCalls
+        }
+        private var _clipboardPasteCalls: [(docId: String, part: Int, text: String)] = []
+        var clipboardPasteCalls: [(docId: String, part: Int, text: String)] {
+            lock.lock(); defer { lock.unlock() }; return _clipboardPasteCalls
+        }
+        private var _undoCalls: [String] = []
+        var undoCalls: [String] {
+            lock.lock(); defer { lock.unlock() }; return _undoCalls
+        }
+        private var _redoCalls: [String] = []
+        var redoCalls: [String] {
+            lock.lock(); defer { lock.unlock() }; return _redoCalls
+        }
+        /// The text `clipboardCopy`/`clipboardCut` answer with — configurable per test
+        /// (`copyAndCutAnswer`), defaulting to a fixed, deterministic, non-empty string so the
+        /// common "did a pasteboard write happen" pin does not need to configure anything.
+        var copyAndCutAnswer: String? = "clipboard-recorder-text"
         /// office live-gate fix #4, FIX 2: `OfficeTileCanvasView.isSpreadsheet` reads this back via
         /// `runtime.stateSnapshot.documents[path]?.type` — every OTHER test in this file relies on
         /// the pre-existing `.text` default (the infinite-grid margin must stay INERT for them), so
         /// this is a constructor default, never a hardcoded literal inside `driver` below.
         private let documentType: OfficeDocumentKind
-        init(documentType: OfficeDocumentKind = .text) { self.documentType = documentType }
+        /// Office Stage B Task 2b test fallout — `Driver.stateDirectory` is a required field now;
+        /// the caller hands in a real scratch dir (`OfficeTileCanvasViewTests.stateDir`) since
+        /// `OfficeRuntime.openAndDispatch` genuinely stages into it before ever calling `open` below.
+        private let stateDirectory: URL
+        init(documentType: OfficeDocumentKind = .text, stateDirectory: URL) {
+            self.documentType = documentType
+            self.stateDirectory = stateDirectory
+        }
         var driver: OfficeRuntime.Driver {
             OfficeRuntime.Driver(
                 helperState: { .ready }, startHelper: { },
@@ -278,12 +392,38 @@ final class OfficeTileCanvasViewTests: XCTestCase {
                     type: documentType, parts: 1,
                     sizeTwips: OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)) },
                 close: { _ in },
+                save: { _, _ in "/tmp/officetilecanvasviewtests-unused-save" },
                 subscribeTiles: { [unowned self] docId, part, zoomPPT, viewportTwips in
                     self.lock.lock(); self._subscribeCalls.append((docId, part, zoomPPT, viewportTwips)); self.lock.unlock()
                     return []
                 },
                 unsubscribeTiles: { _ in },
-                requestTiles: { _, _ in })
+                requestTiles: { _, _ in },
+                postKey: { [unowned self] docId, part, type, charCode, keyCode in
+                    self.lock.lock(); self._postKeyCalls.append((docId, part, type, charCode, keyCode)); self.lock.unlock()
+                },
+                postMouse: { _, _, _, _, _, _, _, _ in },
+                postExtTextInput: { [unowned self] docId, part, type, text in
+                    self.lock.lock(); self._postExtTextInputCalls.append((docId, part, type, text)); self.lock.unlock()
+                },
+                clipboardCopy: { [unowned self] docId, part in
+                    self.lock.lock(); self._clipboardCopyCalls.append((docId, part)); self.lock.unlock()
+                    return self.copyAndCutAnswer
+                },
+                clipboardCut: { [unowned self] docId, part in
+                    self.lock.lock(); self._clipboardCutCalls.append((docId, part)); self.lock.unlock()
+                    return self.copyAndCutAnswer
+                },
+                clipboardPaste: { [unowned self] docId, part, text in
+                    self.lock.lock(); self._clipboardPasteCalls.append((docId, part, text)); self.lock.unlock()
+                },
+                undo: { [unowned self] docId in
+                    self.lock.lock(); self._undoCalls.append(docId); self.lock.unlock()
+                },
+                redo: { [unowned self] docId in
+                    self.lock.lock(); self._redoCalls.append(docId); self.lock.unlock()
+                },
+                stateDirectory: stateDirectory)
         }
     }
 
@@ -301,12 +441,12 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// != nil`; a `subscribeTiles` call against a runtime that never opened anything is a pure no-op
     /// (`(next, [])`, no effect at all), which is exactly what `PanelDocumentTabModel
     /// .requestOpenIfNeeded` would have already done for a real tab before its canvas ever mounts.
-    private func makeOpenedRuntime(path: String = "/gate.xlsx", documentType: OfficeDocumentKind = .text) async
+    private func makeOpenedRuntime(documentType: OfficeDocumentKind = .text) async
         -> (runtime: OfficeRuntime, recorder: SubscribeCapturingDriverRecorder) {
-        let recorder = SubscribeCapturingDriverRecorder(documentType: documentType)
+        let recorder = SubscribeCapturingDriverRecorder(documentType: documentType, stateDirectory: stateDir)
         let runtime = OfficeRuntime(sessionId: "S1", driver: recorder.driver)
-        runtime.open(path)
-        _ = await waitUntil { runtime.stateSnapshot.documents[path] != nil }
+        runtime.open(gatePath)
+        _ = await waitUntil { runtime.stateSnapshot.documents[gatePath] != nil }
         return (runtime, recorder)
     }
 
@@ -315,9 +455,9 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// a part switch is discrete, not a continuation of a scroll burst), carrying the NEW part.
     func testSettingActivePartOnAMountedCanvasResubscribesImmediatelyWithTheNewPart() async {
         let (runtime, recorder) = await makeOpenedRuntime()
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
 
@@ -354,9 +494,9 @@ final class OfficeTileCanvasViewTests: XCTestCase {
         // (`init` touches neither the driver nor the runtime) — no retention hazard here the way the
         // NEXT test has (see that one's own comment). `_` would be fine; bound anyway for symmetry.
         let (runtime, _) = await makeOpenedRuntime()
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         XCTAssertEqual(view.layer?.masksToBounds, true,
                        "without this, a tile straddling the viewport's edge (routine — see the next "
@@ -374,11 +514,11 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// off `view.layer?.sublayers`, so no new production accessor was needed for either assertion.
     func testRelayoutRoutinelyPositionsATileLayerPastTheViewsOwnEdge() async {
         let (runtime, recorder) = await makeOpenedRuntime()
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         // Large enough that the 300pt viewport below sits nowhere near the DOCUMENT's own far edge —
         // this test is about the TILE GRID straddling the VIEWPORT's edge, not the document's.
         let sizeTwips = OfficeDocumentSize(widthTwips: 1_000_000, heightTwips: 1_000_000)
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
         view.mount() // synchronously calls relayoutVisibleTiles() — see mount()'s own body
@@ -424,9 +564,9 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// for at all. Without either half, every tile after a reload is a permanent placeholder.
     func testSyncDocumentIdentityWithANewDocIdUpdatesTheCanvasAndResubscribes() async {
         let (runtime, recorder) = await makeOpenedRuntime()
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
         view.mount()
@@ -452,9 +592,9 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// the scrolled position established BEFORE the reload, not a reset-to-origin one.
     func testSyncDocumentIdentityWithANewDocIdPreservesTheScrollPosition() async {
         let (runtime, recorder) = await makeOpenedRuntime()
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         let sizeTwips = OfficeDocumentSize(widthTwips: 1_000_000, heightTwips: 1_000_000)
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
         view.mount()
@@ -483,9 +623,9 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// so the claim is not vacuously true of the 100% starting point every other test leaves it at.
     func testSyncDocumentIdentityWithANewDocIdPreservesTheZoomLevel() async {
         let (runtime, recorder) = await makeOpenedRuntime()
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         let sizeTwips = OfficeDocumentSize(widthTwips: 1_000_000, heightTwips: 1_000_000)
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
         view.mount()
@@ -510,9 +650,9 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// clamp is a function of it, so a document that shrank must pull an out-of-bounds scroll back in.
     func testSyncDocumentIdentityReClampsScrollAgainstTheFreshSizeTwips() async {
         let (runtime, recorder) = await makeOpenedRuntime()
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         let largeSize = OfficeDocumentSize(widthTwips: 2_000_000, heightTwips: 2_000_000)
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
                                         sizeTwips: largeSize, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
         view.mount()
@@ -543,9 +683,9 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// re-assert: idempotent, no extra resubscribe.
     func testSyncDocumentIdentityWithTheSameDocIdIsTheOrdinaryDriftReassertNotAReload() async {
         let (runtime, recorder) = await makeOpenedRuntime()
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
         view.mount()
@@ -566,9 +706,9 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// REAL mounted canvas end to end, not just a test double conforming to the protocol.
     func testMountRegistersTheViewAsTheModelsCanvasHostAndUnmountClearsIt() async {
         let (runtime, recorder) = await makeOpenedRuntime()
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
 
@@ -603,11 +743,11 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// every call.
     func testFreeScrollAccumulatesRawDeltasExactlyNeverQuantizedToATileLine() async {
         let (runtime, _) = await makeOpenedRuntime()
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         // Far larger than anything these tiny deltas could reach — this test is about the
         // ACCUMULATION, not the edge clamp (that is the next test's own job).
         let sizeTwips = OfficeDocumentSize(widthTwips: 2_000_000, heightTwips: 2_000_000)
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
 
@@ -634,9 +774,9 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// (a further overshoot would snap to a DIFFERENT, further-along grid line instead).
     func testFreeScrollClampsOnlyAtTheDocumentEdgeIdempotentlyNotAtATileLine() async {
         let (runtime, _) = await makeOpenedRuntime()
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000) // small — an overshoot is cheap to reach
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
 
@@ -658,9 +798,9 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// visible only as the placeholder tone until an async round trip lands.
     func testPerformSubscribePadsTheViewportByOneTileSpanBeyondWhatIsVisible() async {
         let (runtime, recorder) = await makeOpenedRuntime()
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         let sizeTwips = OfficeDocumentSize(widthTwips: 2_000_000, heightTwips: 2_000_000)
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
         // Comfortably clear of the near edge, so the margin below is never itself clamped away —
@@ -702,9 +842,9 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// negative-twips content that cannot exist — `performSubscribe`'s own `max(0, ...)`.
     func testPerformSubscribeClampsTheMarginAtTheNearEdgeRatherThanAskingNegativeTwips() async {
         let (runtime, recorder) = await makeOpenedRuntime()
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         let sizeTwips = OfficeDocumentSize(widthTwips: 2_000_000, heightTwips: 2_000_000)
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300) // scrollOrigin stays .zero — the near edge
 
@@ -737,12 +877,17 @@ final class OfficeTileCanvasViewTests: XCTestCase {
         var requestCalls: [(docId: String, keys: [TileKey])] {
             lock.lock(); defer { lock.unlock() }; return _requestCalls
         }
+        /// Office Stage B Task 2b test fallout — see `SubscribeCapturingDriverRecorder
+        /// .stateDirectory`'s own doc.
+        private let stateDirectory: URL
+        init(stateDirectory: URL) { self.stateDirectory = stateDirectory }
         var driver: OfficeRuntime.Driver {
             OfficeRuntime.Driver(
                 helperState: { .ready }, startHelper: { },
                 open: { docId, _ in OfficeDocumentMetadata(type: .spreadsheet, parts: 4,
                                                             sizeTwips: OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)) },
                 close: { _ in },
+                save: { _, _ in "/tmp/officetilecanvasviewtests-unused-save" },
                 subscribeTiles: { [unowned self] docId, part, zoomPPT, viewportTwips in
                     self.lock.lock(); self._subscribeCalls.append((docId, part, zoomPPT, viewportTwips)); self.lock.unlock()
                     return [] // never relied on here — the canvas computes its own prefetch keys
@@ -751,7 +896,15 @@ final class OfficeTileCanvasViewTests: XCTestCase {
                 unsubscribeTiles: { _ in },
                 requestTiles: { [unowned self] docId, keys in
                     self.lock.lock(); self._requestCalls.append((docId, keys)); self.lock.unlock()
-                })
+                },
+                postKey: { _, _, _, _, _ in }, postMouse: { _, _, _, _, _, _, _, _ in },
+                postExtTextInput: { _, _, _, _ in },
+                clipboardCopy: { _, _ in nil },
+                clipboardCut: { _, _ in nil },
+                clipboardPaste: { _, _, _ in },
+                undo: { _ in },
+                redo: { _ in },
+                stateDirectory: stateDirectory)
         }
     }
 
@@ -766,13 +919,13 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// mid fix-round: constructing the canvas with a hardcoded `docId: "doc-1"` here produced exactly
     /// that — a skip-check that never skipped, misread as a residency-logic bug before this mismatch
     /// was found.
-    private func makeOpenedResidencyRuntime(path: String = "/gate.xlsx") async
+    private func makeOpenedResidencyRuntime() async
         -> (runtime: OfficeRuntime, recorder: ResidencyCapturingDriverRecorder, docId: String) {
-        let recorder = ResidencyCapturingDriverRecorder()
+        let recorder = ResidencyCapturingDriverRecorder(stateDirectory: stateDir)
         let runtime = OfficeRuntime(sessionId: "S1", driver: recorder.driver)
-        runtime.open(path)
-        _ = await waitUntil { runtime.stateSnapshot.documents[path] != nil }
-        return (runtime, recorder, runtime.stateSnapshot.documents[path]!.docId)
+        runtime.open(gatePath)
+        _ = await waitUntil { runtime.stateSnapshot.documents[gatePath] != nil }
+        return (runtime, recorder, runtime.stateSnapshot.documents[gatePath]!.docId)
     }
 
     /// **The central proof.** A document small enough to qualify (9 tiles, well under the 128 cap) is
@@ -798,10 +951,10 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// edge already warmed."
     func testResidentDocumentIsPrefetchedWholeInVisibleFirstChunksAndPostFillScrollingIssuesNoFurtherRequests() async {
         let (runtime, recorder, docId) = await makeOpenedResidencyRuntime()
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         // 3x3 tiles at zoomPPT 1000 (tileSpanTwips 5120): 15360 twips per axis is exactly 3 tile spans.
         let sizeTwips = OfficeDocumentSize(widthTwips: 15360, heightTwips: 15360)
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: docId,
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: docId,
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
 
@@ -892,12 +1045,12 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// the sweep must still ask for exactly the document's own 9 keys, nothing past its true edge.
     func testResidencyPrefetchClampsToDocumentExtentWhenThePanelIsLargerThanTheDocument() async {
         let (runtime, recorder, docId) = await makeOpenedResidencyRuntime()
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         // Same 3x3-at-zoomPPT-1000 document as the central proof, above — but in a panel/frame
         // LARGER than the document's own extent (900pt is 18000 twips at this zoom, vs. the
         // document's 15360) — the canonical "small doc, big panel" residency shape.
         let sizeTwips = OfficeDocumentSize(widthTwips: 15360, heightTwips: 15360)
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: docId,
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: docId,
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 900, height: 900)
 
@@ -920,10 +1073,10 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// at all — it is left in today's viewport+margin lazy mode, unchanged.
     func testIneligibleDocumentNeverTriggersAWholeDocumentPrefetch() async {
         let (runtime, recorder, docId) = await makeOpenedResidencyRuntime()
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         // Comfortably past the residency cap (128 tiles) at zoomPPT 1000.
         let sizeTwips = OfficeDocumentSize(widthTwips: 2_000_000, heightTwips: 2_000_000)
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: docId,
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: docId,
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
 
@@ -945,9 +1098,9 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// unregistered as the helper's tile-push subscriber (`performSubscribe`'s own header, reason a).
     func testDiscreteZoomResubscribesEvenWhenTheTargetIsAlreadyFullyCachedUnlikeTheThrottledPath() async {
         let (runtime, recorder, docId) = await makeOpenedResidencyRuntime()
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         let sizeTwips = OfficeDocumentSize(widthTwips: 15360, heightTwips: 15360) // 9 tiles at zoomPPT 1000
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: docId,
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: docId,
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
         view.mount()
@@ -993,9 +1146,9 @@ final class OfficeTileCanvasViewTests: XCTestCase {
         // reference and crashes the whole test host — measured directly, mid fix-round, discarding it
         // with `_` here is exactly what did that.
         let (runtime, recorder, docId) = await makeOpenedResidencyRuntime()
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         let sizeTwips = OfficeDocumentSize(widthTwips: 15360, heightTwips: 15360) // 9 tiles, eligible
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: docId,
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: docId,
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         // Deliberately mount BEFORE the frame is set — the production ordering, unlike every other
         // test in this file (which sets `frame` first for convenience).
@@ -1023,9 +1176,9 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// fix, `applyContents` ran unconditionally for every visible tile on every single tick.
     func testRepositioningAnExistingTileDoesNotReapplyContentsButANewlyExposedTileDoes() async {
         let (runtime, recorder) = await makeOpenedRuntime()
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         let sizeTwips = OfficeDocumentSize(widthTwips: 2_000_000, heightTwips: 2_000_000)
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
         view.mount() // the first relayout paints every initially-visible tile once each
@@ -1106,9 +1259,9 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// `OfficeTileLayer`'s override answers identically either way.
     func testTileLayerNeverResolvesAnAnimatableActionForAnyKeyThisFileTouches() async {
         let (runtime, recorder) = await makeOpenedRuntime()
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
         view.mount() // relayoutVisibleTiles runs synchronously inside mount() — the layer itself needs no wait
@@ -1154,9 +1307,9 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// must never let start.
     func testRepositioningInARealPresentedWindowLeavesNoSettleGlideAfterInputStops() async {
         let (runtime, recorder) = await makeOpenedRuntime()
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         let sizeTwips = OfficeDocumentSize(widthTwips: 2_000_000, heightTwips: 2_000_000)
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
 
@@ -1230,9 +1383,9 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// viewport at 100% zoom.
     func testSpreadsheetScrollExtendsPastTheUsedRangeByTheDocumentedMargin() async {
         let (runtime, _) = await makeOpenedRuntime(documentType: .spreadsheet)
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
 
@@ -1261,9 +1414,9 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// behavior byte-for-byte.
     func testNonSpreadsheetScrollStaysClampedExactlyAtTheUsedRangeUnextended() async {
         let (runtime, _) = await makeOpenedRuntime(documentType: .text)
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
 
@@ -1286,12 +1439,12 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// own header for the full mechanism this pins against).
     func testScrollingIntoTheInfiniteGridMarginStillAsksForTilesNotSkippedForever() async {
         let (runtime, recorder) = await makeOpenedRuntime(documentType: .spreadsheet)
-        let model = PanelDocumentTabModel(tabId: "t1", path: "/gate.xlsx")
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
         // Large enough to stay residency-INELIGIBLE — no eager whole-document prefetch sweep to
         // interfere with this test's own subscribe-call counting (the same size several sibling
         // "large document" tests in this file already use for the identical reason).
         let sizeTwips = OfficeDocumentSize(widthTwips: 2_000_000, heightTwips: 2_000_000)
-        let view = OfficeTileCanvasView(runtime: runtime, path: "/gate.xlsx", docId: "doc-1",
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
         view.mount()
@@ -1312,6 +1465,734 @@ final class OfficeTileCanvasViewTests: XCTestCase {
                       + "widen in lockstep with the scroll clamp, or this margin would be "
                       + "scrollable but its tiles would never be requested (placeholders forever, "
                       + "just moved)")
+
+        view.unmount()
+    }
+
+    // MARK: - Office Stage B Task 5: caret/selection/cell-cursor overlay geometry + behavior
+
+    /// Pure — `officeTwipsRectToScreenRect` at the canonical pin (`zoomPPT == 1000`, `TileMath`'s own
+    /// "100% zoom, 2x device scale" configuration): 1 twip = 0.1px = 0.05pt, so a rect at
+    /// (1418, 1418, 0, 552) twips (a REAL captured caret rect — `OfficeHelperLiveTests`' own probe)
+    /// lands at (70.9, 70.9) points, zero width, 27.6pt tall.
+    func testTwipsRectToScreenRectAtCanonicalZoomNoScroll() {
+        let rect = officeTwipsRectToScreenRect(
+            OfficeTwipsRect(x: 1418, y: 1418, width: 0, height: 552), zoomPPT: 1000, scrollOrigin: .zero)
+        // 1418 twips -> roundedDivide(1418*1000, 10000) = 142px (ties-away-from-zero: 141.8 -> 142)
+        // -> 142/2 = 71.0pt. 552 twips -> roundedDivide(552000, 10000) = 55px -> 55/2 = 27.5pt.
+        // `TileMath.twipsToPixels`'s own rounding, not naive twips*0.05 — matching every OTHER
+        // consumer of that function in this file (`officeTileScreenRect` above).
+        XCTAssertEqual(rect.origin.x, 71.0, accuracy: 0.01)
+        XCTAssertEqual(rect.origin.y, 71.0, accuracy: 0.01)
+        XCTAssertEqual(rect.size.width, 0, accuracy: 0.01)
+        XCTAssertEqual(rect.size.height, 27.5, accuracy: 0.01)
+    }
+
+    /// Scroll offset subtracts from the ORIGIN, matching `officeTileScreenRect`'s own identical
+    /// scroll-handling — a rect fixed in document space must move OPPOSITE the scroll direction on
+    /// screen, exactly like every tile already does.
+    func testTwipsRectToScreenRectSubtractsScrollOrigin() {
+        let rect = officeTwipsRectToScreenRect(
+            OfficeTwipsRect(x: 1000, y: 1000, width: 1000, height: 1000), zoomPPT: 1000, scrollOrigin: CGPoint(x: 10, y: 20))
+        let unscrolled = officeTwipsRectToScreenRect(
+            OfficeTwipsRect(x: 1000, y: 1000, width: 1000, height: 1000), zoomPPT: 1000, scrollOrigin: .zero)
+        XCTAssertEqual(rect.origin.x, unscrolled.origin.x - 10, accuracy: 0.01)
+        XCTAssertEqual(rect.origin.y, unscrolled.origin.y - 20, accuracy: 0.01)
+    }
+
+    /// A degenerate (zero-width) rect must still produce a valid, non-`nil` `CGRect` — UNLIKE
+    /// `officeTileScreenRect`, this function has no `TileMath.tileBoundsTwips` refusal gate at all
+    /// (see its own header) — every REAL caret rect this task's own probe observed has `width == 0`.
+    func testTwipsRectToScreenRectNeverRefusesADegenerateRect() {
+        let rect = officeTwipsRectToScreenRect(
+            OfficeTwipsRect(x: 0, y: 0, width: 0, height: 0), zoomPPT: 1000, scrollOrigin: .zero)
+        XCTAssertEqual(rect, .zero)
+    }
+
+    /// A mounted canvas with NOTHING known yet (no click, no type, no cell click — `OfficeCursorStore`
+    /// starts every docId at its own empty `.State()`) must show NO overlay at all: no caret, no
+    /// selection, no cell-cursor box.
+    func testFreshlyMountedCanvasShowsNoOverlaysUntilACursorEventArrives() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
+        view.mount()
+        // `recorder`'s driver closures capture it `[unowned self]` — this MUST stay alive until
+        // `performSubscribe()`'s own detached Task has landed, or the Task deref's a freed object
+        // the moment this test discards `recorder` early (see `makeOpenedRuntime`'s own callers,
+        // several lines up, for the identical precedent and its own header comment on this hazard).
+        _ = await waitUntil { recorder.subscribeCalls.count >= 1 }
+
+        XCTAssertEqual(view.caretLayerForTesting?.isHidden, true)
+        XCTAssertEqual(view.cellCursorLayerForTesting?.isHidden, true)
+        XCTAssertEqual(view.selectionLayersForTesting.count, 0)
+
+        view.unmount()
+    }
+
+    /// **The load-bearing overlay proof**: a caret event for the canvas's OWN current part shows the
+    /// caret, positioned via the SAME `officeTwipsRectToScreenRect` transform tiles themselves use; a
+    /// caret event stamped with a DIFFERENT part (the canvas navigated away, or the event raced a
+    /// part switch — `OfficeCursorStore`'s own header names this exact window) hides it — the
+    /// brief's own "must hide when their part ≠ the canvas's active part" requirement.
+    func testCaretShowsForTheMatchingPartAndHidesForAMismatchedPart() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
+        view.mount()
+        _ = await waitUntil { recorder.subscribeCalls.count >= 1 } // see testFreshlyMounted...'s own comment
+
+        let rect = OfficeTwipsRect(x: 1418, y: 1418, width: 0, height: 552)
+        runtime.cursorStore.apply(docId: "doc-1", event: .caretRect(rect), activePart: 0)
+        let shown = await waitUntil { view.caretLayerForTesting?.isHidden == false }
+        XCTAssertTrue(shown, "a caret event for part 0 must show the caret on a canvas whose own part is 0")
+        let expected = officeTwipsRectToScreenRect(rect, zoomPPT: 1000, scrollOrigin: .zero)
+        if let screenRect = view.caretLayerForTesting?.frame {
+            XCTAssertEqual(screenRect.origin.x, expected.origin.x, accuracy: 0.01)
+            XCTAssertEqual(screenRect.origin.y, expected.origin.y, accuracy: 0.01)
+            XCTAssertEqual(screenRect.size.width, officeCaretWidthPoints, accuracy: 0.01,
+                           "a real caret rect's own twips width is always 0 — the rendered hairline is this constant, not 0pt")
+        } else {
+            XCTFail("caretLayerForTesting must be non-nil once mounted")
+        }
+
+        // A caret event stamped with a DIFFERENT part (a race, or simply the wrong page/sheet) hides it.
+        runtime.cursorStore.apply(docId: "doc-1", event: .caretRect(rect), activePart: 1)
+        let hidden = await waitUntil { view.caretLayerForTesting?.isHidden == true }
+        XCTAssertTrue(hidden, "a caret rect stamped for a DIFFERENT part than the canvas's own must never be shown")
+
+        view.unmount()
+    }
+
+    /// The blink timer's own test seam — `advanceCaretBlinkForTesting()` toggles visibility WITHOUT
+    /// waiting `OfficeTileCanvasView`'s real ~530ms interval (the house "no arbitrary sleeps" rule).
+    func testCaretBlinkTogglesVisibilityWithoutRealTime() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
+        view.mount()
+        _ = await waitUntil { recorder.subscribeCalls.count >= 1 } // see testFreshlyMounted...'s own comment
+        runtime.cursorStore.apply(docId: "doc-1", event: .caretRect(OfficeTwipsRect(x: 1, y: 1, width: 0, height: 1)), activePart: 0)
+        let shown = await waitUntil { view.caretLayerForTesting?.isHidden == false }
+        XCTAssertTrue(shown, "setup: the caret must be visible before this test can prove blink toggles it off")
+
+        view.advanceCaretBlinkForTesting()
+        XCTAssertEqual(view.caretLayerForTesting?.isHidden, true, "one toggle from the visible phase must hide it")
+
+        view.advanceCaretBlinkForTesting()
+        XCTAssertEqual(view.caretLayerForTesting?.isHidden, false, "a second toggle returns to visible")
+
+        view.unmount()
+    }
+
+    /// The selection pool grows to match the rect COUNT and hides exactly the surplus when the
+    /// selection shrinks — never fewer real layers than rects, never a stale extra one left visible.
+    func testSelectionLayerPoolGrowsToMatchRectCountAndHidesSurplusWhenItShrinks() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
+        view.mount()
+        _ = await waitUntil { recorder.subscribeCalls.count >= 1 } // see testFreshlyMounted...'s own comment
+
+        let twoRects = [OfficeTwipsRect(x: 0, y: 0, width: 100, height: 20), OfficeTwipsRect(x: 0, y: 20, width: 200, height: 20)]
+        runtime.cursorStore.apply(docId: "doc-1", event: .textSelection(twoRects), activePart: 0)
+        let grew = await waitUntil {
+            view.selectionLayersForTesting.count == 2 && view.selectionLayersForTesting.allSatisfy { !$0.isHidden }
+        }
+        XCTAssertTrue(grew, "two selection rects must produce two visible layers")
+
+        runtime.cursorStore.apply(docId: "doc-1", event: .textSelection([]), activePart: 0)
+        let shrank = await waitUntil { view.selectionLayersForTesting.allSatisfy(\.isHidden) }
+        XCTAssertTrue(shrank, "an empty selection must hide every pooled layer")
+        XCTAssertEqual(view.selectionLayersForTesting.count, 2, "the pool itself is kept, not torn down — see its own header")
+
+        view.unmount()
+    }
+
+    /// `CELL_CURSOR`'s own two shapes, end to end through the canvas: a real cell shows the outline
+    /// box at the right screen position; `.empty` (observed live during in-cell edit) hides it.
+    func testCellCursorShowsForARealCellAndHidesForEmpty() async {
+        let (runtime, recorder) = await makeOpenedRuntime(documentType: .spreadsheet)
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
+        view.mount()
+        _ = await waitUntil { recorder.subscribeCalls.count >= 1 } // see testFreshlyMounted...'s own comment
+
+        let cellRect = OfficeTwipsRect(x: 0, y: 0, width: 1265, height: 254)
+        runtime.cursorStore.apply(docId: "doc-1", event: .cellCursor(.at(rectTwips: cellRect, column: 0, row: 0)), activePart: 0)
+        let shown = await waitUntil { view.cellCursorLayerForTesting?.isHidden == false }
+        XCTAssertTrue(shown)
+        let expected = officeTwipsRectToScreenRect(cellRect, zoomPPT: 1000, scrollOrigin: .zero)
+        if let cellCursorFrame = view.cellCursorLayerForTesting?.frame {
+            XCTAssertEqual(cellCursorFrame.origin.x, expected.origin.x, accuracy: 0.01)
+        } else {
+            XCTFail("cellCursorLayerForTesting must be non-nil once mounted")
+        }
+
+        runtime.cursorStore.apply(docId: "doc-1", event: .cellCursor(.empty), activePart: 0)
+        let hidden = await waitUntil { view.cellCursorLayerForTesting?.isHidden == true }
+        XCTAssertTrue(hidden, "EMPTY (in-cell edit mode) must hide the cell-cursor outline")
+
+        view.unmount()
+    }
+
+    /// office live-gate fix #4's own null-action discipline, extended to Task 5's three new layer
+    /// types — mirrors `testTileLayerNeverResolvesAnAnimatableActionForAnyKeyThisFileTouches` exactly
+    /// (same keys, same assertion shape), against the REAL production caret/cell-cursor layers
+    /// `mountCursorOverlays()` mints, not a hand-built `CALayer()`.
+    func testCaretAndCellCursorLayersNeverResolveAnAnimatableAction() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
+        view.mount()
+        _ = await waitUntil { recorder.subscribeCalls.count >= 1 } // see testFreshlyMounted...'s own comment
+
+        for layer in [view.caretLayerForTesting, view.cellCursorLayerForTesting].compactMap({ $0 }) {
+            for actionKey in ["position", "bounds", "backgroundColor", "borderColor", "borderWidth", "hidden", "opacity"] {
+                XCTAssertTrue(layer.action(forKey: actionKey) is NSNull,
+                             "\(actionKey): expected the OfficeTileLayer null-action override")
+            }
+        }
+
+        view.unmount()
+    }
+
+    /// `unmount()` must invalidate the blink timer and clear the sink — otherwise a repeating
+    /// `Timer` fires into a freed view's `[weak self]` forever (see `caretBlinkTimer`'s own header).
+    /// Proven indirectly: after `unmount()`, the overlay layers are gone (removed from their
+    /// superlayer) and a stray `cursorChanged` push for this docId does nothing observable.
+    func testUnmountTearsDownOverlayLayersAndTheBlinkTimer() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
+        view.mount()
+        _ = await waitUntil { recorder.subscribeCalls.count >= 1 } // see testFreshlyMounted...'s own comment
+        XCTAssertNotNil(view.caretLayerForTesting, "setup: mount() must have minted the caret layer")
+
+        view.unmount()
+
+        XCTAssertNil(view.caretLayerForTesting, "unmount() must release the caret layer")
+        XCTAssertNil(view.cellCursorLayerForTesting, "unmount() must release the cell-cursor layer")
+        // A push after unmount must not crash or resurrect anything — the sink was cleared.
+        runtime.cursorStore.apply(docId: "doc-1", event: .caretRect(OfficeTwipsRect(x: 1, y: 1, width: 0, height: 1)), activePart: 0)
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertNil(view.caretLayerForTesting, "still nil — a post-unmount push must not resurrect the layer")
+    }
+
+    // MARK: - Office Stage B Task 5 — NSTextInputClient (IME)
+
+    private func makeMountedView(runtime: OfficeRuntime, docId: String = "doc-1") -> OfficeTileCanvasView {
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: docId,
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
+        view.mount()
+        return view
+    }
+
+    /// The plain-commit path (`markedText == nil` — no composition in progress): one `postKey
+    /// (.keyInput)` per Unicode scalar, `keyCode: 0` for every one of them (no real physical key
+    /// behind synthetic text — `insertText`'s own header explains why `0`, not a guess).
+    func testInsertTextPlainCommitPostsOnePostKeyPerScalarWithKeyCodeZero() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let view = makeMountedView(runtime: runtime)
+
+        view.insertText("ab", replacementRange: NSRange(location: NSNotFound, length: 0))
+        await runtime.drainInputChainForTesting()
+
+        XCTAssertEqual(recorder.postKeyCalls.count, 2)
+        XCTAssertEqual(recorder.postKeyCalls.map(\.charCode), [97, 98])
+        XCTAssertEqual(recorder.postKeyCalls.map(\.keyCode), [0, 0])
+        XCTAssertEqual(recorder.postKeyCalls.map(\.type), [.keyInput, .keyInput])
+        XCTAssertTrue(recorder.postExtTextInputCalls.isEmpty, "a plain commit must never touch the "
+                      + "ext-text-input door at all")
+
+        view.unmount()
+    }
+
+    func testInsertTextWithEmptyStringIsANoOp() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let view = makeMountedView(runtime: runtime)
+
+        view.insertText("", replacementRange: NSRange(location: NSNotFound, length: 0))
+        try? await Task.sleep(nanoseconds: 30_000_000)
+
+        XCTAssertTrue(recorder.postKeyCalls.isEmpty)
+        XCTAssertTrue(recorder.postExtTextInputCalls.isEmpty)
+        view.unmount()
+    }
+
+    /// The composed-commit path: `setMarkedText` first (so `markedText != nil`), then `insertText`
+    /// must post the FINAL text as `.input` immediately followed by `.end` — the exact two-frame
+    /// sequence `OfficeRuntimeLiveTests.testExtTextInputMarksCommitsAndCancelsAgainstRealLOKThrough
+    /// SaveAndReopen` already proved against real LOK. Never touches `postKey` at all.
+    func testInsertTextWhenComposingPostsExtTextInputThenEndAndClearsMarkedText() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let view = makeMountedView(runtime: runtime)
+
+        view.setMarkedText("e", selectedRange: NSRange(location: 1, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
+        XCTAssertTrue(view.hasMarkedText(), "setup: composition must be active before this test means anything")
+
+        view.insertText("é", replacementRange: NSRange(location: NSNotFound, length: 0))
+        await runtime.drainInputChainForTesting()
+
+        // One call from setMarkedText, two from insertText's own commit sequence.
+        XCTAssertEqual(recorder.postExtTextInputCalls.count, 3)
+        XCTAssertEqual(recorder.postExtTextInputCalls[1].type, .input)
+        XCTAssertEqual(recorder.postExtTextInputCalls[1].text, "é")
+        XCTAssertEqual(recorder.postExtTextInputCalls[2].type, .end)
+        XCTAssertEqual(recorder.postExtTextInputCalls[2].text, "", "`.end` must always carry empty "
+                      + "text — LOK ignores it and commits whatever is currently marked instead")
+        XCTAssertTrue(recorder.postKeyCalls.isEmpty, "a composed commit must never touch the postKey "
+                      + "door at all")
+        XCTAssertFalse(view.hasMarkedText(), "insertText must clear the local composing state on commit")
+
+        view.unmount()
+    }
+
+    func testSetMarkedTextPostsInputAndReflectsComposingState() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let view = makeMountedView(runtime: runtime)
+
+        XCTAssertFalse(view.hasMarkedText(), "setup: nothing composing yet")
+        XCTAssertEqual(view.markedRange(), NSRange(location: NSNotFound, length: 0))
+
+        view.setMarkedText("xyz", selectedRange: NSRange(location: 3, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
+        await runtime.drainInputChainForTesting()
+
+        XCTAssertEqual(recorder.postExtTextInputCalls.count, 1)
+        XCTAssertEqual(recorder.postExtTextInputCalls[0].type, .input)
+        XCTAssertEqual(recorder.postExtTextInputCalls[0].text, "xyz")
+        XCTAssertTrue(view.hasMarkedText())
+        XCTAssertEqual(view.markedRange(), NSRange(location: 0, length: 3))
+        XCTAssertEqual(view.selectedRange(), NSRange(location: 3, length: 0))
+
+        view.unmount()
+    }
+
+    /// AppKit's OWN door for "the input method finished quietly" (a focus change mid-compose) —
+    /// same commit mechanism as `insertText`'s own composed-commit arm, `.end` alone.
+    func testUnmarkTextCommitsWhateverIsMarkedAndClearsComposingState() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let view = makeMountedView(runtime: runtime)
+        view.setMarkedText("xyz", selectedRange: NSRange(location: 3, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
+        await runtime.drainInputChainForTesting()
+
+        view.unmarkText()
+        await runtime.drainInputChainForTesting()
+
+        XCTAssertEqual(recorder.postExtTextInputCalls.count, 2)
+        XCTAssertEqual(recorder.postExtTextInputCalls[1].type, .end)
+        XCTAssertEqual(recorder.postExtTextInputCalls[1].text, "")
+        XCTAssertFalse(view.hasMarkedText())
+
+        view.unmount()
+    }
+
+    /// **Refuse-never-pointless**: `unmarkText` with nothing marked must not post anything — mirrors
+    /// the "fire-and-forget, but never a pointless post" posture this codebase already holds
+    /// `OfficeDocumentBridge.postKey` to elsewhere.
+    func testUnmarkTextIsANoOpWhenNothingIsMarked() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let view = makeMountedView(runtime: runtime)
+
+        view.unmarkText()
+        try? await Task.sleep(nanoseconds: 30_000_000)
+
+        XCTAssertTrue(recorder.postExtTextInputCalls.isEmpty)
+        view.unmount()
+    }
+
+    func testFirstRectIsZeroWithNoWindow() async {
+        // `recorder` kept alive (never `let (runtime, _)`) — `mount()` fires `performSubscribe()`'s
+        // detached `Task` into `SubscribeCapturingDriverRecorder`'s own `[unowned self]`-capturing
+        // driver closures; discarding the recorder lets it deallocate before that `Task` runs,
+        // crashing on the unowned read — this file's own documented hazard (see this class's own
+        // header on `driver`), hit and fixed here the same way every other mounting test already is.
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let view = makeMountedView(runtime: runtime)
+        _ = await waitUntil { recorder.subscribeCalls.count >= 1 }
+        // Deliberately never added to an NSWindow — mirrors this suite's own headless-by-default
+        // posture (every OTHER test in this file mounts without a real window too).
+        var actual = NSRange(location: NSNotFound, length: 0)
+        let rect = view.firstRect(forCharacterRange: NSRange(location: 0, length: 0), actualRange: &actual)
+        XCTAssertEqual(rect, .zero, "no window means no screen to report a rect in — must degrade to "
+                      + ".zero, never crash or fabricate a coordinate")
+        view.unmount()
+    }
+
+    func testFirstRectIsZeroWhenNoCaretRectIsTrackedYet() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let view = makeMountedView(runtime: runtime)
+        _ = await waitUntil { recorder.subscribeCalls.count >= 1 }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 300),
+                              styleMask: [.borderless], backing: .buffered, defer: true)
+        window.isReleasedWhenClosed = false // this file's own precedent (line ~1269) — an AppKit
+        // NSWindow defaults to releasing itself on close(); without this, close() below performs an
+        // ADDITIONAL release on top of ARC's own, and repeated runs accumulate window state instead
+        // of tearing down cleanly.
+        defer { window.close() }
+        window.contentView = view
+
+        var actual = NSRange(location: NSNotFound, length: 0)
+        let rect = view.firstRect(forCharacterRange: NSRange(location: 0, length: 0), actualRange: &actual)
+        XCTAssertEqual(rect, .zero, "setup: nothing has stamped a caret rect for this docId yet")
+        view.unmount()
+    }
+
+    /// The brief's own named door, proven positive: a REAL tracked caret rect (fed through the SAME
+    /// `cursorStore.apply` fold `OfficeRuntime.handle(documentEvent:docId:)` uses in production)
+    /// converts to a non-zero SCREEN rect once the view sits in a real window.
+    func testFirstRectReflectsTheTrackedCaretRectWhenPartMatches() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let view = makeMountedView(runtime: runtime, docId: "doc-1")
+        _ = await waitUntil { recorder.subscribeCalls.count >= 1 }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 300),
+                              styleMask: [.borderless], backing: .buffered, defer: true)
+        window.isReleasedWhenClosed = false // see testFirstRectIsZeroWhenNoCaretRectIsTrackedYet's own comment
+        defer { window.close() }
+        window.contentView = view
+
+        runtime.cursorStore.apply(docId: "doc-1", event: .caretRect(OfficeTwipsRect(x: 1418, y: 1418, width: 0, height: 552)), activePart: 0)
+
+        var actual = NSRange(location: NSNotFound, length: 0)
+        let rect = view.firstRect(forCharacterRange: NSRange(location: 0, length: 0), actualRange: &actual)
+        XCTAssertNotEqual(rect, .zero, "a real tracked caret rect, matching part, in a real window — "
+                          + "must produce a real screen rect")
+        view.unmount()
+    }
+
+    /// The SAME part-mismatch discipline `layoutOverlays()` already enforces for the caret overlay
+    /// itself — a caret rect stamped against a part the canvas has since navigated away from must
+    /// never be reported as "here," to LOK's own candidate-window positioning any more than to the
+    /// overlay's own drawing.
+    func testFirstRectIsZeroWhenTrackedCaretPartDoesNotMatchCanvasPart() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let view = makeMountedView(runtime: runtime, docId: "doc-1") // initialPart: 0
+        _ = await waitUntil { recorder.subscribeCalls.count >= 1 }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 300),
+                              styleMask: [.borderless], backing: .buffered, defer: true)
+        window.isReleasedWhenClosed = false // see testFirstRectIsZeroWhenNoCaretRectIsTrackedYet's own comment
+        defer { window.close() }
+        window.contentView = view
+
+        runtime.cursorStore.apply(docId: "doc-1", event: .caretRect(OfficeTwipsRect(x: 1418, y: 1418, width: 0, height: 552)), activePart: 1)
+
+        var actual = NSRange(location: NSNotFound, length: 0)
+        let rect = view.firstRect(forCharacterRange: NSRange(location: 0, length: 0), actualRange: &actual)
+        XCTAssertEqual(rect, .zero, "the tracked rect belongs to part 1; this canvas is on part 0 — "
+                      + "must not report a stale-part rect")
+        view.unmount()
+    }
+
+    /// **The advisor-flagged regression this task's own classifier fix targets.** Before the
+    /// `.control` exclusion, a Ctrl-held key reported a non-zero `charactersIgnoringModifiers`
+    /// scalar (the base letter) and was misclassified text-generating — this pins the FIXED
+    /// behavior directly against `forwardKeyEvent`'s own observable wire payload for a real Ctrl+A
+    /// keyUp (the one call site `isTextGeneratingKeyEvent` still gates for every key, per that
+    /// method's own header): charCode must be `0`, matching "this is not text to insert."
+    func testControlHeldKeyUpPostsZeroCharCodeNotTheBaseLetter() async throws {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let view = makeMountedView(runtime: runtime)
+
+        let event = try XCTUnwrap(NSEvent.keyEvent(with: .keyUp, location: .zero, modifierFlags: [.control],
+                                                    timestamp: 0, windowNumber: 0, context: nil,
+                                                    characters: "a", charactersIgnoringModifiers: "a",
+                                                    isARepeat: false, keyCode: 0))
+        view.keyUp(with: event)
+        await runtime.drainInputChainForTesting()
+
+        XCTAssertEqual(recorder.postKeyCalls.count, 1)
+        XCTAssertEqual(recorder.postKeyCalls[0].charCode, 0, "Ctrl+A is a command, not text — charCode "
+                      + "must be 0, never 97")
+        view.unmount()
+    }
+
+    /// **The end-to-end routing proof** — not just that `insertText` posts the right thing when
+    /// called directly (the tests above), but that a REAL plain-ASCII `keyDown` genuinely reaches it
+    /// THROUGH `interpretKeyEvents`, never through the old direct `forwardKeyEvent` call `keyDown`'s
+    /// own guard now withholds from every text-generating key. `keyCode: 0` is the discriminator:
+    /// `insertText`'s own path always posts `0` (no real physical key behind synthetic text — see its
+    /// own header); had this key WRONGLY fallen through to `forwardKeyEvent`'s direct path instead,
+    /// physical keyCode `0` maps to `Key.a = 512` in `OfficeInputCodes`'s own table — a plainly
+    /// DIFFERENT, nonzero value this assertion would catch.
+    func testPlainAsciiKeyDownRoutesThroughInterpretKeyEventsNotDirectlyToForwardKeyEvent() async throws {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let view = makeMountedView(runtime: runtime)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 300),
+                              styleMask: [.borderless], backing: .buffered, defer: true)
+        window.isReleasedWhenClosed = false // see testFirstRectIsZeroWhenNoCaretRectIsTrackedYet's own comment
+        defer { window.close() }
+        window.contentView = view
+        _ = window.makeFirstResponder(view)
+
+        let event = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+                                                    timestamp: 0, windowNumber: window.windowNumber, context: nil,
+                                                    characters: "a", charactersIgnoringModifiers: "a",
+                                                    isARepeat: false, keyCode: 0))
+        view.keyDown(with: event)
+        await runtime.drainInputChainForTesting()
+
+        let arrived = await waitUntil { recorder.postKeyCalls.count >= 1 }
+        XCTAssertTrue(arrived, "interpretKeyEvents never resolved to insertText for a plain 'a' — "
+                      + "routing regressed to something that produces no postKey call at all")
+        guard arrived else { return }
+        // Fix round 1, M-6: `>= 1` above only proves ARRIVAL, not the absence of a SECOND delivery —
+        // a regressed double-post (this classifier's own `interpretKeyEvents` path AND the old direct
+        // `forwardKeyEvent` path both firing) would still leave `postKeyCalls[0]` matching charCode 97
+        // / keyCode 0 below and pass undetected. The input chain is already fully drained above, so
+        // by this point the count is settled, not still arriving — a hard `== 1` is the direct pin.
+        XCTAssertEqual(recorder.postKeyCalls.count, 1, "exactly one delivery — a second entry would "
+                      + "mean the old direct forwardKeyEvent path ALSO fired: the double-delivery "
+                      + "this task's whole seam exists to prevent (see this test's own header)")
+        XCTAssertEqual(recorder.postKeyCalls[0].charCode, 97)
+        XCTAssertEqual(recorder.postKeyCalls[0].keyCode, 0, "must be insertText's own 0, not "
+                      + "forwardKeyEvent's physical-keyCode 512 (Key.a) — see this test's own header")
+
+        view.unmount()
+    }
+
+    // MARK: - Office Stage B Task 6: clipboard, undo/redo, the menu pass
+
+    /// `copy(_:)`/`cut(_:)` are direct method calls (this file's own established pattern —
+    /// `setActivePart(1)` above does the identical thing) rather than a routed `NSApp` menu
+    /// action: whether AppKit's own `performKeyEquivalent:`/menu validation actually reaches this
+    /// view is disclosed as untestable under xctest at the call site's own header (`keyDown`'s
+    /// policy comment) — what IS tested here is that these methods, once reached, do the right
+    /// thing.
+    func testCopyCallsRuntimePostClipboardCopyForTheOpenDocument() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.copy(nil)
+        await runtime.drainInputChainForTesting()
+        XCTAssertEqual(recorder.clipboardCopyCalls.count, 1)
+        view.unmount()
+    }
+
+    func testCutCallsRuntimePostClipboardCutForTheOpenDocument() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.cut(nil)
+        await runtime.drainInputChainForTesting()
+        XCTAssertEqual(recorder.clipboardCutCalls.count, 1)
+        view.unmount()
+    }
+
+    func testUndoAndRedoCallTheirRuntimeDoors() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.undo(nil)
+        view.redo(nil)
+        await runtime.drainInputChainForTesting()
+        XCTAssertEqual(recorder.undoCalls.count, 1)
+        XCTAssertEqual(recorder.redoCalls.count, 1)
+        view.unmount()
+    }
+
+    /// **Reads the REAL system pasteboard, save/restored around the test** — `paste(_:)` is
+    /// deliberately gesture-time-synchronous (its own header: never re-read from inside the async
+    /// chain), so there is no injected seam to substitute the way `OfficeRuntime`'s own
+    /// `writeSystemPasteboard` lets `postClipboardCopy`/`Cut` avoid the real pasteboard. The prior
+    /// contents are captured before this test writes anything and restored in every exit path.
+    func testPasteReadsTheSystemPasteboardAndCallsRuntimePostClipboardPaste() async {
+        let pasteboard = NSPasteboard.general
+        let priorContents = pasteboard.string(forType: .string)
+        defer {
+            pasteboard.clearContents()
+            if let priorContents { pasteboard.setString(priorContents, forType: .string) }
+        }
+        pasteboard.clearContents()
+        pasteboard.setString("pasted-from-test", forType: .string)
+
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.paste(nil)
+        await runtime.drainInputChainForTesting()
+        XCTAssertEqual(recorder.clipboardPasteCalls.count, 1)
+        XCTAssertEqual(recorder.clipboardPasteCalls.first?.text, "pasted-from-test")
+        view.unmount()
+    }
+
+    /// An empty pasteboard (never `nil`-from-nothing on this system, but no STRING representation)
+    /// must not post an empty/garbage paste — `paste(_:)`'s own `guard let text = ...` is the gate.
+    func testPasteIsANoOpWhenThePasteboardHasNoStringRepresentation() async {
+        let pasteboard = NSPasteboard.general
+        let priorContents = pasteboard.string(forType: .string)
+        defer {
+            pasteboard.clearContents()
+            if let priorContents { pasteboard.setString(priorContents, forType: .string) }
+        }
+        pasteboard.clearContents() // a cleared pasteboard has no .string representation at all
+
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.paste(nil)
+        await runtime.drainInputChainForTesting()
+        XCTAssertTrue(recorder.clipboardPasteCalls.isEmpty, "an empty pasteboard must never reach "
+                      + "the driver — there is nothing to paste")
+        view.unmount()
+    }
+
+    /// `validateMenuItem`'s Copy/Cut gate reads `runtime.cursorStore.state(docId:)` keyed by the
+    /// VIEW's own `docId` property (`"doc-1"`, this file's own established construction literal —
+    /// NOT the runtime's real internal docId, which `postClipboardCopy`/etc. resolve independently
+    /// from `path`; see `OfficeCursorStore`'s own per-docId keying) — seeded directly here via
+    /// `runtime.handle(documentEvent:docId:)`, the exact door `OfficeRuntime.handle(documentEvent:
+    /// docId:)`'s own production callers use.
+    func testValidateMenuItemGatesCopyAndCutOnNonEmptySelection() async {
+        let (runtime, _) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        let copyItem = NSMenuItem(title: "Copy", action: #selector(OfficeTileCanvasView.copy(_:)), keyEquivalent: "")
+        let cutItem = NSMenuItem(title: "Cut", action: #selector(OfficeTileCanvasView.cut(_:)), keyEquivalent: "")
+
+        XCTAssertFalse(view.validateMenuItem(copyItem), "no selection yet — Copy must start disabled")
+        XCTAssertFalse(view.validateMenuItem(cutItem), "no selection yet — Cut must start disabled")
+
+        runtime.handle(documentEvent: .textSelection([OfficeTwipsRect(x: 0, y: 0, width: 100, height: 100)]), docId: "doc-1")
+        XCTAssertTrue(view.validateMenuItem(copyItem), "a real selection must enable Copy")
+        XCTAssertTrue(view.validateMenuItem(cutItem), "a real selection must enable Cut")
+
+        runtime.handle(documentEvent: .textSelection([]), docId: "doc-1")
+        XCTAssertFalse(view.validateMenuItem(copyItem), "the selection collapsing back to empty must disable Copy again")
+
+        view.unmount()
+    }
+
+    /// **Review fix round 1 (I-3) — the Calc case `selectionRectsTwips` alone misses.** A plain
+    /// click on a Calc cell (no drag) never populates `TEXT_SELECTION` — T5's own probe found Calc
+    /// fires the bare `"EMPTY"` sentinel for exactly this, folded to `[]` by the parser — while
+    /// `CELL_CURSOR` is what actually carries the live cell state. Before this fix,
+    /// `validateMenuItem` reported Copy/Cut DISABLED in precisely the state commit `73f89c9b`'s own
+    /// live drill proves `clipboardCopy` genuinely works in (a plain click, no drag) — a real,
+    /// reachable bug this test pins shut.
+    func testValidateMenuItemGatesCopyAndCutOnALiveCellCursorToo() async {
+        let (runtime, _) = await makeOpenedRuntime(documentType: .spreadsheet)
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        let copyItem = NSMenuItem(title: "Copy", action: #selector(OfficeTileCanvasView.copy(_:)), keyEquivalent: "")
+        let cutItem = NSMenuItem(title: "Cut", action: #selector(OfficeTileCanvasView.cut(_:)), keyEquivalent: "")
+
+        XCTAssertFalse(view.validateMenuItem(copyItem), "no cell cursor yet — Copy must start disabled")
+
+        runtime.handle(documentEvent: .cellCursor(.at(rectTwips: OfficeTwipsRect(x: 0, y: 0, width: 1265, height: 254),
+                                                       column: 0, row: 0)),
+                       docId: "doc-1")
+        XCTAssertTrue(view.validateMenuItem(copyItem), "a live cell cursor (`.at`) must enable Copy "
+                      + "even with `selectionRectsTwips` empty — the plain-click Calc case")
+        XCTAssertTrue(view.validateMenuItem(cutItem), "same for Cut")
+
+        view.unmount()
+    }
+
+    func testValidateMenuItemGatesPasteOnPasteboardContent() async {
+        let pasteboard = NSPasteboard.general
+        let priorContents = pasteboard.string(forType: .string)
+        defer {
+            pasteboard.clearContents()
+            if let priorContents { pasteboard.setString(priorContents, forType: .string) }
+        }
+        let (runtime, _) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        let pasteItem = NSMenuItem(title: "Paste", action: #selector(OfficeTileCanvasView.paste(_:)), keyEquivalent: "")
+
+        pasteboard.clearContents()
+        XCTAssertFalse(view.validateMenuItem(pasteItem), "an empty pasteboard must disable Paste")
+
+        pasteboard.setString("something", forType: .string)
+        XCTAssertTrue(view.validateMenuItem(pasteItem), "a real string on the pasteboard must enable Paste")
+
+        view.unmount()
+    }
+
+    /// Undo/Redo/Zoom are reachability-gated only (this task's own disclosed scope, not a full
+    /// LOK-backed canUndo/canRedo signal — `validateMenuItem`'s own header names the follow-up):
+    /// `true` regardless of document/selection/pasteboard state, since being asked to validate AT
+    /// ALL already answers the only question this gate currently asks.
+    func testValidateMenuItemReturnsTrueForUndoRedoAndZoomRegardlessOfState() async {
+        let (runtime, _) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        let items: [NSMenuItem] = [
+            NSMenuItem(title: "Undo", action: #selector(OfficeTileCanvasView.undo(_:)), keyEquivalent: ""),
+            NSMenuItem(title: "Redo", action: #selector(OfficeTileCanvasView.redo(_:)), keyEquivalent: ""),
+            NSMenuItem(title: "Zoom In", action: #selector(OfficeTileCanvasView.zoomIn(_:)), keyEquivalent: ""),
+            NSMenuItem(title: "Zoom Out", action: #selector(OfficeTileCanvasView.zoomOut(_:)), keyEquivalent: ""),
+            NSMenuItem(title: "Actual Size", action: #selector(OfficeTileCanvasView.actualSize(_:)), keyEquivalent: ""),
+        ]
+        for item in items {
+            XCTAssertTrue(view.validateMenuItem(item), "\(item.title) must be reachability-gated only")
+        }
+        view.unmount()
+    }
+
+    /// The zoom actions' own effect — reuse of the SAME `zoomStep`/`officeZoomIn`/`officeZoomOut`
+    /// machinery `keyDown`'s ⌘±/⌘0 switch already drives (Stage B Task 4), just called from a
+    /// menu-shaped door instead of a key equivalent.
+    func testZoomInZoomOutActualSizeActionsMoveZoomPPTAlongTheSameLadderTheKeysUse() async {
+        let (runtime, _) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
+        XCTAssertEqual(view.zoomPPT, 1000, "setup: starts at the 100% pin")
+
+        view.zoomIn(nil)
+        XCTAssertEqual(view.zoomPPT, 1250, "one ladder step up from 1000")
+
+        view.zoomOut(nil)
+        view.zoomOut(nil)
+        XCTAssertEqual(view.zoomPPT, 750, "two ladder steps down from 1250")
+
+        view.actualSize(nil)
+        XCTAssertEqual(view.zoomPPT, 1000, "Actual Size returns exactly to the 100% pin")
 
         view.unmount()
     }

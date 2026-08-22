@@ -176,6 +176,21 @@ func editorRuntimeReleasedOnDeparture(dirtyModels: Int) -> Bool {
     dirtyModels == 0
 }
 
+/// Office Stage B Task 3: **the office mirror of the decision immediately above — same question, same
+/// answer, a separate function rather than a shared one.** The two runtime kinds happen to reduce to
+/// the identical arithmetic (`count == 0`) today, but they are facts about different things (open
+/// Monaco models vs. open LOK documents), tested independently, exactly the way `officeDocumentIsDirty`
+/// stays a separate function from `editorTabIsDirty` rather than a shared predicate parameterized over
+/// a state type (`PanelDocumentTab.swift`'s own header states that precedent). `releaseOfficeRuntimeIfClean`
+/// is this function's one caller — see that method's own doc for why Stage A's identical-looking
+/// "always release" gate was never actually THIS rule until now: Stage A's document tabs were view-only,
+/// so `dirtyDocuments` could never be anything but 0, and the always/clean-only distinction was
+/// unobservable. Office Stage B's real edit surface (T2/T2b: `documents[path].dirty`, LOK-driven) is
+/// what makes the two rules finally diverge in practice, and this is where that divergence lands.
+func officeRuntimeReleasedOnDeparture(dirtyDocuments: Int) -> Bool {
+    dirtyDocuments == 0
+}
+
 // MARK: - The live harness behind an open session
 
 /// One live attachment: a pinned `SessionFeed` (its own `NormaClient`/socket — a full harness, the
@@ -706,6 +721,29 @@ final class ShellSessionHost: ObservableObject {
         return await runtime.save(path)
     }
 
+    /// **Office Stage B Task 2 — the document-tab leg beside the pair above.** Same shape,
+    /// same reasoning, for `.document` tabs: the panel's active tab, if it is a document tab with a
+    /// path (`officeSaveMenuTarget`, `PanelDocumentTab.swift`). Read twice per use for the identical
+    /// reason `activeCodeTabPath` is — once to decide whether the menu item's document leg applies,
+    /// once when it fires.
+    var activeDocumentTabPath: String? {
+        return officeSaveMenuTarget(tabs: panelStore.tabs, activeTabId: panelStore.activeTabId)?.url
+    }
+
+    /// Save the active document tab. **`existingOfficeRuntime`, never `officeRuntime(for:)`** — the
+    /// identical reasoning `saveActiveCodeTab` states for its own runtime lookup: a save must not
+    /// MINT a runtime. A session with no office runtime holds no open document by construction, so
+    /// there is nothing to save. Fire-and-forget from the caller's own point of view — `OfficeRuntime
+    /// .save`'s own contract (never sequence off this call returning; observe `state` instead).
+    func saveActiveDocumentTab() {
+        guard let path = activeDocumentTabPath,
+              let sessionId = panelStore.currentSessionId,
+              let runtime = existingOfficeRuntime(for: sessionId) else {
+            return
+        }
+        runtime.save(path)
+    }
+
     /// Release a session's editor outright, whatever it is holding. The door for a session that is
     /// genuinely going away (T10's quit path, an explicit close); the shell's own departures go
     /// through `releaseEditorRuntimeIfClean` below instead.
@@ -735,7 +773,8 @@ final class ShellSessionHost: ObservableObject {
     /// establishes) **and, as of the office live-gate's Bug 2, by `panelDidReveal`** for every
     /// dirs-having session, ahead of any click (see that method's own note — T7's original "office has
     /// no pre-warm door of its own" ruling is the one this overrides) — and REMOVED by a departure
-    /// (`releaseOfficeRuntimeIfClean` — ALWAYS, see its own doc) or an explicit `teardownOfficeRuntime`.
+    /// (`releaseOfficeRuntimeIfClean` — only when the session holds NOTHING unsaved, since Task 3;
+    /// see its own doc) or an explicit `teardownOfficeRuntime` (unconditional).
     private(set) var officeRuntimes: [String: OfficeRuntime] = [:]
 
     /// The ONE app-wide helper supervisor, minted lazily on the FIRST `officeRuntime(for:)` call —
@@ -822,6 +861,20 @@ final class ShellSessionHost: ObservableObject {
     /// before touching anything: `officeRuntimes`, `OfficeRuntime` and `OfficeTileStore` are all
     /// main-actor-isolated.
     private func wireOfficeTileCallbacks(on supervisor: OfficeHelperSupervisor) {
+        // Office Stage B Task 2 — the dirty-tracking wire: `onDocumentEvent` was declared on
+        // `OfficeHelperClient` since Task 3 (proxying `OfficeWireConnection.onDocumentEvent`) but
+        // had never been pointed at anything — every push it could have delivered went nowhere.
+        // Wired HERE, alongside `onTile`/`onTileFailed`/`onInvalidated`, for the identical reason
+        // those three already are: `OfficeHelperSupervisor.client` is re-minted on every successful
+        // `attemptOnce` (a fresh `OfficeHelperClient` per boot/relaunch), so a wiring done once at
+        // supervisor-creation time would go stale the moment the helper dies and relaunches — this
+        // method already exists specifically to be the ONE re-pointing site, called every time a
+        // fresh client comes up (`.ready` in `ensureOfficeHelperSupervisor`'s fan-out loop).
+        supervisor.client?.onDocumentEvent = { [weak self] docId, event in
+            Task { @MainActor [weak self] in
+                self?.officeRuntime(owning: docId)?.handle(documentEvent: event, docId: docId)
+            }
+        }
         supervisor.client?.onTile = { [weak self] _, docId, key, generation, _, _, pixels in
             // `width`/`height` (the two skipped params) are the wire's own claim, unvalidated by
             // the reader — obligation 8: `TileMath`/the `TileKey` itself are authoritative on
@@ -897,6 +950,17 @@ final class ShellSessionHost: ObservableObject {
                     NSLog("[ShellSessionHost] office close(\(docId)) failed: \(error)")
                 }
             },
+            // Office Stage B Task 2 — throws all the way back to `OfficeRuntime.performSave`
+            // (unlike `close`/`unsubscribeTiles` above, which are fire-and-forget everywhere they're
+            // used): a save's caller needs to know whether it worked, the same reason `open` throws.
+            save: { [weak supervisor] docId, part in
+                try await queue.run {
+                    guard let client = supervisor?.client else {
+                        throw OfficeHelperClientError.serverError(reason: "helper not connected")
+                    }
+                    return try await client.save(docId: docId, part: part)
+                }
+            },
             subscribeTiles: { [weak supervisor] docId, part, zoomPPT, viewportTwips in
                 try await queue.run {
                     guard let client = supervisor?.client else {
@@ -927,7 +991,109 @@ final class ShellSessionHost: ObservableObject {
                     }
                     try await client.requestTiles(docId: docId, keys: keys)
                 }
-            })
+            },
+            // Office Stage B Task 4 — same `queue.run` routing every other Driver call already has
+            // (the single-outstanding-request funnel), and the SAME fire-and-forget-but-not-silent
+            // posture `close`/`unsubscribeTiles` already established: a post that fails has nothing
+            // for `OfficeRuntime` to roll back, only something worth logging.
+            postKey: { [weak supervisor] docId, part, type, charCode, keyCode in
+                do {
+                    try await queue.run {
+                        guard let client = supervisor?.client else { return }
+                        try await client.postKey(docId: docId, part: part, type: type, charCode: charCode, keyCode: keyCode)
+                    }
+                } catch {
+                    NSLog("[ShellSessionHost] office postKey(\(docId)) failed: \(error)")
+                }
+            },
+            postMouse: { [weak supervisor] docId, part, type, xTwips, yTwips, count, buttons, modifiers in
+                do {
+                    try await queue.run {
+                        guard let client = supervisor?.client else { return }
+                        try await client.postMouse(docId: docId, part: part, type: type, xTwips: xTwips, yTwips: yTwips,
+                                                   count: count, buttons: buttons, modifiers: modifiers)
+                    }
+                } catch {
+                    NSLog("[ShellSessionHost] office postMouse(\(docId)) failed: \(error)")
+                }
+            },
+            // Office Stage B Task 5 — same `queue.run` routing and same fire-and-forget-but-not-
+            // silent posture as `postKey`/`postMouse` above.
+            postExtTextInput: { [weak supervisor] docId, part, type, text in
+                do {
+                    try await queue.run {
+                        guard let client = supervisor?.client else { return }
+                        try await client.postExtTextInput(docId: docId, part: part, type: type, text: text)
+                    }
+                } catch {
+                    NSLog("[ShellSessionHost] office postExtTextInput(\(docId)) failed: \(error)")
+                }
+            },
+            // Office Stage B Task 6 — same `queue.run` routing every other Driver call already
+            // has. `nil` on failure (never `""`, which is LOK's own legal "nothing selected"
+            // answer) — the same discrimination `close`/`unsubscribeTiles` already draw between
+            // "nothing to report" and "a real, empty-but-valid result."
+            clipboardCopy: { [weak supervisor] docId, part in
+                do {
+                    return try await queue.run {
+                        guard let client = supervisor?.client else { return nil }
+                        return try await client.clipboardCopy(docId: docId, part: part)
+                    }
+                } catch {
+                    NSLog("[ShellSessionHost] office clipboardCopy(\(docId)) failed: \(error)")
+                    return nil
+                }
+            },
+            clipboardCut: { [weak supervisor] docId, part in
+                do {
+                    return try await queue.run {
+                        guard let client = supervisor?.client else { return nil }
+                        return try await client.clipboardCut(docId: docId, part: part)
+                    }
+                } catch {
+                    NSLog("[ShellSessionHost] office clipboardCut(\(docId)) failed: \(error)")
+                    return nil
+                }
+            },
+            clipboardPaste: { [weak supervisor] docId, part, text in
+                do {
+                    try await queue.run {
+                        guard let client = supervisor?.client else { return }
+                        try await client.clipboardPaste(docId: docId, part: part, text: text)
+                    }
+                } catch {
+                    NSLog("[ShellSessionHost] office clipboardPaste(\(docId)) failed: \(error)")
+                }
+            },
+            undo: { [weak supervisor] docId in
+                do {
+                    try await queue.run {
+                        guard let client = supervisor?.client else { return }
+                        try await client.undo(docId: docId)
+                    }
+                } catch {
+                    NSLog("[ShellSessionHost] office undo(\(docId)) failed: \(error)")
+                }
+            },
+            redo: { [weak supervisor] docId in
+                do {
+                    try await queue.run {
+                        guard let client = supervisor?.client else { return }
+                        try await client.redo(docId: docId)
+                    }
+                } catch {
+                    NSLog("[ShellSessionHost] office redo(\(docId)) failed: \(error)")
+                }
+            },
+            // Office Stage B Task 2b — the LIVE supervisor's own configured directory, never
+            // `OfficeHelperSupervisor.Configuration.defaultStateDirectory()` read fresh: every live
+            // test overrides `socketDirectory` with a scratch dir precisely so its own helper's
+            // write fence and this driver's staging directory are one and the same place. Safe to
+            // read eagerly (not `[weak supervisor]`-gated the way every closure above is) — see
+            // `OfficeHelperSupervisor.statePath`'s own doc: fixed for the supervisor's whole
+            // lifetime, and `supervisor` (a `let` parameter of this very method) already outlives
+            // this call.
+            stateDirectory: supervisor.statePath)
     }
 
     /// Release a session's office runtime outright, closing whatever documents it holds. **Never
@@ -940,14 +1106,20 @@ final class ShellSessionHost: ObservableObject {
         officeRuntimes.removeValue(forKey: sessionId)?.teardown()
     }
 
-    /// The shell is leaving `sessionId`. **Stage A has no dirty state to protect — a document tab is
-    /// view-only — so this ALWAYS releases**, unlike `releaseEditorRuntimeIfClean`'s clean-only
-    /// gate. Today "clean-only" and "always" are the exact same rule, because nothing in
-    /// `OfficeRuntimeState` can ever BE dirty yet; Stage B's editable surface is what will need the
-    /// real gate `editorRuntimeReleasedOnDeparture` already models for the editor side, and this
-    /// comment is the pin that keeps this call site honest about which rule it is actually following
-    /// once that lands.
+    /// The shell is leaving `sessionId`. **Office Stage B Task 3 — the Stage A exception this
+    /// method's own comment foretold lands here: real clean-only, mirroring
+    /// `releaseEditorRuntimeIfClean` exactly.** Editing is genuinely real now (T2/T2b: `documents
+    /// [path].dirty`, driven by LOK's own `.uno:ModifiedStatus` callback), so a departure that
+    /// unconditionally tore down a dirty office runtime would silently discard unsaved edits the
+    /// instant the user hopped sessions or hid the shell — the exact failure `editorRuntimeReleasedOn
+    /// Departure`'s own doc names for the editor side, now equally true here. A dirty runtime is
+    /// RETAINED — not released, not torn down — so it survives to the quit gate (`AppDelegate
+    /// .editorQuitGate`'s office leg) exactly as a dirty editor already does, and a later return to
+    /// this same session finds its unsaved documents exactly as they were left.
     private func releaseOfficeRuntimeIfClean(for sessionId: String) {
+        guard let runtime = officeRuntimes[sessionId] else { return }
+        let dirtyDocuments = runtime.stateSnapshot.documents.values.filter(\.dirty).count
+        guard officeRuntimeReleasedOnDeparture(dirtyDocuments: dirtyDocuments) else { return }
         officeRuntimes.removeValue(forKey: sessionId)?.teardown()
     }
 
@@ -1103,8 +1275,8 @@ final class ShellSessionHost: ObservableObject {
 
     /// editor-product Task 10: the ONE door a tab's `×` goes through (`ShellPanel`'s `onCloseTab`) —
     /// `closePanelTab` below stays the unconditional MECHANISM, reached either straight through (a
-    /// non-code tab, a code tab with no file, or one with no live runtime to ask) or after this gate
-    /// resolves what a dirty `.code` tab means.
+    /// non-code, non-document tab, a code/document tab with no file, or one with no live runtime to
+    /// ask) or after this gate resolves what a dirty `.code`/`.document` tab means.
     ///
     /// **T9's ⚠️, closed**: `dirtyCloseCandidate` below always resolves a code tab's `(path,
     /// runtime)` pair when one exists, clean or dirty, failed-open or mid-boot — so `runtime
@@ -1114,20 +1286,57 @@ final class ShellSessionHost: ObservableObject {
     /// have been). That single call is what stops the leak `PanelEditorTabModels.discard` alone left
     /// standing — the page's model plus the watcher's two file descriptors, previously released only
     /// when the whole runtime eventually was.
+    ///
+    /// **Office Stage B Task 3 — the `.document` leg, deliberately shaped DIFFERENTLY from the
+    /// `.code` leg just above it.** `.code`'s clean branch calls `runtime.close(path)` itself because
+    /// editor-product Task 10 MOVED that close out of `closePanelTab` and into this gate (that
+    /// method's own header explains why: a dirty buffer must never be silently discarded, so the
+    /// close had to move behind a gate that can intervene first). Office never had that problem —
+    /// `closePanelTab`'s own `.document` branch already calls `officeRuntime.close(path)` inline, and
+    /// always has, since Stage A. Moving it here too would not fix anything and would create a SECOND
+    /// door that closes an office document (this gate's `.close`/Discard path, AND `closePanelTab`'s
+    /// own inline call the moment this method reaches it). So this gate DECIDES ONLY (sheet or
+    /// silent-fallthrough); `closePanelTab` stays the one and only closer for a `.document` tab's own
+    /// open document, exactly as it already was — see that method's own updated comment for the seam
+    /// this reasoning lives at.
+    ///
+    /// **Fix round 1 (task review, IMPORTANT-1)**: the paragraph above used to end by naming ONE
+    /// caller that reached `closePanelTab` directly, bypassing this gate entirely —
+    /// `PanelDocumentTabModel.closeTab()`, the `.deleted`-conflict banner's own "Close" button — and
+    /// called that deliberate. It was not a safe thing to leave ungated: `.deleted` conflicts are
+    /// raised only on an already-dirty document (`OfficeRuntimeReducer.externalDeleted`'s own `guard
+    /// doc.dirty`), so that button was unconditionally one click from silently discarding unsaved
+    /// edits — a real ×-shows-a-sheet/banner-Close-doesn't inconsistency Task 3 itself introduced by
+    /// giving the `×` a gate and leaving this second door pointed under it. Fixed at the caller
+    /// (`PanelDocumentTab.swift`'s `closeTab()` now calls `host?.requestCloseTab(tabId)`, the same
+    /// gate the `×` uses), not here — this method needed no change, since `dirtyDocumentCloseCandidate`
+    /// already resolves any `.document` tab reached by tabId regardless of which button called it.
+    /// There is now exactly one door into a `.document` tab's close, gated, from every caller.
     func requestCloseTab(_ tabId: String) {
-        guard let (path, runtime) = dirtyCloseCandidate(tabId: tabId) else {
-            closePanelTab(tabId)
+        if let (path, runtime) = dirtyCloseCandidate(tabId: tabId) {
+            guard editorTabIsDirty(state: runtime.stateSnapshot, path: path) else {
+                runtime.close(path)
+                closePanelTab(tabId)
+                return
+            }
+            let basename = (path as NSString).lastPathComponent
+            presentDirtyCloseSheet(basename, presentingWindow?()) { [weak self, weak runtime] choice in
+                self?.resolveDirtyTabClose(tabId: tabId, path: path, runtime: runtime, choice: choice)
+            }
             return
         }
-        guard editorTabIsDirty(state: runtime.stateSnapshot, path: path) else {
-            runtime.close(path)
-            closePanelTab(tabId)
+        if let (path, runtime) = dirtyDocumentCloseCandidate(tabId: tabId) {
+            guard officeDocumentIsDirty(state: runtime.stateSnapshot, path: path) else {
+                closePanelTab(tabId) // closes the document itself, inline — see this method's own doc
+                return
+            }
+            let basename = (path as NSString).lastPathComponent
+            presentDirtyCloseSheet(basename, presentingWindow?()) { [weak self] choice in
+                self?.resolveDirtyDocumentTabClose(tabId: tabId, choice: choice)
+            }
             return
         }
-        let basename = (path as NSString).lastPathComponent
-        presentDirtyCloseSheet(basename, presentingWindow?()) { [weak self, weak runtime] choice in
-            self?.resolveDirtyTabClose(tabId: tabId, path: path, runtime: runtime, choice: choice)
-        }
+        closePanelTab(tabId)
     }
 
     /// Which `(path, runtime)` the tab-close gate applies to — `nil` for everything it leaves to the
@@ -1139,6 +1348,20 @@ final class ShellSessionHost: ObservableObject {
               tab.kind == .code, let path = tab.url, !path.isEmpty,
               let sessionId = panelTargetSessionId,
               let runtime = existingEditorRuntime(for: sessionId) else {
+            return nil
+        }
+        return (path, runtime)
+    }
+
+    /// Office Stage B Task 3 — `dirtyCloseCandidate`'s own `.document` mirror: `nil` for a non-
+    /// `.document` tab, a document tab with no path (unreachable, `PanelDocumentTabModel.path`'s own
+    /// doc), or a session with no live office runtime (a dirless/never-opened session never minted
+    /// one — nothing there to be dirty).
+    private func dirtyDocumentCloseCandidate(tabId: String) -> (path: String, runtime: OfficeRuntime)? {
+        guard let tab = panelStore.tabs.first(where: { $0.tabId == tabId }),
+              tab.kind == .document, let path = tab.url, !path.isEmpty,
+              let sessionId = panelTargetSessionId,
+              let runtime = existingOfficeRuntime(for: sessionId) else {
             return nil
         }
         return (path, runtime)
@@ -1176,6 +1399,42 @@ final class ShellSessionHost: ObservableObject {
                     self?.closePanelTab(tabId)
                 case .keepOpen, .awaitSave:
                     // `.failed`: T9's banner already carries the sentence — the tab simply stays.
+                    break
+                }
+            }
+        }
+    }
+
+    /// Office Stage B Task 3 — `resolveDirtyTabClose`'s own `.document` mirror, narrower by exactly
+    /// the amount `requestCloseTab`'s own header explains: neither branch here ever calls
+    /// `runtime.close(path)` directly — `.close` and a successful `.awaitSave` both route through
+    /// `closePanelTab(tabId)`, which is the one place a `.document` tab's own open document has ever
+    /// been closed, before or after this task. `runtime` is resolved FRESH here (`existingOfficeRuntime`),
+    /// never weak-captured from the door above the way the editor's own `runtime` parameter is —
+    /// `saveAndAwaitOutcome` is reached only inside the `.awaitSave` branch below, and re-asking through
+    /// the host at fire time (rather than trusting a reference captured when the sheet was first shown)
+    /// is the same "re-ask, never remember" discipline `PanelDocumentTabModel.resolvedRuntime`'s own
+    /// header states for every other door on that object — a session that departed WHILE the sheet was
+    /// up retains its dirty runtime (this task's own `releaseOfficeRuntimeIfClean` fix), so the runtime
+    /// this resolves is the SAME one the sheet was originally shown for, not a fresh mint.
+    private func resolveDirtyDocumentTabClose(tabId: String, choice: DirtyCloseChoice) {
+        switch dirtyCloseAction(dirty: true, choice: choice) {
+        case .close:
+            closePanelTab(tabId)
+        case .keepOpen:
+            break
+        case .awaitSave:
+            guard let (path, runtime) = dirtyDocumentCloseCandidate(tabId: tabId) else { return }
+            Task { @MainActor [weak self, weak runtime] in
+                guard let runtime else { return }
+                let outcome = await runtime.saveAndAwaitOutcome(path)
+                switch dirtyCloseActionAfterSave(outcome) {
+                case .close:
+                    self?.closePanelTab(tabId)
+                case .keepOpen, .awaitSave:
+                    // `.failed`: the reducer's own `.saveFailed` arm already wrote the sentence into
+                    // `documentBanners[path]` (`OfficeRuntimeReducer`'s own doc) — the tab simply stays,
+                    // mirroring the editor's identical posture toward T9's banner.
                     break
                 }
             }
@@ -1226,14 +1485,35 @@ final class ShellSessionHost: ObservableObject {
         // Combine subscription — see `PanelFilesTabModels.discard`/`PanelFilesTabModel.deactivate`.
         PanelFilesTabModels.discard(tabId: tabId)
         // office-plumbing Task 6: and the document tab's — including the RUNTIME'S OWN open
-        // document, closed right HERE rather than behind a gate the way `.code`'s `requestCloseTab`
-        // fronts this same method. Stage A documents are never dirty (view-only — there is no edit
-        // surface yet), so the two-call split editor-product Task 10 built specifically to let a
-        // dirty-close sheet run BEFORE the runtime's model/watcher are released has nothing to
-        // protect here: there is no unsaved state a sheet could ask about. `runtime.close(path)`
-        // evicts the doc's own tiles from `OfficeTileStore` too (`OfficeRuntime.perform`'s
-        // `.helperClose` case) — closing the tab is what makes that eviction correct: a closed
-        // document's cached pixels are dead weight for the rest of the process's life.
+        // document, closed right HERE.
+        //
+        // **Office Stage B Task 3 — the seam the two comments above this one (superseded, kept only
+        // as the historical record of the question) were both waiting on, resolved: this stays the
+        // ONE closer for a `.document` tab's own open document — it does NOT move behind
+        // `requestCloseTab` the way `.code`'s own model/watcher close did in editor-product Task 10.**
+        // That move does not apply here: `.code`'s close had to relocate INTO the gate because Task 10
+        // found it was previously reached NOWHERE ELSE (a dirty buffer could be silently discarded by
+        // `closePanelTab` alone, with no door for a sheet to intervene first) — this call site already
+        // WAS that door, since Stage A, before dirty documents could even exist. Duplicating it into
+        // the gate too would not add safety, only a second place that closes the same document.
+        // `requestCloseTab` (Task 3) now gates the `.document` leg exactly like `.code`'s — a
+        // dirty document tab's `×` shows the sheet, and Discard/a successful Save both still end by
+        // calling THIS method, unconditionally, so the actual close stays exactly where it already
+        // was. `runtime.close(path)` evicts the doc's own tiles from `OfficeTileStore` too
+        // (`OfficeRuntime.perform`'s `.helperClose` case) — closing the tab is what makes that
+        // eviction correct: a closed document's cached pixels are dead weight for the rest of the
+        // process's life.
+        //
+        // **Fix round 1 (task review, IMPORTANT-1)**: this comment used to name `PanelDocumentTabModel
+        // .closeTab()` (the `.deleted`-conflict banner's own "Close" button) as the ONE caller that
+        // reached this method WITHOUT ever passing through the gate — and treated that as safe because
+        // this call site "already WAS that door" before dirty documents existed. That stopped being
+        // true the moment `requestCloseTab` grew a `.document` leg: from then on, a caller reaching
+        // `closePanelTab` directly wasn't reaching "the door," it was reaching the room BEHIND the
+        // door the `×` had just been given, on a conflict banner button that (per `.externalDeleted`'s
+        // own `guard doc.dirty`) is unconditionally dirty every time it's shown. Fixed at the caller —
+        // `closeTab()` now calls `host?.requestCloseTab(tabId)` instead. No caller reaches this method
+        // directly for a `.document` tab anymore; `requestCloseTab` is the only door, for both buttons.
         if let tab = panelStore.tabs.first(where: { $0.tabId == tabId }), tab.kind == .document,
            let path = tab.url, !path.isEmpty, let officeRuntime = existingOfficeRuntime(for: sessionId) {
             officeRuntime.close(path)
@@ -2350,8 +2630,9 @@ final class ShellSessionHost: ObservableObject {
         // editor-product T3: the departing session's editor goes only if it is holding nothing
         // unsaved (`editorRuntimeReleasedOnDeparture`). A hop is not a quit.
         if let departing = attachedSessionId { releaseEditorRuntimeIfClean(for: departing) }
-        // office-plumbing Task 5: same departure moment, ALWAYS-release policy (Stage A has no
-        // dirty state to protect) — see `releaseOfficeRuntimeIfClean`'s own doc.
+        // office-plumbing Task 5 / Stage B Task 3: same departure moment, and since editing became
+        // real the same clean-only policy as the editor line above — a dirty office runtime is
+        // RETAINED across a hop. See `releaseOfficeRuntimeIfClean`'s own doc.
         if let departing = attachedSessionId { releaseOfficeRuntimeIfClean(for: departing) }
         attachedSessionId = sessionId
         refreshOutputFiles(for: sessionId)
@@ -2447,8 +2728,9 @@ final class ShellSessionHost: ObservableObject {
         // editor-product T3: same departure policy as the hop above — a hidden shell releases a
         // CLEAN editor and keeps a dirty one. ⌘W is not a quit, and nothing warns here.
         if let departing = attachedSessionId { releaseEditorRuntimeIfClean(for: departing) }
-        // office-plumbing Task 5: same departure moment, ALWAYS-release policy — see
-        // `releaseOfficeRuntimeIfClean`'s own doc.
+        // office-plumbing Task 5 / Stage B Task 3: same departure policy as the hop above and as
+        // the editor line above it — a hidden shell releases a CLEAN office runtime and keeps a
+        // dirty one. See `releaseOfficeRuntimeIfClean`'s own doc.
         if let departing = attachedSessionId { releaseOfficeRuntimeIfClean(for: departing) }
         live.feedTask?.cancel()
         live.feedTask = nil

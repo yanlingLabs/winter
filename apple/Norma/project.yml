@@ -428,6 +428,14 @@ targets:
           DEST_MACOS="${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/MacOS"
           mkdir -p "${DEST_MACOS}"
           cp "${BUILT_PRODUCTS_DIR}/NormaOfficeHelper" "${DEST_MACOS}/NormaOfficeHelper"
+          # Office Stage B Task 1 — the seatbelt profile, placed at Contents/Resources/office-helper.sb,
+          # sibling to Contents/Resources/LibreOffice (the "Embed LibreOffice (signed)" script
+          # below): main.swift's `resolveSandboxProfilePath()` climbs two directories up from its
+          # own embedded MacOS/ location the same way `resolveInstallRoot()` already does for the LO
+          # root, so this destination is not a free choice — it must match that computation exactly.
+          DEST_RESOURCES="${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Resources"
+          mkdir -p "${DEST_RESOURCES}"
+          cp "${SRCROOT}/Sources/OfficeHelper/office-helper.sb" "${DEST_RESOURCES}/office-helper.sb"
       - name: Embed LibreOffice (signed)
         basedOnDependencyAnalysis: false
         # bash, not the project-wide default /bin/sh (which on macOS is bash running in a
@@ -744,6 +752,15 @@ targets:
     sources:
       - path: Tests/NormaAppTests
       - path: HelperSources/SMCController.swift
+      # Office Stage B Task 7 — OfficeAutosaveScheduler.swift is Foundation-only by deliberate
+      # constraint (see its own header): no LOK, no bridging header, no wire types, so it is safe
+      # to compile directly into the test bundle, mirroring SMCController.swift's own precedent one
+      # line up, and letting the cadence tests inject a fake clock with zero subprocess/socket
+      # involved. The REST of Sources/OfficeHelper stays out of this target on purpose — everything
+      # else there either needs the bridging header (LOKBridge.swift/TileRenderer.swift/Support) or
+      # is exercised only through a real spawned process (OfficeHelperServer.swift, via
+      # NormaOfficeHelperFixture/NormaOfficeHelper — see those targets' own `excludes:`).
+      - path: Sources/OfficeHelper/OfficeAutosaveScheduler.swift
     dependencies:
       - target: Norma
     settings:
@@ -814,6 +831,16 @@ targets:
     sources:
       - path: Sources/OfficeWire
       - path: Sources/OfficeHelper
+        # Office Stage B Task 1: office-helper.sb is read at RUNTIME as raw text (main.swift's own
+        # `resolveSandboxProfilePath()`), never through Xcode's Copy Bundle Resources — a bare
+        # `type: tool` product has no established resource-bundle convention in this project (no
+        # prior target here has ever bundled one), so this sidesteps that unknown entirely rather
+        # than discover it the hard way. Excluded from the source sweep so xcodegen never tries to
+        # classify it as a compiled source OR silently invent a resources phase for it; the "Embed
+        # NormaOfficeHelper" postCompileScript below copies it to `Contents/Resources/` explicitly,
+        # the same deliberate-copy shape that script already uses for the executable itself.
+        excludes:
+          - office-helper.sb
     settings:
       base:
         PRODUCT_NAME: NormaOfficeHelper
@@ -872,6 +899,12 @@ targets:
           - LOKBridge.swift
           - TileRenderer.swift
           - Support
+          # Office Stage B Task 1: the fixture is NOT sandboxed (it is LOK-free by design — see the
+          # excludes above — and OfficeSupervisorTests' own scenarios are handshake/death-detection,
+          # never document-shaped, so there is no LOK attack surface here to fence). Excluded for
+          # the same xcodegen-resource-phase reason as the real target above, not a statement that
+          # it needs the file.
+          - office-helper.sb
       - path: Tests/OfficeHelperFixtureSources
     settings:
       base:

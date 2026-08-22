@@ -88,11 +88,128 @@ func panelFilesDoorShown(sessionId: String?, rows: [SessionSummary]) -> Bool {
 
 // MARK: - office-plumbing Task 7: the file-open router (PURE)
 
+/// **Office Stage B Task 9 — the formats with a genuine, WORKING save story.** Started life as an
+/// exact mirror of `LOKBridge.OfficeSaveFormat`'s own six cases, as a second, INTENTIONAL copy: the
+/// app target has no visibility into `NormaOfficeHelper`'s own module (`OfficeSaveFormat` lives in
+/// `Sources/OfficeHelper`, excluded from the app's own sources sweep — `OfficeDocumentBridge`'s own
+/// header in `OfficeHelperServer.swift` explains why), so there is no way to import it directly.
+/// Read this as the boundary `officeDocumentIsReadOnlyFormat` draws, not as a router — nothing
+/// routes tab KIND off this set; `officeFileExtensions` below (the wider set) still owns that.
+///
+/// **Whole-branch review I2 — `docx` is deliberately NOT here, and that makes this set narrower
+/// than `OfficeSaveFormat` rather than an exact mirror of it.** `OfficeSaveFormat` still has a
+/// `.docx` case and still resolves the right filter; what fails is one layer down, inside this
+/// vendor build: Writer's OOXML export dies with `SfxBaseModel::impl_store ... 0xc10(Error Area:Io
+/// Class:Write Code:16)` (`ERRCODE_IO_CANTWRITE`/`SVSTREAM_WRITE_ERROR`) on every attempt — a
+/// still-open Writer/OOXML defect, distinct from and NOT fixed by Task 11's r3 re-cut, which only
+/// closed the missing-charset-table crash (`testXlsxDocxPptxSaveRoundTripThroughTheRealHelperAfter
+/// TheR3VendorRecut` pins the exact failure through the real helper). So with `docx` in this set a
+/// user could open a Word document, type freely, watch the dirty dot appear — and every ⌘S would
+/// fail, forever, discovered only AFTER investing the edits, with the work reachable afterwards
+/// only inside an ODF autosave sidecar. Holding it read-only until that defect is fixed is exactly
+/// the rule Task 9 already wrote for this situation and states two declarations down: **never let
+/// the buffer BECOME dirty in the first place rather than surface that failure reactively.** The
+/// branch was simply inconsistent with its own rule here.
+///
+/// `xlsx`, `pptx` and all three ODF formats are unaffected and stay fully read-write — xlsx save is
+/// real as of the r3 re-cut, pptx always worked, and ODF never went near the OOXML export path.
+///
+/// **To reverse this the day Writer's OOXML export is fixed:** move `docx` back into this set and
+/// out of the `union` below (both, or it silently stops being an office document at all and routes
+/// to a Monaco code tab), and re-point the doc comments that name the demotion — the docx leg of
+/// `testXlsxDocxPptxSaveRoundTripThroughTheRealHelperAfterTheR3VendorRecut` is the test that will
+/// go red on that day and its `XCTFail` message spells out the same list.
+let officeReadWriteExtensions: Set<String> = ["xlsx", "ods", "pptx", "odp", "odt"]
+
 /// The extensions that make a file an OFFICE document rather than something the code editor should
 /// try to render as text — spreadsheets (`xlsx`/`ods`), presentations (`pptx`/`odp`), documents
-/// (`docx`/`odt`). Stage A's fixture set (`gate.*`, Task 1's own manifest) names exactly these six.
+/// (`docx`/`odt`). Stage A's fixture set (`gate.*`, Task 1's own manifest) named exactly these six.
 /// One set — `panelTabKind(forFilePath:)`'s own doc names the drift a second copy of it would be.
-let officeFileExtensions: Set<String> = ["xlsx", "ods", "pptx", "odp", "docx", "odt"]
+///
+/// **Office Stage B Task 9 — widened by two, empirically, against the real vendored LOK.** `xlsm`
+/// (a macro-enabled spreadsheet — content-identical to `xlsx` when it carries no macro part, which
+/// is exactly what `gate.xlsm`'s own fixture recipe produces) and `odg` (ODF drawing) both OPEN and
+/// RENDER cleanly (`OfficeHelperLiveTests.testLegacyFormatsProbe...`, this task's own live proof).
+/// Three siblings were tried and REJECTED, empirically, not by assumption: `xls`/`doc`/`ppt` (binary
+/// 97-2003) all FAILED to open in this vendor build, each against a genuinely-produced legacy binary
+/// — `.doc` from macOS's own `textutil -convert doc` (no LOK involved, and two independent source
+/// texts gave the identical failure), `.xls`/`.ppt` round-tripped out of LOK's OWN `saveAs` via the
+/// `spikes/office-legacy-probe` C spike. `testRealLegacyBinaryFixturesOpenAsTextAfterR3RecutXls
+/// StillFailsCleanly`'s own header has the per-format recipes and the exact failures; the committed
+/// fixtures ARE those files. `xlsb` could not even be SOURCED — LOK's own `saveAs`
+/// answers "no output filter found for provided suffix" for it in this build, and no other route to
+/// genuine `xlsb` bytes existed within this task's scope; left OUT, honestly undecided rather than
+/// silently assumed either way.
+///
+/// **Task 11 side-finding, NOT a re-decision of this widening** — restated honestly at the
+/// whole-branch review (I3), because the version this comment first shipped rested on a false
+/// premise. It claimed `legacy-doc.doc`/`legacy-ppt.ppt` were "Task 10's own synthetic
+/// CFB-magic-bytes fixtures, degenerate content behind a real OLE2 signature." Every clause of that
+/// was wrong: they are TASK 9's, added by the very commit that made this widening decision
+/// (`9fabfa6b`), and they are the genuinely-produced legacy binaries described one paragraph up —
+/// `file(1)` reports Composite Document File V2 for both, and their UTF-16LE directory trees carry
+/// real streams with real content (`WordDocument`/`1Table` plus this fixture's own body sentences;
+/// `PowerPoint Document`/`Pictures`/`Current User`/`___PPT10` plus placeholder text and font
+/// tables). The cited source said the opposite of what it was cited for: `task-10-report.md`'s F2
+/// verified the CFB MAGIC is real and never called the content synthetic.
+///
+/// What actually happened: the r3 re-cut removed the crash for both fixtures, and they now open —
+/// but sniffed by LOK's own lenient content-detection fallback as plain TEXT, with part counts (9,
+/// 135) far beyond anything their real content could justify, which is consistent with LOK reading
+/// the raw container bytes rather than with either real importer working. For `.ppt` in particular
+/// this is the WHOLE of Task 9's evidence, not one route of two — so "a second, untouched route
+/// still holds the decision up" was never available as a reassurance and is not offered here.
+///
+/// **The widening decision nevertheless stands, on a ground that survives the correction**: opening
+/// a real PowerPoint/Word binary as a many-part TEXT document is not an importer working, it is
+/// mojibake — strictly worse for a user than today's clean refusal, and no reason to add either
+/// extension to this set. `xls` is separately confirmed UNCHANGED (still a clean `openFailed`).
+/// Re-evaluating the posture with more real legacy content, now that the missing-dylib mechanism
+/// behind the original crash is understood, remains a named follow-up (`task-11-report.md`) — not
+/// something this comment or Task 11 decided.
+///
+/// **Every extension named in the `union` here is also, unconditionally, a
+/// `officeDocumentIsReadOnlyFormat` path** (see that predicate's own header) — that is precisely
+/// what the union means: recognized as an office document, opened and rendered, never saved.
+/// `xlsm`/`odg` are here because `OfficeSaveFormat` has no case for either, so a `saveAs` would
+/// fail outright. `docx` is here for a different reason at a different layer — it HAS a case, and
+/// the case is correct; this vendor build's Writer OOXML export is what fails (whole-branch review
+/// I2, the full account at `officeReadWriteExtensions`' own header above). Both routes end at the
+/// same v1 decision, and it is the same sentence in both cases: **never let the buffer BECOME
+/// dirty in the first place rather than surface that failure reactively.**
+///
+/// `docx` must be named in BOTH this union and (on the day the Writer defect is fixed) the set
+/// above — it cannot simply be moved out of `officeReadWriteExtensions`, because this set is
+/// derived from that one: dropping it from both would stop `.docx` being an office document at all
+/// and route it to a Monaco code tab, where a Word document renders as binary mojibake.
+let officeFileExtensions: Set<String> = officeReadWriteExtensions.union(["xlsm", "odg", "docx"])
+
+/// Office Stage B Task 9 — **is `path`'s own extension one `officeFileExtensions` recognizes but
+/// `officeReadWriteExtensions` does not?** The v1 answer to the save story T2's own review left
+/// open for every format this build can open but cannot write: rather than let the save failure
+/// surface reactively (a `saveFailed` banner, after the user has already typed something into a
+/// buffer that was never going to persist), this predicate is
+/// consulted BEFORE any of that can happen — see its three call sites: `officeSaveMenuTarget`
+/// (⌘S disabled), `officeDocumentIsDirty` (no dirty dot, ever, for this path — see that function's
+/// own doc for why this is not merely cosmetic), and `OfficeRuntime`'s own mutation-verb guards
+/// (`postKeyEvent` and its siblings — the input side, which is what makes the dirty-tracking half
+/// of this decision honest rather than a UI-only illusion: if keystrokes still reached LOK, the
+/// canvas would visibly "accept" edits that vanish, silently, the instant the tab closes with no
+/// dirty dot ever having shown to prompt a save the format could not honor anyway).
+///
+/// **Three extensions answer `true` today, by two different routes** (whole-branch review I2):
+/// `xlsm`/`odg`, which `OfficeSaveFormat` has no case for at all; and `docx`, which it does have a
+/// case for — there the failure is one layer lower, in this vendor build's Writer OOXML export. The
+/// predicate does not distinguish them, and does not need to: what every call site below acts on is
+/// "this document cannot be written," not why. Both routes are documented at the two sets above.
+///
+/// `path == nil` (a tab with nothing pointed at it — unreachable through any shipped door, mirrors
+/// `officeDocumentIsDirty`'s own `path` handling) answers `false`: nothing to be read-only ABOUT.
+func officeDocumentIsReadOnlyFormat(path: String?) -> Bool {
+    guard let path else { return false }
+    let ext = (path as NSString).pathExtension.lowercased()
+    return officeFileExtensions.contains(ext) && !officeReadWriteExtensions.contains(ext)
+}
 
 /// PURE: **the ONE router every file-open door calls** — office-plumbing Task 7's answer to the
 /// predicate-unify lesson `editorTabSessionRoots`'s own doc already paid for once (wave-8 item 2): a

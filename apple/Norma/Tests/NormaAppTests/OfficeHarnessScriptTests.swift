@@ -16,19 +16,20 @@ final class OfficeHarnessScriptTests: XCTestCase {
 
     func testTheDrillPlanCarriesEveryDrillInOrderWithUniqueIds() throws {
         let steps = OfficeHarnessPlan.steps
-        XCTAssertEqual(steps.count, 46, "the plan's own step count — a change here is a change to "
+        XCTAssertEqual(steps.count, 88, "the plan's own step count — a change here is a change to "
                        + "what the harness actually runs")
 
         let drills = steps.map(\.drill)
-        XCTAssertEqual(Set(drills), Set(0...12), "every drill from 0 (setup) to 12 (wire sanity) must be present")
+        XCTAssertEqual(Set(drills), Set(0...25), "every drill from 0 (setup) to 25 (Stage B hygiene "
+                       + "re-check) must be present")
         XCTAssertEqual(drills, drills.sorted(), "the steps must be in drill order — the transcript is "
-                       + "read as thirteen groups, never interleaved")
+                       + "read as twenty-six groups, never interleaved")
         XCTAssertEqual(Set(steps.map(\.id)).count, steps.count,
                        "step ids must be unique — the harness's own action switch matches on them")
-        for drill in 0...12 {
+        for drill in 0...25 {
             XCTAssertNotNil(OfficeHarnessPlan.drillTitles[drill], "drill \(drill) has no title for the transcript")
         }
-        XCTAssertEqual(Set(OfficeHarnessPlan.drillTitles.keys), Set(0...12), "drillTitles must have no orphaned entries either")
+        XCTAssertEqual(Set(OfficeHarnessPlan.drillTitles.keys), Set(0...25), "drillTitles must have no orphaned entries either")
 
         // Every id names its own drill as a literal prefix — the same discipline that makes
         // `perform(_:)`'s switch and this pin agree by construction rather than by two hand-kept lists.
@@ -117,6 +118,38 @@ final class OfficeHarnessScriptTests: XCTestCase {
         // Round-trips as a Data write the same way the harness itself writes it (UTF-8, atomic) —
         // catches a stray non-ASCII byte or an unterminated element before this ever reaches real LOK.
         XCTAssertNotNil(content.data(using: .utf8))
+    }
+
+    // MARK: - Task 10: Stage B drill internal order (the same load-bearing-order discipline as
+    // drills 3/5/6/7/8/10 above)
+
+    /// **Drill 18's own internal order**: the marker must be typed and confirmed on disk before the
+    /// ladder can remove it, undo must precede redo (nothing to redo otherwise), and the two-view
+    /// pair must mint+edit BOTH views before the characterization step's own undo can mean anything.
+    func testDrillEighteensInternalOrderIsTypeUndoRedoThenTwoViewMintEditThenCharacterization() throws {
+        let ids = OfficeHarnessPlan.steps.filter { $0.drill == 18 }.map(\.id)
+        XCTAssertEqual(ids, ["18.typeAndSave", "18.undoLadderThenRedo",
+                             "18.twoViewMintAndEditBoth", "18.twoViewUndoCharacterization"])
+    }
+
+    /// **Drill 20's own internal order**: a document must be dirty with a sidecar on disk before the
+    /// kill can mean anything (killing a clean helper would prove nothing about crash recovery), the
+    /// reopen+offer can only be checked after death is real, and restore+save is necessarily last —
+    /// there is nothing left to prove once the recovered content is confirmed on the real path.
+    func testDrillTwentysInternalOrderIsSetupTypeDirtyKillReopenRestore() throws {
+        let ids = OfficeHarnessPlan.steps.filter { $0.drill == 20 }.map(\.id)
+        XCTAssertEqual(ids, ["20.setup", "20.typeDirtyWaitSidecar", "20.kill",
+                             "20.reopenAndRecoveryOffered", "20.restoreAndSaveLands"])
+    }
+
+    /// **Drill 24's own internal order**: the widened-legacy pass-through must be shown to still
+    /// work BEFORE the CFB refusal drill runs against the very same shared helper (so a later
+    /// regression in the refusal path cannot be blamed on the widened opens, and vice versa), and
+    /// the liveness proof is necessarily last — it is the proof that the refusal step did not take
+    /// the helper down with it.
+    func testDrillTwentyFoursInternalOrderIsWidenedPassThroughThenCFBRefusalThenLiveness() throws {
+        let ids = OfficeHarnessPlan.steps.filter { $0.drill == 24 }.map(\.id)
+        XCTAssertEqual(ids, ["24.xlsmOpens", "24.odgOpens", "24.cfbRefusal", "24.livenessAfterRefusal"])
     }
 
     // MARK: - Cross-language wire parity: PanelTabKind's "document" literal

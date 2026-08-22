@@ -3900,8 +3900,23 @@ final class ShellSessionHostTests: XCTestCase {
         // only for the plain synchronous reads/writes on either side.
         private let lock = NSLock()
 
+        /// Office Stage B Task 2b — every recorder gets its OWN scratch state directory by default
+        /// (a fresh UUID-named temp path, never pre-created: `OfficeRuntime.stageDocument`'s own
+        /// `createDirectory(withIntermediateDirectories: true)` brings the whole chain, `docs/`
+        /// included, into existence on first stage). A default parameter rather than a threaded-in
+        /// requirement so every existing `OfficeDriverRecorder()` call site in this file — there are
+        /// several, scattered across unrelated sections — keeps compiling unchanged; only tests that
+        /// actually care about WHERE staging lands (none yet) need to pass one explicitly.
+        let stateDirectory: URL
+        init(stateDirectory: URL = FileManager.default.temporaryDirectory
+                 .appendingPathComponent("OfficeDriverRecorder-\(UUID().uuidString)", isDirectory: true)) {
+            self.stateDirectory = stateDirectory
+        }
+
         private var _openCalls: [(docId: String, path: String)] = []
         private var _closeCalls: [String] = []
+        /// Office Stage B Task 2 — every `save` call, in order.
+        private var _saveCalls: [String] = []
         private var _subscribeCalls: [String] = []
         private var _unsubscribeCalls: [String] = []
         private var _startHelperCalls = 0
@@ -3914,6 +3929,7 @@ final class ShellSessionHostTests: XCTestCase {
 
         var openCalls: [(docId: String, path: String)] { lock.lock(); defer { lock.unlock() }; return _openCalls }
         var closeCalls: [String] { lock.lock(); defer { lock.unlock() }; return _closeCalls }
+        var saveCalls: [String] { lock.lock(); defer { lock.unlock() }; return _saveCalls }
         var subscribeCalls: [String] { lock.lock(); defer { lock.unlock() }; return _subscribeCalls }
         var unsubscribeCalls: [String] { lock.lock(); defer { lock.unlock() }; return _unsubscribeCalls }
         var startHelperCalls: Int { lock.lock(); defer { lock.unlock() }; return _startHelperCalls }
@@ -3929,15 +3945,36 @@ final class ShellSessionHostTests: XCTestCase {
             get { lock.lock(); defer { lock.unlock() }; return _state }
             set { lock.lock(); _state = newValue; lock.unlock() }
         }
-        private var _openFailures: [String: String] = [:] // path -> reason
-        var openFailures: [String: String] {
-            get { lock.lock(); defer { lock.unlock() }; return _openFailures }
-            set { lock.lock(); _openFailures = newValue; lock.unlock() }
+        /// Office Stage B Task 2b — replaces the old path-keyed `openFailures`/`openMetadata` dicts.
+        /// Post-staging, the `open` closure below observes the STAGED path (a UUID-derived name under
+        /// `stateDirectory`, unpredictable from a test), never the real path a test wrote to disk — a
+        /// dictionary keyed by "the path the test expects to see" is structurally unreachable now, not
+        /// just inconvenient. The two tests that used to inject a failure by real path ("garbage
+        /// file") instead now use a real scratch file that genuinely doesn't exist yet, so STAGING
+        /// itself fails before `open` is ever reached — a more representative failure mode than a
+        /// driver-level stub. The one remaining test that needs the DRIVER itself (not staging) to
+        /// fail once — proving a retry reaches the driver a second time — consumes this one-shot flag.
+        /// `openMetadata` had no test setting it at all (confirmed by grep before removal); it was
+        /// dead the moment staging intercepted the path, same reasoning, one less thing to keep in
+        /// sync with a real filesystem.
+        private var _failNextOpenReason: String?
+        var failNextOpenReason: String? {
+            get { lock.lock(); defer { lock.unlock() }; return _failNextOpenReason }
+            set { lock.lock(); _failNextOpenReason = newValue; lock.unlock() }
         }
-        private var _openMetadata: [String: OfficeDocumentMetadata] = [:] // path -> override
-        var openMetadata: [String: OfficeDocumentMetadata] {
-            get { lock.lock(); defer { lock.unlock() }; return _openMetadata }
-            set { lock.lock(); _openMetadata = newValue; lock.unlock() }
+        /// Office Stage B Task 2 — docId -> reason; when set, `save` throws `.saveFailed` instead of
+        /// returning a temp path. Mirrors `openFailures`' own shape exactly.
+        private var _saveFailures: [String: String] = [:]
+        var saveFailures: [String: String] {
+            get { lock.lock(); defer { lock.unlock() }; return _saveFailures }
+            set { lock.lock(); _saveFailures = newValue; lock.unlock() }
+        }
+        /// Office Stage B Task 2 — the temp path `save` reports back for a docId; defaults to a
+        /// deterministic `/tmp` path so most tests never need to set this at all.
+        private var _saveTempPaths: [String: String] = [:]
+        var saveTempPaths: [String: String] {
+            get { lock.lock(); defer { lock.unlock() }; return _saveTempPaths }
+            set { lock.lock(); _saveTempPaths = newValue; lock.unlock() }
         }
         private var _defaultMetadata = OfficeDocumentMetadata(
             type: .spreadsheet, parts: 1, sizeTwips: OfficeDocumentSize(widthTwips: 100, heightTwips: 100))
@@ -3962,18 +3999,29 @@ final class ShellSessionHostTests: XCTestCase {
             set { lock.lock(); _requestTilesShouldFail = newValue; lock.unlock() }
         }
 
-        /// Carry 6's own drill: an `open` for a suspended path does not return until
-        /// `resumeOpen(forPath:)` is called — the seam that lets a test park an open MID-FLIGHT,
-        /// drive a teardown while it is still outstanding, and only then let it resolve.
-        private var suspendedOpens: Set<String> = []
-        private var pendingOpenContinuations: [String: CheckedContinuation<Void, Never>] = [:]
+        /// Carry 6's own drill: an `open` does not return until `resumeNextOpen()` is called — the
+        /// seam that lets a test park an open MID-FLIGHT, drive a teardown while it is still
+        /// outstanding, and only then let it resolve.
+        ///
+        /// Office Stage B Task 2b — **path-agnostic now; was keyed by the path the driver's own
+        /// `open` closure receives.** Post-staging that is always the STAGED path (a UUID-derived
+        /// name under `stateDirectory`, minted internally by `OfficeRuntime.makeDocId`), which no
+        /// test can predict ahead of the very call it needs to suspend — "suspend THIS path" is no
+        /// longer an expressible ask. "Suspend the next open, whatever path it turns out to carry"
+        /// still is: a one-shot flag, mirroring `failNextOpenReason`'s identical shape (same fix,
+        /// same root cause, applied to the other seam that used to be keyed by a real path). The
+        /// only caller (`testTeardownWhileAnOpenIsInFlightResolvesWithoutResurrectingOrLeakingThe
+        /// Document`) only ever has one open in flight at a time, so one shot is enough.
+        private var nextOpenSuspended = false
+        private var pendingOpenContinuation: CheckedContinuation<Void, Never>?
 
-        func suspendOpen(forPath path: String) {
-            lock.lock(); suspendedOpens.insert(path); lock.unlock()
+        func suspendNextOpen() {
+            lock.lock(); nextOpenSuspended = true; lock.unlock()
         }
-        func resumeOpen(forPath path: String) {
+        func resumeNextOpen() {
             lock.lock()
-            let continuation = pendingOpenContinuations.removeValue(forKey: path)
+            let continuation = pendingOpenContinuation
+            pendingOpenContinuation = nil
             lock.unlock()
             continuation?.resume() // resumed OUTSIDE the lock — never resume a continuation while holding it
         }
@@ -3981,8 +4029,9 @@ final class ShellSessionHostTests: XCTestCase {
         /// T6 re-review's own scratch proof, made permanent: gates `requestTiles` so a test can hold
         /// ONE call outstanding while firing a second, overlapping `subscribeTiles` — proving the
         /// second sees the first's keys as already in flight rather than issuing a duplicate. A
-        /// single gate, not per-key/per-doc like `suspendOpen`'s `Set<String>`, since every test that
-        /// needs this only ever holds back one call at a time.
+        /// single gate, held until `resumeRequestTiles()` — unlike `suspendNextOpen`'s consumed-on-
+        /// first-open one-shot above — since every test that needs this only ever holds back one
+        /// call at a time.
         private var requestTilesSuspended = false
         private var pendingRequestTilesContinuations: [CheckedContinuation<Void, Never>] = []
 
@@ -4007,22 +4056,34 @@ final class ShellSessionHostTests: XCTestCase {
                 open: { [unowned self] docId, path in
                     self.lock.lock(); self._openCalls.append((docId, path)); self.lock.unlock()
                     self.lock.lock()
-                    let wasSuspended = self.suspendedOpens.remove(path) != nil
+                    let shouldSuspend = self.nextOpenSuspended
+                    self.nextOpenSuspended = false
                     self.lock.unlock()
-                    if wasSuspended {
+                    if shouldSuspend {
                         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
                             self.lock.lock()
-                            self.pendingOpenContinuations[path] = continuation
+                            self.pendingOpenContinuation = continuation
                             self.lock.unlock()
                         }
                     }
-                    if let reason = self.openFailures[path] {
-                        throw OfficeHelperClientError.openFailed(reason: reason)
+                    self.lock.lock()
+                    let failReason = self._failNextOpenReason
+                    self._failNextOpenReason = nil
+                    self.lock.unlock()
+                    if let failReason {
+                        throw OfficeHelperClientError.openFailed(reason: failReason)
                     }
-                    return self.openMetadata[path] ?? self.defaultMetadata
+                    return self.defaultMetadata
                 },
                 close: { [unowned self] docId in
                     self.lock.lock(); self._closeCalls.append(docId); self.lock.unlock()
+                },
+                save: { [unowned self] docId, _ in
+                    self.lock.lock(); self._saveCalls.append(docId); self.lock.unlock()
+                    if let reason = self.saveFailures[docId] {
+                        throw OfficeHelperClientError.saveFailed(reason: reason)
+                    }
+                    return self.saveTempPaths[docId] ?? "/tmp/officedriverrecorder-\(docId).saved"
                 },
                 subscribeTiles: { [unowned self] docId, _, _, _ in
                     self.lock.lock(); self._subscribeCalls.append(docId); self.lock.unlock()
@@ -4047,7 +4108,15 @@ final class ShellSessionHostTests: XCTestCase {
                         throw OfficeHelperClientError.timedOut
                     }
                     self.lock.lock(); self._requestCalls.append((docId, keys)); self.lock.unlock()
-                })
+                },
+                postKey: { _, _, _, _, _ in }, postMouse: { _, _, _, _, _, _, _, _ in },
+                postExtTextInput: { _, _, _, _ in },
+                clipboardCopy: { _, _ in nil },
+                clipboardCut: { _, _ in nil },
+                clipboardPaste: { _, _, _ in },
+                undo: { _ in },
+                redo: { _ in },
+                stateDirectory: stateDirectory)
         }
     }
 
@@ -4079,6 +4148,24 @@ final class ShellSessionHostTests: XCTestCase {
             }
             try? await Task.sleep(nanoseconds: 20_000_000)
         }
+    }
+
+    /// Office Stage B Task 2b sweep — most of this section's tests use a literal path like `/a.xlsx`
+    /// purely as a `documents` dictionary key. Now that `OfficeRuntime.open` genuinely STAGES (a real
+    /// `copyfile(3)`) the path before ever reaching the driver, a literal that names no real file
+    /// fails at that staging step (ENOENT) instead of ever reaching `documents[path]` — the driver's
+    /// own `open` closure is never even called. Mints a real, empty scratch file with a `prefix` (so
+    /// a failure message prints something recognizable, e.g. "a-<uuid>.xlsx", rather than a bare
+    /// UUID) directly under `FileManager.default.temporaryDirectory` — the exact per-test-local idiom
+    /// `testActivatingATabWhosePathIsInOpenFailuresAlsoRetriesTheOpen`/`testTheRouterRetriesAFailed
+    /// OfficeOpenOnActivateThroughTheSameDoorOpenDocumentTabUses` already established for `badPath`,
+    /// factored out once it started repeating, unchanged, across a dozen more tests in this same set
+    /// of sections. Always `.xlsx` — every literal this sweep replaces already was.
+    private func makeScratchOfficePath(_ prefix: String) -> String {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(prefix)-\(UUID().uuidString).xlsx").path
+        try? Data().write(to: URL(fileURLWithPath: path))
+        return path
     }
 
     func testOfficeRuntimeIsMintedOnFirstUseAndReusedThereafter() {
@@ -4113,8 +4200,10 @@ final class ShellSessionHostTests: XCTestCase {
         let office = officeFactory()
         host.makeOfficeRuntime = office.make
         let runtime = host.officeRuntime(for: "S1")
-        runtime.open("/a.xlsx")
-        runtime.open("/b.xlsx")
+        let aPath = makeScratchOfficePath("a")
+        let bPath = makeScratchOfficePath("b")
+        runtime.open(aPath)
+        runtime.open(bPath)
         await officeWaitUntil(timeout: 2) {
             runtime.stateSnapshot.documents.count == 2
         }
@@ -4130,20 +4219,24 @@ final class ShellSessionHostTests: XCTestCase {
         // already known for; see `officeDoubles`' own doc).
         await officeWaitUntil(timeout: 2) { office.recorder.closeCalls.count == 2 }
         XCTAssertEqual(office.recorder.closeCalls.count, 2, "both open documents are closed on teardown")
+        try? FileManager.default.removeItem(atPath: aPath)
+        try? FileManager.default.removeItem(atPath: bPath)
     }
 
-    /// **Departure always-release** (Stage A has no dirty state) — driven through the REAL door the
-    /// shell uses on a hop, mirroring `testHidingTheShellReleasesACleanEditorAndKeepsOneWithUnsavedWork`
-    /// exactly, minus the "dirty: kept" half that has no office analogue yet.
-    ///
-    /// **A hop moves the attachment on the SAME socket — no second connection**
-    /// (`testHopDetachesThePreviousAndAttachesTheNewWithNoAbort`'s own pin, immediately above this
-    /// section): `releaseOfficeRuntimeIfClean` fires synchronously inside `hop(to:)`, well before
-    /// any round trip, so this test never needs a second `factory.made` connection or its reply —
-    /// `host.select("S2")` alone is the trigger.
-    func testHopAlwaysReleasesTheOfficeRuntimeRegardlessOfWhatItHolds() async {
+    /// **Office Stage B Task 3 — the Stage A "always releases" claim these two tests used to pin is
+    /// now false, and this is the rewrite: clean released, dirty RETAINED.** Mirrors
+    /// `testHidingTheShellReleasesACleanEditorAndKeepsOneWithUnsavedWork`'s own two-host shape
+    /// exactly, including the reason (two independent hosts, since the first host's clean release
+    /// tears the runtime down and there is nothing left to make dirty afterward). Driven through the
+    /// REAL door the shell uses on a hop — `releaseOfficeRuntimeIfClean` fires synchronously inside
+    /// `hop(to:)`, well before any round trip (`testHopDetachesThePreviousAndAttachesTheNewWithNoAbort`'s
+    /// own pin), so this test never needs a second `factory.made` connection or its reply —
+    /// `host.select("S2")` alone is the trigger, on both hosts.
+    func testHopReleasesACleanOfficeRuntimeAndKeepsOneWithUnsavedWork() async throws {
         let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)]),
                    codeRow("S2", dirs: [SessionDirEntry(path: "/repo2", locked: false)])]
+
+        // Clean: released.
         let (host, factory) = makeHost(rows: rows)
         defer { host.deselect() }
         let office = officeFactory()
@@ -4153,27 +4246,55 @@ final class ShellSessionHostTests: XCTestCase {
         host.select("S1")
         await waitUntilMade(factory, 1)
         await answerHandshake(factory.made[0], sessionId: "S1")
-
         let runtime = host.officeRuntime(for: "S1")
-        runtime.open("/repo/gate.xlsx")
-        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.documents["/repo/gate.xlsx"] != nil }
+        let gatePath = makeScratchOfficePath("gate")
+        runtime.open(gatePath)
+        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.documents[gatePath] != nil }
         XCTAssertEqual(host.officeRuntimes.count, 1)
 
         host.select("S2")
 
-        XCTAssertEqual(host.officeRuntimes.count, 0, "Stage A has no dirty state to protect — a "
-                       + "document tab is view-only, so a hop ALWAYS releases")
+        XCTAssertEqual(host.officeRuntimes.count, 0, "a clean office runtime is rebuilt on demand")
         // See the identical comment in `testTeardownOfficeRuntimeRemovesItFromTheTableAnd
         // ClosesEveryOpenDocument` — waited out so the test does not return with an orphaned close
         // Task still in flight.
         await officeWaitUntil(timeout: 2) { office.recorder.closeCalls.count == 1 }
         XCTAssertEqual(office.recorder.closeCalls.count, 1, "the open document was closed on the way out")
+        try? FileManager.default.removeItem(atPath: gatePath)
+
+        // Dirty: kept.
+        let (host2, factory2) = makeHost(rows: rows)
+        defer { host2.deselect() }
+        let office2 = officeFactory()
+        host2.makeOfficeRuntime = office2.make
+        await host2.directory.refresh()
+        host2.setShellVisible(true)
+        host2.select("S1")
+        await waitUntilMade(factory2, 1)
+        await answerHandshake(factory2.made[0], sessionId: "S1")
+        let runtime2 = host2.officeRuntime(for: "S1")
+        let gatePath2 = makeScratchOfficePath("gate2")
+        runtime2.open(gatePath2)
+        await officeWaitUntil(timeout: 2) { runtime2.stateSnapshot.documents[gatePath2] != nil }
+        let docId2 = try XCTUnwrap(runtime2.stateSnapshot.documents[gatePath2]?.docId)
+        runtime2.handle(documentEvent: .modifiedChanged(true), docId: docId2)
+        XCTAssertEqual(runtime2.stateSnapshot.documents[gatePath2]?.dirty, true, "setup must leave the document dirty")
+
+        host2.select("S2")
+
+        XCTAssertEqual(host2.officeRuntimes.count, 1, "hopping away must never destroy unsaved office edits")
+        XCTAssertEqual(office2.recorder.closeCalls.count, 0)
+        XCTAssertEqual(runtime2.stateSnapshot.documents[gatePath2]?.dirty, true)
+        try? FileManager.default.removeItem(atPath: gatePath2)
     }
 
     /// Hiding the shell (⌘W / window close) detaches exactly like a hop does — same policy, same
-    /// always-release door (`detachCurrent`), driven via `setShellVisible(false)`.
-    func testHidingTheShellAlsoAlwaysReleasesTheOfficeRuntime() async {
+    /// clean-only-release door (`detachCurrent`), driven via `setShellVisible(false)`. Same rewrite
+    /// as the hop test immediately above, for the identical reason.
+    func testHidingTheShellReleasesACleanOfficeRuntimeAndKeepsOneWithUnsavedWork() async throws {
         let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+
+        // Clean: released.
         let (host, factory) = makeHost(rows: rows)
         let office = officeFactory()
         host.makeOfficeRuntime = office.make
@@ -4182,16 +4303,388 @@ final class ShellSessionHostTests: XCTestCase {
         host.select("S1")
         await waitUntilMade(factory, 1)
         await answerHandshake(factory.made[0], sessionId: "S1")
-
         let runtime = host.officeRuntime(for: "S1")
-        runtime.open("/repo/gate.xlsx")
-        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.documents["/repo/gate.xlsx"] != nil }
+        let gatePath = makeScratchOfficePath("gate")
+        runtime.open(gatePath)
+        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.documents[gatePath] != nil }
 
         host.setShellVisible(false)
 
         XCTAssertEqual(host.officeRuntimes.count, 0)
         await officeWaitUntil(timeout: 2) { office.recorder.closeCalls.count == 1 }
         XCTAssertEqual(office.recorder.closeCalls.count, 1)
+        try? FileManager.default.removeItem(atPath: gatePath)
+
+        // Dirty: kept.
+        let (host2, factory2) = makeHost(rows: rows)
+        defer { host2.deselect() }
+        let office2 = officeFactory()
+        host2.makeOfficeRuntime = office2.make
+        await host2.directory.refresh()
+        host2.setShellVisible(true)
+        host2.select("S1")
+        await waitUntilMade(factory2, 1)
+        await answerHandshake(factory2.made[0], sessionId: "S1")
+        let runtime2 = host2.officeRuntime(for: "S1")
+        let gatePath2 = makeScratchOfficePath("gate2")
+        runtime2.open(gatePath2)
+        await officeWaitUntil(timeout: 2) { runtime2.stateSnapshot.documents[gatePath2] != nil }
+        let docId2 = try XCTUnwrap(runtime2.stateSnapshot.documents[gatePath2]?.docId)
+        runtime2.handle(documentEvent: .modifiedChanged(true), docId: docId2)
+
+        host2.setShellVisible(false)
+
+        XCTAssertEqual(host2.officeRuntimes.count, 1, "hiding the window must never destroy unsaved office edits")
+        XCTAssertEqual(office2.recorder.closeCalls.count, 0)
+        XCTAssertEqual(runtime2.stateSnapshot.documents[gatePath2]?.dirty, true)
+        try? FileManager.default.removeItem(atPath: gatePath2)
+    }
+
+    // MARK: - Office Stage B Task 3: the document tab-close gate
+
+    /// `makeDirtyCodeTab`'s own `.document` mirror: drive one session to a real open, DIRTY document
+    /// (`runtime.handle(documentEvent: .modifiedChanged(true), docId:)` — the same test door
+    /// `OfficeRuntimeLiveTests`' own `becameDirty` wait proves is the real LOK callback's shape,
+    /// driven directly rather than through a live helper) and register its `.document` tab in the
+    /// panel. Returns the docId alongside the runtime/path — `OfficeDriverRecorder`'s `save`/
+    /// `saveFailures`/`saveTempPaths` seams are all keyed by docId, never by path.
+    private func makeDirtyDocumentTab(host: ShellSessionHost, factory: ShellTransportFactory,
+                                      sessionId: String, tabId: String, scratchPrefix: String)
+        async throws -> (runtime: OfficeRuntime, path: String, docId: String) {
+        await host.directory.refresh()
+        host.setShellVisible(true)
+        host.select(sessionId)
+        await waitUntilMade(factory, 1)
+        await answerHandshake(factory.made[0], sessionId: sessionId)
+        let runtime = host.officeRuntime(for: sessionId)
+        let path = makeScratchOfficePath(scratchPrefix)
+        runtime.open(path)
+        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.documents[path] != nil }
+        let docId = try XCTUnwrap(runtime.stateSnapshot.documents[path]?.docId)
+        runtime.handle(documentEvent: .modifiedChanged(true), docId: docId)
+        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.dirty, true, "setup must leave the document dirty")
+        host.panelStore.applyFetchedSnapshot(
+            sessionId: sessionId,
+            tabs: [PanelTab(tabId: tabId, kind: .document, url: path, title: (path as NSString).lastPathComponent)],
+            activeTabId: nil)
+        return (runtime, path, docId)
+    }
+
+    /// A clean document tab's `×` takes the silent path — no sheet — and `closePanelTab`'s own
+    /// inline close still runs (Office Stage B Task 3's own header on `requestCloseTab`: the gate
+    /// DECIDES ONLY, `closePanelTab` stays the one closer for a `.document` tab).
+    func testRequestCloseTabOnACleanDocumentTabClosesSilently() async {
+        let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+        let (host, factory, mgmt) = await makeHostWithManagement(rows: rows)
+        defer { host.deselect() }
+        let office = officeFactory()
+        host.makeOfficeRuntime = office.make
+        await host.directory.refresh()
+        host.setShellVisible(true)
+        host.select("S1")
+        await waitUntilMade(factory, 1)
+        await answerHandshake(factory.made[0], sessionId: "S1")
+        let runtime = host.officeRuntime(for: "S1")
+        let path = makeScratchOfficePath("clean")
+        runtime.open(path)
+        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.documents[path] != nil }
+        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.dirty, false, "setup must leave the document clean")
+        host.panelStore.applyFetchedSnapshot(
+            sessionId: "S1", tabs: [PanelTab(tabId: "t1", kind: .document, url: path, title: "clean.xlsx")],
+            activeTabId: nil)
+        var sheetsPresented = 0
+        host.presentDirtyCloseSheet = { _, _, _ in sheetsPresented += 1 }
+
+        host.requestCloseTab("t1")
+
+        XCTAssertEqual(sheetsPresented, 0, "a clean document tab must never show the sheet")
+        await feedWaitUntil { mgmt.methods.contains("panel.closeTab") }
+        await officeWaitUntil(timeout: 2) { office.recorder.closeCalls.count == 1 }
+        XCTAssertEqual(office.recorder.closeCalls.count, 1, "closePanelTab's own inline close must still run")
+        try? FileManager.default.removeItem(atPath: path)
+    }
+
+    /// The dirty sheet's Cancel: nothing closes, nothing saves, the tab and its document are untouched.
+    func testRequestCloseTabOnADirtyDocumentTabCancelChoiceLeavesEverythingOpen() async throws {
+        let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+        let (host, factory, mgmt) = await makeHostWithManagement(rows: rows)
+        defer { host.deselect() }
+        let office = officeFactory()
+        host.makeOfficeRuntime = office.make
+        let (runtime, path, _) = try await makeDirtyDocumentTab(
+            host: host, factory: factory, sessionId: "S1", tabId: "t1", scratchPrefix: "cancel")
+        var presentedBasename: String?
+        host.presentDirtyCloseSheet = { basename, _, respond in
+            presentedBasename = basename
+            respond(.cancel)
+        }
+
+        host.requestCloseTab("t1")
+
+        XCTAssertEqual(presentedBasename, (path as NSString).lastPathComponent)
+        try? await Task.sleep(nanoseconds: 100_000_000) // given a beat, in case a close were racing behind it
+        XCTAssertFalse(mgmt.methods.contains("panel.closeTab"), "Cancel must never fire the RPC")
+        XCTAssertNotNil(runtime.stateSnapshot.documents[path], "the document must still be open")
+        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.dirty, true, "still dirty — nothing was saved or discarded")
+        try? FileManager.default.removeItem(atPath: path)
+    }
+
+    /// **T2b composition, pinned explicitly**: a document already in conflict (an external write
+    /// raced a still-dirty document) is still DIRTY — `officeDocumentIsDirty` reads the same `dirty`
+    /// bit the conflict machinery leaves untouched, and the gate never inspects `documentConflicts`
+    /// at all — so the close gate must show the sheet exactly as the plain-dirty case does. This does
+    /// not exercise a new branch; the task's own dispatch context explicitly named this composition
+    /// as an obligation ("a document sitting in conflict state is still DIRTY — gates fire"), so it
+    /// is pinned here rather than left to code-reading alone.
+    func testRequestCloseTabOnADirtyDocumentTabInConflictStillShowsTheSheet() async throws {
+        let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+        let (host, factory, mgmt) = await makeHostWithManagement(rows: rows)
+        defer { host.deselect() }
+        let office = officeFactory()
+        host.makeOfficeRuntime = office.make
+        let (runtime, path, _) = try await makeDirtyDocumentTab(
+            host: host, factory: factory, sessionId: "S1", tabId: "t1", scratchPrefix: "conflict")
+
+        // Race an external write onto the already-dirty document — same shape as
+        // `testExternalWriteBetweenNoteExpectedWriteAndTheOwningSavesWithdrawOnADirtyDocumentRaisesAConflict`
+        // (OfficeRuntimeReducerTests), minus the expected-write note: this wants a plain, untracked
+        // external write, which `officeDiskChange` classifies `.external` with no identity to match.
+        try Data("external bytes landed while this document was still dirty".utf8)
+            .write(to: URL(fileURLWithPath: path))
+        runtime.fileChangedOnDisk(path)
+        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.documentConflicts[path] != nil }
+        XCTAssertEqual(runtime.stateSnapshot.documentConflicts[path], .changed, "setup: genuinely "
+                       + "conflicted, not merely dirty")
+        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.dirty, true, "setup: a conflict never "
+                       + "silently clears dirty")
+
+        var presentedBasename: String?
+        host.presentDirtyCloseSheet = { basename, _, respond in
+            presentedBasename = basename
+            respond(.cancel)
+        }
+
+        host.requestCloseTab("t1")
+
+        XCTAssertEqual(presentedBasename, (path as NSString).lastPathComponent, "the sheet must still "
+                       + "fire — conflict never bypasses the dirty gate, it only adds a banner on top of it")
+        try? await Task.sleep(nanoseconds: 100_000_000) // given a beat, in case a close were racing behind it
+        XCTAssertFalse(mgmt.methods.contains("panel.closeTab"), "Cancel must never fire the RPC")
+        try? FileManager.default.removeItem(atPath: path)
+    }
+
+    /// **Fix round 1 (task review, IMPORTANT-1) — the `.deleted` half of the pair above.** Deleting
+    /// the file out from under a dirty document raises `.deleted`, never `.changed` — the SAME gate
+    /// claim, the OTHER conflict kind, and the specific kind that matters here: `.deleted` is the
+    /// only conflict kind `PanelDocumentTabModel.closeTab()`'s own conflict-banner "Close" button
+    /// ever targets (`OfficeConflictBannerView.body`'s `.deleted` case is the only one offering a
+    /// Close action at all — see that view's own switch). This test proves the GATE'S decision is
+    /// correct for `.deleted` specifically, driven directly through `requestCloseTab`; the actual
+    /// wiring bug the review caught — `closeTab()` reaching `closePanelTab` instead of this gate — is
+    /// separately pinned by `testPanelDocumentTabModelCloseTabRoutesADeletionConflictThroughTheGate`
+    /// immediately below, which drives the SAME `.deleted` setup through the real caller.
+    func testRequestCloseTabOnADirtyDocumentTabInDeletionConflictStillShowsTheSheet() async throws {
+        let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+        let (host, factory, mgmt) = await makeHostWithManagement(rows: rows)
+        defer { host.deselect() }
+        let office = officeFactory()
+        host.makeOfficeRuntime = office.make
+        let (runtime, path, _) = try await makeDirtyDocumentTab(
+            host: host, factory: factory, sessionId: "S1", tabId: "t1", scratchPrefix: "delconflict")
+
+        try? FileManager.default.removeItem(atPath: path)
+        runtime.fileChangedOnDisk(path)
+        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.documentConflicts[path] != nil }
+        XCTAssertEqual(runtime.stateSnapshot.documentConflicts[path], .deleted, "setup: a deletion "
+                       + "conflict specifically, not `.changed`")
+        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.dirty, true, "setup: `.deleted` "
+                       + "conflicts are raised only on an already-dirty document "
+                       + "(`OfficeRuntimeReducer.externalDeleted`'s own `guard doc.dirty`)")
+
+        var presentedBasename: String?
+        host.presentDirtyCloseSheet = { basename, _, respond in
+            presentedBasename = basename
+            respond(.cancel)
+        }
+
+        host.requestCloseTab("t1")
+
+        XCTAssertEqual(presentedBasename, (path as NSString).lastPathComponent, "the sheet must fire "
+                       + "for a deletion conflict exactly as it does for a plain dirty tab")
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertFalse(mgmt.methods.contains("panel.closeTab"), "Cancel must never fire the RPC")
+        try? FileManager.default.removeItem(atPath: path)
+    }
+
+    /// **The wiring pin itself (task review, IMPORTANT-1).** Drives the real caller —
+    /// `PanelDocumentTabModel.closeTab()`, the conflict banner's own "Close" button — instead of
+    /// calling `host.requestCloseTab` directly the way every other test in this section does.
+    /// Pre-fix, `closeTab()` called `host?.closePanelTab(tabId)` directly: this exact setup (a
+    /// `.deleted` conflict, always dirty by construction) would have closed the document with NO
+    /// sheet, no Save/Discard/Cancel choice, silently discarding the unsaved edits — the review's own
+    /// "one click from silent discard" finding. Post-fix, `closeTab()` calls
+    /// `host?.requestCloseTab(tabId)`, the same gate the panel's own `×` uses, so this must now show
+    /// the sheet exactly like `testRequestCloseTabOnADirtyDocumentTabInDeletionConflictStillShowsThe
+    /// Sheet` immediately above — the only difference is which caller asks.
+    func testPanelDocumentTabModelCloseTabRoutesADeletionConflictThroughTheGate() async throws {
+        let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+        let (host, factory, mgmt) = await makeHostWithManagement(rows: rows)
+        defer { host.deselect() }
+        let office = officeFactory()
+        host.makeOfficeRuntime = office.make
+        let (runtime, path, _) = try await makeDirtyDocumentTab(
+            host: host, factory: factory, sessionId: "S1", tabId: "t1", scratchPrefix: "banner-close")
+
+        try? FileManager.default.removeItem(atPath: path)
+        runtime.fileChangedOnDisk(path)
+        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.documentConflicts[path] == .deleted }
+
+        // The conflict banner's own model — constructed and bound exactly as
+        // `PanelDocumentTabModels.model(for:host:sessionId:)` would for this tab, mirroring
+        // `PanelDocumentTabTests`' own `makeHost`-adjacent tests. `closeTab()` reads only `self.host`
+        // (set synchronously by `bind`, before its own deferred `activate()` Task even runs) and
+        // `self.tabId` — no need to await anything model-side before calling it.
+        let model = PanelDocumentTabModel(tabId: "t1", path: path)
+        model.bind(host: host, sessionId: "S1")
+        var presentedBasename: String?
+        host.presentDirtyCloseSheet = { basename, _, respond in
+            presentedBasename = basename
+            respond(.cancel)
+        }
+
+        model.closeTab()
+
+        XCTAssertEqual(presentedBasename, (path as NSString).lastPathComponent, "the banner's Close "
+                       + "button must reach the SAME gated sheet the × does — this is the exact "
+                       + "regression IMPORTANT-1 caught")
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertFalse(mgmt.methods.contains("panel.closeTab"), "Cancel must never fire the RPC, "
+                       + "from this caller either")
+        XCTAssertNotNil(runtime.stateSnapshot.documents[path], "pre-fix this caller would have closed "
+                        + "the document with no sheet at all — still open proves the gate, not the "
+                        + "old direct door, was reached")
+        try? FileManager.default.removeItem(atPath: path)
+    }
+
+    /// The dirty sheet's Discard: closes without ever asking the save door for anything.
+    func testRequestCloseTabOnADirtyDocumentTabDiscardChoiceClosesWithoutSaving() async throws {
+        let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+        let (host, factory, mgmt) = await makeHostWithManagement(rows: rows)
+        defer { host.deselect() }
+        let office = officeFactory()
+        host.makeOfficeRuntime = office.make
+        let (runtime, path, _) = try await makeDirtyDocumentTab(
+            host: host, factory: factory, sessionId: "S1", tabId: "t1", scratchPrefix: "discard")
+        host.presentDirtyCloseSheet = { _, _, respond in respond(.discard) }
+
+        host.requestCloseTab("t1")
+
+        XCTAssertNil(runtime.stateSnapshot.documents[path], "discard still closes the document — synchronous "
+                     + "in the reducer's own state (`OfficeRuntimeReducer.closeRequested`)")
+        await feedWaitUntil { mgmt.methods.contains("panel.closeTab") }
+        XCTAssertTrue(office.recorder.saveCalls.isEmpty, "Discard must never save")
+        await officeWaitUntil(timeout: 2) { office.recorder.closeCalls.count == 1 }
+        try? FileManager.default.removeItem(atPath: path)
+    }
+
+    /// The dirty sheet's Save, when the save FAILS: the tab stays open — the reducer's own
+    /// `documentBanners[path]` already carries the sentence, mirroring the editor's identical posture
+    /// toward T9's banner.
+    func testRequestCloseTabOnADirtyDocumentTabSaveChoiceThatFailsKeepsTheTabOpen() async throws {
+        let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+        let (host, factory, mgmt) = await makeHostWithManagement(rows: rows)
+        defer { host.deselect() }
+        let office = officeFactory()
+        host.makeOfficeRuntime = office.make
+        let (runtime, path, docId) = try await makeDirtyDocumentTab(
+            host: host, factory: factory, sessionId: "S1", tabId: "t1", scratchPrefix: "savefail")
+        office.recorder.saveFailures[docId] = "disk full"
+        host.presentDirtyCloseSheet = { _, _, respond in respond(.save) }
+
+        host.requestCloseTab("t1")
+
+        await officeWaitUntil(timeout: 2) { office.recorder.saveCalls.contains(docId) }
+        try? await Task.sleep(nanoseconds: 100_000_000) // let the failed save's outcome settle
+        XCTAssertFalse(mgmt.methods.contains("panel.closeTab"), "a failed save must not close the tab")
+        XCTAssertNotNil(runtime.stateSnapshot.documents[path], "the document is untouched by a failed save")
+        XCTAssertNotNil(runtime.stateSnapshot.documentBanners[path], "the failure banner must be up")
+        try? FileManager.default.removeItem(atPath: path)
+    }
+
+    /// The dirty sheet's Save, when the save SUCCEEDS: closes only once the outcome is known, and
+    /// AFTER it. `saveTempPaths` points at a REAL file with real bytes — `OfficeRuntime.placeAtomically`
+    /// copies FROM it, so a nonexistent temp would fail the save (`testSaveAndAwaitOutcomeReturnsFailed
+    /// WhenThePlaceCannotFindTheHelpersTempFile`'s own case, deliberately not this one).
+    func testRequestCloseTabOnADirtyDocumentTabSaveChoiceThatSucceedsClosesAfterSaving() async throws {
+        let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+        let (host, factory, mgmt) = await makeHostWithManagement(rows: rows)
+        defer { host.deselect() }
+        let office = officeFactory()
+        host.makeOfficeRuntime = office.make
+        let (_, path, docId) = try await makeDirtyDocumentTab(
+            host: host, factory: factory, sessionId: "S1", tabId: "t1", scratchPrefix: "savesucceed")
+        let renderedPath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rendered-\(UUID().uuidString).xlsx").path
+        try Data("rendered".utf8).write(to: URL(fileURLWithPath: renderedPath))
+        office.recorder.saveTempPaths[docId] = renderedPath
+        host.presentDirtyCloseSheet = { _, _, respond in respond(.save) }
+
+        host.requestCloseTab("t1")
+
+        await feedWaitUntil { mgmt.methods.contains("panel.closeTab") }
+        XCTAssertEqual(try? String(contentsOfFile: path, encoding: .utf8), "rendered",
+                       "a successful save must land on the real path before the tab closes")
+        try? FileManager.default.removeItem(atPath: path)
+    }
+
+    /// **The closing loop the brief's own context note names**: a runtime RETAINED dirty by one
+    /// departure, reattached, and made clean again by closing its (now only) dirty tab through the
+    /// sheet — releases on the NEXT departure exactly as a runtime that was always clean would. No
+    /// eager release is invented here: `resolveDirtyDocumentTabClose`'s own `.close` branch only ever
+    /// calls `closePanelTab` (which closes the DOCUMENT, not the runtime) — the same shape the
+    /// editor's own `resolveDirtyTabClose` `.close` case already takes. It is `releaseOfficeRuntimeIfClean`,
+    /// reached by the SUBSEQUENT departure, that notices the runtime is clean again and finally lets it go.
+    func testClosingTheLastDirtyDocumentTabThroughTheSheetLetsTheNextDepartureReleaseTheRuntime() async throws {
+        let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)]),
+                   codeRow("S2", dirs: [SessionDirEntry(path: "/repo2", locked: false)])]
+        let (host, factory, mgmt) = await makeHostWithManagement(rows: rows)
+        defer { host.deselect() }
+        let office = officeFactory()
+        host.makeOfficeRuntime = office.make
+        let (runtime, path, _) = try await makeDirtyDocumentTab(
+            host: host, factory: factory, sessionId: "S1", tabId: "t1", scratchPrefix: "retain")
+
+        // First departure: dirty, retained.
+        host.select("S2")
+        XCTAssertEqual(host.officeRuntimes.count, 1, "the dirty runtime must survive the first departure")
+        XCTAssertTrue(host.existingOfficeRuntime(for: "S1") === runtime, "the SAME retained runtime, not a fresh mint")
+
+        // Reattach — `attachedSessionId` (and so `panelTargetSessionId`) flips synchronously, ahead
+        // of any round trip (`testHopDetachesThePreviousAndAttachesTheNewWithNoAbort`'s own pin), so
+        // this test never needs to feed a second `session.attach` reply on the per-session transport
+        // to make the assertions below true.
+        host.select("S1")
+        XCTAssertTrue(host.officeRuntime(for: "S1") === runtime, "returning finds the SAME retained runtime")
+
+        // Discard through the sheet — the runtime's own last document closes, and the runtime becomes clean.
+        host.presentDirtyCloseSheet = { _, _, respond in respond(.discard) }
+        host.requestCloseTab("t1")
+        await feedWaitUntil { mgmt.methods.contains("panel.closeTab") }
+        XCTAssertNil(runtime.stateSnapshot.documents[path], "the document itself is closed")
+        XCTAssertEqual(host.officeRuntimes.count, 1, "closing the tab must not itself tear the runtime "
+                       + "down — no eager release exists for office, mirroring the editor's own gate")
+        // Drain the fire-and-forget close before proceeding, exactly like every other Discard/close
+        // test in this file — otherwise the in-flight Task can still be holding `runtime`/`office`
+        // when `tearDown` clears `officeDoubles`, an orphaned-Task-touches-a-deallocated-recorder
+        // crash class this file's own doc comments name repeatedly. Count is 1, not 2: the second
+        // departure's own teardown (below) walks zero docIds since this document already closed.
+        await officeWaitUntil(timeout: 2) { office.recorder.closeCalls.count == 1 }
+
+        // Second departure: now clean, released.
+        host.select("S2")
+        XCTAssertEqual(host.officeRuntimes.count, 0, "the runtime the first departure retained is "
+                       + "finally released once it has nothing left to protect")
+        try? FileManager.default.removeItem(atPath: path)
     }
 
     /// The fan-out itself: `broadcastOfficeHelperEvent` is the ONE consumer's routing logic, tested
@@ -4203,10 +4696,12 @@ final class ShellSessionHostTests: XCTestCase {
         host.makeOfficeRuntime = office.make
         let r1 = host.officeRuntime(for: "S1")
         let r2 = host.officeRuntime(for: "S2")
-        r1.open("/a.xlsx")
-        r2.open("/b.xlsx")
+        let aPath = makeScratchOfficePath("a")
+        let bPath = makeScratchOfficePath("b")
+        r1.open(aPath)
+        r2.open(bPath)
         await officeWaitUntil(timeout: 2) {
-            r1.stateSnapshot.documents["/a.xlsx"] != nil && r2.stateSnapshot.documents["/b.xlsx"] != nil
+            r1.stateSnapshot.documents[aPath] != nil && r2.stateSnapshot.documents[bPath] != nil
         }
 
         host.broadcastOfficeHelperEvent(.helperDied)
@@ -4216,6 +4711,8 @@ final class ShellSessionHostTests: XCTestCase {
             XCTAssertTrue(runtime.stateSnapshot.documents.isEmpty)
             XCTAssertEqual(runtime.stateSnapshot.failureReason, "The office helper stopped unexpectedly.")
         }
+        try? FileManager.default.removeItem(atPath: aPath)
+        try? FileManager.default.removeItem(atPath: bPath)
     }
 
     /// The quit path's process-kill door, at the host level: walks the table (every runtime's
@@ -4228,8 +4725,9 @@ final class ShellSessionHostTests: XCTestCase {
         host.makeOfficeRuntime = office.make
         let r1 = host.officeRuntime(for: "S1")
         _ = host.officeRuntime(for: "S2")
-        r1.open("/a.xlsx")
-        await officeWaitUntil(timeout: 2) { r1.stateSnapshot.documents["/a.xlsx"] != nil }
+        let aPath = makeScratchOfficePath("a")
+        r1.open(aPath)
+        await officeWaitUntil(timeout: 2) { r1.stateSnapshot.documents[aPath] != nil }
 
         let count = host.teardownAllOfficeRuntimesAndStopHelper()
 
@@ -4239,6 +4737,7 @@ final class ShellSessionHostTests: XCTestCase {
         // Hygiene, not an assertion: let r1's fire-and-forget close settle before this test returns
         // so nothing is left orphaned to touch the recorder after `officeDoubles` releases it.
         await officeWaitUntil(timeout: 2) { office.recorder.closeCalls.count == 1 }
+        try? FileManager.default.removeItem(atPath: aPath)
     }
 
     /// A host that never touched office at all must tolerate the quit leg — no supervisor was ever
@@ -4255,32 +4754,60 @@ final class ShellSessionHostTests: XCTestCase {
     /// **Carry 6**: a teardown that lands WHILE an open is still awaiting its reply must reset
     /// synchronously (never wait for the reply), and the late reply must neither resurrect the
     /// torn-down runtime nor leak the document it just opened on the shared helper.
+    ///
+    /// Office Stage B Task 2b: `suspendOpen(forPath:)`/`resumeOpen(forPath:)` used to key on the
+    /// exact path the driver's own `open` closure receives — before staging, that WAS the real path
+    /// this test names directly. Post-staging, the driver only ever observes the STAGED path (a
+    /// UUID-derived name under `office.recorder.stateDirectory`, minted internally from a fresh
+    /// docId), which cannot be predicted ahead of the call that needs suspending — so the recorder's
+    /// seam is now `suspendNextOpen()`/`resumeNextOpen()`, path-agnostic and one-shot (see that
+    /// seam's own doc on the recorder for the full reasoning, mirroring `failNextOpenReason`'s
+    /// identical shape for the identical root cause).
     func testTeardownWhileAnOpenIsInFlightResolvesWithoutResurrectingOrLeakingTheDocument() async {
         let (host, _) = makeHost()
         let office = officeFactory()
         host.makeOfficeRuntime = office.make
         let runtime = host.officeRuntime(for: "S1")
-        office.recorder.suspendOpen(forPath: "/a.xlsx")
+        let aPath = makeScratchOfficePath("a")
+        office.recorder.suspendNextOpen()
 
-        runtime.open("/a.xlsx")
+        runtime.open(aPath)
         await officeWaitUntil(timeout: 2) { office.recorder.openCalls.count == 1 }
         XCTAssertEqual(runtime.stateSnapshot.phase, .ready, "the phase transition is synchronous — "
                        + "only the wire round trip for THIS open is still outstanding")
         XCTAssertTrue(runtime.stateSnapshot.documents.isEmpty, "not recorded until the reply lands")
 
         host.teardownOfficeRuntime(for: "S1")
-        XCTAssertEqual(runtime.stateSnapshot, OfficeRuntimeState(), "teardown resets synchronously "
+        // Task 9, fix round 1 (review F2) — NOT a literal fresh `OfficeRuntimeState()`: `aPath`'s
+        // open captured ticket 0 and, since the F2 fix, that capture is RECORDED (not merely read)
+        // at the moment it's issued — so teardown's own bump-every-entry-by-one lands it at 1, not
+        // absent. See `OfficeRuntimeState.pathGenerations`'s own header for the full mechanism.
+        var expectedAfterTeardown = OfficeRuntimeState()
+        expectedAfterTeardown.pathGenerations[aPath] = 1
+        XCTAssertEqual(runtime.stateSnapshot, expectedAfterTeardown, "teardown resets synchronously "
                        + "even with the open still awaiting its reply")
         XCTAssertEqual(host.officeRuntimes.count, 0)
 
-        office.recorder.resumeOpen(forPath: "/a.xlsx")
+        office.recorder.resumeNextOpen()
         await officeWaitUntil(timeout: 2) { office.recorder.closeCalls.count == 1 }
 
-        XCTAssertEqual(runtime.stateSnapshot, OfficeRuntimeState(), "the late resume must not "
-                       + "resurrect the torn-down runtime")
-        XCTAssertEqual(office.recorder.openCalls.map(\.path), ["/a.xlsx"], "opened exactly once")
+        XCTAssertEqual(runtime.stateSnapshot, expectedAfterTeardown, "the late resume must not "
+                       + "resurrect the torn-down runtime — and must not touch pathGenerations "
+                       + "either: a drop is mutation-free")
+        // Office Stage B Task 2b — the old `openCalls.map(\.path) == ["/a.xlsx"]` compared against
+        // the REAL path; the driver only ever sees the STAGED one now, so "opened exactly once" and
+        // "for this path" are asserted separately: a count, plus the closest recoverable identity
+        // check (staged under the recorder's own state directory, with the real path's extension
+        // preserved — the same two-part pattern `PanelDocumentTabTests
+        // .testActivatingResolvesTheRuntimeAndOpensThePathExactlyOnce` already uses).
+        XCTAssertEqual(office.recorder.openCalls.count, 1, "opened exactly once")
+        let stagedPath = office.recorder.openCalls[0].path
+        XCTAssertTrue(stagedPath.hasPrefix(office.recorder.stateDirectory.path),
+                      "the recorded open carried the STAGED path, never \(aPath) itself: \(stagedPath)")
+        XCTAssertEqual((stagedPath as NSString).pathExtension, "xlsx")
         XCTAssertEqual(office.recorder.closeCalls.count, 1, "the now-orphaned document is closed "
                        + "rather than leaked on the shared helper — never a second open either")
+        try? FileManager.default.removeItem(atPath: aPath)
     }
 
     // MARK: - office-plumbing Task 6: the pixel-fetch half of `.subscribe`
@@ -4301,13 +4828,14 @@ final class ShellSessionHostTests: XCTestCase {
         let office = officeFactory()
         host.makeOfficeRuntime = office.make
         let runtime = host.officeRuntime(for: "S1")
-        runtime.open("/a.xlsx")
-        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.documents["/a.xlsx"] != nil }
-        let docId = runtime.stateSnapshot.documents["/a.xlsx"]!.docId
+        let aPath = makeScratchOfficePath("a")
+        runtime.open(aPath)
+        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.documents[aPath] != nil }
+        let docId = runtime.stateSnapshot.documents[aPath]!.docId
         let keys = [tileKey(0, 0), tileKey(1, 0), tileKey(0, 1)]
         office.recorder.subscribeReplies[docId] = keys
 
-        runtime.subscribeTiles(path: "/a.xlsx", part: 0, zoomPPT: 1000, viewportTwips: sampleViewport)
+        runtime.subscribeTiles(path: aPath, part: 0, zoomPPT: 1000, viewportTwips: sampleViewport)
 
         // T6 re-review F2: anchor on the recorder's append. `markRequested` now runs SYNCHRONOUSLY,
         // in program order, before `driver.requestTiles` is even called (see that call's own
@@ -4318,6 +4846,7 @@ final class ShellSessionHostTests: XCTestCase {
         XCTAssertEqual(office.recorder.requestCalls[0].docId, docId)
         XCTAssertEqual(Set(office.recorder.requestCalls[0].keys), Set(keys))
         XCTAssertEqual(runtime.tileStore.inFlightCountForTesting, 3, "every requested key is tracked in flight")
+        try? FileManager.default.removeItem(atPath: aPath)
     }
 
     /// Obligation 3: a second subscribe covering an overlapping viewport must not re-request a key
@@ -4331,13 +4860,14 @@ final class ShellSessionHostTests: XCTestCase {
         let office = officeFactory()
         host.makeOfficeRuntime = office.make
         let runtime = host.officeRuntime(for: "S1")
-        runtime.open("/a.xlsx")
-        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.documents["/a.xlsx"] != nil }
-        let docId = runtime.stateSnapshot.documents["/a.xlsx"]!.docId
+        let aPath = makeScratchOfficePath("a")
+        runtime.open(aPath)
+        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.documents[aPath] != nil }
+        let docId = runtime.stateSnapshot.documents[aPath]!.docId
         let (k0, k1, k2) = (tileKey(0, 0), tileKey(1, 0), tileKey(0, 1))
         office.recorder.subscribeReplies[docId] = [k0, k1]
 
-        runtime.subscribeTiles(path: "/a.xlsx", part: 0, zoomPPT: 1000, viewportTwips: sampleViewport)
+        runtime.subscribeTiles(path: aPath, part: 0, zoomPPT: 1000, viewportTwips: sampleViewport)
         // T6 re-review F2: anchor on the recorder's append — `markRequested` now runs synchronously
         // before `driver.requestTiles` is called, so the append implies the mark, AND (unlike a
         // store-only anchor) this specific condition also guarantees call #1's own append precedes
@@ -4349,12 +4879,13 @@ final class ShellSessionHostTests: XCTestCase {
 
         // A scrolled viewport now needs k0 (cached), k1 (still in flight) and k2 (genuinely new).
         office.recorder.subscribeReplies[docId] = [k0, k1, k2]
-        runtime.subscribeTiles(path: "/a.xlsx", part: 0, zoomPPT: 1000, viewportTwips: sampleViewport)
+        runtime.subscribeTiles(path: aPath, part: 0, zoomPPT: 1000, viewportTwips: sampleViewport)
 
         await officeWaitUntil(timeout: 2) { office.recorder.requestCalls.count == 2 }
         XCTAssertEqual(office.recorder.requestCalls[1].docId, docId)
         XCTAssertEqual(office.recorder.requestCalls[1].keys, [k2],
                        "only the genuinely-missing key is requested a second time")
+        try? FileManager.default.removeItem(atPath: aPath)
     }
 
     /// T6 review F2, re-reviewed: a thrown `requestTiles` must not strand its keys in flight forever.
@@ -4369,14 +4900,15 @@ final class ShellSessionHostTests: XCTestCase {
         let office = officeFactory()
         host.makeOfficeRuntime = office.make
         let runtime = host.officeRuntime(for: "S1")
-        runtime.open("/a.xlsx")
-        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.documents["/a.xlsx"] != nil }
-        let docId = runtime.stateSnapshot.documents["/a.xlsx"]!.docId
+        let aPath = makeScratchOfficePath("a")
+        runtime.open(aPath)
+        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.documents[aPath] != nil }
+        let docId = runtime.stateSnapshot.documents[aPath]!.docId
         let keys = [tileKey(0, 0), tileKey(1, 0)]
         office.recorder.subscribeReplies[docId] = keys
         office.recorder.requestTilesShouldFail = true
 
-        runtime.subscribeTiles(path: "/a.xlsx", part: 0, zoomPPT: 1000, viewportTwips: sampleViewport)
+        runtime.subscribeTiles(path: aPath, part: 0, zoomPPT: 1000, viewportTwips: sampleViewport)
 
         // Wait on the failure path itself having run (recorded before the throw) rather than on the
         // store's in-flight count, which would read as trivially "zero" even before the Task starts.
@@ -4393,9 +4925,10 @@ final class ShellSessionHostTests: XCTestCase {
 
         // A subsequent subscribe, now with a healthy driver, must actually re-request them.
         office.recorder.requestTilesShouldFail = false
-        runtime.subscribeTiles(path: "/a.xlsx", part: 0, zoomPPT: 1000, viewportTwips: sampleViewport)
+        runtime.subscribeTiles(path: aPath, part: 0, zoomPPT: 1000, viewportTwips: sampleViewport)
         await officeWaitUntil(timeout: 2) { !office.recorder.requestCalls.isEmpty }
         XCTAssertEqual(Set(office.recorder.requestCalls[0].keys), Set(keys))
+        try? FileManager.default.removeItem(atPath: aPath)
     }
 
     /// T6 re-review's own empirical proof, made permanent: gate the first `requestTiles` mid-flight,
@@ -4410,14 +4943,15 @@ final class ShellSessionHostTests: XCTestCase {
         let office = officeFactory()
         host.makeOfficeRuntime = office.make
         let runtime = host.officeRuntime(for: "S1")
-        runtime.open("/a.xlsx")
-        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.documents["/a.xlsx"] != nil }
-        let docId = runtime.stateSnapshot.documents["/a.xlsx"]!.docId
+        let aPath = makeScratchOfficePath("a")
+        runtime.open(aPath)
+        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.documents[aPath] != nil }
+        let docId = runtime.stateSnapshot.documents[aPath]!.docId
         let keys = [tileKey(0, 0), tileKey(1, 0)]
         office.recorder.subscribeReplies[docId] = keys
         office.recorder.suspendRequestTiles()
 
-        runtime.subscribeTiles(path: "/a.xlsx", part: 0, zoomPPT: 1000, viewportTwips: sampleViewport)
+        runtime.subscribeTiles(path: aPath, part: 0, zoomPPT: 1000, viewportTwips: sampleViewport)
         // The gate holds `requestTiles` itself, not `markRequested` — which runs synchronously
         // BEFORE the gated call is even reached (program order, no `await` in between; see
         // `OfficeTileStore.markRequested`'s own doc). Waiting on the store here, rather than on the
@@ -4425,7 +4959,7 @@ final class ShellSessionHostTests: XCTestCase {
         // gated, and it is exactly the signal the second subscribe below depends on.
         await officeWaitUntil(timeout: 2) { runtime.tileStore.inFlightCountForTesting == 2 }
 
-        runtime.subscribeTiles(path: "/a.xlsx", part: 0, zoomPPT: 1000, viewportTwips: sampleViewport)
+        runtime.subscribeTiles(path: aPath, part: 0, zoomPPT: 1000, viewportTwips: sampleViewport)
         // The second subscribe's own `subscribeTiles` round trip is NOT gated — only `requestTiles`
         // is — so it completes quickly regardless of the first call sitting parked, and with these
         // keys already marked in flight, its `needed` set is empty: no second `requestTiles` call is
@@ -4438,6 +4972,7 @@ final class ShellSessionHostTests: XCTestCase {
                        "the second, overlapping subscribe must not issue a duplicate request for keys "
                        + "the first has already marked in flight")
         XCTAssertEqual(Set(office.recorder.requestCalls[0].keys), Set(keys))
+        try? FileManager.default.removeItem(atPath: aPath)
     }
 
     // MARK: - office live-gate fix #3: whole-document tile residency's own door
@@ -4451,18 +4986,20 @@ final class ShellSessionHostTests: XCTestCase {
         let office = officeFactory()
         host.makeOfficeRuntime = office.make
         let runtime = host.officeRuntime(for: "S1")
-        runtime.open("/a.xlsx")
-        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.documents["/a.xlsx"] != nil }
-        let docId = runtime.stateSnapshot.documents["/a.xlsx"]!.docId
+        let aPath = makeScratchOfficePath("a")
+        runtime.open(aPath)
+        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.documents[aPath] != nil }
+        let docId = runtime.stateSnapshot.documents[aPath]!.docId
         let keys = [tileKey(0, 0), tileKey(1, 0)]
 
-        await runtime.prefetchTilesChunk(path: "/a.xlsx", keys: keys)
+        await runtime.prefetchTilesChunk(path: aPath, keys: keys)
 
         XCTAssertEqual(office.recorder.subscribeCalls.count, 0, "prefetch never calls subscribeTiles")
         XCTAssertEqual(office.recorder.requestCalls.count, 1)
         XCTAssertEqual(office.recorder.requestCalls[0].docId, docId)
         XCTAssertEqual(Set(office.recorder.requestCalls[0].keys), Set(keys))
         XCTAssertEqual(runtime.tileStore.inFlightCountForTesting, 2)
+        try? FileManager.default.removeItem(atPath: aPath)
     }
 
     /// The store-filtering half: a key already cached, or already requested by an ordinary
@@ -4474,23 +5011,25 @@ final class ShellSessionHostTests: XCTestCase {
         let office = officeFactory()
         host.makeOfficeRuntime = office.make
         let runtime = host.officeRuntime(for: "S1")
-        runtime.open("/a.xlsx")
-        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.documents["/a.xlsx"] != nil }
-        let docId = runtime.stateSnapshot.documents["/a.xlsx"]!.docId
+        let aPath = makeScratchOfficePath("a")
+        runtime.open(aPath)
+        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.documents[aPath] != nil }
+        let docId = runtime.stateSnapshot.documents[aPath]!.docId
         let (k0, k1, k2) = (tileKey(0, 0), tileKey(1, 0), tileKey(0, 1))
         office.recorder.subscribeReplies[docId] = [k0]
 
-        runtime.subscribeTiles(path: "/a.xlsx", part: 0, zoomPPT: 1000, viewportTwips: sampleViewport)
+        runtime.subscribeTiles(path: aPath, part: 0, zoomPPT: 1000, viewportTwips: sampleViewport)
         await officeWaitUntil(timeout: 2) { office.recorder.requestCalls.count == 1 }
         XCTAssertEqual(Set(office.recorder.requestCalls[0].keys), [k0])
 
         // A prefetch chunk covering k0 (already in flight from the ordinary subscribe above), k1
         // (genuinely new) and k2 (genuinely new) must only request the two new ones.
-        await runtime.prefetchTilesChunk(path: "/a.xlsx", keys: [k0, k1, k2])
+        await runtime.prefetchTilesChunk(path: aPath, keys: [k0, k1, k2])
 
         XCTAssertEqual(office.recorder.requestCalls.count, 2, "one call from the subscribe, one from the prefetch chunk")
         XCTAssertEqual(Set(office.recorder.requestCalls[1].keys), [k1, k2],
                        "k0 is already in flight — the prefetch chunk must not re-request it")
+        try? FileManager.default.removeItem(atPath: aPath)
     }
 
     /// A prefetch chunk for a path with no open document (closed, or never opened) is a harmless
@@ -4517,17 +5056,21 @@ final class ShellSessionHostTests: XCTestCase {
         host.makeOfficeRuntime = office.make
         let r1 = host.officeRuntime(for: "S1")
         let r2 = host.officeRuntime(for: "S2")
-        r1.open("/a.xlsx")
-        r2.open("/b.xlsx")
+        let aPath = makeScratchOfficePath("a")
+        let bPath = makeScratchOfficePath("b")
+        r1.open(aPath)
+        r2.open(bPath)
         await officeWaitUntil(timeout: 2) {
-            r1.stateSnapshot.documents["/a.xlsx"] != nil && r2.stateSnapshot.documents["/b.xlsx"] != nil
+            r1.stateSnapshot.documents[aPath] != nil && r2.stateSnapshot.documents[bPath] != nil
         }
-        let docIdA = r1.stateSnapshot.documents["/a.xlsx"]!.docId
-        let docIdB = r2.stateSnapshot.documents["/b.xlsx"]!.docId
+        let docIdA = r1.stateSnapshot.documents[aPath]!.docId
+        let docIdB = r2.stateSnapshot.documents[bPath]!.docId
 
         XCTAssertTrue(host.officeRuntime(owning: docIdA) === r1)
         XCTAssertTrue(host.officeRuntime(owning: docIdB) === r2)
         XCTAssertNil(host.officeRuntime(owning: "no-such-doc"))
+        try? FileManager.default.removeItem(atPath: aPath)
+        try? FileManager.default.removeItem(atPath: bPath)
     }
 
     /// Store hygiene: a helper death must clear EVERY runtime's tile store, not just the one that
@@ -4540,13 +5083,15 @@ final class ShellSessionHostTests: XCTestCase {
         host.makeOfficeRuntime = office.make
         let r1 = host.officeRuntime(for: "S1")
         let r2 = host.officeRuntime(for: "S2")
-        r1.open("/a.xlsx")
-        r2.open("/b.xlsx")
+        let aPath = makeScratchOfficePath("a")
+        let bPath = makeScratchOfficePath("b")
+        r1.open(aPath)
+        r2.open(bPath)
         await officeWaitUntil(timeout: 2) {
-            r1.stateSnapshot.documents["/a.xlsx"] != nil && r2.stateSnapshot.documents["/b.xlsx"] != nil
+            r1.stateSnapshot.documents[aPath] != nil && r2.stateSnapshot.documents[bPath] != nil
         }
-        let docIdA = r1.stateSnapshot.documents["/a.xlsx"]!.docId
-        let docIdB = r2.stateSnapshot.documents["/b.xlsx"]!.docId
+        let docIdA = r1.stateSnapshot.documents[aPath]!.docId
+        let docIdB = r2.stateSnapshot.documents[bPath]!.docId
         r1.tileStore.ingest(docId: docIdA, key: tileKey(0, 0), generation: 0, pixels: Data([1]))
         r2.tileStore.ingest(docId: docIdB, key: tileKey(0, 0), generation: 0, pixels: Data([2]))
         XCTAssertEqual(r1.tileStore.cachedCountForTesting, 1)
@@ -4556,6 +5101,8 @@ final class ShellSessionHostTests: XCTestCase {
 
         XCTAssertEqual(r1.tileStore.cachedCountForTesting, 0, "S1's store is cleared too, not just S2's")
         XCTAssertEqual(r2.tileStore.cachedCountForTesting, 0)
+        try? FileManager.default.removeItem(atPath: aPath)
+        try? FileManager.default.removeItem(atPath: bPath)
     }
 
     /// A document close must release its own tiles from the store — `OfficeRuntime.perform`'s
@@ -4565,15 +5112,17 @@ final class ShellSessionHostTests: XCTestCase {
         let office = officeFactory()
         host.makeOfficeRuntime = office.make
         let runtime = host.officeRuntime(for: "S1")
-        runtime.open("/a.xlsx")
-        runtime.open("/b.xlsx")
+        let aPath = makeScratchOfficePath("a")
+        let bPath = makeScratchOfficePath("b")
+        runtime.open(aPath)
+        runtime.open(bPath)
         await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.documents.count == 2 }
-        let docIdA = runtime.stateSnapshot.documents["/a.xlsx"]!.docId
-        let docIdB = runtime.stateSnapshot.documents["/b.xlsx"]!.docId
+        let docIdA = runtime.stateSnapshot.documents[aPath]!.docId
+        let docIdB = runtime.stateSnapshot.documents[bPath]!.docId
         runtime.tileStore.ingest(docId: docIdA, key: tileKey(0, 0), generation: 0, pixels: Data([1]))
         runtime.tileStore.ingest(docId: docIdB, key: tileKey(0, 0), generation: 0, pixels: Data([2]))
 
-        runtime.close("/a.xlsx")
+        runtime.close(aPath)
 
         XCTAssertNil(runtime.tileStore.tile(docId: docIdA, key: tileKey(0, 0)), "a.xlsx's tile is gone")
         XCTAssertNotNil(runtime.tileStore.tile(docId: docIdB, key: tileKey(0, 0)), "b.xlsx's tile is untouched")
@@ -4582,6 +5131,8 @@ final class ShellSessionHostTests: XCTestCase {
         // test returns, so nothing is left orphaned to touch `office.recorder` (an `[unowned self]`
         // closure struct) after `officeDoubles` releases it in `tearDown`.
         await officeWaitUntil(timeout: 2) { office.recorder.closeCalls.count == 1 }
+        try? FileManager.default.removeItem(atPath: aPath)
+        try? FileManager.default.removeItem(atPath: bPath)
     }
 
     // MARK: - office-plumbing Task 6: the document door — mirrors `openFileTab`'s own wire-level
@@ -4646,43 +5197,58 @@ final class ShellSessionHostTests: XCTestCase {
     /// `openFailures` gets a fresh `open()` alongside the activate — mirrors editor's own HANDOFFS
     /// obligation (`openFileTab`'s doc), applied to `OfficeRuntime.open` instead of
     /// `EditorRuntime.openFile` (no `Task` needed here: `OfficeRuntime.open` is not `async`).
+    ///
+    /// Office Stage B Task 2b: the failure this test drills is now staged at a REAL scratch path
+    /// that genuinely doesn't exist yet, not a driver-level stub keyed by path — post-staging, the
+    /// driver only ever observes the STAGED path (a UUID-derived name under the recorder's
+    /// `stateDirectory`), so a `openFailures[realPath]` dictionary on the recorder is structurally
+    /// unreachable (see the recorder's own doc on `failNextOpenReason`, which replaces it). This is
+    /// in fact a MORE representative drill than the old stub: it is this file's first coverage of
+    /// the staging-failure branch of `openAndDispatch`'s catch block (the "stage itself failed"
+    /// half of its own doc comment), not just the "wire `open` failed" half.
     func testActivatingATabWhosePathIsInOpenFailuresAlsoRetriesTheOpen() async {
         // **No `select`/`deselect` here, deliberately** (unlike this section's other two document-
         // door tests): `openDocumentTab` reaches `openPanelTab`'s EXPLICIT `sessionId:` door, which
         // needs no attachment at all (`ShellSessionHost.openPanelTab`'s own doc). This test's own
-        // retry SUCCEEDS (the simulated failure is removed before the retry), which means the
-        // runtime holds a genuinely open document by the time this function returns — a `defer {
-        // host.deselect() }` here would fire `releaseOfficeRuntimeIfClean`'s ALWAYS-release policy
-        // (Stage A office tabs are never dirty) synchronously, spawning a NEW fire-and-forget
-        // `driver.close` `Task` this test has no `await` point left to settle before `officeDoubles`
-        // releases the recorder in `tearDown` — exactly the unowned-reference crash class this
-        // file's own recorder doc warns about. Simplest fix: nothing here needs an attach at all.
+        // retry SUCCEEDS (the file gets created before the retry), which means the runtime holds a
+        // genuinely open document by the time this function returns — a `defer { host.deselect() }`
+        // here would fire `releaseOfficeRuntimeIfClean`'s ALWAYS-release policy (Stage A office tabs
+        // are never dirty) synchronously, spawning a NEW fire-and-forget `driver.close` `Task` this
+        // test has no `await` point left to settle before `officeDoubles` releases the recorder in
+        // `tearDown` — exactly the unowned-reference crash class this file's own recorder doc warns
+        // about. Simplest fix: nothing here needs an attach at all.
         let (host, _, mgmt) = await makeHostWithManagement()
         let office = officeFactory()
         host.makeOfficeRuntime = office.make
 
+        let badPath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bad-\(UUID().uuidString).xlsx").path
+        // Deliberately NOT created yet — staging (`copyfile`) fails before the driver's `open` is
+        // ever reached, a genuine "garbage/missing file" rather than a simulated one.
         let runtime = host.officeRuntime(for: "S1")
-        office.recorder.openFailures["/repo/bad.xlsx"] = "garbage file"
-        runtime.open("/repo/bad.xlsx")
-        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.openFailures["/repo/bad.xlsx"] != nil }
-        office.recorder.openFailures.removeValue(forKey: "/repo/bad.xlsx") // "the file got fixed"
+        runtime.open(badPath)
+        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.openFailures[badPath] != nil }
+        try? Data().write(to: URL(fileURLWithPath: badPath)) // "the file got fixed"
 
         host.panelStore.applyFetchedSnapshot(
             sessionId: "S1",
-            tabs: [PanelTab(tabId: "t9", kind: .document, url: "/repo/bad.xlsx", title: "bad.xlsx")],
+            tabs: [PanelTab(tabId: "t9", kind: .document, url: badPath, title: "bad.xlsx")],
             activeTabId: nil)
 
-        host.openDocumentTab("/repo/bad.xlsx", sessionId: "S1")
+        host.openDocumentTab(badPath, sessionId: "S1")
         await feedWaitUntil { mgmt.methods.contains("panel.activateTab") }
-        await officeWaitUntil(timeout: 2) { office.recorder.openCalls.filter { $0.path == "/repo/bad.xlsx" }.count == 2 }
-        XCTAssertEqual(office.recorder.openCalls.filter { $0.path == "/repo/bad.xlsx" }.count, 2,
-                       "the first (failed) open plus the retry from re-clicking the same path")
-        // Hygiene, not an assertion: the retry SUCCEEDS (the simulated failure was cleared above),
-        // so this runtime now holds a genuinely open document — release it explicitly and wait for
-        // the resulting close to settle, rather than leaving it for a test-ending `deselect()` this
-        // test deliberately does not call (see the header comment on why that would be unsafe here).
+        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.documents[badPath] != nil }
+        XCTAssertNotNil(runtime.stateSnapshot.documents[badPath],
+                        "the retry, now that the file genuinely exists, must reach a genuinely open document")
+        XCTAssertEqual(office.recorder.openCalls.count, 1,
+                       "only the SUCCEEDING retry ever reaches the driver — the first attempt failed at staging, before the wire open")
+        // Hygiene, not an assertion: the retry SUCCEEDS, so this runtime now holds a genuinely open
+        // document — release it explicitly and wait for the resulting close to settle, rather than
+        // leaving it for a test-ending `deselect()` this test deliberately does not call (see the
+        // header comment on why that would be unsafe here).
         host.teardownOfficeRuntime(for: "S1")
         await officeWaitUntil(timeout: 2) { office.recorder.closeCalls.count == 1 }
+        try? FileManager.default.removeItem(atPath: badPath)
     }
 
     /// **`closePanelTab`'s own new leg**: closing a `.document` tab must reach the runtime's own
@@ -4703,13 +5269,14 @@ final class ShellSessionHostTests: XCTestCase {
         await answerHandshake(factory.made[0], sessionId: "S1")
 
         let runtime = host.officeRuntime(for: "S1")
-        runtime.open("/repo/gate.xlsx")
-        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.documents["/repo/gate.xlsx"] != nil }
-        let docId = runtime.stateSnapshot.documents["/repo/gate.xlsx"]!.docId
+        let gatePath = makeScratchOfficePath("gate")
+        runtime.open(gatePath)
+        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.documents[gatePath] != nil }
+        let docId = runtime.stateSnapshot.documents[gatePath]!.docId
 
         host.panelStore.applyFetchedSnapshot(
             sessionId: "S1",
-            tabs: [PanelTab(tabId: "t1", kind: .document, url: "/repo/gate.xlsx", title: "gate.xlsx")],
+            tabs: [PanelTab(tabId: "t1", kind: .document, url: gatePath, title: "gate.xlsx")],
             activeTabId: nil)
 
         host.closePanelTab("t1")
@@ -4717,6 +5284,7 @@ final class ShellSessionHostTests: XCTestCase {
         await officeWaitUntil(timeout: 2) { office.recorder.closeCalls.count == 1 }
         XCTAssertEqual(office.recorder.closeCalls, [docId])
         XCTAssertTrue(runtime.stateSnapshot.documents.isEmpty, "the reducer's own close removed the entry")
+        try? FileManager.default.removeItem(atPath: gatePath)
     }
 
     /// A `.code` tab whose `url` happens to equal an open document's path must NOT trigger an office
@@ -4735,12 +5303,13 @@ final class ShellSessionHostTests: XCTestCase {
         await answerHandshake(factory.made[0], sessionId: "S1")
 
         let runtime = host.officeRuntime(for: "S1")
-        runtime.open("/repo/gate.xlsx")
-        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.documents["/repo/gate.xlsx"] != nil }
+        let gatePath = makeScratchOfficePath("gate")
+        runtime.open(gatePath)
+        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.documents[gatePath] != nil }
 
         host.panelStore.applyFetchedSnapshot(
             sessionId: "S1",
-            tabs: [PanelTab(tabId: "t1", kind: .code, url: "/repo/gate.xlsx", title: "gate.xlsx")],
+            tabs: [PanelTab(tabId: "t1", kind: .code, url: gatePath, title: "gate.xlsx")],
             activeTabId: nil)
 
         host.closePanelTab("t1")
@@ -4753,6 +5322,7 @@ final class ShellSessionHostTests: XCTestCase {
         host.teardownOfficeRuntime(for: "S1")
         await officeWaitUntil(timeout: 2) { office.recorder.closeCalls.count == 1 }
         host.deselect()
+        try? FileManager.default.removeItem(atPath: gatePath)
     }
 
     // MARK: - office-plumbing Task 7: the ONE router both UI doors call
@@ -4843,6 +5413,14 @@ final class ShellSessionHostTests: XCTestCase {
     /// explains why: this retry SUCCEEDS, leaving a genuinely open document, so `select`/`deselect`
     /// would spawn an unawaited close `Task` — no attach is needed here either, `openPanelTab`'s
     /// explicit `sessionId:` door).
+    ///
+    /// Office Stage B Task 2b: unlike the sibling test above, THIS drill specifically wants the
+    /// DRIVER invoked twice (proving the retry reaches the real door a second time, not just that
+    /// the reducer's own state recovers) — so the failure here must be at the wire-open layer, not
+    /// staging. The file exists for real on both attempts; `failNextOpenReason` makes only the
+    /// FIRST driver-level open fail, mirroring what `openFailures["/repo/bad.xlsx"] = "garbage
+    /// file"` used to simulate before staging made a path-keyed driver stub unreachable (see the
+    /// recorder's own doc on why).
     func testTheRouterRetriesAFailedOfficeOpenOnActivateThroughTheSameDoorOpenDocumentTabUses() async {
         let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
         let (host, _, mgmt) = await makeHostWithManagement(rows: rows)
@@ -4850,26 +5428,71 @@ final class ShellSessionHostTests: XCTestCase {
         let office = officeFactory()
         host.makeOfficeRuntime = office.make
 
+        let badPath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bad-\(UUID().uuidString).xlsx").path
+        try? Data().write(to: URL(fileURLWithPath: badPath)) // exists for real on BOTH attempts
         let runtime = host.officeRuntime(for: "S1")
-        office.recorder.openFailures["/repo/bad.xlsx"] = "garbage file"
-        runtime.open("/repo/bad.xlsx")
-        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.openFailures["/repo/bad.xlsx"] != nil }
-        office.recorder.openFailures.removeValue(forKey: "/repo/bad.xlsx") // "the file got fixed"
+        office.recorder.failNextOpenReason = "garbage file" // consumed by the FIRST open only
+        runtime.open(badPath)
+        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.openFailures[badPath] != nil }
 
         host.panelStore.applyFetchedSnapshot(
             sessionId: "S1",
-            tabs: [PanelTab(tabId: "t9", kind: .document, url: "/repo/bad.xlsx", title: "bad.xlsx")],
+            tabs: [PanelTab(tabId: "t9", kind: .document, url: badPath, title: "bad.xlsx")],
             activeTabId: nil)
 
-        host.openFileOrDocumentTab("/repo/bad.xlsx", sessionId: "S1")
+        host.openFileOrDocumentTab(badPath, sessionId: "S1")
         await feedWaitUntil { mgmt.methods.contains("panel.activateTab") }
-        await officeWaitUntil(timeout: 2) { office.recorder.openCalls.filter { $0.path == "/repo/bad.xlsx" }.count == 2 }
-        XCTAssertEqual(office.recorder.openCalls.filter { $0.path == "/repo/bad.xlsx" }.count, 2,
-                       "the first (failed) open plus the retry from re-clicking through the router")
+        await officeWaitUntil(timeout: 2) { office.recorder.openCalls.count == 2 }
+        XCTAssertEqual(office.recorder.openCalls.count, 2,
+                       "the first (failed-at-the-driver) open plus the retry from re-clicking through the router")
+        XCTAssertTrue(office.recorder.openCalls.allSatisfy { $0.path.hasPrefix(office.recorder.stateDirectory.path) },
+                      "both opens carry a STAGED path, never \(badPath) itself: \(office.recorder.openCalls)")
 
         // Hygiene, not an assertion: the retry SUCCEEDS, so this runtime now holds a genuinely open
         // document — release it explicitly and wait for the resulting close to settle.
         host.teardownOfficeRuntime(for: "S1")
         await officeWaitUntil(timeout: 2) { office.recorder.closeCalls.count == 1 }
+        try? FileManager.default.removeItem(atPath: badPath)
+    }
+
+    // MARK: - Office Stage B Task 9: LOK's raw error text never reaches the banner
+
+    /// `OfficeRuntime.describe(_:)` is `private` — this drives the mapping through the REAL round
+    /// trip a live failure takes (`OfficeDriverRecorder.failNextOpenReason` throws
+    /// `OfficeHelperClientError.openFailed(reason:)` exactly like the real wire client would,
+    /// `openAndDispatch`'s own catch block is what calls `describe`), rather than asserting on a
+    /// symbol no test file can see. A KNOWN shape (this task's own live-observed
+    /// `legacy-xls.xls` text) maps to its house sentence; an UNRECOGNIZED shape maps to the generic
+    /// fallback — NEITHER raw string ever reaches `openFailures`.
+    func testALegacyImportFailuresRawLOKTextNeverReachesOpenFailuresOnlyTheMappedSentenceDoes() async throws {
+        let office = officeFactory()
+        let runtime = OfficeRuntime(sessionId: "S-error-mapping", driver: office.recorder.driver)
+        let knownPath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("known-\(UUID().uuidString).xls").path
+        try Data().write(to: URL(fileURLWithPath: knownPath)) // staging needs a real source file
+
+        office.recorder.failNextOpenReason = "loadComponentFromURL returned an empty reference"
+        runtime.open(knownPath)
+        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.openFailures[knownPath] != nil }
+        let knownReason = runtime.stateSnapshot.openFailures[knownPath]
+        XCTAssertEqual(knownReason, "This file couldn't be opened — it may be corrupted or in a "
+                       + "format the office viewer doesn't support.")
+        XCTAssertFalse((knownReason ?? "").contains("loadComponentFromURL"), "the raw LOK string must "
+                       + "never reach the banner")
+
+        let unknownPath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("unknown-\(UUID().uuidString).xls").path
+        try Data().write(to: URL(fileURLWithPath: unknownPath))
+        office.recorder.failNextOpenReason = "some brand-new LOK failure text nobody has seen before"
+        runtime.open(unknownPath)
+        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.openFailures[unknownPath] != nil }
+        let unknownReason = runtime.stateSnapshot.openFailures[unknownPath]
+        XCTAssertEqual(unknownReason, "This document couldn't be processed. See the log for details.")
+        XCTAssertFalse((unknownReason ?? "").contains("brand-new LOK failure"), "an UNRECOGNIZED raw "
+                       + "string must fall back to the generic sentence, never surface verbatim")
+
+        try? FileManager.default.removeItem(atPath: knownPath)
+        try? FileManager.default.removeItem(atPath: unknownPath)
     }
 }

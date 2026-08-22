@@ -55,6 +55,20 @@ final class OfficeHelperLiveSmokeTests: XCTestCase {
         for _ in 0..<5 { url = url.deletingLastPathComponent() }
         return url.appendingPathComponent("apple/Norma/vendor/libreoffice/product-set", isDirectory: true)
     }
+    /// Office Stage B Task 1 — same repo-root climb as `vendorProductSetRoot` above, for the
+    /// checked-in seatbelt profile SOURCE. This test spawns the STANDALONE `BUILT_PRODUCTS_DIR`
+    /// build product directly (never the app-embedded copy — see this file's own header), which has
+    /// no `Contents/Resources/office-helper.sb` sibling of its own, so — exactly like `--lok-root`
+    /// a few lines below — it needs an explicit `--sandbox-profile` override or `main.swift`'s
+    /// default (no-override) two-dirs-up resolution finds nothing and this helper refuses to boot at
+    /// all (fail-closed, by design: found via a deliberate sweep of every OTHER real-helper spawn
+    /// site in this test bundle after `OfficeHelperLiveTests.spawnLiveHelper` was fixed, not by this
+    /// test failing first — see task-1-report.md).
+    private static var sandboxProfilePath: URL {
+        var url = URL(fileURLWithPath: #filePath)
+        for _ in 0..<5 { url = url.deletingLastPathComponent() }
+        return url.appendingPathComponent("apple/Norma/Sources/OfficeHelper/office-helper.sb", isDirectory: false)
+    }
 
     func testRealHelperBindsHandshakesPingsAndIdleExits() async throws {
         let helperURL = Bundle.main.bundleURL.deletingLastPathComponent()
@@ -82,7 +96,8 @@ final class OfficeHelperLiveSmokeTests: XCTestCase {
         // below, not two real minutes, to prove idle-exit happens at all.
         process.arguments = ["--socket-path", socketPath, "--state-path", stateDir.path,
                               "--token", token, "--idle-exit-seconds", "1",
-                              "--lok-root", vendorRoot.path]
+                              "--lok-root", vendorRoot.path,
+                              "--sandbox-profile", Self.sandboxProfilePath.path]
         try process.run()
         addTeardownBlock { if process.isRunning { process.terminate() } }
 

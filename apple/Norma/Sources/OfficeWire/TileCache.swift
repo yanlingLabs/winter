@@ -103,6 +103,19 @@ public struct TileCache: Sendable {
     /// empirically distinguishable from "current part only" against real LOK — see
     /// task-4-report.md).
     ///
+    /// **Fix round 1, F3 — `part == -1` on a NON-empty rect also means "every part," matching LOK's
+    /// own sentinel.** `desktop/inc/lib/init.hxx`'s `RectangleAndPart` reserves `-1` for "all parts"
+    /// (`m_nPart(INT_MIN)`'s own comment; `RectangleAndPart::toString()` serializes any `m_nPart >=
+    /// -1`, so `-1` legitimately reaches the wire) — reachable from `SfxLokHelper
+    /// ::notifyInvalidation`'s explicit-part overload independently of whether the rect itself is
+    /// empty. Before this fix, a real `-1`-part RECT firing would silently bump NOTHING here (no
+    /// cached key's `part` is ever `-1`, so the plain `key.part == part` guard always failed) — the
+    /// same "stale pixels no scroll/zoom can correct" failure mode F3 exists to close, just on the
+    /// non-empty-rect path instead of the EMPTY one. `-1` now skips the part guard (matches every
+    /// part) while still requiring genuine geometric intersection — unlike the EMPTY case, there IS
+    /// a real rect here to test against, so this is not "bump everything," only "bump everything
+    /// this rect actually touches."
+    ///
     /// Returns every `TileKey` actually bumped, SORTED by `(part, zoomPPT, tileX, tileY)` — fix
     /// round 1, discretionary: the underlying `Dictionary.keys` iteration order is unspecified, so
     /// leaving it unsorted made every wire-level capture of an `invalidated{keys}` push
@@ -117,7 +130,11 @@ public struct TileCache: Sendable {
             touchedKeys = Array(generations.keys)
         } else {
             touchedKeys = generations.keys.filter { key in
-                guard key.part == part else { return false }
+                // Fix round 1, F3: `-1` is LOK's own "all parts" sentinel — see this method's own
+                // header. Every other value keeps the exact-match scoping this guard always had.
+                if part != -1 {
+                    guard key.part == part else { return false }
+                }
                 // Fix round 1, I1's trap #3 (the "poisoned cached key" half): `tileBoundsTwips` is
                 // now `nil`-safe rather than trapping, but a `nil` here still needs a DECISION, not
                 // just an absence of a crash. A key whose own coordinates are no longer

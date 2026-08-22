@@ -61,7 +61,9 @@ if let raw = args["idle-exit-seconds"], let parsed = Double(raw), parsed > 0 { i
 // never calls open/close). FakeOfficeDocumentBridge is Task 2's own old bookkeeping-only behavior,
 // now given a name. Named here (not inline) so the "multicastInvalidate" mode's hook can capture
 // it directly (Task 4).
-let bridge = FakeOfficeDocumentBridge()
+// Office Stage B Task 2 — the fake bridge's own `saveAs` needs somewhere to write; the fixture's
+// real `--state-path` (already parsed above) is exactly the directory the real helper would use.
+let bridge = FakeOfficeDocumentBridge(statePath: URL(fileURLWithPath: statePath, isDirectory: true))
 
 let mode = args["mode"] ?? "ok"
 var hooks = OfficeHelperServer.Hooks()

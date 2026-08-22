@@ -1,0 +1,255 @@
+;; Office Stage B Task 1 — NormaOfficeHelper's own seatbelt.
+;;
+;; Applied by main.swift via `sandbox_init_with_parameters`, FIRST — before LibreOfficeKit ever
+;; loads (`lok_init_2`, inside `LOKBridge.init`) and before the socket ever binds
+;; (`OfficeHelperServer.start()`). This is SELF-sandboxing, not a `sandbox-exec`-style external
+;; wrapper: this helper is spawned directly by `OfficeHelperSupervisor` (`Process()`, no shell in
+;; between, no exec chain), so putting the sandbox_init call inside the helper's own `main.swift`
+;; means every existing and future spawn site is sandboxed for free, with zero changes of its own —
+;; see main.swift's own header for the mechanism-choice writeup and task-1-report.md for why this
+;; was chosen over wrapping the spawn the way `packages/core/src/workflows/sandbox.ts` does for the
+;; workflow-worker subprocess.
+;;
+;; Parameterized on TWO substitutions — STATE_PATH (main.swift's own `--state-path` argument) and
+;; TMPDIR (this process's own per-user Darwin scratch dir, `NSTemporaryDirectory()` —
+;; `confstr(_CS_DARWIN_USER_TEMP_DIR)` under the hood) — both realpath(3)-canonicalized before being
+;; handed to `sandbox_init_with_parameters`, never Foundation's `resolvingSymlinksInPath` (which
+;; strips the canonical `/private` prefix back OFF — the wrong direction). Verified empirically
+;; before this file was trusted: an un-canonicalized `/tmp/...` value makes every
+;; `(subpath (param "STATE_PATH"))` rule below match NOTHING, because the kernel checks paths in
+;; their resolved `/private/tmp/...` form — a standalone Swift harness reproduced the false-deny
+;; with the raw path and confirmed the fix with the realpath'd one, on this exact macOS build,
+;; before any of this Swift code shipped. No other absolute path is ever baked into this file.
+
+(version 1)
+(deny default)
+
+;; --- process ---
+;; This process never execs or forks anything, before or after sandboxing — LOK renders in-process
+;; (dlopen, not a subprocess: `lok_init_2` inside LOKBridge.swift) and this helper's own lifetime
+;; model is "boot once, serve documents, _exit(0)" (LOKBridge.swift's own header). No `process-exec`
+;; allow at all — contrast `packages/core/src/workflows/sandbox.ts`'s own profile, which carves out
+;; exactly `(allow process-exec (literal self))` because ITS mechanism is an EXTERNAL
+;; `sandbox-exec <target>` wrapper, whose own execvp() of the target is itself a checked transition
+;; the profile must survive. Self-init here never execs anything, so there is no such transition to
+;; carve out, and no self-exec allow to copy.
+(deny process-fork)
+(deny process-exec)
+(allow signal (target self))
+(allow sysctl-read)
+
+;; --- mach services ---
+;; NOTE on methodology (disclosed in task-1-report.md): the brief's own suggested
+;; `log show --predicate 'sender == "Sandbox"'`/`log stream` iteration produced ZERO matching lines
+;; on this OS build (Darwin 25.6.0 / macOS 26.4 SDK) even while actively reproducing a real,
+;; confirmed denial seconds apart — tried both `log show --last` and a live `log stream` running
+;; concurrently with the reproduction. Sandbox denials on this build simply do not appear to route
+;; through the unified log's `sender == "Sandbox"` channel the way they historically have on older
+;; releases. Iterated instead via direct empirical bisection: a standalone `swift <file>.swift`
+;; script (seconds per iteration, versus a full Xcode rebuild) for the file-write/TMPDIR finding
+;; below, and — for THIS list — starting from the shared mach-lookup baseline this repo's own two
+;; existing seatbelt profiles already carry (`packages/core/src/agent/sandbox.ts`'s bash tool and
+;; `packages/core/src/workflows/sandbox.ts`'s workflow worker), then PROVING it both sufficient and
+;; not overbroad against this helper specifically: the full six-format matrix + all 22
+;; `OfficeHelperLiveTests` drills + all 5 `OfficeSandboxTests` probes (27 tests) were run TWICE — once
+;; with 4 speculative additions beyond this baseline (`cfprefsd.daemon`/`cfprefsd.agent`/
+;; `distributed_notifications@Uv3`/`com.apple.fonts`, added defensively before ever observing a real
+;; LOK-specific mach-lookup denial) and once WITHOUT them. Both runs passed identically — the 4 extra
+;; entries were never actually load-bearing for anything this task's own test matrix exercises, so
+;; they were removed rather than kept "just in case": a profile that grants an unused capability is
+;; worse than one that has to be revisited if Stage B's editable surface later needs one of them for
+;; real. What remains below is exactly this repo's own already-reviewed baseline, carried over
+;; unchanged, not a fresh guess.
+;;
+;; Task 10 addendum, fix round 1 (whole-branch review) — ONE entry below is the actual fix. Two
+;; earlier readings of this whole investigation were each overbroad, corrected only by running the
+;; matrix a careful reviewer asked for rather than the one Task 10 itself first reached for — every
+;; claim below cites the specific experiment cell that supports it, per that review's own guardrail.
+;;
+;; **The symptom** (Impress/Writer documents hanging — "office helper request timed out" — via the
+;; embedded, production install-root resolution while Calc opened fine): captured directly, not
+;; inferred, via `/usr/bin/log stream --predicate 'eventMessage contains "deny"'` (NOT `sender ==
+;; "Sandbox"` — T1's own predicate produces zero lines on this OS build; `deny` matches both the
+;; terse `kernel[...] (Sandbox)` lines and the full `sandboxd[...][com.apple.sandbox.reporting:
+;; violation]` reports, and only the latter carries a per-thread backtrace) around a live
+;; reproduction. The captured violation's `office-helper.lok` thread was blocked inside:
+;;   LOKBridge.openOnDedicatedThread → lo_documentLoadWithOptions → ... →
+;;   SvxShapeText::setString → LinguServiceManager::create → LngSvcMgr::GetAvailableSpellSvcs_Impl →
+;;   MacSpellChecker::MacSpellChecker() → NSApplicationLoad() → +[NSApplication initialize] →
+;;   { CFPasteboardCreate, then in turn TCC / WindowServer / LaunchServices connection attempts }
+;; i.e. the VENDORED, unmodified LOK probes macOS's native spellchecker's *availability* when a
+;; document's editable text/shape model is built — Impress shapes and Writer text frames both reach
+;; `SvxShapeText::setString`. That Calc's pure grid-cell path does not reach it, and that this is
+;; why Calc opened cleanly through this same seatbelt while Impress/Writer did not, is the obvious
+;; reading of the captured trace and is CONSISTENT WITH it — but it is an inference from ONE
+;; backtrace (the hanging thread's), not a measurement: no trace was ever captured for a Calc open
+;; to confirm it never reaches this path. Hedged here for a second reason too — Experiment B below
+;; later showed the open-vs-hang outcome tracks EXECUTABLE BUNDLING, a variable this document-type
+;; reading did not hold fixed, and the first version of this fix drew a wrong conclusion from
+;; exactly that gap.
+;; `NSApplicationLoad()` is LOK's own one-time linguistic-service enumeration, not anything this
+;; helper's own Swift code invokes — and a headless, no-Aqua-session process denied a service that
+;; bootstrap needs does not fail fast; it stalls, which is the hang's actual mechanism (not a crash,
+;; and not the CFB defect — that guard sits earlier, before any of this LOK-internal code runs).
+;;
+;; **What actually gates it — Experiment B (whole-branch review), not "embedded root."** The FIRST
+;; version of this fix shipped all four services named in the captured trace above and reasoned "the
+;; divergence tracks document TYPE via the embedded root." A review caught that no test in this
+;; repo had EVER varied executable-bundling (bundled inside `<app>/Contents/MacOS/`, vs. a bare
+;; `BUILT_PRODUCTS_DIR` product with no enclosing Info.plist) independently of install-root — every
+;; "embedded root" test used a bundled executable, every "standalone root" test used a bare one. The
+;; missing 2x2 cells (run against a PRE-WIDENING profile, T1's original four services only) settled
+;; it: bare+embedded-root OPENS CLEANLY; bundled+standalone-root HANGS. Install root is irrelevant.
+;;
+;; Fix-round-2 I1 residual (security re-review) — **the sentence that WAS here next asserted a
+;; specific MECHANISM for that result** ("`NSBundle.main`'s own resolution … finds Norma.app's real
+;; bundle identity ONLY for the bundled exec, which is what makes `+[NSApplication initialize]`
+;; behave like a real windowed app … the bare exec has no such identity to find, and takes a
+;; different, non-blocking path") **as flat fact, with no cell that actually traces it.** The 2x2
+;; above licenses "bundling is the trigger," a correlation between one binary property and the
+;; open/hang outcome — it does not license any claim about WHAT INSIDE `+[NSApplication
+;; initialize]` reads that property or branches on it; no trace (log capture, symbolicated stack, or
+;; otherwise) was ever captured for either bare-exec cell, only their black-box outcome (opens
+;; cleanly). Restated honestly: bundling is the PROVEN trigger; `NSBundle.main` resolution driving
+;; `+[NSApplication initialize]`'s own internal branching is a PLAUSIBLE, UNTESTED hypothesis for
+;; WHY, offered because it is the most obvious mechanism a bundled-vs-bare distinction could act
+;; through, not because anything here traced it directly.
+;;
+;; **Also disclosed here, not only in the report — the fix above is narrower than "no denials
+;; occur."** Re-verified live for this fix round (`log stream --predicate 'eventMessage contains
+;; "deny"'` around a real four-format open under this exact, current, minimized profile):
+;; `com.apple.pasteboard.1`, `com.apple.tccd.system`, and `com.apple.windowserver.active` are ALL
+;; STILL DENIED, on every single open, every fixture — `+[NSApplication initialize]`'s own later
+;; steps (per the captured trace above: CFPasteboardCreate, then TCC/WindowServer connection
+;; attempts, all AFTER the LaunchServices step this fix's one grant unblocks) keep firing and keep
+;; getting denied, same as before this fix round. The open still succeeds anyway. What Experiment C
+;; proved is narrower than "these three are safe to deny" — it proved "these three are not
+;; NECESSARY for THIS specific hang," full stop; it says nothing about whether some OTHER code path
+;; (LOK's spellchecker actually invoked during editing, not just probed at open time — see the
+;; `mul-xpc` `findMisspelledWordInString` denial this same re-verification run also observed, live,
+;; a fifth and previously uncatalogued denied service, tolerated the same way) depends on one of
+;; them succeeding in a way this task's own fixture matrix never exercises. Tolerated, not
+;; eliminated — the same distinction this profile already draws for TCC/pasteboard/WindowServer
+;; being denied in the FIRST place (v1's own baseline containment posture), just made explicit here
+;; for the three specific services this fix round's own minimization touched.
+;;
+;; **Experiment A (whole-branch review) — tried, failed, does not change the fix.** Hypothesis:
+;; seed `registrymodifications.xcu` (the SAME mechanism `disableDocumentLockFile` above already
+;; uses) to stop `LngSvcMgr::GetAvailableSpellSvcs_Impl` from ever constructing `MacSpellChecker`,
+;; making the grant unnecessary. Two variants tried, both against the PRE-WIDENING profile: (1)
+;; `ServiceManager/DisabledDictionaries` naming `org.openoffice.lingu.MacOSXSpellChecker` (the exact
+;; implementation string a live-booted helper's own `registrymodifications.xcu` records under
+;; `LastFoundSpellCheckers`, per-locale) — no change, hang persists identically. (2) seeding a
+;; "warm cache" of 234 `SpellCheckerList`/`LastFoundSpellCheckers` entries verbatim from that same
+;; live capture, on the theory a pre-populated cache short-circuits the probe — no change either.
+;; Fix-round-3 (convergence re-review) I1 residual — **this paragraph originally closed by
+;; reasserting, as fact, the exact mechanism claim the "Fix-round-2 I1 residual" paragraph above
+;; already hedged** ("`MacSpellChecker` constructs SUCCESSFULLY in the bare-exec cells" stated flat,
+;; and "`NSApplicationLoad()`'s own bundle-identity-dependent behavior was [the right lever]" stated
+;; flat) — three paragraphs below its own hedge, contradicting it. Corrected in place rather than
+;; left standing: the bare-exec cells COMPLETE, which is CONSISTENT WITH construction succeeding —
+;; nothing here traced construction directly, so "constructs successfully" is the same black-box
+;; inference the paragraph above already named, not an independently observed fact. Experiment A's
+;; own negative result licenses only "neither registry seed changed the outcome" — it does not, on
+;; its own, license a claim about WHY not; that "why" is still the same untested `NSBundle.main`/
+;; `NSApplicationLoad()` hypothesis the paragraph above already restated honestly as a hypothesis,
+;; not a second, independent confirmation of it.
+;;
+;; **Experiment C (whole-branch review) — sequential minimization, oracle = the inverted pin below,
+;; against a rebuilt bundled+embedded helper each round.** Dropping `coreservices.launchservicesd`
+;; ALONE reproduced the original hang on all four formats — confirmed load-bearing, restored. With
+;; it restored, dropping `pasteboard.1` ALONE opened all four formats cleanly — confirmed
+;; UNNECESSARY, the exact grant this review's own rationale called the most dangerous one ("breaks
+;; this profile's entire containment sentence... silent clipboard harvest plus paste-injection").
+;; Dropping `tccd.system` TOO (both pasteboard and tccd absent) also opened cleanly. Dropping
+;; `windowserver.active` as well — i.e. `coreservices.launchservicesd` ALONE, on top of T1's
+;; original four baseline services, nothing else Task 10 ever added — STILL opened all four formats
+;; cleanly, reproduced twice. **The minimal necessary and sufficient addition is this one service.**
+;;
+;; This inverts the review's own risk intuition, and that tension is not softened here: the ONE
+;; surviving grant is the one that review flagged as the SCARIER of the four — "plausibly defeats
+;; (deny process-exec)/(deny network*) by asking another daemon to open a payload written into the
+;; in-fence TMPDIR" — a potential sandbox-containment bypass, not merely a data-exfiltration surface
+;; the way pasteboard access would have been. `OfficeSandboxTests`' own `launch-services-query`
+;; probe (`main.swift`'s `--sandbox-probe` mode, mirroring the write-fence/connect-outbound probes
+;; already there) empirically CONFIRMS the concern is live, not foreclosed by some other gate: a raw
+;; `xpc_connection_create_mach_service` against this literal name, activated and sent one message,
+;; gets `XPC_ERROR_CONNECTION_INVALID` (bootstrap lookup itself failed) without the grant and a real
+;; connection (interrupted only because the daemon rejects this probe's own deliberately-malformed
+;; message, not a sandbox denial) with it. What this probe deliberately does NOT test: whether an
+;; ACTUAL "open this file with its handler" request also succeeds through that connection — doing so
+;; risks a real, visible application launching as a side effect of an automated diagnostic run. The
+;; connection being genuinely live is necessary but not sufficient for the review's own confused-
+;; deputy concern to be exploitable; this profile accepts that open question rather than concealing
+;; it, because launchservicesd is independently proven NECESSARY (Experiment C) and no narrower fix
+;; was found (Experiment A failed; Experiment B named the true trigger but not a safe, comparably-
+;; scoped code change — restructuring `NormaOfficeHelper`'s own bundle identity to avoid inheriting
+;; Norma.app's is a materially bigger change than this fix round's own scope, and belongs in a
+;; dedicated follow-up, not an improvised addition here).
+;;
+;; Fix-round-3 (convergence re-review) F4 — **this section's own "open question" was never updated
+;; after fix round 2 partially answered it, and the convergence re-review has now gone further
+;; still.** Fix round 2's own Test A (`OfficeSandboxTests.testLaunchServicesAdjacentEndpointsAre
+;; DeniedUnderTheShippedProfile`) and Test B (`testUnregisteredURLSchemeOpenNeverReachesAHandled
+;; Launch`) are not referenced above at all. Test B's own finding, corrected in fix round 3 (see
+;; `main.swift`'s own `launch-open-unregistered-scheme` case for the full account): the "ACTUAL
+;; open … request" this section names as untested is, for an UNREGISTERED scheme, now known to fail
+;; via `kLSExecutableIncorrectFormat` (-10661) regardless of this grant — and the convergence
+;; re-review's own reproduction on the PRODUCTION bundled+embedded shape (its own 9 cells, cited, not
+;; reproduced in this repo) found the REAL gate on this open path is the sandbox's denial of
+;; `lsd.mapdb`/`.modifydb`/quarantine-resolution, not the `launchservicesd` grant below — the
+;; re-review found removing it makes NO difference to this open path either way. `launchservicesd`
+;; remains independently NECESSARY for the ORIGINAL hang this whole fix round exists to fix
+;; (unchanged, Experiment C above) — the two facts do not contradict each other; they answer
+;; different questions (document-open bootstrap vs. this specific LaunchServices-open-by-URL
+;; confused-deputy path). See `OfficeSandboxTests`' own Test A/Test B and `task-10-report.md`'s
+;; fix-round-2 and fix-round-3 sections for the full, corrected chain — the Experiment C prose above
+;; is left as the historical record of what that experiment itself established at the time, not
+;; rewritten to sound as if it already knew this.
+;;
+(allow mach-lookup
+  (global-name "com.apple.system.notification_center")
+  (global-name "com.apple.system.logger")
+  (global-name "com.apple.CoreServices.coreservicesd")
+  (global-name "com.apple.bsd.dirhelper")
+  (global-name "com.apple.coreservices.launchservicesd")
+)
+
+;; --- filesystem ---
+;; Reads stay broad in v1, per the whole-branch ruling restated in this task's own brief: documents
+;; the app hands this helper can live anywhere in the user's session directories, and this helper
+;; never receives a path it didn't get from a request it must serve. Writes are the fence: STATE_PATH
+;; — the LOK user profile, the fontconfig conf+cache, and the office.sock socket file all already
+;; live under `--state-path` by Stage A's own design (LOKBridge.swift) — plus TMPDIR, the standard
+;; darwin scratch every Foundation process needs. TMPDIR earned its OWN line, not folded into "the
+;; standard scratch every runtime needs" hand-wave: `LOKBridge.configureFontconfig`'s ATOMIC write of
+;; `fontconfig/fonts.conf` (`String.write(to:atomically:true,...)`) was reproduced, isolated,
+;; DENIED under STATE_PATH-only — then reproduced AGAIN, PASSING, once TMPDIR joined it. Foundation's
+;; atomic-write path stages its temp file under `NSTemporaryDirectory()` (this process's own
+;; `confstr(_CS_DARWIN_USER_TEMP_DIR)`), NOT as a sibling inside the target's own parent directory —
+;; a plain `open()`+`write()` and a NON-atomic Foundation write both landed the temp file beside the
+;; target and needed no such allowance; only the atomic path needed this. Scoped to THIS process's
+;; own per-user temp root (not a static `/private/var/folders` wildcard, which would cover every
+;; other app's scratch on the machine too) — narrower, and machine-portable the same way STATE_PATH
+;; already is.
+(allow file-read*)
+(allow file-write*
+  (subpath (param "STATE_PATH")))
+(allow file-write*
+  (subpath (param "TMPDIR")))
+(allow file-write-data (path "/dev/null") (path "/dev/stdout") (path "/dev/stderr") (path "/dev/dtracehelper"))
+
+;; --- network ---
+;; LOK needs none, and this helper only ever SERVES localhost app connections over the ONE unix
+;; socket `OfficeHelperServer.start()` binds under `--state-path`
+;; (`OfficeHelperSupervisor.attemptOnce`'s own `socketPath = socketDirectory.appendingPathComponent
+;; ("office.sock")` — the same directory as STATE_PATH) — never TCP/UDP, never any remote address,
+;; in either direction. Scoped to the DIRECTORY (subpath), not the exact filename, so this profile
+;; stays decoupled from a wire-protocol implementation detail (the literal "office.sock" name) that
+;; lives in Swift, not here. `network-bind` covers this process's own `bind()`+`listen()`;
+;; `network-inbound` covers `accept()`ing the app's connection — both verified empirically (a
+;; standalone C harness bound+listened a real unix socket under a realpath'd STATE_PATH under this
+;; exact profile shape) before being trusted for the real live handshake.
+(deny network*)
+(allow network-bind (subpath (param "STATE_PATH")))
+(allow network-inbound (subpath (param "STATE_PATH")))

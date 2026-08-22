@@ -185,12 +185,14 @@ final class OfficeTileStoreTests: XCTestCase {
         XCTAssertEqual(store.cachedCountForTesting, 0)
     }
 
-    /// office-plumbing Task 8 (F5): the bug the store's own header now documents at length. Before
-    /// this fix, `invalidate` only touched `entries` — a key that was IN FLIGHT (requested, nothing
-    /// cached yet) survived an invalidation untouched, so `keysNeedingRequest` kept believing an ask
-    /// for it was still outstanding forever, and the eventual (stale, pre-invalidation) reply would
-    /// be the last word on it.
-    func testInvalidateOfAnInFlightKeyWithNoCachedEntryClearsItsInFlightMarker() {
+    /// office-plumbing Task 8 (F5) ORIGIN, Office Stage B Task 4 RESOLUTION — the store's own header
+    /// has the full account of both. Before T8's fix, `invalidate` left an in-flight key's marker
+    /// untouched, wedging it forever. T8's own fix cleared it immediately, which this test used to
+    /// pin as "askable again right after `invalidate`" — but that reopened a DIFFERENT hazard (two
+    /// ambiguous in-flight replies for one key) that Task 4's `invalidatedWhileInFlight` now closes.
+    /// This test pins the CURRENT, two-step contract: blocked immediately after `invalidate` (the
+    /// one outstanding reply has not resolved yet), askable again only once it does.
+    func testInvalidateOfAnInFlightKeyBlocksReRequestsUntilTheOneOutstandingReplyResolves() {
         let store = OfficeTileStore()
         store.markRequested(docId: "d1", keys: [key(0, 0)])
         XCTAssertEqual(store.keysNeedingRequest(docId: "d1", candidates: [key(0, 0)]), [],
@@ -198,32 +200,143 @@ final class OfficeTileStoreTests: XCTestCase {
 
         store.invalidate(docId: "d1", keys: [key(0, 0)])
 
+        XCTAssertEqual(store.keysNeedingRequest(docId: "d1", candidates: [key(0, 0)]), [],
+                       "STILL blocked immediately after invalidate — a second, ambiguous request must "
+                       + "not go out before the one already-outstanding reply resolves")
+        XCTAssertEqual(store.inFlightCountForTesting, 1, "deliberately NOT cleared yet")
+        XCTAssertEqual(store.invalidatedWhileInFlightCountForTesting, 1)
+
+        // The one outstanding reply finally resolves (as a rejection — see the sibling test below
+        // for that half of the contract). ONLY NOW does the key become askable again.
+        store.ingest(docId: "d1", key: key(0, 0), generation: 0, pixels: pixels(9))
+
         XCTAssertEqual(store.keysNeedingRequest(docId: "d1", candidates: [key(0, 0)]), [key(0, 0)],
-                       "an invalidated key must become askable again, not stay in flight forever")
+                       "the one-shot marker's resolution is what unblocks re-asking, not invalidate itself")
         XCTAssertEqual(store.inFlightCountForTesting, 0)
+        XCTAssertEqual(store.invalidatedWhileInFlightCountForTesting, 0, "one-shot: consumed by the resolution")
     }
 
-    /// The disclosed residual the store's header names: the STALE reply itself, already in flight
-    /// before the invalidation, can still land and still paint — ONE frame, immediately correctable
-    /// (the previous test proves a fresh ask follows). This test pins that the store does not go
-    /// further than that — it does not (today) refuse the late arrival outright, which would require
-    /// the per-key ledger the header explains was deliberately not built yet.
-    func testALateArrivalForAnInvalidatedKeyIsStillAcceptedThisIsTheDisclosedResidual() {
+    /// Office Stage B Task 4 — the residual `testALateArrivalForAnInvalidatedKeyIsStillAcceptedThis
+    /// IsTheDisclosedResidual` used to pin (a stale, pre-invalidation reply still landing and still
+    /// painting) is now CLOSED: the one-shot `invalidatedWhileInFlight` marker rejects it outright.
+    func testALateArrivalForAnInvalidatedKeyIsNowRejectedNotCached() {
         let store = OfficeTileStore()
         store.markRequested(docId: "d1", keys: [key(0, 0)])
         store.invalidate(docId: "d1", keys: [key(0, 0)])
 
         let accepted = store.ingest(docId: "d1", key: key(0, 0), generation: 0, pixels: pixels(9))
 
-        XCTAssertTrue(accepted, "the disclosed residual: a reply already in flight when the "
-                      + "invalidation fired still lands — see OfficeTileStore's own header")
-        XCTAssertNotNil(store.tile(docId: "d1", key: key(0, 0)))
-        // T8 fix-round review I1: the DEFAULT ordering (late reply lands before any viewport pass
-        // re-requests the key — see the header's corrected claim) leaves the key excluded here, not
-        // askable — the stale frame the assertions above just proved landed is not "superseded by the
-        // next pass," it PERSISTS on a static viewport. This is the documented reality, not a gap.
-        XCTAssertEqual(store.keysNeedingRequest(docId: "d1", candidates: [key(0, 0)]), [],
-                       "the late-cached reply now reads as fresh, not stale — nothing re-asks for it")
+        XCTAssertFalse(accepted, "a reply already in flight when the invalidation fired is now known-stale")
+        XCTAssertNil(store.tile(docId: "d1", key: key(0, 0)), "the stale pixels must never be cached")
+    }
+
+    /// The other half of "one-shot": the rejection above must not poison the key permanently — a
+    /// SECOND, genuinely fresh request-and-reply cycle for the same key (the one the previous test's
+    /// sibling proves becomes askable again) is accepted completely normally.
+    func testAfterTheOneShotRejectionASubsequentFreshArrivalForTheSameKeyIsAcceptedNormally() {
+        let store = OfficeTileStore()
+        store.markRequested(docId: "d1", keys: [key(0, 0)])
+        store.invalidate(docId: "d1", keys: [key(0, 0)])
+        XCTAssertFalse(store.ingest(docId: "d1", key: key(0, 0), generation: 0, pixels: pixels(9)),
+                       "setup: the stale reply is rejected, exactly like the sibling test above")
+
+        // A genuinely fresh ask, now that the key reads as askable again.
+        store.markRequested(docId: "d1", keys: [key(0, 0)])
+        let acceptedSecondTime = store.ingest(docId: "d1", key: key(0, 0), generation: 1, pixels: pixels(42))
+
+        XCTAssertTrue(acceptedSecondTime, "the one-shot marker must not still be poisoning this key")
+        XCTAssertEqual(store.tile(docId: "d1", key: key(0, 0))?.pixels, pixels(42))
+        XCTAssertEqual(store.invalidatedWhileInFlightCountForTesting, 0)
+    }
+
+    /// Office Stage B Task 4 — `markFailed` must consume the one-shot marker exactly like `ingest`'s
+    /// rejection path does: a request that resolves via failure (`.tileFailed`) is still A
+    /// resolution, and must unblock the key the same way a resolved-but-rejected `.tile` does.
+    func testMarkFailedAlsoConsumesTheOneShotMarkerAndUnblocksTheKey() {
+        let store = OfficeTileStore()
+        store.markRequested(docId: "d1", keys: [key(0, 0)])
+        store.invalidate(docId: "d1", keys: [key(0, 0)])
+        XCTAssertEqual(store.invalidatedWhileInFlightCountForTesting, 1, "setup")
+
+        store.markFailed(docId: "d1", key: key(0, 0))
+
+        XCTAssertEqual(store.invalidatedWhileInFlightCountForTesting, 0)
+        XCTAssertEqual(store.keysNeedingRequest(docId: "d1", candidates: [key(0, 0)]), [key(0, 0)])
+    }
+
+    /// Fix round 1, F1 (CRITICAL) — the marker-consumption rejection branch used to clear `inFlight`
+    /// (making the key askable again) WITHOUT ever signaling `tilesArrived` — so nothing downstream
+    /// (`OfficeTileCanvasView.handleTilesArrived` -> `OfficeRuntime.refetchInvalidatedTiles`) ever
+    /// learned the key was worth re-asking for; a static viewport (typing) would show a blank caret
+    /// tile forever. This is the live proof at the store's own public surface: the stale-reply
+    /// rejection itself is what unblocks AND signals, in the same call, which is the fix.
+    func testIngestsMarkerConsumptionRejectionSignalsTilesArrivedSoTheKeyGetsReAsked() async {
+        let store = OfficeTileStore()
+        store.markRequested(docId: "d1", keys: [key(0, 0)])
+        store.invalidate(docId: "d1", keys: [key(0, 0)]) // marks invalidatedWhileInFlight
+
+        var received: [(docId: String, keys: Set<TileKey>)] = []
+        store.tilesArrived.sink { received.append($0) }.store(in: &cancellables)
+
+        let accepted = store.ingest(docId: "d1", key: key(0, 0), generation: 0, pixels: pixels(9))
+        XCTAssertFalse(accepted, "setup: the stale reply is still rejected exactly as before this fix")
+
+        let settled = await waitUntil { !received.isEmpty }
+        XCTAssertTrue(settled, "the rejection itself must signal -- F1 found it silently didn't")
+        XCTAssertEqual(received[0].docId, "d1")
+        XCTAssertEqual(received[0].keys, [key(0, 0)])
+        XCTAssertEqual(store.keysNeedingRequest(docId: "d1", candidates: [key(0, 0)]), [key(0, 0)],
+                       "and the key really is askable again by the time the signal fires")
+    }
+
+    /// Fix round 1, F1 — `markFailed` must ALSO signal when it consumes a marker (a failed
+    /// resolution is still a resolution, treated identically to `ingest`'s rejection branch for
+    /// every OTHER purpose here — consuming the marker, clearing `inFlight`).
+    func testMarkFailedWithAConsumedMarkerSignalsTilesArrived() async {
+        let store = OfficeTileStore()
+        store.markRequested(docId: "d1", keys: [key(0, 0)])
+        store.invalidate(docId: "d1", keys: [key(0, 0)])
+
+        var received: [(docId: String, keys: Set<TileKey>)] = []
+        store.tilesArrived.sink { received.append($0) }.store(in: &cancellables)
+
+        store.markFailed(docId: "d1", key: key(0, 0))
+
+        let settled = await waitUntil { !received.isEmpty }
+        XCTAssertTrue(settled)
+        XCTAssertEqual(received[0].keys, [key(0, 0)])
+    }
+
+    /// Fix round 1, F1 — the storm guard the reviewer explicitly named: an ORDINARY `markFailed`
+    /// (no invalidation racing it — a plain bad key, a transient LOK error) must NOT signal.
+    /// Signaling unconditionally here would mean every ordinary failure re-triggers a re-ask, which
+    /// re-fails, which re-signals, forever, for a key that has nothing to do with an invalidation at
+    /// all. A negative proof — a bounded wait for "nothing arrived," not `waitUntil` for something.
+    func testMarkFailedWithoutAConsumedMarkerDoesNotSignalTheStormGuard() async {
+        let store = OfficeTileStore()
+        store.markRequested(docId: "d1", keys: [key(0, 0)]) // no invalidate -- nothing to consume
+
+        var received: [(docId: String, keys: Set<TileKey>)] = []
+        store.tilesArrived.sink { received.append($0) }.store(in: &cancellables)
+
+        store.markFailed(docId: "d1", key: key(0, 0))
+
+        try? await Task.sleep(nanoseconds: 50_000_000) // give a wrong signal a generous beat to arrive
+        XCTAssertTrue(received.isEmpty, "an ordinary failure with no marker consumed must not signal — "
+                      + "the reviewer's own storm-guard requirement")
+    }
+
+    /// Office Stage B Task 4 — invalidating a key that was NEVER in flight (nothing outstanding to
+    /// distrust) must not mark it at all; this is the ordinary "evict a cached, settled tile" path
+    /// every earlier task's own live-invalidation reasoning already assumed.
+    func testInvalidatingAKeyThatWasNotInFlightNeverMarksItOneShot() {
+        let store = OfficeTileStore()
+        store.ingest(docId: "d1", key: key(0, 0), generation: 0, pixels: pixels(1))
+
+        store.invalidate(docId: "d1", keys: [key(0, 0)])
+
+        XCTAssertEqual(store.invalidatedWhileInFlightCountForTesting, 0)
+        XCTAssertNil(store.tile(docId: "d1", key: key(0, 0)), "still evicted, unrelated to the one-shot set")
     }
 
     /// office-plumbing Task 8 (F5, the reload story): the OTHER half of the store header's

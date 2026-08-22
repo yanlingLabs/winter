@@ -363,21 +363,40 @@ extension OfficeTwipsRect {
     /// intersects nothing, including an identical zero-size rect at the same origin — an empty
     /// rectangle covers no area to overlap.
     ///
-    /// **Disclosed edge case (fix round 1), folded into Stage B's own live-invalidation
-    /// verification criteria rather than resolved here**: this "zero area intersects nothing"
-    /// reading is about an individual DEGENERATE rect inside a non-empty `rectsTwips` array —
-    /// distinct from `TileCache.invalidate`'s own "empty ARRAY means bump everything" special case
-    /// (LOK's `"EMPTY"` sentinel, handled before any `intersects` call is ever made). Whether real
-    /// LOK can ever emit a non-empty invalidation payload containing a genuinely zero-area rect
-    /// that was still MEANT to invalidate something (as opposed to a legitimately no-op rect) is
-    /// unverified — no real `INVALIDATE_TILES` firing has been observed at all yet (Debt #1,
-    /// task-4-report.md). If Stage B's first live edit-triggered invalidation ever surfaces one,
-    /// re-examine this reading against what LOK actually sends before assuming today's "intersects
-    /// nothing" is the semantically correct call — it currently fails CLOSED (bumps nothing extra),
-    /// not open, which is the safer of the two wrong answers if it is ever wrong at all.
+    /// **Office Stage B Task 4, criterion 5 — DECIDED, not merely disclosed.** The prior version of
+    /// this comment left the zero-area case as an open question pending real invalidation data;
+    /// Task 4 is the first to actually fire a real, edit-triggered `INVALIDATE_TILES` (the six
+    /// criteria live tests), and the reasoning was always sufficient on its own regardless of what
+    /// real LOK happens to send: a zero-area rect covers no pixels, so "intersects nothing" is the
+    /// semantically CORRECT reading, not merely a safe default fallen back to for lack of data. This
+    /// fails CLOSED (bumps nothing extra) — `TileCacheTests` pins this explicitly, distinct from
+    /// `TileCache.invalidate`'s own "empty ARRAY means bump everything" special case (LOK's
+    /// `"EMPTY"` sentinel, handled before any `intersects` call is ever made — a degenerate rect
+    /// INSIDE a non-empty array is a different situation entirely, and this is the one this method
+    /// itself governs).
+    ///
+    /// **Office Stage B Task 4, criterion 6 — checked arithmetic (N5, T3-whole-branch review:
+    /// "intersects unchecked-add on the callback rect path").** `other` is now reachable with a
+    /// REAL callback-derived rect for the first time (a genuine edit's `LOK_CALLBACK_INVALIDATE_TILES`
+    /// payload, parsed by `OfficeDocumentEvent.parseInvalidateTiles` with no magnitude bound of its
+    /// own) — the bare `other.x + other.width`/`other.y + other.height` additions below used to be
+    /// unchecked `Int64` arithmetic, the exact overflow shape `TileMath`'s OTHER functions
+    /// (`indexRange`, `tileBoundsTwips`, ...) were already hardened against in Stage A's own fix
+    /// round, for the identical reason: a `SIGTRAP`-and-crash-every-open-document class, not merely
+    /// a wrong answer. `self`'s own bounds (always `TileMath.tileBoundsTwips`-derived, already
+    /// sane-bounded) never need this, but `other` is checked symmetrically anyway — this function
+    /// has no way to know which side a future caller passes a hostile value as, and a total
+    /// function should not depend on getting that right. Overflow on EITHER side answers `false`
+    /// (fails CLOSED, mirroring the zero-area decision immediately above) — "this rect's true extent
+    /// cannot be represented, so it cannot be proven to intersect anything" is the same
+    /// never-trap, never-guess posture every other checked operation in this file already takes.
     public func intersects(_ other: OfficeTwipsRect) -> Bool {
         guard width > 0, height > 0, other.width > 0, other.height > 0 else { return false }
-        return x < other.x + other.width && other.x < x + width
-            && y < other.y + other.height && other.y < y + height
+        let (selfMaxX, selfXOverflowed) = x.addingReportingOverflow(width)
+        let (otherMaxX, otherXOverflowed) = other.x.addingReportingOverflow(other.width)
+        let (selfMaxY, selfYOverflowed) = y.addingReportingOverflow(height)
+        let (otherMaxY, otherYOverflowed) = other.y.addingReportingOverflow(other.height)
+        guard !selfXOverflowed, !otherXOverflowed, !selfYOverflowed, !otherYOverflowed else { return false }
+        return x < otherMaxX && other.x < selfMaxX && y < otherMaxY && other.y < selfMaxY
     }
 }

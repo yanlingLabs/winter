@@ -70,6 +70,114 @@ public protocol OfficeDocumentBridge: AnyObject {
     /// returns `[]` — never throws (there is no request here whose failure needs reporting; an
     /// invalidation for a document nobody has ever asked to paint has nothing to bump).
     func applyTileInvalidation(docId: String, rectsTwips: [OfficeTwipsRect], part: Int) -> [TileKey]
+
+    /// Office Stage B Task 2 — renders `docId`'s current state to a fresh file UNDER THIS HELPER'S
+    /// OWN `--state-path` (never the real document path — the write fence only ever allows
+    /// `--state-path`; see `OfficeWireFrame.saved`'s own header for the app-places-it split this
+    /// exists to serve), in the document's own format. `seq` is the wire request's own seq, reused
+    /// as the destination filename's disambiguator. Called from a CONNECTION thread, never from
+    /// inside a LOK callback — `LOKBridge`'s implementation marshals onto its dedicated thread, same
+    /// as `open`/`close`/`paintTile`. Throws on any failure (an unopened `docId`, an unsupported
+    /// format, a genuine `saveAs` failure) — the helper always survives, exactly like a failed
+    /// `open`; `OfficeHelperServer` translates this into a `saveFailed` reply.
+    ///
+    /// **Fix round 4 (NEW-2) — `part` added**: the part the USER is on, which the real
+    /// (`LOKBridge`) conformance asserts onto LOK immediately before writing, so ordinary paint
+    /// traffic cannot decide which part the saved view state records. See `OfficeWireFrame.save`'s
+    /// own header for why a save needs this even though painting already carries a part of its own.
+    func saveAs(docId: String, seq: UInt64, part: Int) throws -> String
+
+    /// Office Stage B Task 7 — the autosave sidecar write: renders `docId`'s CURRENT (possibly
+    /// still-dirty) state to `<state-path>/autosave/<docId>.<ext>`, called on
+    /// `OfficeAutosaveScheduler`'s own timer queue rather than from a connection thread or a LOK
+    /// callback — `LOKBridge`'s implementation marshals onto its dedicated thread, same as
+    /// `saveAs`/`open`/`close`/`paintTile`. Returns the extension actually written (native for an
+    /// already-ODF document, the ODF sibling for an OOXML one) and whether that is a fallback away
+    /// from the document's own real format — `OfficeHelperServer` needs both to push
+    /// `.autosaved(ext:isODFFallback:)`. Throws on any failure exactly like `saveAs` — the helper
+    /// always survives; there is no reply frame here to fail, so a throw here just means "try again
+    /// next interval," logged, not surfaced to the app at all.
+    ///
+    /// **Deliberately NOT `saveAs` with a flag** — the real (`LOKBridge`) conformance never
+    /// dispatches the `.uno:Save` follow-up `saveAs` itself relies on to clear `ModifiedStatus` (see
+    /// that conformance's own header for why an autosave that cleared the dirty flag would cancel
+    /// its own timer after one fire). `FakeOfficeDocumentBridge`'s conformance is a no-op stub past
+    /// the existence check, same reasoning as its `saveAs` stub: wire-level dispatch is what the
+    /// fixture-backed tests exercise, never real content or real format selection.
+    ///
+    /// **No `part` parameter, unlike `saveAs`** — an autosave fire has no wire request to have
+    /// carried one at all (see `LOKBridge.OpenDocument.lastKnownPart`'s own header for how the real
+    /// conformance answers "which part" without one).
+    ///
+    /// **Fix round 1 (review I-1) — `isStillArmed` and the `Optional` return.** A bare `saveAs`
+    /// (this method's whole point) never clears `ModifiedStatus`, so the ONLY way this document's
+    /// own scheduler timer ever disarms is a REAL save's `.uno:Save` follow-up round-tripping
+    /// `.modifiedChanged(false)` back through the wire — a later event than that same real save's
+    /// own `placeAtomically`/`.clearAutosave` on the app side. A fire that started (the timer
+    /// callback ran, `performAutosaveFire` began) before that round-trip lands, but whose call into
+    /// this method doesn't actually reach the dedicated thread until after it does, would otherwise
+    /// write a sidecar with a newer mtime than the just-saved real file — a spurious "Recovered
+    /// unsaved changes" banner on the next open (no data lost, but one click from restaging an
+    /// unsaveable tab on an already-OOXML-broken document). `isStillArmed` is called ON the
+    /// dedicated thread, as the very first action, by both conformances below — re-checking at
+    /// EXECUTION time, not at the moment `performAutosaveFire` was invoked, is what actually closes
+    /// this window (a check made before marshaling onto a possibly-busy dedicated thread would not:
+    /// arbitrary time can still pass between that check and this method's own real work). Returns
+    /// `nil` — not a throw — when the re-check fails: this is not a failure, there is nothing wrong,
+    /// there is simply nothing left to do. `OfficeHelperServer.performAutosaveFire` logs the
+    /// distinction and does not push `.autosaved` for a `nil` result.
+    func saveAsSidecar(docId: String, isStillArmed: @escaping () -> Bool) throws -> (ext: String, isODFFallback: Bool)?
+
+    /// Office Stage B Task 4 — LOK's `postKeyEvent`, unchanged parameter shape. Throws only on a
+    /// `docId` this bridge has no handle for — `postKeyEvent` itself is `void` on LOK's own side
+    /// (fire-and-forget, no synchronous success/failure to report — the same posture the now-
+    /// removed DEBUG-only `debugEdit` door had, replaced by this real verb). `FakeOfficeDocumentBridge`'s
+    /// conformance is a no-op past the existence check — same reasoning as its `saveAs` stub:
+    /// wire-level dispatch is what the fixture-backed tests exercise, never real content.
+    ///
+    /// **Fix round 1, F2 — `part` added.** The real (`LOKBridge`) conformance turns this into a
+    /// `setPart` call immediately before `postKeyEvent`, on the SAME dedicated-thread job — see
+    /// that conformance's own header for why LOK's C API forces this (no part-scoped input call
+    /// exists, unlike `paintPartTile`).
+    func postKey(docId: String, part: Int, type: OfficeKeyEventType, charCode: Int, keyCode: Int) throws
+    /// Office Stage B Task 4 — LOK's `postMouseEvent`, same posture as `postKey` above.
+    func postMouse(docId: String, part: Int, type: OfficeMouseEventType, xTwips: Int64, yTwips: Int64,
+                   count: Int, buttons: Int, modifiers: Int) throws
+
+    /// Office Stage B Task 5 — LOK's `postWindowExtTextInputEvent`, the IME marked-text/commit door.
+    /// Same fire-and-forget, throws-only-on-unopened-docId posture as `postKey`/`postMouse` above.
+    /// `FakeOfficeDocumentBridge`'s conformance is an existence-checked no-op, identical reasoning
+    /// to its `postKey`/`postMouse` stubs: wire-level dispatch is what the fixture-backed tests
+    /// exercise, never real composition. See `OfficeWireFrame.extTextInputEvent`'s own header for
+    /// what `type`/`text` mean, and `LOKBridge.postExtTextInputOnDedicatedThread`'s own header for
+    /// the real conformance's `setView`/`setPart` prefix.
+    func postExtTextInput(docId: String, part: Int, type: OfficeExtTextInputType, text: String) throws
+
+    // MARK: - Office Stage B Task 6: clipboard, undo/redo, the second ("agent") view
+
+    /// Reads the current text selection — `""` for LOK's own `nullptr` "no selection" answer,
+    /// never a distinct case. Throws only on a `docId` this bridge has no handle for, matching
+    /// `postKey`/`postMouse`'s own posture.
+    func clipboardCopy(docId: String, part: Int) throws -> String
+    /// Same read as `clipboardCopy`, but ALSO deletes the selection (`.uno:Cut`) — the text
+    /// returned is what was selected just BEFORE the cut.
+    func clipboardCut(docId: String, part: Int) throws -> String
+    /// Writes `text` at the current caret via LOK's own `paste()`. Throws on a `docId` this bridge
+    /// has no handle for, OR when `paste()` itself reports failure (`SaveError.pasteFailed`) — the
+    /// one clipboard door LOK gives a real synchronous success/failure answer for.
+    func clipboardPaste(docId: String, part: Int, text: String) throws
+    /// `.uno:Undo` against the document's own primary view. Fire-and-forget on LOK's own side —
+    /// throws only on a `docId` this bridge has no handle for.
+    func undo(docId: String) throws
+    /// `.uno:Redo`, same posture as `undo` above.
+    func redo(docId: String) throws
+    /// Mints a second ("agent") LOK view for `docId`, returning its view id — `createView()`'s own
+    /// return value, never re-derived. Throws `SaveError.agentViewAlreadyExists` if this docId
+    /// already has one (a deliberate refusal, not a silent "return the existing id").
+    func createAgentView(docId: String) throws -> Int32
+    /// Posts a key event through the agent view specifically. Throws `SaveError.noAgentView` if
+    /// `createAgentView` was never called for this docId.
+    func agentKeyEvent(docId: String, part: Int, type: OfficeKeyEventType, charCode: Int, keyCode: Int) throws
 }
 
 /// The result of a successful `OfficeDocumentBridge.paintTile` call — helper-internal (never
@@ -109,14 +217,152 @@ public final class FakeOfficeDocumentBridge: OfficeDocumentBridge {
     public var onEvent: ((String, OfficeDocumentEvent) -> Void)?
     private let lock = NSLock()
     private var caches: [String: TileCache] = [:]
+    /// Office Stage B Task 2 — where this fake's own `saveAs` writes its placeholder output.
+    /// Defaults to a throwaway temp directory so every pre-Task-2 caller of the parameterless
+    /// `init()` (none exist outside this file today, but the default keeps the signature additive)
+    /// keeps working; `Tests/OfficeHelperFixtureSources/main.swift` passes the fixture's own real
+    /// `--state-path` so its `saves/` subdirectory lands in the SAME place the real helper's would.
+    private let statePath: URL
 
-    public init() {}
+    public init(statePath: URL = FileManager.default.temporaryDirectory) {
+        self.statePath = statePath
+    }
     public func open(docId: String, path: String) throws -> OfficeDocumentMetadata {
         lock.lock(); caches[docId] = TileCache(capacity: 32); lock.unlock()
         return OfficeDocumentMetadata(type: .other, parts: 1, sizeTwips: OfficeDocumentSize(widthTwips: 0, heightTwips: 0))
     }
     public func close(docId: String) {
         lock.lock(); caches.removeValue(forKey: docId); lock.unlock()
+    }
+
+    /// Office Stage B Task 2 — a real (if content-free) `saveAs`: proves the WIRE-LEVEL dispatch
+    /// (docId-not-open, seq-in-filename, `saved`/`saveFailed`) end to end, over a real socket,
+    /// without needing a LOK boot — only pixel/content CORRECTNESS needs the vendor-gated live
+    /// tests against `LOKBridge`, the same split `paintTile` already established for tiles.
+    public func saveAs(docId: String, seq: UInt64, part: Int) throws -> String {
+        lock.lock()
+        let isOpen = caches[docId] != nil
+        lock.unlock()
+        guard isOpen else {
+            throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)")
+        }
+        let savesDirectory = statePath.appendingPathComponent("saves", isDirectory: true)
+        try FileManager.default.createDirectory(at: savesDirectory, withIntermediateDirectories: true)
+        let destination = savesDirectory.appendingPathComponent("\(docId)-\(seq).fake")
+        try Data("fake saveAs output for \(docId)".utf8).write(to: destination)
+        return destination.path
+    }
+
+    /// Office Stage B Task 7 — same "real wire dispatch, fake content" split as `saveAs` above:
+    /// proves `OfficeHelperServer`'s own scheduler-fires-bridge-pushes-event plumbing end to end,
+    /// over a real socket, without any real LOK format/ODF-fallback logic to fake convincingly —
+    /// that correctness is `LOKBridge`'s own live-tested job (`OfficeRuntimeLiveTests`' crash
+    /// drill). Always reports `ext: "fake", isODFFallback: false` — nothing here needs to vary it.
+    ///
+    /// **Fix round 1 (review I-1) — `isStillArmed` checked FIRST, mirroring `LOKBridge`'s own
+    /// conformance exactly** (see that method's own header, and the protocol requirement's, for the
+    /// race this closes). This fake has no real dedicated thread to queue behind, so it cannot
+    /// reproduce the RACE itself — that is `OfficeAutosaveSchedulerTests
+    /// .testIsArmedReflectsADisarmThatHappensAfterAClosureCapturingItWasBuiltButBeforeThatClosureIsCalled`'s
+    /// own job, the one piece of this fix reachable in-process at all (`FakeOfficeDocumentBridge` is
+    /// exercised only through a spawned subprocess — see `project.yml`'s `NormaAppTests`
+    /// `excludes:` comment). What this conformance DOES guarantee: any caller that hands it an
+    /// already-false `isStillArmed` gets `nil` back and no file written, keeping this fake an
+    /// honest stand-in for the real contract.
+    public func saveAsSidecar(docId: String, isStillArmed: @escaping () -> Bool) throws -> (ext: String, isODFFallback: Bool)? {
+        guard isStillArmed() else { return nil }
+        lock.lock()
+        let isOpen = caches[docId] != nil
+        lock.unlock()
+        guard isOpen else {
+            throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)")
+        }
+        let autosaveDirectory = statePath.appendingPathComponent("autosave", isDirectory: true)
+        try FileManager.default.createDirectory(at: autosaveDirectory, withIntermediateDirectories: true)
+        let destination = autosaveDirectory.appendingPathComponent("\(docId).fake")
+        try Data("fake autosave sidecar for \(docId)".utf8).write(to: destination)
+        return (ext: "fake", isODFFallback: false)
+    }
+
+    /// Office Stage B Task 4 — existence-checked no-op, same reasoning as `saveAs` above: this fake
+    /// has no real LOK document to post an event to, only wire-level dispatch (docId-not-open, the
+    /// `keyEventOk` reply shape) is exercised against it.
+    public func postKey(docId: String, part: Int, type: OfficeKeyEventType, charCode: Int, keyCode: Int) throws {
+        lock.lock()
+        let isOpen = caches[docId] != nil
+        lock.unlock()
+        guard isOpen else {
+            throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)")
+        }
+    }
+    public func postMouse(docId: String, part: Int, type: OfficeMouseEventType, xTwips: Int64, yTwips: Int64,
+                          count: Int, buttons: Int, modifiers: Int) throws {
+        lock.lock()
+        let isOpen = caches[docId] != nil
+        lock.unlock()
+        guard isOpen else {
+            throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)")
+        }
+    }
+    public func postExtTextInput(docId: String, part: Int, type: OfficeExtTextInputType, text: String) throws {
+        lock.lock()
+        let isOpen = caches[docId] != nil
+        lock.unlock()
+        guard isOpen else {
+            throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)")
+        }
+    }
+
+    /// Office Stage B Task 6 — existence-checked no-ops, same reasoning as `postKey`/`postMouse`
+    /// above: this fake has no real LOK document, only wire-level dispatch is exercised against
+    /// it. `clipboardCopy`/`clipboardCut` answer a fixed, deterministic (never real-selection)
+    /// string — enough for a wire-level round-trip test to assert on, never content correctness
+    /// (that is `LOKBridge`'s own live-tested job, the same split every other verb here already
+    /// has).
+    private var agentViewIds: [String: Int32] = [:]
+
+    public func clipboardCopy(docId: String, part: Int) throws -> String {
+        lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
+        guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
+        return "fake selection for \(docId)"
+    }
+    public func clipboardCut(docId: String, part: Int) throws -> String {
+        lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
+        guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
+        return "fake selection for \(docId)"
+    }
+    public func clipboardPaste(docId: String, part: Int, text: String) throws {
+        lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
+        guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
+    }
+    public func undo(docId: String) throws {
+        lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
+        guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
+    }
+    public func redo(docId: String) throws {
+        lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
+        guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
+    }
+    public func createAgentView(docId: String) throws -> Int32 {
+        lock.lock()
+        defer { lock.unlock() }
+        guard caches[docId] != nil else {
+            throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)")
+        }
+        guard agentViewIds[docId] == nil else {
+            throw OfficeHelperServerError.posix("fake bridge: docId already has an agent view: \(docId)")
+        }
+        let viewId = Int32(agentViewIds.count + 1000) // arbitrary, distinct from a real primary view's id
+        agentViewIds[docId] = viewId
+        return viewId
+    }
+    public func agentKeyEvent(docId: String, part: Int, type: OfficeKeyEventType, charCode: Int, keyCode: Int) throws {
+        lock.lock()
+        let hasAgentView = agentViewIds[docId] != nil
+        lock.unlock()
+        guard hasAgentView else {
+            throw OfficeHelperServerError.posix("fake bridge: docId has no agent view: \(docId)")
+        }
     }
 
     /// A small, deterministic, key-dependent pixel pattern (never blank, never identical across
@@ -285,10 +531,24 @@ public final class OfficeHelperServer {
     private var connectionCount = 0
     private var idleTimer: DispatchSourceTimer?
     private var nextConnectionId = 0
+    /// Office Stage B Task 7 — owns the per-docId "autosave while dirty" timer; armed/disarmed by
+    /// `routeDocumentEvent`'s own `.modifiedChanged` handling and by both close paths below. Never
+    /// touched under `stateQueue` — its own internal state is independent of `docOwner`/connection
+    /// bookkeeping, so there is no ordering hazard to reason about the way the `documentBridge`
+    /// invariant above exists for.
+    private let autosaveScheduler: OfficeAutosaveScheduler
 
     public init(socketPath: String, statePath: String, expectedToken: String,
                 idleExitSeconds: Double = 120, hooks: Hooks = Hooks(),
                 documentBridge: OfficeDocumentBridge,
+                /// Office Stage B Task 7 — the brief's own 60s, overridable so the live crash drill
+                /// does not spend a real minute per sample. Mirrors `main.swift`'s own
+                /// `idle-exit-seconds` CLI-arg-override idiom exactly (never an environment
+                /// variable) — see `OfficeHelperSupervisor.Configuration.autosaveIntervalSeconds`'s
+                /// own header for the app-side half of that mirror. Production callers
+                /// (`NormaOfficeHelper`'s real `main.swift`, absent an explicit override) never pass
+                /// anything but the default.
+                autosaveIntervalSeconds: TimeInterval = 60,
                 log: @escaping (String) -> Void = { message in
                     FileHandle.standardError.write(Data((message + "\n").utf8))
                 }) {
@@ -299,8 +559,51 @@ public final class OfficeHelperServer {
         self.hooks = hooks
         self.documentBridge = documentBridge
         self.log = log
+        self.autosaveScheduler = OfficeAutosaveScheduler(interval: autosaveIntervalSeconds)
         documentBridge.onEvent = { [weak self] docId, event in
             self?.routeDocumentEvent(docId: docId, event: event)
+        }
+        // `onFire` needs `self` (to reach `documentBridge`/`routeDocumentEvent`/`log`) — assigned
+        // here, as its OWN statement after every stored property (including `autosaveScheduler`
+        // itself) already has a value, which is what makes capturing `[weak self]` legal at this
+        // point — the identical reasoning `documentBridge.onEvent`'s own assignment one line up
+        // already rests on.
+        self.autosaveScheduler.onFire = { [weak self] docId in
+            self?.performAutosaveFire(docId: docId)
+        }
+    }
+
+    /// Office Stage B Task 7 — `autosaveScheduler`'s own fire callback: render the sidecar, then
+    /// push `.autosaved` so the app can write its own manifest entry. Runs on WHATEVER queue
+    /// `OfficeAutosaveScheduler.Scheduling` fires its timer on (production: `autosaveScheduler`'s
+    /// own dedicated `office-helper.autosave` queue) — never `stateQueue`, so calling
+    /// `documentBridge`/`routeDocumentEvent` here carries no reentrancy risk against the bridge-call
+    /// invariant this file states at `docOwner`'s own header.
+    ///
+    /// **Throws never propagate anywhere — logged and dropped, exactly "the helper always
+    /// survives."** There is no reply frame for an autosave to fail; a write that fails this
+    /// interval gets another chance next interval for as long as the document stays dirty.
+    ///
+    /// **Fix round 1 (review I-1) — the `isStillArmed` closure this hands `saveAsSidecar`.** Built
+    /// HERE, at fire time, but — critically — capturing `autosaveScheduler` by reference and calling
+    /// `isArmed` only when the CONFORMANCE actually invokes it (on the dedicated thread, as that
+    /// method's own header states) rather than being evaluated once right here and passed down as
+    /// an already-decided `Bool`. That distinction is the entire fix: `OfficeAutosaveScheduler
+    /// .isArmed`'s own header, and `OfficeAutosaveSchedulerTests
+    /// .testIsArmedReflectsADisarmThatHappensAfterAClosureCapturingItWasBuiltButBeforeThatClosureIsCalled`,
+    /// both spell out why a snapshot taken here would still lose the race the review describes.
+    private func performAutosaveFire(docId: String) {
+        do {
+            guard let (ext, isODFFallback) = try documentBridge.saveAsSidecar(
+                docId: docId, isStillArmed: { [autosaveScheduler] in autosaveScheduler.isArmed(docId: docId) }
+            ) else {
+                log("[OfficeHelperServer] autosave sidecar write skipped for \(docId): no longer "
+                    + "armed by the time the dedicated-thread job ran — a real save already landed")
+                return
+            }
+            routeDocumentEvent(docId: docId, event: .autosaved(ext: ext, isODFFallback: isODFFallback))
+        } catch {
+            log("[OfficeHelperServer] autosave sidecar write failed for \(docId): \(error) — retrying next interval")
         }
     }
 
@@ -322,6 +625,19 @@ public final class OfficeHelperServer {
     /// a LOK callback) — see `OfficeDocumentBridge.applyTileInvalidation`'s own header for why its
     /// implementation must never re-enter `thread.sync` here.
     private func routeDocumentEvent(docId: String, event: OfficeDocumentEvent) {
+        // Office Stage B Task 7 — the autosave timer's own arm/disarm, driven by the SAME
+        // `.modifiedChanged` firing that already feeds the app's dirty dot. Unconditional, ahead of
+        // the `docOwner` guard below (the scheduler has no concept of "who owns this docId" and
+        // never needs one — arming/disarming a timer for a docId nobody currently tracks is inert,
+        // never a leak: `markDirty` only ever starts a timer, and every close path this file has
+        // separately calls `autosaveScheduler.remove` regardless of whether this arm ever ran).
+        if case .modifiedChanged(let modified) = event {
+            if modified {
+                autosaveScheduler.markDirty(docId: docId)
+            } else {
+                autosaveScheduler.markClean(docId: docId)
+            }
+        }
         guard let entry = stateQueue.sync(execute: { docOwner[docId] }) else { return }
         pushFrame(.documentEvent(seq: entry.opener.pushSeqAllocator.nextSeq(), docId: docId, event: event),
                   to: entry.opener)
@@ -372,6 +688,54 @@ public final class OfficeHelperServer {
     /// non-blocking write or a bounded per-connection push queue (decouple "LOK produced this
     /// frame" from "the socket accepted these bytes") — deliberately NOT designed here; carried in
     /// the fix-round ledger (task-4-report.md) for a future round.
+    ///
+    /// **Office Stage B Task 4 — measured, and this is a DIFFERENT hazard from the one this task's
+    /// own transport re-eval found.** This one needs a SLOW/STALLED CLIENT to manifest — a healthy,
+    /// fast reader never blocks a socket write for long. Task 4's own measurement (a 6-tile
+    /// cold-paint batch queued immediately ahead of one keystroke, both from a perfectly healthy,
+    /// synchronous test client) found a real, ~212ms stall with NO slow client anywhere in the
+    /// picture.
+    ///
+    /// **Fix round 1, F4 (IMPORTANT) — the CAUSE Task 4 originally wrote here was wrong; the
+    /// numbers, the decision, and "visible-latency, never a freeze" were all correct, only the
+    /// mechanism was misattributed.** The original text blamed "ordinary `LOKDedicatedThread` FIFO
+    /// contention... regardless of which app-side queue sent it," implying the keyEvent's own
+    /// `postKey` call was promptly SUBMITTED to the LOK thread and simply waited its turn behind 6
+    /// already-queued paint jobs. That is not what happens in this measured scenario. **The real
+    /// mechanism is READER-THREAD serialization**: `handleConnection`'s read loop
+    /// (`OfficeHelperServer.swift`, the `while let newlineIndex = buffer.firstIndex(of: 0x0A)` loop)
+    /// calls `handlePostAuthLine` INLINE, synchronously, on that one connection's own dedicated
+    /// `Thread` (`acceptLoop`'s `connectionThread`) — never dispatched elsewhere. `.tileRequest`'s
+    /// case then runs `for key in keys { documentBridge.paintTile(...) }` synchronously, IN THAT
+    /// SAME CALL, each iteration itself blocking on `thread.sync` until that one tile's paint
+    /// finishes on the LOK thread. So when a `keyEvent` line sits right behind a `tileRequest` line
+    /// from the SAME connection (this task's own measured scenario — one synchronous test client
+    /// sends both), the reader thread cannot even ATTEMPT to decode and dispatch that `keyEvent`
+    /// line — let alone call `documentBridge.postKey`, let alone have that call reach the LOK
+    /// thread's own queue — until `handlePostAuthLine`'s entire `.tileRequest` case returns, all 6
+    /// paints later. There was never a moment where 6 jobs sat queued in front of the keystroke's
+    /// own job on the LOK thread; the keystroke's job simply had not been SUBMITTED yet, because the
+    /// one thread that would submit it was still busy running through the prior line's own work,
+    /// one paint at a time, itself.
+    ///
+    /// **The two-connection case is different, and genuinely IS LOK-thread contention**: a `keyEvent`
+    /// arriving on a SEPARATE connection (its own reader thread) is attempted promptly — decoded and
+    /// dispatched to `documentBridge.postKey` immediately — and THAT call then legitimately queues
+    /// behind whichever paint job is currently executing on the one shared `LOKDedicatedThread`
+    /// (`thread.sync`, one job at a time, from any calling thread). That secondary hazard is real,
+    /// but it is not what Task 4's own single-connection measurement scenario exercised or
+    /// attributed its numbers to.
+    ///
+    /// This is a DIFFERENT hazard, either way, from `pushFrame`'s own write-blocking one two
+    /// paragraphs up (the bounded push queue named there would not touch reader-thread serialization
+    /// at all — it relieves RECEIVER backpressure on writes, not a reader thread's own inline paint
+    /// work) — see `task-4-report.md`'s transport section for the numbers and the full reasoning.
+    /// Decided NOT to build a fix for either hazard this round; both stay named, neither is fixed,
+    /// and they should not be conflated when a future round picks either back up. A real fix for
+    /// THIS hazard would need the reader thread to stop doing paint work inline — e.g. dispatching
+    /// `.tileRequest`'s paint loop onto a separate queue so the reader can return to decoding the
+    /// next line immediately — not any change to the LOK thread's own scheduling, which was never
+    /// actually the bottleneck here.
     private func pushFrame(_ frame: OfficeWireFrame, to writer: ConnectionWriter) {
         writer.writeLock.lock()
         writeFrameLocked(frame, writer: writer)
@@ -481,6 +845,10 @@ public final class OfficeHelperServer {
             }
             for docId in owned {
                 documentBridge.close(docId: docId)
+                // Office Stage B Task 7 — a connection dying (not just an explicit `.close` frame)
+                // must ALSO stop that docId's own autosave timer; same reasoning as the explicit
+                // close handler's identical call.
+                autosaveScheduler.remove(docId: docId)
             }
             var closeNotifications: [(subscriber: ConnectionWriter, docId: String)] = []
             stateQueue.sync {
@@ -650,6 +1018,11 @@ public final class OfficeHelperServer {
                 return
             }
             documentBridge.close(docId: docId)
+            // Office Stage B Task 7 — the autosave timer goes with the document, the ordinary-close
+            // half of `OfficeAutosaveScheduler`'s own contract; see that type's own header for why
+            // this cancels the TIMER only, never a sidecar already on disk (the app's own
+            // `.clearAutosave` owns that, once it has proof the real path itself is resolved).
+            autosaveScheduler.remove(docId: docId)
             let remainingSubscribers = stateQueue.sync { () -> [ConnectionWriter] in
                 let subscribers = docOwner[docId]?.subscribers.filter { $0 !== writer } ?? []
                 docOwner.removeValue(forKey: docId)
@@ -666,6 +1039,143 @@ public final class OfficeHelperServer {
                           to: subscriber)
             }
             writeReply(.closed(seq: seq, docId: docId), writer: writer)
+        case .frame(.save(let seq, let docId, let part)):
+            // Office Stage B Task 2 — mirrors `tileRequest`'s own "must already be open — by ANY
+            // connection" posture (not `close`'s ownership check): Stage A/B has one client at a
+            // time in practice, and there is no destructive "who may save" question the way there
+            // is for "who may destroy the handle" on `close`.
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                // Never called while holding stateQueue (the bridge-call invariant above).
+                let tempPath = try documentBridge.saveAs(docId: docId, seq: seq, part: part)
+                writeReply(.saved(seq: seq, docId: docId, tempPath: tempPath), writer: writer)
+            } catch {
+                // The helper SURVIVES a failed save — same posture as a failed open.
+                writeReply(.saveFailed(seq: seq, docId: docId, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.keyEvent(let seq, let docId, let part, let type, let charCode, let keyCode)):
+            // Office Stage B Task 4 — same existence check as `.save` above (not an ownership check
+            // — any connection touching an already-open doc may post input to it, matching
+            // `tileRequest`'s own posture, not `close`'s).
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                // Fix round 1, F2 — `part` threaded straight through; see `LOKBridge.postKey`'s own
+                // header for what it does with it (a `setPart` immediately before the real post).
+                try documentBridge.postKey(docId: docId, part: part, type: type, charCode: charCode, keyCode: keyCode)
+                writeReply(.keyEventOk(seq: seq, docId: docId), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.mouseEvent(let seq, let docId, let part, let type, let xTwips, let yTwips, let count, let buttons, let modifiers)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                try documentBridge.postMouse(docId: docId, part: part, type: type, xTwips: xTwips, yTwips: yTwips,
+                                             count: count, buttons: buttons, modifiers: modifiers)
+                writeReply(.mouseEventOk(seq: seq, docId: docId), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.extTextInputEvent(let seq, let docId, let part, let type, let text)):
+            // Office Stage B Task 5 — same existence check and same posture as `.keyEvent`/
+            // `.mouseEvent` above: any connection touching an already-open doc may post input to it.
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                try documentBridge.postExtTextInput(docId: docId, part: part, type: type, text: text)
+                writeReply(.extTextInputEventOk(seq: seq, docId: docId), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.clipboardCopy(let seq, let docId, let part)):
+            // Office Stage B Task 6 — same existence-check posture as `.keyEvent`/`.mouseEvent`
+            // above (any connection touching an already-open doc may read its selection).
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                let text = try documentBridge.clipboardCopy(docId: docId, part: part)
+                writeReply(.clipboardCopyOk(seq: seq, docId: docId, text: text), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.clipboardCut(let seq, let docId, let part)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                let text = try documentBridge.clipboardCut(docId: docId, part: part)
+                writeReply(.clipboardCutOk(seq: seq, docId: docId, text: text), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.clipboardPaste(let seq, let docId, let part, let text)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                try documentBridge.clipboardPaste(docId: docId, part: part, text: text)
+                writeReply(.clipboardPasteOk(seq: seq, docId: docId), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.undo(let seq, let docId)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                try documentBridge.undo(docId: docId)
+                writeReply(.undoOk(seq: seq, docId: docId), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.redo(let seq, let docId)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                try documentBridge.redo(docId: docId)
+                writeReply(.redoOk(seq: seq, docId: docId), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.createView(let seq, let docId)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                let viewId = try documentBridge.createAgentView(docId: docId)
+                writeReply(.agentViewReady(seq: seq, docId: docId, viewId: viewId), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.agentKeyEvent(let seq, let docId, let part, let type, let charCode, let keyCode)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                try documentBridge.agentKeyEvent(docId: docId, part: part, type: type, charCode: charCode, keyCode: keyCode)
+                writeReply(.agentKeyEventOk(seq: seq, docId: docId), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
         case .frame(.subscribeTiles(let seq, let docId, let part, let zoomPPT, let viewportTwips)):
             guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
                 writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)

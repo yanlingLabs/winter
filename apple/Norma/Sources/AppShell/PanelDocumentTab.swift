@@ -11,6 +11,13 @@ let officePartStripBottomHeight: CGFloat = 32
 let officePartStripRailWidth: CGFloat = 40
 let officePartStripItemSpacing: CGFloat = 2
 
+/// Office Stage B Task 8 — the formula bar's own row height (matches `officePartStripBottomHeight`
+/// for the same "reads as part of the same system" reasoning) and the cell-reference column's
+/// fixed leading width (wide enough for "AA100"-shaped references without the divider jumping
+/// around as the ref's own digit count changes cell to cell).
+let officeFormulaBarHeight: CGFloat = 32
+let officeFormulaBarReferenceWidth: CGFloat = 56
+
 // MARK: - Pure: the failure sentence
 
 /// Should never render — `OfficeRuntimeState.Phase.failed` is always accompanied by a
@@ -114,6 +121,60 @@ func officePartStripKind(for type: OfficeDocumentKind) -> OfficePartStripKind {
     }
 }
 
+// MARK: - Pure: the formula bar's own A1-style cell reference (Office Stage B Task 8)
+
+/// A spreadsheet column index (0-based — `OfficeCellCursor.at`'s own `column`) rendered as the
+/// bijective base-26 letters every spreadsheet UI uses for column headers: A, B, … Z, AA, AB, ….
+/// **Not ordinary base-26** — there is no digit for zero in this system (column 26 is "AA", never
+/// "A0"), which is why each place value subtracts one before dividing (the standard "bijective
+/// numeration" construction) rather than the textbook base-26 remainder/divide loop. Boundary
+/// values (single→double letters at Z/AA, double→triple at ZZ/AAA) are what
+/// `PanelDocumentTabTests` pins — a plain base-26 loop passes the single-letter cases and silently
+/// misnames every multi-letter column.
+func officeColumnLetters(_ column: Int) -> String {
+    var remaining = column + 1
+    var letters = ""
+    while remaining > 0 {
+        let digit = (remaining - 1) % 26
+        letters = String(UnicodeScalar(UInt8(65 + digit))) + letters
+        remaining = (remaining - 1) / 26
+    }
+    return letters
+}
+
+/// The formula bar's own cell reference: CELL_CURSOR's 0-based `(column, row)` rendered A1-style —
+/// both axes read as 1-based from the user's point of view (column through `officeColumnLetters`,
+/// row by a plain `+ 1`), so `(column: 0, row: 0)` — A1 — is the top-left cell.
+func officeCellReference(column: Int, row: Int) -> String {
+    "\(officeColumnLetters(column))\(row + 1)"
+}
+
+/// PURE: the formula bar's own ref-display decision, extracted from `OfficeFormulaBar.referenceText`
+/// (advisor review, this task) so it can be pinned directly, independent of SwiftUI/`@Published`
+/// timing. Blank when `part != activePart` (a stale part — mirrors
+/// `OfficeTileCanvasView.layoutOverlays`'s identical "hides every overlay whose STAMPED part
+/// disagrees" rule for the cell-cursor RECT) OR when `cellCursor` is `.empty`/`nil` (Task 5's own
+/// in-cell-edit sentinel, or nothing known yet) — see `OfficeFormulaBar`'s own header for why
+/// blank-during-edit is the deliberate choice, not an oversight.
+func officeFormulaBarReference(cellCursor: OfficeCellCursor?, part: Int?, activePart: Int) -> String {
+    guard part == activePart, case .at(_, let column, let row) = cellCursor else { return "" }
+    return officeCellReference(column: column, row: row)
+}
+
+/// PURE: the formula bar's own content-display decision, extracted alongside
+/// `officeFormulaBarReference` for the identical reason. Blank when `part != activePart` — the same
+/// stale-part rule — but, UNLIKE the ref, does NOT blank for any OTHER reason: this reads
+/// `cellFormulaText` (a SEPARATE field/part pair from `cellCursor` — `OfficeFormulaBar`'s own
+/// header), which keeps updating live through in-cell edit even while the ref itself goes quiet.
+/// `nil` (nothing known yet) and `""` (a real empty cell, this task's own live probe) both fold to
+/// `""` here — the caller (`OfficeFormulaBar.contentText`, via `officeFormulaBarEmptyPlaceholder`)
+/// owns whatever DISPLAY difference there is between them; this function's own contract is only
+/// the gating.
+func officeFormulaBarContent(text: String?, part: Int?, activePart: Int) -> String {
+    guard part == activePart else { return "" }
+    return text ?? ""
+}
+
 // MARK: - Pure: what a document-door click does
 
 /// The two things a document-door click can ask for — mirrors `PanelFileTabAction` exactly
@@ -134,6 +195,45 @@ func panelDocumentTabAction(tabs: [PanelTab], path: String, openFailures: Set<St
         return .activate(tabId: open.tabId, retryOpen: openFailures.contains(path))
     }
     return .mint(title: (path as NSString).lastPathComponent)
+}
+
+// MARK: - Office Stage B Task 2: saving
+
+/// PURE: the app's ⌘S menu item's document-tab leg — mirrors `editorSaveMenuTarget`
+/// (`PanelEditorTab.swift`) exactly, filtered to `.document` instead of `.code`. Lives here, not
+/// there, because THIS file is document-tab territory (`panelDocumentTabAction`'s own precedent one
+/// section up: the `.document`-kind filter is this file's own recurring idiom, never borrowed).
+///
+/// **Office Stage B Task 9 — the read-only-viewer gate.** A read-only format
+/// (`officeDocumentIsReadOnlyFormat` — three extensions today, by two different routes; see that
+/// predicate's own header) has no save this build can land — `nil` here disables the ⌘S menu item
+/// outright, which is BOTH of this door's two
+/// reads (`ShellSessionHost.activeDocumentTabPath`'s own doc: "once to decide whether the menu item
+/// is enabled, once when it fires"), so this one change closes the door completely, not merely
+/// grays it out cosmetically.
+func officeSaveMenuTarget(tabs: [PanelTab], activeTabId: String?) -> PanelTab? {
+    guard let activeTabId, let tab = tabs.first(where: { $0.tabId == activeTabId }) else { return nil }
+    guard tab.kind == .document, let url = tab.url, !url.isEmpty else { return nil }
+    guard !officeDocumentIsReadOnlyFormat(path: url) else { return nil }
+    return tab
+}
+
+/// PURE: does the chrome show the unsaved dot? Mirrors `editorTabIsDirty` exactly — read from the
+/// runtime's state (`documents[path].dirty`, driven purely by LOK's own `.uno:ModifiedStatus`
+/// callback, via `OfficeRuntime.handle(documentEvent:docId:)` — never inferred here). A path with no
+/// open document is not dirty; neither is a session with no runtime.
+///
+/// **Office Stage B Task 9 — read-only formats never show dirty, by construction.** Not merely
+/// cosmetic: `OfficeRuntime`'s own input-verb guards (`postKeyEvent` and its siblings) refuse to
+/// forward keystrokes/mouse-edits/paste/undo/redo for a read-only-format path in the first place,
+/// so LOK's own buffer for one of these documents never actually diverges from disk — this dot
+/// reading `false` is reporting a true fact, not hiding a real one. Were it the other way around
+/// (dot suppressed while edits still reached LOK), a user could type, watch it render, and lose it
+/// silently on close with no warning ever shown — exactly the "one click from data loss" shape this
+/// codebase's own reviews (T3, T7) have repeatedly refused to ship.
+func officeDocumentIsDirty(state: OfficeRuntimeState?, path: String?) -> Bool {
+    guard let state, let path, !officeDocumentIsReadOnlyFormat(path: path) else { return false }
+    return state.documents[path]?.dirty == true
 }
 
 // MARK: - The canvas host door
@@ -157,6 +257,12 @@ func panelDocumentTabAction(tabs: [PanelTab], path: String, openFailures: Set<St
 @MainActor
 protocol OfficeDocumentCanvasHost: AnyObject {
     func setActivePart(_ part: Int)
+    /// Office Stage B Task 8 — the formula bar's own door. The bar is DISPLAY ONLY (v1's own
+    /// scope: in-cell editing on the canvas IS the edit path — see `OfficeFormulaBar`'s own
+    /// header), so a click on it does not open an editable field; it hands keyboard focus back to
+    /// the canvas instead, the same `window?.makeFirstResponder(self)` a real click on the canvas
+    /// itself already performs (`OfficeTileCanvasView.mouseDown`).
+    func focusCanvas()
 }
 
 // MARK: - The per-tab model
@@ -309,6 +415,12 @@ final class PanelDocumentTabModel: ObservableObject {
         canvasHost?.setActivePart(part)
     }
 
+    /// The formula bar's own door — see `OfficeDocumentCanvasHost.focusCanvas`'s own header. A
+    /// no-op with no canvas mounted, mirroring `selectPart`'s identical defensive posture.
+    func focusCanvas() {
+        canvasHost?.focusCanvas()
+    }
+
     /// Resolved through the host at fire time, never through a remembered runtime — mirrors
     /// `PanelEditorTabModel.resolvedRuntime`'s own reasoning: a button pressed on a tab whose
     /// session has departed must reach nothing, not a torn-down runtime.
@@ -335,6 +447,84 @@ final class PanelDocumentTabModel: ObservableObject {
     var banner: String? {
         guard let path else { return nil }
         return runtimeState?.documentBanners[path]
+    }
+
+    /// Office Stage B Task 2 — the chrome's dirty dot, mirroring `PanelEditorTabModel.isDirty`'s own
+    /// door onto `editorTabIsDirty` exactly.
+    var isDirty: Bool { officeDocumentIsDirty(state: runtimeState, path: path) }
+
+    /// Office Stage B Task 2b — the conflict banner's own source, read directly like `banner` above
+    /// (`OfficeRuntimeState.documentConflicts`, single source). **Deliberately a SEPARATE optional
+    /// from `banner`, not folded into one enum the way `EditorTabBanner` unifies the editor's two
+    /// sources**: `documentBanners`/`documentConflicts` are two different dictionaries on the
+    /// runtime's own state (kept apart there so the protected Stage A tripwire reading
+    /// `documentBanners[path]` never has to change shape) — the VIEW layer is what decides
+    /// precedence between them (`PanelDocumentContent.body`: a conflict, when present, wins).
+    var conflict: OfficeConflictKind? {
+        guard let path else { return nil }
+        return runtimeState?.documentConflicts[path]
+    }
+
+    /// **"Reload from disk"** — discards the in-memory edits and re-stages fresh content under a new
+    /// docId, the SAME machinery a clean document's silent external-change path already uses.
+    func reloadFromDisk() {
+        guard let runtime = resolvedRuntime(), let path else { return }
+        runtime.reloadFromDisk(path)
+    }
+
+    /// **"Keep my version"** — dismisses the conflict with no other effect; the document stays
+    /// exactly as it is, still dirty, still showing its in-memory edits. The brief's own words: "the
+    /// next ⌘S overwrites."
+    func keepMyVersion() {
+        guard let runtime = resolvedRuntime(), let path else { return }
+        runtime.keepMyVersion(path)
+    }
+
+    /// **"Close"** — the dirty-deletion conflict's own second action: this document is gone from
+    /// disk and the user does not want it back, so there is nothing left to reload TO (unlike
+    /// `.changed`, which always offers Reload) — closing the tab is the only other choice.
+    ///
+    /// **Office Stage B Task 3 fix round 1 (task review, IMPORTANT-1)**: this used to call
+    /// `ShellSessionHost.closePanelTab` directly, on the (pre-Task-3-accurate, now-false) claim
+    /// that it "reuses the SAME door the ordinary tab-close control already calls." Task 3 gave the
+    /// ordinary `×` control a gate (`requestCloseTab`) that shows the dirty-close sheet before ever
+    /// reaching `closePanelTab` — but left THIS caller pointed at the ungated door underneath it.
+    /// `.deleted` conflicts are raised only on an already-dirty document (`OfficeRuntimeReducer
+    /// .externalDeleted`'s own `guard doc.dirty` — a clean deletion never reaches `documentConflicts`
+    /// at all, it goes silent-banner instead), so this button was **always** one click from silently
+    /// discarding unsaved edits — precisely the ×-sheets/banner-doesn't inconsistency the review
+    /// caught. Routes through the gate now: a dirty (always true here) `.deleted`-conflict document
+    /// raises the SAME dirty-close sheet the `×` does, Discard/Save/Cancel and all.
+    func closeTab() {
+        host?.requestCloseTab(tabId)
+    }
+
+    /// Office Stage B Task 7 — the recovery banner's own source, read directly like `banner`/
+    /// `conflict` above (`OfficeRuntimeState.documentRecoveryCandidates`, single source). A THIRD,
+    /// separate optional rather than folded into either existing dict — `documentBanners`'s own
+    /// protected-tripwire constraint (`conflict`'s own header) already rules out widening THAT one,
+    /// and `documentConflicts` is about a different fact entirely (the file moved out from under a
+    /// dirty buffer, not "there might be older content worth offering back"). The view decides
+    /// precedence (`PanelDocumentContent.body`): a conflict wins over the plain banner, which wins
+    /// over a recovery offer — the least urgent of the three, since nothing about it blocks the
+    /// canvas already showing real, current content underneath it.
+    var recoveryCandidate: OfficeRecoveryCandidate? {
+        guard let path else { return nil }
+        return runtimeState?.documentRecoveryCandidates[path]
+    }
+
+    /// **"Restore"** — replace the buffer with the sidecar's own (older) content, under a fresh
+    /// docId, dirty (the user must ⌘S to land it on the real path).
+    func restoreRecovery() {
+        guard let runtime = resolvedRuntime(), let path else { return }
+        runtime.restoreFromRecovery(path)
+    }
+
+    /// **"Discard"** — decline the offer; delete the sidecar and its manifest entry. The tab is
+    /// already showing the real file's own content, opened normally — nothing else changes.
+    func discardRecovery() {
+        guard let runtime = resolvedRuntime(), let path else { return }
+        runtime.discardRecovery(path)
     }
 
     /// Test seam: drive one refresh cycle synchronously, without a view.
@@ -429,11 +619,15 @@ func officeOpenWithLabel(forFileAt path: String?) -> String {
 
 // MARK: - The chrome row
 
-/// Path, plus the open-with escape hatch. No save button, no dirty dot: Stage A documents are
-/// view-only, so neither concept applies (`PanelEditorChrome`'s own two extras are both about an
-/// editable buffer). Reuses `editorTabDisplayPath` verbatim — despite its name, the function is
-/// generic path-shortening, and a second copy of "last two path components" would drift the moment
-/// one of them learned about `~`.
+/// Path, the dirty dot, plus the open-with escape hatch. **Office Stage B Task 2 narrows this
+/// file's own Stage-A claim**: documents are no longer purely view-only, so the dirty dot now
+/// applies — `PanelEditorChrome`'s own visual precedent, reused directly (`Theme.accent` +
+/// `panelEditorDirtyDotSize`, same as there). Still no SAVE BUTTON, deliberately: unlike the code
+/// tab, a document tab's own chrome row has no obvious second trigger the way `PanelEditorChrome`'s
+/// button is one of three (menu ⌘S, button, the page's own ⌘S) — ⌘S alone is this tab's one save
+/// door for now; a button can follow if a live gate asks for one. Reuses `editorTabDisplayPath`
+/// verbatim — despite its name, the function is generic path-shortening, and a second copy of "last
+/// two path components" would drift the moment one of them learned about `~`.
 struct PanelDocumentChrome: View {
     @ObservedObject var model: PanelDocumentTabModel
     let tab: PanelTab
@@ -457,6 +651,34 @@ struct PanelDocumentChrome: View {
                 .foregroundStyle(Theme.textMuted)
                 .lineLimit(1)
                 .truncationMode(.middle)
+
+            if model.isDirty {
+                // Office Stage B Task 2 — the editor's own visual precedent (`PanelEditorChrome`'s
+                // identical dot), reusing its exact size token and the brand accent rather than a
+                // second literal: this is the one place in the row that is about STATE, not text.
+                Circle()
+                    .fill(Theme.accent)
+                    .frame(width: panelEditorDirtyDotSize, height: panelEditorDirtyDotSize)
+                    .accessibilityLabel("Unsaved changes")
+            }
+
+            // Office Stage B Task 9 — the read-only viewer's own chip: a read-only format
+            // (`officeDocumentIsReadOnlyFormat`) never shows the dirty dot above (it can never
+            // become dirty — see that predicate's own header), so this is never drawn alongside it;
+            // both read the identical fact, mutually exclusive by construction, not by a shared
+            // `if`/`else`. Deliberately subtle — this file's own `OfficeDocumentBannerView` tokens
+            // (`Theme.hairline`/`Theme.textMuted`), a thin outline rather than a filled badge, so it
+            // reads as informational chrome, not a warning.
+            if officeDocumentIsReadOnlyFormat(path: model.path) {
+                Text("Read-only")
+                    .font(Typography.captionMono())
+                    .foregroundStyle(Theme.textMuted)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .overlay(Capsule().stroke(Theme.hairline, lineWidth: 1))
+                    .accessibilityLabel("Read-only document")
+            }
+
             Spacer(minLength: panelEditorChromeGap)
 
             // office-plumbing Task 7: the open-with escape hatch — Stage A documents are view-only,
@@ -493,8 +715,24 @@ struct PanelDocumentContent: View {
             // `PanelEditorContent.body`'s identical placement and identical reasoning (a file that
             // was deleted while its tab was showing something else still has something to say, and a
             // banner that only rendered over the canvas would be invisible exactly when it matters).
-            if let banner = model.banner {
+            // Office Stage B Task 2b: a conflict, when present, WINS over the plain banner — the two
+            // are mutually exclusive in practice (the reducer never sets both for the same path: a
+            // conflict clears `documentBanners` the instant it is raised, `.opened`/`.saveSucceeded`
+            // clear `documentConflicts` the instant either resolves it), but the view layer's own
+            // precedence is the tie-break of record, matching `PanelDocumentTabModel.conflict`'s own
+            // header.
+            if let conflict = model.conflict {
+                OfficeConflictBannerView(kind: conflict, onReload: { model.reloadFromDisk() },
+                                         onKeepMine: { model.keepMyVersion() }, onClose: { model.closeTab() })
+            } else if let banner = model.banner {
                 OfficeDocumentBannerView(text: banner)
+            } else if let recoveryCandidate = model.recoveryCandidate {
+                // Office Stage B Task 7 — lowest of the three: a recovery offer blocks nothing (the
+                // canvas below is already showing the real file's own current content), so a
+                // conflict or a plain banner — either one about something ACTIVELY wrong right now
+                // — wins the one visible row over it.
+                OfficeRecoveryBannerView(candidate: recoveryCandidate, onRestore: { model.restoreRecovery() },
+                                         onDiscard: { model.discardRecovery() })
             }
             viewport
         }
@@ -556,6 +794,177 @@ struct OfficeDocumentBannerView: View {
     }
 }
 
+// MARK: - Office Stage B Task 2b: the conflict banner (a dirty document's own, two actions)
+
+/// **The same row, wearing `EditorBannerView`'s exact vocabulary** (`EditorBannerView`'s own header
+/// explains the tokens this reuses verbatim: `Theme.elevatedSurface` + `Theme.hairline`, `.primary`
+/// sentence / `Theme.textMuted` detail, `ShellSidebarRowStyle` text buttons, no danger tone) — unlike
+/// the editor's OWN `.conflict(.deleted)` arm, which offers a single dismiss button because there is
+/// nothing else editor-side to choose, Office's brief names TWO actions for EVERY conflict kind
+/// (`.changed`: Reload from disk / Keep my version; `.deleted`: Keep my version / Close) — there is
+/// no bare-dismiss case here at all, so unlike `EditorBannerView` this view never needs an
+/// `onDismiss`.
+struct OfficeConflictBannerView: View {
+    let kind: OfficeConflictKind
+    let onReload: () -> Void
+    let onKeepMine: () -> Void
+    let onClose: () -> Void
+
+    var body: some View {
+        HStack(spacing: panelEditorBannerGap) {
+            Text(sentence)
+                .font(Typography.caption(.medium))
+                .foregroundStyle(.primary)
+                .lineLimit(2)
+                .truncationMode(.middle)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if let detail {
+                Text(detail)
+                    .font(Typography.caption())
+                    .foregroundStyle(Theme.textMuted)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: panelEditorBannerGap)
+
+            switch kind {
+            case .changed:
+                // Reload first, Keep mine second — the destructive one (discards the in-memory
+                // edits) answers the sentence's own question first; mirrors
+                // `EditorBannerView.body`'s identical ordering and identical reasoning.
+                action(officeConflictReloadTitle, onReload)
+                action(officeConflictKeepTitle, onKeepMine)
+            case .deleted:
+                // No Reload — there is nothing left on disk to reload TO (`officeConflictDeletedDetail`
+                // says as much). Keep mine first (the non-destructive choice, and the one that leaves
+                // the tab open) so Close — the one that ends this tab — reads last.
+                action(officeConflictKeepTitle, onKeepMine)
+                action(officeConflictCloseTitle, onClose)
+            }
+        }
+        .padding(.horizontal, panelTabPillInset)
+        .padding(.vertical, panelEditorBannerVerticalPadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.elevatedSurface)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Theme.hairline).frame(height: 1)
+        }
+    }
+
+    private var sentence: String {
+        switch kind {
+        case .changed: return officeConflictChangedMessage
+        case .deleted: return officeConflictDeletedMessage
+        }
+    }
+
+    private var detail: String? {
+        guard kind == .deleted else { return nil }
+        return officeConflictDeletedDetail
+    }
+
+    /// Identical to `EditorBannerView`'s own private `action` helper — the panel's ONE text-button
+    /// treatment, not reinvented here.
+    private func action(_ title: String, _ perform: @escaping () -> Void) -> some View {
+        Button(action: perform) {
+            Text(title)
+                .font(Typography.caption(.medium))
+                .foregroundStyle(Theme.textMuted)
+                .padding(.horizontal, panelEditorBannerGap)
+                .frame(height: panelChromeButtonSize)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(ShellSidebarRowStyle(isSelected: false))
+        .accessibilityLabel(title)
+    }
+}
+
+// MARK: - Office Stage B Task 7: the recovery banner (a freshly opened document, an older sidecar)
+
+/// **"~Ns ago" from the brief's own banner text** — generalized past bare seconds once the gap
+/// grows (a crashed document might not be reopened for hours, even days), never more precision than
+/// the unit warrants. `now` is a parameter, not `Date()` read inline, purely so this stays a pure,
+/// directly-testable function — the view itself calls it with the real `Date()` at render time (no
+/// live-updating countdown; a banner sitting on screen for a while showing a slightly stale
+/// relative time is cosmetic, not a correctness concern here).
+func officeRecoveryAgeDescription(capturedAt: Date, now: Date) -> String {
+    let seconds = max(0, now.timeIntervalSince(capturedAt))
+    switch seconds {
+    case ..<60: return "~\(Int(seconds))s ago"
+    case ..<3600: return "~\(Int(seconds / 60))m ago"
+    case ..<86400: return "~\(Int(seconds / 3600))h ago"
+    default: return "~\(Int(seconds / 86400))d ago"
+    }
+}
+
+/// **The same `EditorBannerView`/`OfficeConflictBannerView` vocabulary** (`Theme.elevatedSurface` +
+/// `Theme.hairline`, `.primary` sentence / `Theme.textMuted` detail, `ShellSidebarRowStyle` text
+/// buttons) — the THIRD banner shape this file now carries, and deliberately still not folded into
+/// one enum with the other two (`PanelDocumentTabModel.recoveryCandidate`'s own header has the
+/// dictionary-separation reasoning one layer down; the view-level story is the same: a conflict and
+/// a plain banner already have an established, tested precedence between them, and adding a third
+/// independent source is simpler than re-deriving a three-way sum type this late).
+struct OfficeRecoveryBannerView: View {
+    let candidate: OfficeRecoveryCandidate
+    let onRestore: () -> Void
+    let onDiscard: () -> Void
+
+    var body: some View {
+        HStack(spacing: panelEditorBannerGap) {
+            Text("Recovered unsaved changes from \(officeRecoveryAgeDescription(capturedAt: candidate.capturedAt, now: Date()))")
+                .font(Typography.caption(.medium))
+                .foregroundStyle(.primary)
+                .lineLimit(2)
+                .truncationMode(.middle)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if candidate.isODFFallback {
+                // Office Stage B Task 7 — the OOXML sidecar fallback's own disclosure
+                // (`OfficeSaveFormat.autosaveFormat`'s own header): Restore loads ODF-format
+                // content, never silently pretending the recovered bytes are still the document's
+                // OWN original format.
+                Text("Recovered in ODF format")
+                    .font(Typography.caption())
+                    .foregroundStyle(Theme.textMuted)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: panelEditorBannerGap)
+
+            // Restore first (answers the sentence's own implicit question), Discard second — the
+            // SAME "the more consequential/likely choice reads first" ordering
+            // `OfficeConflictBannerView.body`'s own `.changed` case documents.
+            action(officeRecoveryRestoreTitle, onRestore)
+            action(officeRecoveryDiscardTitle, onDiscard)
+        }
+        .padding(.horizontal, panelTabPillInset)
+        .padding(.vertical, panelEditorBannerVerticalPadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.elevatedSurface)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Theme.hairline).frame(height: 1)
+        }
+    }
+
+    /// Identical to `OfficeConflictBannerView`'s own private `action` helper — not shared via a
+    /// free function purely because SwiftUI view-builder helpers this small read better local to
+    /// their own type than hoisted, matching this file's existing precedent (the conflict banner
+    /// keeps its own copy rather than reaching for the plain banner's).
+    private func action(_ title: String, _ perform: @escaping () -> Void) -> some View {
+        Button(action: perform) {
+            Text(title)
+                .font(Typography.caption(.medium))
+                .foregroundStyle(Theme.textMuted)
+                .padding(.horizontal, panelEditorBannerGap)
+                .frame(height: panelChromeButtonSize)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(ShellSidebarRowStyle(isSelected: false))
+        .accessibilityLabel(title)
+    }
+}
+
 /// The canvas plus its part-navigation strip, laid out per `officePartStripKind` (obligation 10):
 /// sheets get a bottom row, slides get a left rail, docs get neither.
 struct OfficeDocumentSurface: View {
@@ -575,6 +984,14 @@ struct OfficeDocumentSurface: View {
                 OfficeSlideRail(parts: parts, activePart: activePart, onSelect: model.selectPart)
             }
             VStack(spacing: 0) {
+                // Office Stage B Task 8 — spreadsheets only, above the canvas: the formula bar
+                // reads CELL_CURSOR/CELL_FORMULA, both Calc-only LOK callbacks (their own doc
+                // comments on `OfficeDocumentEvent`) — a text/drawing/presentation document has no
+                // cell concept for it to show.
+                if type == .spreadsheet {
+                    OfficeFormulaBar(runtime: runtime, docId: docId, activePart: activePart,
+                                     onFocusCanvas: model.focusCanvas)
+                }
                 OfficeTileCanvasRepresentable(model: model, runtime: runtime, path: path, docId: docId,
                                               sizeTwips: sizeTwips, activePart: activePart)
                 if stripKind == .bottomSheetTabs {
@@ -649,6 +1066,128 @@ struct OfficeSlideRail: View {
         .overlay(alignment: .trailing) { Rectangle().fill(Theme.hairline).frame(width: 1) }
     }
 }
+
+// MARK: - The formula bar (Office Stage B Task 8)
+
+/// The formula bar's own tiny observable slice of `OfficeCursorStore`, scoped to exactly the two
+/// field pairs `OfficeFormulaBar` draws (`cellCursor`/`cellCursorPart`,
+/// `cellFormulaText`/`cellFormulaPart`). Mirrors the canvas's own `cursorChanged`-sink-then-re-read
+/// discipline (`OfficeTileCanvasView.layoutOverlays`) rather than widening `OfficeCursorStore`
+/// itself onto `@Published OfficeRuntimeState` — that store's own header is explicit that
+/// caret/selection/cell-cursor state "must never ride" that graph, and this task's own live probe
+/// found `CELL_FORMULA` fires at up-to-per-keystroke frequency during in-cell edit, the same
+/// keystroke-frequency concern that header already names for the sibling caret/selection fields.
+///
+/// Filters its own re-publish to genuine field changes — `cursorChanged` fires for EVERY
+/// caret/selection/cell field a docId's store folds (five independent LOK callback types, now six
+/// with this task's `CELL_FORMULA`, share the one signal), and a `@Published` reassignment sends on
+/// every call regardless of equality; without the guard, this model would re-publish (and this
+/// small view would re-diff) on every plain-text keystroke in a Writer tab sharing the same
+/// runtime, not just on a Calc cell/content change.
+@MainActor
+final class OfficeFormulaBarModel: ObservableObject {
+    @Published private(set) var cellCursor: OfficeCellCursor?
+    @Published private(set) var cellCursorPart: Int?
+    @Published private(set) var cellFormulaText: String?
+    @Published private(set) var cellFormulaPart: Int?
+
+    private weak var runtime: OfficeRuntime?
+    private var docId: String?
+    private var sink: AnyCancellable?
+
+    /// Idempotent — safe to call on every `(runtime, docId)` SwiftUI hands it (mirrors
+    /// `PanelDocumentTabModel.bind`'s own idempotence rule): only re-subscribes when the pair
+    /// actually changed.
+    func bind(runtime: OfficeRuntime, docId: String) {
+        guard self.runtime !== runtime || self.docId != docId else { return }
+        self.runtime = runtime
+        self.docId = docId
+        sink = runtime.cursorStore.cursorChanged.sink { [weak self] changedDocId in
+            guard let self, changedDocId == docId else { return }
+            self.refresh()
+        }
+        refresh()
+    }
+
+    private func refresh() {
+        guard let runtime, let docId else { return }
+        let state = runtime.cursorStore.state(docId: docId)
+        if state.cellCursor != cellCursor { cellCursor = state.cellCursor }
+        if state.cellCursorPart != cellCursorPart { cellCursorPart = state.cellCursorPart }
+        if state.cellFormulaText != cellFormulaText { cellFormulaText = state.cellFormulaText }
+        if state.cellFormulaPart != cellFormulaPart { cellFormulaPart = state.cellFormulaPart }
+    }
+}
+
+/// Spreadsheets only: the current cell's own A1-style reference plus its content, both DISPLAY
+/// ONLY — v1's own scope, this task's brief: in-cell editing on the canvas IS the edit path; a
+/// fully editable formula bar (typing directly into THIS row to commit a new value) is a disclosed
+/// follow-up, never attempted here. Sits above the canvas, sized against `officePartStripBottomHeight`
+/// (via `officeFormulaBarHeight`, the same value) for the same visual rhythm the sheet strip below
+/// the canvas already establishes.
+struct OfficeFormulaBar: View {
+    let runtime: OfficeRuntime
+    let docId: String
+    let activePart: Int
+    /// Routes to `PanelDocumentTabModel.focusCanvas()` — see `OfficeDocumentCanvasHost.focusCanvas`'s
+    /// own header for why a click here does not open an editable field: the bar LOOKS like an
+    /// input row every spreadsheet app trains a user to expect, so a click still needs to DO
+    /// something rather than silently swallow the gesture — it hands keyboard focus back to the
+    /// canvas, where in-cell editing actually happens.
+    let onFocusCanvas: () -> Void
+
+    @StateObject private var cursorModel = OfficeFormulaBarModel()
+
+    var body: some View {
+        HStack(spacing: panelEditorChromeGap) {
+            Text(referenceText)
+                .font(Typography.captionMono(.medium))
+                .foregroundStyle(Color.primary)
+                .lineLimit(1)
+                .frame(minWidth: officeFormulaBarReferenceWidth, alignment: .leading)
+
+            Rectangle()
+                .fill(Theme.hairline)
+                .frame(width: 1)
+                .padding(.vertical, officePartStripItemSpacing * 3)
+
+            Text(contentText.isEmpty ? officeFormulaBarEmptyPlaceholder : contentText)
+                .font(Typography.controlMono())
+                .foregroundStyle(contentText.isEmpty ? Theme.textMuted : Color.primary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, panelTabPillInset)
+        .frame(height: officeFormulaBarHeight)
+        .contentShape(Rectangle())
+        .onTapGesture { onFocusCanvas() }
+        .background(Theme.elevatedSurface)
+        .overlay(alignment: .bottom) { Rectangle().fill(Theme.hairline).frame(height: 1) }
+        .onChange(of: docId, initial: true) { _, newDocId in cursorModel.bind(runtime: runtime, docId: newDocId) }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(referenceText.isEmpty ? "Formula bar" : "\(referenceText): \(contentText.isEmpty ? "empty" : contentText)")
+    }
+
+    /// A thin call onto `officeFormulaBarReference` — see that pure function's own header for the
+    /// actual decision (part-mismatch and in-cell-edit both blank) and why it lives there, testable
+    /// independent of SwiftUI/`@Published` timing, rather than inline here.
+    private var referenceText: String {
+        officeFormulaBarReference(cellCursor: cursorModel.cellCursor, part: cursorModel.cellCursorPart, activePart: activePart)
+    }
+
+    /// A thin call onto `officeFormulaBarContent` — see that pure function's own header.
+    private var contentText: String {
+        officeFormulaBarContent(text: cursorModel.cellFormulaText, part: cursorModel.cellFormulaPart, activePart: activePart)
+    }
+}
+
+/// The content row's own empty-cell placeholder — distinguishes "this cell has no content" (a
+/// real, observed shape — this task's own live probe: an empty cell sends the empty string, not
+/// silence) from "nothing is known yet" (`cellFormulaText == nil`, before the first firing);
+/// both currently render the SAME muted dash, a disclosed v1 simplification — see task-8-report.md.
+let officeFormulaBarEmptyPlaceholder = "\u{2014}" // em dash
 
 // MARK: - The calm states
 

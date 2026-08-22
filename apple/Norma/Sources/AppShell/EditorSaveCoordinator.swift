@@ -399,3 +399,138 @@ final class EditorSaveMenuCommand: NSObject, NSMenuItemValidation {
         file.addItem(makeMenuItem())
     }
 }
+
+// MARK: - Office Stage B Task 6: the deferred menu pass — Zoom In/Out/Actual Size
+
+/// The ⌘±/⌘0 menu items the earlier canvas work deferred — canvas zoom via the key equivalents
+/// THEMSELVES has worked since Office Stage B Task 4; this is the DISCOVERABLE, clickable
+/// menu-item half.
+///
+/// **`target: nil` throughout — unlike `EditorSaveMenuCommand` above, deliberately.** ⌘S has no
+/// live `NSView` of its own to route through (the active code/document tab is a fact about the
+/// shell's own state, resolved via closures into `ShellSessionHost`); a focused
+/// `OfficeTileCanvasView` IS a real, live `NSResponder` — already first responder the instant the
+/// user clicks into a document (`OfficeTileCanvasView.mouseDown`'s own `makeFirstResponder` call)
+/// — so these items route through the ORDINARY AppKit responder chain straight to
+/// `OfficeTileCanvasView.zoomIn(_:)`/`.zoomOut(_:)`/`.actualSize(_:)`, enabled exactly when a
+/// canvas is reachable (AppKit's own default menu validation: a `target: nil` item with no
+/// `respondsToSelector:` match anywhere in the chain is disabled, no separate check needed) and
+/// disabled when none is — no command object, no injected closures, unlike `EditorSaveMenuCommand`
+/// above.
+///
+/// A plain `enum` with static members (never instantiated) — there is no per-instance state to
+/// hold; `install(in:)` is a pure function of the menu tree it is handed.
+enum OfficeCanvasMenuInstaller {
+    static let viewMenuTitle = "View"
+
+    /// Put three plain, `target: nil` items in `menu`'s View submenu, creating that submenu if the
+    /// app has none — mirrors `EditorSaveMenuCommand.install`'s own find-or-create shape for
+    /// "File" exactly, one menu title over.
+    ///
+    /// **Idempotent, but matched by ACTION SELECTOR, not by `target === self`** (`EditorSaveMenuCommand
+    /// .install`'s own comparison) — these items share no target object to compare against, `target:
+    /// nil` is the whole point. Removes any prior item whose action is one of these three before
+    /// adding fresh ones, so a second summon (or a menu SwiftUI rebuilt underneath) replaces rather
+    /// than duplicates — two items sharing one key equivalent is a menu where the wrong one wins,
+    /// the identical concern `EditorSaveMenuCommand`'s own header states for ⌘S.
+    ///
+    /// `nil` is a legal argument and does nothing — an app with no main menu has nowhere to put
+    /// these, and the key equivalents (already live since Task 4) still work through the canvas's
+    /// own `keyDown` switch regardless.
+    static func install(in menu: NSMenu?) {
+        guard let menu else { return }
+        let view: NSMenu
+        if let existing = menu.items.first(where: { $0.submenu?.title == viewMenuTitle
+                                                    || $0.title == viewMenuTitle })?.submenu {
+            view = existing
+        } else {
+            let item = NSMenuItem(title: viewMenuTitle, action: nil, keyEquivalent: "")
+            let submenu = NSMenu(title: viewMenuTitle)
+            item.submenu = submenu
+            menu.addItem(item)
+            view = submenu
+        }
+
+        let actions: Set<Selector> = [
+            #selector(OfficeTileCanvasView.zoomIn(_:)),
+            #selector(OfficeTileCanvasView.zoomOut(_:)),
+            #selector(OfficeTileCanvasView.actualSize(_:)),
+        ]
+        view.items.filter { $0.action.map(actions.contains) ?? false }.forEach { view.removeItem($0) }
+
+        let zoomIn = NSMenuItem(title: "Zoom In", action: #selector(OfficeTileCanvasView.zoomIn(_:)), keyEquivalent: "+")
+        zoomIn.keyEquivalentModifierMask = [.command]
+        let zoomOut = NSMenuItem(title: "Zoom Out", action: #selector(OfficeTileCanvasView.zoomOut(_:)), keyEquivalent: "-")
+        zoomOut.keyEquivalentModifierMask = [.command]
+        let actualSize = NSMenuItem(title: "Actual Size", action: #selector(OfficeTileCanvasView.actualSize(_:)), keyEquivalent: "0")
+        actualSize.keyEquivalentModifierMask = [.command]
+        [zoomIn, zoomOut, actualSize].forEach { view.addItem($0) }
+    }
+
+    static let editMenuTitle = "Edit"
+
+    /// **Review fix round 1 (I-1) — the belt.** `keyDown`'s own policy comment (and this file's
+    /// `validateMenuItem`) rest on an UNVERIFIED premise: that SwiftUI's default command set
+    /// (`NormaApp: App` carries no `.commands` override) actually wires target-`nil` Copy/Cut/
+    /// Paste/Undo/Redo items into this specific `LSUIElement` + `Settings`-only app's real main
+    /// menu. That premise is structurally unprovable under xctest (no real main menu is ever built
+    /// in the test host). Rather than leave five headline verbs resting on an assumption with no
+    /// runtime check, this method makes the app self-healing: if an item carrying one of these
+    /// five ACTION SELECTORS is not already present ANYWHERE in the Edit menu, add one — with the
+    /// same standard title/key-equivalent a Mac user already expects.
+    ///
+    /// **A SEPARATE call from `install(in:)` above, deliberately** — not folded into it. `install`
+    /// already has its own tested contract (it never adds a top-level menu beyond "View" when one
+    /// wasn't there), and unconditionally creating an "Edit" menu as a SIDE EFFECT of a zoom-item
+    /// install would have silently broken that contract for every caller, test included. Called as
+    /// its own explicit second step, from `AppDelegate.installOfficeZoomMenuItems()`, right beside
+    /// (not inside) the zoom install.
+    ///
+    /// **Install-IF-ABSENT, deliberately NOT `install(in:)`'s own zoom-item remove-then-add
+    /// idempotence pattern above.** A real SwiftUI-provided item (if the premise holds) must be
+    /// left EXACTLY as SwiftUI made it — whatever title/localization/extra state it carries —
+    /// never removed and replaced by this belt's own guess at "the" canonical item. This method
+    /// only ever fills a gap; it never competes with, or second-guesses, an item already there.
+    /// Naturally idempotent as a consequence: a second call finds every selector already present
+    /// (SwiftUI's own, or this method's own prior addition) and adds nothing.
+    ///
+    /// **Diagnostic, for the live gate this premise still needs**: logs the Edit menu's own item
+    /// titles/actions BEFORE this belt runs, so a human reading `OrbDebug`'s log can tell directly
+    /// whether SwiftUI's own items were found (premise holds) or this belt had to synthesize its
+    /// own (premise was false — thankfully covered either way).
+    static func installEditActionsIfAbsent(in menu: NSMenu?) {
+        guard let menu else { return }
+        let edit: NSMenu
+        if let existing = menu.items.first(where: { $0.submenu?.title == editMenuTitle
+                                                    || $0.title == editMenuTitle })?.submenu {
+            edit = existing
+        } else {
+            let item = NSMenuItem(title: editMenuTitle, action: nil, keyEquivalent: "")
+            let submenu = NSMenu(title: editMenuTitle)
+            item.submenu = submenu
+            let insertionIndex = menu.items.firstIndex(where: { $0.title == "File" }).map { $0 + 1 } ?? min(1, menu.items.count)
+            menu.insertItem(item, at: insertionIndex)
+            edit = submenu
+        }
+
+        OrbDebug.log("office edit-menu belt: Edit submenu before install has "
+                     + "\(edit.items.count) item(s): "
+                     + edit.items.map { "\"\($0.title)\"(action:\($0.action.map(String.init(describing:)) ?? "nil"))" }.joined(separator: ", "))
+
+        let standard: [(title: String, action: Selector, key: String, shift: Bool)] = [
+            ("Undo", #selector(OfficeTileCanvasView.undo(_:)), "z", false),
+            ("Redo", #selector(OfficeTileCanvasView.redo(_:)), "z", true),
+            ("Cut", #selector(OfficeTileCanvasView.cut(_:)), "x", false),
+            ("Copy", #selector(OfficeTileCanvasView.copy(_:)), "c", false),
+            ("Paste", #selector(OfficeTileCanvasView.paste(_:)), "v", false),
+        ]
+        let present = Set(edit.items.compactMap(\.action))
+        for entry in standard where !present.contains(entry.action) {
+            let item = NSMenuItem(title: entry.title, action: entry.action, keyEquivalent: entry.key)
+            item.keyEquivalentModifierMask = entry.shift ? [.command, .shift] : [.command]
+            edit.addItem(item)
+            OrbDebug.log("office edit-menu belt: \(entry.title) was ABSENT — added a fallback item "
+                         + "(the SwiftUI-default-menu premise did not hold for this action)")
+        }
+    }
+}

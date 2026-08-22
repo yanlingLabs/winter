@@ -69,6 +69,144 @@ public enum OfficeWireFrame: Equatable, Sendable {
     /// destroy or it doesn't; either way "not open anymore" is true after this).
     case close(seq: UInt64, docId: String)
 
+    /// Office Stage B Task 2 — ask the helper to render `docId`'s CURRENT in-memory state to a
+    /// fresh file, in the document's own format, under the helper's own `--state-path` (never at
+    /// the real document path — the seatbelt's write fence only ever allows writes under
+    /// `--state-path`, Task 1's invariant, unchanged and untouched by this task). The APP is what
+    /// places the helper's answer onto the real path afterward (`OfficeRuntime.perform`'s `.save`
+    /// effect) — see `saved`'s own header for the two-step split this shape exists to honor, and
+    /// why the helper is never asked to write to the real path directly.
+    ///
+    /// **Fix round 4 (NEW-2) — `part` added, and it means something different here than on the
+    /// input verbs.** On `keyEvent`/`mouseEvent`, `part` says "where this event is aimed." Here it
+    /// says "which part the USER is actually on," and its only job is to be asserted onto LOK
+    /// immediately before the write, so that the saved view state records the user's own active
+    /// part rather than whatever the last tile paint happened to leave current. That is not the
+    /// same thing: LOK's current part is process state that ordinary PAINT traffic moves, and a
+    /// prefetch chunk cut by a part switch is still delivered afterward — so a paint carrying the
+    /// OLD part can re-park LOK there after the switch, with no corrective paint to follow if the
+    /// new part's tiles are already cached. Before this field, `saveAs` asserted no part at all and
+    /// simply inherited that race. Resolved from the SAME `DocumentEntry.activePart` the input
+    /// verbs read (`OfficeRuntimeReducer`'s `.saveRequested`), so "the user's part" has exactly one
+    /// definition across this wire.
+    case save(seq: UInt64, docId: String, part: Int)
+
+    /// Office Stage B Task 4 — **the real edit verb.** LOK's `postKeyEvent(nType, nCharCode,
+    /// nKeyCode)` (`LibreOfficeKit.h`), unchanged parameter-for-parameter across the wire.
+    ///
+    /// **Fix round 1, F2 (CRITICAL) — `part` added.** `postKeyEvent` has NO part parameter in LOK's
+    /// own C signature (unlike `paintPartTile`'s explicit `nPart`) — it always targets whatever
+    /// `getPart()`/the document's current part happens to be, a genuinely STATEFUL LOK-side notion
+    /// painting never has to deal with. Before this field existed, a keystroke posted while viewing
+    /// sheet 2 could silently land on sheet 0 (whatever LOK's internal "current part" happened to be
+    /// last set to, never communicated over this wire at all) — persisted by save, no visible
+    /// repaint to notice by. `part` carries the SAME value `subscribeTiles`/`tileRequest` already
+    /// scope painting by (`OfficeRuntimeState.DocumentEntry.activePart`, resolved at enqueue time —
+    /// see `OfficeRuntime.postKeyEvent`'s own doc); the helper is what turns this into a real
+    /// `setPart` call immediately before the post — see `LOKBridge.postKeyOnDedicatedThread`'s own
+    /// header for why that stateful step cannot be avoided the way `paintPartTile`'s avoids it.
+    ///
+    /// `charCode` is the Unicode scalar the key produces (0 for a non-printing key — arrows, Delete, bare
+    /// modifiers); `keyCode` is a FULL VCL-packed value — `com.sun.star.awt.Key`'s base code (e.g.
+    /// `512` for `A`) OR'd with SHIFTED modifier bits (`0x1000`/`0x2000`/`0x4000`/`0x8000` for
+    /// Shift/Mod1/Mod2/Mod3), never the bare, unshifted `KeyModifier` group's `1/2/4/8`. This is not
+    /// a guess: `SfxLokHelper::postKeyEventAsync` (`sfx2/source/view/lokhelper.cxx`) constructs
+    /// `KeyEvent(nCharCode, nKeyCode, nRepeat)`, whose second parameter converts via
+    /// `vcl::KeyCode(sal_uInt16 nKey, sal_uInt16 nModifier = 0)` — a SINGLE-argument implicit
+    /// conversion (`nModifier` defaults to 0), so the ENTIRE incoming `int` becomes
+    /// `nKeyCodeAndModifiers` verbatim (`include/vcl/keycod.hxx`). `OfficeInputCodes` is the one
+    /// place that builds this packed value; see its own header for the AppKit-keyCode source and the
+    /// cross-check against this repo's own independent `ComputerCapabilities.cuKeyCode` table.
+    case keyEvent(seq: UInt64, docId: String, part: Int, type: OfficeKeyEventType, charCode: Int, keyCode: Int)
+    /// Office Stage B Task 4 — LOK's `postMouseEvent(nType, nX, nY, nCount, nButtons, nModifier)`.
+    /// **Fix round 1, F2 — `part` added, same reasoning and same resolution point as `keyEvent`'s
+    /// own doc comment above**: `postMouseEvent` has no part parameter either, `xTwips`/`yTwips`
+    /// are only meaningful once the RIGHT part is current (a document-space coordinate is anchored
+    /// to whichever part LOK considers active), so this is not merely "which part gets the click" —
+    /// an un-scoped `setPart` mismatch would misinterpret the coordinates themselves, against
+    /// whatever part LOK happened to have current.
+    /// `xTwips`/`yTwips` are DOCUMENT-space twips (LOK's own coordinate system for this call —
+    /// confirmed against `ScModelObj::postMouseEvent`, `sc/source/ui/unoobj/docuno.cxx`, which
+    /// converts them via `GetPPTX()`/`GetPPTY()` the same way every other twips-space input this
+    /// wire already carries is converted). `buttons` is VCL's `MOUSE_LEFT`(1)/`MIDDLE`(2)/`RIGHT`(4)
+    /// bitmask (`include/vcl/event.hxx`) — UNLIKE `keyEvent`'s `keyCode`, this is NOT combined with
+    /// `modifiers`: `MouseEvent`'s own constructor takes `nButtons`/`nModifier` as two SEPARATE
+    /// `sal_uInt16` parameters, packed into the same low/high-bit split internally
+    /// (`GetButtons()`/`IsShift()` etc. mask the identical field two different ways) but never
+    /// combined by a CALLER. `modifiers` uses the SAME shifted encoding `keyEvent.keyCode`'s
+    /// modifier half does (`OfficeInputCodes.modifierMask`) — confirmed by `MouseEvent::IsShift()`
+    /// checking `mnCode & KEY_SHIFT` (`0x1000`), the identical constant `KeyCode::IsShift()` checks.
+    case mouseEvent(seq: UInt64, docId: String, part: Int, type: OfficeMouseEventType, xTwips: Int64, yTwips: Int64,
+                     count: Int, buttons: Int, modifiers: Int)
+
+    /// Office Stage B Task 5 — LOK's `postWindowExtTextInputEvent(pThis, nWindowId, nType, pText)`
+    /// (`LibreOfficeKit.h`; `nWindowId` always `0` — see `LOKBridge.postExtTextInputOnDedicatedThread`'s
+    /// own header for why `0` resolves to the SAME document-instance-scoped window `postKey`/
+    /// `postMouse` already target, not a process-global one). This is the MARKED/preedit half of IME
+    /// composition — `NSTextInputClient.setMarkedText(_:...)` calls through here with `type: .input`
+    /// on every keystroke of a multi-stage compose (LOK underlines whatever `text` names, replacing
+    /// any previously-marked run); `type: .end` COMMITS — LOK's own `SfxLokHelper::postExtTextEventAsync`
+    /// (`sfx2/source/view/lokhelper.cxx`) sets `LOK_EXT_TEXTINPUT_END`'s final text unconditionally to
+    /// EMPTY, ignoring `pText` entirely, so "end" always commits whatever is CURRENTLY marked, never
+    /// text passed alongside it — `text` on an `.end` frame is therefore always sent empty by this
+    /// bridge's own caller (`OfficeRuntime.postExtTextInput`), a documented-not-decorative convention,
+    /// not a wire requirement `OfficeWireCodec` itself enforces. A plain, non-marked `insertText:`
+    /// (typing an ordinary ASCII character, no composition) does NOT come through here at all — see
+    /// `OfficeTileCanvasView.insertText(_:replacementRange:)`'s own header for why that case rides the
+    /// already-proven `postKeyEvent`-per-scalar path instead, reserving this newer, less-exercised verb
+    /// strictly for genuine marked text.
+    ///
+    /// `part` — same resolved-at-enqueue-time meaning and same ordering-chain membership as
+    /// `keyEvent`/`mouseEvent`'s own `part` (see `OfficeRuntime.postExtTextInput`'s own header): a
+    /// composition keystroke must reach LOK in the SAME relative order as any key/mouse event typed
+    /// or clicked around it, or a click-mid-compose / arrow-key-mid-compose can reorder against it.
+    case extTextInputEvent(seq: UInt64, docId: String, part: Int, type: OfficeExtTextInputType, text: String)
+
+    // MARK: Office Stage B Task 6 — clipboard, undo/redo, the second ("agent") view
+
+    /// Reads the CURRENT text selection back to the caller — never mutates the document. `part`
+    /// is asserted onto LOK immediately before the read (`setView` + type-gated `setPart`,
+    /// exactly `save`'s own prefix): `getTextSelection`'s own answer is genuinely view-dependent —
+    /// LOK's own `doc_createView` calls `forceSetClipboardForCurrentView` (confirmed by reading
+    /// `desktop/source/lib/init.cxx` at this repo's vendored pin), so a stale current-view/part
+    /// left over from unrelated paint traffic could answer with the WRONG selection.
+    case clipboardCopy(seq: UInt64, docId: String, part: Int)
+    /// Same read as `clipboardCopy`, but ALSO deletes the selection afterward (`.uno:Cut`,
+    /// fire-and-forget exactly like `undo`/`redo` below) — the text returned is what was selected
+    /// just BEFORE the cut; it is never re-read after (there would be nothing left to read).
+    case clipboardCut(seq: UInt64, docId: String, part: Int)
+    /// Writes `text` at the current caret via LOK's own `paste()`, which — confirmed by reading
+    /// `doc_paste` at the vendored pin — internally stages the bytes (`doc_setClipboard`) then
+    /// dispatches `.uno:Paste` through the SAME process-global-current-frame `comphelper::
+    /// dispatchCommand` mechanism the `.uno:Save` follow-up's own fix-round-2 citation already
+    /// found in `LOKBridge`. `part` is carried for the identical reason `clipboardCopy` carries it.
+    case clipboardPaste(seq: UInt64, docId: String, part: Int, text: String)
+    /// `.uno:Undo`, dispatched via `postUnoCommand` against the document's OWN primary view (never
+    /// a caller-supplied view id — see `LOKBridge.OpenDocument.viewId`, the identical view every
+    /// `postKey`/`postMouse`/`save` already targets). No `part` field: `.uno:Save`'s own
+    /// fix-round-2 citation already established `postUnoCommand`'s dispatch resolves through the
+    /// process-global "active frame," never a part-scoped call — and the brief's own words for
+    /// this door are "view-scoped (setView prefix)"; `setPart` was never asked for and is not
+    /// added speculatively.
+    case undo(seq: UInt64, docId: String)
+    /// `.uno:Redo`, same posture as `undo` above.
+    case redo(seq: UInt64, docId: String)
+    /// The two-writer groundwork: mints a SECOND LOK view for `docId` on demand (`createView()`),
+    /// for a future AI collaborator's own edits — never used by the app today (the brief's own
+    /// words), only by the live characterization drill (`OfficeRuntimeLiveTests`). Refused
+    /// (`error{reason:"agentViewExists"}`) if this docId already has one — deliberate, not "return
+    /// the existing id": a second mint is a caller bug this wire makes visible, never silently
+    /// tolerated.
+    case createView(seq: UInt64, docId: String)
+    /// Posts a key event through the AGENT view specifically (never the primary view `keyEvent`
+    /// targets) — the only way to actually PRODUCE an edit "as" the second view, needed to drive
+    /// the two-writer characterization drill. Refused (`error{reason:"noAgentView"}`) if
+    /// `createView` was never called for this docId. Same shape as `keyEvent` in every other
+    /// respect (`part`/`type`/`charCode`/`keyCode`). Deliberately NOT reachable from
+    /// `OfficeRuntime`/`Driver` — the drill talks to `OfficeHelperClient` directly, the same
+    /// raw-probe precedent Task 5's ext-text-input investigation already set.
+    case agentKeyEvent(seq: UInt64, docId: String, part: Int, type: OfficeKeyEventType, charCode: Int, keyCode: Int)
+
     /// Task 4 — registers this connection as a tile-push subscriber for `docId` (must already be
     /// open — by ANY connection, not necessarily this one; see `OfficeHelperServer`'s multicast
     /// seam) and reports the tile-set the CURRENT viewport needs, computed via
@@ -122,6 +260,58 @@ public enum OfficeWireFrame: Equatable, Sendable {
     case openFailed(seq: UInt64, docId: String, reason: String)
     /// Answers a successful `close`.
     case closed(seq: UInt64, docId: String)
+    /// Office Stage B Task 2 — answers a successful `save`: `tempPath` is where the helper rendered
+    /// the document, ALWAYS under its own `--state-path` (`<state-path>/saves/<docId>-<seq>.<ext>`,
+    /// `<ext>` the document's OWN format captured at open — see `LOKBridge`'s own doc). The helper's
+    /// write fence has no concept of the real document path, and must never be asked to write
+    /// there: placing these bytes onto the real path is entirely the APP's job — fsync+rename,
+    /// cross-volume-safe (`OfficeRuntime.perform`'s `.save` case handles the EXDEV case a
+    /// state-path-to-document-directory copy can hit, since the two need not share a filesystem).
+    case saved(seq: UInt64, docId: String, tempPath: String)
+    /// Office Stage B Task 2 — answers a failed `save`: a `saveAs` failure (a real disk problem
+    /// under the helper's own `--state-path`, or a LOK internal save error). The helper always
+    /// SURVIVES this, the same posture `openFailed` already has for a bad `open`.
+    case saveFailed(seq: UInt64, docId: String, reason: String)
+    /// Office Stage B Task 4 — answers `keyEvent`: the key was POSTED to LOK — not a claim it
+    /// already took effect (`postKeyEvent` is `void` on LOK's own side, exactly as fire-and-forget
+    /// as `postUnoCommand` was for the now-removed DEBUG-only `debugEdit` door this replaces — the
+    /// "posted, not a claim of effect" wording is that retired reply's own, deliberately repeated
+    /// here). The real effect is observed the same way every other Stage A/B async effect is:
+    /// through the `documentEvent`/`invalidated` pushes that follow.
+    case keyEventOk(seq: UInt64, docId: String)
+    /// Office Stage B Task 4 — answers `mouseEvent`, same posture as `keyEventOk` above.
+    case mouseEventOk(seq: UInt64, docId: String)
+    /// Office Stage B Task 5 — answers `extTextInputEvent`, same "posted, not a claim of effect"
+    /// posture as `keyEventOk`/`mouseEventOk` above.
+    case extTextInputEventOk(seq: UInt64, docId: String)
+    /// Office Stage B Task 6 — answers `clipboardCopy`: `text` is exactly what `getTextSelection`
+    /// returned, or `""` for LOK's own `nullptr` "no selection" answer (never a distinct
+    /// empty-vs-absent case on this wire — `""` already means "nothing to put on the pasteboard"
+    /// to every caller).
+    case clipboardCopyOk(seq: UInt64, docId: String, text: String)
+    /// Office Stage B Task 6 — answers `clipboardCut`: `text` is what was selected just before the
+    /// cut, same `""` -> "nothing selected" convention as `clipboardCopyOk`.
+    case clipboardCutOk(seq: UInt64, docId: String, text: String)
+    /// Office Stage B Task 6 — answers a successful `clipboardPaste`. `paste()` is LOK's one
+    /// clipboard door with a real, synchronous success/failure return — a `false` throws
+    /// `SaveError.pasteFailed` server-side and surfaces as `.error`, never silently swallowed the
+    /// way `postKeyEvent`'s `void` return forces `keyEventOk` to be.
+    case clipboardPasteOk(seq: UInt64, docId: String)
+    /// Office Stage B Task 6 — answers `undo`: the command was DISPATCHED, not a claim it changed
+    /// anything (an empty undo stack, or an LO-internal refusal, both dispatch cleanly and both
+    /// answer `undoOk`; see `LOKBridge.undoOnDedicatedThread`'s own header for why this bridge
+    /// cannot tell the difference without widening scope beyond what Task 6 asks for).
+    case undoOk(seq: UInt64, docId: String)
+    /// Office Stage B Task 6 — answers `redo`, same posture as `undoOk`.
+    case redoOk(seq: UInt64, docId: String)
+    /// Office Stage B Task 6 — answers a successful `createView`: `viewId` is `createView()`'s OWN
+    /// return value (never re-derived via `getView()`, which becomes ambiguous the instant a
+    /// second view exists — see `LOKBridge.createAgentViewOnDedicatedThread`'s own header). The
+    /// dispatch context's own name for this reply, kept verbatim.
+    case agentViewReady(seq: UInt64, docId: String, viewId: Int32)
+    /// Office Stage B Task 6 — answers `agentKeyEvent`, same "posted, not a claim of effect"
+    /// posture every other `...Ok` input reply already has.
+    case agentKeyEventOk(seq: UInt64, docId: String)
     /// Answers anything the helper refuses post-auth: an unknown frame type (`reason:"unknown"`,
     /// the brief's literal pin), a known type whose fields don't decode (`reason:"malformed"`),
     /// or a structurally valid frame that is never legal for a client to SEND (a reply shape —
@@ -203,9 +393,20 @@ public enum OfficeWireFrame: Equatable, Sendable {
     /// `EditorBridgeInbound.wireTypes`'s own test does — one fixture per name, decode, assert the
     /// case names itself the same way — so this array and `decode`/`wireType` cannot drift apart
     /// unnoticed.
+    /// Office Stage B Task 4 — reverted to a plain array literal: the DEBUG-only `debugEdit`/
+    /// `debugEditOk` entries (which previously forced a closure-building shape, since `#if` cannot
+    /// appear directly inside `[...]`'s element list) are gone — real edit verbs replace them.
+    /// Order still matches frame-declaration order.
     public static let wireTypes: [String] = [
-        "hello", "ping", "open", "close", "subscribeTiles", "unsubscribe", "tileRequest",
-        "helloOk", "refused", "pong", "opened", "openFailed", "closed", "error", "documentEvent",
+        "hello", "ping", "open", "close", "save", "keyEvent", "mouseEvent", "extTextInputEvent",
+        // Office Stage B Task 6 — clipboard, undo/redo, the second ("agent") view.
+        "clipboardCopy", "clipboardCut", "clipboardPaste", "undo", "redo", "createView", "agentKeyEvent",
+        "subscribeTiles", "unsubscribe", "tileRequest",
+        "helloOk", "refused", "pong", "opened", "openFailed", "closed", "saved", "saveFailed",
+        "keyEventOk", "mouseEventOk", "extTextInputEventOk",
+        "clipboardCopyOk", "clipboardCutOk", "clipboardPasteOk", "undoOk", "redoOk",
+        "agentViewReady", "agentKeyEventOk",
+        "error", "documentEvent",
         "subscribed", "unsubscribed", "tileRequestAccepted", "tile", "tileFailed", "invalidated",
     ]
 
@@ -215,6 +416,17 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .ping: return "ping"
         case .open: return "open"
         case .close: return "close"
+        case .save: return "save"
+        case .keyEvent: return "keyEvent"
+        case .mouseEvent: return "mouseEvent"
+        case .extTextInputEvent: return "extTextInputEvent"
+        case .clipboardCopy: return "clipboardCopy"
+        case .clipboardCut: return "clipboardCut"
+        case .clipboardPaste: return "clipboardPaste"
+        case .undo: return "undo"
+        case .redo: return "redo"
+        case .createView: return "createView"
+        case .agentKeyEvent: return "agentKeyEvent"
         case .subscribeTiles: return "subscribeTiles"
         case .unsubscribe: return "unsubscribe"
         case .tileRequest: return "tileRequest"
@@ -224,6 +436,18 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .opened: return "opened"
         case .openFailed: return "openFailed"
         case .closed: return "closed"
+        case .saved: return "saved"
+        case .saveFailed: return "saveFailed"
+        case .keyEventOk: return "keyEventOk"
+        case .mouseEventOk: return "mouseEventOk"
+        case .extTextInputEventOk: return "extTextInputEventOk"
+        case .clipboardCopyOk: return "clipboardCopyOk"
+        case .clipboardCutOk: return "clipboardCutOk"
+        case .clipboardPasteOk: return "clipboardPasteOk"
+        case .undoOk: return "undoOk"
+        case .redoOk: return "redoOk"
+        case .agentViewReady: return "agentViewReady"
+        case .agentKeyEventOk: return "agentKeyEventOk"
         case .error: return "error"
         case .documentEvent: return "documentEvent"
         case .subscribed: return "subscribed"
@@ -241,6 +465,17 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .ping(let seq): return seq
         case .open(let seq, _, _): return seq
         case .close(let seq, _): return seq
+        case .save(let seq, _, _): return seq
+        case .keyEvent(let seq, _, _, _, _, _): return seq
+        case .mouseEvent(let seq, _, _, _, _, _, _, _, _): return seq
+        case .extTextInputEvent(let seq, _, _, _, _): return seq
+        case .clipboardCopy(let seq, _, _): return seq
+        case .clipboardCut(let seq, _, _): return seq
+        case .clipboardPaste(let seq, _, _, _): return seq
+        case .undo(let seq, _): return seq
+        case .redo(let seq, _): return seq
+        case .createView(let seq, _): return seq
+        case .agentKeyEvent(let seq, _, _, _, _, _): return seq
         case .subscribeTiles(let seq, _, _, _, _): return seq
         case .unsubscribe(let seq, _): return seq
         case .tileRequest(let seq, _, _): return seq
@@ -250,6 +485,18 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .opened(let seq, _, _, _, _): return seq
         case .openFailed(let seq, _, _): return seq
         case .closed(let seq, _): return seq
+        case .saved(let seq, _, _): return seq
+        case .saveFailed(let seq, _, _): return seq
+        case .keyEventOk(let seq, _): return seq
+        case .mouseEventOk(let seq, _): return seq
+        case .extTextInputEventOk(let seq, _): return seq
+        case .clipboardCopyOk(let seq, _, _): return seq
+        case .clipboardCutOk(let seq, _, _): return seq
+        case .clipboardPasteOk(let seq, _): return seq
+        case .undoOk(let seq, _): return seq
+        case .redoOk(let seq, _): return seq
+        case .agentViewReady(let seq, _, _): return seq
+        case .agentKeyEventOk(let seq, _): return seq
         case .error(let seq, _): return seq
         case .documentEvent(let seq, _, _): return seq
         case .subscribed(let seq, _, _): return seq
@@ -277,6 +524,61 @@ public enum OfficeWireFrame: Equatable, Sendable {
             payload["path"] = path
         case .close(_, let docId), .closed(_, let docId):
             payload["docId"] = docId
+        case .save(_, let docId, let part):
+            payload["docId"] = docId
+            payload["part"] = part
+        case .keyEvent(_, let docId, let part, let type, let charCode, let keyCode):
+            payload["docId"] = docId
+            payload["part"] = part
+            payload["eventType"] = type.rawValue
+            payload["charCode"] = charCode
+            payload["keyCode"] = keyCode
+        case .mouseEvent(_, let docId, let part, let type, let xTwips, let yTwips, let count, let buttons, let modifiers):
+            payload["docId"] = docId
+            payload["part"] = part
+            payload["eventType"] = type.rawValue
+            payload["xTwips"] = xTwips
+            payload["yTwips"] = yTwips
+            payload["count"] = count
+            payload["buttons"] = buttons
+            payload["modifiers"] = modifiers
+        case .extTextInputEvent(_, let docId, let part, let type, let text):
+            payload["docId"] = docId
+            payload["part"] = part
+            payload["eventType"] = type.rawValue
+            payload["text"] = text
+        case .keyEventOk(_, let docId), .mouseEventOk(_, let docId), .extTextInputEventOk(_, let docId):
+            payload["docId"] = docId
+        case .clipboardCopy(_, let docId, let part), .clipboardCut(_, let docId, let part):
+            payload["docId"] = docId
+            payload["part"] = part
+        case .clipboardPaste(_, let docId, let part, let text):
+            payload["docId"] = docId
+            payload["part"] = part
+            payload["text"] = text
+        case .undo(_, let docId), .redo(_, let docId), .createView(_, let docId):
+            payload["docId"] = docId
+        case .agentKeyEvent(_, let docId, let part, let type, let charCode, let keyCode):
+            payload["docId"] = docId
+            payload["part"] = part
+            payload["eventType"] = type.rawValue
+            payload["charCode"] = charCode
+            payload["keyCode"] = keyCode
+        case .clipboardCopyOk(_, let docId, let text), .clipboardCutOk(_, let docId, let text):
+            payload["docId"] = docId
+            payload["text"] = text
+        case .clipboardPasteOk(_, let docId), .undoOk(_, let docId), .redoOk(_, let docId),
+             .agentKeyEventOk(_, let docId):
+            payload["docId"] = docId
+        case .agentViewReady(_, let docId, let viewId):
+            payload["docId"] = docId
+            payload["viewId"] = viewId
+        case .saved(_, let docId, let tempPath):
+            payload["docId"] = docId
+            payload["tempPath"] = tempPath
+        case .saveFailed(_, let docId, let reason):
+            payload["docId"] = docId
+            payload["reason"] = reason
         case .opened(_, let docId, let type, let parts, let size):
             payload["docId"] = docId
             payload["docType"] = type.rawValue
@@ -385,6 +687,40 @@ public enum OfficeWireRole: String, Equatable, Sendable {
     case agent
 }
 
+/// LOK's `LibreOfficeKitKeyEventType` (`LibreOfficeKitEnums.h:1076-1080`) — a direct 1:1 mirror
+/// (`rawValue` IS the wire integer, no translation table needed, unlike `OfficeDocumentKind`):
+/// `LOK_KEYEVENT_KEYINPUT = 0` (implicit first enumerator), `LOK_KEYEVENT_KEYUP = 1`.
+public enum OfficeKeyEventType: Int, Equatable, Sendable {
+    case keyInput = 0
+    case keyUp = 1
+}
+
+/// LOK's `LibreOfficeKitMouseEventType` (`LibreOfficeKitEnums.h:1253-1261`) — same direct 1:1
+/// mirror as `OfficeKeyEventType`: `LOK_MOUSEEVENT_MOUSEBUTTONDOWN = 0`,
+/// `LOK_MOUSEEVENT_MOUSEBUTTONUP = 1`, `LOK_MOUSEEVENT_MOUSEMOVE = 2`.
+public enum OfficeMouseEventType: Int, Equatable, Sendable {
+    case buttonDown = 0
+    case buttonUp = 1
+    case move = 2
+}
+
+/// LOK's `LibreOfficeKitExtTextInputType` (`LibreOfficeKitEnums.h:1084-1093`) — same direct 1:1
+/// mirror as `OfficeKeyEventType`/`OfficeMouseEventType`: `rawValue` IS the wire integer, no
+/// translation. LOK declares THREE enumerators (`LOK_EXT_TEXTINPUT = 0`, `LOK_EXT_TEXTINPUT_POS = 1`,
+/// `LOK_EXT_TEXTINPUT_END = 2`) — this bridge only ever SENDS two of them. `POS` (cf.
+/// `SalEvent::ExtTextInputPos`) is an IME candidate-window positioning query; Norma answers that need
+/// itself, locally, via `NSTextInputClient.firstRect(forCharacterRange:)` reading the already-tracked
+/// caret rect — there is nothing to ask LOK for. **`.end`'s rawValue is therefore `2`, deliberately
+/// skipping `1`** — a sequential `case input = 0, end = 1` would silently post `LOK_EXT_TEXTINPUT_POS`
+/// instead of the real commit, and composition would never land; see `OfficeWireCodecTests`'s own
+/// fixture for the pinned raw value.
+public enum OfficeExtTextInputType: Int, Equatable, Sendable {
+    case input = 0
+    // LOK_EXT_TEXTINPUT_POS = 1 is intentionally not modeled — this bridge never sends it; see this
+    // enum's own header.
+    case end = 2
+}
+
 /// LOK's `LibreOfficeKitDocumentType` (`LibreOfficeKitEnums.h:22-27`), transcribed rather than
 /// imported — that header is not safely importable outside a C++ translation unit (see
 /// `LOKBridge.swift`'s header for the full reason) — restricted to the three kinds the brief names
@@ -478,6 +814,30 @@ public struct OfficeTwipsRect: Equatable, Sendable {
 public enum OfficeDocumentEvent: Equatable, Sendable {
     case opened(type: OfficeDocumentKind, parts: Int, sizeTwips: OfficeDocumentSize)
     case openFailed(reason: String)
+    /// Task 5 — `LOK_CALLBACK_INVALIDATE_VISIBLE_CURSOR`'s parsed rect: the blinking text caret's
+    /// own position/size. Never carries "no cursor" — LOK only ever fires this with a real
+    /// rectangle (see `parseCaretRect`'s own header for the empirical capture this is built from);
+    /// Norma owns the actual BLINK timing itself (`LOK_CALLBACK_CURSOR_VISIBLE`, type 5, is
+    /// deliberately not wired — a disclosed Task 5 scope decision, not an oversight).
+    case caretRect(OfficeTwipsRect)
+    /// Task 5 — `LOK_CALLBACK_TEXT_SELECTION`'s parsed rect LIST: one rect per visual line the
+    /// selection spans (a multi-line selection is NOT one bounding box). Empty means no selection —
+    /// LOK's own payload is `""` or (observed live from Calc specifically, an undocumented
+    /// divergence) the bare string `"EMPTY"`; both fold to `[]` here, mirroring `.invalidated`'s own
+    /// established leniency for the identical sentinel on a different callback.
+    case textSelection([OfficeTwipsRect])
+    /// Task 5 — `LOK_CALLBACK_TEXT_SELECTION_START`'s parsed rect: the selection anchor's own
+    /// cursor-shaped rectangle (used to draw a selection handle). Per LO's own source
+    /// (`SwSelPaintRects::getLOKPayload`, `sw/source/core/crsr/viscrs.cxx`, read at the pinned
+    /// commit) this callback simply does not fire at all when there is no selection — never observed
+    /// live with an empty payload, so unlike `textSelection` there is no "no selection" case to fold.
+    case textSelectionStart(OfficeTwipsRect)
+    /// Task 5 — the selection's trailing edge, `TEXT_SELECTION_END`'s counterpart to
+    /// `textSelectionStart` above. Same "always a real rect" posture.
+    case textSelectionEnd(OfficeTwipsRect)
+    /// Task 5 — `LOK_CALLBACK_CELL_CURSOR`'s parsed payload (Calc only) — see `OfficeCellCursor`'s
+    /// own header for the two shapes (a real cell, or the in-cell-edit `"EMPTY"` window).
+    case cellCursor(OfficeCellCursor)
     /// `rectsTwips` is plural/an array (the brief's own field name) even though a single stock LOK
     /// `LOK_CALLBACK_INVALIDATE_TILES` firing carries exactly one rectangle, or the string
     /// `"EMPTY"` meaning "the whole document" — represented here as an EMPTY array, documented at
@@ -485,9 +845,47 @@ public enum OfficeDocumentEvent: Equatable, Sendable {
     /// forward-compatible with a future coalesced/batched-rects producer without another wire
     /// change. `part` is present because `LOK_FEATURE_PART_IN_INVALIDATION_CALLBACK` is enabled at
     /// boot (`LOKBridge`), which appends the part number as the payload's 5th value.
+    ///
+    /// **Fix round 1, F3 — corrected: `"EMPTY"` DOES carry a part number, always, once the
+    /// part-in-invalidation feature is on.** `RectangleAndPart::toString()` (LO core,
+    /// `desktop/inc/lib/init.hxx`) is unconditional about this: `if (m_nPart >= -1) return
+    /// (isInfinite() ? "EMPTY" : rect) + ", " + part + ", " + mode;` — a whole-document
+    /// invalidation is `"EMPTY, <part>, <mode>"` on the wire, not bare `"EMPTY"`, whenever
+    /// `isPartInInvalidation()` is true (which `LOKBridge` always sets). `part` for this case can
+    /// legitimately be `-1` — LO's own "all parts" sentinel (`init.hxx`'s own `m_nPart(INT_MIN)`/
+    /// "-1 is reserved to mean 'all parts'" comment; `SfxLokHelper::notifyInvalidation`'s single-
+    /// rectangle overload can be called with an explicit `-1`) — harmless here since the EMPTY case
+    /// already bumps every part regardless (`TileCache.invalidate`'s own doc), but a NON-empty rect
+    /// can carry `-1` too; see that method's own fix-round doc for how it now honors that.
     case invalidated(rectsTwips: [OfficeTwipsRect], part: Int)
     case modifiedChanged(Bool)
     case closed
+    /// Office Stage B Task 7 — the helper's own `OfficeAutosaveScheduler` fired and
+    /// `OfficeDocumentBridge.saveAsSidecar` wrote (or refreshed) `docId`'s sidecar at
+    /// `<state-path>/autosave/<docId>.<ext>`. `ext` is the extension ACTUALLY written — native for
+    /// an already-ODF document, the ODF sibling for an OOXML one (`OfficeSaveFormat.autosaveFormat`)
+    /// — not necessarily the document's own real extension, which is why this carries it rather
+    /// than leaving the app to assume. `isODFFallback` is that same fact restated as a bool, purely
+    /// so the app never has to re-derive "was this a fallback" by comparing extensions itself
+    /// (`OfficeRuntime`'s own manifest write and, eventually, the recovery banner's format
+    /// disclosure both read it directly). The helper never learns `docId`'s real PATH (the
+    /// Collabora jail — `OfficeRuntime.stageDocument`'s own header), so this is the one thing this
+    /// event exists to carry: the app is the only side that can turn `docId` back into a real path
+    /// and write the manifest entry this task's recovery flow reads at open time.
+    case autosaved(ext: String, isODFFallback: Bool)
+    /// Task 8 — `LOK_CALLBACK_CELL_FORMULA`'s parsed payload (Calc only): "the text content of the
+    /// formula bar" (`LibreOfficeKitEnums.h:345-347`), verbatim. Confirmed live (a probe against
+    /// `two-sheet.ods`'s own real seed content, `OfficeHelperLiveTests
+    /// .testProbeInvestigatesWhetherCellFormulaCallbacksExistForTheFormulaBarsContent`) to fire on
+    /// EVERY cell move — including onto a genuinely empty cell, which sends the empty string, not
+    /// a sentinel and not silence — AND per keystroke while typing an in-cell edit BEFORE it
+    /// commits (live edit-buffer text), all independent of `CELL_CURSOR`'s own `"EMPTY"` window
+    /// during that same edit. A SEPARATE `OfficeCursorStore` field pair from `cellCursor`, never
+    /// folded together — that same probe found the two callbacks' own ORDERING differs by
+    /// scenario (content before ref on a plain navigate; ref-goes-empty before content on entering
+    /// edit mode), so treating one as derived from the other would silently mix two independently
+    /// timed LOK callbacks into one field.
+    case cellFormula(String)
 
     /// This case's own fields, flattened into the SAME single-level JSON object
     /// `OfficeWireFrame.encodedLine()` builds for a `.documentEvent` frame — `kind` is the
@@ -510,7 +908,31 @@ public enum OfficeDocumentEvent: Equatable, Sendable {
             return ["kind": "modifiedChanged", "modified": modified]
         case .closed:
             return ["kind": "closed"]
+        case .autosaved(let ext, let isODFFallback):
+            return ["kind": "autosaved", "ext": ext, "isODFFallback": isODFFallback]
+        case .caretRect(let rect):
+            return ["kind": "caretRect"].merging(Self.encodeBareRect(rect)) { _, new in new }
+        case .textSelection(let rects):
+            return ["kind": "textSelection", "rectsTwips": rects.map { Self.encodeBareRect($0) }]
+        case .textSelectionStart(let rect):
+            return ["kind": "textSelectionStart"].merging(Self.encodeBareRect(rect)) { _, new in new }
+        case .textSelectionEnd(let rect):
+            return ["kind": "textSelectionEnd"].merging(Self.encodeBareRect(rect)) { _, new in new }
+        case .cellCursor(let cell):
+            switch cell {
+            case .empty:
+                return ["kind": "cellCursor", "empty": true]
+            case .at(let rect, let column, let row):
+                return ["kind": "cellCursor", "empty": false, "column": column, "row": row]
+                    .merging(Self.encodeBareRect(rect)) { _, new in new }
+            }
+        case .cellFormula(let text):
+            return ["kind": "cellFormula", "text": text]
         }
+    }
+
+    private static func encodeBareRect(_ rect: OfficeTwipsRect) -> [String: Any] {
+        ["x": rect.x, "y": rect.y, "width": rect.width, "height": rect.height]
     }
 
     /// The inverse of `encodedFields()`, reading from the SAME flat object a `.documentEvent`
@@ -551,20 +973,87 @@ public enum OfficeDocumentEvent: Equatable, Sendable {
             return .modifiedChanged(number.boolValue)
         case "closed":
             return .closed
+        case "autosaved":
+            // Wire strictness (house norm): both fields required, `isODFFallback` boolean-typed via
+            // the SAME NSNumber/CFBoolean discriminator `modifiedChanged`/`cellCursor` above use —
+            // a malformed or missing field here rejects the whole frame rather than silently
+            // defaulting, matching every other case in this switch.
+            guard let ext = object["ext"] as? String, !ext.isEmpty,
+                  let number = object["isODFFallback"] as? NSNumber,
+                  CFGetTypeID(number) == CFBooleanGetTypeID() else {
+                return nil
+            }
+            return .autosaved(ext: ext, isODFFallback: number.boolValue)
+        case "caretRect":
+            guard let rect = decodeBareRect(object) else { return nil }
+            return .caretRect(rect)
+        case "textSelection":
+            guard let rawRects = object["rectsTwips"] as? [[String: Any]] else { return nil }
+            var rects: [OfficeTwipsRect] = []
+            for rawRect in rawRects {
+                guard let rect = decodeBareRect(rawRect) else { return nil }
+                rects.append(rect)
+            }
+            return .textSelection(rects)
+        case "textSelectionStart":
+            guard let rect = decodeBareRect(object) else { return nil }
+            return .textSelectionStart(rect)
+        case "textSelectionEnd":
+            guard let rect = decodeBareRect(object) else { return nil }
+            return .textSelectionEnd(rect)
+        case "cellCursor":
+            guard let number = object["empty"] as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else {
+                return nil
+            }
+            if number.boolValue { return .cellCursor(.empty) }
+            guard let rect = decodeBareRect(object), let column = intValue(object["column"]),
+                  let row = intValue(object["row"]) else {
+                return nil
+            }
+            return .cellCursor(.at(rectTwips: rect, column: column, row: row))
+        case "cellFormula":
+            // Wire strictness (house norm): `text` is required — a missing field rejects the
+            // whole frame rather than silently defaulting to "", which would be indistinguishable
+            // from a genuinely empty cell's own real, meaningful payload (see this case's own
+            // header on `OfficeDocumentEvent`).
+            guard let text = object["text"] as? String else { return nil }
+            return .cellFormula(text)
         default:
             return nil
         }
     }
 
+    private static func decodeBareRect(_ object: [String: Any]) -> OfficeTwipsRect? {
+        guard let x = int64Value(object["x"]), let y = int64Value(object["y"]),
+              let width = int64Value(object["width"]), let height = int64Value(object["height"]) else {
+            return nil
+        }
+        return OfficeTwipsRect(x: x, y: y, width: width, height: height)
+    }
+
     // MARK: - LOK raw callback payload parsing
 
     /// Parses `LOK_CALLBACK_INVALIDATE_TILES`'s raw payload: `"x, y, width, height"` in twips,
-    /// `"x, y, width, height, part"` with `LOK_FEATURE_PART_IN_INVALIDATION_CALLBACK` set (always,
-    /// in `LOKBridge`), or the literal string `"EMPTY"` meaning "the whole document" —
-    /// `LibreOfficeKitEnums.h:120-129`. `"EMPTY"` maps to an EMPTY `rectsTwips` array (documented on
-    /// the `.invalidated` case itself); `part` for that case defaults to `0` — LOK's own "EMPTY"
-    /// firing carries no part number to parse, and "whole document" is not meaningfully scoped to
-    /// one part anyway. `nil` for anything that doesn't parse as either shape.
+    /// `"x, y, width, height, part, mode"` with `LOK_FEATURE_PART_IN_INVALIDATION_CALLBACK` set
+    /// (always, in `LOKBridge`), or `"EMPTY"` — with the SAME optional `", part, mode"` suffix —
+    /// meaning "the whole document" (`LibreOfficeKitEnums.h:120-129`). `nil` for anything that
+    /// doesn't parse as either shape.
+    ///
+    /// **Fix round 1, F3 (CRITICAL — a real, confirmed bug, not a hardening nice-to-have): a bare
+    /// `trimmed == "EMPTY"` exact-match used to be the ONLY accepted whole-document shape.** With
+    /// `LOK_FEATURE_PART_IN_INVALIDATION_CALLBACK` on (always, in `LOKBridge`), LO's own writer
+    /// (`RectangleAndPart::toString()`, `desktop/inc/lib/init.hxx`, fetched and read directly, not
+    /// guessed) NEVER emits bare `"EMPTY"` — it unconditionally appends `", " + part + ", " + mode`
+    /// whenever `m_nPart >= -1`, i.e. the real wire shape is `"EMPTY, 0, 0"` (or whatever part/mode
+    /// happen to be). The old exact-match rejected that: it fell through to the numeric-rect branch,
+    /// `Int64("EMPTY")` failed, and the WHOLE callback was silently dropped — a genuine
+    /// whole-document invalidation that never reached `TileCache.invalidate` at all, leaving stale
+    /// pixels no scroll/zoom could ever correct (nothing re-marks a key "stale" if the invalidation
+    /// that should have done so was never parsed in the first place). Fixed below by matching on
+    /// `fields[0] == "EMPTY"` rather than the whole trimmed string, mirroring LO's OWN reader's
+    /// leniency (`RectangleAndPart::Create`, same file: part is read if present, mode is optional
+    /// even then) — this parser now accepts bare `"EMPTY"`, `"EMPTY, <part>"`, and `"EMPTY, <part>,
+    /// <mode>"` alike, discarding mode (`OfficeDocumentEvent.invalidated` carries no mode field).
     ///
     /// Lives here (not on `LOKBridge`, its one real caller) so a test can reach it at all:
     /// `LOKBridge` is a `type: tool` Xcode target no test bundle can import. Task 4's live callback
@@ -572,8 +1061,13 @@ public enum OfficeDocumentEvent: Equatable, Sendable {
     /// Parsers`) DOES now provoke real LOK callbacks over open+paintTile+close, so this parser is no
     /// longer permanently zero-coverage against real firings — but that probe observed **zero**
     /// `LOK_CALLBACK_INVALIDATE_TILES` firings against a view-only document with no edit verb
-    /// available (Stage A ships none), so this function specifically remains untested against real
-    /// data; the table test below is still its only exercise.
+    /// available (Stage A ships none); Task 4's OWN live edit tests are what first observed a real
+    /// firing (the 6-field, non-EMPTY rect shape) — see `OfficeHelperLiveTests`' criterion-1 test.
+    /// The EMPTY shape specifically remains cross-checked only against real UPSTREAM SOURCE (this
+    /// comment's own citations), not yet against a captured live EMPTY firing — Stage B's own edit
+    /// traffic so far has stayed within one already-visible tile range, never triggered a genuine
+    /// whole-document invalidation (a format change, a huge paste, a full recalc). Revisit the day
+    /// one is captured live.
     ///
     /// **Re-judged leniency (Task 4, debt #1), one clause at a time:**
     /// - `"EMPTY"` and the 4-field shape: both structurally reachable and both covered by the table
@@ -585,18 +1079,30 @@ public enum OfficeDocumentEvent: Equatable, Sendable {
     ///   unconditionally in `LOKBridge`, so production should always get 5 fields when this callback
     ///   ever DOES fire — but that claim is a header-doc reading, not something Task 4's probe
     ///   confirmed live. Structurally unreachable until a Stage-B edit verb exists to provoke a real
-    ///   invalidation; revisit this comment the day one does.
+    ///   invalidation; revisit this comment the day one does. **Fix round 1 update**: Task 4's own
+    ///   live edit traffic DID cross-check this — real firings observed 6 fields, always with a
+    ///   parseable `fields[4]`, never exercising the default. The default itself (garbage or a
+    ///   missing 5th field) is still unexercised by real data.
     static func parseInvalidateTiles(_ payload: String) -> OfficeDocumentEvent? {
         let trimmed = payload.trimmingCharacters(in: .whitespaces)
-        if trimmed == "EMPTY" {
-            return .invalidated(rectsTwips: [], part: 0)
-        }
         let fields = trimmed.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        guard let first = fields.first else { return nil }
+        if first == "EMPTY" {
+            // Fix round 1, F3: part (and, if present, mode) after "EMPTY" — see this function's own
+            // header. `part` can legitimately be `-1` ("all parts") — passed through unchanged;
+            // `TileCache.invalidate`'s empty-rects branch already ignores `part` entirely, so `-1`
+            // is indistinguishable from any other value there (harmless either way).
+            let part = fields.count >= 2 ? (Int(fields[1]) ?? 0) : 0
+            return .invalidated(rectsTwips: [], part: part)
+        }
         guard fields.count >= 4,
               let x = Int64(fields[0]), let y = Int64(fields[1]),
               let width = Int64(fields[2]), let height = Int64(fields[3]) else {
             return nil
         }
+        // `Int` parses a leading "-" natively — `part == -1` ("all parts," the same LO sentinel the
+        // EMPTY branch above can carry) survives this unchanged; `TileCache.invalidate`'s own
+        // fix-round update is what makes a NON-empty rect actually honor it.
         let part = fields.count >= 5 ? (Int(fields[4]) ?? 0) : 0
         return .invalidated(rectsTwips: [OfficeTwipsRect(x: x, y: y, width: width, height: height)], part: part)
     }
@@ -622,6 +1128,172 @@ public enum OfficeDocumentEvent: Equatable, Sendable {
         guard payload.hasPrefix(prefix) else { return nil }
         return .modifiedChanged(payload.dropFirst(prefix.count) == "true")
     }
+
+    // MARK: - Task 5: caret, selection, cell-cursor raw payload parsing
+    //
+    // Every shape below is built from a REAL captured firing, not from the enum header's own doc
+    // comments alone — `OfficeHelperLiveTests.testRealLOKCallbackProbeCapturesCaretSelectionAndCell
+    // CursorRawPayloads` is where each was first observed; see that test's own header for the full
+    // methodology and why more than one input door (keyboard AND mouse, Writer AND Calc) was probed
+    // before writing any of this. The header comments for these five LOK callback types describe a
+    // shape at least one of them does NOT actually produce at this vendored pin (`LOK_FEATURE_
+    // VIEWID_IN_VISCURSOR_INVALIDATION_CALLBACK`'s own JSON format for `INVALIDATE_VISIBLE_CURSOR` —
+    // see `parseCaretRect`'s own header) — the T4 lesson, generalized past `INVALIDATE_TILES`'s own
+    // "EMPTY carries no part" mistake to the whole callback vocabulary.
+
+    /// Shared core: a bare `"x, y, width, height"` rect, the SAME shape `INVALIDATE_TILES`'s own
+    /// non-EMPTY branch parses, reused here rather than re-derived — every one of Task 5's five new
+    /// callback types builds on this same primitive (`CELL_CURSOR` extends it with two more fields;
+    /// `TEXT_SELECTION` repeats it, semicolon-joined). `>= 4`, never `== 4` — mirrors
+    /// `parseInvalidateTiles`'s own established leniency for a payload that turns out to carry more
+    /// fields than any live capture has shown so far, even though every firing THIS task's own probe
+    /// observed carried exactly 4.
+    private static func parseBareRect(_ text: String) -> OfficeTwipsRect? {
+        let fields = text.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        guard fields.count >= 4,
+              let x = Int64(fields[0]), let y = Int64(fields[1]),
+              let width = Int64(fields[2]), let height = Int64(fields[3]) else {
+            return nil
+        }
+        return OfficeTwipsRect(x: x, y: y, width: width, height: height)
+    }
+
+    /// Parses `LOK_CALLBACK_INVALIDATE_VISIBLE_CURSOR`'s raw payload.
+    ///
+    /// **Empirically a bare `"x, y, width, height"` rect, identical for every scenario probed** —
+    /// Writer's main document caret (typing in the body) AND Calc's in-cell edit caret (typing inside
+    /// a cell) both produced this exact shape; `width` was `0` in every one of the six real firings
+    /// observed (a caret is a vertical line, no horizontal extent). The enum header's own doc comment
+    /// (`LibreOfficeKitEnums.h:131-140`) describes a DIFFERENT "new format" — a JSON object with
+    /// `viewId`/`rectangle`/`misspelledWord` — gated on `LOK_FEATURE_VIEWID_IN_VISCURSOR_INVALIDATION_
+    /// CALLBACK`; source-reading ahead of the probe (`SfxLokHelper::notifyCursorInvalidation`,
+    /// `sfx2/source/view/lokhelper.cxx`, pinned commit `11482c8f`) found that function's own
+    /// `bControlEvent == false` branch never closes the `"rectangle"` value's own JSON string before
+    /// appending `" }"` — looks structurally incapable of producing valid JSON — but the probe's own
+    /// real captures show this path is simply never reached by ordinary document-caret movement in
+    /// this build at all (every real firing is the plain rect, not JSON, malformed or otherwise).
+    /// Accepted anyway, defensively, as a fallback — cheap, matches the header's own documented
+    /// alternative, and costs nothing against a future LOK version or an untested path (a floating
+    /// dialog's own cursor, reached with `nWindowId != 0`) that DOES emit it.
+    static func parseCaretRect(_ payload: String) -> OfficeDocumentEvent? {
+        if let rect = parseBareRect(payload) {
+            return .caretRect(rect)
+        }
+        guard let data = payload.data(using: .utf8),
+              let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let rectString = object["rectangle"] as? String,
+              let rect = parseBareRect(rectString) else {
+            return nil
+        }
+        return .caretRect(rect)
+    }
+
+    /// Parses `LOK_CALLBACK_TEXT_SELECTION`'s raw payload: `"rect1[; rect2[; ...]]"`
+    /// (`LibreOfficeKitEnums.h:142-149`'s own documented shape, confirmed live for the single-rect
+    /// case — every selection this task's own probe produced fit on one line, so the semicolon-joined
+    /// multi-rect shape is accepted by construction of this parser but not itself cross-checked
+    /// against a real multi-line-selection firing; disclosed, not chased further, the same posture
+    /// `parseInvalidateTiles`'s own header takes toward its own never-observed EMPTY-with-garbage
+    /// case). Empty selection folds BOTH real shapes observed live to `[]`: LOK's documented `""`,
+    /// AND (Calc-specific, undocumented, found by reading `sc/source/ui/view/gridwin.cxx:7005` ahead
+    /// of the probe though not itself re-triggered by this task's own Writer-focused probe run) the
+    /// bare string `"EMPTY"` — mirrors `parseInvalidateTiles`'s own established EMPTY leniency on a
+    /// different callback entirely.
+    static func parseTextSelection(_ payload: String) -> OfficeDocumentEvent? {
+        let trimmed = payload.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty || trimmed == "EMPTY" {
+            return .textSelection([])
+        }
+        var rects: [OfficeTwipsRect] = []
+        for piece in trimmed.split(separator: ";") {
+            guard let rect = parseBareRect(String(piece)) else { return nil }
+            rects.append(rect)
+        }
+        return .textSelection(rects)
+    }
+
+    /// Parses `LOK_CALLBACK_TEXT_SELECTION_START`'s raw payload — a bare rect, confirmed live
+    /// (Writer, keyboard shift-selection). Per `SwSelPaintRects::getLOKPayload`
+    /// (`sw/source/core/crsr/viscrs.cxx`, read at the pin) this callback does not fire AT ALL when
+    /// there is no selection (`if (!size()) return {}` — no payload, not an empty one), consistent
+    /// with the probe's own capture: no START/END line was ever observed accompanying a
+    /// selection-collapse. `nil` for anything that doesn't parse as a bare rect — there is no
+    /// documented or observed "empty" shape for this callback to be lenient toward.
+    static func parseTextSelectionStart(_ payload: String) -> OfficeDocumentEvent? {
+        guard let rect = parseBareRect(payload) else { return nil }
+        return .textSelectionStart(rect)
+    }
+
+    /// The trailing-edge counterpart to `parseTextSelectionStart` — same shape, same posture,
+    /// confirmed live the same way.
+    static func parseTextSelectionEnd(_ payload: String) -> OfficeDocumentEvent? {
+        guard let rect = parseBareRect(payload) else { return nil }
+        return .textSelectionEnd(rect)
+    }
+
+    /// Parses `LOK_CALLBACK_CELL_CURSOR`'s raw payload (Calc only).
+    ///
+    /// **A SIX-field payload, not the four-field shape the enum header's own doc comment would
+    /// suggest by analogy with `INVALIDATE_TILES`** — confirmed live (two real firings, A1 and a
+    /// distant cell) and cross-checked against source ahead of the probe
+    /// (`ScViewData::describeCellCursorAt`, `sc/source/ui/view/viewdata.cxx`, pinned commit
+    /// `11482c8f`, the non-print-twips branch this helper's own registry configuration takes —
+    /// `LibreOfficeKit::isCompatFlagSet(Compat::scPrintTwipsMsgs)` is never set here): `"x, y, width,
+    /// height, col, row"` — the trailing `col`/`row` are the cell's own 0-based column/row indices,
+    /// which `TileMath`'s existing rect-only vocabulary has no field for. Kept, not discarded — this
+    /// is the brief's own named T8 feed ("CELL_CURSOR parsing you build now feeds it"), and the parse
+    /// stays pure and reusable exactly as asked: this function has no opinion about the formula
+    /// bar/cell-ref strip that will eventually read `column`/`row`.
+    ///
+    /// **The bare `"EMPTY"` sentinel — confirmed live, during in-cell edit mode.** Unlike
+    /// `INVALIDATE_TILES`'s `"EMPTY, <part>, <mode>"`, this one carries no trailing fields at all —
+    /// `ScGridWindow::getCellCursor()` (`sc/source/ui/view/gridwin.cxx`) returns the bare literal
+    /// whenever `mpOOCursors` is unset, which the probe's own capture shows happens the moment a cell
+    /// enters text-edit mode (the grid's own "current cell" concept doesn't apply while editing text
+    /// inside one) — `column`/`row` are genuinely unknown in that state, not merely omitted, which is
+    /// exactly why `OfficeCellCursor` models this as its own case rather than a rect-optional pair
+    /// carrying stale/sentinel numbers.
+    static func parseCellCursor(_ payload: String) -> OfficeDocumentEvent? {
+        let trimmed = payload.trimmingCharacters(in: .whitespaces)
+        if trimmed == "EMPTY" {
+            return .cellCursor(.empty)
+        }
+        let fields = trimmed.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        guard fields.count >= 6,
+              let x = Int64(fields[0]), let y = Int64(fields[1]),
+              let width = Int64(fields[2]), let height = Int64(fields[3]),
+              let column = Int(fields[4]), let row = Int(fields[5]) else {
+            return nil
+        }
+        return .cellCursor(.at(rectTwips: OfficeTwipsRect(x: x, y: y, width: width, height: height), column: column, row: row))
+    }
+
+    /// Parses `LOK_CALLBACK_CELL_FORMULA`'s raw payload (Calc only) — "the text content of the
+    /// formula bar" (`LibreOfficeKitEnums.h:345-347`). **Never rejects anything** — unlike every
+    /// other parser in this file, there is no structure here to malform: the payload IS the text,
+    /// verbatim, confirmed live (`OfficeHelperLiveTests
+    /// .testProbeInvestigatesWhetherCellFormulaCallbacksExistForTheFormulaBarsContent`'s own real
+    /// capture) to arrive as a plain string in every observed shape — a cell's literal content
+    /// ("NORMA GATE", "42"), the empty string for a genuinely empty cell, and the live,
+    /// uncommitted in-progress edit-buffer text while typing. A bare `""` is therefore NOT an
+    /// error sentinel the way it is for `parseTextSelectionStart`/`parseCellCursor` — it is the
+    /// real, meaningful "this cell has no content" shape, and must fold as such, never as a
+    /// rejected/ignored firing.
+    static func parseCellFormula(_ payload: String) -> OfficeDocumentEvent? {
+        .cellFormula(payload)
+    }
+}
+
+/// Task 5 — `LOK_CALLBACK_CELL_CURSOR`'s two real shapes (Calc only), kept as its own type rather
+/// than an `(OfficeTwipsRect?, Int, Int)` tuple with meaningless sentinel numbers when empty — see
+/// `OfficeDocumentEvent.parseCellCursor`'s own header for the empirical basis of both cases.
+public enum OfficeCellCursor: Equatable, Sendable {
+    /// A real cell is current: its own rect (twips) plus its 0-based `(column, row)` — the T8
+    /// formula-bar/cell-ref strip's own feed.
+    case at(rectTwips: OfficeTwipsRect, column: Int, row: Int)
+    /// No cell cursor to report right now (observed live: while a cell is in text-edit mode) — LOK's
+    /// own bare `"EMPTY"` sentinel, carrying no column/row at all.
+    case empty
 }
 
 /// Task 2 introduced this as a Stage-A-wide placeholder (no LibreOfficeKit loaded anywhere yet).
@@ -759,6 +1431,140 @@ public enum OfficeWireCodec {
                 return .rejected(seq: seq, reason: "malformed")
             }
             return .frame(.close(seq: seq, docId: docId))
+        case "save":
+            // Fix round 4 (NEW-2) — `part` is REQUIRED, exactly like `keyEvent`/`mouseEvent`'s own.
+            // Deliberately not defaulted to 0 on a missing field: a `save` frame with no part is a
+            // sender that predates this field, and silently substituting sheet 1 for "whatever the
+            // user is on" is the precise failure this field exists to prevent. Both ends of this
+            // wire ship in the SAME app bundle (the helper is embedded), so there is no mixed-version
+            // case to be lenient for — the same reasoning `keyEvent`'s own required `part` already
+            // rests on.
+            guard let docId = object["docId"] as? String, let part = intValue(object["part"]) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.save(seq: seq, docId: docId, part: part))
+        case "keyEvent":
+            guard let docId = object["docId"] as? String, let part = intValue(object["part"]),
+                  let typeRaw = intValue(object["eventType"]), let type = OfficeKeyEventType(rawValue: typeRaw),
+                  let charCode = intValue(object["charCode"]), let keyCode = intValue(object["keyCode"]) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.keyEvent(seq: seq, docId: docId, part: part, type: type, charCode: charCode, keyCode: keyCode))
+        case "mouseEvent":
+            guard let docId = object["docId"] as? String, let part = intValue(object["part"]),
+                  let typeRaw = intValue(object["eventType"]), let type = OfficeMouseEventType(rawValue: typeRaw),
+                  let xTwips = int64Value(object["xTwips"]), let yTwips = int64Value(object["yTwips"]),
+                  let count = intValue(object["count"]), let buttons = intValue(object["buttons"]),
+                  let modifiers = intValue(object["modifiers"]) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.mouseEvent(seq: seq, docId: docId, part: part, type: type, xTwips: xTwips, yTwips: yTwips,
+                                       count: count, buttons: buttons, modifiers: modifiers))
+        case "extTextInputEvent":
+            guard let docId = object["docId"] as? String, let part = intValue(object["part"]),
+                  let typeRaw = intValue(object["eventType"]), let type = OfficeExtTextInputType(rawValue: typeRaw),
+                  let text = object["text"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.extTextInputEvent(seq: seq, docId: docId, part: part, type: type, text: text))
+        case "keyEventOk":
+            guard let docId = object["docId"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.keyEventOk(seq: seq, docId: docId))
+        case "mouseEventOk":
+            guard let docId = object["docId"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.mouseEventOk(seq: seq, docId: docId))
+        case "extTextInputEventOk":
+            guard let docId = object["docId"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.extTextInputEventOk(seq: seq, docId: docId))
+        case "clipboardCopy":
+            guard let docId = object["docId"] as? String, let part = intValue(object["part"]) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.clipboardCopy(seq: seq, docId: docId, part: part))
+        case "clipboardCut":
+            guard let docId = object["docId"] as? String, let part = intValue(object["part"]) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.clipboardCut(seq: seq, docId: docId, part: part))
+        case "clipboardPaste":
+            guard let docId = object["docId"] as? String, let part = intValue(object["part"]),
+                  let text = object["text"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.clipboardPaste(seq: seq, docId: docId, part: part, text: text))
+        case "undo":
+            guard let docId = object["docId"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.undo(seq: seq, docId: docId))
+        case "redo":
+            guard let docId = object["docId"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.redo(seq: seq, docId: docId))
+        case "createView":
+            guard let docId = object["docId"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.createView(seq: seq, docId: docId))
+        case "agentKeyEvent":
+            guard let docId = object["docId"] as? String, let part = intValue(object["part"]),
+                  let typeRaw = intValue(object["eventType"]), let type = OfficeKeyEventType(rawValue: typeRaw),
+                  let charCode = intValue(object["charCode"]), let keyCode = intValue(object["keyCode"]) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.agentKeyEvent(seq: seq, docId: docId, part: part, type: type, charCode: charCode, keyCode: keyCode))
+        case "clipboardCopyOk":
+            guard let docId = object["docId"] as? String, let text = object["text"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.clipboardCopyOk(seq: seq, docId: docId, text: text))
+        case "clipboardCutOk":
+            guard let docId = object["docId"] as? String, let text = object["text"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.clipboardCutOk(seq: seq, docId: docId, text: text))
+        case "clipboardPasteOk":
+            guard let docId = object["docId"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.clipboardPasteOk(seq: seq, docId: docId))
+        case "undoOk":
+            guard let docId = object["docId"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.undoOk(seq: seq, docId: docId))
+        case "redoOk":
+            guard let docId = object["docId"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.redoOk(seq: seq, docId: docId))
+        case "agentViewReady":
+            guard let docId = object["docId"] as? String, let viewId = intValue(object["viewId"]) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.agentViewReady(seq: seq, docId: docId, viewId: Int32(truncatingIfNeeded: viewId)))
+        case "agentKeyEventOk":
+            guard let docId = object["docId"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.agentKeyEventOk(seq: seq, docId: docId))
+        case "saved":
+            guard let docId = object["docId"] as? String, let tempPath = object["tempPath"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.saved(seq: seq, docId: docId, tempPath: tempPath))
+        case "saveFailed":
+            guard let docId = object["docId"] as? String, let reason = object["reason"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.saveFailed(seq: seq, docId: docId, reason: reason))
         case "helloOk":
             guard let lokVersion = object["lokVersion"] as? String else {
                 return .rejected(seq: seq, reason: "malformed")

@@ -55,6 +55,15 @@ final class OfficeHelperLiveTests: XCTestCase {
     private static var vendorProductSetRoot: URL {
         repoRoot.appendingPathComponent("apple/Norma/vendor/libreoffice/product-set", isDirectory: true)
     }
+    /// Office Stage B Task 1 — the checked-in seatbelt profile SOURCE, passed via `--sandbox-profile`
+    /// (DEBUG-only override, mirrors `--lok-root` exactly) so the standalone `BUILT_PRODUCTS_DIR`
+    /// helper this file mostly spawns can find it without a full app embed. Never used by
+    /// `testEmbeddedRootBootsAgainstTheRealBuiltAppAndBundleStaysUntouched`, which passes `nil`
+    /// deliberately — that test's whole point is exercising `resolveSandboxProfilePath()`'s own
+    /// DEFAULT (no-override) resolution against the real embedded `Contents/Resources/office-helper.sb`.
+    private static var repoSandboxProfilePath: URL {
+        repoRoot.appendingPathComponent("apple/Norma/Sources/OfficeHelper/office-helper.sb", isDirectory: false)
+    }
     private static var fixturesRoot: URL {
         repoRoot.appendingPathComponent("apple/Norma/Tests/NormaAppTests/Fixtures/office", isDirectory: true)
     }
@@ -148,7 +157,23 @@ final class OfficeHelperLiveTests: XCTestCase {
         // `LOKBridge.handleCallback`'s raw-payload trace line for whatever LOK actually fired.
         // `false` for every existing caller (unchanged behavior: stderr inherited, visible in the
         // test log directly, nothing programmatically read back).
-        captureStderr: Bool = false
+        captureStderr: Bool = false,
+        // Office Stage B Task 1 — defaults ON (the repo-checked-in profile source), same
+        // always-pass-unless-embedded-root posture `installRoot` already has: EVERY test in this
+        // file that does not explicitly override this spawns a FULLY SANDBOXED helper, with no
+        // per-test change needed — "default sandboxed everywhere, including all live tests" is true
+        // by construction, not by each test opting in. `nil` is reserved for
+        // `testEmbeddedRootBootsAgainstTheRealBuiltAppAndBundleStaysUntouched`, which needs
+        // main.swift's own DEFAULT (no `--sandbox-profile` override) resolution exercised for real.
+        sandboxProfilePath: URL? = OfficeHelperLiveTests.repoSandboxProfilePath,
+        // Task 10 discriminator #5 — the bare DEBUG `--no-sandbox` escape hatch (main.swift's
+        // `sandboxDisabledForDebugHarness`), forwarded ONLY when `true`. `false` for every existing
+        // caller (unchanged behavior: still fully sandboxed by construction, per this function's own
+        // header above). This exists to isolate "embedded install root" from "seatbelt" as two
+        // independently-toggleable variables — every prior test in this file only ever varied them
+        // together (sandboxed+standalone-root, or sandboxed+embedded-root), so "embedded root" and
+        // "under this seatbelt" were confounded in every run to date.
+        noSandbox: Bool = false
     ) async throws -> LiveHelper {
         let resolvedHelperURL = helperURL ?? Bundle.main.bundleURL.deletingLastPathComponent()
             .appendingPathComponent("NormaOfficeHelper")
@@ -175,6 +200,8 @@ final class OfficeHelperLiveTests: XCTestCase {
         var arguments = ["--socket-path", socketPath, "--state-path", resolvedStateDir.path,
                           "--token", token, "--idle-exit-seconds", String(idleExitSeconds)]
         if let installRoot { arguments += ["--lok-root", installRoot.path] }
+        if let sandboxProfilePath { arguments += ["--sandbox-profile", sandboxProfilePath.path] }
+        if noSandbox { arguments += ["--no-sandbox"] }
         process.arguments = arguments
 
         var stderrCapture: StderrCapture?
@@ -289,6 +316,350 @@ final class OfficeHelperLiveTests: XCTestCase {
         }
     }
 
+    // MARK: - Office Stage B Task 9: the legacy-format widening decision, empirical
+
+    /// **The two formats the widening decision ACCEPTED.** `gate.xlsm` is `gate.xlsx`'s own bytes,
+    /// renamed — `cp gate.xlsx gate.xlsm`, the whole recipe: xlsm's container format IS xlsx's
+    /// (a zip of OOXML parts) with an OPTIONAL macro part, and a macro-free `.xlsm` is byte-for-byte
+    /// what this file already is under its real name. `gate.odg` is HAND-AUTHORED flat ODF —
+    /// `two-slide.fodp`'s own precedent (T8), adapted to `office:mimetype=".graphics"` and an
+    /// `office:drawing`/`draw:page` body instead of `office:presentation`. Proves two things at
+    /// once: LOK's own content-sniffing accepts flat-XML content under the PACKAGED `.odg` extension
+    /// (not only its native `.fodg` — the office-legacy-probe spike's own `open` mode confirmed both
+    /// names independently before this test existed), and `getDocumentType()` genuinely reports
+    /// `DRAWING` (`LOK_DOCTYPE_DRAWING = 3`) for it, a document kind none of the original six ever
+    /// exercised (`OfficeDocumentKind.drawing`, added ahead of need at Task 3, first proven live
+    /// here).
+    func testWidenedLegacyFormatsXlsmAndOdgOpenWithSaneTypePartsAndSize() async throws {
+        try skipUnlessVendorPresent()
+        let helper = try await spawnLiveHelper()
+
+        struct Expectation {
+            let fixture: String; let type: OfficeDocumentKind; let parts: Int
+            let widthTwips: Int64; let heightTwips: Int64
+        }
+        // Same tolerance-free pins as the six-format matrix: `gate.xlsm` is `gate.xlsx`'s own bytes,
+        // so its dimensions match that fixture's own EXACT pin, not the tolerance-banded `.ods` one.
+        let expectations: [Expectation] = [
+            Expectation(fixture: "gate.xlsm", type: .spreadsheet, parts: 1, widthTwips: 26593, heightTwips: 13005),
+            Expectation(fixture: "gate.odg", type: .drawing, parts: 1, widthTwips: 12241, heightTwips: 15841),
+        ]
+        for expectation in expectations {
+            let path = Self.fixturesRoot.appendingPathComponent(expectation.fixture).path
+            let docId = UUID().uuidString
+            let metadata = try await helper.client.open(docId: docId, path: path)
+            XCTAssertEqual(metadata.type, expectation.type, "\(expectation.fixture): type")
+            XCTAssertEqual(metadata.parts, expectation.parts, "\(expectation.fixture): parts")
+            XCTAssertEqual(metadata.sizeTwips.widthTwips, expectation.widthTwips, "\(expectation.fixture): widthTwips")
+            XCTAssertEqual(metadata.sizeTwips.heightTwips, expectation.heightTwips, "\(expectation.fixture): heightTwips")
+            print("[legacy widening matrix] \(expectation.fixture): type=\(metadata.type) parts=\(metadata.parts) "
+                    + "size=\(metadata.sizeTwips.widthTwips)x\(metadata.sizeTwips.heightTwips)")
+            try await helper.client.close(docId: docId)
+        }
+    }
+
+    /// **Fix round 1 (review F4) — the drift tripwire `officeReadWriteExtensions` itself cannot
+    /// have.** `PanelEditorTab.swift`'s own header explains why a compile-time parity test against
+    /// `OfficeSaveFormat` cannot exist: the app target has no visibility into `NormaOfficeHelper`'s
+    /// module (`OfficeDocumentBridge`'s own header in `OfficeHelperServer.swift`). This is the
+    /// EMPIRICAL substitute the review names instead — a live assertion, against the REAL vendored
+    /// LOK, that `saveAs` genuinely fails `unsupportedFormat` for `xlsm`/`odg`. `saveAsOnDedicatedThread`'s
+    /// `guard let format = doc.saveFormat else { throw SaveError.unsupportedFormat(...) }` fires
+    /// before any LOK C call at all — no death race like the OOXML-export limitation's own test below
+    /// has to account for, so this can assert synchronously rather than polling for a process death.
+    /// **The day `OfficeSaveFormat` gains a case for either format, this test goes red** (the save
+    /// would succeed instead of throwing) — the signal that `officeReadWriteExtensions`' own hand-
+    /// maintained list (`PanelDocumentTabTests.testOfficeDocumentIsReadOnlyFormatIsTrueOnlyForThe
+    /// FormatsThisBuildCannotWrite` pins that list against ITSELF, not against the original —
+    /// exactly the gap this test closes) is now stale and the read-only gates it drives need lifting.
+    ///
+    /// **Scope, after whole-branch review I2:** this test covers the `no OfficeSaveFormat case` route
+    /// into read-only, which is `xlsm`/`odg` only. `docx` is read-only by a SECOND, independent route
+    /// — it has a case, and this build's Writer OOXML export fails anyway — so it is deliberately not
+    /// in the loop below (a `saveAs` for it fails with `impl_store`, not `unsupportedFormat`, and
+    /// asserting the wrong wording here would pin the wrong mechanism). Its tripwire is the docx leg
+    /// of `testXlsxDocxPptxSaveRoundTripThroughTheRealHelperAfterTheR3VendorRecut`.
+    func testWidenedFormatsXlsmAndOdgFailSaveWithUnsupportedFormatTheDriftTripwireForOfficeReadWriteExtensions() async throws {
+        try skipUnlessVendorPresent()
+        let helper = try await spawnLiveHelper()
+
+        for fixture in ["gate.xlsm", "gate.odg"] {
+            let path = Self.fixturesRoot.appendingPathComponent(fixture).path
+            let docId = UUID().uuidString
+            _ = try await helper.client.open(docId: docId, path: path)
+            do {
+                _ = try await helper.client.save(docId: docId, part: 0)
+                XCTFail("\(fixture): saveAs SUCCEEDED — OfficeSaveFormat has gained a case for this "
+                        + "format. Update officeReadWriteExtensions (PanelEditorTab.swift) to include "
+                        + "it and lift its read-only gates (officeDocumentIsReadOnlyFormat and every "
+                        + "doc comment naming this as a Task 9 widened-but-read-only format).")
+            } catch let error as OfficeHelperClientError {
+                guard case .saveFailed(let reason) = error else {
+                    XCTFail("\(fixture): expected .saveFailed, got \(error)")
+                    continue
+                }
+                XCTAssertTrue(reason.localizedCaseInsensitiveContains("not supported"), "\(fixture): "
+                              + "expected SaveError.unsupportedFormat's own wording (\"saving is not "
+                              + "supported for this document's format\"), got: \(reason)")
+            }
+            try await helper.client.close(docId: docId)
+        }
+    }
+
+    /// **The three formats the widening decision REJECTED — a known, disclosed limitation, pinned
+    /// the same way `testXlsxDocxPptxSaveRoundTripThroughTheRealHelperAfterTheR3VendorRecut` pins
+    /// the (now largely fixed) export-side gap and
+    /// `testRealLegacyBinaryFixturesOpenAsTextAfterR3RecutXlsStillFailsCleanly` pins this import-side
+    /// one, so a future vendor rebuild that fixes this further is caught by a RED test here, not
+    /// silently missed.** All three fixtures are committed, genuinely-produced
+    /// legacy binary (OLE2/CFB) documents — never fabricated garbage bytes (`testGarbageFileOpen
+    /// FailsAndHelperSurvives`'s own well-known caveat: LOK's content-sniffing is lenient enough
+    /// that arbitrary bytes rarely reproduce a REAL format-specific failure).
+    ///
+    /// `legacy-doc.doc` — macOS's own `textutil -convert doc` (built in, no LOK involved at all;
+    /// exact recipe: `echo '<text>' > x.txt && textutil -convert doc x.txt -output legacy-doc.doc`),
+    /// a genuine "Composite Document File V2 Document" per `file(1)`. Two independent source texts
+    /// (plain ASCII and a richer RTF import) both produced the IDENTICAL failure while writing this
+    /// test — not a content-specific fluke.
+    ///
+    /// `legacy-xls.xls`/`legacy-ppt.ppt` — LOK's OWN `saveAs`, called directly against the bare
+    /// extension (bypassing this app's `OfficeSaveFormat` table entirely, which has no case for
+    /// either), via the `spikes/office-legacy-probe` C spike this task added (`saveas` mode) —
+    /// `gate.ods`/`gate.odp` in, `.xls`/`.ppt` out. **The export half of that round trip SUCCEEDED
+    /// cleanly** — genuine, non-crashing writes, disproving the advisor's own pre-registered guess
+    /// that legacy export would crash the same way OOXML export does (`ooxml-export-investigation
+    /// .md`'s own missing-`libsal_textenclo.dylib` mechanism does not reach these filters). **Only
+    /// the READ-BACK half fails** — the exact inverse of the six original formats' own OOXML
+    /// situation (there, EXPORT was the gap and IMPORT always worked; here, IMPORT is the gap and
+    /// EXPORT works), which is why this vendor build's own trim is the more likely explanation than
+    /// any inherent legacy-binary limitation: something the IMPORT-side filter registration needs
+    /// is missing from this trimmed product-set, distinct from whatever the export-side filter needs.
+    ///
+    /// **`legacy-xls.xls` fails CLEANLY** — `documentLoad` returns `NULL`,
+    /// `OfficeHelperServer`'s own "the helper always survives" design holds exactly as it does for
+    /// the six original formats' own `testGarbageFileOpenFailsAndHelperSurvives`: a catchable
+    /// `LoadError`, a normal `openFailed` reply, `helper.process.isRunning` stays `true`.
+    ///
+    /// **HISTORICAL (Task 9, pre-r3) — `legacy-doc.doc` and `legacy-ppt.ppt` did NOT fail cleanly —
+    /// they took the whole helper process down.** Live-caught, not assumed, at the time: the FIRST
+    /// cut of this test expected a clean `openFailed` for both (mirroring `.xls`) and failed with
+    /// `OfficeHelperClientError.timedOut` instead — `expectReply`'s own `nextFrame(timeout:)`
+    /// returning `nil` early (a genuine 15s network stall would not resolve in ~2s) because the
+    /// CONNECTION closed out from under it, not because nothing answered in time. The standalone
+    /// `office-legacy-probe` spike (no Swift/ObjC exception layer at all) independently reproduced
+    /// the identical shape for both: LOK printed its own generic UNO fallback string,
+    /// `"Unspecified Application Error"`, then the PROCESS EXITED (`exit(1)`, confirmed via the
+    /// spike's own `$?` — not a signal-raised crash: no entry landed in
+    /// `~/Library/Logs/DiagnosticReports/` for it). A direct libc `exit()`/`_Exit()` call from deep
+    /// inside LO's own C++ import path bypassed Swift's `try`/`catch` entirely — `OfficeHelperServer`'s
+    /// "never a crash" design (`LoadError`'s own doc) assumes every LOK failure surfaces as a
+    /// catchable return value, which held for `.xls`'s own `NULL`-returning failure but not for
+    /// whatever internal condition `.doc`/`.ppt` import hit here at the time.
+    ///
+    /// **Task 11 update — this mechanism is the SAME missing-`libsal_textenclo.dylib` gap
+    /// `ooxml-export-investigation.md` diagnosed for xlsx EXPORT, reached here on the IMPORT side
+    /// instead** (legacy binary formats store text with a Windows-codepage-tagged encoding;
+    /// resolving it on import needs the identical `rtl_getBestWindowsCharsetFromTextEncoding`
+    /// lookup the missing dylib broke). The r3 vendor re-cut that added the dylib for xlsx export
+    /// also closed this import-side crash for these two fixtures — measured directly (a diagnostic
+    /// pass through the real client, not assumed from the export-side fix alone): `open()` now
+    /// returns cleanly instead of the process dying. The test below no longer polls
+    /// `!helper.process.isRunning` for `.doc`/`.ppt` — it asserts the actual, successful
+    /// `OfficeDocumentMetadata` returned, matching what was measured. See this test's own header
+    /// above the `for` loop for what this does and does not prove (two real legacy binaries opening
+    /// via LOK's lenient TEXT fallback, which is not a verdict on legacy import working).
+    func testRealLegacyBinaryFixturesOpenAsTextAfterR3RecutXlsStillFailsCleanly() async throws {
+        try skipUnlessVendorPresent()
+
+        // The clean-failure case — unaffected by the r3 vendor re-cut, unchanged from the original
+        // pin. Mirrors testGarbageFileOpenFailsAndHelperSurvives exactly.
+        do {
+            let helper = try await spawnLiveHelper()
+            let path = Self.fixturesRoot.appendingPathComponent("legacy-xls.xls").path
+            do {
+                _ = try await helper.client.open(docId: UUID().uuidString, path: path)
+                XCTFail("legacy-xls.xls: expected the KNOWN legacy-import limitation to reproduce (an "
+                        + "openFailed) — if this succeeded instead, the limitation was fixed; widen "
+                        + "\"xls\" in officeFileExtensions (PanelEditorTab.swift) and delete this row")
+            } catch OfficeHelperClientError.openFailed(let reason) {
+                XCTAssertTrue(reason.contains("loadComponentFromURL returned an empty reference"),
+                              "legacy-xls.xls: reason was \"\(reason)\" — if this is a DIFFERENT "
+                              + "failure than the one this test pinned, the underlying cause may have "
+                              + "changed; re-verify before assuming the limitation is unchanged")
+            }
+            XCTAssertTrue(helper.process.isRunning, "legacy-xls.xls: a failed legacy import must not "
+                          + "take the helper down with it — same survival bar as any other openFailed")
+        }
+
+        // doc/ppt: CHANGED by the r3 vendor re-cut, discovered as a side effect of Task 11, not
+        // pursued as its own goal.
+        //
+        // **Provenance — corrected at the whole-branch review (I3).** Task 11's first version of
+        // this comment called these "Task 10's own synthetic CFB-magic-bytes fixtures (8 bytes of
+        // real OLE2 signature, minimal/degenerate content behind it — see task-10-report.md)". That
+        // was wrong in every clause, and contradicted this very test's own header 70 lines up. They
+        // are TASK 9's, added by 9fabfa6b — the same commit that made the widening decision — and
+        // they are genuine legacy binaries, not stubs: `file(1)` reports Composite Document File V2
+        // for both, legacy-doc.doc is 19KB with real `WordDocument`/`1Table` streams carrying its
+        // own body sentences (macOS `textutil -convert doc`, no LOK involved), legacy-ppt.ppt is
+        // 458KB with `PowerPoint Document`/`Pictures`/`Current User`/`___PPT10` streams carrying
+        // placeholder text and font tables (LOK's OWN saveAs from gate.odp). task-10-report.md's F2
+        // — the cited source — verified the CFB MAGIC is real and never called the content
+        // synthetic; it says the opposite of what it was cited for.
+        //
+        // Pre-r3, opening either one took the whole helper down with it — a direct libc exit() deep
+        // inside LO's import path, the same class of crash ooxml-export-investigation.md diagnosed
+        // for xlsx EXPORT: legacy binary formats store text with a Windows-codepage-tagged encoding,
+        // and IMPORTING it needs the identical rtl_getBestWindowsCharsetFromTextEncoding lookup
+        // libsal_textenclo.dylib's absence broke. Post-r3 (measured directly, not assumed — a
+        // diagnostic pass through the real client, not the detached-Task/isRunning-poll shape this
+        // test used pre-r3), the crash is GONE for both: they open cleanly, sniffed by LOK's own
+        // lenient content-detection fallback as plain TEXT documents. That is a MORE surprising
+        // result now the provenance is stated correctly, not a less surprising one — and the reason
+        // to still read it as the fallback rather than as working importers is the part counts,
+        // which the assertions below pin: 135 parts for a .ppt exported from a single-slide gate.odp
+        // is not a presentation being imported (and a real one would report .presentation, not
+        // .text, which is the stronger half of this leg's evidence), and 9 parts
+        // for a .doc whose entire body is two short sentences is consistent with LOK paginating the
+        // raw 19KB container as text rather than parsing the Word streams.
+        //
+        // **Does NOT reopen Task 9's read-only-viewer decision — but NOT for the reason the first
+        // version of this comment gave.** There is no untouched "second route" holding the decision
+        // up: for .ppt these fixtures are the WHOLE of Task 9's evidence (its only route was this
+        // LOK-native round trip), and for .doc the only thing not re-run is the second source TEXT
+        // Task 9 fed the same textutil recipe. What actually holds the decision up is the outcome
+        // itself: a real legacy binary opening as many-part mojibake is worse for a user than
+        // today's clean refusal, so it argues against widening, not for it. `xls` is separately
+        // confirmed unchanged above. Re-evaluating the posture with more real legacy content stays a
+        // named follow-up (task-11-report.md), not something decided here.
+        //
+        // Still the load-bearing exerciser of Task 10's CFB `cfbNativeLegacyExtensions` allowlist
+        // (`LOKBridge.swift`) — opens all three fixtures by their REAL, native extensions, which
+        // that allowlist explicitly passes through to `documentLoad` rather than refusing; dropping
+        // `doc`/`ppt` from it would make these two hit the CFB-refusal `openFailed` instead of the
+        // clean, successful open asserted below, so this still catches that regression.
+        for (fixture, expectedParts, widthTwips, heightTwips) in [
+            ("legacy-doc.doc", 9, 12808, 145400),
+            ("legacy-ppt.ppt", 135, 12808, 2177024),
+        ] {
+            let helper = try await spawnLiveHelper()
+            let path = Self.fixturesRoot.appendingPathComponent(fixture).path
+            let docId = UUID().uuidString
+            let metadata = try await helper.client.open(docId: docId, path: path)
+            XCTAssertEqual(metadata.type, .text, "\(fixture): expected LOK's lenient fallback to sniff "
+                          + "this genuine legacy binary as a text document — if this is a DIFFERENT "
+                          + "type, either LOK's sniffing changed or this is no longer the fallback "
+                          + "path (a .presentation here would mean the real ppt importer now works)")
+            XCTAssertEqual(metadata.parts, expectedParts, "\(fixture): part count changed — re-verify "
+                          + "before assuming the same fallback shape still applies. This count is "
+                          + "the load-bearing evidence that this is the fallback and not a working "
+                          + "importer: neither fixture's real content could produce it")
+            XCTAssertEqual(metadata.sizeTwips.widthTwips, Int64(widthTwips), "\(fixture): widthTwips")
+            XCTAssertEqual(metadata.sizeTwips.heightTwips, Int64(heightTwips), "\(fixture): heightTwips")
+            XCTAssertTrue(helper.process.isRunning, "\(fixture): expected a clean, successful open "
+                          + "after the r3 vendor re-cut — if the helper died instead, the re-cut's "
+                          + "fix for this fixture's own crash mechanism regressed")
+            try await helper.client.close(docId: docId)
+        }
+    }
+
+    // MARK: - Office Stage B Task 10 — the CFB release blocker's own refusal drill
+
+    /// **The adopted release blocker, live: a GENUINE OLE2/CFB document under a MODERN extension —
+    /// "a user's genuine .doc renamed .docx," the exact scenario the blocker names.** Reuses
+    /// `legacy-doc.doc`'s own committed bytes (never synthesized magic-bytes-plus-garbage:
+    /// `testGarbageFileOpenFailsAndHelperSurvives`'s own well-known caveat — LOK's content-sniffing
+    /// is lenient enough that arbitrary bytes rarely reproduce a REAL format-specific failure —
+    /// applies here too, and inverted: a hand-rolled prefix risks never reaching the real crash path
+    /// this test exists to prove is now intercepted) — copied byte-for-byte to a `.docx`-named
+    /// scratch path, never a repo fixture (the interesting fact is the RENAME, not new content).
+    ///
+    /// **Pre-fix, this reproduced the historical helper-death mode
+    /// `testRealLegacyBinaryFixturesOpenAsTextAfterR3RecutXlsStillFailsCleanly`'s `.doc`/`.ppt` legs
+    /// used to pin** (that test's own name and assertions changed at Task 11 — the missing-dylib
+    /// crash those two legs pinned is gone — but THIS gate's refusal, below, is unaffected either
+    /// way: it fires before LOK ever sees the bytes) — confirmed live, once, before `LOKBridge`'s CFB
+    /// sniff landed (see task-10-report.md for the transcript: the open never replies,
+    /// `helper.process.isRunning` goes false). **Post-fix**, the refusal below
+    /// fires INSIDE `openOnDedicatedThread`, strictly before `documentLoad` is ever called, so LOK
+    /// never sees these bytes at all and the crash path is never reached.
+    func testCFBBytesUnderAModernExtensionRefuseCleanlyAndTheHelperStaysAlive() async throws {
+        try skipUnlessVendorPresent()
+        let helper = try await spawnLiveHelper()
+
+        let scratch = makeScratchDirectory()
+        let renamed = scratch.appendingPathComponent("renamed-legacy.docx")
+        try FileManager.default.copyItem(
+            at: Self.fixturesRoot.appendingPathComponent("legacy-doc.doc"), to: renamed)
+
+        do {
+            _ = try await helper.client.open(docId: UUID().uuidString, path: renamed.path)
+            XCTFail("renamed-legacy.docx: expected the CFB refusal to fire — if this succeeded, "
+                    + "either the sniff regressed or documentLoad itself no longer needs guarding "
+                    + "against this content (re-verify testRealLegacyBinaryFixturesOpenAsTextAfter"
+                    + "R3RecutXlsStillFailsCleanly's own .doc leg before assuming either)")
+        } catch OfficeHelperClientError.openFailed(let reason) {
+            XCTAssertEqual(reason, "refused before documentLoad: legacy OLE2/CFB binary content "
+                            + "under a modern Office extension",
+                            "renamed-legacy.docx: unexpected refusal reason — \(reason)")
+        }
+
+        // Liveness proof, exactly the brief's own bar: not merely `isRunning` (a boolean that would
+        // stay true for a hung-but-not-dead process too) but a SECOND, GOOD document actually
+        // opening on the same helper right after — the same behavioral proof
+        // `testGarbageFileOpenFailsAndHelperSurvives`'s sibling assertion below already establishes
+        // the pattern for.
+        XCTAssertTrue(helper.process.isRunning, "the CFB refusal must not take the helper down")
+        let goodDocId = UUID().uuidString
+        let goodPath = Self.fixturesRoot.appendingPathComponent("gate.docx").path
+        let metadata = try await helper.client.open(docId: goodDocId, path: goodPath)
+        XCTAssertEqual(metadata.type, .text, "gate.docx must open normally on the same helper, "
+                        + "right after the refusal — the actual liveness proof, not just the flag")
+        try await helper.client.close(docId: goodDocId)
+    }
+
+    /// Fix-round finding (I2, whole-branch review of this task): the CFB gate above only ever
+    /// guarded `OfficeSaveFormat`'s six modern read-write extensions — CFB bytes under `.xlsm`/
+    /// `.odg` (T9's WIDENED, read-only-viewer extensions) fell through completely unguarded, hitting
+    /// the identical helper-killing `exit()` path every other CFB-under-a-wrong-extension case hits.
+    /// No legitimate CFB (pre-2007 OLE2 binary) file has ever had an `.xlsm`/`.odg` extension —
+    /// those are XML-zip-based formats introduced years after CFB's own era — so this widening
+    /// excludes nothing real. Same reason string, same liveness bar, same shape as the sibling test
+    /// immediately above — this is that same gate, now closing the two extensions T9 widened.
+    func testCFBBytesUnderTheTwoWidenedExtensionsAlsoRefuseCleanlyAndTheHelperStaysAlive() async throws {
+        try skipUnlessVendorPresent()
+        let helper = try await spawnLiveHelper()
+
+        for (renamedName, goodFixture, expectedGoodType) in [
+            ("renamed-legacy.xlsm", "gate.xlsm", OfficeDocumentKind.spreadsheet),
+            ("renamed-legacy.odg", "gate.odg", OfficeDocumentKind.drawing),
+        ] {
+            let scratch = makeScratchDirectory()
+            let renamed = scratch.appendingPathComponent(renamedName)
+            try FileManager.default.copyItem(
+                at: Self.fixturesRoot.appendingPathComponent("legacy-doc.doc"), to: renamed)
+
+            do {
+                _ = try await helper.client.open(docId: UUID().uuidString, path: renamed.path)
+                XCTFail("\(renamedName): expected the CFB refusal to fire — if this succeeded, "
+                        + "the sniff regressed for this extension")
+            } catch OfficeHelperClientError.openFailed(let reason) {
+                XCTAssertEqual(reason, "refused before documentLoad: legacy OLE2/CFB binary content "
+                                + "under a modern Office extension",
+                                "\(renamedName): unexpected refusal reason — \(reason)")
+            }
+
+            XCTAssertTrue(helper.process.isRunning, "\(renamedName): the CFB refusal must not take "
+                            + "the helper down")
+            let goodDocId = UUID().uuidString
+            let goodPath = Self.fixturesRoot.appendingPathComponent(goodFixture).path
+            let metadata = try await helper.client.open(docId: goodDocId, path: goodPath)
+            XCTAssertEqual(metadata.type, expectedGoodType, "\(goodFixture): must open normally on "
+                            + "the same helper, right after the refusal")
+            try await helper.client.close(docId: goodDocId)
+        }
+    }
+
     // MARK: - Garbage-file survival
 
     /// Task 3 finding, empirical, disclosed in the report — TWO escalating attempts before this
@@ -350,6 +721,59 @@ final class OfficeHelperLiveTests: XCTestCase {
 
         // The first handle is unaffected — close still works normally.
         try await helper.client.close(docId: docId)
+    }
+
+    // MARK: - Office Stage B Task 1: lock-file probe (the seatbelt's own carried branch)
+    //
+    // Task 1 brief's own decision point: LOK's convention for a document opened for editing is to
+    // write a sibling `.~lock.<name>#` marker beside it. Pre-seatbelt (this helper, today) that
+    // write succeeds silently — nothing in Stage A ever noticed because nothing was watching for
+    // it. Once the write fence denies anything outside `--state-path` (this task's own job), the
+    // brief's own ruling is explicit: LOK must be observed to WARN-AND-CONTINUE (never widen the
+    // fence to cover document directories) — and if it does not, the fix is a LOK-side knob that
+    // stops the write from being attempted at all, not a wider fence.
+    //
+    // This test asserts the END-STATE invariant that must hold EITHER way: after opening a document
+    // that lives in an ordinary writable directory (never `--state-path`), no `.~lock.*#` sibling
+    // exists, and the open itself still succeeded. A pre-fence run against the then-unsandboxed
+    // helper (this test's own first run, before `office-helper.sb`/main.swift's sandbox wiring
+    // existed) confirmed the assertion was genuinely RED — LOK really does write the lock file when
+    // nothing stops it — and this test now runs sandboxed BY DEFAULT (`spawnLiveHelper`'s own
+    // `sandboxProfilePath` default), where it is GREEN: the warn-and-continue branch fired, not the
+    // disable-at-source one — see task-1-report.md for both runs' evidence in full.
+    func testOpeningADocumentInAWritableDirectoryLeavesNoLockFileBeside() async throws {
+        try skipUnlessVendorPresent()
+        let helper = try await spawnLiveHelper()
+
+        let scratchDir = makeScratchDirectory()
+        let fixtureData = try Data(contentsOf: Self.fixturesRoot.appendingPathComponent("gate.docx"))
+        let docPath = scratchDir.appendingPathComponent("editable-gate.docx")
+        try fixtureData.write(to: docPath)
+        let lockPath = scratchDir.appendingPathComponent(".~lock.editable-gate.docx#")
+
+        let docId = UUID().uuidString
+        let metadata = try await helper.client.open(docId: docId, path: docPath.path)
+        XCTAssertEqual(metadata.type, .text, "setup: gate.docx must still open as a text document")
+
+        // A generous settle window — LOK's own lock-file write (if it happens at all) is
+        // synchronous with `documentLoad`/`initializeForRendering` in every LO embedding this repo
+        // has observed, but this gives any deferred-write implementation a fair chance to have
+        // acted before this test reads the directory.
+        try? await Task.sleep(nanoseconds: 500_000_000)
+
+        let lockExistsWhileOpen = FileManager.default.fileExists(atPath: lockPath.path)
+        let siblingsWhileOpen = (try? FileManager.default.contentsOfDirectory(atPath: scratchDir.path)) ?? []
+        print("[lock-file probe] while open: lockExists=\(lockExistsWhileOpen) siblings=\(siblingsWhileOpen)")
+
+        try await helper.client.close(docId: docId)
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        let lockExistsAfterClose = FileManager.default.fileExists(atPath: lockPath.path)
+        print("[lock-file probe] after close: lockExists=\(lockExistsAfterClose)")
+
+        XCTAssertFalse(lockExistsWhileOpen, "no .~lock.*# sibling may exist while the document is open under the "
+                        + "seatbelt — either LOK warn-and-continues past a denied write (fence stays narrow) or "
+                        + "lock-file creation is disabled at the source (see LOKBridge's user-profile config)")
+        XCTAssertFalse(lockExistsAfterClose, "no .~lock.*# sibling may exist after close either")
     }
 
     // MARK: - Version pin (carry T3-c)
@@ -431,7 +855,135 @@ final class OfficeHelperLiveTests: XCTestCase {
             .filter { $0.lastPathComponent.hasPrefix("lok-profile-") }
     }
 
+    // MARK: - Office Stage B Task 7 — autosave/ is the ONE state-path directory NOT wholesale-swept
+
+    /// **The load-bearing counterpart to the sweep test immediately above — same two-sequential-
+    /// boots-same-state-path shape, opposite claim.** `docs/`/`saves/` are wiped unconditionally at
+    /// every boot (`LOKBridge.sweepStaleDocumentDirectories`, proven implicitly by every save/stage
+    /// test in this file leaving no cross-boot leftovers) because nothing they hold survives being
+    /// deleted — a staged copy re-stages, a rendered save is a one-shot temp already relocated.
+    /// `autosave/` is the opposite: whatever is sitting there when a helper boots is the ONE thing a
+    /// crash-recovery feature exists to NOT delete out from under the app's own next-open check.
+    /// Proves this the SAME way `testStaleProfileDirectoriesAreSweptOnTheNextBootOfTheSameStatePath`
+    /// proves the wipe: a file placed under the FIRST boot's own `autosave/`, that boot SIGKILLed
+    /// (matching how a dead helper actually goes away once LOK is loaded — carry #4), a SECOND
+    /// helper booted against the exact same `--state-path`, and the file still there afterward.
+    ///
+    /// Deliberately does not need a REAL autosaved sidecar (no wire traffic, no LOK document, no
+    /// dirty timer) — `LOKBridge.init`'s own boot-time sweep call runs unconditionally, before
+    /// anything document-shaped ever happens, so a bare marker file already proves the claim: this
+    /// directory is either swept at boot or it is not, independent of what created its contents.
+    func testAutosaveDirectorySurvivesAcrossASIGKILLAndRespawnUnlikeDocsAndSaves() async throws {
+        try skipUnlessVendorPresent()
+        let sharedStateDir = makeScratchDirectory()
+
+        let first = try await spawnLiveHelper(stateDir: sharedStateDir)
+        let autosaveDir = sharedStateDir.appendingPathComponent("autosave", isDirectory: true)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: autosaveDir.path),
+                      "the boot-time sweep call (which also CREATES this directory, mirroring "
+                      + "docs/saves) must have run")
+        let markerPath = autosaveDir.appendingPathComponent("crashed-doc.odt")
+        try "unsaved content from before the crash".write(to: markerPath, atomically: true, encoding: .utf8)
+
+        // SIGKILL — matching the sweep test immediately above, and production
+        // (`OfficeHelperSupervisor.forceKill`, carry #4) — confirmed fully reaped before the
+        // second boot starts, so the "one live helper per state-path at a time" safety argument
+        // both sweeps' own headers rely on genuinely holds.
+        let killResult = kill(first.process.processIdentifier, SIGKILL)
+        XCTAssertEqual(killResult, 0, "setup: kill(SIGKILL) syscall itself failed: errno \(errno)")
+        first.process.waitUntilExit()
+        let firstDied = await waitUntil(timeout: 5.0) { !first.process.isRunning }
+        XCTAssertTrue(firstDied, "setup: first helper must be fully dead before the second boots against the same state path")
+
+        let second = try await spawnLiveHelper(stateDir: sharedStateDir)
+
+        XCTAssertEqual(try String(contentsOf: markerPath, encoding: .utf8), "unsaved content from before the crash",
+                       "autosave/ must survive a crash+respawn — deleting it here is deleting the "
+                       + "evidence crash recovery exists to find")
+
+        // The sweep must not have left the second helper in a broken state.
+        let docId = UUID().uuidString
+        let metadata = try await second.client.open(docId: docId, path: Self.fixturesRoot.appendingPathComponent("gate.xlsx").path)
+        XCTAssertEqual(metadata.type, .spreadsheet, "the second helper must still be fully functional")
+        try await second.client.close(docId: docId)
+    }
+
     // MARK: - Embedded root (carry #1: at least one test against the REAL built app)
+
+    /// **FIXED, office-editable Task 10 — was a known limitation, now a permanent regression pin,
+    /// corrected once more by a whole-branch review's own fix round.** Impress (`pptx`/`odp`) and
+    /// Writer (`docx`/`odt`) documents used to fail to open (helper-killing hang/timeout) via this
+    /// exact configuration — the bundled, embedded-in-`<app>` helper executable, the production
+    /// shape every real user's build takes.
+    ///
+    /// **Two readings of the root cause, in sequence, each corrected by running a matrix the
+    /// PREVIOUS reading never had:** (1) First cut: a live `/usr/bin/log stream` capture (T1's own
+    /// `sender == "Sandbox"` predicate produces zero lines on this OS build; `eventMessage contains
+    /// "deny"` does not) caught the `office-helper.lok` thread blocked inside `SvxShapeText::
+    /// setString → LinguServiceManager::create → LngSvcMgr::GetAvailableSpellSvcs_Impl →
+    /// MacSpellChecker::MacSpellChecker() → NSApplicationLoad() → +[NSApplication initialize]`,
+    /// denied four mach-lookups in turn — LOK's own unconditional, vendor-internal probe of macOS's
+    /// native spellchecker availability, reached only when a document's editable shape/text-frame
+    /// model is built (Impress shapes, Writer text frames; Calc's pure grid-cell path never reaches
+    /// `SvxShapeText::setString`, which is exactly why it was always unaffected). Shipped as "grant
+    /// all four, install root is the trigger" — WRONG, per (2): a review's own Experiment B ran the
+    /// missing 2x2 (bundled/bare executable x standalone/embedded root, against a PRE-widening
+    /// profile) and found root irrelevant — bare+embedded opens cleanly, bundled+standalone hangs.
+    /// Bundling is the PROVEN trigger (the 2x2 above). **`NSBundle.main`'s own path-climbing
+    /// resolution finding Norma.app's real bundle identity only for the bundled exec, and THAT
+    /// being what makes `+[NSApplication initialize]` attempt real WindowServer/TCC/LaunchServices
+    /// connections at all, is a plausible but UNTESTED mechanism hypothesis for WHY** — fix-round-2
+    /// (security re-review, I1 residual) caught this stated as flat fact with no cell actually
+    /// tracing it; hedged here to match `office-helper.sb`'s own corrected comment, the canonical
+    /// copy of this history.
+    ///
+    /// **The fix, corrected**: a registry-layer attempt to stop `MacSpellChecker` from ever
+    /// constructing (Experiment A — two variants, both against `registrymodifications.xcu`) failed
+    /// both times, consistent with B's own finding in hindsight (construction was never the
+    /// problem). Experiment C's sequential drop-one minimization found the true minimal grant is
+    /// ONE service, not four: `com.apple.coreservices.launchservicesd` alone, on top of T1's
+    /// original baseline — confirmed twice, reproducibly. See `office-helper.sb`'s own "Task 10
+    /// addendum, fix round 1" comment for the full evidence chain, including the honest,
+    /// unresolved tension this leaves (the one grant that survived is the one a reviewer's own
+    /// threat model called the scarier of the four originally-widened candidates) and fix round 2's
+    /// own addendum there (the three other denials this fix's minimization drops are still denied
+    /// live, every open, and tolerated rather than eliminated).
+    ///
+    /// This test now pins the FIXED behavior — a permanent regression tripwire matching this file's
+    /// own `testRealLegacyBinaryFixturesOpenAsTextAfterR3RecutXlsStillFailsCleanly` sibling pattern in
+    /// spirit (pin what's actually true today so a future regression is caught RED, not silently
+    /// reintroduced) but inverted, since here "true today" is success, not failure.
+    func testImpressAndWriterDocumentsOpenSuccessfullyViaTheEmbeddedInstallRootMatchingCalcAndTheStandaloneLokRoot() async throws {
+        let appBundleURL = Bundle.main.bundleURL
+        let embeddedHelperURL = appBundleURL.appendingPathComponent("Contents/MacOS/NormaOfficeHelper")
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: embeddedHelperURL.path),
+                      "NormaOfficeHelper was not embedded into this run's built app — this pin goes "
+                        + "live the moment a Debug build embeds it.")
+
+        // Calc — a FRESH helper's FIRST document, via the embedded root — must keep working.
+        do {
+            let helper = try await spawnLiveHelper(helperURL: embeddedHelperURL, installRoot: nil, sandboxProfilePath: nil)
+            let metadata = try await helper.client.open(docId: UUID().uuidString,
+                                                        path: Self.fixturesRoot.appendingPathComponent("gate.xlsx").path)
+            XCTAssertEqual(metadata.type, .spreadsheet, "sanity: Calc via the embedded root must still work")
+        }
+
+        // Impress/Writer — each its own FRESH helper's FIRST document (never a shared one — a dead
+        // helper from a prior fixture in this same loop must never be blamed for the NEXT fixture's
+        // own failure), now expected to open cleanly with a sane type, matching Calc.
+        let expectedTypes: [String: OfficeDocumentKind] = [
+            "gate.pptx": .presentation, "gate.odp": .presentation,
+            "gate.docx": .text, "gate.odt": .text,
+        ]
+        for fixture in ["gate.pptx", "gate.odp", "gate.docx", "gate.odt"] {
+            let helper = try await spawnLiveHelper(helperURL: embeddedHelperURL, installRoot: nil, sandboxProfilePath: nil)
+            let path = Self.fixturesRoot.appendingPathComponent(fixture).path
+            let metadata = try await helper.client.open(docId: UUID().uuidString, path: path)
+            XCTAssertEqual(metadata.type, expectedTypes[fixture],
+                            "\(fixture): must open with a sane type via the embedded root, matching "
+                            + "the standalone-root behavior every other test in this file already relies on")
+        }
+    }
 
     func testEmbeddedRootBootsAgainstTheRealBuiltAppAndBundleStaysUntouched() async throws {
         let appBundleURL = Bundle.main.bundleURL
@@ -448,7 +1000,7 @@ final class OfficeHelperLiveTests: XCTestCase {
         // check above — this is the tree whose seal actually matters).
         let before = try Self.snapshotTree(embeddedLOKRoot)
 
-        let helper = try await spawnLiveHelper(helperURL: embeddedHelperURL, installRoot: nil)
+        let helper = try await spawnLiveHelper(helperURL: embeddedHelperURL, installRoot: nil, sandboxProfilePath: nil)
         let docId = UUID().uuidString
         let metadata = try await helper.client.open(docId: docId, path: Self.fixturesRoot.appendingPathComponent("gate.xlsx").path)
         XCTAssertEqual(metadata.type, .spreadsheet)
@@ -804,6 +1356,273 @@ final class OfficeHelperLiveTests: XCTestCase {
         }
         print("[callback probe] SUMMARY: invalidate-tiles observed=\(anyInvalidateTilesObserved), "
                 + "state-changed observed=\(anyStateChangedObserved), total raw lines=\(rawLines.count)")
+    }
+
+    // MARK: - Task 4, criteria 1+2+3: a real edit's raw INVALIDATE_TILES, its rects->keys
+    // translation, and the resulting generation bump — all against ONE real edit, one still-open
+    // document (spawning a fresh sandboxed helper is this file's expensive part; combining what
+    // naturally shares one edit keeps the suite's wall-clock reasonable without weakening any one
+    // criterion's own assertion).
+
+    /// **Methodological note, preserved from this test's own earlier probe form.** The FIRST attempt
+    /// opened `gate.ods` directly from the checked-in fixtures directory and observed NOTHING — no
+    /// `INVALIDATE_TILES`, `ModifiedStatus` staying `false` — which read, on paper, like LOK's own
+    /// unipoll/event-queueing model (`SfxLokHelper::postKeyEventAsync`, LibreOffice core source,
+    /// read directly) might require a pump this dedicated-thread architecture never runs (`LOKBridge`
+    /// never calls `runLoop`, the one thing that flips `vcl::lok::isUnipoll()` true). That theory was
+    /// WRONG: the real cause was T2's own already-documented trap — a document opened from OUTSIDE
+    /// `--state-path`, under this sandboxed helper, loads READ-ONLY (`LOKBridge.swift`'s
+    /// `disableDocumentLockFile` header has the full account; `paste()`/`postKeyEvent` both still
+    /// "succeed" against the in-memory model, but the modified flag can never flip against a
+    /// read-only medium). Against a properly STAGED (inside `--state-path`) writable copy, a posted
+    /// key applies promptly, with NO pump needed — proven by every assertion below, none of which
+    /// needed a follow-up "unrelated LOK call" to make anything happen.
+    func testARealEditFiresInvalidateTilesTranslatesToTheSameKeysTheStoreWouldAndBumpsTheGeneration() async throws {
+        try skipUnlessVendorPresent()
+        let helper = try await spawnLiveHelper(captureStderr: true)
+
+        var invalidatedEventPushes: [(rects: [OfficeTwipsRect], part: Int)] = []
+        var invalidatedKeyPushes: [[TileKey]] = []
+        let pushLock = NSLock()
+        helper.client.onDocumentEvent = { _, event in
+            guard case .invalidated(let rects, let part) = event else { return }
+            pushLock.lock(); invalidatedEventPushes.append((rects, part)); pushLock.unlock()
+        }
+        helper.client.onInvalidated = { _, _, keys in
+            pushLock.lock(); invalidatedKeyPushes.append(keys); pushLock.unlock()
+        }
+
+        // T2's own root-caused finding — see this test's own header. The copy must land INSIDE this
+        // spawned helper's OWN `--state-path` (`helper.stateDir`), mirroring
+        // `OfficeRuntime.stageDocument`'s real staging directory.
+        let stagedPath = helper.stateDir.appendingPathComponent("docs", isDirectory: true)
+            .appendingPathComponent("gate-writable.ods").path
+        try FileManager.default.createDirectory(
+            at: URL(fileURLWithPath: stagedPath).deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(contentsOf: Self.fixturesRoot.appendingPathComponent("gate.ods")).write(to: URL(fileURLWithPath: stagedPath))
+
+        let docId = UUID().uuidString
+        _ = try await helper.client.open(docId: docId, path: stagedPath)
+
+        let zoomPPT = 1000
+        let originKey = TileKey(part: 0, zoomPPT: zoomPPT, tileX: 0, tileY: 0)
+        let viewport = OfficeTwipsRect(x: 0, y: 0, width: 5120, height: 5120) // exactly one tile span
+        _ = try await helper.client.subscribeTiles(docId: docId, part: 0, zoomPPT: zoomPPT, viewportTwips: viewport)
+
+        final class OriginTileCollector: @unchecked Sendable {
+            private let lock = NSLock()
+            private var pushes: [(generation: Int, pixels: Data)] = []
+            func record(generation: Int, pixels: Data) { lock.lock(); pushes.append((generation, pixels)); lock.unlock() }
+            func snapshot() -> [(generation: Int, pixels: Data)] { lock.lock(); defer { lock.unlock() }; return pushes }
+        }
+        let collector = OriginTileCollector()
+        helper.client.onTile = { _, _, key, generation, _, _, pixels in
+            guard key == originKey else { return }
+            collector.record(generation: generation, pixels: pixels)
+        }
+
+        // Baseline paint, before any edit.
+        try await helper.client.requestTiles(docId: docId, keys: [originKey])
+        let baselineArrived = await waitUntil(timeout: 10) { collector.snapshot().count >= 1 }
+        XCTAssertTrue(baselineArrived, "expected a baseline .tile push before any edit")
+        let baseline = try XCTUnwrap(collector.snapshot().first)
+        XCTAssertEqual(baseline.generation, 0, "a document's first-ever paint of any coordinate starts at generation 0")
+
+        // The real edit: click inside A1 (its own bounding rect observed live, in this same test's
+        // earlier probe form, as roughly "0, 0, 1265, 254" — (100, 100) twips is safely inside it),
+        // type one character, commit it with Return (Calc's own cell-edit commit — ends the pending
+        // edit rather than leaving it in-flight for anything after this to race).
+        try await helper.client.postMouse(docId: docId, part: 0, type: .buttonDown, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await helper.client.postMouse(docId: docId, part: 0, type: .buttonUp, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await helper.client.postKey(docId: docId, part: 0, type: .keyInput, charCode: 65, keyCode: 512) // 'A', KEY_A
+        try await helper.client.postKey(docId: docId, part: 0, type: .keyUp, charCode: 65, keyCode: 512)
+        try await helper.client.postKey(docId: docId, part: 0, type: .keyInput, charCode: 0, keyCode: 1280) // Return commits the cell edit
+        try await helper.client.postKey(docId: docId, part: 0, type: .keyUp, charCode: 0, keyCode: 1280)
+
+        let invalidationArrived = await waitUntil(timeout: 10) { !invalidatedEventPushes.isEmpty && !invalidatedKeyPushes.isEmpty }
+        XCTAssertTrue(invalidationArrived, "the edit must produce both the raw documentEvent push (to the "
+                      + "opener) and the translated .invalidated key push (to the subscriber)")
+
+        // CRITERION 1 — the 5-value part payload parses under LOK_FEATURE_PART_IN_INVALIDATION_CALLBACK.
+        let rawLines = (helper.stderrCapture?.linesSnapshot() ?? []).filter {
+            $0.contains("[LOKBridge raw callback]") && $0.contains(" type=0 ")
+        }
+        XCTAssertFalse(rawLines.isEmpty, "expected at least one real LOK_CALLBACK_INVALIDATE_TILES firing")
+        let firstRawLine = try XCTUnwrap(rawLines.first)
+        let payloadRange = try XCTUnwrap(firstRawLine.range(of: " payload="))
+        let rawPayload = String(firstRawLine[payloadRange.upperBound...])
+        let fields = rawPayload.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        // Disclosed, real finding: this vendored LOK build's own real firing carries 6 fields, not
+        // 5 ("x, y, width, height, part, <unidentified 6th value — always observed 0>") — the
+        // header doc comment's own "@see LOK_FEATURE_PART_IN_INVALIDATION_CALLBACK" names only the
+        // part as position 5; the parser's own `fields.count >= 5` leniency (never `== 5`) already
+        // covers this without any change, but the ASSERTION here is intentionally `>= 5`, not `==
+        // 5`, so it stays true to what was actually observed rather than overclaiming a field count
+        // no real firing in this codebase has ever produced.
+        XCTAssertGreaterThanOrEqual(fields.count, 5, "criterion 1: a real firing must carry the part as a "
+                                    + "5th value — observed \(fields.count) fields: \"\(rawPayload)\"")
+        guard case .invalidated(_, let parsedPart) = OfficeDocumentEvent.parseInvalidateTiles(rawPayload) else {
+            return XCTFail("criterion 1: the real \(fields.count)-value payload failed to parse: \"\(rawPayload)\"")
+        }
+        XCTAssertEqual(parsedPart, 0, "criterion 1: the real part value (position 4) parses correctly — "
+                       + "gate.ods is single-part (the six-format matrix's own pin), so 0 is the only "
+                       + "legitimate value a correct parser could report here")
+
+        // CRITERION 2 — rects->keys against REAL LOK coordinates: the raw rects the OPENER's own
+        // documentEvent push carried, independently run through the SAME TileMath the store itself
+        // uses, must equal the keys the SUBSCRIBER's own .invalidated push actually reported —
+        // proving the server's real rect->key translation (TileCache.invalidate ->
+        // OfficeHelperServer's multicast) agrees with TileMath's own authority, against genuine LOK
+        // numbers, not hand-built test fixtures.
+        let firstEventPush = try XCTUnwrap(invalidatedEventPushes.first)
+        let expectedKeys = Set(firstEventPush.rects.flatMap { rect in
+            TileMath.tileCoordinates(rectTwips: rect, zoomPPT: zoomPPT).map {
+                TileKey(part: firstEventPush.part, zoomPPT: zoomPPT, tileX: $0.tileX, tileY: $0.tileY)
+            }
+        })
+        let actualKeys = Set(invalidatedKeyPushes.first ?? [])
+        XCTAssertFalse(expectedKeys.isEmpty, "criterion 2 setup: the real edit's own rect must touch at least one tile")
+        XCTAssertEqual(actualKeys, expectedKeys, "criterion 2: the server's real rect->key translation must "
+                       + "match TileMath's own independently-computed key set for the SAME real rect")
+        XCTAssertTrue(actualKeys.contains(originKey), "criterion 2: the edited cell (A1, inside the origin "
+                      + "tile) must be among the bumped keys")
+
+        // CRITERION 3 — same-document generation bump + a genuinely differing hash, on the
+        // STILL-OPEN doc (no close/reopen — that is
+        // `testReloadOfAModifiedFixtureCopyProducesADifferentTileHashAtTheSameCoordinates`'s own,
+        // different proof, which explicitly does NOT establish this).
+        try await helper.client.requestTiles(docId: docId, keys: [originKey])
+        let repaintArrived = await waitUntil(timeout: 10) { collector.snapshot().count >= 2 }
+        XCTAssertTrue(repaintArrived, "expected a SECOND .tile push for the origin key after the real edit")
+        let repainted = collector.snapshot()[1]
+        XCTAssertGreaterThan(repainted.generation, baseline.generation, "criterion 3: a real edit-triggered "
+                             + "invalidation must bump the generation on the SAME open document")
+        XCTAssertNotEqual(repainted.pixels, baseline.pixels, "criterion 3: the typed character must be "
+                          + "visibly different — the same tile coordinate, genuinely different pixels")
+
+        try await helper.client.close(docId: docId)
+    }
+
+    // MARK: - Task 4, criterion 4: multicast delivery against the REAL bridge (two connections)
+
+    /// The REAL-bridge counterpart to `OfficeSupervisorTests
+    /// .testMulticastInvalidationReachesBothSubscribersWithPerConnectionSeqAndCloseByNonOwnerIsRefused`
+    /// (that test's own trigger is `NormaOfficeHelperFixture`'s synthetic `--mode multicastInvalidate`
+    /// hook — proves the WIRE-LEVEL fan-out mechanics without booting real LOK). This test proves the
+    /// same fan-out against a REAL edit: connection A opens+stages the document and subscribes;
+    /// connection B (never the opener) subscribes to the SAME doc; a REAL keystroke posted on A's
+    /// connection must multicast its `.invalidated` push to BOTH.
+    func testMulticastInvalidationFromARealEditReachesBothSubscribersAgainstTheRealBridge() async throws {
+        try skipUnlessVendorPresent()
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
+                      "NormaOfficeHelper was not built into this run — add it to the scheme's build list.")
+        let stateDir = makeScratchDirectory()
+        let socketPath = stateDir.appendingPathComponent("office.sock").path
+        let token = "officelive-multicast-\(UUID().uuidString.prefix(8))"
+
+        let process = Process()
+        process.executableURL = helperURL
+        process.arguments = ["--socket-path", socketPath, "--state-path", stateDir.path,
+                              "--token", token, "--idle-exit-seconds", "30",
+                              "--lok-root", Self.vendorProductSetRoot.path,
+                              "--sandbox-profile", Self.repoSandboxProfilePath.path]
+        try process.run()
+        runningProcesses.append(process)
+        let socketAppeared = await waitUntil(timeout: 60.0) { FileManager.default.fileExists(atPath: socketPath) }
+        XCTAssertTrue(socketAppeared, "real helper never created its socket file")
+
+        // Staged copy INSIDE --state-path — see the sibling criteria-1/2/3 test's own header for why.
+        let stagedPath = stateDir.appendingPathComponent("docs", isDirectory: true)
+            .appendingPathComponent("gate-writable.ods").path
+        try FileManager.default.createDirectory(
+            at: URL(fileURLWithPath: stagedPath).deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(contentsOf: Self.fixturesRoot.appendingPathComponent("gate.ods")).write(to: URL(fileURLWithPath: stagedPath))
+
+        let docId = UUID().uuidString
+        let zoomPPT = 1000
+        let originKey = TileKey(part: 0, zoomPPT: zoomPPT, tileX: 0, tileY: 0)
+        let viewport = OfficeTwipsRect(x: 0, y: 0, width: 5120, height: 5120)
+
+        // Connection A: opens (becomes the OWNER), subscribes, paints the origin tile so the real
+        // invalidation below has something already-cached to bump (an empty cache has nothing to
+        // report — the sibling criteria-1/2/3 test's own baseline-paint step, for the same reason).
+        let connectionA = OfficeWireConnection(socketPath: socketPath)
+        openConnections.append(connectionA)
+        try await connectionA.open()
+        try await connectionA.send(.hello(seq: 1, role: .app, token: token))
+        guard case .helloOk = await connectionA.nextFrame(timeout: 10.0) else { return XCTFail("A hello failed") }
+        try await connectionA.send(.open(seq: 2, docId: docId, path: stagedPath))
+        guard case .opened = await connectionA.nextFrame(timeout: 10.0) else { return XCTFail("A open failed") }
+        try await connectionA.send(.subscribeTiles(seq: 3, docId: docId, part: 0, zoomPPT: zoomPPT, viewportTwips: viewport))
+        guard case .subscribed = await connectionA.nextFrame(timeout: 10.0) else { return XCTFail("A subscribe failed") }
+
+        final class PushCollector: @unchecked Sendable {
+            private let lock = NSLock()
+            private var invalidations: [[TileKey]] = []
+            private var tileCount = 0
+            func record(_ keys: [TileKey]) { lock.lock(); invalidations.append(keys); lock.unlock() }
+            func recordTile() { lock.lock(); tileCount += 1; lock.unlock() }
+            func snapshot() -> [[TileKey]] { lock.lock(); defer { lock.unlock() }; return invalidations }
+            func tileCountSnapshot() -> Int { lock.lock(); defer { lock.unlock() }; return tileCount }
+        }
+        let collectorA = PushCollector()
+        let collectorB = PushCollector()
+        connectionA.onInvalidated = { _, _, keys in collectorA.record(keys) }
+        // `.tile` is a PUSH, never delivered through `nextFrame`/`frameQueue` — see
+        // `OfficeWireConnection.onTile`'s own header. `OfficeSupervisorTests`' own multicast test
+        // (the fixture-backed sibling this one mirrors) uses the identical callback+poll shape.
+        connectionA.onTile = { _, _, _, _, _, _, _ in collectorA.recordTile() }
+
+        try await connectionA.send(.tileRequest(seq: 4, docId: docId, keys: [originKey]))
+        guard case .tileRequestAccepted = await connectionA.nextFrame(timeout: 10.0) else { return XCTFail("A tileRequest not accepted") }
+        let sawOriginTile = await waitUntil(timeout: 10.0) { collectorA.tileCountSnapshot() >= 1 }
+        XCTAssertTrue(sawOriginTile, "expected A's own baseline .tile push for the origin key")
+
+        // Connection B: never opens — only subscribes to the doc A already opened, the SAME shape
+        // the fixture-backed multicast test already established.
+        let connectionB = OfficeWireConnection(socketPath: socketPath)
+        openConnections.append(connectionB)
+        try await connectionB.open()
+        try await connectionB.send(.hello(seq: 1, role: .app, token: token))
+        guard case .helloOk = await connectionB.nextFrame(timeout: 10.0) else { return XCTFail("B hello failed") }
+        try await connectionB.send(.subscribeTiles(seq: 2, docId: docId, part: 0, zoomPPT: zoomPPT, viewportTwips: viewport))
+        guard case .subscribed = await connectionB.nextFrame(timeout: 10.0) else { return XCTFail("B subscribe failed") }
+        connectionB.onInvalidated = { _, _, keys in collectorB.record(keys) }
+
+        // The real edit, posted on A's own connection — a click + one character + Return, the same
+        // shape the sibling criteria test uses.
+        let seqAllocator = OfficeWireSeqAllocator()
+        func sendA(_ build: (UInt64) -> OfficeWireFrame) async throws {
+            let seq = seqAllocator.nextSeq() + 10 // clear of A's own earlier hand-minted seqs above
+            try await connectionA.send(build(seq))
+        }
+        try await sendA { .mouseEvent(seq: $0, docId: docId, part: 0, type: .buttonDown, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0) }
+        guard case .mouseEventOk = await connectionA.nextFrame(timeout: 10.0) else { return XCTFail("A mouseDown not acked") }
+        try await sendA { .mouseEvent(seq: $0, docId: docId, part: 0, type: .buttonUp, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0) }
+        guard case .mouseEventOk = await connectionA.nextFrame(timeout: 10.0) else { return XCTFail("A mouseUp not acked") }
+        try await sendA { .keyEvent(seq: $0, docId: docId, part: 0, type: .keyInput, charCode: 65, keyCode: 512) }
+        guard case .keyEventOk = await connectionA.nextFrame(timeout: 10.0) else { return XCTFail("A keyDown not acked") }
+        try await sendA { .keyEvent(seq: $0, docId: docId, part: 0, type: .keyUp, charCode: 65, keyCode: 512) }
+        guard case .keyEventOk = await connectionA.nextFrame(timeout: 10.0) else { return XCTFail("A keyUp not acked") }
+        try await sendA { .keyEvent(seq: $0, docId: docId, part: 0, type: .keyInput, charCode: 0, keyCode: 1280) }
+        guard case .keyEventOk = await connectionA.nextFrame(timeout: 10.0) else { return XCTFail("A Return not acked") }
+        try await sendA { .keyEvent(seq: $0, docId: docId, part: 0, type: .keyUp, charCode: 0, keyCode: 1280) }
+        guard case .keyEventOk = await connectionA.nextFrame(timeout: 10.0) else { return XCTFail("A Return-up not acked") }
+
+        let bothReceived = await waitUntil(timeout: 10.0) {
+            !collectorA.snapshot().isEmpty && !collectorB.snapshot().isEmpty
+        }
+        XCTAssertTrue(bothReceived, "criterion 4: both subscribers must receive the SAME real edit's "
+                      + "invalidated push — the multicast fan-out, against the real bridge, not the fixture")
+        let keysA = Set(collectorA.snapshot().first ?? [])
+        let keysB = Set(collectorB.snapshot().first ?? [])
+        XCTAssertEqual(keysA, keysB, "criterion 4: both subscribers must see the IDENTICAL bumped key set "
+                       + "for the same underlying invalidation")
+        XCTAssertTrue(keysA.contains(originKey), "criterion 4: the edited cell's own tile must be among them")
+
+        try await connectionA.send(.close(seq: 99, docId: docId))
+        _ = await connectionA.nextFrame(timeout: 10.0)
     }
 
     // MARK: - Invalidation drill: reload-triggered (Stage A has no edit verbs)
@@ -1245,6 +2064,96 @@ final class OfficeHelperLiveTests: XCTestCase {
                             + "territory now, comfortably under this bar — see this test's own report entry for the real number)")
     }
 
+    // MARK: - Task 4, I2/M4: the transport re-evaluation, measured against real edit traffic
+
+    /// **Office Stage B Task 4 — the transport re-eval, measured, per the dispatch's own instruction:
+    /// implement the bounded per-connection push queue ONLY if the numbers demand it.** Three
+    /// scenarios, one spawned helper: (1) a type-burst ack-latency baseline on an otherwise-idle
+    /// document; (2) the worst REALISTIC head-of-line case this codebase's own architecture actually
+    /// has — a keystroke posted the instant a multi-tile paint batch is queued ahead of it on
+    /// `LOKDedicatedThread` (never the `officeRequestQueue` app-side funnel, which this test does
+    /// not exercise at all: that queue only orders SENDS, and `requestTiles`' own client call
+    /// returns the moment `tileRequestAccepted` arrives, BEFORE any tile actually paints — see
+    /// `OfficeHelperServer.handlePostAuthLine`'s `.tileRequest` case, `tileRequestAccepted` written
+    /// before the paint loop starts. The REAL contention is `LOKDedicatedThread` itself: every
+    /// `postKey`/`postMouse`/`paintTile` call — regardless of which app-side queue sent it —
+    /// ultimately does `thread.sync { ... }`, and that thread runs exactly one job at a time,
+    /// FIFO. A keystroke queued behind an already-in-flight 6-tile paint batch waits for every one
+    /// of those 6 paints, not merely its own); (3) a `mouseDragged`-shaped burst (many `.move`
+    /// posts in a row, the shape a real drag-select produces).
+    func testTransportMeasurementTypeBurstMidPrefetchHeadOfLineAndDragBurstLatencies() async throws {
+        try skipUnlessVendorPresent()
+        let helper = try await spawnLiveHelper()
+
+        let stagedPath = helper.stateDir.appendingPathComponent("docs", isDirectory: true)
+            .appendingPathComponent("gate-writable.ods").path
+        try FileManager.default.createDirectory(
+            at: URL(fileURLWithPath: stagedPath).deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(contentsOf: Self.fixturesRoot.appendingPathComponent("gate.ods")).write(to: URL(fileURLWithPath: stagedPath))
+        let docId = UUID().uuidString
+        _ = try await helper.client.open(docId: docId, path: stagedPath)
+        try await helper.client.postMouse(docId: docId, part: 0, type: .buttonDown, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await helper.client.postMouse(docId: docId, part: 0, type: .buttonUp, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+
+        // Scenario 1 — type-burst baseline, otherwise-idle document: 20 keystrokes, back to back,
+        // each one's own full send-to-ack round trip timed individually.
+        var typeBurstLatenciesMs: [Double] = []
+        for _ in 0..<20 {
+            let start = Date()
+            try await helper.client.postKey(docId: docId, part: 0, type: .keyInput, charCode: 65, keyCode: 512)
+            typeBurstLatenciesMs.append(Date().timeIntervalSince(start) * 1000)
+        }
+        let typeBurstAvg = typeBurstLatenciesMs.reduce(0, +) / Double(typeBurstLatenciesMs.count)
+        let typeBurstMax = typeBurstLatenciesMs.max() ?? 0
+
+        // Scenario 2 — the worst realistic head-of-line case: queue a 6-tile paint batch (the
+        // repo's own `OfficeTileCanvasView.prefetchChunkSize`), then IMMEDIATELY post one keystroke
+        // — `tileRequestAccepted` returns before any of the 6 tiles paint, so this keystroke's own
+        // `thread.sync` job genuinely lands BEHIND all 6 on the dedicated thread's queue.
+        let prefetchKeys = (0..<6).map { TileKey(part: 0, zoomPPT: 1000, tileX: $0, tileY: 10) } // unpainted row, real cold paints
+        try await helper.client.requestTiles(docId: docId, keys: prefetchKeys)
+        let midPrefetchStart = Date()
+        try await helper.client.postKey(docId: docId, part: 0, type: .keyInput, charCode: 66, keyCode: 513)
+        let midPrefetchLatencyMs = Date().timeIntervalSince(midPrefetchStart) * 1000
+
+        // Scenario 3 — a mouseDragged-shaped burst: 40 `.move` posts in a row (a real drag-select
+        // produces exactly this shape — one `postMouseEvent(LOK_MOUSEEVENT_MOUSEMOVE)` per dragged
+        // pixel-ish delta), total elapsed AND per-call latency both recorded.
+        let dragBurstStart = Date()
+        var dragBurstLatenciesMs: [Double] = []
+        for step in 0..<40 {
+            let stepStart = Date()
+            try await helper.client.postMouse(docId: docId, part: 0, type: .move, xTwips: Int64(100 + step * 20), yTwips: 100,
+                                              count: 0, buttons: 1, modifiers: 0)
+            dragBurstLatenciesMs.append(Date().timeIntervalSince(stepStart) * 1000)
+        }
+        let dragBurstTotalMs = Date().timeIntervalSince(dragBurstStart) * 1000
+        let dragBurstAvg = dragBurstLatenciesMs.reduce(0, +) / Double(dragBurstLatenciesMs.count)
+
+        try await helper.client.close(docId: docId)
+
+        print("""
+        [transport measurement, I2/M4] real edit traffic, one spawned helper, single connection:
+          (1) TYPE-BURST (20 keystrokes, idle doc): avg \(String(format: "%.2f", typeBurstAvg))ms/keystroke, \
+        max \(String(format: "%.2f", typeBurstMax))ms, total \(String(format: "%.1f", typeBurstLatenciesMs.reduce(0, +)))ms
+          (2) MID-PREFETCH HEAD-OF-LINE (1 keystroke queued behind a 6-tile cold-paint batch): \
+        \(String(format: "%.2f", midPrefetchLatencyMs))ms (vs. scenario 1's own \(String(format: "%.2f", typeBurstAvg))ms idle baseline — \
+        the delta is this codebase's own real LOKDedicatedThread contention cost, not the app-side officeRequestQueue, which this test never touches)
+          (3) DRAG-BURST (40 mousemove posts): \(String(format: "%.1f", dragBurstTotalMs))ms total, \
+        avg \(String(format: "%.2f", dragBurstAvg))ms/move, \(String(format: "%.1f", 40.0 / (dragBurstTotalMs / 1000))) moves/sec effective
+        """)
+
+        // DECISION (task-4-report.md has the full writeup): informational assertions only — this is
+        // a measurement, not a target. Every one of these completing without a timeout, on real
+        // edit+paint traffic sharing one connection, is itself part of the evidence: nothing here
+        // wedges the connection, even under the deliberately adversarial scenario 2.
+        XCTAssertLessThan(typeBurstAvg, 200, "an idle-doc keystroke ack should not be anywhere near a "
+                          + "human-perceptible lag floor (~100-200ms) — if this regresses past it, "
+                          + "the bounded-queue redesign this task's own dispatch named becomes worth building")
+        XCTAssertGreaterThan(midPrefetchLatencyMs, typeBurstAvg, "sanity: the adversarial scenario must "
+                             + "actually BE slower than the idle baseline, or scenario 2 measured nothing real")
+    }
+
     // MARK: - USER LIVE-GATE FIX #4, FIX 2 research: does LOK paint an infinite grid past documentSize?
 
     /// **Empirical, not documentary.** Today the canvas clamps its scrollable extent to
@@ -1348,6 +2257,460 @@ final class OfficeHelperLiveTests: XCTestCase {
                                   provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent) else { return nil }
         let rep = NSBitmapImageRep(cgImage: image)
         return rep.representation(using: .png, properties: [:])
+    }
+
+    // MARK: - Office Stage B Task 11: the r3 vendor re-cut — OOXML export, proven per format
+
+    /// **Direct successor to the deleted `testKnownLimitationOOXMLExportIsNotAvailableInThis
+    /// VendorBuildWhileODFExportWorks`** (Task 2/2b; see git history for its full text). That test
+    /// pinned xlsx's helper-killing `SIGABRT` as the known, accepted state, and its own doc comment
+    /// said the day OOXML export starts working is "the correct trigger for a human to update this
+    /// test's own claim, not a silent gap" — this is that day. (The stronger "it should be deleted
+    /// rather than 'fixed'" phrasing is `task-2-report.md`'s, not the test's; attributing it to the
+    /// doc comment was a whole-branch-review finding. What actually happened here is closer to what
+    /// the doc comment asked for than to the report's wording: a semantically inverted successor,
+    /// not a deletion — the coverage moved, it did not go away.) The vendor re-cut (`.superpowers/sdd/2026-08-20-office-editable/
+    /// ooxml-export-investigation.md` + `task-11-brief.md`) added the one dylib the crash traced to
+    /// (`libsal_textenclo.dylib`, `sal`'s lazily-`dlopen`'d full text-encoding table, absent from the
+    /// vendored product-set because it is reached only via a runtime `dlopen` on the export code
+    /// path the closure recipe's own dyld-trace workload never exercised). This test proves, through
+    /// the REAL helper — not the investigation's own standalone LOK probe harness — the honest,
+    /// per-format result of that fix:
+    ///
+    /// - **`.xlsx` — FIXED.** Was the confirmed, symbolicated crash (`abort` inside `sal`'s
+    ///   `FullTextEncodingData` constructor, reached from the Excel export filter's font/style-table
+    ///   code); now saves for real, reopens as the same kind, and the fixture's own seed text
+    ///   survives the round trip — dumped from the saved archive's own `xl/sharedStrings.xml`, not
+    ///   inferred from exit codes or file size alone.
+    /// - **`.pptx` — regression check.** Already worked before this fix (Impress's OOXML export is a
+    ///   different internal code path, `oox::ppt`, that never called into the missing dylib); still
+    ///   does, same round-trip shape, so a future vendor change that breaks it will be caught here.
+    /// **Whole-branch review I2 — this test is now the tripwire for a PRODUCT decision, not only a
+    /// vendor fact.** Because docx save can never succeed in this build, the app holds `.docx`
+    /// read-only (`PanelEditorTab.swift`'s `officeReadWriteExtensions`, whose own header carries the
+    /// reasoning): no dirty tracking, ⌘S disabled, a "Read-only" chip. This test is the ONLY thing
+    /// that will notice the day that stops being necessary — its docx leg's own `XCTFail` message
+    /// lists everything to reverse.
+    ///
+    /// - **`.docx` — STILL fails, honestly re-investigated for this task.** The original
+    ///   investigation never independently confirmed docx's mechanism (one capture hit the
+    ///   already-known, unrelated `SwDLL` exit-time teardown abort instead; another showed a raw
+    ///   `LOK_CALLBACK_ERROR`). Re-probed fresh, with the dylib present, on two independent clean
+    ///   profiles (see `task-11-report.md`): the missing-dylib abort is GONE — no crash of any kind
+    ///   — but `saveAs` now fails cleanly with `SfxBaseModel::impl_store ... failed:
+    ///   0xc10(Error Area:Io Class:Write Code:16)`, i.e. `ERRCODE_IO_CANTWRITE` /
+    ///   `SVSTREAM_WRITE_ERROR` (`include/comphelper/errcode.hxx:300` in this build's own pinned
+    ///   commit) — a distinct, still-open Writer/OOXML-export defect, unrelated to the charset-table
+    ///   gap this re-cut fixes. Production code already handles this correctly end to end (LOK's
+    ///   `saveAs` returning false → `LOKBridge.SaveError.saveAsFailed` →
+    ///   `OfficeHelperClientError.saveFailed`), so this is pinned as a clean, catchable, non-fatal
+    ///   failure — a real improvement over the crash the old test (and, less reliably, this same
+    ///   fixture before Task 11) used to hit, and this task's own honest answer to "does docx export
+    ///   work with the dylib present?": no, but it now fails safely.
+    func testXlsxDocxPptxSaveRoundTripThroughTheRealHelperAfterTheR3VendorRecut() async throws {
+        try skipUnlessVendorPresent()
+
+        // xlsx: the headline fix. Save round-trip through the real wire dispatch, content preserved,
+        // reopens as the same kind.
+        do {
+            let helper = try await spawnLiveHelper()
+            let scratchDir = makeScratchDirectory()
+            let docPath = scratchDir.appendingPathComponent("roundtrip-gate.xlsx").path
+            try Data(contentsOf: Self.fixturesRoot.appendingPathComponent("gate.xlsx")).write(to: URL(fileURLWithPath: docPath))
+            let docId = "xlsx-roundtrip"
+            _ = try await helper.client.open(docId: docId, path: docPath)
+            let savedPath = try await helper.client.save(docId: docId, part: 0)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: savedPath), "xlsx: saveAs must produce a real file")
+            XCTAssertTrue(savedPath.hasSuffix(".xlsx"), "xlsx: saved under its own format's extension")
+            let savedSize = (try? FileManager.default.attributesOfItem(atPath: savedPath)[.size] as? Int) ?? nil
+            XCTAssertNotEqual(savedSize, 0, "xlsx: the saved file must have real content, not an empty stub")
+            XCTAssertTrue(helper.process.isRunning, "xlsx: the helper must survive its own save")
+
+            // Dumped bytes — the fixture's own seed text must survive the round trip.
+            let sharedStrings = try readOOXMLEntry(atPath: savedPath, entry: "xl/sharedStrings.xml")
+            XCTAssertTrue(sharedStrings.contains("NORMA GATE"), "xlsx: seed text must survive the save")
+
+            // Reopen as a genuinely valid, re-loadable xlsx — not merely non-empty bytes.
+            let reopenHelper = try await spawnLiveHelper()
+            let reopenDocId = "xlsx-roundtrip-reopen"
+            let metadata = try await reopenHelper.client.open(docId: reopenDocId, path: savedPath)
+            XCTAssertEqual(metadata.type, .spreadsheet, "xlsx: the saved file must reopen as a spreadsheet")
+            try await reopenHelper.client.close(docId: reopenDocId)
+        }
+
+        // pptx: regression check — already worked before this fix, must still work after.
+        do {
+            let helper = try await spawnLiveHelper()
+            let scratchDir = makeScratchDirectory()
+            let docPath = scratchDir.appendingPathComponent("roundtrip-gate.pptx").path
+            try Data(contentsOf: Self.fixturesRoot.appendingPathComponent("gate.pptx")).write(to: URL(fileURLWithPath: docPath))
+            let docId = "pptx-roundtrip"
+            _ = try await helper.client.open(docId: docId, path: docPath)
+            let savedPath = try await helper.client.save(docId: docId, part: 0)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: savedPath), "pptx: saveAs must produce a real file")
+            XCTAssertTrue(savedPath.hasSuffix(".pptx"), "pptx: saved under its own format's extension")
+            XCTAssertTrue(helper.process.isRunning, "pptx: the helper must survive its own save")
+
+            // Dumped bytes — the fixture's own seed shape (a filled rectangle, no text run) must
+            // survive the save.
+            let slide1 = try readOOXMLEntry(atPath: savedPath, entry: "ppt/slides/slide1.xml")
+            XCTAssertTrue(slide1.contains("FF6600"), "pptx: the seed shape's fill color must survive the save")
+
+            let reopenHelper = try await spawnLiveHelper()
+            let reopenDocId = "pptx-roundtrip-reopen"
+            let metadata = try await reopenHelper.client.open(docId: reopenDocId, path: savedPath)
+            XCTAssertEqual(metadata.type, .presentation, "pptx: the saved file must reopen as a presentation")
+            try await reopenHelper.client.close(docId: reopenDocId)
+        }
+
+        // docx: the honest current state — still fails, but cleanly (no crash) since the r3 fix.
+        do {
+            let helper = try await spawnLiveHelper()
+            let scratchDir = makeScratchDirectory()
+            let docPath = scratchDir.appendingPathComponent("roundtrip-gate.docx").path
+            try Data(contentsOf: Self.fixturesRoot.appendingPathComponent("gate.docx")).write(to: URL(fileURLWithPath: docPath))
+            let docId = "docx-roundtrip"
+            _ = try await helper.client.open(docId: docId, path: docPath)
+            do {
+                _ = try await helper.client.save(docId: docId, part: 0)
+                XCTFail("docx: expected OfficeHelperClientError.saveFailed — if this now succeeds, the "
+                        + "Writer/OOXML-export defect (SVSTREAM_WRITE_ERROR / ERRCODE_IO_CANTWRITE, "
+                        + "documented in this test's own header and the r3 VERSION-PIN addendum) has "
+                        + "been independently fixed. THREE things to do, in one change: (1) update "
+                        + "this test to assert success; (2) REVERSE the read-only demotion — move "
+                        + "\"docx\" back into officeReadWriteExtensions and out of the "
+                        + "officeFileExtensions union (PanelEditorTab.swift; both, or .docx stops "
+                        + "being an office document at all and routes to a Monaco code tab), and "
+                        + "re-point the doc comments there and on OfficeSaveFormat.autosaveFormat; "
+                        + "(3) narrow T7's ODF-autosave-fallback scope for docx to native.")
+            } catch OfficeHelperClientError.saveFailed(let reason) {
+                // Expected — see this test's own header for the exact mechanism. Reason-string
+                // check (matching this suite's own house convention, e.g. legacy-xls.xls's pin
+                // below) so a FUTURE docx failure for a genuinely different cause is caught as a
+                // pin mismatch, not silently absorbed by a bare case match.
+                XCTAssertTrue(reason.contains("impl_store"), "docx: reason was \"\(reason)\" — if "
+                              + "this is a DIFFERENT failure than SfxBaseModel::impl_store's "
+                              + "SVSTREAM_WRITE_ERROR, the underlying cause may have changed; "
+                              + "re-verify before assuming the same mechanism")
+            }
+            XCTAssertTrue(helper.process.isRunning, "docx: the helper must survive a failed save — this "
+                          + "is the whole point of the r3 fix: the missing-dylib SIGABRT that used to "
+                          + "kill the process here is gone; this is now a clean, catchable failure")
+        }
+    }
+
+    /// `unzip -p` for a single entry inside a saved OOXML (zip-based) document — mirrors
+    /// `OfficeRuntimeLiveTests.readODFEntry`'s own shape (shell out to a well-understood system tool
+    /// rather than reimplement zip reading), kept as a local copy rather than shared across test
+    /// classes per this suite's existing per-file-helper convention.
+    private func readOOXMLEntry(atPath path: String, entry: String) throws -> String {
+        let unzip = Process()
+        unzip.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+        unzip.arguments = ["-p", path, entry]
+        let pipe = Pipe()
+        unzip.standardOutput = pipe
+        try unzip.run()
+        unzip.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        return try XCTUnwrap(String(data: data, encoding: .utf8), "\(entry) was not valid UTF-8")
+    }
+
+    // MARK: - Task 5: caret/selection/cell-cursor raw callback probe (the T4-lesson, applied again)
+
+    /// **Task 5 — capture REAL payloads before writing a single parser line.** Mirrors
+    /// `testRealLOKCallbackProbeCapturesRawPayloadsAndCrossChecksTheParsers`'s own methodology
+    /// exactly (raw stderr capture of `LOKBridge.handleCallback`'s unconditional trace line), aimed
+    /// at the five callback types this task's brief names: `LOK_CALLBACK_INVALIDATE_VISIBLE_CURSOR`
+    /// (1), `LOK_CALLBACK_TEXT_SELECTION` (2), `_START` (3), `_END` (4), and `LOK_CALLBACK_CELL_CURSOR`
+    /// (17).
+    ///
+    /// **Why more than one scenario per callback type — read this before trusting a single capture.**
+    /// Source-reading ahead of this probe (LO core, pinned commit `11482c8f` — see `VERSION-PIN`)
+    /// found the *payload-construction* code for these callbacks is NOT one shared function per type:
+    /// `LOK_CALLBACK_INVALIDATE_VISIBLE_CURSOR` alone has independent emitters in `editeng/` (in-place
+    /// text edit engines — Calc's in-cell edit, shape text) and `sfx2/source/view/lokhelper.cxx`'s
+    /// `notifyCursorInvalidation` (the ordinary VCL document-window caret, reached via
+    /// `vcl/source/window/cursor.cxx`) — and reading `notifyCursorInvalidation` itself raised a real
+    /// question this probe is what actually answers: its `bControlEvent == false` branch never closes
+    /// the `"rectangle"` value's own JSON quote before appending `" }"`, which LOOKS like it would
+    /// produce structurally invalid JSON — every traced call site in this tree passes `true`, so the
+    /// malformed branch may simply be dead in practice, but that is a claim about RUNTIME BEHAVIOR no
+    /// amount of source-reading settles on its own. Four scenarios, therefore: Writer body typing
+    /// (the vcl path), Writer shift-arrow AND drag selection (selection has its own independent
+    /// per-app emitters too — `sw/source/core/crsr/viscrs.cxx` for Writer), and Calc cell
+    /// navigation + in-cell edit (`sc/source/ui/view/gridwin.cxx`'s own `getCellCursor()` — a SIX-field
+    /// payload per that source read: `x, y, width, height, col, row` in the non-print-twips mode this
+    /// helper runs in, not the four-field shape the enum header's own doc comment would suggest by
+    /// analogy with `INVALIDATE_TILES`).
+    ///
+    /// **This probe is deliberately observational first.** It prints every matching raw line for
+    /// visual inspection (`grep '\[caret probe\]' <test log>` if the printed lines below scroll past),
+    /// then asserts only the WEAK, format-agnostic properties that must hold no matter which of the
+    /// several possible real shapes each callback turns out to use: `type=<n>` is one of the five,
+    /// `payload=` is present, and (once real output is read back) the specific field-count/shape
+    /// assertions this task's parser is built against — added in a follow-up pass once the FIRST run's
+    /// output is actually read, matching `testRealLOKCallbackProbeCapturesRawPayloadsAndCrossChecksThe
+    /// Parsers`'s own two-pass history (that test's own committed form already has its assertions;
+    /// this one starts the same way that one did, before its own fields.count>=5 finding existed).
+    func testRealLOKCallbackProbeCapturesCaretSelectionAndCellCursorRawPayloads() async throws {
+        try skipUnlessVendorPresent()
+        let helper = try await spawnLiveHelper(captureStderr: true)
+
+        // MARK: Writer — body typing, shift-arrow selection, drag selection
+        let writerStagedPath = helper.stateDir.appendingPathComponent("docs", isDirectory: true)
+            .appendingPathComponent("caret-probe-writer.odt").path
+        try FileManager.default.createDirectory(
+            at: URL(fileURLWithPath: writerStagedPath).deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(contentsOf: Self.fixturesRoot.appendingPathComponent("gate.odt")).write(to: URL(fileURLWithPath: writerStagedPath))
+        let writerDocId = UUID().uuidString
+        _ = try await helper.client.open(docId: writerDocId, path: writerStagedPath)
+
+        // A conservative in-body point — gate.odt's page is 12474x17406 twips (the six-format
+        // matrix's own pin); (1200, 1200) sits well inside a default ~1440-twip margin's own text
+        // area regardless of the seed content's exact layout. Exact placement is not load-bearing
+        // for a PROBE (unlike the placement drills in section below) — LOK resolves a click to the
+        // nearest valid text position regardless.
+        try await helper.client.postMouse(docId: writerDocId, part: 0, type: .buttonDown, xTwips: 1200, yTwips: 1200, count: 1, buttons: 1, modifiers: 0)
+        try await helper.client.postMouse(docId: writerDocId, part: 0, type: .buttonUp, xTwips: 1200, yTwips: 1200, count: 1, buttons: 1, modifiers: 0)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        // Type "AB" — each keystroke's caret move is a fresh chance for INVALIDATE_VISIBLE_CURSOR.
+        try await helper.client.postKey(docId: writerDocId, part: 0, type: .keyInput, charCode: 65, keyCode: 512) // A
+        try await helper.client.postKey(docId: writerDocId, part: 0, type: .keyUp, charCode: 65, keyCode: 512)
+        try await helper.client.postKey(docId: writerDocId, part: 0, type: .keyInput, charCode: 66, keyCode: 513) // B
+        try await helper.client.postKey(docId: writerDocId, part: 0, type: .keyUp, charCode: 66, keyCode: 513)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        // Shift+Left x2 — a real text selection via the KEYBOARD door.
+        let keyShift = 0x1000
+        let keyLeft = 1026
+        try await helper.client.postKey(docId: writerDocId, part: 0, type: .keyInput, charCode: 0, keyCode: keyLeft | keyShift)
+        try await helper.client.postKey(docId: writerDocId, part: 0, type: .keyUp, charCode: 0, keyCode: keyLeft | keyShift)
+        try await helper.client.postKey(docId: writerDocId, part: 0, type: .keyInput, charCode: 0, keyCode: keyLeft | keyShift)
+        try await helper.client.postKey(docId: writerDocId, part: 0, type: .keyUp, charCode: 0, keyCode: keyLeft | keyShift)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        // A bare Left arrow collapses the selection — the "selection went away" shape.
+        try await helper.client.postKey(docId: writerDocId, part: 0, type: .keyInput, charCode: 0, keyCode: keyLeft)
+        try await helper.client.postKey(docId: writerDocId, part: 0, type: .keyUp, charCode: 0, keyCode: keyLeft)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        // A drag selection via the MOUSE door — a genuinely different input path than shift-arrow.
+        try await helper.client.postMouse(docId: writerDocId, part: 0, type: .buttonDown, xTwips: 1200, yTwips: 1200, count: 1, buttons: 1, modifiers: 0)
+        try await helper.client.postMouse(docId: writerDocId, part: 0, type: .move, xTwips: 2400, yTwips: 1200, count: 1, buttons: 1, modifiers: 0)
+        try await helper.client.postMouse(docId: writerDocId, part: 0, type: .move, xTwips: 3600, yTwips: 1200, count: 1, buttons: 1, modifiers: 0)
+        try await helper.client.postMouse(docId: writerDocId, part: 0, type: .buttonUp, xTwips: 3600, yTwips: 1200, count: 1, buttons: 1, modifiers: 0)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+
+        try await helper.client.close(docId: writerDocId)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+
+        // MARK: Calc — cell navigation (CELL_CURSOR) + in-cell edit (INVALIDATE_VISIBLE_CURSOR again)
+        let calcStagedPath = helper.stateDir.appendingPathComponent("docs", isDirectory: true)
+            .appendingPathComponent("caret-probe-calc.ods").path
+        try Data(contentsOf: Self.fixturesRoot.appendingPathComponent("gate.ods")).write(to: URL(fileURLWithPath: calcStagedPath))
+        let calcDocId = UUID().uuidString
+        _ = try await helper.client.open(docId: calcDocId, path: calcStagedPath)
+
+        // A1, proven safe by testARealEditFiresInvalidateTiles...'s own precedent.
+        try await helper.client.postMouse(docId: calcDocId, part: 0, type: .buttonDown, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await helper.client.postMouse(docId: calcDocId, part: 0, type: .buttonUp, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        // A distant cell — several rows/columns over (row height ~254 twips, so 2000 twips is
+        // several rows down; column width varies but 3000 twips is comfortably a different column).
+        try await helper.client.postMouse(docId: calcDocId, part: 0, type: .buttonDown, xTwips: 3000, yTwips: 2000, count: 1, buttons: 1, modifiers: 0)
+        try await helper.client.postMouse(docId: calcDocId, part: 0, type: .buttonUp, xTwips: 3000, yTwips: 2000, count: 1, buttons: 1, modifiers: 0)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        // Enter in-cell edit mode — Calc's OWN edit-engine caret, a plausible SECOND
+        // INVALIDATE_VISIBLE_CURSOR emitter distinct from Writer's vcl-level one.
+        try await helper.client.postKey(docId: calcDocId, part: 0, type: .keyInput, charCode: 67, keyCode: 514) // C
+        try await helper.client.postKey(docId: calcDocId, part: 0, type: .keyUp, charCode: 67, keyCode: 514)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        try await helper.client.postKey(docId: calcDocId, part: 0, type: .keyInput, charCode: 0, keyCode: 1280) // Return commits
+        try await helper.client.postKey(docId: calcDocId, part: 0, type: .keyUp, charCode: 0, keyCode: 1280)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+
+        try await helper.client.close(docId: calcDocId)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+
+        // MARK: Cross-check — every raw line for types 1/2/3/4/17 must parse under its own parser.
+        //
+        // **First-run finding, disclosed rather than chased further**: the drag-selection scenario
+        // above (mouseDown/move/move/buttonUp at three DISCRETE, separately-async-posted twips
+        // points) produced NO `TEXT_SELECTION_START`/`_END` firing at all — the total counts below
+        // (`3=2, 4=2`) match EXACTLY the two shift-arrow keystrokes and leave nothing over for the
+        // drag. Whether the drag ALSO produced a redundant EMPTY `TEXT_SELECTION` is not
+        // individually isolated (see `sawSelectionEmpty`'s own comment near the bottom of this
+        // function). Plausible mechanism for the drag producing no real selection at all, not
+        // confirmed: T4's own fix-round-4 finding (NEW-3, task-4-report.md) already established that
+        // EVERY posted input event re-asserts the current view and grabs focus at DISPATCH time
+        // (`LOKPostAsyncEvent`) — three independently-posted mouse events may not preserve VCL's own
+        // continuous drag-tracking state the way one genuine, uninterrupted OS gesture would. Left
+        // disclosed rather than chased: this task's own parser is payload-shape-agnostic to WHICH
+        // input door produced a firing, and the keyboard door already proves the real shape live.
+        let interestingTypes: Set<Int32> = [1, 2, 3, 4, 17]
+        let rawLines = (helper.stderrCapture?.linesSnapshot() ?? []).filter { $0.contains("[LOKBridge raw callback]") }
+        var perType: [Int32: Int] = [:]
+        var sawCaretRect = false, sawSelectionRect = false, sawSelectionEmpty = false
+        var sawSelectionStart = false, sawSelectionEnd = false
+        var sawCellCursorAt = false, sawCellCursorEmpty = false
+        for line in rawLines {
+            guard let typeRange = line.range(of: "type="), let payloadRange = line.range(of: " payload=") else { continue }
+            guard let type = Int32(line[typeRange.upperBound..<payloadRange.lowerBound]) else { continue }
+            guard interestingTypes.contains(type) else { continue }
+            perType[type, default: 0] += 1
+            let payload = String(line[payloadRange.upperBound...])
+            print("[caret probe] type=\(type) payload=\"\(payload)\"")
+            switch type {
+            case 1:
+                guard case .caretRect(let rect) = OfficeDocumentEvent.parseCaretRect(payload) else {
+                    return XCTFail("a REAL INVALIDATE_VISIBLE_CURSOR payload failed to parse: \"\(payload)\"")
+                }
+                sawCaretRect = true
+                XCTAssertEqual(rect.width, 0, "every real caret rect observed has zero width (a caret has no horizontal extent)")
+            case 2:
+                guard case .textSelection(let rects) = OfficeDocumentEvent.parseTextSelection(payload) else {
+                    return XCTFail("a REAL TEXT_SELECTION payload failed to parse: \"\(payload)\"")
+                }
+                if rects.isEmpty { sawSelectionEmpty = true } else { sawSelectionRect = true }
+            case 3:
+                guard case .textSelectionStart = OfficeDocumentEvent.parseTextSelectionStart(payload) else {
+                    return XCTFail("a REAL TEXT_SELECTION_START payload failed to parse: \"\(payload)\"")
+                }
+                sawSelectionStart = true
+            case 4:
+                guard case .textSelectionEnd = OfficeDocumentEvent.parseTextSelectionEnd(payload) else {
+                    return XCTFail("a REAL TEXT_SELECTION_END payload failed to parse: \"\(payload)\"")
+                }
+                sawSelectionEnd = true
+            case 17:
+                guard case .cellCursor(let cell) = OfficeDocumentEvent.parseCellCursor(payload) else {
+                    return XCTFail("a REAL CELL_CURSOR payload failed to parse: \"\(payload)\"")
+                }
+                switch cell {
+                case .at: sawCellCursorAt = true
+                case .empty: sawCellCursorEmpty = true
+                }
+            default:
+                break
+            }
+        }
+        print("[caret probe] SUMMARY by type: \(perType.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: ", "))")
+
+        // Every scenario this probe actually drove DID produce real traffic (unlike the drag-
+        // selection disclosure above) — these are real assertions, not the "vacuously true for zero
+        // firings" honesty clause `testRealLOKCallbackProbeCapturesRawPayloadsAndCrossChecksTheParsers`
+        // uses for callbacks that may or may not fire incidentally.
+        XCTAssertTrue(sawCaretRect, "Writer typing and Calc in-cell edit must both produce a real caret rect")
+        XCTAssertTrue(sawSelectionRect, "Shift-arrow selection must produce a real, non-empty TEXT_SELECTION")
+        XCTAssertTrue(sawSelectionStart, "a real selection must produce TEXT_SELECTION_START")
+        XCTAssertTrue(sawSelectionEnd, "a real selection must produce TEXT_SELECTION_END")
+        XCTAssertTrue(sawCellCursorAt, "a real Calc cell click must produce a real CELL_CURSOR rect+col+row")
+        XCTAssertTrue(sawCellCursorEmpty, "entering Calc in-cell edit mode must produce CELL_CURSOR \"EMPTY\"")
+        // `sawSelectionEmpty` is observed (this run's own capture: 3 of the 5 total TEXT_SELECTION
+        // firings carried an empty payload) but deliberately NOT asserted here — this test's own raw
+        // line filter reads type+payload only, not `docId`, so which specific step(s) among "the
+        // very first click," "the bare-arrow collapse," "the drag selection," and "Calc's own
+        // initial no-selection state" produced which empty firing was not individually isolated.
+        // Not chased further: the PARSER (this test's actual subject) already has real, both-shapes
+        // coverage from `testParseTextSelectionCalcsBareEMPTYAlsoMeansNoSelection`/`...Real
+        // CapturedShapes`, and every one of these 3 empty firings above already parsed correctly as
+        // `.textSelection([])` without tripping the XCTFail branch.
+        _ = sawSelectionEmpty
+    }
+
+    // MARK: - Task 8: the formula-bar content-source investigation (capture REAL payloads first)
+
+    /// **Task 8 — before writing a single line of formula-bar production code**: does
+    /// `LOK_CALLBACK_CELL_FORMULA` (raw type 19, "the text content of the formula bar in Calc" per
+    /// `LibreOfficeKitEnums.h:345-347`) actually fire against this pin's real, TRIMMED vendor
+    /// tree, and if so, in what shape and with what timing relative to `CELL_CURSOR` (type 17)?
+    /// Neither `LOKCallbackType` nor `handleCallback` recognizes type 19 today — this probe reads
+    /// it purely off `LOKBridge.handleCallback`'s own unconditional raw-callback trace (the SAME
+    /// capture mechanism `testRealLOKCallbackProbeCapturesCaretSelectionAndCellCursorRawPayloads`
+    /// one screen up uses), never a parser, since there is no parser yet to call.
+    ///
+    /// Three scenarios, each targeting a specific formula-bar design question (this task's own
+    /// report records what each one actually found and the resulting wiring decision):
+    /// 1. **Full → empty → full** — click A1 ("NORMA GATE", real content) → click B2 (genuinely
+    ///    empty, per `two-sheet.ods`'s own seed) → click B1 (the number 42): does 19 fire on
+    ///    EVERY cell move, including onto an empty cell? If it never fires there, a naive store
+    ///    would leave stale content on screen against a fresh, empty cell's own ref unless the
+    ///    store clears on every `CELL_CURSOR` change too — this is what settles that question
+    ///    empirically rather than by assumption.
+    /// 2. **Ordering** — on the SAME move, does 17 (`CELL_CURSOR`) or 19 arrive first? A design
+    ///    that reads both off one store must know which of the two is the stale one for the one
+    ///    frame between them.
+    /// 3. **Typing without committing** — back on A1, type one character, then Escape rather than
+    ///    Return (abandon the edit — a probe should observe, not leave the fixture copy dirtied
+    ///    for whatever runs after it): does 19 fire per keystroke while `CELL_CURSOR` itself sits
+    ///    at its `"EMPTY"` sentinel (Task 5's own finding for in-cell edit mode)? This is the
+    ///    brief's own "type → content updates" drill leg.
+    ///
+    /// A1's/B1's own distinctive seed content ("NORMA GATE", "42") is the cross-check: whatever
+    /// type=19 sends must contain them verbatim, or this is not really the formula bar's own
+    /// content.
+    func testProbeInvestigatesWhetherCellFormulaCallbacksExistForTheFormulaBarsContent() async throws {
+        try skipUnlessVendorPresent()
+        let helper = try await spawnLiveHelper(captureStderr: true)
+
+        let calcPath = helper.stateDir.appendingPathComponent("docs", isDirectory: true)
+            .appendingPathComponent("t8-formula-probe.ods").path
+        try FileManager.default.createDirectory(
+            at: URL(fileURLWithPath: calcPath).deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(contentsOf: Self.fixturesRoot.appendingPathComponent("two-sheet.ods"))
+            .write(to: URL(fileURLWithPath: calcPath))
+        let docId = UUID().uuidString
+        _ = try await helper.client.open(docId: docId, path: calcPath)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+
+        // --- Scenario 1+2: full (A1, "NORMA GATE") -> empty (B2) -> full (B1, 42). Column width
+        // ~1280 twips (two-sheet.ods's own co1 style, 0.889in), row height ~256 twips (ro1,
+        // 0.178in) — B2 sits in row 2 (y > 256), B1 in row 1 (y < 256), matching the fixture's own
+        // seed content read directly off its content.xml.
+        try await helper.client.postMouse(docId: docId, part: 0, type: .buttonDown, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await helper.client.postMouse(docId: docId, part: 0, type: .buttonUp, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        try await helper.client.postMouse(docId: docId, part: 0, type: .buttonDown, xTwips: 1500, yTwips: 400, count: 1, buttons: 1, modifiers: 0)
+        try await helper.client.postMouse(docId: docId, part: 0, type: .buttonUp, xTwips: 1500, yTwips: 400, count: 1, buttons: 1, modifiers: 0)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        try await helper.client.postMouse(docId: docId, part: 0, type: .buttonDown, xTwips: 1500, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await helper.client.postMouse(docId: docId, part: 0, type: .buttonUp, xTwips: 1500, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+
+        // --- Scenario 3: back to A1, type one character, Escape (abandon — never commits). ---
+        try await helper.client.postMouse(docId: docId, part: 0, type: .buttonDown, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await helper.client.postMouse(docId: docId, part: 0, type: .buttonUp, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        try await helper.client.postKey(docId: docId, part: 0, type: .keyInput, charCode: 88, keyCode: 535) // X (512 + 'X'-'A')
+        try await helper.client.postKey(docId: docId, part: 0, type: .keyUp, charCode: 88, keyCode: 535)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        try await helper.client.postKey(docId: docId, part: 0, type: .keyInput, charCode: 0, keyCode: 1281) // Escape (OfficeInputCodes.swift:193)
+        try await helper.client.postKey(docId: docId, part: 0, type: .keyUp, charCode: 0, keyCode: 1281)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+
+        try await helper.client.close(docId: docId)
+        try? await Task.sleep(nanoseconds: 300_000_000)
+
+        // --- Read back every type=17/19 raw line, in ARRIVAL ORDER — `linesSnapshot()` is an
+        // ordered ingestion log, not a set, so this is also the ordering (question 2) evidence. ---
+        let rawLines = (helper.stderrCapture?.linesSnapshot() ?? []).filter { $0.contains("[LOKBridge raw callback]") }
+        struct Firing { let type: Int32; let payload: String }
+        var firings: [Firing] = []
+        for line in rawLines {
+            guard let typeRange = line.range(of: "type="), let payloadRange = line.range(of: " payload=") else { continue }
+            guard let type = Int32(line[typeRange.upperBound..<payloadRange.lowerBound]) else { continue }
+            guard type == 17 || type == 19 else { continue }
+            let payload = String(line[payloadRange.upperBound...])
+            firings.append(Firing(type: type, payload: payload))
+            print("[formula probe] type=\(type) payload=\"\(payload)\"")
+        }
+        print("[formula probe] SUMMARY: \(firings.count) total firings — type=17 count="
+              + "\(firings.filter { $0.type == 17 }.count), type=19 count=\(firings.filter { $0.type == 19 }.count)")
+
+        // The one load-bearing baseline: CELL_CURSOR (17) firing at all proves the scenario's own
+        // mouse-click choreography actually reached Calc's cell-navigation path — a failure here
+        // means the SETUP is broken, not that type=19 is absent. Deliberately no assertion on
+        // type=19 itself: its presence/shape/timing is exactly what this probe exists to OBSERVE,
+        // never assumed in either direction ahead of the read-back.
+        XCTAssertTrue(firings.contains { $0.type == 17 }, "CELL_CURSOR must fire at all from three "
+                      + "real cell clicks — this probe's own baseline")
     }
 }
 
