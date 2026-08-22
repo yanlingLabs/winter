@@ -349,6 +349,18 @@ final class LOKBridge: OfficeDocumentBridge {
         /// Office Stage B Task 6 — `agentKeyEvent` requested for a docId `createAgentView` was
         /// never called for.
         case noAgentView(String)
+        /// office-agent-tools T3 — `sheetsInfo`/`sheetsRead` requested for a document that is not a
+        /// spreadsheet. Distinct from every OTHER refusal on this enum: it is composed ENTIRELY from
+        /// this bridge's own words, never a LOK-thrown string, so it is already house-voice by
+        /// construction — the "mapped, never raw LibreOffice text" requirement the brief's own proof
+        /// obligations name is satisfied at the point of composition, not by a later translation
+        /// layer (unlike `.saveAsFailed`, whose `reason` — see `saveAsOnDedicatedThread` — DOES carry
+        /// LOK-adjacent text and relies on the app-side T9 mapping table).
+        case notSpreadsheet(docId: String, kind: OfficeDocumentKind)
+        /// office-agent-tools T3 — `sheetsRead`'s `sheet` named no part this document actually has.
+        /// `available` is the real, current sheet-name list (in part order) — carried so the caller
+        /// can build "no sheet named X — this workbook has: A, B, C" without a second round trip.
+        case sheetNotFound(docId: String, sheet: String, available: [String])
         var description: String {
             switch self {
             case .docNotOpen(let docId): return "save requested for a docId that is not open: \(docId)"
@@ -357,6 +369,19 @@ final class LOKBridge: OfficeDocumentBridge {
             case .pasteFailed(let docId): return "paste() failed for docId: \(docId)"
             case .agentViewAlreadyExists(let docId): return "docId already has an agent view: \(docId)"
             case .noAgentView(let docId): return "docId has no agent view: \(docId)"
+            case .notSpreadsheet(let docId, let kind):
+                let noun: String
+                switch kind {
+                case .text: noun = "a text document"
+                case .spreadsheet: noun = "a spreadsheet" // unreachable — this case IS the accepted kind
+                case .presentation: noun = "a presentation"
+                case .drawing: noun = "a drawing"
+                case .other: noun = "not a recognized office document"
+                }
+                return "the `sheets` tool only works on spreadsheets, but \(docId) is \(noun)"
+            case .sheetNotFound(let docId, let sheet, let available):
+                let list = available.isEmpty ? "(no sheets)" : available.joined(separator: ", ")
+                return "no sheet named \"\(sheet)\" in \(docId) — this workbook has: \(list)"
             }
         }
     }
@@ -714,6 +739,15 @@ final class LOKBridge: OfficeDocumentBridge {
         try thread.sync {
             try self.agentKeyEventOnDedicatedThread(docId: docId, part: part, type: type, charCode: charCode, keyCode: keyCode)
         }
+    }
+
+    // MARK: - office-agent-tools T3: sheets info/read
+
+    func sheetsInfo(docId: String) throws -> (sheets: [OfficeSheetInfo], activeSheet: String) {
+        try thread.sync { try self.sheetsInfoOnDedicatedThread(docId: docId) }
+    }
+    func sheetsRead(docId: String, sheet: String, range: String, formulas: Bool) throws -> [[String]] {
+        try thread.sync { try self.sheetsReadOnDedicatedThread(docId: docId, sheet: sheet, range: range, formulas: formulas) }
     }
 
     // MARK: - Office Stage B Task 10 — the CFB release blocker
@@ -1540,6 +1574,145 @@ final class LOKBridge: OfficeDocumentBridge {
         }
         doc.handle.pointee.pClass.pointee.postKeyEvent?(
             doc.handle, Int32(type.rawValue), Int32(truncatingIfNeeded: charCode), Int32(truncatingIfNeeded: keyCode))
+    }
+
+    // MARK: - office-agent-tools T3: sheets info/read
+
+    /// All sheet-name lookups this bridge does (`sheetsInfo`'s own list, `sheetsRead`'s name-to-part
+    /// resolution) go through this one helper, `setView` already asserted by the caller — `getParts`/
+    /// `getPartName` are cheap, and duplicating the loop at each call site risked the two drifting
+    /// (a name found here but not there, or vice versa, on the exact same document). Returns names in
+    /// PART ORDER (index i's name is sheet i), never re-sorted — order is itself information (spec
+    /// §2: "sheet names" is a list, and `sheetsInfoOk.sheets` promises the same order `info` reports
+    /// as `sheets[i]`'s own part-scoped facts).
+    private func sheetNamesOnDedicatedThread(_ doc: OpenDocument) -> [String] {
+        let partCount = Int(doc.handle.pointee.pClass.pointee.getParts?(doc.handle) ?? 0)
+        var names: [String] = []
+        names.reserveCapacity(partCount)
+        for part in 0..<partCount {
+            if let cName = doc.handle.pointee.pClass.pointee.getPartName?(doc.handle, Int32(part)) {
+                defer { free(cName) }
+                names.append(String(cString: cName))
+            } else {
+                names.append("Sheet\(part + 1)") // defensive fallback — getPartName should not fail for a real part index
+            }
+        }
+        return names
+    }
+
+    /// Selects `range` on `part` (`.uno:GoToCell`'s own `ToPoint` argument — proven, live-tested
+    /// single-cell targeting since Office Stage B Task 4's now-retired `debugEdit` door; this task's
+    /// own live drills are what confirm it also accepts a two-corner span) and reads the selection
+    /// back via `getTextSelection`, the SAME mechanism `clipboardCopyOnDedicatedThread` already uses
+    /// and this codebase's own live tests already trust. `setPart` is the CALLER's job (both
+    /// `sheetsInfoOnDedicatedThread`'s A1-emptiness probe and `sheetsReadOnDedicatedThread` need a
+    /// specific part asserted first, and asserting it here a second time would be redundant, not
+    /// wrong, but this keeps the "one assertion per dedicated-thread job" shape the rest of this file
+    /// already has).
+    ///
+    /// **`formulas` selects Calc's own View > Show Formula mode (`.uno:ShowFormula`) around the SAME
+    /// read, toggled on immediately before and off immediately after** — a display-mode toggle, not a
+    /// document mutation (the same category as zoom or a split-pane position), so it is not expected
+    /// to touch `ModifiedStatus`; this task's own live drills assert that directly rather than
+    /// trusting the category alone. Toggled unconditionally both ways (never queried first): a UNO
+    /// toggle command flips whatever the CURRENT state is, so flip-read-flip returns to the original
+    /// state regardless of what it was, without this bridge needing to ask what it started as.
+    private func selectionTextOnDedicatedThread(_ doc: OpenDocument, range: String, formulas: Bool) -> String {
+        let gotoPayload: [String: Any] = ["ToPoint": ["type": "string", "value": range]]
+        if let gotoData = try? JSONSerialization.data(withJSONObject: gotoPayload),
+           let gotoString = String(data: gotoData, encoding: .utf8) {
+            ".uno:GoToCell".withCString { commandPtr in
+                gotoString.withCString { argsPtr in
+                    doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, argsPtr, false)
+                }
+            }
+        }
+        if formulas {
+            ".uno:ShowFormula".withCString { commandPtr in
+                doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, nil, false)
+            }
+        }
+        let text: String
+        if let cString = "text/plain;charset=utf-8".withCString({ mimePtr in
+            doc.handle.pointee.pClass.pointee.getTextSelection?(doc.handle, mimePtr, nil)
+        }) {
+            defer { free(cString) }
+            text = String(cString: cString)
+        } else {
+            text = ""
+        }
+        if formulas {
+            ".uno:ShowFormula".withCString { commandPtr in
+                doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, nil, false)
+            }
+        }
+        return text
+    }
+
+    /// office-agent-tools T3 — sheet names, each one's used range, and the active sheet's name.
+    /// Read-only: no `postUnoCommand` that mutates content, only the ones `selectionTextOnDedicated
+    /// Thread`'s A1-emptiness probe issues (a SELECTION move, not an edit).
+    private func sheetsInfoOnDedicatedThread(docId: String) throws -> (sheets: [OfficeSheetInfo], activeSheet: String) {
+        guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        guard doc.kind == .spreadsheet else { throw SaveError.notSpreadsheet(docId: docId, kind: doc.kind) }
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+
+        let names = sheetNamesOnDedicatedThread(doc)
+        var sheets: [OfficeSheetInfo] = []
+        sheets.reserveCapacity(names.count)
+        for (part, name) in names.enumerated() {
+            doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(part))
+            var lastCol: CLong = 0
+            var lastRow: CLong = 0
+            doc.handle.pointee.pClass.pointee.getDataArea?(doc.handle, CLong(part), &lastCol, &lastRow)
+            // `getDataArea`'s own C signature has no separate "is this sheet empty at all" out-param
+            // (unlike the internal `ScDocument::GetCellArea` it almost certainly wraps), so (0,0) is
+            // genuinely ambiguous between "wholly empty" and "only A1 has anything" from this call
+            // alone. Disambiguated with one targeted probe rather than guessed: read A1 itself
+            // (`selectionTextOnDedicatedThread`, the SAME mechanism `sheetsRead` uses) and treat a
+            // truly blank answer as the wholly-empty sentinel.
+            if lastCol == 0, lastRow == 0 {
+                let a1 = selectionTextOnDedicatedThread(doc, range: "A1", formulas: false)
+                if a1.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    sheets.append(OfficeSheetInfo(name: name, usedEndColumn: -1, usedEndRow: -1))
+                    continue
+                }
+            }
+            sheets.append(OfficeSheetInfo(name: name, usedEndColumn: Int(lastCol), usedEndRow: Int(lastRow)))
+        }
+
+        let activeIndex = Int(doc.handle.pointee.pClass.pointee.getPart?(doc.handle) ?? 0)
+        let activeSheet = (activeIndex >= 0 && activeIndex < names.count) ? names[activeIndex] : (names.first ?? "")
+        return (sheets, activeSheet)
+    }
+
+    /// office-agent-tools T3 — a value or formula grid over one already-validated, already-formatted
+    /// A1 `range` on ONE named sheet. `sheet` is resolved to a part index HERE (never by the caller —
+    /// see `OfficeWireFrame.sheetsRead`'s own header for why this MUST live helper-side), refusing
+    /// with the workbook's real sheet list on no match.
+    private func sheetsReadOnDedicatedThread(docId: String, sheet: String, range: String, formulas: Bool) throws -> [[String]] {
+        guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        guard doc.kind == .spreadsheet else { throw SaveError.notSpreadsheet(docId: docId, kind: doc.kind) }
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+
+        let names = sheetNamesOnDedicatedThread(doc)
+        guard let part = names.firstIndex(of: sheet) else {
+            throw SaveError.sheetNotFound(docId: docId, sheet: sheet, available: names)
+        }
+        doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(part))
+
+        let text = selectionTextOnDedicatedThread(doc, range: range, formulas: formulas)
+        // `getTextSelection`'s own TSV shape: rows joined by "\n", cells within a row joined by "\t".
+        // A wholly-empty selection answers `""`, which `.split` on an empty string with
+        // `omittingEmptySubsequences: false` would otherwise turn into ONE spurious empty row —
+        // guarded explicitly rather than trusted to fall out of the split, since a genuinely single
+        // BLANK cell ("\t"-free, content-free) must still come back as `[[""]]`, not `[]`.
+        guard !text.isEmpty else { return [] }
+        // A trailing "\n" (there almost always is one — LOK's own convention for a Calc selection
+        // copy) would otherwise produce one spurious wholly-empty trailing row; every OTHER embedded
+        // newline is a real row boundary and must survive.
+        let trimmed = text.hasSuffix("\n") ? String(text.dropLast()) : text
+        return trimmed.components(separatedBy: "\n").map { $0.components(separatedBy: "\t") }
     }
 
     // MARK: - Callback translation
