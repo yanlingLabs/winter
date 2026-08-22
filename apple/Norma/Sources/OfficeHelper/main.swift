@@ -376,36 +376,71 @@ if let probeKind = args["sandbox-probe"] {
         // probe side-effect-free by construction, the same posture `launch-services-query` (above)
         // already committed to for the identical reason.
         //
-        // The discriminator is the returned `OSStatus`, not a bare success/failure bit. The ACTUAL,
+        // The discriminator is the returned `OSStatus`, not a bare success/failure bit. The
         // repeatedly-verified reading under the shipped profile is `kLSExecutableIncorrectFormat`
-        // (-10661, "No compatible executable was found") — confirmed stable across 6 direct spawns
-        // outside any test harness plus every subsequent XCTest run, IDENTICAL with and without the
-        // grant (`OfficeSandboxTests.testUnregisteredURLSchemeOpenNeverReachesAHandledLaunch` pins
-        // and explains this exactly). This was NOT the first guess written here (`-10822`,
-        // `kLSServerCommunicationErr`, was — see task-10-report.md's fix-round-2 section for the
-        // corrected-in-place history); -10661 is a LOCAL, client-side rejection — LaunchServices'
-        // own code decides this manufactured URL "isn't a compatible executable" before ever
-        // needing to ask `lsd` who handles it, the same code this file's `launch-services-query`
-        // comment already documented, independently, for a `.txt` path
-        // (`LSCopyDefaultApplicationURLForURL`, fix round 1) as "unrelated to sandboxing." Only two
-        // readings actually matter for this probe's own verdict:
-        //   - `kLSApplicationNotFoundErr` (-10814) — LaunchServices DID service the request and only
-        //     then failed because no handler is registered for THIS scheme specifically. A
-        //     registered/handled URL type would, by the same code path, have gone on to actually
-        //     resolve and launch a handler — i.e., the confused-deputy launch this whole fix round
-        //     is about IS reachable. This is a hard ship-blocker, not a result to average away
-        //     against the control below; see this probe's own call site in `OfficeSandboxTests` and
-        //     `task-10-report.md`'s fix-round-2 section for the disposition if this code is ever the
-        //     one that comes back.
-        //   - anything else (currently -10661; -10822 or another connection-level code would read
-        //     the same way) — NOT -10814, which is the only claim this probe actually needs to
-        //     support. Disclosed limit, not concealed: because -10661 is a rejection that happens
-        //     BEFORE consulting `lsd` at all, this probe's own shape cannot distinguish "the grant
-        //     lets a real, registered open through" from "the grant is irrelevant here" — it only
-        //     rules out the specific -10814 finding for THIS unregistered-scheme shape. Proving the
-        //     grant's effect (or lack of one) on a REGISTERED/handled URL type is the same
-        //     deliberately-not-attempted stronger test Experiment C's own report section already
-        //     named as a follow-up, for the same side-effect reason.
+        // (-10661, "No compatible executable was found") — 6 direct spawns outside any test harness
+        // plus every XCTest run (fix round 2), IDENTICAL with and without the grant.
+        //
+        // Fix-round-3 (convergence re-review) — **the mechanism claim previously written here next
+        // ("-10661 is a LOCAL, client-side rejection … before ever needing to ask `lsd` who handles
+        // it") was FALSIFIED, not merely unhedged — this paragraph replaces it rather than qualify
+        // it.** The re-review reproduced this exact probe on the PRODUCTION shape (bundled helper,
+        // embedded install root — neither of this file's own two -10661 readings covers that
+        // combination; see the coverage note below) and ran the control fix round 2 never did:
+        // unsandboxed, the same call returns `kLSApplicationNotFoundErr` (-10814, 4 runs); sandboxed,
+        // `kLSExecutableIncorrectFormat` (-10661, 5 runs) — the re-review's own 9 cells, cited, not
+        // reproduced here. So the SANDBOX, not a local pre-`lsd` LaunchServices quirk, is what stops
+        // this request being serviced. A `log stream` capture (the re-review's own) shows the open
+        // dying inside `_LSAgentGetConnection` on DENIED `com.apple.lsd.modifydb`/`.mapdb`/a
+        // quarantine-resolution service ("quarantine-resolver" in the re-review's own words — this
+        // file does not independently confirm its literal bootstrap name), BEFORE handler resolution
+        // is ever reached. Adding those names to a scratch profile flips the SANDBOXED reading to
+        // -10814 (the re-review's own cell); REMOVING `com.apple.coreservices.launchservicesd` (this
+        // profile's one surviving grant, Experiment C) changes NOTHING — -10661 either way.
+        //
+        // **Stated as the pair it has to be stated as — writing only one half is what makes this
+        // dangerous, not merely incomplete**: `com.apple.coreservices.launchservicesd` remains
+        // NECESSARY for the ORIGINAL hang this whole fix round fixed (Experiment C's own bisection,
+        // fix round 1 — LOK's `MacSpellChecker` bootstrap during document OPEN needs it; unrelated to
+        // this probe) AND is IRRELEVANT to THIS open path specifically (`LSOpenCFURLRef`'s own
+        // confused-deputy question). The open path's real containment was never this grant — it is
+        // the ABSENCE of the `lsd.*`/quarantine-resolution endpoints above, which T1's original
+        // baseline never granted and no fix round on this task ever added. A future edit that reads
+        // only "the grant does nothing" and drops it would silently reintroduce the original
+        // Impress/Writer hang.
+        //
+        // Two upgrades this licenses:
+        //   (i) `OfficeSandboxTests.testLaunchServicesAdjacentEndpointsAreDeniedUnderTheShippedProfile`
+        //       (Test A, fix round 2) is now a LOAD-BEARING CONTAINMENT PIN for this open path, not
+        //       merely a denial curiosity — it already covers two of the re-review's own three named
+        //       denials (`.mapdb`/`.modifydb`). Its third service, `.openurl`, is NOT the same one
+        //       the re-review's quarantine-resolution finding names — an honest gap, disclosed rather
+        //       than papered over: no test in this repo pins that third service denied. Any future
+        //       widening that grants `com.apple.lsd.mapdb`, `com.apple.lsd.modifydb`, or a
+        //       quarantine-resolution-adjacent service is SHIP-BLOCKER-CLASS on this profile — it
+        //       would flip the sandboxed reading to -10814 on the re-review's own demonstrated cell.
+        //   (ii) The "registered/handled URL type" follow-up (named below, and in fix round 2's own
+        //       Experiment C section) is now LARGELY CLOSED BY MECHANISM: if no scheme — registered
+        //       or not — can resolve a handler without `_LSAgentGetConnection` reaching the denied
+        //       endpoints above, a registered scheme cannot behave differently from this probe's
+        //       unregistered one on this profile. A MECHANISM-BACKED INFERENCE from the re-review's
+        //       own cells, not a run cell of its own — the stronger test (an actual registered-scheme
+        //       open, accepting a real, visible launch once) was still never run.
+        //
+        // **Coverage note, not a defect**: neither this probe nor `OfficeSandboxTests`' own driver of
+        // it (`resolvedHelperURL()`, a bare `BUILT_PRODUCTS_DIR` executable) exercises the BUNDLED
+        // shape — the exact variable Experiment B (fix round 1) proved outcome-determining for the
+        // original hang. The re-review ran bundled+embedded directly and it matched this file's own
+        // bare-exec reading; recorded here so a future reader knows this file's own tests alone do
+        // not cover that shape.
+        //
+        // Only one reading is still a hard block for this probe's own verdict:
+        //   - `kLSApplicationNotFoundErr` (-10814) — would mean a handler lookup was attempted and
+        //     failed only for lack of a match; a registered/handled URL type would, by the same path,
+        //     resolve a real handler. Never observed under the shipped profile, across fix round 2's
+        //     own 7 observations plus the re-review's own 9. Still the hard ship-blocker if it is
+        //     ever the one that comes back; see `OfficeSandboxTests` and `task-10-report.md`'s
+        //     fix-round-3 section for the disposition.
         //
         // Uses the older `LSOpenCFURLRef` (not `NSWorkspace.open`) deliberately: this file already
         // links `CoreServices` (see the top-of-file import) for no other reason than this probe, and

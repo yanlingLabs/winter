@@ -136,10 +136,18 @@
 ;; `LastFoundSpellCheckers`, per-locale) — no change, hang persists identically. (2) seeding a
 ;; "warm cache" of 234 `SpellCheckerList`/`LastFoundSpellCheckers` entries verbatim from that same
 ;; live capture, on the theory a pre-populated cache short-circuits the probe — no change either.
-;; Consistent with Experiment B's own finding in hindsight: `MacSpellChecker` constructs SUCCESSFULLY
-;; in the bare-exec cells (that's how B's own cells complete) — the registry layer was never the
-;; right lever, because construction itself was never the problem; `NSApplicationLoad()`'s own
-;; bundle-identity-dependent behavior was.
+;; Fix-round-3 (convergence re-review) I1 residual — **this paragraph originally closed by
+;; reasserting, as fact, the exact mechanism claim the "Fix-round-2 I1 residual" paragraph above
+;; already hedged** ("`MacSpellChecker` constructs SUCCESSFULLY in the bare-exec cells" stated flat,
+;; and "`NSApplicationLoad()`'s own bundle-identity-dependent behavior was [the right lever]" stated
+;; flat) — three paragraphs below its own hedge, contradicting it. Corrected in place rather than
+;; left standing: the bare-exec cells COMPLETE, which is CONSISTENT WITH construction succeeding —
+;; nothing here traced construction directly, so "constructs successfully" is the same black-box
+;; inference the paragraph above already named, not an independently observed fact. Experiment A's
+;; own negative result licenses only "neither registry seed changed the outcome" — it does not, on
+;; its own, license a claim about WHY not; that "why" is still the same untested `NSBundle.main`/
+;; `NSApplicationLoad()` hypothesis the paragraph above already restated honestly as a hypothesis,
+;; not a second, independent confirmation of it.
 ;;
 ;; **Experiment C (whole-branch review) — sequential minimization, oracle = the inverted pin below,
 ;; against a rebuilt bundled+embedded helper each round.** Dropping `coreservices.launchservicesd`
@@ -172,6 +180,27 @@
 ;; scoped code change — restructuring `NormaOfficeHelper`'s own bundle identity to avoid inheriting
 ;; Norma.app's is a materially bigger change than this fix round's own scope, and belongs in a
 ;; dedicated follow-up, not an improvised addition here).
+;;
+;; Fix-round-3 (convergence re-review) F4 — **this section's own "open question" was never updated
+;; after fix round 2 partially answered it, and the convergence re-review has now gone further
+;; still.** Fix round 2's own Test A (`OfficeSandboxTests.testLaunchServicesAdjacentEndpointsAre
+;; DeniedUnderTheShippedProfile`) and Test B (`testUnregisteredURLSchemeOpenNeverReachesAHandled
+;; Launch`) are not referenced above at all. Test B's own finding, corrected in fix round 3 (see
+;; `main.swift`'s own `launch-open-unregistered-scheme` case for the full account): the "ACTUAL
+;; open … request" this section names as untested is, for an UNREGISTERED scheme, now known to fail
+;; via `kLSExecutableIncorrectFormat` (-10661) regardless of this grant — and the convergence
+;; re-review's own reproduction on the PRODUCTION bundled+embedded shape (its own 9 cells, cited, not
+;; reproduced in this repo) found the REAL gate on this open path is the sandbox's denial of
+;; `lsd.mapdb`/`.modifydb`/quarantine-resolution, not the `launchservicesd` grant below — the
+;; re-review found removing it makes NO difference to this open path either way. `launchservicesd`
+;; remains independently NECESSARY for the ORIGINAL hang this whole fix round exists to fix
+;; (unchanged, Experiment C above) — the two facts do not contradict each other; they answer
+;; different questions (document-open bootstrap vs. this specific LaunchServices-open-by-URL
+;; confused-deputy path). See `OfficeSandboxTests`' own Test A/Test B and `task-10-report.md`'s
+;; fix-round-2 and fix-round-3 sections for the full, corrected chain — the Experiment C prose above
+;; is left as the historical record of what that experiment itself established at the time, not
+;; rewritten to sound as if it already knew this.
+;;
 (allow mach-lookup
   (global-name "com.apple.system.notification_center")
   (global-name "com.apple.system.logger")

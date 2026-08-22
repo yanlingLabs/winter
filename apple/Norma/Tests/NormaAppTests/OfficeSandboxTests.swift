@@ -260,17 +260,27 @@ final class OfficeSandboxTests: XCTestCase {
     /// the way (`runProbe`'s `stderr = Pipe()` deadlocking specifically under `xcodebuild test`'s
     /// own environment, fixed below in `runProbe` itself — this test's own first XCTest run hung
     /// for that reason, not a sandbox one; six direct, non-XCTest-hosted spawns had already shown
-    /// the true, fast, -10661 reading before that infrastructure bug was even found). -10661 is the
-    /// SAME code this file's neighboring `launch-services-query` doc comment already established,
-    /// independently, as "a LaunchServices-semantic error unrelated to sandboxing" (the `.txt`-path
-    /// `LSCopyDefaultApplicationURLForURL` attempt, fix round 1) — LaunchServices' own client-side
-    /// code rejects this probe's manufactured scheme as "not a compatible executable" BEFORE ever
-    /// needing to ask `lsd` who handles it, which is why it reads identically with and without the
-    /// grant (asserted explicitly below): this specific probe shape never reaches the code path the
-    /// grant would affect at all. That is a known, disclosed limit of an UNREGISTERED-scheme probe,
-    /// not a new one — the item that named this test chose an unregistered scheme specifically to
-    /// stay side-effect-free, at the accepted cost of not exercising a REGISTERED/handled URL type's
-    /// own code path; see the report for the follow-up this leaves open.
+    /// the true, fast, -10661 reading before that infrastructure bug was even found).
+    ///
+    /// **Fix-round-3 (convergence re-review) — the mechanism this comment gave for -10661 was
+    /// FALSIFIED, not merely unhedged; see `main.swift`'s own `launch-open-unregistered-scheme` case
+    /// for the full, corrected account (the re-review's own 9 cells: 5 sandboxed -10661 / 4
+    /// unsandboxed -10814 on the PRODUCTION bundled+embedded shape; `_LSAgentGetConnection` dying on
+    /// denied `lsd.mapdb`/`.modifydb`/quarantine-resolution, before handler resolution; the
+    /// scratch-profile flip; the grant-removal null result).** This test's own -10661 finding (WITH
+    /// and WITHOUT the grant, identical) is real and still stands, but "the client-side rejection
+    /// happens before ever needing to ask `lsd`" was wrong — it is the SANDBOX denying specific
+    /// `lsd.*`/quarantine-resolution endpoints, not a local pre-`lsd` LaunchServices decision. This
+    /// test also does not cover the production BUNDLED shape (`resolvedHelperURL()` spawns a bare
+    /// `BUILT_PRODUCTS_DIR` executable) — the re-review ran that shape directly and it matched; a
+    /// coverage note, not a defect. `testLaunchServicesAdjacentEndpointsAreDeniedUnderTheShippedProfile`
+    /// (Test A, above) is now the LOAD-BEARING containment pin for this open path (see `main.swift`'s
+    /// own comment for the precise, partial-coverage statement of what it does and does not pin) —
+    /// any future widening of `com.apple.lsd.mapdb`/`.modifydb`, or a quarantine-resolution-adjacent
+    /// service, is a SHIP-BLOCKER-CLASS change here, not a routine one. The REGISTERED/handled URL
+    /// type follow-up this comment previously left fully open is now LARGELY CLOSED BY MECHANISM
+    /// (again, see `main.swift`) — a mechanism-backed inference from the re-review's own cells, not a
+    /// run cell of its own; the side-effecting stronger test itself was still never run.
     func testUnregisteredURLSchemeOpenNeverReachesAHandledLaunch() async throws {
         let (withGrantOutput, _) = try await runProbe(kind: "launch-open-unregistered-scheme")
         let withGrantStatus = try Self.extractProbeStatus(from: withGrantOutput)
@@ -310,10 +320,17 @@ final class OfficeSandboxTests: XCTestCase {
         // also never be -10814, regardless of its exact value otherwise.
         XCTAssertNotEqual(withoutGrantStatus, -10814, "got: \(withoutGrantOutput)")
         // Disclosed, not concealed: this specific probe shape reads IDENTICALLY with and without
-        // the grant — direct evidence that an unregistered scheme's rejection happens before
-        // LaunchServices' client code ever needs to consult `lsd` (and so before this profile's one
-        // grant could possibly matter either way), not evidence that the grant is a no-op in
-        // general. See this test's own doc comment above for what this does and does not establish.
+        // the grant. Fix round 2 read that as "the rejection happens before LaunchServices' client
+        // code ever needs to consult `lsd`" — fix-round-3 (convergence re-review) FALSIFIED that
+        // reading: the re-review's own cells show `lsd` IS consulted either way (`_LSAgentGetConnection`
+        // runs regardless), and the identical reading instead reflects that
+        // `com.apple.coreservices.launchservicesd` (the one grant this control toggles) was never the
+        // relevant grant for THIS open path — the endpoints that actually gate it
+        // (`lsd.mapdb`/`.modifydb`/quarantine-resolution) are absent from BOTH configurations this
+        // control compares, so toggling a THIRD, irrelevant grant was never going to move this
+        // reading. Not evidence the grant is a no-op in general — see this test's own doc comment
+        // above, and `main.swift`'s own comment, for the corrected account and what it does and does
+        // not establish.
         XCTAssertEqual(withGrantStatus, withoutGrantStatus,
             "if these ever diverge, this probe shape IS discriminating on the grant after all and "
                 + "the doc comment above needs updating — with=\(withGrantOutput) without=\(withoutGrantOutput)")

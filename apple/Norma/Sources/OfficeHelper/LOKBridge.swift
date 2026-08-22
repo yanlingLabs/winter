@@ -716,18 +716,47 @@ final class LOKBridge: OfficeDocumentBridge {
     ///
     /// Inverted instead of patched: this is now a NEGATIVE allowlist — extensions where genuine CFB
     /// content is EXPECTED and must reach `documentLoad`, not refused — so every extension not
-    /// named here, including every future one, defaults to PROTECTED. `doc`/`ppt`/`xls`/`xlsb` are
-    /// the pre-2007 binary formats that are natively OLE2/CFB containers by definition (`xlsb`
-    /// specifically is T9's own already-disclosed concern #6 — see `PanelEditorTab.swift`'s header
-    /// for why it was left out of Stage B's scope). **None of the four is reachable through this
-    /// helper today** — `officeFileExtensions` (`PanelEditorTab.swift`) contains none of them, and a
-    /// repo-wide grep turns up zero fixtures or tests for any of the four anywhere under `Sources/`
-    /// or `Tests/` — so today this allowlist is inert and the gate below is, in effect,
-    /// unconditional. It names its own escape hatch in advance anyway, for the day one of these four
-    /// genuinely ships (at which point a real `.doc` file IS a real CFB file and must open, not be
-    /// refused) — the alternative, an unconditional gate with no allowlist at all, would need
-    /// editing again at that point instead of already being correct.
-    private static let cfbNativeLegacyExtensions: Set<String> = ["doc", "ppt", "xls", "xlsb"]
+    /// named here, including every future one, defaults to PROTECTED. `doc`/`ppt`/`xls` are the
+    /// pre-2007 binary formats that are natively OLE2/CFB containers by definition.
+    /// `officeFileExtensions` (`PanelEditorTab.swift`) still contains none of them — this app's own
+    /// document-tab ROUTING never sends this helper a `.doc`/`.ppt`/`.xls` path in production today.
+    ///
+    /// Fix-round-3 (convergence re-review) F2 — **the sentence that WAS here next, "a repo-wide grep
+    /// turns up zero fixtures or tests for any of the four … so today this allowlist is inert," was
+    /// FALSE, not merely unverified.** `git ls-files` returns three committed fixtures —
+    /// `Tests/NormaAppTests/Fixtures/office/legacy-doc.doc`, `legacy-ppt.ppt`, `legacy-xls.xls`, each
+    /// beginning with the real CFB magic bytes (`d0cf11e0a1b11ae1`, verified via `xxd`) — and
+    /// `OfficeHelperLiveTests.testKnownLimitationLegacyBinaryImportDoesNotOpenInThisVendorBuild` opens
+    /// all three through THIS exact helper. Application routing being closed is a fact about
+    /// `PanelEditorTab.swift`, not about this test file, which calls `spawnLiveHelper()` directly and
+    /// bypasses that routing entirely — the allowlist is LOAD-BEARING TODAY, precisely, not inert:
+    ///   - Drop `xls` → CFB bytes under `.xls` would hit THIS gate's own refusal instead of reaching
+    ///     `documentLoad` → the test's pinned failure reason ("loadComponentFromURL returned an empty
+    ///     reference") would no longer match → RED.
+    ///   - Drop `doc`/`ppt` → a clean gate refusal means the helper SURVIVES the open — but that
+    ///     test's own "helper-dies case" asserts the process DIES for exactly these two fixtures
+    ///     (`XCTAssertTrue(died, …)`) → surviving instead of dying → RED.
+    ///
+    /// `xlsb` was removed from this allowlist here (it was present through fix round 2): F5, same
+    /// re-review. `.xlsb` (Excel Binary Workbook) is a POST-2007 OPC/ZIP package — BIFF12 binary
+    /// records inside the same ZIP container shape as `.xlsx`/`.xlsm`, never an OLE2/CFB file, so it
+    /// never belonged in a "genuine CFB is expected here" allowlist. A REAL `.xlsb` file is ZIP and
+    /// never trips `pathBeginsWithCFBMagic` regardless of this list, so removing it changes nothing
+    /// for genuine files — but leaving it in this allowlist would have silently DISABLED the CFB
+    /// guard for `.xlsb` the day T9's own concern #6 ships real support for it: a malicious or
+    /// mislabeled CFB payload under a `.xlsb` extension would have reached `documentLoad` unguarded,
+    /// the exact helper-killing path this whole gate exists to close. `PanelEditorTab.swift`'s own
+    /// header still has the fuller "why xlsb was left out of Stage B's scope" context (LOK's own
+    /// `saveAs` could not source genuine `xlsb` bytes within that task's scope — a different, orthogonal
+    /// reason from this one, which is purely about container format).
+    ///
+    /// **None of these three is reachable through the app's own document-tab routing today** — that
+    /// half of the original claim was correct and is unchanged. It names its own escape hatch in
+    /// advance anyway, for the day the app widens `officeFileExtensions` to include one of them (at
+    /// which point a real `.doc` file IS a real CFB file and must open, not be refused) — the
+    /// alternative, an unconditional gate with no allowlist at all, would need editing again at that
+    /// point instead of already being correct.
+    private static let cfbNativeLegacyExtensions: Set<String> = ["doc", "ppt", "xls"]
 
     /// **The needle `OfficeRuntime.knownLOKErrorShapes` (app target) matches on.** Hand-mirrored,
     /// never imported — the SAME cross-module boundary `OfficeSaveFormat`'s own header already
@@ -775,11 +804,16 @@ final class LOKBridge: OfficeDocumentBridge {
         // `officeFileExtensions` tomorrow needs no matching edit here to stay safe, unlike the
         // THIRD one (`xlsm`/`odg`, T9) did.
         // `.lowercased()` matters more now than it did for the old positive check: this is a
-        // DENY-BY-DEFAULT gate, so a case mismatch here fails OPEN, not closed — an uppercase
-        // `.DOC`/`.PPT`/`.XLS`/`.XLSB` that missed `cfbNativeLegacyExtensions`'s membership test
-        // (all lowercase literals) would be wrongly REFUSED, not wrongly admitted; still matches
-        // `OfficeSaveFormat.init?(pathExtension:)`'s own internal lowercasing (its switch is on
-        // `pathExtension.lowercased()`) for the unrelated reason that call still sits below.
+        // DENY-BY-DEFAULT gate, so a case mismatch here fails CLOSED in the over-cautious direction
+        // — an uppercase `.DOC`/`.PPT`/`.XLS` that missed `cfbNativeLegacyExtensions`'s membership
+        // test (all lowercase literals) would be wrongly REFUSED (a legitimate legacy file blocked),
+        // not wrongly admitted (fix-round-3, F6: the previous wording here said "fails OPEN, not
+        // closed" immediately before describing a wrongly-REFUSED outcome — refusing IS failing
+        // closed; the two halves of that sentence contradicted each other). Safer than the reverse
+        // mistake would be, but still a real, avoidable false refusal — which is what `.lowercased()`
+        // avoids. Still matches `OfficeSaveFormat.init?(pathExtension:)`'s own internal lowercasing
+        // (its switch is on `pathExtension.lowercased()`) for the unrelated reason that call still
+        // sits below.
         let ext = (path as NSString).pathExtension.lowercased()
         if !Self.cfbNativeLegacyExtensions.contains(ext), pathBeginsWithCFBMagic(path) {
             throw LoadError.documentLoadFailed(Self.cfbUnderModernExtensionReason)
