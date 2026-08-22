@@ -10,6 +10,14 @@
 #ifndef INCLUDED_LIBREOFFICEKIT_LIBREOFFICEKIT_TYPES_H
 #define INCLUDED_LIBREOFFICEKIT_LIBREOFFICEKIT_TYPES_H
 
+// office-agent-tools T3 re-review (C1-split follow-up) — RESTORED, same position the engine's own
+// copy has it (immediately after the include guard, before `extern "C"`). Missing in this vendored
+// copy even though `LibreOfficeKitFileSaveDialogCallback` (below) uses `size_t` — the build was
+// passing only because some OTHER translation unit already pulled `stddef.h` in first, the exact
+// fragility this whole C1 investigation exists to remove: a header must declare what it actually
+// needs, not rely on include order it does not control.
+#include <stddef.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -35,7 +43,7 @@ typedef bool (*LibreOfficeKitAnyInputCallback)(void* pData, int nMostUrgentPrior
 /// against a real running kit, not assumed from this header's own prior omission).
 /// @see lok::Office::registerFileSaveDialogCallback()
 typedef void (*LibreOfficeKitFileSaveDialogCallback)(const char* pSuggestedUri, char* pResultUri,
-                                                      size_t nResultUri);
+                                                     size_t nResultUri);
 
 #ifdef __cplusplus
 }
