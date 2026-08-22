@@ -1738,21 +1738,49 @@ final class OfficeRuntime: ObservableObject {
     ///
     /// **The fix: stop trusting `dirty` as a proxy for "the helper is done" and ask the helper
     /// directly, via a real awaited round trip, whether it still is one.** Every `Driver` call is
-    /// already an `async` round trip to the shared helper, and — the fact that makes ANY of them work
-    /// as this proof — `LOKBridge`'s own dedicated worker thread (`thread.sync`, the same mechanism
-    /// `open`/`close`/`save`/`saveAsSidecar`/`clipboardCopy`/every other LOK entry point already uses)
-    /// serializes EVERY LOK call for the WHOLE helper process onto that one thread, not merely per
-    /// docId. A `clipboardCopy` issued for this `docId` right after this save's own `.uno:Save`
-    /// completed cannot be serviced until whatever LOK-internal work the save's own completion left
-    /// queued on that same thread has run — so waiting for this call's reply is waiting for that work,
-    /// genuinely, not by proxy. `clipboardCopy` specifically: read-only (never mutates the document —
-    /// no undo-history/selection risk the way `undo`/`redo`/`clipboardCut` would carry), never throws
-    /// to the caller (`Driver.clipboardCopy`'s own doc: answers `nil` on any failure, `""` is a legal
-    /// "no selection" reply), and calling `driver.clipboardCopy` directly — never `postClipboardCopy`
-    /// — means this reads LOK's selection and discards it without writing anything to the system
-    /// pasteboard (`postClipboardCopy`'s own header: the pasteboard write happens in ITS wrapper, not
-    /// in the driver call itself) and without joining `inputChainTail`'s user-input ordering chain,
-    /// which has nothing to do with this function's own question.
+    /// already an `async` round trip to the shared helper, routed through `OfficeHelperRequestQueue`'s
+    /// FIFO and then through `LOKBridge`'s own dedicated worker thread (`thread.sync`) into a real UNO
+    /// API entry (a SolarMutex handshake) — so waiting for `clipboardCopy`'s reply genuinely proves two
+    /// things happened first: this request cleared the FIFO ahead of it, and the helper's dedicated
+    /// thread was free enough to take a new LOK call and hand back an answer.
+    ///
+    /// **What this does NOT prove, stated plainly rather than overclaimed (fix-round review, second
+    /// pass).** It is NOT established that this round trip serializes strictly BEHIND whatever
+    /// LOK-internal work the save's own `.uno:Save` dispatch left in flight. `.uno:Save` is itself
+    /// posted fire-and-forget (`postUnoCommand`'s own `bNotifyWhenFinished: false`,
+    /// `LOKBridge.swift`'s `saveAsOnDedicatedThread`), and the FIRST version of this function — which
+    /// made NO LOK call of any kind, only watched `$state` — still observed the real
+    /// `.uno:ModifiedStatus=false` callback arrive on its own schedule, which demonstrates LOK-side
+    /// completion work progresses independently of whether the app issues a further `thread.sync` call
+    /// at all. So the honest claim is: this is a real, empirically effective barrier — 25 consecutive
+    /// real closes against the real helper stayed alive with it, versus dying in 5 of 5 attempts
+    /// without it (`task-2-report.md`'s own fix report has the full count) — not a logically complete
+    /// proof that it closes the exact race window LOK's own internal `exit()` draws from. It may be
+    /// substantially narrowing that window (the FIFO ordering plus the SolarMutex handshake) rather
+    /// than eliminating it outright; completeness is unproven, effectiveness is measured.
+    ///
+    /// `clipboardCopy` specifically, for what it costs and what it's safe against: read-only (never
+    /// mutates the document — no undo-history/selection risk the way `undo`/`redo`/`clipboardCut`
+    /// would carry), never throws to the caller (`Driver.clipboardCopy`'s own doc: answers `nil` on
+    /// any failure, `""` is a legal "no selection" reply), and calling `driver.clipboardCopy` directly
+    /// — never `postClipboardCopy` — means this reads LOK's selection and discards it without writing
+    /// anything to the system pasteboard (`postClipboardCopy`'s own header: the pasteboard write
+    /// happens in ITS wrapper, not in the driver call itself) and without joining `inputChainTail`'s
+    /// user-input ordering chain, which has nothing to do with this function's own question. **Cost is
+    /// NOT O(1)** — `clipboardCopy` serializes the CURRENT selection on the shared LOK thread and ships
+    /// it back only to be discarded here, so a large current selection turns this into a real, if
+    /// bounded, stall rather than a true ping; a dedicated no-op/health-check verb would be the correct
+    /// long-term fix and is filed as a follow-up (`task-2-report.md`'s own fix-round record), not
+    /// implemented here since it would change what the 25-close evidence above was measured against.
+    ///
+    /// **A silent-degradation edge, logged not fixed differently:** if the shared supervisor's client
+    /// is `nil` at the moment this round trip runs (`ShellSessionHost.officeDriver(for:)`'s own
+    /// `clipboardCopy` closure), the FIFO pass still happens but the SolarMutex half never does — this
+    /// answers `nil` exactly like a real empty-selection reply, so `drained == true` in that case does
+    /// NOT mean the full barrier ran, only that the driver was asked and answered. That site now logs
+    /// this specific case (`NSLog`, `[ShellSessionHost]`) so it is observable rather than silently
+    /// indistinguishable from an ordinary successful probe — harmless in that state (no client also
+    /// means no helper for a close to endanger), but worth knowing about if it starts happening.
     ///
     /// Returns immediately, `true`, if `path` has no open document at all — nothing left to protect,
     /// and no `docId` left to round-trip against. This also folds in the "document disappeared mid-

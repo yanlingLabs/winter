@@ -2381,9 +2381,10 @@ final class OfficeRuntimeLiveTests: XCTestCase {
 
             // THE FIX under test — this test's own header has the RED-measurement instruction.
             let drained = await runtime.drainUntilClean(docPath)
-            XCTAssertTrue(drained, "lap \(lap): drain timed out rather than observing LOK's own "
-                          + "clear — not itself a failure (the write already landed regardless) but "
-                          + "worth knowing if a 15s stall starts happening for real")
+            XCTAssertTrue(drained, "lap \(lap): the drain's own round trip (driver.clipboardCopy) "
+                          + "timed out rather than completing — not itself a failure (the write "
+                          + "already landed regardless) but worth knowing if a 15s stall starts "
+                          + "happening for real")
 
             runtime.close(docPath)
 

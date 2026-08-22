@@ -1033,10 +1033,23 @@ final class ShellSessionHost: ObservableObject {
             // has. `nil` on failure (never `""`, which is LOK's own legal "nothing selected"
             // answer) — the same discrimination `close`/`unsubscribeTiles` already draw between
             // "nothing to report" and "a real, empty-but-valid result."
+            //
+            // dirty-close-helper-kill fix-round review, second pass — **`OfficeRuntime.drainUntilClean`
+            // is now also a caller of this closure**, using its answer only as "did a round trip
+            // happen," never the text itself. The `guard let client` miss below answers `nil` exactly
+            // like a real empty-selection reply, with NO round trip to the helper at all (the FIFO
+            // pass through `queue.run` still happens; the SolarMutex half never does) — logged here,
+            // where the degradation actually occurs, so a caller reporting "drained" in this state is
+            // observable rather than silently indistinguishable from a real probe. Harmless today (no
+            // client also means no helper for a close to endanger) but worth knowing about.
             clipboardCopy: { [weak supervisor] docId, part in
                 do {
                     return try await queue.run {
-                        guard let client = supervisor?.client else { return nil }
+                        guard let client = supervisor?.client else {
+                            NSLog("[ShellSessionHost] office clipboardCopy(\(docId)): no live client — "
+                                  + "answering nil with no round trip reaching the helper")
+                            return nil
+                        }
                         return try await client.clipboardCopy(docId: docId, part: part)
                     }
                 } catch {
