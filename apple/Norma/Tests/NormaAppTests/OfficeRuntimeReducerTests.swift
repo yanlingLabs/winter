@@ -2472,7 +2472,7 @@ final class OfficeRuntimeWatcherTests: XCTestCase {
     /// the user's banner — exactly the class T9's F1 fix existed to eliminate.
     ///
     /// The raw string is the one `OfficeHelperLiveTests.testXlsxDocxPptxSaveRoundTripThroughTheReal
-    /// HelperAfterTheR3VendorRecut` pins, reproduced here verbatim rather than reduced to the needle
+    /// HelperAfterTheR4VendorRecut` pins, reproduced here verbatim rather than reduced to the needle
     /// — a needle asserted against itself would pass no matter how the real text drifts.
     func testSaveAndAwaitOutcomeMapsTheRealLOKStoreWriteFailureToHouseVoiceRatherThanLeakingIt() async throws {
         let rawLOKText = "SfxBaseModel::impl_store <file:///tmp/x.docx> failed: "

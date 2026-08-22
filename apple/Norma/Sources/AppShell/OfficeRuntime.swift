@@ -1080,19 +1080,23 @@ enum OfficeRuntimeReducer {
             //   * `.recoveryRestored` — forces `true` and is NOT mask-gated. Safe for a different
             //     reason, which is worth stating rather than leaving to be re-derived: a read-only
             //     path can never reach it at all, because no recovery candidate can ever exist for
-            //     one. **Two different mechanisms deliver that, and the distinction is new** (review
-            //     I2 put `docx` in the read-only set):
+            //     one. **ONE mechanism delivers that for both remaining read-only extensions, and
+            //     the second, weaker leg this comment used to carry is GONE** (review I2 had put
+            //     `docx` in the read-only set; the r4 vendor re-cut took it back out — see
+            //     `PanelEditorTab.swift`'s `officeReadWriteExtensions`):
             //       - `xlsm`/`odg` — `OfficeSaveFormat` has no case, so `saveAsSidecar` throws
-            //         `unsupportedFormat` before any sidecar or manifest is ever written.
-            //       - `docx` — that guard does NOT apply (it has a case, and an ODF autosave
-            //         fallback that would happily write). What holds instead is one step earlier:
-            //         this file's own input-verb gates mean no keystroke ever reaches LOK for a
-            //         docx, so LOK never fires `modified=true`, so the helper's autosave scheduler
-            //         never arms for it (`OfficeHelperServer.routeDocumentEvent` — `markDirty` runs
-            //         only on that firing). No timer, no sidecar, no manifest, no candidate.
-            //     So this arm is reachability-guarded, not mask-guarded — and the reachability
-            //     argument now has a docx-shaped leg that a future change could break without
-            //     touching `OfficeSaveFormat` at all. Give it the mask if that ever happens.
+            //         `unsupportedFormat` before any sidecar or manifest is ever written. No
+            //         sidecar, no manifest, no candidate.
+            //     That is now the whole argument, and it is the strong one: it is enforced by a
+            //     `guard` in the helper, not by a chain of app-side input gates. The docx leg that
+            //     used to sit beside it rested on "no keystroke ever reaches LOK for a docx, so the
+            //     autosave scheduler never arms" — a reachability argument a future change could
+            //     have broken without touching `OfficeSaveFormat` at all. It no longer applies
+            //     (docx is read-write again, and a docx recovery candidate is now a perfectly
+            //     ordinary thing to have), and nothing else in this reducer depends on it.
+            //     Should a format ever be read-only for a reason OTHER than a missing
+            //     `OfficeSaveFormat` case, give this arm the mask rather than re-deriving a
+            //     reachability story for it.
             // `.saveSucceeded` also touches `dirty`, but only to CLEAR it, and only for the two
             // app-held flags — clearing needs no mask.
             //
@@ -3240,7 +3244,7 @@ final class OfficeRuntime: ObservableObject {
     /// which: `OfficeHelperLiveTests.testRealLegacyBinaryFixturesOpenAsTextAfterR3RecutXlsStillFails
     /// Cleanly`'s legacy-format matrix for the OPEN-side shapes (the `xls` leg specifically; the
     /// `doc`/`ppt` legs stopped erroring at Task 11, see that test's own header), and
-    /// `...testXlsxDocxPptxSaveRoundTripThroughTheRealHelperAfterTheR3VendorRecut` for the one
+    /// `...testXlsxDocxPptxSaveRoundTripThroughTheRealHelperAfterTheR4VendorRecut` for the one
     /// SAVE-side shape (whole-branch review I1). The Stage A concern
     /// this closes is specifically "LOK's raw getError strings surface verbatim in openFailures
     /// banners," not every error string this file can produce (see `describe(_:)`'s own header for
@@ -3262,19 +3266,25 @@ final class OfficeRuntime: ObservableObject {
         // **Whole-branch review I1 — the one SAVE-side shape in this table, and the gap that let raw
         // LibreOffice internals reach a user's banner.** Task 11 pinned the observed text through the
         // real helper (`OfficeHelperLiveTests.testXlsxDocxPptxSaveRoundTripThroughTheRealHelperAfter
-        // TheR3VendorRecut`): `SfxBaseModel::impl_store ... failed: 0xc10(Error Area:Io Class:Write
+        // TheR4VendorRecut`): `SfxBaseModel::impl_store ... failed: 0xc10(Error Area:Io Class:Write
         // Code:16)`. No needle matched it, and `houseErrorSentenceForSaveFailure` returns an
         // unrecognized reason VERBATIM by design — so the banner read `Couldn't save Report.docx:
         // SfxBaseModel::impl_store ... 0xc10(...)`. That is precisely the class T9's own F1 fix
         // existed to eliminate; the mechanism shipped, the needle did not, because T11 discovered
         // the shape after this table was written.
         //
-        // **The sentence is deliberately format-neutral.** `0xc10` is `ERRCODE_IO_CANTWRITE` /
-        // `SVSTREAM_WRITE_ERROR` — LO's GENERIC store-write failure, not a docx-specific code — and
-        // after review I2 no shipped door can reach a docx save at all (`.docx` is held read-only),
-        // so a sentence naming Word would be both unprovable and unreachable. What IS true of every
-        // reason carrying this needle: the failure happened inside the helper's own `saveAs`, before
-        // the app's `placeAtomically` ever ran, so the real file was never touched.
+        // **The sentence is deliberately format-neutral, and that choice aged well.** `0xc10` is
+        // `ERRCODE_IO_CANTWRITE` / `SVSTREAM_WRITE_ERROR`, which is LO's GENERIC store-write
+        // failure and not a docx-specific code — indeed not really a write failure at all:
+        // `SfxBaseModel::impl_store` synthesises it whenever storing returns false with no error
+        // set (`sfxbasemodel.cxx:3266` at the pinned commit), which is how a MISSING EXPORT SERVICE
+        // presented itself for docx on the r3 vendor tree. A sentence naming Word would therefore
+        // have been wrong on the mechanism as well as unreachable at the time. The r4 re-cut both
+        // fixed that docx cause and made this needle genuinely REACHABLE from a shipped door for
+        // the first time (docx is read-write again), which is one more reason to keep the wording
+        // about the outcome rather than the format. What IS true of every reason carrying this
+        // needle: the failure happened inside the helper's own `saveAs`, before the app's
+        // `placeAtomically` ever ran, so the real file was never touched.
         //
         // Matching only `SfxBaseModel::impl_store` — not the `0xc10` code — on purpose: the code is
         // the part most likely to vary between LO's own error areas for the same user-visible

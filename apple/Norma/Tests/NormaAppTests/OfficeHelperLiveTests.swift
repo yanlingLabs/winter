@@ -373,12 +373,16 @@ final class OfficeHelperLiveTests: XCTestCase {
     /// FormatsThisBuildCannotWrite` pins that list against ITSELF, not against the original —
     /// exactly the gap this test closes) is now stale and the read-only gates it drives need lifting.
     ///
-    /// **Scope, after whole-branch review I2:** this test covers the `no OfficeSaveFormat case` route
-    /// into read-only, which is `xlsm`/`odg` only. `docx` is read-only by a SECOND, independent route
-    /// — it has a case, and this build's Writer OOXML export fails anyway — so it is deliberately not
-    /// in the loop below (a `saveAs` for it fails with `impl_store`, not `unsupportedFormat`, and
-    /// asserting the wrong wording here would pin the wrong mechanism). Its tripwire is the docx leg
-    /// of `testXlsxDocxPptxSaveRoundTripThroughTheRealHelperAfterTheR3VendorRecut`.
+    /// **Scope — this test covers the `no OfficeSaveFormat case` route into read-only, which is
+    /// `xlsm`/`odg`, and as of the r4 vendor re-cut that is the ONLY route there is.** Whole-branch
+    /// review I2 had briefly opened a second one (`docx`: a case existed, but the r3 vendor tree's
+    /// DOCX export service was missing, so a `saveAs` failed with `impl_store`, not
+    /// `unsupportedFormat`) and this test deliberately stayed out of it rather than pin the wrong
+    /// wording. r4 closed that route by fixing the export; `docx` is read-write again and its
+    /// round-trip is asserted positively by
+    /// `testXlsxDocxPptxSaveRoundTripThroughTheRealHelperAfterTheR4VendorRecut`. If a format is ever
+    /// read-only for a reason other than a missing case again, keep it out of this loop for the same
+    /// reason and give it its own live pin.
     func testWidenedFormatsXlsmAndOdgFailSaveWithUnsupportedFormatTheDriftTripwireForOfficeReadWriteExtensions() async throws {
         try skipUnlessVendorPresent()
         let helper = try await spawnLiveHelper()
@@ -407,8 +411,8 @@ final class OfficeHelperLiveTests: XCTestCase {
     }
 
     /// **The three formats the widening decision REJECTED — a known, disclosed limitation, pinned
-    /// the same way `testXlsxDocxPptxSaveRoundTripThroughTheRealHelperAfterTheR3VendorRecut` pins
-    /// the (now largely fixed) export-side gap and
+    /// the same way `testXlsxDocxPptxSaveRoundTripThroughTheRealHelperAfterTheR4VendorRecut` pins
+    /// the (now fixed, all three OOXML formats) export-side gap and
     /// `testRealLegacyBinaryFixturesOpenAsTextAfterR3RecutXlsStillFailsCleanly` pins this import-side
     /// one, so a future vendor rebuild that fixes this further is caught by a RED test here, not
     /// silently missed.** All three fixtures are committed, genuinely-produced
@@ -468,6 +472,19 @@ final class OfficeHelperLiveTests: XCTestCase {
     /// `OfficeDocumentMetadata` returned, matching what was measured. See this test's own header
     /// above the `for` loop for what this does and does not prove (two real legacy binaries opening
     /// via LOK's lenient TEXT fallback, which is not a verdict on legacy import working).
+    ///
+    /// **r4 addendum — re-measured, deliberately, and the pins below are UNCHANGED.** The r4 re-cut
+    /// adds `libmswordlo.dylib` for DOCX export, and that library also contains Writer's WW8
+    /// (`.doc`) IMPORT reader (`sw/source/filter/ww8/ww8par*`, per `sw/Library_msword.mk`) plus the
+    /// RTF parser — so "does legacy `.doc` now import for real?" was a live question this test could
+    /// have answered by going red. It was run against the r4 tree before that change shipped and
+    /// passed unchanged: `.doc`/`.ppt` still arrive as the same many-part TEXT fallback (same
+    /// measured part counts), `.xls` still fails cleanly. The consistent reading is that what
+    /// actually gates real legacy import here is TYPE DETECTION, not the reader: the writer/calc/
+    /// draw/math `FormatDetector` services (`libswdlo`/`libscdlo`/`libsddlo`/`libsmdlo`) are also
+    /// absent from the vendored product-set, so detection never selects a binary filter to hand the
+    /// reader in the first place. That is a NAMED, UNDECIDED follow-up — not a widening this change
+    /// makes, and not a re-decision of Task 9's read-only-viewer posture.
     func testRealLegacyBinaryFixturesOpenAsTextAfterR3RecutXlsStillFailsCleanly() async throws {
         try skipUnlessVendorPresent()
 
@@ -2259,7 +2276,7 @@ final class OfficeHelperLiveTests: XCTestCase {
         return rep.representation(using: .png, properties: [:])
     }
 
-    // MARK: - Office Stage B Task 11: the r3 vendor re-cut — OOXML export, proven per format
+    // MARK: - Office Stage B Task 11 + the r4 re-cut: OOXML export, proven per format
 
     /// **Direct successor to the deleted `testKnownLimitationOOXMLExportIsNotAvailableInThis
     /// VendorBuildWhileODFExportWorks`** (Task 2/2b; see git history for its full text). That test
@@ -2285,29 +2302,32 @@ final class OfficeHelperLiveTests: XCTestCase {
     /// - **`.pptx` — regression check.** Already worked before this fix (Impress's OOXML export is a
     ///   different internal code path, `oox::ppt`, that never called into the missing dylib); still
     ///   does, same round-trip shape, so a future vendor change that breaks it will be caught here.
-    /// **Whole-branch review I2 — this test is now the tripwire for a PRODUCT decision, not only a
-    /// vendor fact.** Because docx save can never succeed in this build, the app holds `.docx`
-    /// read-only (`PanelEditorTab.swift`'s `officeReadWriteExtensions`, whose own header carries the
-    /// reasoning): no dirty tracking, ⌘S disabled, a "Read-only" chip. This test is the ONLY thing
-    /// that will notice the day that stops being necessary — its docx leg's own `XCTFail` message
-    /// lists everything to reverse.
+    /// - **`.docx` — FIXED by the r4 re-cut, and this leg is the inversion of the one that used to
+    ///   assert its failure.** Task 11 left docx failing with `SfxBaseModel::impl_store ... failed:
+    ///   0xc10(Error Area:Io Class:Write Code:16)` and honestly called it "a distinct, still-open
+    ///   Writer/OOXML-export defect." It was neither Writer's nor a defect: `0xc10`
+    ///   (`ERRCODE_IO_CANTWRITE`/`SVSTREAM_WRITE_ERROR`) is what `SfxBaseModel::impl_store`
+    ///   SYNTHESISES when storing returns false having set no error of its own
+    ///   (`sfx2/source/doc/sfxbasemodel.cxx:3266` at this build's pinned commit — "Storing has
+    ///   failed, no error is set!"), so it was never evidence of a write at all. The real cause was
+    ///   the SAME CLASS as Task 11's own: `writer.xcd` routes `.docx` export to
+    ///   `com.sun.star.comp.Writer.WriterFilter`, which for an export descriptor does nothing but
+    ///   `createInstance("com.sun.star.comp.Writer.DocxExport")` — and `services.rdb` places that
+    ///   implementation in `libmswordlo.dylib`, which was **absent from the vendored product-set**
+    ///   (the UNO service manager `dlopen`s it BY NAME, so neither the closure recipe's
+    ///   `DYLD_PRINT_LIBRARIES` trace nor its `otool -L` safety net could ever see it, exactly like
+    ///   `libsal_textenclo.dylib` before it). Adding that one library — nothing else — makes this
+    ///   leg pass. Proven first on the standalone probe both ways round (`.docx`→`.docx` AND
+    ///   `.odt`→`.docx`, so it is the export filter and not the fixture), then here through the real
+    ///   SEATBELTED helper: no `office-helper.sb` change was needed, which is what rules out the
+    ///   "denied write" reading the error text invites.
     ///
-    /// - **`.docx` — STILL fails, honestly re-investigated for this task.** The original
-    ///   investigation never independently confirmed docx's mechanism (one capture hit the
-    ///   already-known, unrelated `SwDLL` exit-time teardown abort instead; another showed a raw
-    ///   `LOK_CALLBACK_ERROR`). Re-probed fresh, with the dylib present, on two independent clean
-    ///   profiles (see `task-11-report.md`): the missing-dylib abort is GONE — no crash of any kind
-    ///   — but `saveAs` now fails cleanly with `SfxBaseModel::impl_store ... failed:
-    ///   0xc10(Error Area:Io Class:Write Code:16)`, i.e. `ERRCODE_IO_CANTWRITE` /
-    ///   `SVSTREAM_WRITE_ERROR` (`include/comphelper/errcode.hxx:300` in this build's own pinned
-    ///   commit) — a distinct, still-open Writer/OOXML-export defect, unrelated to the charset-table
-    ///   gap this re-cut fixes. Production code already handles this correctly end to end (LOK's
-    ///   `saveAs` returning false → `LOKBridge.SaveError.saveAsFailed` →
-    ///   `OfficeHelperClientError.saveFailed`), so this is pinned as a clean, catchable, non-fatal
-    ///   failure — a real improvement over the crash the old test (and, less reliably, this same
-    ///   fixture before Task 11) used to hit, and this task's own honest answer to "does docx export
-    ///   work with the dylib present?": no, but it now fails safely.
-    func testXlsxDocxPptxSaveRoundTripThroughTheRealHelperAfterTheR3VendorRecut() async throws {
+    /// **This test is also the tripwire for a PRODUCT decision, not only a vendor fact.** Whole-branch
+    /// review I2 held `.docx` read-only in the app for exactly as long as this leg failed (no dirty
+    /// tracking, ⌘S disabled, a "Read-only" chip). That demotion is reversed in the same change that
+    /// inverts this leg — `PanelEditorTab.swift`'s `officeReadWriteExtensions` has the account. If
+    /// this leg ever goes red again, the demotion is the FIRST thing to re-apply, before shipping.
+    func testXlsxDocxPptxSaveRoundTripThroughTheRealHelperAfterTheR4VendorRecut() async throws {
         try skipUnlessVendorPresent()
 
         // xlsx: the headline fix. Save round-trip through the real wire dispatch, content preserved,
@@ -2363,7 +2383,8 @@ final class OfficeHelperLiveTests: XCTestCase {
             try await reopenHelper.client.close(docId: reopenDocId)
         }
 
-        // docx: the honest current state — still fails, but cleanly (no crash) since the r3 fix.
+        // docx: the r4 headline fix — the leg that used to assert its own failure. Same shape as
+        // the xlsx leg above, deliberately: real file, dumped bytes, real reopen.
         do {
             let helper = try await spawnLiveHelper()
             let scratchDir = makeScratchDirectory()
@@ -2371,31 +2392,30 @@ final class OfficeHelperLiveTests: XCTestCase {
             try Data(contentsOf: Self.fixturesRoot.appendingPathComponent("gate.docx")).write(to: URL(fileURLWithPath: docPath))
             let docId = "docx-roundtrip"
             _ = try await helper.client.open(docId: docId, path: docPath)
-            do {
-                _ = try await helper.client.save(docId: docId, part: 0)
-                XCTFail("docx: expected OfficeHelperClientError.saveFailed — if this now succeeds, the "
-                        + "Writer/OOXML-export defect (SVSTREAM_WRITE_ERROR / ERRCODE_IO_CANTWRITE, "
-                        + "documented in this test's own header and the r3 VERSION-PIN addendum) has "
-                        + "been independently fixed. THREE things to do, in one change: (1) update "
-                        + "this test to assert success; (2) REVERSE the read-only demotion — move "
-                        + "\"docx\" back into officeReadWriteExtensions and out of the "
-                        + "officeFileExtensions union (PanelEditorTab.swift; both, or .docx stops "
-                        + "being an office document at all and routes to a Monaco code tab), and "
-                        + "re-point the doc comments there and on OfficeSaveFormat.autosaveFormat; "
-                        + "(3) narrow T7's ODF-autosave-fallback scope for docx to native.")
-            } catch OfficeHelperClientError.saveFailed(let reason) {
-                // Expected — see this test's own header for the exact mechanism. Reason-string
-                // check (matching this suite's own house convention, e.g. legacy-xls.xls's pin
-                // below) so a FUTURE docx failure for a genuinely different cause is caught as a
-                // pin mismatch, not silently absorbed by a bare case match.
-                XCTAssertTrue(reason.contains("impl_store"), "docx: reason was \"\(reason)\" — if "
-                              + "this is a DIFFERENT failure than SfxBaseModel::impl_store's "
-                              + "SVSTREAM_WRITE_ERROR, the underlying cause may have changed; "
-                              + "re-verify before assuming the same mechanism")
-            }
-            XCTAssertTrue(helper.process.isRunning, "docx: the helper must survive a failed save — this "
-                          + "is the whole point of the r3 fix: the missing-dylib SIGABRT that used to "
-                          + "kill the process here is gone; this is now a clean, catchable failure")
+            let savedPath = try await helper.client.save(docId: docId, part: 0)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: savedPath), "docx: saveAs must produce a real file")
+            XCTAssertTrue(savedPath.hasSuffix(".docx"), "docx: saved under its own format's extension — "
+                          + "NOT an .odt fallback; T7's ODF autosave fallback was narrowed off docx in "
+                          + "the same change (OfficeSaveFormat.autosaveFormat)")
+            let savedSize = (try? FileManager.default.attributesOfItem(atPath: savedPath)[.size] as? Int) ?? nil
+            XCTAssertNotEqual(savedSize, 0, "docx: the saved file must have real content, not an empty stub")
+            XCTAssertTrue(helper.process.isRunning, "docx: the helper must survive its own save")
+
+            // Dumped bytes — the fixture's own seed text must survive the round trip, and it must
+            // arrive as a real WordprocessingML body, not merely as bytes somewhere in the archive.
+            // (`word/document.xml` existing AT ALL is itself the assertion that the DOCX export
+            // filter ran: the failure this fixes produced no output file whatsoever.)
+            let documentXML = try readOOXMLEntry(atPath: savedPath, entry: "word/document.xml")
+            XCTAssertTrue(documentXML.contains("NORMA GATE"), "docx: seed text must survive the save")
+            XCTAssertTrue(documentXML.contains("<w:body"), "docx: the saved part must be real "
+                          + "WordprocessingML, not an ODF/other payload under a .docx name")
+
+            // Reopen as a genuinely valid, re-loadable docx — not merely non-empty bytes.
+            let reopenHelper = try await spawnLiveHelper()
+            let reopenDocId = "docx-roundtrip-reopen"
+            let metadata = try await reopenHelper.client.open(docId: reopenDocId, path: savedPath)
+            XCTAssertEqual(metadata.type, .text, "docx: the saved file must reopen as a text document")
+            try await reopenHelper.client.close(docId: reopenDocId)
         }
     }
 

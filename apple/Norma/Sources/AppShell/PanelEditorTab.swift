@@ -96,30 +96,33 @@ func panelFilesDoorShown(sessionId: String?, rows: [SessionSummary]) -> Bool {
 /// Read this as the boundary `officeDocumentIsReadOnlyFormat` draws, not as a router — nothing
 /// routes tab KIND off this set; `officeFileExtensions` below (the wider set) still owns that.
 ///
-/// **Whole-branch review I2 — `docx` is deliberately NOT here, and that makes this set narrower
-/// than `OfficeSaveFormat` rather than an exact mirror of it.** `OfficeSaveFormat` still has a
-/// `.docx` case and still resolves the right filter; what fails is one layer down, inside this
-/// vendor build: Writer's OOXML export dies with `SfxBaseModel::impl_store ... 0xc10(Error Area:Io
-/// Class:Write Code:16)` (`ERRCODE_IO_CANTWRITE`/`SVSTREAM_WRITE_ERROR`) on every attempt — a
-/// still-open Writer/OOXML defect, distinct from and NOT fixed by Task 11's r3 re-cut, which only
-/// closed the missing-charset-table crash (`testXlsxDocxPptxSaveRoundTripThroughTheRealHelperAfter
-/// TheR3VendorRecut` pins the exact failure through the real helper). So with `docx` in this set a
-/// user could open a Word document, type freely, watch the dirty dot appear — and every ⌘S would
-/// fail, forever, discovered only AFTER investing the edits, with the work reachable afterwards
-/// only inside an ODF autosave sidecar. Holding it read-only until that defect is fixed is exactly
-/// the rule Task 9 already wrote for this situation and states two declarations down: **never let
-/// the buffer BECOME dirty in the first place rather than surface that failure reactively.** The
-/// branch was simply inconsistent with its own rule here.
+/// **`docx` is BACK, and this set is once again an exact mirror of `OfficeSaveFormat`'s six cases**
+/// — the reversal whole-branch review I2's own demotion asked for, taken on the evidence it named.
+/// I2 removed `docx` because `OfficeSaveFormat` having a case was necessary but not sufficient: on
+/// the r3 vendor tree, Writer's OOXML export died with `SfxBaseModel::impl_store ... 0xc10(Error
+/// Area:Io Class:Write Code:16)` on every attempt, so a user could open a Word document, type
+/// freely, watch the dirty dot appear — and every ⌘S would fail, forever, discovered only AFTER
+/// investing the edits. That was the right call for that vendor tree.
 ///
-/// `xlsx`, `pptx` and all three ODF formats are unaffected and stay fully read-write — xlsx save is
-/// real as of the r3 re-cut, pptx always worked, and ODF never went near the OOXML export path.
+/// **The r4 re-cut fixes the export at the root, so the reason is gone.** `services.rdb` has always
+/// routed `.docx` export to `com.sun.star.comp.Writer.DocxExport`, which lives in
+/// `libmswordlo.dylib` — a library the product-set's dyld-trace-derived closure never captured,
+/// because the UNO service manager `dlopen`s it BY NAME at export time and the traced fixture
+/// workload only ever imported and painted tiles. (`0xc10` was never a literal write failure:
+/// `SfxBaseModel::impl_store` synthesises `ERRCODE_IO_CANTWRITE` as its "storing failed and nobody
+/// set an error" fallback — `sfxbasemodel.cxx:3266` at the pinned commit — and the missing export
+/// service is exactly such a failure. The same gap is why `WriterFilter::filter`'s own
+/// `createInstance` throw never carried a more specific code.) With that one library present,
+/// `.docx` saves for real, its content survives, and the saved file reopens as a Writer document —
+/// proven through the REAL, seatbelted helper by `OfficeHelperLiveTests
+/// .testXlsxDocxPptxSaveRoundTripThroughTheRealHelperAfterTheR4VendorRecut`, which now asserts the
+/// round trip it used to assert the failure of.
 ///
-/// **To reverse this the day Writer's OOXML export is fixed:** move `docx` back into this set and
-/// out of the `union` below (both, or it silently stops being an office document at all and routes
-/// to a Monaco code tab), and re-point the doc comments that name the demotion — the docx leg of
-/// `testXlsxDocxPptxSaveRoundTripThroughTheRealHelperAfterTheR3VendorRecut` is the test that will
-/// go red on that day and its `XCTFail` message spells out the same list.
-let officeReadWriteExtensions: Set<String> = ["xlsx", "ods", "pptx", "odp", "odt"]
+/// The rule I2 wrote is not weakened by this — **never let the buffer BECOME dirty in the first
+/// place rather than surface that failure reactively** — it simply no longer has a format among the
+/// six to apply to. `xlsm`/`odg` stay read-only for the different, still-true reason
+/// `officeFileExtensions` below gives: `OfficeSaveFormat` has no case for either at all.
+let officeReadWriteExtensions: Set<String> = ["xlsx", "ods", "pptx", "odp", "odt", "docx"]
 
 /// The extensions that make a file an OFFICE document rather than something the code editor should
 /// try to render as text — spreadsheets (`xlsx`/`ods`), presentations (`pptx`/`odp`), documents
@@ -168,21 +171,23 @@ let officeReadWriteExtensions: Set<String> = ["xlsx", "ods", "pptx", "odp", "odt
 /// behind the original crash is understood, remains a named follow-up (`task-11-report.md`) — not
 /// something this comment or Task 11 decided.
 ///
-/// **Every extension named in the `union` here is also, unconditionally, a
+/// **Every extension named in this `union`'s EXTRAS list is also, unconditionally, a
 /// `officeDocumentIsReadOnlyFormat` path** (see that predicate's own header) — that is precisely
-/// what the union means: recognized as an office document, opened and rendered, never saved.
-/// `xlsm`/`odg` are here because `OfficeSaveFormat` has no case for either, so a `saveAs` would
-/// fail outright. `docx` is here for a different reason at a different layer — it HAS a case, and
-/// the case is correct; this vendor build's Writer OOXML export is what fails (whole-branch review
-/// I2, the full account at `officeReadWriteExtensions`' own header above). Both routes end at the
-/// same v1 decision, and it is the same sentence in both cases: **never let the buffer BECOME
-/// dirty in the first place rather than surface that failure reactively.**
+/// what the extras mean: recognized as an office document, opened and rendered, never saved.
+/// `xlsm`/`odg` are there because `OfficeSaveFormat` has no case for either, so a `saveAs` would
+/// fail outright: **never let the buffer BECOME dirty in the first place rather than surface that
+/// failure reactively.**
 ///
-/// `docx` must be named in BOTH this union and (on the day the Writer defect is fixed) the set
-/// above — it cannot simply be moved out of `officeReadWriteExtensions`, because this set is
-/// derived from that one: dropping it from both would stop `.docx` being an office document at all
-/// and route it to a Monaco code tab, where a Word document renders as binary mojibake.
-let officeFileExtensions: Set<String> = officeReadWriteExtensions.union(["xlsm", "odg", "docx"])
+/// **`docx` was a third extra here from whole-branch review I2 until the r4 vendor re-cut**, by a
+/// different route at a different layer — it HAS an `OfficeSaveFormat` case, and the case was
+/// always correct; the r3 vendor tree's missing DOCX-export service is what failed underneath it
+/// (`officeReadWriteExtensions`' own header above has the mechanism). With that fixed, `docx`
+/// arrives here through the union's BASE instead, which is the only correct place for it: this set
+/// is DERIVED from `officeReadWriteExtensions`, so a format must be named in exactly one of the two
+/// — the base if it is writable, the extras if it is not. Naming it in NEITHER would stop `.docx`
+/// being an office document at all and route it to a Monaco code tab, where a Word document renders
+/// as binary mojibake; naming it in BOTH would make it read-only again while looking writable.
+let officeFileExtensions: Set<String> = officeReadWriteExtensions.union(["xlsm", "odg"])
 
 /// Office Stage B Task 9 — **is `path`'s own extension one `officeFileExtensions` recognizes but
 /// `officeReadWriteExtensions` does not?** The v1 answer to the save story T2's own review left
@@ -197,11 +202,13 @@ let officeFileExtensions: Set<String> = officeReadWriteExtensions.union(["xlsm",
 /// canvas would visibly "accept" edits that vanish, silently, the instant the tab closes with no
 /// dirty dot ever having shown to prompt a save the format could not honor anyway).
 ///
-/// **Three extensions answer `true` today, by two different routes** (whole-branch review I2):
-/// `xlsm`/`odg`, which `OfficeSaveFormat` has no case for at all; and `docx`, which it does have a
-/// case for — there the failure is one layer lower, in this vendor build's Writer OOXML export. The
-/// predicate does not distinguish them, and does not need to: what every call site below acts on is
-/// "this document cannot be written," not why. Both routes are documented at the two sets above.
+/// **Two extensions answer `true` today, by ONE route**: `xlsm`/`odg`, which `OfficeSaveFormat` has
+/// no case for at all. `docx` answered `true` as well from whole-branch review I2 until the r4
+/// vendor re-cut restored Writer's OOXML export (the account is at `officeReadWriteExtensions`' own
+/// header above) — that second route is gone, and this predicate is once again exactly "recognized
+/// as an office document, but there is no `OfficeSaveFormat` case to write it with." The predicate
+/// never distinguished the routes and did not need to: what every call site below acts on is "this
+/// document cannot be written," not why.
 ///
 /// `path == nil` (a tab with nothing pointed at it — unreachable through any shipped door, mirrors
 /// `officeDocumentIsDirty`'s own `path` handling) answers `false`: nothing to be read-only ABOUT.
