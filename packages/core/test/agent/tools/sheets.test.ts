@@ -1,0 +1,290 @@
+import { describe, expect, test } from "bun:test";
+import { OFFICE_DEADLINES_MS } from "../../../src/panel/office-commands";
+import { ToolRegistry, type ToolContext } from "../../../src/agent/tools/registry";
+import { registerSheetsTool, officeTimeoutMessage, type SheetsToolDeps } from "../../../src/agent/tools/sheets";
+import type { PanelCommandOutcome } from "../../../src/panel/commands";
+import type { SessionDirs } from "../../../src/sessions/dirs";
+
+/**
+ * office-agent-tools T3 — the `sheets` daemon tool, through a FAKE registry recorder rather than a
+ * live daemon (same posture `browser.test.ts` takes, spec §9: "the daemon tool [is tested] through
+ * the fake transport, end-to-end only at the live gate" — the live gate here is the Swift-side live
+ * drills task-3-report.md documents against real fixtures).
+ */
+
+const SID = "s-sheets";
+const WORKDIR = "/repo";
+
+interface Recorded {
+  sessionId: string;
+  action: string;
+  args?: Record<string, unknown>;
+  deadlineMs: number;
+}
+
+interface Harness {
+  deps: SheetsToolDeps;
+  recorded: Recorded[];
+  registry: ToolRegistry;
+  outcome: (cmd: Recorded) => Promise<PanelCommandOutcome>;
+  run(args: unknown, ctx?: Partial<ToolContext>): Promise<{ output: string; isError: boolean }>;
+}
+
+function makeHarness(opts?: {
+  dirs?: SessionDirs;
+  harnesses?: Array<{ clientName: string; role?: string | null }>;
+}): Harness {
+  const recorded: Recorded[] = [];
+  const h: Harness = {
+    recorded,
+    outcome: async () => ({ kind: "result", ok: true, result: "did it" }),
+    registry: new ToolRegistry(),
+    deps: {
+      dispatch(cmd) {
+        const rec: Recorded = { sessionId: cmd.sessionId, action: cmd.action, args: cmd.args, deadlineMs: cmd.deadlineMs };
+        recorded.push(rec);
+        return { commandId: `pcmd_${recorded.length}`, settled: h.outcome(rec) };
+      },
+      harnesses: () => opts?.harnesses ?? [{ clientName: "orb", role: "harness" }],
+      dirsOf: () => opts?.dirs ?? [{ path: WORKDIR, locked: true }],
+    },
+    async run(args, ctx) {
+      return h.registry.execute("sheets", args, {
+        cwd: WORKDIR, roots: [WORKDIR], sessionId: SID, mode: "code",
+        ...ctx,
+      } as ToolContext);
+    },
+  };
+  registerSheetsTool(h.registry, h.deps);
+  return h;
+}
+
+// ================================================================================================
+// Registration — the brief's own explicit pin
+// ================================================================================================
+
+describe("registration", () => {
+  test("modes is exactly [\"code\", \"dispatch\"] — never chat", () => {
+    const h = makeHarness();
+    expect(h.registry.namesForMode("code").has("sheets")).toBe(true);
+    expect(h.registry.namesForMode("dispatch").has("sheets")).toBe(true);
+    expect(h.registry.namesForMode("chat").has("sheets")).toBe(false);
+  });
+});
+
+// ================================================================================================
+// info
+// ================================================================================================
+
+describe("info", () => {
+  test("dispatches office.sheets.info with just path, at its own deadline", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "info", path: `${WORKDIR}/budget.xlsx` });
+    expect(result.isError).toBe(false);
+    expect(h.recorded).toEqual([{
+      sessionId: SID, action: "office.sheets.info",
+      args: { path: `${WORKDIR}/budget.xlsx` },
+      deadlineMs: OFFICE_DEADLINES_MS["office.sheets.info"],
+    }]);
+  });
+
+  test("a missing path is malformed and refused by zod, before dispatch", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "info" });
+    expect(result.isError).toBe(true);
+    expect(h.recorded).toEqual([]);
+  });
+});
+
+// ================================================================================================
+// read
+// ================================================================================================
+
+describe("read", () => {
+  test("dispatches office.sheets.read with path/sheet/range/formulas, at its own deadline", async () => {
+    const h = makeHarness();
+    const result = await h.run({
+      verb: "read", path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1", range: "A1:C10", formulas: true,
+    });
+    expect(result.isError).toBe(false);
+    expect(h.recorded).toEqual([{
+      sessionId: SID, action: "office.sheets.read",
+      args: { path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1", range: "A1:C10", formulas: true },
+      deadlineMs: OFFICE_DEADLINES_MS["office.sheets.read"],
+    }]);
+  });
+
+  test("formulas defaults to false when absent — the one genuinely optional operand", async () => {
+    const h = makeHarness();
+    await h.run({ verb: "read", path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1", range: "A1" });
+    expect(h.recorded[0]?.args).toEqual({ path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1", range: "A1", formulas: false });
+  });
+
+  test("a missing sheet is malformed and refused, before dispatch", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "read", path: `${WORKDIR}/budget.xlsx`, range: "A1" });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("sheet");
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("a missing range is malformed and refused, before dispatch", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "read", path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1" });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("range");
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("a range that does not even LOOK like A1 notation is refused before dispatch — no round trip for an obviously bad string", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "read", path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1", range: "not a range" });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("not a range");
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("a single cell is a legal range shape", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "read", path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1", range: "B2" });
+    expect(result.isError).toBe(false);
+    expect(h.recorded).toHaveLength(1);
+  });
+});
+
+// ================================================================================================
+// The fence (spec §5) — and its precedence over reach
+// ================================================================================================
+
+describe("the fence", () => {
+  test("a path outside every working directory is refused, before dispatch", async () => {
+    const h = makeHarness({ dirs: [{ path: WORKDIR, locked: true }] });
+    const result = await h.run({ verb: "info", path: "/etc/passwd" });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("working directories");
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("no working directories at all refuses every path", async () => {
+    const h = makeHarness({ dirs: [] });
+    const result = await h.run({ verb: "info", path: `${WORKDIR}/budget.xlsx` });
+    expect(result.isError).toBe(true);
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("a relative path resolves against the primary working directory", async () => {
+    const h = makeHarness({ dirs: [{ path: WORKDIR, locked: true }] });
+    const result = await h.run({ verb: "info", path: "budget.xlsx" });
+    expect(result.isError).toBe(false);
+    expect(h.recorded[0]?.args?.path).toBe(`${WORKDIR}/budget.xlsx`);
+  });
+
+  test("a sibling directory that merely shares a string prefix is not inside the root", async () => {
+    const h = makeHarness({ dirs: [{ path: "/x/proj", locked: true }] });
+    const result = await h.run({ verb: "info", path: "/x/proj-evil/budget.xlsx" });
+    expect(result.isError).toBe(true);
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("a secondary (non-primary) working directory is in-fence too", async () => {
+    const h = makeHarness({ dirs: [{ path: WORKDIR, locked: true }, { path: "/granted", locked: false }] });
+    const result = await h.run({ verb: "info", path: "/granted/budget.xlsx" });
+    expect(result.isError).toBe(false);
+    expect(h.recorded[0]?.args?.path).toBe("/granted/budget.xlsx");
+  });
+
+  /** spec §5's own words, tested literally: "a probe outside the working dirs answers with the
+   *  fence refusal, not the app-not-running one." With NO harnesses attached AND an out-of-fence
+   *  path, the fence must win — reach is never even consulted. */
+  test("an out-of-fence path with the app not even running still gets the FENCE refusal, not \"app not running\"", async () => {
+    const h = makeHarness({ dirs: [{ path: WORKDIR, locked: true }], harnesses: [] });
+    const result = await h.run({ verb: "info", path: "/etc/passwd" });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("working directories");
+    expect(result.output).not.toContain("isn't showing this session");
+    expect(h.recorded).toEqual([]);
+  });
+});
+
+// ================================================================================================
+// Reach (spec §3 — info doubles as the drivability probe)
+// ================================================================================================
+
+describe("reach", () => {
+  test("no attached client at all refuses with a clear reason, before dispatch", async () => {
+    const h = makeHarness({ harnesses: [] });
+    const result = await h.run({ verb: "info", path: `${WORKDIR}/budget.xlsx` });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("isn't showing this session");
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("only a phone/terminal attached (no panel-hosting client) refuses, before dispatch", async () => {
+    const h = makeHarness({ harnesses: [{ clientName: "cli-abc", role: "harness" }] });
+    const result = await h.run({ verb: "read", path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1", range: "A1" });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("cli-abc");
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("a remote (phone) role does not count as a panel host", async () => {
+    const h = makeHarness({ harnesses: [{ clientName: "orb", role: "remote" }] });
+    const result = await h.run({ verb: "info", path: `${WORKDIR}/budget.xlsx` });
+    expect(result.isError).toBe(true);
+    expect(h.recorded).toEqual([]);
+  });
+});
+
+// ================================================================================================
+// Outcomes — timeout (OUTCOME UNKNOWN, never "failed"), ok:false, ok:true
+// ================================================================================================
+
+describe("outcomes", () => {
+  test("a timeout says OUTCOME UNKNOWN, never that the read failed — and Task 4 inherits this exact wording", async () => {
+    const h = makeHarness();
+    h.outcome = async () => ({ kind: "timeout", deadlineMs: OFFICE_DEADLINES_MS["office.sheets.info"] });
+    const result = await h.run({ verb: "info", path: `${WORKDIR}/budget.xlsx` });
+    expect(result.isError).toBe(true);
+    expect(result.output.toLowerCase()).toContain("unknown");
+    // The word "failed" legitimately appears in a NEGATING clause ("don't act as if it failed") —
+    // the claim this pins is "never asserts failure as fact," not "never uses the word."
+    expect(result.output.toLowerCase()).toContain("not a failure");
+    expect(result.output.toLowerCase()).not.toContain("this failed");
+    expect(result.output.toLowerCase()).not.toContain("did not happen");
+    expect(result.output).toBe(officeTimeoutMessage("sheets info", OFFICE_DEADLINES_MS["office.sheets.info"]));
+  });
+
+  test("officeTimeoutMessage never claims the outcome is known — pinned literally so Task 4's write verbs inherit the same guarantee, not just the same function name", () => {
+    const message = officeTimeoutMessage("sheets set", 12_345);
+    expect(message).toContain("UNKNOWN");
+    expect(message.toLowerCase()).not.toContain("did not happen");
+    expect(message.toLowerCase()).not.toContain("this failed");
+    expect(message.toLowerCase()).toContain("never retry blindly");
+  });
+
+  test("an app-reported failure (ok:false) surfaces the app's own reason, unedited", async () => {
+    const h = makeHarness();
+    h.outcome = async () => ({ kind: "result", ok: false, result: "no sheet named \"Nope\" — this workbook has: Sheet1" });
+    const result = await h.run({ verb: "read", path: `${WORKDIR}/budget.xlsx`, sheet: "Nope", range: "A1" });
+    expect(result.isError).toBe(true);
+    expect(result.output).toBe("no sheet named \"Nope\" — this workbook has: Sheet1");
+  });
+
+  test("a successful read returns the app's own result text verbatim", async () => {
+    const h = makeHarness();
+    h.outcome = async () => ({ kind: "result", ok: true, result: "Sheet1!A1:B2 (values):\n42\tHello" });
+    const result = await h.run({ verb: "read", path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1", range: "A1:B2" });
+    expect(result.isError).toBe(false);
+    expect(result.output).toBe("Sheet1!A1:B2 (values):\n42\tHello");
+  });
+
+  test("an aborted turn returns an interrupted note rather than dispatching or throwing", async () => {
+    const h = makeHarness();
+    const controller = new AbortController();
+    controller.abort();
+    const result = await h.run({ verb: "info", path: `${WORKDIR}/budget.xlsx` }, { signal: controller.signal });
+    expect(result.isError).toBe(false);
+    expect(result.output).toContain("interrupted");
+    expect(h.recorded).toEqual([]);
+  });
+});
