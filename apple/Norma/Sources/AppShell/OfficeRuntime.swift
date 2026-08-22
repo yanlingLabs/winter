@@ -1575,6 +1575,18 @@ final class OfficeRuntime: ObservableObject {
         var undo: (_ docId: String) async -> Void
         /// `.uno:Redo`, same posture as `undo` above.
         var redo: (_ docId: String) async -> Void
+        /// office-agent-tools T3 — read-only, no reducer/effect of its own (unlike `open`/`save`):
+        /// there is nothing in `OfficeRuntimeState` for a sheet-info query to update, so
+        /// `OfficeRuntime.sheetsInfo(docId:)` calls straight through to this closure and returns its
+        /// answer directly, the same "no state to change" posture `clipboardCopy` almost has (that
+        /// one still writes the system pasteboard as a side effect; this one has no side effect at
+        /// all). Throws exactly like `open`/`save` (a docId this connection cannot reach, or a
+        /// non-spreadsheet document) — never silently swallowed, since a caller here has no `nil`
+        /// answer to sensibly fall back to the way `clipboardCopy`'s `String?` does.
+        var sheetsInfo: (_ docId: String) async throws -> (sheets: [OfficeSheetInfo], activeSheet: String)
+        /// office-agent-tools T3 — same no-reducer posture as `sheetsInfo` above. `range` is already
+        /// an A1 string; see `OfficeWireFrame.sheetsRead`'s own header for why.
+        var sheetsRead: (_ docId: String, _ sheet: String, _ range: String, _ formulas: Bool) async throws -> [[String]]
         /// **Office Stage B Task 2b — the shared helper's own `--state-path`.** A plain stored
         /// value, unlike every sibling above: it is a FACT about the shared supervisor's
         /// configuration (`OfficeHelperSupervisor.statePath`, exposing `Configuration
@@ -1766,6 +1778,33 @@ final class OfficeRuntime: ObservableObject {
             saveWaiters[path, default: []].append(SaveWaiter(docId: docId, continuation: continuation))
             perform(effects)
         }
+    }
+
+    // MARK: office-agent-tools T3 — sheets info/read
+
+    /// Sheet names, each one's used range, and the active sheet's name for `docId`. Unlike
+    /// `open`/`close`/`save`, this does not go through `dispatch`/`perform` at all: a read query has
+    /// no reducer EFFECT (`OfficeAgentBroker`'s own task-2 report calls this out explicitly — "a read
+    /// has no reducer effects") because there is nothing in `OfficeRuntimeState` for it to update, so
+    /// routing it through the event/effect machinery built for state-CHANGING doors would be
+    /// ceremony with nothing to guard. Calls straight through to `driver.sheetsInfo`, which in
+    /// production is routed through `ShellSessionHost`'s ONE `OfficeHelperRequestQueue` — the SAME
+    /// serialization every other Driver call gets — just without a reducer dispatch wrapping it.
+    ///
+    /// `docId` is a PARAMETER, not resolved from `path` via `state.documents[path]` — every caller
+    /// (`OfficeAgentBroker.perform`'s `action` closure) already has the docId in hand from its own
+    /// adopt-or-open step, and re-deriving it here would risk observing a DIFFERENT docId if a reload
+    /// raced in between (the exact hazard `OfficeAgentBroker`'s own rule-2 `defer` re-verify exists
+    /// to guard against one layer up).
+    func sheetsInfo(docId: String) async throws -> (sheets: [OfficeSheetInfo], activeSheet: String) {
+        try await driver.sheetsInfo(docId)
+    }
+
+    /// Same no-reducer posture as `sheetsInfo` above. `range` is already an A1 string, and `sheet` is
+    /// resolved to a part index by the HELPER, never here — see `OfficeWireFrame.sheetsRead`'s own
+    /// header for why.
+    func sheetsRead(docId: String, sheet: String, range: String, formulas: Bool) async throws -> [[String]] {
+        try await driver.sheetsRead(docId, sheet, range, formulas)
     }
 
     /// One `saveAndAwaitOutcome` caller, still waiting. Kept per PATH (a table, not a single slot) —

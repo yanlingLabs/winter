@@ -423,6 +423,8 @@ final class OfficeTileCanvasViewTests: XCTestCase {
                 redo: { [unowned self] docId in
                     self.lock.lock(); self._redoCalls.append(docId); self.lock.unlock()
                 },
+                sheetsInfo: { _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
+                sheetsRead: { _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
                 stateDirectory: stateDirectory)
         }
     }
@@ -904,6 +906,8 @@ final class OfficeTileCanvasViewTests: XCTestCase {
                 clipboardPaste: { _, _, _ in },
                 undo: { _ in },
                 redo: { _ in },
+                sheetsInfo: { _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
+                sheetsRead: { _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
                 stateDirectory: stateDirectory)
         }
     }

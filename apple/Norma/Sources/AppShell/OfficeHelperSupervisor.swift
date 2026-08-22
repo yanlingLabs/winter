@@ -306,6 +306,32 @@ final class OfficeHelperClient {
         }
     }
 
+    // MARK: - office-agent-tools T3: sheets info/read
+
+    func sheetsInfo(docId: String) async throws -> (sheets: [OfficeSheetInfo], activeSheet: String) {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.sheetsInfo(seq: seq, docId: docId))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .sheetsInfoOk(_, _, let sheets, let activeSheet): return (sheets, activeSheet)
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    /// `range` is already an A1 string ("A1:C10") — see `OfficeWireFrame.sheetsRead`'s own header for
+    /// why this client never builds it from column/row integers itself.
+    func sheetsRead(docId: String, sheet: String, range: String, formulas: Bool) async throws -> [[String]] {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.sheetsRead(seq: seq, docId: docId, sheet: sheet, range: range, formulas: formulas))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .sheetsReadOk(_, _, let rows): return rows
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
     // MARK: - Task 4: tiles
 
     /// Registers this connection as a tile-push subscriber for `docId` (which must already be open

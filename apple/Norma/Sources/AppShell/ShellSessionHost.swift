@@ -1103,6 +1103,25 @@ final class ShellSessionHost: ObservableObject {
                     NSLog("[ShellSessionHost] office redo(\(docId)) failed: \(error)")
                 }
             },
+            // office-agent-tools T3 — same `queue.run` routing, and same throws-all-the-way-back
+            // posture `open`/`save` have (unlike `close`/`undo`/`redo`'s fire-and-forget swallow):
+            // a read caller needs to know WHY it failed, not just that it did.
+            sheetsInfo: { [weak supervisor] docId in
+                try await queue.run {
+                    guard let client = supervisor?.client else {
+                        throw OfficeHelperClientError.serverError(reason: "helper not connected")
+                    }
+                    return try await client.sheetsInfo(docId: docId)
+                }
+            },
+            sheetsRead: { [weak supervisor] docId, sheet, range, formulas in
+                try await queue.run {
+                    guard let client = supervisor?.client else {
+                        throw OfficeHelperClientError.serverError(reason: "helper not connected")
+                    }
+                    return try await client.sheetsRead(docId: docId, sheet: sheet, range: range, formulas: formulas)
+                }
+            },
             // Office Stage B Task 2b — the LIVE supervisor's own configured directory, never
             // `OfficeHelperSupervisor.Configuration.defaultStateDirectory()` read fresh: every live
             // test overrides `socketDirectory` with a scratch dir precisely so its own helper's

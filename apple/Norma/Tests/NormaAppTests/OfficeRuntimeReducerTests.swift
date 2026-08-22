@@ -1842,6 +1842,8 @@ final class OfficeRuntimeWatcherTests: XCTestCase {
             clipboardPaste: { _, _, _ in },
             undo: { _ in },
             redo: { _ in },
+            sheetsInfo: { _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
+            sheetsRead: { _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
             stateDirectory: stateDir)
     }
 
