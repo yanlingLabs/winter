@@ -121,9 +121,15 @@ export const OFFICE_WRITE_ACTIONS = OFFICE_COMMAND_ACTIONS.filter(
  *    not control.
  *  - **`placeAtomically`** (`OfficeRuntime.swift:2741`, called at `:2435`) runs AFTER `driver.save`
  *    returns (`:2402`) and BEFORE the save waiters resolve (`resumeSaveWaiters(.saved)`, `:2483`) —
- *    write-only, but on the hot path of every write. It always does a real `FileManager.copyItem`
- *    (never a clone — the destination is a fresh sibling file, not `stageDocument`'s jailed copy),
- *    an `fsync`, and a `rename(2)`: a full byte copy plus a flush, whatever the volume.
+ *    write-only, but on the hot path of every write. Its copy (`:2747`) is plain `FileManager.copyItem`,
+ *    not `stageDocument`'s own explicit `copyfile(3)` + `COPYFILE_CLONE` call (`:2837`); this file does
+ *    not assert whether Foundation's `copyItem` clones on its own where `stageDocument` has to ask for
+ *    it by name, so treat that part as unverified rather than "never." What IS certain regardless: the
+ *    source (`tempPath`, the helper's own save output) and destination (`path`, the user's document)
+ *    share a volume only when the document happens to live on the same one as the helper's state dir —
+ *    the identical common-case-vs-external-drive-or-network-share split `stageDocument` names above —
+ *    and `clonefile(2)` cannot cross volumes at all, so a cross-volume place is a full byte copy under
+ *    either reading. The `fsync` and `rename(2)` after it are always real I/O either way.
  *  - **`OfficeHelperRequestQueue`** (`OfficeRuntime.swift:3449-3469`, the ONE instance at
  *    `ShellSessionHost.swift:799`) is an app-wide FIFO — literally one `tail: Task` every Driver call
  *    chains behind, across EVERY open document and EVERY session, not scoped to the verb's own
