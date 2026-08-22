@@ -1627,7 +1627,38 @@ final class LOKBridge: OfficeDocumentBridge {
     /// (never queried first): a UNO toggle command flips whatever the CURRENT state is, so
     /// flip-read-flip returns to the original state regardless of what it was, without this bridge
     /// needing to ask what it started as.
-    private func selectionTextOnDedicatedThread(_ doc: OpenDocument, range: String, formulas: Bool) -> String {
+    ///
+    /// **Fix round 2 (live-drill-caught, ~25% of isolated reruns) — `.uno:GoToCell` is verified,
+    /// not trusted blind.** `postUnoCommand` is fire-and-forget: it returns before LOK's own
+    /// internal dispatcher has necessarily processed the command, and this task's own live drill
+    /// (`testLiveSheetsReadValuesMatchesTwoSheetOdsKnownContent`) measured `getTextSelection`,
+    /// called immediately after, sometimes still answering with whatever was selected BEFORE this
+    /// call (a fresh document's default cursor at A1) rather than `range`'s real content.
+    ///
+    /// **Fix round 2a, FALSIFIED by its own follow-up drill — re-dispatching `.uno:GoToCell` in a
+    /// tight loop does not help, and made the failure rate WORSE (5/5 isolated reruns, not the
+    /// original ~25%).** The first attempt at this fix re-issued `.uno:GoToCell` on every retry
+    /// iteration, reasoning that "each iteration re-enters LOK on the dedicated thread, giving its
+    /// internal dispatcher the turns it needs to drain the deferred slot." The very next live drill
+    /// falsified that reasoning directly: the stderr instrumentation showed the retry loop
+    /// exhausting its full budget, THEN — after `selectionTextOnDedicatedThread` had already
+    /// returned its (stale) answer — a burst of callbacks including the real "selection is now
+    /// A1:B2" firing, triggered by an entirely different LOK call later in the same request
+    /// (`sheetsReadOnDedicatedThread`'s own `setPart` restore, below). Repeated `getTextSelection`
+    /// reads do not pump whatever internal queue `.uno:GoToCell` sits in; only some OTHER LOK call
+    /// does, and re-dispatching `GoToCell` itself on every iteration is, if anything,
+    /// counterproductive — each repeat is one more queued selection-move that can still land later,
+    /// on the user's own sheet, after this function has moved on.
+    ///
+    /// **Fix round 2b (current) — dispatch `.uno:GoToCell` exactly ONCE, then poll
+    /// `getTextSelection` with a cheap, throwaway `paintPartTile` call as the pump between reads.**
+    /// `paintPartTile` was chosen over a second candidate (a `setPart` round-trip) on this task's
+    /// own repo precedent — Office Stage B's live drills already establish "paint before other
+    /// operations" as what settles LOK's view state — and because a real part switch would flicker
+    /// an adopted tab's own visible sheet, which a read-only probe must not do. See
+    /// `pumpDedicatedThreadForPendingDispatch` for the call itself and why it is not
+    /// `paintTileOnDedicatedThread`.
+    private func selectionTextOnDedicatedThread(_ doc: OpenDocument, part: Int, range: String, formulas: Bool) -> String {
         // **Order is load-bearing: the formula toggle MUST run BEFORE `.uno:GoToCell`, not after —
         // live-drill-caught, not reasoned in advance.** The first working version of this function
         // toggled AFTER selecting (select the range, then flip Show Formulas, then read) and got the
@@ -1643,6 +1674,15 @@ final class LOKBridge: OfficeDocumentBridge {
                 doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, nil, false)
             }
         }
+
+        // Baseline: whatever `getTextSelection` answers BEFORE this call ever asks LOK to move the
+        // selection. This is the exact value a not-yet-processed `.uno:GoToCell` reads back as —
+        // see the poll loop below, which exists to tell "GoToCell hasn't landed yet" apart from
+        // "GoToCell landed, and the requested range's content happens to equal what was already
+        // selected" (read under `formulas`' own display mode, matching every read below, so a
+        // stale-vs-fresh comparison is never comparing across two different display modes).
+        let baseline = readSelectionTextOnDedicatedThread(doc)
+
         let gotoPayload: [String: Any] = ["ToPoint": ["type": "string", "value": range]]
         if let gotoData = try? JSONSerialization.data(withJSONObject: gotoPayload),
            let gotoString = String(data: gotoData, encoding: .utf8) {
@@ -1652,15 +1692,44 @@ final class LOKBridge: OfficeDocumentBridge {
                 }
             }
         }
-        let text: String
-        if let cString = "text/plain;charset=utf-8".withCString({ mimePtr in
-            doc.handle.pointee.pClass.pointee.getTextSelection?(doc.handle, mimePtr, nil)
-        }) {
-            defer { free(cString) }
-            text = String(cString: cString)
-        } else {
-            text = ""
+
+        // **Poll-with-pump, never a sleep** — house norm (`CLAUDE.md`: "no arbitrary sleeps...
+        // condition-poll instead"). `.uno:GoToCell` is dispatched exactly ONCE, above; every
+        // iteration below only READS plus, on a still-stale read, PUMPS
+        // (`pumpDedicatedThreadForPendingDispatch`) — never re-dispatches GoToCell itself, per fix
+        // round 2a's own falsification. Bounded by ITERATION COUNT, never a clock. A callback-based
+        // wait (blocking this job until `LOK_CALLBACK_STATE_CHANGED`/similar fires) is not available
+        // here without risking the exact same-thread reentrant deadlock `LOKDedicatedThread`'s own
+        // header warns against — `lokBridgeDocumentCallback` fires ON this thread, as part of
+        // whatever job is already running.
+        //
+        // **Exhaustion returns the last read rather than throwing.** When `range`'s real content
+        // genuinely EQUALS `baseline` — a freshly-opened document's default A1 selection, probed
+        // for a sheet whose only content IS at A1 (this task's own `two-sheet.ods` Sheet2 fixture,
+        // read via `sheetsInfo`'s A1:Z5000 probe from a default cursor, is exactly this case; so is
+        // every genuinely EMPTY sheet, which legitimately reads `""` both before and after) —
+        // "stale" and "correct" are indistinguishable by this detector's own construction, and
+        // throwing here would wrongly fail a read that in fact succeeded. The undetectable residual
+        // (GoToCell never actually lands within the attempt budget AND the requested range's real
+        // content differs from `baseline`) is a disclosed tail — task-3-report.md's concerns, not a
+        // claimed-solved case. Because the pump runs BEFORE each retry read, exhaustion still leaves
+        // this function having pumped at least once more before returning — which also helps flush
+        // a genuinely-still-pending GoToCell before the caller's own `setPart` restore runs, rather
+        // than leaving it to land later, unobserved, on the user's own sheet.
+        var text = readSelectionTextOnDedicatedThread(doc)
+        var attempts = 1
+        while text == baseline && attempts < Self.goToCellVerificationAttempts {
+            pumpDedicatedThreadForPendingDispatch(doc, part: part)
+            text = readSelectionTextOnDedicatedThread(doc)
+            attempts += 1
         }
+        if attempts > 1 {
+            // Evidence line for task-3-report.md's before/after — how often the race actually
+            // fires in practice, and which attempt it resolved on, never silent.
+            FileHandle.standardError.write(Data(
+                "[LOKBridge sheets] GoToCell(\(range)) needed \(attempts) attempt(s) before the selection changed (or the budget was exhausted)\n".utf8))
+        }
+
         if formulas {
             ".uno:ToggleFormula".withCString { commandPtr in
                 doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, nil, false)
@@ -1668,6 +1737,59 @@ final class LOKBridge: OfficeDocumentBridge {
         }
         return text
     }
+
+    /// The one place this bridge calls `getTextSelection` — `selectionTextOnDedicatedThread`'s
+    /// baseline read and every poll-loop read share this so the two can never disagree about the
+    /// MIME type or the empty-string fallback.
+    private func readSelectionTextOnDedicatedThread(_ doc: OpenDocument) -> String {
+        guard let cString = "text/plain;charset=utf-8".withCString({ mimePtr in
+            doc.handle.pointee.pClass.pointee.getTextSelection?(doc.handle, mimePtr, nil)
+        }) else {
+            return ""
+        }
+        defer { free(cString) }
+        return String(cString: cString)
+    }
+
+    /// A cheap, throwaway `paintPartTile` call whose ONLY purpose is to give LOK's own internal
+    /// idle/dispatch queue a chance to drain a still-pending `.uno:GoToCell` — see
+    /// `selectionTextOnDedicatedThread`'s own fix-round-2 history for the live evidence this exists
+    /// to answer. Pixels are discarded immediately; nothing here is cached or returned to any
+    /// caller — only the SIDE EFFECT of making the call matters.
+    ///
+    /// **Deliberately NOT `paintTileOnDedicatedThread`** — that method updates
+    /// `OpenDocument.lastKnownPart` (autosave's own "what part is the user looking at" signal, see
+    /// that field's own header) and this is a read probe, which must never perturb it. `part` is
+    /// always the SAME part the caller already asserted via `setPart` before calling into
+    /// `selectionTextOnDedicatedThread` in the first place (`sheetsInfoOnDedicatedThread`'s
+    /// per-sheet loop, `sheetsReadOnDedicatedThread`'s target-sheet switch) — passed straight
+    /// through rather than re-derived, so this call's own `nPart` argument always matches
+    /// `doc_getPart(pThis)` already. That equality is what keeps this call out of
+    /// `paintTileOnDedicatedThread`'s own documented `getAlternativeViewForPaint` hazard (fix round
+    /// 3 there): that unfiltered bystander-view search only triggers on a part/mode MISMATCH, which
+    /// passing the already-current part structurally avoids without needing that method's own
+    /// type-gated `setPart` prefix here.
+    private func pumpDedicatedThreadForPendingDispatch(_ doc: OpenDocument, part: Int) {
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        var buffer = [UInt8](repeating: 0, count: Self.pumpTileByteCount)
+        buffer.withUnsafeMutableBufferPointer { rawBuffer in
+            doc.handle.pointee.pClass.pointee.paintPartTile?(
+                doc.handle, rawBuffer.baseAddress, Int32(part), 0 /* LOK_PARTMODE_SLIDES */,
+                Int32(Self.pumpTilePixelSize), Int32(Self.pumpTilePixelSize),
+                0, 0, 3000, 3000)
+        }
+    }
+    private static let pumpTilePixelSize = 64
+    private static let pumpTileByteCount = 64 * 64 * 4
+
+    /// `selectionTextOnDedicatedThread`'s own poll budget — small deliberately, not generous:
+    /// `sheetsInfoOnDedicatedThread` pays this cost once per sheet, and a genuinely EMPTY sheet
+    /// legitimately burns the FULL budget every time (`""` read equals `""` baseline, so the loop
+    /// never sees a difference to stop early on) — a large budget would make `info` on a many-sheet,
+    /// mostly-empty workbook slow for no correctness benefit. Each attempt is a real, if cheap, LOK
+    /// call (a 64x64 tile paint), not a clock tick, so this is a real cost per attempt, unlike a
+    /// bounded wall-clock retry would be.
+    private static let goToCellVerificationAttempts = 4
 
     /// Splits `getTextSelection`'s own TSV shape (rows joined by `"\n"`, cells within a row joined by
     /// `"\t"`) into a grid — the ONE place both `sheetsInfo` and `sheetsRead` turn that raw string into
@@ -1710,11 +1832,23 @@ final class LOKBridge: OfficeDocumentBridge {
         doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
 
         let names = sheetNamesOnDedicatedThread(doc)
+
+        // **Fix round 2 (CRITICAL, review-caught) — captured BEFORE the per-sheet probe loop
+        // below, not after.** The loop calls `setPart` once per sheet to probe each one's used
+        // range in turn, so reading `getPart()` AFTER that loop always answers with the LAST
+        // sheet probed — never the sheet the caller (an adopted tab's own live view, most of the
+        // time) was actually looking at when this request arrived. The original version of this
+        // function read `getPart()` after the loop and passed its OWN live test
+        // (`two-sheet.ods`, active Sheet2 — the fixture's last sheet) for the wrong reason: with
+        // exactly two sheets, "last sheet probed" and "the fixture's real active sheet" happen to
+        // coincide. They do not for a document parked on any sheet OTHER than its last.
+        let originalPart = Int(doc.handle.pointee.pClass.pointee.getPart?(doc.handle) ?? 0)
+
         var sheets: [OfficeSheetInfo] = []
         sheets.reserveCapacity(names.count)
         for (part, name) in names.enumerated() {
             doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(part))
-            let text = selectionTextOnDedicatedThread(doc, range: Self.usedRangeProbeBound, formulas: false)
+            let text = selectionTextOnDedicatedThread(doc, part: part, range: Self.usedRangeProbeBound, formulas: false)
             let grid = parseTSVGrid(text)
             guard !grid.isEmpty else {
                 sheets.append(OfficeSheetInfo(name: name, usedEndColumn: -1, usedEndRow: -1))
@@ -1725,8 +1859,16 @@ final class LOKBridge: OfficeDocumentBridge {
             sheets.append(OfficeSheetInfo(name: name, usedEndColumn: usedEndColumn, usedEndRow: usedEndRow))
         }
 
-        let activeIndex = Int(doc.handle.pointee.pClass.pointee.getPart?(doc.handle) ?? 0)
-        let activeSheet = (activeIndex >= 0 && activeIndex < names.count) ? names[activeIndex] : (names.first ?? "")
+        // Restored, not left on whatever sheet the probe loop happened to visit last — `info` is
+        // read-only in INTENT (this function's own header above), so it must never be the reason
+        // an adopted tab's live view jumps to a different sheet than the one the user had open.
+        // `setPart` is ungated here (unlike `postKeyOnDedicatedThread`'s own `.text` guard
+        // elsewhere in this file) because this whole function already requires `doc.kind ==
+        // .spreadsheet` above — the caret-move hazard `OpenDocument.kind` exists to gate around
+        // does not apply to a document this function would even reach.
+        doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(originalPart))
+
+        let activeSheet = (originalPart >= 0 && originalPart < names.count) ? names[originalPart] : (names.first ?? "")
         return (sheets, activeSheet)
     }
 
@@ -1751,9 +1893,19 @@ final class LOKBridge: OfficeDocumentBridge {
         guard let part = names.firstIndex(of: sheet) else {
             throw SaveError.sheetNotFound(docId: docId, sheet: sheet, available: names)
         }
+
+        // Restored after the read, below — `read` names ONE sheet to read FROM, not a standing
+        // "switch the adopted tab to this sheet" request. Without this, a `read` naming a sheet
+        // other than the one the user has open would silently move their live view to it (mirrors
+        // `sheetsInfoOnDedicatedThread`'s own restore, immediately above this function, for the
+        // identical reason).
+        let originalPart = Int(doc.handle.pointee.pClass.pointee.getPart?(doc.handle) ?? 0)
         doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(part))
 
-        let text = selectionTextOnDedicatedThread(doc, range: range, formulas: formulas)
+        let text = selectionTextOnDedicatedThread(doc, part: part, range: range, formulas: formulas)
+
+        doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(originalPart))
+
         return parseTSVGrid(text)
     }
 

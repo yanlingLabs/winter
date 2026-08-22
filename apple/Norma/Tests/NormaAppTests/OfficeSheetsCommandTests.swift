@@ -214,12 +214,42 @@ final class OfficeSheetsCommandTests: XCTestCase {
         let result = try XCTUnwrap(sent.result)
         print("[live sheets info] two-sheet.ods ->\n\(result)")
         XCTAssertTrue(result.contains("2 sheets"), result)
-        XCTAssertTrue(result.contains("active"), result)
+
+        // **The active sheet is a genuine, independently-verified fact, not "contains the word
+        // active."** `two-sheet.ods`'s own `settings.xml` has NO `ActiveTable` config item at all
+        // (checked directly against the fixture's own bytes, once, while diagnosing the bug below) —
+        // so LOK's own default for a file with no saved preference applies: part 0, "Sheet1". This
+        // is the regression pin for a REAL bug this task's own review caught:
+        // `sheetsInfoOnDedicatedThread` originally read `getPart()` AFTER the per-sheet used-range
+        // probe loop, which calls `setPart` once per sheet in order — so the reported "active" sheet
+        // was always the LAST sheet probed, never the document's real active one. That bug's own
+        // live output ("active: Sheet2") LOOKED plausible and this test's original assertion
+        // (`contains("active")`) could not have caught it: for a 2-sheet document, "last sheet
+        // probed" and "Sheet2" coincide by pure luck of there being exactly two sheets.
+        XCTAssertTrue(result.contains("(active: \"Sheet1\")"), result)
 
         // ADOPTED — never reloaded: the SAME docId a plain runtime.open already produced, still open
         // afterward (rule 2: a document this call did not open must never be closed).
         XCTAssertEqual(runtime.stateSnapshot.documents[path]?.docId, originalDocId,
                        "info on an already-open document must adopt it, never reload it")
+
+        // **`getPart()` is unchanged after BOTH verbs — proven, not assumed, by asking `info` again
+        // after a `read` that names a DIFFERENT sheet.** Neither `sheetsInfoOnDedicatedThread`'s own
+        // per-sheet probe loop nor `sheetsReadOnDedicatedThread`'s target-sheet switch may leave the
+        // document parked away from where it started — an adopted tab's live view must never jump
+        // to a different sheet just because the agent asked a read-only question about the
+        // workbook. If EITHER restore were missing, this second `info` call would report "Sheet2"
+        // (wherever the read above left it), not "Sheet1" again.
+        let readOtherSheet = await send(command("office.sheets.read",
+                                                 args: ["path": path, "sheet": "Sheet2", "range": "A1:A1"],
+                                                 sessionId: "S1"), through: host)
+        XCTAssertTrue(readOtherSheet.ok, "\(readOtherSheet)")
+
+        let sentAgain = await send(command("office.sheets.info", args: ["path": path], sessionId: "S1"), through: host)
+        XCTAssertTrue(sentAgain.ok, "\(sentAgain)")
+        let resultAgain = try XCTUnwrap(sentAgain.result)
+        XCTAssertTrue(resultAgain.contains("(active: \"Sheet1\")"),
+                      "a read naming Sheet2, or info's own probe loop, left the document parked away from Sheet1: \(resultAgain)")
     }
 
     /// `sheets read` VALUES against `two-sheet.ods`'s own KNOWN, documented content
