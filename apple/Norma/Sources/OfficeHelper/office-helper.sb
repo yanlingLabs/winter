@@ -77,10 +77,16 @@
 ;;   SvxShapeText::setString → LinguServiceManager::create → LngSvcMgr::GetAvailableSpellSvcs_Impl →
 ;;   MacSpellChecker::MacSpellChecker() → NSApplicationLoad() → +[NSApplication initialize] →
 ;;   { CFPasteboardCreate, then in turn TCC / WindowServer / LaunchServices connection attempts }
-;; i.e. the VENDORED, unmodified LOK always probes macOS's native spellchecker's *availability* the
-;; first time a document's editable text/shape model is built — Impress shapes and Writer text
-;; frames both reach `SvxShapeText::setString`; Calc's pure grid-cell path never does, which is
-;; exactly why Calc opened cleanly through this same seatbelt while Impress/Writer did not.
+;; i.e. the VENDORED, unmodified LOK probes macOS's native spellchecker's *availability* when a
+;; document's editable text/shape model is built — Impress shapes and Writer text frames both reach
+;; `SvxShapeText::setString`. That Calc's pure grid-cell path does not reach it, and that this is
+;; why Calc opened cleanly through this same seatbelt while Impress/Writer did not, is the obvious
+;; reading of the captured trace and is CONSISTENT WITH it — but it is an inference from ONE
+;; backtrace (the hanging thread's), not a measurement: no trace was ever captured for a Calc open
+;; to confirm it never reaches this path. Hedged here for a second reason too — Experiment B below
+;; later showed the open-vs-hang outcome tracks EXECUTABLE BUNDLING, a variable this document-type
+;; reading did not hold fixed, and the first version of this fix drew a wrong conclusion from
+;; exactly that gap.
 ;; `NSApplicationLoad()` is LOK's own one-time linguistic-service enumeration, not anything this
 ;; helper's own Swift code invokes — and a headless, no-Aqua-session process denied a service that
 ;; bootstrap needs does not fail fast; it stalls, which is the hang's actual mechanism (not a crash,

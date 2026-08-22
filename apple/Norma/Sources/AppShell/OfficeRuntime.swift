@@ -1046,13 +1046,27 @@ enum OfficeRuntimeReducer {
             // `officeDocumentIsDirty` (`PanelDocumentTab.swift`) already masked its OWN read of this
             // field, but the quit gate's `officeDirtyFilePaths` (`AppDelegate.swift`) read `dirty`
             // RAW and disagreed with it — a read-only `.xlsm` could be named unsaved at quit with no
-            // dirty dot and a disabled ⌘S to act on, a dead end. Gating THIS single writer instead
-            // means every consumer, present and future, inherits the guarantee for free; the two
-            // existing masked predicates become belt rather than the only guard. Only the assignment
-            // is gated, not an early return — the recovery-offer clear below stays unconditional on
-            // `modified` (harmless for a read-only path: no candidate can exist there in the first
-            // place, per the autosave chain's own two-layer fail-closed walk — `saveAsSidecar` throws
-            // `unsupportedFormat` before any manifest is ever written).
+            // dirty dot and a disabled ⌘S to act on, a dead end. Gating the WRITERS instead of each
+            // consumer means every consumer, present and future, inherits the guarantee for free;
+            // the two existing masked predicates become belt rather than the only guard. Only the
+            // assignment is gated, not an early return — the recovery-offer clear below stays
+            // unconditional on `modified` (harmless for a read-only path: no candidate can exist
+            // there in the first place, per the autosave chain's own two-layer fail-closed walk —
+            // `saveAsSidecar` throws `unsupportedFormat` before any manifest is ever written).
+            //
+            // **Precisely which writers, since F3's original wording said "this single writer" and
+            // that was already imprecise then** (whole-branch review sweep). `dirty` has THREE
+            // writers in this reducer, not one:
+            //   * this arm — LOK's own truth, mask-gated;
+            //   * `.saveFailed` (whole-branch review C1) — mask-gated identically;
+            //   * `.recoveryRestored` — forces `true` and is NOT mask-gated. Safe for a different
+            //     reason, which is worth stating rather than leaving to be re-derived: a read-only
+            //     path can never reach it at all, because a recovery candidate can never exist for
+            //     one (the same two-layer fail-closed autosave walk cited above). It is
+            //     reachability-guarded, not mask-guarded — so if a future change ever gives a
+            //     read-only format a sidecar, that arm needs the mask too.
+            // `.saveSucceeded` also touches `dirty`, but only to CLEAR it, and only for the two
+            // app-held flags — clearing needs no mask.
             //
             // **Whole-branch review C1 — the one thing LOK is NOT allowed to say.** While a failed
             // save is outstanding (`saveFailedPendingSave`), a `modified == false` firing means only
@@ -2413,8 +2427,14 @@ final class OfficeRuntime: ObservableObject {
                     // `testASecondSavesNoteSurvivesAFireLandingBetweenTwoOverlappingSaves` and
                     // `testASecondSavesNoteSurvivesEvenWhenTheSecondSaveLandsAndFiresFirst` (both
                     // primitive-in-isolation pins, not production-race proofs — their own headers
-                    // say so) plus `testAGenuineOursRaceStaysSuppressedButUntouchedUntilTheOwning
-                    // SaveCatchesUp` (the interleaving that IS reachable).
+                    // say so) plus the reachable-interleaving pair,
+                    // `testExternalWriteBetweenNoteExpectedWriteAndTheOwningSavesWithdrawOnAClean
+                    // DocumentReloads` and its `...OnADirtyDocumentRaisesAConflict` sibling. Those
+                    // two REPLACED an earlier `testAGenuineOursRaceStaysSuppressedButUntouchedUntil
+                    // TheOwningSaveCatchesUp`, which this comment went on citing after it was
+                    // deleted; that test asserted the PRE-N1 behavior (an unmatched fire left the
+                    // bag untouched and never reloaded), which is now false by design — see the
+                    // successors' own shared header.
                     self.withdrawExpectedWrite(path: path, token: expectedWriteToken)
                     // `tempPath` is `LOKBridge`'s own ephemeral `saves/<docId>-<seq>.<ext>` render —
                     // a one-shot temp that exists for exactly this one placement (`saveAsOnDedicated

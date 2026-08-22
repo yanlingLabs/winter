@@ -2262,9 +2262,13 @@ final class OfficeHelperLiveTests: XCTestCase {
 
     /// **Direct successor to the deleted `testKnownLimitationOOXMLExportIsNotAvailableInThis
     /// VendorBuildWhileODFExportWorks`** (Task 2/2b; see git history for its full text). That test
-    /// pinned xlsx's helper-killing `SIGABRT` as the known, accepted state, with its own doc comment
-    /// warning it should be DELETED, not fixed, the day OOXML export starts working — this is that
-    /// day. The vendor re-cut (`.superpowers/sdd/2026-08-20-office-editable/
+    /// pinned xlsx's helper-killing `SIGABRT` as the known, accepted state, and its own doc comment
+    /// said the day OOXML export starts working is "the correct trigger for a human to update this
+    /// test's own claim, not a silent gap" — this is that day. (The stronger "it should be deleted
+    /// rather than 'fixed'" phrasing is `task-2-report.md`'s, not the test's; attributing it to the
+    /// doc comment was a whole-branch-review finding. What actually happened here is closer to what
+    /// the doc comment asked for than to the report's wording: a semantically inverted successor,
+    /// not a deletion — the coverage moved, it did not go away.) The vendor re-cut (`.superpowers/sdd/2026-08-20-office-editable/
     /// ooxml-export-investigation.md` + `task-11-brief.md`) added the one dylib the crash traced to
     /// (`libsal_textenclo.dylib`, `sal`'s lazily-`dlopen`'d full text-encoding table, absent from the
     /// vendored product-set because it is reached only via a runtime `dlopen` on the export code

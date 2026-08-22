@@ -1157,9 +1157,12 @@ final class LOKBridge: OfficeDocumentBridge {
     }
 
     /// Office Stage B Task 7 — the autosave sidecar write: `<state-path>/autosave/<docId>.<ext>`,
-    /// `ext` from `OfficeSaveFormat.autosaveFormat` (native for already-ODF documents, the ODF
-    /// sibling for every OOXML one — see that property's own header for why all three, not just
-    /// the two the vendor investigation reproduced a crash for).
+    /// `ext` from `OfficeSaveFormat.autosaveFormat`. **Native for five of the six formats**; `.docx`
+    /// alone falls back to `.odt`, because it is the one format this build genuinely cannot export.
+    /// Task 7 originally fell back for all three OOXML formats uniformly; Task 11's r3 re-cut
+    /// replaced that evidence-light caution with per-format measurement and narrowed it to docx —
+    /// see that property's own header for the per-format results and for why the docx arm is kept
+    /// even though the app now holds docx read-only.
     ///
     /// **Bare `saveAs`, deliberately no `.uno:Save` follow-up** — the ONE structural difference
     /// from `saveAsOnDedicatedThread` immediately above, and the reason this is its own method
@@ -1556,9 +1559,10 @@ final class LOKBridge: OfficeDocumentBridge {
         // prove they finally have). Unconditional, not test-only instrumentation: a cheap, one-line
         // stderr trace of every callback this helper's whole lifetime ever receives, useful for
         // production debugging too (LOK callback traffic is otherwise entirely invisible). `type`
-        // is the raw LOK integer, not a name — `LOKCallbackType`'s two named constants above are
-        // the only ones this bridge currently interprets; an unrecognized type is still logged
-        // here, just not turned into an OfficeDocumentEvent below.
+        // is the raw LOK integer, not a name — `LOKCallbackType`'s eight named constants above are
+        // the only ones this bridge currently interprets (the count has grown with every task since
+        // this line was written for two; the `switch` immediately below is the live list); an
+        // unrecognized type is still logged here, just not turned into an OfficeDocumentEvent.
         FileHandle.standardError.write(Data("[LOKBridge raw callback] docId=\(docId) type=\(type) payload=\(payload)\n".utf8))
         let event: OfficeDocumentEvent?
         switch type {

@@ -773,7 +773,8 @@ final class ShellSessionHost: ObservableObject {
     /// establishes) **and, as of the office live-gate's Bug 2, by `panelDidReveal`** for every
     /// dirs-having session, ahead of any click (see that method's own note — T7's original "office has
     /// no pre-warm door of its own" ruling is the one this overrides) — and REMOVED by a departure
-    /// (`releaseOfficeRuntimeIfClean` — ALWAYS, see its own doc) or an explicit `teardownOfficeRuntime`.
+    /// (`releaseOfficeRuntimeIfClean` — only when the session holds NOTHING unsaved, since Task 3;
+    /// see its own doc) or an explicit `teardownOfficeRuntime` (unconditional).
     private(set) var officeRuntimes: [String: OfficeRuntime] = [:]
 
     /// The ONE app-wide helper supervisor, minted lazily on the FIRST `officeRuntime(for:)` call —
@@ -2629,8 +2630,9 @@ final class ShellSessionHost: ObservableObject {
         // editor-product T3: the departing session's editor goes only if it is holding nothing
         // unsaved (`editorRuntimeReleasedOnDeparture`). A hop is not a quit.
         if let departing = attachedSessionId { releaseEditorRuntimeIfClean(for: departing) }
-        // office-plumbing Task 5: same departure moment, ALWAYS-release policy (Stage A has no
-        // dirty state to protect) — see `releaseOfficeRuntimeIfClean`'s own doc.
+        // office-plumbing Task 5 / Stage B Task 3: same departure moment, and since editing became
+        // real the same clean-only policy as the editor line above — a dirty office runtime is
+        // RETAINED across a hop. See `releaseOfficeRuntimeIfClean`'s own doc.
         if let departing = attachedSessionId { releaseOfficeRuntimeIfClean(for: departing) }
         attachedSessionId = sessionId
         refreshOutputFiles(for: sessionId)
@@ -2726,8 +2728,9 @@ final class ShellSessionHost: ObservableObject {
         // editor-product T3: same departure policy as the hop above — a hidden shell releases a
         // CLEAN editor and keeps a dirty one. ⌘W is not a quit, and nothing warns here.
         if let departing = attachedSessionId { releaseEditorRuntimeIfClean(for: departing) }
-        // office-plumbing Task 5: same departure moment, ALWAYS-release policy — see
-        // `releaseOfficeRuntimeIfClean`'s own doc.
+        // office-plumbing Task 5 / Stage B Task 3: same departure policy as the hop above and as
+        // the editor line above it — a hidden shell releases a CLEAN office runtime and keeps a
+        // dirty one. See `releaseOfficeRuntimeIfClean`'s own doc.
         if let departing = attachedSessionId { releaseOfficeRuntimeIfClean(for: departing) }
         live.feedTask?.cancel()
         live.feedTask = nil
