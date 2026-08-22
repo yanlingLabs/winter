@@ -4675,6 +4675,16 @@ final class ShellSessionHostTests: XCTestCase {
         await feedWaitUntil { mgmt.methods.contains("panel.closeTab") }
         XCTAssertEqual(try? String(contentsOfFile: path, encoding: .utf8), "rendered",
                        "a successful save must land on the real path before the tab closes")
+        // Full-suite-only flake note: this used to be an immediate, un-waited XCTAssertTrue. Under a
+        // heavily loaded full-suite run (2840 tests, real subprocesses elsewhere) it was observed
+        // failing here even though `panel.closeTab` had already fired — plausible MainActor/Task
+        // scheduling delay under contention rather than a causality violation (the recorder's own
+        // append happens-before the continuation resume, which happens-before `drainUntilClean`
+        // returns, which happens-before `closePanelTab` is ever called), never reproduced in
+        // isolation or in a same-order grouped run. Widened to a bounded poll, matching this file's
+        // own established idiom for anything that depends on async completion rather than asserting
+        // a Swift-structured-concurrency happens-before edge is ALSO instantaneously observable.
+        await officeWaitUntil(timeout: 5) { office.recorder.clipboardCopyCalls.contains(docId) }
         XCTAssertTrue(office.recorder.clipboardCopyCalls.contains(docId), "the drain's own round trip "
                       + "must actually have been attempted for this docId")
         try? FileManager.default.removeItem(atPath: path)
@@ -4719,8 +4729,14 @@ final class ShellSessionHostTests: XCTestCase {
 
         host.requestCloseTab("t1")
 
-        await officeWaitUntil(timeout: 2) { office.recorder.saveCalls.contains(docId) }
-        await officeWaitUntil(timeout: 2) { office.recorder.clipboardCopyCalls.contains(docId) }
+        // Full-suite-only flake note: widened from 2s to 8s after a heavily loaded full-suite run
+        // (2840 tests, real subprocesses elsewhere) was observed missing the 2s bound here — an
+        // unrelated real-animation-timer test (`SurfaceWindowTests`, its own 5s `pollUntil` bound)
+        // failed the SAME way in that SAME run, corroborating system-level scheduling pressure over
+        // a bug in this test's own logic. Never reproduced in isolation or in a same-order grouped
+        // run of this file's own office tab-close tests.
+        await officeWaitUntil(timeout: 8) { office.recorder.saveCalls.contains(docId) }
+        await officeWaitUntil(timeout: 8) { office.recorder.clipboardCopyCalls.contains(docId) }
         // Give a premature close every chance to race ahead if the drain were ever dropped — the
         // exact beat pre-fix code did not wait through.
         try? await Task.sleep(nanoseconds: 300_000_000)
@@ -4757,7 +4773,9 @@ final class ShellSessionHostTests: XCTestCase {
         office.recorder.saveFailures[docId] = "disk full"
         host.presentDirtyCloseSheet = { _, _, respond in respond(.save) }
         host.requestCloseTab("t1")
-        await officeWaitUntil(timeout: 2) { office.recorder.saveCalls.contains(docId) }
+        // Full-suite-only flake note: widened from 2s to 8s — see the sibling test's own identical
+        // note immediately above this one in the file for the full account.
+        await officeWaitUntil(timeout: 8) { office.recorder.saveCalls.contains(docId) }
         try? await Task.sleep(nanoseconds: 100_000_000) // let the failed save's outcome settle
         XCTAssertNotNil(runtime.stateSnapshot.documents[path], "setup: the failed save must not have closed anything")
         XCTAssertEqual(runtime.stateSnapshot.documents[path]?.dirty, true, "setup: still dirty after the failure")
@@ -4779,7 +4797,7 @@ final class ShellSessionHostTests: XCTestCase {
         host.presentDirtyCloseSheet = { _, _, respond in respond(.save) }
         host.requestCloseTab("t1")
 
-        await officeWaitUntil(timeout: 2) { office.recorder.saveCalls.filter { $0 == docId }.count == 2 }
+        await officeWaitUntil(timeout: 8) { office.recorder.saveCalls.filter { $0 == docId }.count == 2 }
         XCTAssertEqual(runtime.stateSnapshot.documents[path]?.dirty, false, "sanity: the reducer's own "
                        + "synchronous clear on a successful retry already fired — the OLD dirty-gated "
                        + "drain would stop right here")
