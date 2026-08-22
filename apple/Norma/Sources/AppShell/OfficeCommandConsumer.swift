@@ -131,15 +131,15 @@ struct OfficeCommandConsumer {
 
     /// `office.sheets.info` — sheet names, each one's used range, and the active sheet.
     ///
-    /// **`info` is ALSO the drivability probe** (spec §1/§3, mirroring `browser tabs`): with no app
-    /// attached to this session, `officeReach` below answers before the broker is ever reached, and
-    /// the refusal names that reason. **The fence runs first, always** — spec §5's "a probe outside
-    /// the working dirs answers with the fence refusal, not the app-not-running one" is why
-    /// `officeAgentBroker(...).perform` (rule 5, checked before rule 1 even asks whether a runtime
-    /// exists) is called BEFORE `officeReach` gets a turn: the broker's own fence is a pure, path-only
-    /// check that needs no live app connection at all, so ordering it first is what makes "out of
-    /// fence" true even when nothing is attached — checking reach first would instead answer
-    /// "app not running" for a path that was never going to be allowed regardless.
+    /// **`info` is ALSO the drivability probe** (spec §1/§3, mirroring `browser tabs`) — but the
+    /// "app not running" half of that lives on the DAEMON side, not here: `sheets.ts`'s own reach
+    /// check (mirroring `browser.ts`'s `panelReach`) refuses BEFORE ever dispatching a `panel_command`
+    /// when no usable harness is attached, so this function only ever runs at all once the app IS
+    /// known to be reachable. **The fence still has to win when BOTH would fire** — spec §5's "a probe
+    /// outside the working dirs answers with the fence refusal, not the app-not-running one" is why
+    /// `sheets.ts` checks its OWN fence BEFORE its reach check (see that file's own header): the
+    /// daemon already knows the session's working directories without needing the app at all, so
+    /// refusing an out-of-fence path never has to wait to learn whether the app is even running.
     private func handleSheetsInfo(_ command: SessionEvent.PanelCommand) async {
         guard let path = Self.requiredPath(command.args) else {
             return sendResult(command.sessionId, command.commandId, false,
@@ -155,7 +155,8 @@ struct OfficeCommandConsumer {
                 let (sheets, activeSheet) = try await runtime.sheetsInfo(docId: docId)
                 return Self.formatSheetsInfo(path: path, sheets: sheets, activeSheet: activeSheet)
             }
-            sendResult(command.sessionId, command.commandId, true, Self.capped(resultText), nil)
+            let (ok, text) = Self.capped(resultText)
+            sendResult(command.sessionId, command.commandId, ok, text, nil)
         } catch {
             sendResult(command.sessionId, command.commandId, false, Self.message(for: error), nil)
         }
@@ -207,7 +208,8 @@ struct OfficeCommandConsumer {
                 let rows = try await runtime.sheetsRead(docId: docId, sheet: sheet, range: rangeString, formulas: formulas)
                 return Self.formatSheetsRead(sheet: sheet, range: rangeString, formulas: formulas, rows: rows)
             }
-            sendResult(command.sessionId, command.commandId, true, Self.capped(resultText), nil)
+            let (ok, text) = Self.capped(resultText)
+            sendResult(command.sessionId, command.commandId, ok, text, nil)
         } catch {
             sendResult(command.sessionId, command.commandId, false, Self.message(for: error), nil)
         }
@@ -274,12 +276,14 @@ struct OfficeCommandConsumer {
 
     /// The final belt — `sheetsResultMaxLength`, checked in the wire's own UTF-16-code-unit unit
     /// (`PanelURLPolicy.wireLength`, the same measure `PanelCommandConsumer`'s own cap uses), never
-    /// `String.count`. Refuses rather than truncates: a silently clipped grid would be indistinguishable
-    /// from a complete one to whatever reads this file's own result text.
-    private static func capped(_ text: String) -> String {
-        guard PanelURLPolicy.wireLength(text) > sheetsResultMaxLength else { return text }
-        return "this read's own result would be \(PanelURLPolicy.wireLength(text)) characters, past the "
-            + "\(sheetsResultMaxLength)-character wire limit — ask for a smaller range or narrower columns."
+    /// `String.count`. Returns `ok: false` when it fires — an over-cap answer is a REFUSAL, never sent
+    /// as `ok: true` with swapped-in prose (that would tell the daemon a successful read produced this
+    /// sentence as its own real content). Refuses rather than truncates: a silently clipped grid would
+    /// be indistinguishable from a complete one to whatever reads this file's own result text.
+    private static func capped(_ text: String) -> (ok: Bool, text: String) {
+        guard PanelURLPolicy.wireLength(text) > sheetsResultMaxLength else { return (true, text) }
+        return (false, "this read's own result would be \(PanelURLPolicy.wireLength(text)) characters, past "
+                + "the \(sheetsResultMaxLength)-character wire limit — ask for a smaller range or narrower columns.")
     }
 
     /// One error, one sentence — never `"\(error)"` verbatim when a cleaner extraction exists.

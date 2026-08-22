@@ -1,3 +1,4 @@
+import NormaKit
 import NormaProtocol
 import XCTest
 @testable import Norma
@@ -29,10 +30,32 @@ final class OfficeCommandConsumerTests: XCTestCase {
     }
 
     private var sent: [Sent] = []
+    private var scratchDirs: [URL] = []
 
     override func setUp() {
         super.setUp()
         sent = []
+    }
+
+    override func tearDown() {
+        for dir in scratchDirs { try? FileManager.default.removeItem(at: dir) }
+        scratchDirs = []
+        super.tearDown()
+    }
+
+    /// `OfficeRuntime.open` genuinely stages (copies) its argument onto disk before a `Driver` — even
+    /// a FAKE one — is ever reached (`OfficeAgentBrokerTests.writeDummyFile`'s own header makes the
+    /// identical point). Every path a test below routes through a real broker/runtime needs a real,
+    /// readable file on disk first, and that file must sit inside `makeSheetsWorld`'s own
+    /// `workingDirs` for the fence to pass.
+    private func makeScratchFile(named name: String = "budget.xlsx") -> String {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("officecommandconsumer-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        scratchDirs.append(dir)
+        let path = dir.appendingPathComponent(name).path
+        try? Data().write(to: URL(fileURLWithPath: path))
+        return path
     }
 
     private func makeConsumer() -> OfficeCommandConsumer {
@@ -212,5 +235,229 @@ final class OfficeCommandConsumerTests: XCTestCase {
         consumer.handle(command(hugeAction))
         XCTAssertEqual(sent.count, 1)
         XCTAssertLessThan(sent.first?.result?.count ?? Int.max, 1_000)
+    }
+
+    // MARK: - office-agent-tools T3: sheets.info / sheets.read — the first two verbs with real behaviour
+
+    /// A fake `Driver`, wired into a REAL `OfficeRuntime` and a REAL `OfficeAgentBroker` — no real
+    /// helper, no real LOK (mirrors `OfficeAgentBrokerTests.BrokerOfficeDriverRecorder`'s own
+    /// established shape; that one is `private` to its own file, so this is its own minimal copy
+    /// rather than a cross-file reuse). `open` always "succeeds" with spreadsheet metadata; `sheets
+    /// Info`/`sheetsRead` are the two knobs each test sets.
+    @MainActor
+    private func makeSheetsWorld(
+        workingDirs: [SessionDirEntry]? = [SessionDirEntry(path: "/tmp", locked: true)],
+        sheetsInfo: @escaping (String) async throws -> (sheets: [OfficeSheetInfo], activeSheet: String) = { _ in
+            throw OfficeHelperClientError.serverError(reason: "sheetsInfo not stubbed for this test")
+        },
+        sheetsRead: @escaping (String, String, String, Bool) async throws -> [[String]] = { _, _, _, _ in
+            throw OfficeHelperClientError.serverError(reason: "sheetsRead not stubbed for this test")
+        }
+    ) -> (consumer: OfficeCommandConsumer, runtime: OfficeRuntime) {
+        let driver = OfficeRuntime.Driver(
+            helperState: { .ready }, startHelper: { },
+            open: { _, _ in OfficeDocumentMetadata(
+                type: .spreadsheet, parts: 1, sizeTwips: OfficeDocumentSize(widthTwips: 100, heightTwips: 100)) },
+            close: { _ in },
+            save: { _, _ in "/tmp/unused-save" },
+            subscribeTiles: { _, _, _, _ in [] }, unsubscribeTiles: { _ in }, requestTiles: { _, _ in },
+            postKey: { _, _, _, _, _ in }, postMouse: { _, _, _, _, _, _, _, _ in },
+            postExtTextInput: { _, _, _, _ in },
+            clipboardCopy: { _, _ in nil }, clipboardCut: { _, _ in nil }, clipboardPaste: { _, _, _ in },
+            undo: { _ in }, redo: { _ in },
+            sheetsInfo: sheetsInfo, sheetsRead: sheetsRead,
+            stateDirectory: FileManager.default.temporaryDirectory)
+        let runtime = OfficeRuntime(sessionId: "s1", driver: driver)
+        let broker = OfficeAgentBroker(host: .init(
+            existingRuntime: { _ in nil },
+            runtime: { _ in runtime },
+            workingDirectories: { _ in workingDirs }))
+        let consumer = OfficeCommandConsumer(
+            sendResult: { [unowned self] sessionId, commandId, ok, result, imageBase64 in
+                self.sent.append(Sent(sessionId: sessionId, commandId: commandId, ok: ok,
+                                      result: result, imageBase64: imageBase64))
+            },
+            officeAgentBroker: { _ in broker })
+        return (consumer, runtime)
+    }
+
+    // MARK: Operand validation — malformed/missing, never defaulted, and the broker never reached
+
+    func testSheetsInfoRefusesAMissingPathWithoutTouchingTheBroker() async {
+        var driverCalled = false
+        let world = makeSheetsWorld(sheetsInfo: { _ in driverCalled = true; return ([], "") })
+        world.consumer.handle(command("office.sheets.info"))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.count, 1)
+        XCTAssertEqual(sent.first?.ok, false)
+        XCTAssertTrue(sent.first?.result?.contains("path") == true, "\(sent)")
+        XCTAssertFalse(driverCalled, "a missing path must refuse before the broker/driver is ever reached")
+    }
+
+    func testSheetsReadRefusesAMissingSheet() async {
+        let world = makeSheetsWorld()
+        world.consumer.handle(command("office.sheets.read", args: ["path": "/tmp/a.xlsx", "range": "A1"]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, false)
+        XCTAssertTrue(sent.first?.result?.contains("sheet") == true, "\(sent)")
+    }
+
+    func testSheetsReadRefusesAMissingRange() async {
+        let world = makeSheetsWorld()
+        world.consumer.handle(command("office.sheets.read", args: ["path": "/tmp/a.xlsx", "sheet": "Sheet1"]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, false)
+        XCTAssertTrue(sent.first?.result?.contains("range") == true, "\(sent)")
+    }
+
+    func testSheetsReadRefusesAMalformedRangeWithoutTouchingTheBroker() async {
+        var driverCalled = false
+        let world = makeSheetsWorld(sheetsRead: { _, _, _, _ in driverCalled = true; return [] })
+        world.consumer.handle(command("office.sheets.read",
+                                       args: ["path": "/tmp/a.xlsx", "sheet": "Sheet1", "range": "not-a-range"]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, false)
+        XCTAssertTrue(sent.first?.result?.contains("not-a-range") == true, "\(sent)")
+        XCTAssertFalse(driverCalled, "a malformed range must refuse before the broker/driver is ever reached")
+    }
+
+    /// The cell-count cap (`officeReadRangeMaxCells`) is checked BEFORE the broker is ever reached —
+    /// `OfficeCommandConsumer.handleSheetsRead`'s own header explains why (a request that was always
+    /// going to be refused must not pay for a cold helper boot). Proven the same way the malformed-
+    /// range test proves it: the driver would throw if it were ever asked.
+    func testSheetsReadRefusesAnOversizedRangeWithoutTouchingTheBroker() async {
+        var driverCalled = false
+        let world = makeSheetsWorld(sheetsRead: { _, _, _, _ in driverCalled = true; return [] })
+        let tooManyRows = officeReadRangeMaxCells + 1
+        world.consumer.handle(command("office.sheets.read",
+                                       args: ["path": "/tmp/a.xlsx", "sheet": "Sheet1", "range": "A1:A\(tooManyRows)"]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, false)
+        XCTAssertTrue(sent.first?.result?.contains("cells") == true, "\(sent)")
+        XCTAssertFalse(driverCalled, "an oversized range must refuse before the broker/driver is ever reached")
+    }
+
+    // MARK: The fence and drivability — mirroring the two refusal shapes the brief names
+
+    /// spec §5: "a probe outside the working dirs answers with the fence refusal, not the
+    /// app-not-running one." `info` (the drivability probe) still refuses with the FENCE's own wording
+    /// here, even though this test's fake broker/runtime IS reachable — the fence runs before rule 1
+    /// ever asks whether a runtime exists.
+    func testSheetsInfoOutsideWorkingDirsGetsTheFenceRefusalNotAppNotRunning() async {
+        let world = makeSheetsWorld(workingDirs: [SessionDirEntry(path: "/repo", locked: true)])
+        world.consumer.handle(command("office.sheets.info", args: ["path": "/etc/passwd"]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, false)
+        XCTAssertTrue(sent.first?.result?.contains("working directories") == true, "\(sent)")
+    }
+
+    func testSheetsInfoWithNoBrokerAtAllRefusesRatherThanCrashing() async {
+        let consumer = OfficeCommandConsumer(
+            sendResult: { [unowned self] sessionId, commandId, ok, result, imageBase64 in
+                self.sent.append(Sent(sessionId: sessionId, commandId: commandId, ok: ok,
+                                      result: result, imageBase64: imageBase64))
+            }) // officeAgentBroker defaults to `{ _ in nil }` — the host-gone case
+        consumer.handle(command("office.sheets.info", args: ["path": "/tmp/a.xlsx"]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, false)
+        XCTAssertFalse(sent.isEmpty)
+    }
+
+    // MARK: The happy path — real content flows through, formatted, capped, sent ok:true
+
+    func testSheetsInfoHappyPathReportsSheetsAndActiveSheet() async {
+        let path = makeScratchFile()
+        let world = makeSheetsWorld(
+            workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+            sheetsInfo: { _ in
+                ([OfficeSheetInfo(name: "Summary", usedEndColumn: 5, usedEndRow: 19),
+                  OfficeSheetInfo(name: "Empty", usedEndColumn: -1, usedEndRow: -1)], "Summary")
+            })
+        world.consumer.handle(command("office.sheets.info", args: ["path": path]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, true, "\(sent)")
+        let result = sent.first?.result ?? ""
+        XCTAssertTrue(result.contains("Summary"), result)
+        XCTAssertTrue(result.contains("A1:F20"), result) // column 5 -> F, row 19 -> 20 (1-based)
+        XCTAssertTrue(result.contains("Empty"), result)
+        XCTAssertTrue(result.lowercased().contains("empty"), result) // the -1/-1 sentinel renders as "empty"
+        XCTAssertTrue(result.contains("active"), result)
+    }
+
+    func testSheetsReadHappyPathReturnsTheValueGridAsTSV() async {
+        let path = makeScratchFile()
+        let world = makeSheetsWorld(
+            workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+            sheetsRead: { docId, sheet, range, formulas in
+                XCTAssertEqual(sheet, "Sheet1")
+                XCTAssertEqual(range, "A1:B2")
+                XCTAssertFalse(formulas)
+                return [["42", "Hello"], ["1", ""]]
+            })
+        world.consumer.handle(command("office.sheets.read",
+                                       args: ["path": path, "sheet": "Sheet1", "range": "A1:B2"]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, true, "\(sent)")
+        let result = sent.first?.result ?? ""
+        XCTAssertTrue(result.contains("42\tHello"), result)
+        XCTAssertTrue(result.contains("values"), result)
+        XCTAssertFalse(result.contains("formulas"), result)
+    }
+
+    func testSheetsReadHappyPathThreadsFormulasTrue() async {
+        let path = makeScratchFile()
+        let world = makeSheetsWorld(
+            workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+            sheetsRead: { _, _, _, formulas in
+                XCTAssertTrue(formulas)
+                return [["=SUM(A1:A2)"]]
+            })
+        world.consumer.handle(command("office.sheets.read",
+                                       args: ["path": path, "sheet": "Sheet1", "range": "A1",
+                                              "formulas": true]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, true, "\(sent)")
+        let result = sent.first?.result ?? ""
+        XCTAssertTrue(result.contains("=SUM(A1:A2)"), result)
+        XCTAssertTrue(result.contains("formulas"), result)
+    }
+
+    /// A sheet-not-found refusal reaches the agent as clean, composed-by-LOKBridge house voice, never
+    /// wrapped in this app's own "office helper refused:" framing — `OfficeCommandConsumer.message
+    /// (for:)`'s own doc explains why `OfficeHelperClientError.serverError`'s bare `reason` is used
+    /// rather than its `.description`.
+    func testSheetsReadSheetNotFoundSurfacesTheBridgesOwnMessageCleanly() async {
+        let path = makeScratchFile()
+        let world = makeSheetsWorld(
+            workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+            sheetsRead: { _, _, _, _ in
+                throw OfficeHelperClientError.serverError(
+                    reason: "no sheet named \"Nope\" in doc-1 — this workbook has: Sheet1, Sheet2")
+            })
+        world.consumer.handle(command("office.sheets.read",
+                                       args: ["path": path, "sheet": "Nope", "range": "A1"]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, false)
+        let result = sent.first?.result ?? ""
+        XCTAssertTrue(result.contains("Sheet1, Sheet2"), result)
+        XCTAssertFalse(result.contains("office helper refused"), result)
+    }
+
+    /// The final belt: even though the requested range was well within `officeReadRangeMaxCells`, a
+    /// LOK answer this file did not anticipate (more/longer cells than the request implied) must not
+    /// grow the sent result unbounded — refused, not silently truncated.
+    func testASheetsReadResultIsCappedNotAllowedToGrowUnbounded() async {
+        let path = makeScratchFile()
+        let hugeRow = (0..<5_000).map { "cell-\($0)-" + String(repeating: "x", count: 20) }
+        let world = makeSheetsWorld(
+            workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+            sheetsRead: { _, _, _, _ in [hugeRow] })
+        world.consumer.handle(command("office.sheets.read",
+                                       args: ["path": path, "sheet": "Sheet1", "range": "A1:A1"]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, false, "an oversized answer must be refused, not sent as ok:true")
+        let result = sent.first?.result ?? ""
+        XCTAssertLessThan(result.utf16.count, PanelCommandConsumer.resultMaxLength)
+        XCTAssertFalse(result.contains("cell-0-"), "a capped refusal must not still carry the oversized content")
     }
 }
