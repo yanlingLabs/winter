@@ -417,6 +417,79 @@ final class OfficeAgentBrokerTests: XCTestCase {
                        "the rendered bytes must have LANDED on the real path, not merely been requested")
     }
 
+    /// **The drain, pinned.** This task's own live drills found that closing a document immediately
+    /// after `saveAndAwaitOutcome` resolves `.saved` — before LOK's own, separate
+    /// `.uno:ModifiedStatus=false` callback lands — kills the shared office helper roughly 4 times out
+    /// of 5 (`task-2-report.md`'s evidence table). `runOnce` now drains `dirty` back to `!= true`
+    /// before it returns OR lets rule 2's `defer` close anything. Proven here the same way a real edit
+    /// would drive it: the action injects `.modifiedChanged(true)` directly on the runtime (the fake
+    /// driver has no LOK behind it to fire the callback itself), `perform` must NOT return and rule
+    /// 2's close must NOT fire while dirty is still `true` after a successful save, and both must
+    /// happen once — and only once — the (also directly injected) `.modifiedChanged(false)` arrives,
+    /// mirroring LOK's own later, asynchronous round trip.
+    func testWriteVerbDrainsDirtyBeforeReturningAndBeforeClosingASelfOpenedDocument() async throws {
+        let scratch = makeScratchDirectory()
+        let path = scratch.appendingPathComponent("drain.xlsx").path
+        writeDummyFile(at: path)
+        let office = BrokerOfficeDriverRecorder()
+        let host = makeHost(office: office, dirs: [SessionDirEntry(path: scratch.path, locked: true)])
+        await host.directory.refresh()
+
+        final class ResultBox: @unchecked Sendable { var value: String? }
+        let resultBox = ResultBox()
+
+        let performTask = Task<String, Error> { @MainActor in
+            let value = try await host.officeAgentBroker.perform(
+                sessionId: "S1", path: path, access: .write, requestId: UUID().uuidString
+            ) { runtime, docId in
+                // A rendered file the driver's own `saveTempPaths` names — mirrors every OTHER
+                // write-success test's own setup (`testWriteVerbSavesThroughAndReturnsTheActions
+                // ResultOnSuccess`): the recorder's un-set fallback path never exists on disk, so
+                // WITHOUT this, `placeAtomically`'s own stat-before-rename throws and the save
+                // resolves `.failed` — never reaching the drain this test exists to prove at all.
+                let rendered = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("drain-\(UUID().uuidString).xlsx").path
+                try? Data("edited bytes".utf8).write(to: URL(fileURLWithPath: rendered))
+                office.saveTempPaths[docId] = rendered
+                // The realistic flow: a real edit's own `.uno:ModifiedStatus=true` callback would
+                // land through exactly this door (`ShellSessionHost.wireOfficeTileCallbacks`'s own
+                // routing) — injected directly since the fake driver has nothing behind it to fire it.
+                runtime.handle(documentEvent: .modifiedChanged(true), docId: docId)
+                return "edited"
+            }
+            resultBox.value = value
+            return value
+        }
+
+        let runtime = host.officeRuntime(for: "S1")
+        let opened = await waitUntil { runtime.stateSnapshot.documents[path] != nil }
+        XCTAssertTrue(opened, "setup: never opened")
+        let docId = try XCTUnwrap(runtime.stateSnapshot.documents[path]?.docId)
+
+        let saved = await waitUntil { office.saveCalls.count == 1 }
+        XCTAssertTrue(saved, "setup: save never reached the driver")
+
+        // A beat for `perform` to have wrongly returned/closed already, if the drain were absent.
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertNil(resultBox.value, "perform must not return while dirty is still true after a "
+                     + "successful save — the drain must still be waiting")
+        XCTAssertEqual(office.closeCalls.count, 0, "rule 2's close must not fire before the drain resolves")
+        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.dirty, true,
+                       "sanity: still dirty — no ModifiedStatus=false injected yet")
+
+        // LOK's own later, separate callback, arriving asynchronously exactly as it does in production.
+        runtime.handle(documentEvent: .modifiedChanged(false), docId: docId)
+
+        let result = try await performTask.value
+        XCTAssertEqual(result, "edited")
+        // The driver-level close runs inside a spawned effect Task (the same race
+        // `testOpensAPathThatIsNotCurrentlyOpenAndClosesItAfterward` already documents and waits
+        // out) — `performTask.value` resuming proves the REDUCER's state settled, not that the
+        // driver has been told yet.
+        let closed = await waitUntil { office.closeCalls.count == 1 }
+        XCTAssertTrue(closed, "close must fire only once the drain has resolved")
+    }
+
     /// **Deliberately built on the ADOPTED shape, not the open-fresh one.** An open-fresh write that
     /// fails is closed by this call's own `defer` the instant the error propagates (rule 2 — close
     /// only what you opened, unconditionally) — a document nobody was ever watching, so there is
@@ -645,26 +718,23 @@ final class OfficeAgentBrokerTests: XCTestCase {
     /// step — mirroring `OfficeRuntimeLiveTests.postRealEdit` verbatim, not merely "in shape".
     ///
     /// **Why not `OfficeRuntime.postKeyEvent(path:)`/`postMouseEvent(path:)`, this file's own first
-    /// attempt: those doors are fire-and-forget.** They append to `OfficeRuntime`'s own
-    /// `inputChainTail` and return immediately; the caller has no way to await delivery. `dirty`
-    /// flips true on the FIRST mutating event LOK actually receives (the "T"), not the last one
-    /// posted — so waiting on `dirty == true` and then immediately asking the broker to save races
-    /// the CHAIN'S OWN TAIL: the trailing Return keystroke can still be in flight when
-    /// `saveAndAwaitOutcome` fires, serializing a mid-edit (uncommitted Calc cell editor) document,
-    /// and worse, a keystroke still in the chain can land AFTER rule 2's `defer`-close destroys the
-    /// docId it was addressed to. Builds 2 and 3 of this task hit exactly this: build 2 (no Return
-    /// at all) and build 3 (Return posted but racing the save) both produced a saved file that a
-    /// fresh reopen could not re-parse — the helper process itself died (`phase` went `.failed` with
-    /// no per-path `openFailures` entry, i.e. `OfficeRuntimeReducer`'s `.helperDied` full-state
-    /// reset, not a per-document refusal). `postRealEdit` has no such race: `client.postKey`/
-    /// `postMouse` are themselves `async throws` — delivery to LOK is CONFIRMED before the call
-    /// returns, so there is no chain tail left to race the save or to land on a dead docId.
+    /// attempt: those doors are fire-and-forget API surface, real regardless of the drain fix below.**
+    /// They append to `OfficeRuntime`'s own `inputChainTail` and return immediately; the caller has no
+    /// way to await delivery, so `dirty == true` only proves the FIRST posted event landed, not the
+    /// last. **This file's build 2/3 failures were originally attributed to that gap — WRONG, corrected
+    /// after the fact:** repeated isolated reruns showed this SAME awaited `client.postKey` mechanism
+    /// (used here from the start of build 4 onward, no chain-tail possible) still failed the
+    /// close-then-reopen live drill roughly 4 times out of 5. The actual cause was the broker closing
+    /// immediately after a successful save, before LOK's own `.uno:ModifiedStatus=false` callback
+    /// landed — fixed by `OfficeAgentBroker.drainDirty`, not by anything about how these keystrokes are
+    /// posted. Builds 2–5's own account, and the diagnostic matrix that found the real cause, are in
+    /// `task-2-report.md`'s appendix.
     ///
-    /// This is a genuine, disclosed finding about `OfficeRuntime`'s own input doors (see this file's
-    /// concerns list in the task report), not fixed here — Task 2's scope is the broker, reusing
-    /// `OfficeRuntime` as it stands, never modifying it. Task 3's mutation verbs will need either an
-    /// awaitable drain on those doors or a mutation mechanism that is itself awaitable end to end
-    /// (as this helper now is).
+    /// The fire-and-forget fact about `postKeyEvent(path:)`/`postMouseEvent(path:)` stands on its own
+    /// regardless: `dirty == true` still only proves the FIRST posted event landed, and Task 3's
+    /// mutation verbs (which will very likely use these exact doors, or ones shaped like them) should
+    /// know that going in — disclosed in this file's own concerns list in the task report as an API
+    /// hazard, not the helper-kill mechanism it was first mistaken for.
     private func typeOneCharacter(client: OfficeHelperClient, docId: String) async throws {
         try await client.postMouse(docId: docId, part: 0, type: .buttonDown, xTwips: 100, yTwips: 100,
                                    count: 1, buttons: 1, modifiers: 0)
@@ -801,9 +871,18 @@ final class OfficeAgentBrokerTests: XCTestCase {
     }
 
     /// **A not-open document round-trips and is closed after.** Proven by: the bytes on disk changed
-    /// (the write really happened), the document is gone from `documents[path]` the instant the
+    /// (the write really happened), those bytes are a well-formed ODF zip carrying the typed edit (not
+    /// merely "different" — the house norm, "a write is proven by the saved file's own bytes, never by
+    /// a return code," made literal), the document is gone from `documents[path]` the instant the
     /// broker call returns (rule 2, self-opened is self-closed), and reopening it shows the edit was
     /// genuinely persisted, not merely staged (the "round-trip" the brief's own step line names).
+    ///
+    /// **This is also this task's committed regression tripwire for the helper-kill bug the drain
+    /// fixes** (`OfficeAgentBroker.drainDirty`'s own header, `task-2-report.md`'s evidence table):
+    /// close-then-immediate-reopen on the SAME runtime is exactly the shape that measured ~4/5 fatal
+    /// to the shared helper before the drain existed. Left on the same runtime deliberately, not moved
+    /// to a fresh host/supervisor — a fresh host would prove the WRITE survived but could no longer
+    /// prove the HELPER did, which is the half of this drill that actually caught the bug.
     func testLiveANotOpenDocumentRoundTripsThroughTheBrokerAndIsClosedAfterward() async throws {
         let helperURL = Bundle.main.bundleURL.deletingLastPathComponent()
             .appendingPathComponent("NormaOfficeHelper")
@@ -865,6 +944,17 @@ final class OfficeAgentBrokerTests: XCTestCase {
                        + "close is synchronous in the reducer's own state")
         XCTAssertNotEqual(officeFileStat(atPath: docPath), beforeStat, "the save never reached the real path")
 
+        // The house norm made literal, BEFORE any reopen: a well-formed ODF zip (PK signature, the
+        // mimetype/content.xml entries a valid .ods must carry) with the typed edit inside it — proven
+        // from the saved file's own bytes, independent of whether LOK can later re-parse them. This is
+        // what pinned, empirically, that the bug the drain fixes was ALWAYS a helper-liveness problem,
+        // never a corruption one: every diagnostic sample this task collected, including every failing
+        // one, passed exactly this check (`task-2-report.md`'s evidence table).
+        let savedBytes = try Data(contentsOf: URL(fileURLWithPath: docPath))
+        XCTAssertEqual(savedBytes.prefix(4), Data([0x50, 0x4B, 0x03, 0x04]), "not a well-formed zip")
+        XCTAssertTrue(savedBytes.range(of: Data("mimetype".utf8)) != nil, "missing the ODF mimetype entry")
+        XCTAssertTrue(savedBytes.range(of: Data("content.xml".utf8)) != nil, "missing content.xml")
+
         // Round-trip: reopen and confirm the edit was genuinely persisted, not merely staged.
         runtime.open(docPath)
         let reopened = await waitUntilLive(timeout: 90) {
@@ -872,8 +962,10 @@ final class OfficeAgentBrokerTests: XCTestCase {
         }
         XCTAssertTrue(reopened, "the saved file never reopened — phase \(runtime.stateSnapshot.phase)")
         XCTAssertNotNil(runtime.stateSnapshot.documents[docPath],
-                        "reopen failed — the save may have corrupted the file: "
-                          + "\(runtime.stateSnapshot.openFailures[docPath] ?? "no reason recorded")")
+                        "reopen failed — phase=\(runtime.stateSnapshot.phase) reason="
+                          + "\(runtime.stateSnapshot.openFailures[docPath] ?? "no reason recorded") — "
+                          + "the bytes above already proved this is not corruption; see "
+                          + "OfficeAgentBroker.drainDirty and task-2-report.md if this regresses")
         XCTAssertEqual(runtime.stateSnapshot.documents[docPath]?.dirty, false,
                        "a fresh reopen of the saved bytes starts clean")
 

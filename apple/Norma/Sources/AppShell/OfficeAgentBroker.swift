@@ -14,16 +14,21 @@ import NormaKit
 /// (`OfficeRuntime.stageDocument`), `placeAtomically`, the save waiters (`saveAndAwaitOutcome`),
 /// `officeDocumentIsDirty`, the read-only-format predicate, and the request queue's no-nesting rule
 /// are all `OfficeRuntime`'s own, called through its existing public doors (`open`/`close`/
-/// `saveAndAwaitOutcome`) — this file adds no new call into the helper, no new LOK call, and no
-/// change to `OfficeRuntime.swift` at all. The one genuinely new piece of machinery is
-/// `awaitOpen(_:path:)` below, a bridge over `open`'s existing fire-and-forget contract (see its own
-/// header for why that has to live here rather than as a new `OfficeRuntime` method).
+/// `saveAndAwaitOutcome`/`$state`) — this file adds no new call into the helper, no new LOK call, and
+/// no change to `OfficeRuntime.swift` at all. Two genuinely new pieces of machinery live here:
+/// `awaitOpen(_:path:)`, a bridge over `open`'s existing fire-and-forget contract, and
+/// `drainDirty(_:path:)`, a bridge over the gap between "the save landed" and "LOK's own bookkeeping
+/// caught up" — see each one's own header for why it has to live here rather than as a new
+/// `OfficeRuntime` method.
 ///
 /// **The five rules, briefly — each one's own reasoning lives at its call site in `runOnce` below:**
 /// 1. Adopt or open (`runOnce`'s branch on `existingRuntime(sessionId)`).
 /// 2. Close only what you opened (`runOnce`'s `defer`, gated on `!adopted`).
 /// 3. Dirty refusal, write-only, adopted-only (`runOnce`'s `officeDocumentIsDirty` check).
-/// 4. Save-through with a real awaited outcome (`runOnce`'s `saveAndAwaitOutcome` switch).
+/// 4. Save-through with a real awaited outcome, AND a drain of LOK's own post-save bookkeeping before
+///    returning or closing (`runOnce`'s `saveAndAwaitOutcome` switch, `.saved`'s own `drainDirty`
+///    call) — the drain was added after this task's own live drills measured its absence killing the
+///    shared office helper; see `drainDirty`'s own header for the full account.
 /// 5. Fence (`officeAgentResolvedPathWithinFence`, checked before anything else runs).
 ///
 /// ## The double-mutation story: option (a), an idempotency token, memoizing the WHOLE outcome
@@ -197,8 +202,20 @@ final class OfficeAgentBroker {
         // half — the caller actually being told — true for the agent's own tool result too).
         switch await runtime.saveAndAwaitOutcome(resolvedPath) {
         case .saved:
+            // Rule 4's own completion — see `drainDirty`'s own header for why this is load-bearing,
+            // not belt-and-braces: this runs BEFORE `return`, so it also runs before the `defer`
+            // above can close the document (a `defer` fires at the function's actual exit, after
+            // every statement in its body, including this `await`).
+            await drainDirty(runtime, path: resolvedPath)
             return result
         case .failed(let reason):
+            // Dirty is held `true` here too (`OfficeRuntime`'s own `saveFailedPendingSave`), but no
+            // drain is possible — LOK's own `ModifiedStatus=false` is never coming for a save that
+            // never reached the real path (`OfficeRuntimeReducer.saveFailed`'s own header states
+            // this), so there is nothing to wait FOR. The `defer` above closes immediately on this
+            // path, exactly as before; whether that immediate close is itself ever lethal the way an
+            // undrained SUCCESS close measured is remains undiagnosed — see `task-2-report.md`'s
+            // concerns.
             throw OfficeAgentBrokerError.saveFailed(path: resolvedPath, reason: reason)
         case .noModel:
             if officeDocumentIsReadOnlyFormat(path: resolvedPath) {
@@ -208,6 +225,66 @@ final class OfficeAgentBroker {
             }
             throw OfficeAgentBrokerError.saveFailed(path: resolvedPath, reason:
                 "there was no open document to save.")
+        }
+    }
+
+    /// **Rule 4's own completion, added after this task's own live drills measured its absence
+    /// killing the shared office helper.** `saveAndAwaitOutcome`'s `.saved` resolves the instant
+    /// `placeAtomically` lands on disk — but `OfficeRuntimeReducer.saveSucceeded`'s own header states
+    /// plainly that an ORDINARY save leaves `dirty` untouched: `documents[path].dirty` stays `true`
+    /// until LOK's own SEPARATE, later `.uno:ModifiedStatus=false` callback arrives (only the two
+    /// app-held cases, `restoredPendingSave`/`saveFailedPendingSave`, clear it synchronously inside
+    /// `.saveSucceeded` itself — see that reducer arm's own comment for exactly which two and why;
+    /// this function's own fast-path guard below is what makes it a no-op for precisely those two).
+    ///
+    /// **This is not a cosmetic ordering nicety — it is the fix for a measured helper-kill.** This
+    /// task's own diagnostic matrix (`task-2-report.md`'s evidence table) found that closing a
+    /// document immediately after `.saved`, before that real LOK callback lands, kills
+    /// `NormaOfficeHelper` roughly 4 times out of 5 — and every OTHER open document in the app rides
+    /// on that SAME one process (`OfficeHelperRequestQueue` is app-wide, per this file's own header).
+    /// The write itself is never in question by the time this runs (`saveAndAwaitOutcome` already
+    /// confirmed the bytes landed) — this exists purely to keep the ONE shared helper alive for
+    /// whatever opens next.
+    ///
+    /// **Bounded, and the timeout's own failure mode is deliberately silent.** 15s, this file's own
+    /// live-wait convention; on timeout, proceeds to close/return anyway rather than report an error —
+    /// the save already genuinely landed, and turning a landed write into a reported failure because
+    /// the CLEANUP took too long would be a worse lie than the one this function exists to prevent.
+    /// A helper that is still unstable 15s after a successful save is a real, undiagnosed condition
+    /// this silently absorbs rather than solves — disclosed in `task-2-report.md`'s concerns, not
+    /// solved here.
+    ///
+    /// Exits on `dirty != true`, not merely `dirty == false` — a document that DISAPPEARED entirely
+    /// during the drain (a session tearing down mid-write) has just as little left to wait for as one
+    /// that genuinely went clean, and treating only the latter as terminal would spin this function
+    /// for the full 15s bound over a runtime that already moved on.
+    ///
+    /// Mirrors `awaitOpen`'s own Combine-sink shape (a `resolved` guard, `sink`, explicit cancel) —
+    /// this file's own established pattern for bridging a fire-and-forget/eventually-consistent
+    /// `OfficeRuntime` signal into something `async` code can wait on — with a second, parallel
+    /// MainActor `Task` racing the timeout; both sites guard on the SAME `resolved` flag before
+    /// acting, and since neither has an `await` between checking it and setting it, only one of them
+    /// can ever actually resume the continuation.
+    private static func drainDirty(_ runtime: OfficeRuntime, path: String) async {
+        guard runtime.stateSnapshot.documents[path]?.dirty == true else { return }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            var resolved = false
+            var cancellable: AnyCancellable?
+            let timeoutTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 15_000_000_000)
+                guard !resolved else { return }
+                resolved = true
+                cancellable?.cancel()
+                continuation.resume()
+            }
+            cancellable = runtime.$state.sink { state in
+                guard !resolved else { return }
+                guard state.documents[path]?.dirty != true else { return }
+                resolved = true
+                timeoutTask.cancel()
+                cancellable?.cancel()
+                continuation.resume()
+            }
         }
     }
 
