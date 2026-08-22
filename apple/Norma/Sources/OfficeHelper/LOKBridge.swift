@@ -1875,10 +1875,41 @@ final class LOKBridge: OfficeDocumentBridge {
     /// `[[""]]`, not `[]`. A trailing `"\n"` (there almost always is one — LOK's own convention for a
     /// Calc selection copy) would otherwise produce one spurious wholly-empty trailing row; every
     /// OTHER embedded newline is a real row boundary and must survive.
+    ///
+    /// **office-agent-tools T3 review (I3) — characterized live before touching this function, not
+    /// assumed.** A purpose-built fixture (`embedded-delimiters.ods`, a cell with a real
+    /// `<text:tab/>` and a second `<text:p>` paragraph — ODF's own in-cell tab and line-break
+    /// shapes) dumped through the real `getTextSelection` mechanism read back as
+    /// `"lineone\u{01}tabbed linetwo\tNEXTCELL"` for a two-cell selection. Two findings, neither
+    /// the one the review's own framing assumed:
+    ///
+    /// 1. **The splitting above was never actually corrupted.** Calc's own plain-text clipboard
+    ///    export substitutes an EMBEDDED tab with U+0001 (Start of Heading) — never the real
+    ///    U+0009 this function splits on — specifically so an in-cell tab can never be confused
+    ///    with the real cell-boundary delimiter. Splitting on literal `"\t"`/`"\n"` above is safe
+    ///    exactly because Calc itself keeps those bytes reserved for real boundaries.
+    /// 2. **An embedded line break (`<text:p>` count > 1) is LOSSY, not corrupting**: it copies
+    ///    through as a plain SPACE, not U+000A and not any other distinguishable marker — genuinely
+    ///    indistinguishable, after the fact, from a space the user actually typed. Nothing this
+    ///    function does can recover that distinction; disclosed in `task-3-report.md`'s concerns,
+    ///    not silently accepted as "handled."
+    ///
+    /// U+0001 is substituted back to a real tab HERE, in each cell's own value — not left as an
+    /// opaque control character an agent would have no way to interpret. Safe to do AFTER
+    /// splitting, never before: by finding (1) above, only a genuine cell boundary is ever a real
+    /// U+0009 at the point this function's own `.components(separatedBy: "\t")` runs, so this later
+    /// substitution can never retroactively misinterpret a real delimiter as this fix's own target.
+    /// The wire-level RE-ambiguity this reintroduces (a cell's OWN value now containing a real tab,
+    /// same as `formatSheetsRead`'s own join separator) is closed one layer up, at the point that
+    /// join actually happens — see `OfficeCommandConsumer.formatSheetsRead`'s own quoting.
     private func parseTSVGrid(_ text: String) -> [[String]] {
         guard !text.isEmpty else { return [] }
         let trimmed = text.hasSuffix("\n") ? String(text.dropLast()) : text
-        return trimmed.components(separatedBy: "\n").map { $0.components(separatedBy: "\t") }
+        return trimmed.components(separatedBy: "\n").map { row in
+            row.components(separatedBy: "\t").map { cell in
+                cell.replacingOccurrences(of: "\u{01}", with: "\t")
+            }
+        }
     }
 
     /// office-agent-tools T3 — sheet names, each one's used range, and the active sheet's name.

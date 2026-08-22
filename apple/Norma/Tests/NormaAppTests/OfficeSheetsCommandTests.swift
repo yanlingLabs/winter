@@ -507,4 +507,38 @@ final class OfficeSheetsCommandTests: XCTestCase {
         let runtime = host.officeRuntime(for: "S1")
         XCTAssertNil(runtime.stateSnapshot.documents[path], "a fenced-out path must never reach the helper at all")
     }
+
+    /// office-agent-tools T3 review (I3) — a cell containing BOTH an embedded tab and an embedded
+    /// line break, read against real content, asserted literally against what live-characterization
+    /// proved (`LOKBridge.parseTSVGrid`'s own header has the full account and citation of the raw
+    /// bytes this test's own fixture produces). `embedded-delimiters.ods` (built the same way
+    /// `sparse-sheets.ods` was) has A1 = `<text:tab/>`-and-two-`<text:p>`-paragraph content, B1 an
+    /// ordinary cell — one REAL cell boundary for A1's own embedded delimiters to be confused with,
+    /// if the fix were wrong.
+    func testLiveACellWithAnEmbeddedTabAndLineBreakRoundTripsTheTabAndQuotesTheCell() async throws {
+        try requireLiveEngine()
+        let path = try makeWritableCopy(of: "embedded-delimiters.ods")
+        let stateDir = makeScratchDirectory()
+        let host = makeLiveHost(stateDir: stateDir, dirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)])
+        await host.directory.refresh()
+
+        let sent = await send(command("office.sheets.read",
+                                       args: ["path": path, "sheet": "Sheet1", "range": "A1:B1"],
+                                       sessionId: "S1"), through: host)
+        XCTAssertTrue(sent.ok, "\(sent)")
+        let result = try XCTUnwrap(sent.result)
+
+        // The embedded tab round-trips to a REAL tab inside A1's own value, and — because that
+        // would otherwise collide with the real column separator — A1 is quoted (RFC4180-style)
+        // in the flattened wire text. B1, with no embedded delimiter, is never quoted.
+        XCTAssertTrue(result.contains("\"lineone\ttabbed linetwo\"\tNEXTCELL"), result)
+
+        // The embedded LINE BREAK is disclosed-lossy, not corrupting: Calc's own plain-text export
+        // converts it to a plain space, genuinely indistinguishable after the fact from a space the
+        // user actually typed — "tabbed" and "linetwo" (the two original paragraphs) are joined by
+        // exactly one space, never a stray tab or a row split that would misalign B1.
+        XCTAssertFalse(result.contains("tabbed\nlinetwo"), "an embedded line break must never surface as a real row split: \(result)")
+        XCTAssertEqual(result.components(separatedBy: "\n").count, 2, // header line + exactly one content row
+                       "A1's embedded delimiters must never manufacture an extra row: \(result)")
+    }
 }

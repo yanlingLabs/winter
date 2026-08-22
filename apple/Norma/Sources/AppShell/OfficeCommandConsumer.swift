@@ -270,8 +270,23 @@ struct OfficeCommandConsumer {
     private static func formatSheetsRead(sheet: String, range: String, formulas: Bool, rows: [[String]]) -> String {
         let header = "\(sheet)!\(range) (\(formulas ? "formulas" : "values")):"
         guard !rows.isEmpty else { return "\(header) (nothing in this range)" }
-        let grid = rows.map { $0.joined(separator: "\t") }.joined(separator: "\n")
+        let grid = rows.map { row in row.map(quotedIfNeededForTSV).joined(separator: "\t") }.joined(separator: "\n")
         return "\(header)\n\(grid)"
+    }
+
+    /// office-agent-tools T3 review (I3) — the wire-side half of the fix.
+    /// `LOKBridge.parseTSVGrid`'s own header has the live-characterized evidence: an in-cell tab
+    /// substitutes back to a REAL tab character in each cell's own VALUE (safe there — it never
+    /// existed as a real delimiter at split time). Re-joining cells with `"\t"` HERE, unquoted,
+    /// would reintroduce the exact ambiguity that substitution just resolved — this cell's own tab
+    /// would again be indistinguishable from the real column separator. RFC4180-style quoting
+    /// (double the cell in `"..."`, doubling any literal `"` inside it) applies ONLY to a cell that
+    /// actually needs it — the overwhelming common case (no embedded tab, no literal quote) is
+    /// passed through byte-identical, so this changes nothing for any read this task's own live
+    /// drills already prove correct.
+    private static func quotedIfNeededForTSV(_ cell: String) -> String {
+        guard cell.contains("\t") || cell.contains("\"") else { return cell }
+        return "\"\(cell.replacingOccurrences(of: "\"", with: "\"\""))\""
     }
 
     /// The final belt — `sheetsResultMaxLength`, checked in the wire's own UTF-16-code-unit unit
