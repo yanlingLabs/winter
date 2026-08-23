@@ -2429,6 +2429,44 @@ final class LOKBridge: OfficeDocumentBridge {
         return cursor
     }
 
+    /// Fix-round review item 1 (resize-verb positioning) — factored out of
+    /// `writeOneCellOnDedicatedThread`'s own original inline block so both that function and
+    /// `sheetsResizeOnDedicatedThread`'s anchor check below share ONE verification path rather than
+    /// two independently-written copies of the same column/row comparison (a maintenance/drift risk
+    /// a shared helper removes by construction). Positions via the proven single-cell
+    /// `.uno:GoToCell` mechanism every write verb in this file already uses — `cellCursorOnDedicatedThread`'s
+    /// own header has the full "why a synchronous query, not a callback" story and the live probe
+    /// that ruled out the callback alternative — then confirms the agent view's cursor actually
+    /// reached `address` BEFORE the caller does anything that depends on that position. Throws
+    /// `positionVerificationFailed` on any mismatch, including an unparseable `address` itself
+    /// (`landedAt: nil` — the cursor was never even queried, since there is nothing to compare
+    /// against); never returns a partial or best-guess result.
+    private func positionAndVerifyOnDedicatedThread(_ doc: OpenDocument, docId: String, viewId: Int32, part: Int,
+                                                     address: String) throws {
+        guard let target = Self.parseSingleCellReference(address) else {
+            throw SaveError.positionVerificationFailed(docId: docId, address: address, landedAt: nil)
+        }
+        _ = selectionTextOnDedicatedThread(doc, docId: docId, viewId: viewId, part: part, range: address, formulas: false)
+        try verifyCellCursorOnDedicatedThread(doc, docId: docId, expectedAddress: address, target: target)
+    }
+
+    /// The comparison half of `positionAndVerifyOnDedicatedThread`, split out so
+    /// `sheetsResizeOnDedicatedThread` can re-check a position established by an EARLIER `GoToCell`
+    /// (its own span selection) against an already-computed `target`, without issuing a second,
+    /// redundant `GoToCell` to the same effective anchor. Throws `positionVerificationFailed` on any
+    /// mismatch, `landedAt` carrying the best available description of where the cursor actually was
+    /// (`nil` only when the query itself returned nothing usable).
+    private func verifyCellCursorOnDedicatedThread(_ doc: OpenDocument, docId: String, expectedAddress: String,
+                                                    target: (column: Int, row: Int)) throws {
+        let landed = cellCursorOnDedicatedThread(doc)
+        let landedColumnRow: (column: Int, row: Int)?
+        if case .at(_, let column, let row)? = landed { landedColumnRow = (column, row) } else { landedColumnRow = nil }
+        guard let landedColumnRow, landedColumnRow.column == target.column, landedColumnRow.row == target.row else {
+            let landedDescription = landedColumnRow.map { Self.formatCellReference(column: $0.column, row: $0.row) }
+            throw SaveError.positionVerificationFailed(docId: docId, address: expectedAddress, landedAt: landedDescription)
+        }
+    }
+
     /// office-agent-tools T4 — writes each `(cellAddresses[i], cellValues[i])` pair, in order, on the
     /// AGENT view (same isolation reasoning `sheetsReadOnDedicatedThread`'s own I1 fix established:
     /// nothing this does is ever visible to a human's own primary-view selection).
@@ -2561,18 +2599,10 @@ final class LOKBridge: OfficeDocumentBridge {
         // Fix-round review (Important #3) — position, then VERIFY the agent view's cursor actually
         // reached `address` before typing anything. See this function's own header above for the
         // full "why," and `cellCursorOnDedicatedThread`'s own header for the mechanism and the live
-        // probe that ruled out the callback-based alternative first.
-        _ = selectionTextOnDedicatedThread(doc, docId: docId, viewId: viewId, part: part, range: address, formulas: false)
-        guard let target = Self.parseSingleCellReference(address) else {
-            throw SaveError.positionVerificationFailed(docId: docId, address: address, landedAt: nil)
-        }
-        let landed = cellCursorOnDedicatedThread(doc)
-        let landedColumnRow: (column: Int, row: Int)?
-        if case .at(_, let column, let row)? = landed { landedColumnRow = (column, row) } else { landedColumnRow = nil }
-        guard let landedColumnRow, landedColumnRow.column == target.column, landedColumnRow.row == target.row else {
-            let landedDescription = landedColumnRow.map { Self.formatCellReference(column: $0.column, row: $0.row) }
-            throw SaveError.positionVerificationFailed(docId: docId, address: address, landedAt: landedDescription)
-        }
+        // probe that ruled out the callback-based alternative first. `positionAndVerifyOnDedicatedThread`
+        // is this exact check, factored out so `sheetsResizeOnDedicatedThread`'s own anchor
+        // verification (fix-round review item 1) shares it rather than re-deriving it.
+        try positionAndVerifyOnDedicatedThread(doc, docId: docId, viewId: viewId, part: part, address: address)
 
         if text.hasPrefix("=") {
             for (charCode, keyCode) in formulaKeyEvents {
@@ -2728,11 +2758,27 @@ final class LOKBridge: OfficeDocumentBridge {
     /// sheet's full width/height itself). None of the four commands
     /// (`InsertRowsBefore`/`DeleteRows`/`InsertColumnsBefore`/`DeleteColumns`) takes an argument —
     /// they act entirely on the CURRENT SELECTION, which is why positioning has to happen first, on
-    /// the SAME proven GoToCell mechanism every other verb in this file uses, with the SAME disclosed
-    /// straggler residual (not re-derived here — see `writeOneCellOnDedicatedThread`'s own header for
-    /// the pointer). `getDataArea` needs no `setPart`/selection of its own (T3 review C2's own
-    /// finding: it takes `nPart` directly) — reused here exactly as `sheetsInfoOnDedicatedThread`
-    /// already does, including its `(0,0)` empty-vs-A1-only disambiguation.
+    /// the SAME proven GoToCell mechanism every other verb in this file uses. `getDataArea` needs no
+    /// `setPart`/selection of its own (T3 review C2's own finding: it takes `nPart` directly) —
+    /// reused here exactly as `sheetsInfoOnDedicatedThread` already does, including its `(0,0)`
+    /// empty-vs-A1-only disambiguation.
+    ///
+    /// **Fix-round review item 1 — the GoToCell straggler's own residual, CLOSED here too, not left
+    /// at "same as `set`."** This function originally carried the identical unverified-position risk
+    /// `writeOneCellOnDedicatedThread` had before Important #3's fix — worse here, per the
+    /// coordinator's own review: "clobbering one cell damages one value the user can see and undo;
+    /// inserting or deleting rows at the wrong offset shifts every row below the mistake" (formulas
+    /// keep computing, references keep resolving — silent, hard-to-notice, harder-to-undo
+    /// misalignment of an entire sheet). Closed with the SAME `positionAndVerifyOnDedicatedThread`/
+    /// `verifyCellCursorOnDedicatedThread` mechanism `set` uses, applied at TWO points below: once
+    /// against a single-cell ANCHOR (the span's own first row/column — known semantics, proven
+    /// mechanism) BEFORE the span is ever selected, and once again immediately after the span
+    /// selection, re-checking the SAME anchor target. The second check is possible only because it
+    /// was actually measured live, not assumed: see the comment immediately above the anchor logic
+    /// below for the 6 captured observations (2 anchors, including 2 away from the sheet origin, zero
+    /// outliers) proving `.uno:CellCursor` reports a row/column-only span's own anchor cell, not
+    /// something uncharacterized. Both checks throw `SaveError.positionVerificationFailed` before the
+    /// resize command is ever dispatched — deletion-red proven (task-4-report.md).
     private func sheetsResizeOnDedicatedThread(docId: String, sheet: String, dimension: OfficeSheetsResizeDimension,
                                                op: OfficeSheetsResizeOp, selectionRange: String) throws -> (usedEndColumn: Int, usedEndRow: Int) {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
@@ -2748,8 +2794,48 @@ final class LOKBridge: OfficeDocumentBridge {
         doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
         doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(part))
 
+        // Fix-round review item 1 — verify the ANCHOR before ever selecting the full span or
+        // dispatching the resize, AND re-verify after the span selection. The coordinator's own
+        // framing: "clobbering one cell damages one value the user can see and undo; inserting or
+        // deleting rows at the wrong offset shifts every row below the mistake" — a worse,
+        // harder-to-notice outcome than the cell-level risk `writeOneCellOnDedicatedThread` already
+        // closed, so this gets the identical treatment, PLUS the extra check the cell case has no
+        // equivalent need for.
+        //
+        // `selectionRange` is always `"<first>:<last>"` (`OfficeCommandConsumer.handleSheetsResize`'s
+        // own construction: `"\(startRow):\(startRow + count - 1)"` for rows, digits; or
+        // `"\(officeColumnLetters(startColumn)):..."` for columns, letters) — `<first>` is the exact
+        // row/column the resize is anchored on. `<first>` combined with a synthetic, fixed value on
+        // the OTHER axis (column A for a row anchor, row 1 for a column anchor) is an ordinary
+        // SINGLE-CELL address, the exact shape `positionAndVerifyOnDedicatedThread` already proves
+        // reliable against — reused verbatim, not re-derived, for the anchor check below.
+        //
+        // **The post-span check is possible only because it was actually measured, not assumed**:
+        // what `getCommandValues(".uno:CellCursor")` reports for a ROW-ONLY/COLUMN-ONLY span
+        // selection (as opposed to the single-cell selection the anchor check above uses) was
+        // genuinely uncharacterized before this fix round. A temporary diagnostic captured it live —
+        // 6 observations across 2 anchors, including 2 away from the sheet origin (row 3 / column C,
+        // not just row 1 / column A, which alone could not distinguish "reports the span's own
+        // anchor" from "always reports (0,0)") — task-4-report.md has the full captured values. Every
+        // observation, no outliers: `.uno:CellCursor` after a row/column-only span selection reports
+        // the EXACT SAME `(column, row)` as the span's own anchor cell (LOK treats the range's active
+        // cell as its top-left corner) — so `anchorTarget`, already verified once above, is the
+        // correct expectation to re-check here too, confirming the SPAN selection itself — not just
+        // the earlier single-cell `GoToCell` — landed correctly before the resize is dispatched.
+        guard let firstToken = selectionRange.split(separator: ":", maxSplits: 1).first, !firstToken.isEmpty else {
+            throw SaveError.positionVerificationFailed(docId: docId, address: selectionRange, landedAt: nil)
+        }
+        let anchorAddress = dimension == .row ? "A\(firstToken)" : "\(firstToken)1"
+        guard let anchorTarget = Self.parseSingleCellReference(anchorAddress) else {
+            throw SaveError.positionVerificationFailed(docId: docId, address: anchorAddress, landedAt: nil)
+        }
+        _ = selectionTextOnDedicatedThread(doc, docId: docId, viewId: agentViewId, part: part,
+                                           range: anchorAddress, formulas: false)
+        try verifyCellCursorOnDedicatedThread(doc, docId: docId, expectedAddress: anchorAddress, target: anchorTarget)
+
         _ = selectionTextOnDedicatedThread(doc, docId: docId, viewId: agentViewId, part: part,
                                            range: selectionRange, formulas: false)
+        try verifyCellCursorOnDedicatedThread(doc, docId: docId, expectedAddress: selectionRange, target: anchorTarget)
 
         let command: String
         switch (dimension, op) {
