@@ -294,6 +294,18 @@ describe("resize verbs", () => {
     }]);
   });
 
+  // Fix-round review (item 4) — `at` for a row verb is documented-legal as EITHER a JSON number OR
+  // a digit-only JSON string (the validation below coerces via `String(a.at)` against a regex, never
+  // requiring `typeof a.at === "number"`) — and passes the ORIGINAL value through UNCHANGED, never
+  // normalized to a number, so the app-side consumer must accept a string "3" too (a real gap this
+  // review round found and fixed on the Swift side — see OfficeCommandConsumerTests.swift).
+  test("a row verb's `at` may be a digit-only STRING, not just a number — documented-legal, passed through unchanged", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "insert_rows", path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", at: "3", count: 2 });
+    expect(result.isError).toBe(false);
+    expect(h.recorded[0]?.args).toEqual({ path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", at: "3", count: 2 });
+  });
+
   test("delete_cols dispatches office.sheets.delete_cols with sheet/at/count, at as letters", async () => {
     const h = makeHarness();
     const result = await h.run({ verb: "delete_cols", path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", at: "C", count: 2 });

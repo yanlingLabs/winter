@@ -336,12 +336,26 @@ struct OfficeCommandConsumer {
         let selectionRange: String
         switch dimension {
         case .row:
-            guard case .number(let atNumber)? = command.args?["at"],
-                  atNumber >= 1, atNumber.truncatingRemainder(dividingBy: 1) == 0 else {
+            // Fix-round review (item 4) — `sheets.ts`'s own daemon-side validation
+            // (`packages/core/src/agent/tools/sheets.ts`, the `rowVerbs` branch) accepts `at` as
+            // EITHER a JSON number OR a digit-only JSON STRING for a row verb (`String(a.at)` against
+            // `/^[1-9][0-9]*$/` — a check that passes identically whether `a.at` started as `3` or
+            // `"3"`), so `at: "3"` is documented-legal and reaches this consumer verbatim. The
+            // ORIGINAL code here accepted `.number` only, refusing a perfectly valid `"3"` outright —
+            // a real gap between what the daemon promises and what the app actually honors.
+            let atRow: Int?
+            switch command.args?["at"] {
+            case .number(let atNumber) where atNumber >= 1 && atNumber.truncatingRemainder(dividingBy: 1) == 0:
+                atRow = Int(atNumber)
+            case .string(let atString):
+                atRow = Int(atString).flatMap { $0 >= 1 ? $0 : nil }
+            default:
+                atRow = nil
+            }
+            guard let startRow = atRow else {
                 return sendResult(command.sessionId, command.commandId, false,
                                    "`at` must be a positive 1-based row number.", nil)
             }
-            let startRow = Int(atNumber)
             selectionRange = "\(startRow):\(startRow + count - 1)"
         case .col:
             guard case .string(let atLetters)? = command.args?["at"],

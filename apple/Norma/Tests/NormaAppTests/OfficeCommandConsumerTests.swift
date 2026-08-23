@@ -275,14 +275,22 @@ final class OfficeCommandConsumerTests: XCTestCase {
         },
         sheetsManageSheet: @escaping (String, OfficeSheetsManageSheetOp, String, String?) async throws -> [String] = { _, _, _, _ in
             throw OfficeHelperClientError.serverError(reason: "sheetsManageSheet not stubbed for this test")
-        }
+        },
+        // Fix-round review (item 4) — every EXISTING caller of this helper only ever exercises
+        // sheetsInfo/sheetsRead (read-only, no save-through) or a refusal path (never reaches save
+        // either), so the original hardcoded `"/tmp/unused-save"` — a path that does not exist —
+        // never mattered before. A write verb's own happy path DOES reach the broker's save-through
+        // step, which needs `save` to return a REAL file the broker can copy onto the target path;
+        // the default here is UNCHANGED (same non-existent path, same behavior for every existing
+        // call site) — only a test that overrides it can reach a write verb's happy path.
+        save: @escaping (String, Int) async throws -> String = { _, _ in "/tmp/unused-save" }
     ) -> (consumer: OfficeCommandConsumer, runtime: OfficeRuntime) {
         let driver = OfficeRuntime.Driver(
             helperState: { .ready }, startHelper: { },
             open: { _, _ in OfficeDocumentMetadata(
                 type: .spreadsheet, parts: 1, sizeTwips: OfficeDocumentSize(widthTwips: 100, heightTwips: 100)) },
             close: { _ in },
-            save: { _, _ in "/tmp/unused-save" },
+            save: save,
             subscribeTiles: { _, _, _, _ in [] }, unsubscribeTiles: { _ in }, requestTiles: { _, _ in },
             postKey: { _, _, _, _, _ in }, postMouse: { _, _, _, _, _, _, _, _ in },
             postExtTextInput: { _, _, _, _ in },
@@ -359,6 +367,64 @@ final class OfficeCommandConsumerTests: XCTestCase {
         XCTAssertEqual(sent.first?.ok, false)
         XCTAssertTrue(sent.first?.result?.contains("cells") == true, "\(sent)")
         XCTAssertFalse(driverCalled, "an oversized range must refuse before the broker/driver is ever reached")
+    }
+
+    /// Fix-round review (item 4) — `sheets.ts`'s own daemon-side validation for a row verb's `at`
+    /// coerces via `String(a.at)` against a digit-only regex, accepting EITHER a JSON number OR a
+    /// JSON string, and passes the value through UNCHANGED (never normalized to a number) — so
+    /// `at: "3"` reaches this consumer as a real `.string("3")`, not a `.number(3)`. The ORIGINAL
+    /// `handleSheetsResize` row arm accepted `.number` only, refusing this documented-legal shape
+    /// outright. Built through the REAL wire decode (`command(_:args:)`), not a memberwise
+    /// initializer — `["at": "3"]` is a Swift `String`, which `JSONSerialization` encodes as a JSON
+    /// string, decoding to `.string`, exactly the wire shape a real caller sending `at: "3"` produces.
+    func testSheetsInsertRowsAcceptsADigitOnlyStringAtSameAsANumber() async {
+        let path = makeScratchFile()
+        let savedPath = makeScratchFile(named: "saved.xlsx")
+        var capturedRange: String?
+        let world = makeSheetsWorld(
+            workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+            sheetsResize: { _, _, _, _, selectionRange in
+                capturedRange = selectionRange
+                return (usedEndColumn: 0, usedEndRow: 0)
+            },
+            save: { _, _ in savedPath })
+        world.consumer.handle(command("office.sheets.insert_rows",
+                                      args: ["path": path, "sheet": "Sheet1", "at": "3", "count": 2]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, true, "\(sent)")
+        XCTAssertEqual(capturedRange, "3:4", "at: \"3\" (string) must resolve identically to at: 3 (number)")
+    }
+
+    /// The number path, alongside the string one above — both must resolve to the IDENTICAL
+    /// selection range, proving the fix did not merely swap which type is accepted.
+    func testSheetsInsertRowsAcceptsANumberAtTheSameAsADigitOnlyString() async {
+        let path = makeScratchFile()
+        let savedPath = makeScratchFile(named: "saved.xlsx")
+        var capturedRange: String?
+        let world = makeSheetsWorld(
+            workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+            sheetsResize: { _, _, _, _, selectionRange in
+                capturedRange = selectionRange
+                return (usedEndColumn: 0, usedEndRow: 0)
+            },
+            save: { _, _ in savedPath })
+        world.consumer.handle(command("office.sheets.insert_rows",
+                                      args: ["path": path, "sheet": "Sheet1", "at": 3, "count": 2]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, true, "\(sent)")
+        XCTAssertEqual(capturedRange, "3:4")
+    }
+
+    /// A non-digit string must still refuse — the fix widens WHICH TYPE is accepted, not what VALUE.
+    func testSheetsInsertRowsStillRefusesANonDigitString() async {
+        var driverCalled = false
+        let world = makeSheetsWorld(sheetsResize: { _, _, _, _, _ in driverCalled = true; return (0, 0) })
+        world.consumer.handle(command("office.sheets.insert_rows",
+                                      args: ["path": "/tmp/a.xlsx", "sheet": "Sheet1", "at": "C", "count": 1]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, false, "\(sent)")
+        XCTAssertTrue(sent.first?.result?.contains("row number") == true, "\(sent)")
+        XCTAssertFalse(driverCalled)
     }
 
     // MARK: The fence and drivability — mirroring the two refusal shapes the brief names
