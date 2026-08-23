@@ -928,6 +928,17 @@ final class OfficeSheetsCommandTests: XCTestCase {
     /// number. A structural verb that silently shifted the WRONG range, or shifted by the wrong
     /// count, would leave the content somewhere this drill does not look, which is exactly what a
     /// position-based (not count-based) assertion catches.
+    ///
+    /// **The saved-bytes proof lives MID-CHAIN, not just at the end.** Every `readCell()` call in
+    /// this test reads through the ADOPTED runtime document — the in-memory LOK model — which would
+    /// read back correctly even if the save-through to disk silently failed. And the chain's own
+    /// final position is the fixture's OWN untouched A1, so a reopen taken only after the full
+    /// round trip cannot discriminate "really persisted" from "never persisted at all" — both look
+    /// identical from there. So after `insert_cols` (the maximally-shifted state this chain ever
+    /// reaches, content at B3, never coinciding with the original), a SEPARATE docId opens the SAME
+    /// path independently via the raw helper client — `testLiveSheetsSetWritesValues...`'s own
+    /// reopen pattern, taken mid-chain instead of at the end — and reads from THAT copy, which can
+    /// only reflect what the two prior writes actually put on disk.
     func testLiveSheetsResizeInsertAndDeleteRowsAndColumnsShiftRealContentAndRoundTrips() async throws {
         try requireLiveEngine()
         let path = try makeWritableCopy(of: "gate.xlsx")
@@ -970,6 +981,31 @@ final class OfficeSheetsCommandTests: XCTestCase {
         XCTAssertTrue(insertColsSent.ok, "\(insertColsSent)")
         let afterInsertCols = await readCell("B3")
         XCTAssertTrue(afterInsertCols.contains("NORMA GATE"), "content must shift RIGHT by 1 column: \(afterInsertCols)")
+
+        // Mid-chain SAVED-BYTES proof (see the doc comment above for why this must happen HERE,
+        // not only at the chain's end). `dirty == false` on the adopted runtime is the save-through
+        // signal every other write drill in this file already trusts before reopening — confirm it
+        // before treating a second open of the same path as meaningful.
+        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.dirty, false,
+                       "must be saved-through before the mid-chain reopen below can prove anything")
+        guard let midChainClient = host.officeHelperSupervisor?.client else {
+            return XCTFail("no live client for the mid-chain reopen")
+        }
+        let midChainDocId = "sheets-resize-reopen-midchain"
+        _ = try await midChainClient.open(docId: midChainDocId, path: path)
+        func midChainCell(_ cell: String) async throws -> String {
+            let rows = try await midChainClient.sheetsRead(docId: midChainDocId, sheet: "Sheet1", range: cell, formulas: false)
+            return rows.map { $0.joined(separator: "\t") }.joined(separator: "\n")
+        }
+        let midChainB3 = try await midChainCell("B3")
+        XCTAssertTrue(midChainB3.contains("NORMA GATE"),
+                      "the insert_rows+insert_cols shift must have actually PERSISTED to the saved "
+                          + "file — read from a genuinely independent reopen, not the adopted "
+                          + "runtime's in-memory model: \(midChainB3)")
+        let midChainA1 = try await midChainCell("A1")
+        XCTAssertFalse(midChainA1.contains("NORMA GATE"),
+                       "A1 must be vacated in the SAVED file too, not just the in-memory model: \(midChainA1)")
+        try await midChainClient.close(docId: midChainDocId)
 
         // delete_cols at="A" count=1 — shifts B3 back to A3.
         let deleteColsSent = await send(command("office.sheets.delete_cols",
