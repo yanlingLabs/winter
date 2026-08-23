@@ -181,6 +181,18 @@ final class OfficeSheetsCommandTests: XCTestCase {
     /// coordinates `postRealEdit`/`typeOneCharacter` already prove land on a real, editable cell.
     /// Typing directly after a click REPLACES the cell's entire content (ordinary spreadsheet UX, and
     /// this task's own live drills do not need to know or preserve whatever was there before).
+    /// office-agent-tools T4 — the SIMPLEST possible real, unsaved edit on the PRIMARY view (never
+    /// the agent's), for the dirty-refusal drill: one character, no navigation beyond the document's
+    /// own default open position (A1), committed with Return. Mirrors `typeFormulaOnePlusOne`'s own
+    /// proven click-then-type-then-Return shape, reduced to what THIS drill actually needs — a real
+    /// `dirty == true` transition a human's own tab would show, nothing about the edit's own content
+    /// matters here.
+    private func typeOneCharacterOnPrimaryView(client: OfficeHelperClient, docId: String) async throws {
+        try await click(client: client, docId: docId, xTwips: 100, yTwips: 100)
+        try await type(client: client, docId: docId, character: "Z", appKitKeyCode: 6 /* kVK_ANSI_Z */)
+        try await pressReturn(client: client, docId: docId)
+    }
+
     private func typeFormulaOnePlusOne(client: OfficeHelperClient, docId: String) async throws {
         try await click(client: client, docId: docId, xTwips: 100, yTwips: 100)
         try await type(client: client, docId: docId, character: "=", appKitKeyCode: 24 /* kVK_ANSI_Equal */)
@@ -907,5 +919,199 @@ final class OfficeSheetsCommandTests: XCTestCase {
         let (reopenSheets, _) = try await client.sheetsInfo(docId: reopenDocId)
         XCTAssertEqual(reopenSheets.map(\.name), ["Sheet1"], "only the real, surviving sheet list must persist")
         try await client.close(docId: reopenDocId)
+    }
+
+    /// `insert_rows`/`insert_cols`/`delete_rows`/`delete_cols`, round-tripped: shift real, known
+    /// content (`gate.xlsx`'s own A1 = "NORMA GATE", ground-truthed via this file's own raw-callback
+    /// trace on a prior run, not assumed) two rows down and one column right, then back — each step
+    /// verified by READING the content at its new expected position, not merely by a dimension
+    /// number. A structural verb that silently shifted the WRONG range, or shifted by the wrong
+    /// count, would leave the content somewhere this drill does not look, which is exactly what a
+    /// position-based (not count-based) assertion catches.
+    func testLiveSheetsResizeInsertAndDeleteRowsAndColumnsShiftRealContentAndRoundTrips() async throws {
+        try requireLiveEngine()
+        let path = try makeWritableCopy(of: "gate.xlsx")
+        let stateDir = makeScratchDirectory()
+        let host = makeLiveHost(stateDir: stateDir, dirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)])
+        await host.directory.refresh()
+
+        let runtime = host.officeRuntime(for: "S1")
+        runtime.open(path)
+        let opened = await waitUntilLive { runtime.stateSnapshot.documents[path] != nil || runtime.stateSnapshot.phase == .failed }
+        XCTAssertTrue(opened, "setup: gate.xlsx never settled")
+        let originalDocId = try XCTUnwrap(runtime.stateSnapshot.documents[path]?.docId)
+
+        func readCell(_ cell: String) async -> String {
+            let sent = await send(command("office.sheets.read",
+                                          args: ["path": path, "sheet": "Sheet1", "range": cell],
+                                          sessionId: "S1", commandId: "pcmd-r-\(UUID().uuidString.prefix(6))"), through: host)
+            return sent.result ?? "<no result: \(sent)>"
+        }
+
+        // Baseline — confirmed real, not assumed.
+        let baseline = await readCell("A1")
+        XCTAssertTrue(baseline.contains("NORMA GATE"), "setup: A1 must be the known seed text: \(baseline)")
+
+        // insert_rows at=1 count=2 — shifts A1 down to A3.
+        let insertRowsSent = await send(command("office.sheets.insert_rows",
+                                                args: ["path": path, "sheet": "Sheet1", "at": 1, "count": 2],
+                                                sessionId: "S1", commandId: "pcmd-ir-1"), through: host)
+        XCTAssertTrue(insertRowsSent.ok, "\(insertRowsSent)")
+        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.docId, originalDocId, "insert_rows must ADOPT")
+        let afterInsertRows = await readCell("A3")
+        XCTAssertTrue(afterInsertRows.contains("NORMA GATE"), "content must shift DOWN by 2 rows: \(afterInsertRows)")
+        let a1AfterInsert = await readCell("A1")
+        XCTAssertFalse(a1AfterInsert.contains("NORMA GATE"), "A1 must be vacated by the insert: \(a1AfterInsert)")
+
+        // insert_cols at="A" count=1 — shifts A3 right to B3.
+        let insertColsSent = await send(command("office.sheets.insert_cols",
+                                                args: ["path": path, "sheet": "Sheet1", "at": "A", "count": 1],
+                                                sessionId: "S1", commandId: "pcmd-ic-1"), through: host)
+        XCTAssertTrue(insertColsSent.ok, "\(insertColsSent)")
+        let afterInsertCols = await readCell("B3")
+        XCTAssertTrue(afterInsertCols.contains("NORMA GATE"), "content must shift RIGHT by 1 column: \(afterInsertCols)")
+
+        // delete_cols at="A" count=1 — shifts B3 back to A3.
+        let deleteColsSent = await send(command("office.sheets.delete_cols",
+                                                args: ["path": path, "sheet": "Sheet1", "at": "A", "count": 1],
+                                                sessionId: "S1", commandId: "pcmd-dc-1"), through: host)
+        XCTAssertTrue(deleteColsSent.ok, "\(deleteColsSent)")
+        let afterDeleteCols = await readCell("A3")
+        XCTAssertTrue(afterDeleteCols.contains("NORMA GATE"), "content must shift back LEFT: \(afterDeleteCols)")
+
+        // delete_rows at=1 count=2 — shifts A3 back to A1, the original position.
+        let deleteRowsSent = await send(command("office.sheets.delete_rows",
+                                                args: ["path": path, "sheet": "Sheet1", "at": 1, "count": 2],
+                                                sessionId: "S1", commandId: "pcmd-dr-1"), through: host)
+        XCTAssertTrue(deleteRowsSent.ok, "\(deleteRowsSent)")
+        let backToOriginal = await readCell("A1")
+        XCTAssertTrue(backToOriginal.contains("NORMA GATE"), "the full round trip must restore the "
+                     + "original position exactly: \(backToOriginal)")
+        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.docId, originalDocId,
+                       "every resize verb in this chain must have ADOPTED — never reloaded")
+        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.dirty, false,
+                       "every write verb saves through — the document must be clean after the last one")
+    }
+
+    /// **Rule 3 — the dirty refusal, live.** A document a human's own tab holds DIRTY (a real,
+    /// unsaved keystroke edit through the PRIMARY view — never the agent's own view, which would be
+    /// a different, less honest drill) must refuse a `sheets set` naming the tab, exactly as
+    /// `OfficeAgentBroker`'s own rule 3 requires — proven here through the REAL `sheets` tool path,
+    /// not the broker's own fake-driver unit tests.
+    func testLiveSheetsSetRefusesADirtyAdoptedDocumentNamingTheTab() async throws {
+        try requireLiveEngine()
+        let path = try makeWritableCopy(of: "gate.xlsx")
+        let stateDir = makeScratchDirectory()
+        let host = makeLiveHost(stateDir: stateDir, dirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)])
+        await host.directory.refresh()
+
+        let runtime = host.officeRuntime(for: "S1")
+        runtime.open(path)
+        let opened = await waitUntilLive { runtime.stateSnapshot.documents[path] != nil || runtime.stateSnapshot.phase == .failed }
+        XCTAssertTrue(opened, "setup: gate.xlsx never settled")
+        guard let client = host.officeHelperSupervisor?.client else {
+            return XCTFail("no live client to dirty the primary view through")
+        }
+        let docId = try XCTUnwrap(runtime.stateSnapshot.documents[path]?.docId)
+
+        // A real, unsaved edit on the PRIMARY view — the human's own tab, never the agent's.
+        try await typeOneCharacterOnPrimaryView(client: client, docId: docId)
+        let dirtied = await waitUntilLive(timeout: 15) { runtime.stateSnapshot.documents[path]?.dirty == true }
+        XCTAssertTrue(dirtied, "setup: the primary-view edit never landed as dirty")
+        let beforeStat = officeFileStat(atPath: path)
+
+        let setSent = await send(command("office.sheets.set", args: [
+            "path": path, "sheet": "Sheet1", "range": "H10", "values": [["should never land"]],
+        ], sessionId: "S1", commandId: "pcmd-dirty-refuse"), through: host)
+        XCTAssertFalse(setSent.ok, "a write on a dirty adopted document must refuse: \(setSent)")
+        let name = (path as NSString).lastPathComponent
+        XCTAssertTrue(setSent.result?.contains(name) == true, "the refusal must name the tab: \(setSent)")
+
+        // No file changed — the strongest form of this drill's own claim.
+        XCTAssertEqual(officeFileStat(atPath: path), beforeStat, "a refused write must never touch the "
+                       + "file — the stat must be byte-identical to before the attempt")
+        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.dirty, true,
+                       "the document must remain exactly as dirty as the human left it")
+
+        // Confirm the refusal is real, not merely "any string with the filename" — the SAME range
+        // read back must show NOTHING was written.
+        let readBack = await send(command("office.sheets.read",
+                                          args: ["path": path, "sheet": "Sheet1", "range": "H10"],
+                                          sessionId: "S1", commandId: "pcmd-dirty-verify"), through: host)
+        XCTAssertFalse(readBack.result?.contains("should never land") == true, "\(readBack)")
+    }
+
+    /// **The office fence, live, on a WRITE verb** — mirrors
+    /// `testLiveAPathOutsideWorkingDirectoriesGetsTheFenceRefusal` (T3's own read-side drill)
+    /// exactly, through `OfficeCommandConsumer` directly with a path outside every working
+    /// directory. No document is ever opened — the fence in `handleSheetsSet` runs before the
+    /// broker is ever reached, the identical ordering every read verb already has.
+    func testLiveSheetsSetOutsideWorkingDirectoriesGetsTheFenceRefusalNeverOpeningAnything() async throws {
+        try requireLiveEngine()
+        let path = try makeWritableCopy(of: "gate.xlsx")
+        let stateDir = makeScratchDirectory()
+        // The fence's own working directories are a DIFFERENT, unrelated scratch dir — `path` is
+        // real and readable, just outside the session's own fence.
+        let fencedDir = makeScratchDirectory()
+        let host = makeLiveHost(stateDir: stateDir, dirs: [SessionDirEntry(path: fencedDir.path, locked: true)])
+        await host.directory.refresh()
+
+        let sent = await send(command("office.sheets.set", args: [
+            "path": path, "sheet": "Sheet1", "range": "A1", "values": [["nope"]],
+        ], sessionId: "S1"), through: host)
+        XCTAssertFalse(sent.ok, "\(sent)")
+        XCTAssertTrue(sent.result?.contains("working directories") == true, "\(sent)")
+
+        // Confirm nothing opened at all — the runtime's own document table must stay empty.
+        let runtime = host.officeRuntime(for: "S1")
+        XCTAssertTrue(runtime.stateSnapshot.documents.isEmpty, "the fence must refuse before ANY open: "
+                     + "\(runtime.stateSnapshot.documents)")
+    }
+
+    /// **Writing to a document the user has OPEN and CLEAN must repaint AND persist** — the proof
+    /// obligation's own words. Mirrors `OfficeAgentBrokerTests.testLiveAdoptionEditsTheAlready
+    /// OpenDocumentInPlaceAndNeverClosesIt`'s own repaint predicate exactly (paint BEFORE the write,
+    /// compare pixels AFTER — a PRESENT tile that DIFFERS, never merely "the old tile is gone",
+    /// which an eviction-timing artifact could satisfy too) — that task's own drill proved this for
+    /// a raw keystroke edit; this one proves the identical claim for the real `sheets set` tool path.
+    func testLiveSheetsSetOnAnOpenCleanDocumentRepaintsTheCanvasAndPersists() async throws {
+        try requireLiveEngine()
+        let path = try makeWritableCopy(of: "gate.xlsx")
+        let stateDir = makeScratchDirectory()
+        let host = makeLiveHost(stateDir: stateDir, dirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)])
+        await host.directory.refresh()
+
+        let runtime = host.officeRuntime(for: "S1")
+        runtime.open(path)
+        let opened = await waitUntilLive { runtime.stateSnapshot.documents[path] != nil || runtime.stateSnapshot.phase == .failed }
+        XCTAssertTrue(opened, "setup: gate.xlsx never settled")
+        let originalDocId = try XCTUnwrap(runtime.stateSnapshot.documents[path]?.docId)
+        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.dirty, false, "setup: a freshly opened document must start clean")
+
+        let beforeStat = officeFileStat(atPath: path)
+
+        let zoomPPT = 1000
+        let tileKey = TileKey(part: 0, zoomPPT: zoomPPT, tileX: 0, tileY: 0)
+        let viewport = officeViewportTwips(scrollOrigin: .zero, visibleSize: CGSize(width: 256, height: 256), zoomPPT: zoomPPT)
+        runtime.subscribeTiles(path: path, part: 0, zoomPPT: zoomPPT, viewportTwips: viewport)
+        let paintedBefore = await waitUntilLive(timeout: 30) { runtime.tileStore.tile(docId: originalDocId, key: tileKey) != nil }
+        XCTAssertTrue(paintedBefore, "the pre-write tile never arrived")
+        let pixelsBefore = try XCTUnwrap(runtime.tileStore.tile(docId: originalDocId, key: tileKey)).pixels
+
+        let setSent = await send(command("office.sheets.set", args: [
+            "path": path, "sheet": "Sheet1", "range": "A1", "values": [["REPAINTED"]],
+        ], sessionId: "S1", commandId: "pcmd-repaint-1"), through: host)
+        XCTAssertTrue(setSent.ok, "\(setSent)")
+        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.docId, originalDocId, "the write must ADOPT, never reload")
+        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.dirty, false, "the write must save through and clean the dirty dot")
+        XCTAssertNotEqual(officeFileStat(atPath: path), beforeStat, "the write must persist to the real path")
+
+        runtime.subscribeTiles(path: path, part: 0, zoomPPT: zoomPPT, viewportTwips: viewport)
+        let repainted = await waitUntilLive(timeout: 30) {
+            guard let pixels = runtime.tileStore.tile(docId: originalDocId, key: tileKey)?.pixels else { return false }
+            return pixels != pixelsBefore
+        }
+        XCTAssertTrue(repainted, "the canvas never repainted — a sheets set on an open, clean document "
+                     + "must invalidate and repaint the tile the same way a human's own edit does")
     }
 }
