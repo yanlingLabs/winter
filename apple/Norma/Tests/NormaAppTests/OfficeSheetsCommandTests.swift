@@ -830,4 +830,82 @@ final class OfficeSheetsCommandTests: XCTestCase {
                        "the write must survive an independent close+reopen, exact values")
         try await client.close(docId: reopenDocId)
     }
+
+    /// **`add_sheet`/`delete_sheet`/`rename_sheet`, chained on one document — including the ONE
+    /// genuinely unverified unknown this task's own research flagged plainly rather than guessed
+    /// at**: the JSON "type" string `.uno:Remove`'s numeric `Index` argument needs, which
+    /// `postUnoCommand`'s own `comphelper::JsonToPropertyValues` machinery could not be confirmed
+    /// from source alone (this task's research: "an honest gap, not a guess dressed up as fact") —
+    /// AND the real headless-hang risk if it is wrong (`pReqArgs == nullptr`-shaped args opens a
+    /// synchronous, undismissable confirmation dialog on the dedicated thread). Run in isolation,
+    /// never batched with other live drills, for exactly that reason — `OfficeHelperClient`'s own
+    /// bounded `requestTimeout` (30s) protects THIS test's own outcome even in the worst case, but a
+    /// wedged dedicated thread would still strand the ONE helper process this test's own scratch
+    /// state directory mints, never another test's.
+    ///
+    /// `gate.xlsx` starts with exactly one sheet ("Sheet1" — ground-truthed against the fixture's
+    /// own `xl/workbook.xml`, not assumed). The chain: add "Q3" (2 sheets) -> rename "Q3" to
+    /// "Revenue" (still 2, different name) -> delete "Revenue" (back to 1 — THIS dispatches
+    /// `.uno:Remove`, the unverified door) -> delete "Sheet1", now the ONLY sheet, must REFUSE
+    /// (`SaveError.lastSheet`) -> add "Sheet1" (a duplicate of the sheet that still exists) must
+    /// REFUSE (`SaveError.duplicateSheetName`) — DELETION-RED for both refusals: each is preceded by
+    /// a real, structurally identical call that SUCCEEDS, so an assertion that always passes
+    /// regardless of the real refusal logic (e.g. a stale `ok` check) would be caught by the
+    /// contrast, not merely trusted.
+    func testLiveSheetsManageSheetAddRenameDeleteAndTheTwoPreDispatchRefusals() async throws {
+        try requireLiveEngine()
+        let path = try makeWritableCopy(of: "gate.xlsx")
+        let stateDir = makeScratchDirectory()
+        let host = makeLiveHost(stateDir: stateDir, dirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)])
+        await host.directory.refresh()
+
+        let runtime = host.officeRuntime(for: "S1")
+        runtime.open(path)
+        let opened = await waitUntilLive { runtime.stateSnapshot.documents[path] != nil || runtime.stateSnapshot.phase == .failed }
+        XCTAssertTrue(opened, "setup: gate.xlsx never settled")
+        let originalDocId = try XCTUnwrap(runtime.stateSnapshot.documents[path]?.docId)
+
+        // add_sheet
+        let addSent = await send(command("office.sheets.add_sheet", args: ["path": path, "name": "Q3"],
+                                         sessionId: "S1", commandId: "pcmd-add-1"), through: host)
+        XCTAssertTrue(addSent.ok, "\(addSent)")
+        XCTAssertTrue(addSent.result?.contains("Sheet1") == true && addSent.result?.contains("Q3") == true, "\(addSent)")
+        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.docId, originalDocId, "add_sheet must ADOPT, never reload")
+
+        // rename_sheet
+        let renameSent = await send(command("office.sheets.rename_sheet",
+                                            args: ["path": path, "name": "Q3", "newName": "Revenue"],
+                                            sessionId: "S1", commandId: "pcmd-rename-1"), through: host)
+        XCTAssertTrue(renameSent.ok, "\(renameSent)")
+        XCTAssertTrue(renameSent.result?.contains("Revenue") == true && renameSent.result?.contains("Q3") == false, "\(renameSent)")
+
+        // delete_sheet — the unverified .uno:Remove numeric-Index door.
+        let deleteSent = await send(command("office.sheets.delete_sheet", args: ["path": path, "name": "Revenue"],
+                                            sessionId: "S1", commandId: "pcmd-delete-1"), through: host)
+        XCTAssertTrue(deleteSent.ok, "\(deleteSent)")
+        XCTAssertTrue(deleteSent.result?.contains("Sheet1") == true && deleteSent.result?.contains("Revenue") == false, "\(deleteSent)")
+
+        // DELETION-RED #1 — the last sheet must be refused, right after a real delete just succeeded.
+        let lastSheetSent = await send(command("office.sheets.delete_sheet", args: ["path": path, "name": "Sheet1"],
+                                               sessionId: "S1", commandId: "pcmd-delete-last"), through: host)
+        XCTAssertFalse(lastSheetSent.ok, "deleting the only remaining sheet must be refused: \(lastSheetSent)")
+        XCTAssertTrue(lastSheetSent.result?.lowercased().contains("only") == true, "\(lastSheetSent)")
+
+        // DELETION-RED #2 — a duplicate name must be refused, right after a real add just succeeded.
+        let dupSent = await send(command("office.sheets.add_sheet", args: ["path": path, "name": "Sheet1"],
+                                         sessionId: "S1", commandId: "pcmd-add-dup"), through: host)
+        XCTAssertFalse(dupSent.ok, "adding a sheet with an already-existing name must be refused: \(dupSent)")
+        XCTAssertTrue(dupSent.result?.lowercased().contains("already exists") == true, "\(dupSent)")
+
+        // Persistence: reopen independently and confirm the real sheet list survived.
+        guard let client = host.officeHelperSupervisor?.client else {
+            return XCTFail("no live client to reopen through")
+        }
+        let reopenDocId = "sheets-manage-reopen"
+        let metadata = try await client.open(docId: reopenDocId, path: path)
+        XCTAssertEqual(metadata.type, .spreadsheet)
+        let (reopenSheets, _) = try await client.sheetsInfo(docId: reopenDocId)
+        XCTAssertEqual(reopenSheets.map(\.name), ["Sheet1"], "only the real, surviving sheet list must persist")
+        try await client.close(docId: reopenDocId)
+    }
 }
