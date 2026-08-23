@@ -993,6 +993,33 @@ final class OfficeSheetsCommandTests: XCTestCase {
         XCTAssertTrue(renameSent.ok, "\(renameSent)")
         XCTAssertTrue(renameSent.result?.contains("Revenue") == true && renameSent.result?.contains("Q3") == false, "\(renameSent)")
 
+        // Mid-chain SAVED-BYTES proof (coordinator review, the ❌ blocker) — every assertion above
+        // reads the adopted runtime's own in-memory sheet list, which would read back correctly even
+        // if NEITHER add_sheet NOR rename_sheet ever persisted a single byte to disk. Worse: this
+        // chain's own END state (after delete_sheet removes "Revenue") is `["Sheet1"]` — IDENTICAL to
+        // gate.xlsx's own pristine, untouched sheet list — so a reopen taken only at the end (the
+        // ORIGINAL form of this test) would pass even if add/rename/delete were all silent no-ops.
+        // Reopening HERE, mid-chain, at `["Sheet1", "Revenue"]` — a state that can ONLY exist if BOTH
+        // add_sheet and rename_sheet genuinely persisted — closes that gap the same way `8d232cb9`
+        // already closed it for the resize round trip.
+        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.dirty, false,
+                       "must be saved-through before the mid-chain reopen below can prove anything")
+        guard let midChainClient = host.officeHelperSupervisor?.client else {
+            return XCTFail("no live client for the mid-chain reopen")
+        }
+        let midChainDocId = "sheets-manage-reopen-midchain"
+        _ = try await midChainClient.open(docId: midChainDocId, path: path)
+        let (midChainSheets, _) = try await midChainClient.sheetsInfo(docId: midChainDocId)
+        XCTAssertEqual(midChainSheets.map(\.name), ["Sheet1", "Revenue"],
+                       "add_sheet + rename_sheet must have actually PERSISTED to the saved file — "
+                           + "read from a genuinely independent reopen, not the adopted runtime's "
+                           + "in-memory model")
+        // Closed BEFORE the delete step below, not left open — this task's own live-forced retreat
+        // (this function's own header, and LOKBridge.sheetsManageSheetOnDedicatedThread's) found
+        // `.uno:Remove` hangs whenever ANY agent view exists for this docId; closing this reopened
+        // docId's own view here keeps that variable isolated from this test's own reopen addition.
+        try await midChainClient.close(docId: midChainDocId)
+
         // delete_sheet — the unverified .uno:Remove numeric-Index door.
         let deleteSent = await send(command("office.sheets.delete_sheet", args: ["path": path, "name": "Revenue"],
                                             sessionId: "S1", commandId: "pcmd-delete-1"), through: host)
@@ -1129,6 +1156,37 @@ final class OfficeSheetsCommandTests: XCTestCase {
                        "every resize verb in this chain must have ADOPTED — never reloaded")
         XCTAssertEqual(runtime.stateSnapshot.documents[path]?.dirty, false,
                        "every write verb saves through — the document must be clean after the last one")
+
+        // End-of-chain SAVED-BYTES proof (coordinator review, the ❌ blocker) —
+        // `delete_rows`/`delete_cols` had NO saved-bytes proof of their own anywhere in this test:
+        // the mid-chain reopen added by `8d232cb9` covers insert_rows+insert_cols only, and this
+        // chain's own FINAL position is `gate.xlsx`'s own pristine, untouched A1 — a reopen here
+        // would pass even if delete_rows/delete_cols silently did nothing at all, since the fixture's
+        // OWN unwritten A1 already reads "NORMA GATE". **Checks B3, not B2** — the coordinator's own
+        // review named B2, but B3 is the cell THIS chain's own insert_cols step actually shifted real
+        // content into (line ~1119 above, `afterInsertCols`/the mid-chain reopen both target B3 for
+        // the same reason) — B2 is never touched anywhere in this chain, so asserting it stays empty
+        // would be true regardless of whether delete_rows/delete_cols worked at all, exactly the
+        // vacuity this fix-round exists to close, not reproduce under a different cell letter. B3
+        // genuinely discriminates: if EITHER delete verb failed to persist, a leftover fragment would
+        // still be sitting there on the SAVED file, which this reopen would catch even though the
+        // adopted runtime's own in-memory model already (correctly) shows a clean round trip.
+        guard let endChainClient = host.officeHelperSupervisor?.client else {
+            return XCTFail("no live client for the end-of-chain reopen")
+        }
+        let endChainDocId = "sheets-resize-reopen-endchain"
+        _ = try await endChainClient.open(docId: endChainDocId, path: path)
+        let endChainA1 = try await endChainClient.sheetsRead(docId: endChainDocId, sheet: "Sheet1", range: "A1", formulas: false)
+        XCTAssertEqual(endChainA1, [["NORMA GATE"]],
+                       "the full round trip must have actually PERSISTED A1's restoration to the "
+                           + "saved file — read from a genuinely independent reopen, not the adopted "
+                           + "runtime's in-memory model")
+        let endChainB3 = try await endChainClient.sheetsRead(docId: endChainDocId, sheet: "Sheet1", range: "B3", formulas: false)
+        XCTAssertNotEqual(endChainB3, [["NORMA GATE"]],
+                          "B3 (the cell insert_cols shifted real content into, earlier in this same "
+                              + "chain) must be vacated in the SAVED file too — no leftover fragment "
+                              + "from delete_cols/delete_rows: \(endChainB3)")
+        try await endChainClient.close(docId: endChainDocId)
     }
 
     /// **Rule 3 — the dirty refusal, live.** A document a human's own tab holds DIRTY (a real,
