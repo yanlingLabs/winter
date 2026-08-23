@@ -4,6 +4,7 @@ import { ToolRegistry, type ToolContext } from "../../../src/agent/tools/registr
 import { registerSheetsTool, officeTimeoutMessage, type SheetsToolDeps } from "../../../src/agent/tools/sheets";
 import type { PanelCommandOutcome } from "../../../src/panel/commands";
 import type { SessionDirs } from "../../../src/sessions/dirs";
+import { PermissionGate } from "../../../src/agent/gate";
 
 /**
  * office-agent-tools T3 — the `sheets` daemon tool, through a FAKE registry recorder rather than a
@@ -71,19 +72,33 @@ describe("registration", () => {
     expect(h.registry.namesForMode("chat").has("sheets")).toBe(false);
   });
 
-  // office-agent-tools T3 review (I6) — `sheets`' verb enum is pinned literally, rendered through
-  // the SAME z.toJSONSchema path a real model actually sees (ToolRegistry.specFor), not a raw zod
-  // import that could drift from what's really offered. `gate.ts`'s own READ_ONLY classification
-  // is name-keyed (`"sheets"`, not per-verb) — Task 4's write verbs (`set`, `insert_rows`, …) will
-  // land as NEW cases in this SAME enum and inherit READ_ONLY silently unless that classification
-  // is revisited then. This test's own failure message names that file directly: the day this
-  // enum grows, it fails here first, before a write verb ever ships gated as if it only read.
-  test("the verb enum is exactly [\"info\", \"read\"] — Task 4 must revisit gate.ts's READ_ONLY classification when this grows", () => {
+  // office-agent-tools T3 review (I6), T4 update — `sheets`' verb enum is pinned literally,
+  // rendered through the SAME z.toJSONSchema path a real model actually sees (ToolRegistry.specFor),
+  // not a raw zod import that could drift from what's really offered. T3 warned that gate.ts's
+  // READ_ONLY classification was name-keyed and would need revisiting the day a write verb landed —
+  // T4 did that (gate.ts now classifies `sheets` MUTATING; see gate.test.ts's own dedicated test).
+  // This test now guards the NEXT growth (`format`, T5+): the day the enum grows again, it fails
+  // here first, before a new verb ships without its own operand validation/gate audit.
+  test("the verb enum is exactly the 10 verbs T3+T4 shipped — format (T5+) is not registered yet", () => {
     const h = makeHarness();
     const spec = h.registry.specFor("sheets", WORKDIR, "code");
     const parameters = spec?.parameters as { properties?: { verb?: { enum?: string[] } } } | undefined;
     const verbEnum = parameters?.properties?.verb?.enum;
-    expect(verbEnum).toEqual(["info", "read"]);
+    expect(verbEnum).toEqual([
+      "info", "read", "set",
+      "insert_rows", "insert_cols", "delete_rows", "delete_cols",
+      "add_sheet", "delete_sheet", "rename_sheet",
+    ]);
+  });
+
+  // office-agent-tools T4 — the companion half of the guard above: the day a verb lands here, it
+  // must ALSO be reflected in gate.ts's classification. Since gate.ts classifies by TOOL NAME (not
+  // verb), this is a single assertion rather than one per verb — but it is what actually closes the
+  // loop the I6 comment above promises, rather than merely restating the enum.
+  test("sheets is classified MUTATING in gate.ts, not READ_ONLY — every verb, including info/read, pays this now", () => {
+    const gate = new PermissionGate();
+    expect(gate.evaluate("sheets", "ask")).toBe("ask");
+    expect(gate.evaluate("sheets", "plan")).toBe("deny");
   });
 });
 
@@ -168,6 +183,203 @@ describe("read", () => {
 });
 
 // ================================================================================================
+// set (T4) — a single `values` grid, content-driven formula detection (this file's own header)
+// ================================================================================================
+
+describe("set", () => {
+  test("dispatches office.sheets.set via the dedicated typed builder, at its own deadline", async () => {
+    const h = makeHarness();
+    const result = await h.run({
+      verb: "set", path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1", range: "A1:B1",
+      values: [["hello", 42]],
+    });
+    expect(result.isError).toBe(false);
+    expect(h.recorded).toEqual([{
+      sessionId: SID, action: "office.sheets.set",
+      args: { path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1", range: "A1:B1", values: [["hello", 42]] },
+      deadlineMs: OFFICE_DEADLINES_MS["office.sheets.set"],
+    }]);
+  });
+
+  test("a missing sheet is malformed and refused, before dispatch", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "set", path: `${WORKDIR}/budget.xlsx`, range: "A1", values: [["x"]] });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("sheet");
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("a missing range is malformed and refused, before dispatch", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "set", path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1", values: [["x"]] });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("range");
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("a missing values is malformed and refused, before dispatch", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "set", path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1", range: "A1" });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("values");
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("a ragged (non-rectangular) grid is refused, before dispatch", async () => {
+    const h = makeHarness();
+    const result = await h.run({
+      verb: "set", path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1", range: "A1:B2",
+      values: [["a", "b"], ["c"]],
+    });
+    expect(result.isError).toBe(true);
+    expect(result.output.toLowerCase()).toContain("rectangular");
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("an embedded tab in a cell is refused, before dispatch — write to one cell at a time instead", async () => {
+    const h = makeHarness();
+    const result = await h.run({
+      verb: "set", path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1", range: "A1", values: [["a\tb"]],
+    });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("tab");
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("an embedded newline in a cell is refused, before dispatch", async () => {
+    const h = makeHarness();
+    const result = await h.run({
+      verb: "set", path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1", range: "A1", values: [["a\nb"]],
+    });
+    expect(result.isError).toBe(true);
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("a grid past sheetsSetMaxCells is refused outright, before dispatch", async () => {
+    const h = makeHarness();
+    const row = Array.from({ length: 201 }, (_, i) => i);
+    const result = await h.run({
+      verb: "set", path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1", range: "A1:GS1", values: [row],
+    });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("201 cells");
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("values may carry a formula string — the tool never distinguishes it from a plain value at this layer", async () => {
+    const h = makeHarness();
+    const result = await h.run({
+      verb: "set", path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1", range: "A1", values: [["=1+1"]],
+    });
+    expect(result.isError).toBe(false);
+    expect(h.recorded[0]?.args).toEqual({
+      path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1", range: "A1", values: [["=1+1"]],
+    });
+  });
+});
+
+// ================================================================================================
+// insert_rows / insert_cols / delete_rows / delete_cols (T4)
+// ================================================================================================
+
+describe("resize verbs", () => {
+  test("insert_rows dispatches office.sheets.insert_rows with sheet/at/count", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "insert_rows", path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", at: 3, count: 2 });
+    expect(result.isError).toBe(false);
+    expect(h.recorded).toEqual([{
+      sessionId: SID, action: "office.sheets.insert_rows",
+      args: { path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", at: 3, count: 2 },
+      deadlineMs: OFFICE_DEADLINES_MS["office.sheets.insert_rows"],
+    }]);
+  });
+
+  test("delete_cols dispatches office.sheets.delete_cols with sheet/at/count, at as letters", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "delete_cols", path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", at: "C", count: 2 });
+    expect(result.isError).toBe(false);
+    expect(h.recorded[0]?.args).toEqual({ path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", at: "C", count: 2 });
+  });
+
+  test("a row verb's `at` must be a positive integer row number, not letters", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "insert_rows", path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", at: "C", count: 1 });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("row number");
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("a column verb's `at` must be letters, not a number", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "insert_cols", path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", at: 3, count: 1 });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("column letters");
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("a missing count is malformed and refused, before dispatch", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "delete_rows", path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", at: 1 });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("count");
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("a missing sheet is malformed and refused, before dispatch", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "insert_rows", path: `${WORKDIR}/b.xlsx`, at: 1, count: 1 });
+    expect(result.isError).toBe(true);
+    expect(h.recorded).toEqual([]);
+  });
+});
+
+// ================================================================================================
+// add_sheet / delete_sheet / rename_sheet (T4) — `name`/`newName`, no `sheet` operand
+// ================================================================================================
+
+describe("sheet management verbs", () => {
+  test("add_sheet dispatches office.sheets.add_sheet with just name (no `sheet`, no position)", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "add_sheet", path: `${WORKDIR}/b.xlsx`, name: "Q3" });
+    expect(result.isError).toBe(false);
+    expect(h.recorded).toEqual([{
+      sessionId: SID, action: "office.sheets.add_sheet",
+      args: { path: `${WORKDIR}/b.xlsx`, name: "Q3" },
+      deadlineMs: OFFICE_DEADLINES_MS["office.sheets.add_sheet"],
+    }]);
+  });
+
+  test("add_sheet without a name is malformed and refused, before dispatch", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "add_sheet", path: `${WORKDIR}/b.xlsx` });
+    expect(result.isError).toBe(true);
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("delete_sheet dispatches office.sheets.delete_sheet with name", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "delete_sheet", path: `${WORKDIR}/b.xlsx`, name: "Sheet2" });
+    expect(result.isError).toBe(false);
+    expect(h.recorded[0]?.args).toEqual({ path: `${WORKDIR}/b.xlsx`, name: "Sheet2" });
+  });
+
+  test("rename_sheet dispatches office.sheets.rename_sheet with name+newName", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "rename_sheet", path: `${WORKDIR}/b.xlsx`, name: "Sheet1", newName: "Revenue" });
+    expect(result.isError).toBe(false);
+    expect(h.recorded[0]?.args).toEqual({ path: `${WORKDIR}/b.xlsx`, name: "Sheet1", newName: "Revenue" });
+  });
+
+  test("rename_sheet without newName is malformed and refused, before dispatch", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "rename_sheet", path: `${WORKDIR}/b.xlsx`, name: "Sheet1" });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("newName");
+    expect(h.recorded).toEqual([]);
+  });
+});
+
+// ================================================================================================
 // The fence (spec §5) — and its precedence over reach
 // ================================================================================================
 
@@ -217,6 +429,18 @@ describe("the fence", () => {
     expect(result.isError).toBe(true);
     expect(result.output).toContain("working directories");
     expect(result.output).not.toContain("isn't showing this session");
+    expect(h.recorded).toEqual([]);
+  });
+
+  // office-agent-tools T4 — the fence applies identically to a WRITE verb (this file's own header:
+  // "v1 office tools, read or write, are working-directories-only"). Cheap defense-in-depth here;
+  // the live, Swift-side proof (both the app's own fence and the daemon's, agreeing) is the real
+  // one — see task-4-report.md.
+  test("a write verb is refused by the fence exactly like a read, before dispatch", async () => {
+    const h = makeHarness({ dirs: [{ path: WORKDIR, locked: true }] });
+    const result = await h.run({ verb: "set", path: "/etc/passwd", sheet: "Sheet1", range: "A1", values: [["x"]] });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("working directories");
     expect(h.recorded).toEqual([]);
   });
 });

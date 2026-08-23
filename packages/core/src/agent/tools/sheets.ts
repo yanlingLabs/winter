@@ -1,18 +1,36 @@
 import { z } from "zod";
-import { OFFICE_DEADLINES_MS, officeCommandArgs, type OfficeCommandAction } from "../../panel/office-commands";
+import { OFFICE_DEADLINES_MS, officeCommandArgs, officeSheetsSetArgs, type OfficeCommandAction } from "../../panel/office-commands";
 import type { ToolRegistry } from "./registry";
 import type { PanelCommandAction, PanelCommandOutcome } from "../../panel/commands";
 import type { SessionDirs } from "../../sessions/dirs";
 import { canHostPanel } from "./browser";
 
 /**
- * `sheets` (office-agent-tools T3, task-3-brief.md; design
- * `docs/superpowers/specs/2026-08-22-office-agent-tools-design.md` §1-§5) — the agent's first two
- * real office verbs: `info` and `read`. Everything else `sheets` will eventually do (`set`,
- * `insert_rows`, …) is Task 4's; this file registers ONLY `info`/`read` today, deliberately — the
- * model is never told about a verb this build cannot yet perform (contrast Task 1's app-side
+ * `sheets` (office-agent-tools T3/T4, task-3-brief.md/task-4-brief.md; design
+ * `docs/superpowers/specs/2026-08-22-office-agent-tools-design.md` §1-§5) — T3 shipped `info`/`read`;
+ * this task (T4) adds the write verbs: `set`, `insert_rows`, `insert_cols`, `delete_rows`,
+ * `delete_cols`, `add_sheet`, `delete_sheet`, `rename_sheet`. `format` (T5+) is still not registered
+ * — the model is never told about a verb this build cannot yet perform (contrast the app's own
  * `OfficeCommandConsumer`, which DOES answer all 22 for wire-completeness reasons that do not apply
  * to a tool schema no agent has reached yet).
+ *
+ * ## T4's own operand design — one real, disclosed deviation from the spec's compressed table
+ *
+ * Spec §2's table lists `set`'s operands as "path, sheet, range, values | formulas" — read as two
+ * MUTUALLY EXCLUSIVE grid operands, one for literal values and one for formula text. This file ships
+ * a SINGLE `values` operand instead: content, not a caller-declared mode, decides formula-ness —
+ * exactly how every real spreadsheet already behaves (typing `=1+1` into a cell makes a formula
+ * regardless of what the UI was "in mode for"; there is no separate "formula-entry mode" a human
+ * ever toggles). Three reasons, not just simplicity for its own sake: (1) `read`'s own `formulas`
+ * operand is already a `boolean` — a second, differently-typed `formulas` grid operand on the SAME
+ * flat zod object would collide, forcing an awkward rename either way; (2) the write mechanism this
+ * task builds (real synthetic text entry into a cell, on the agent view — see the app/helper side)
+ * has no separate code path for "type as a formula" vs "type as a value" — LOK/Calc's own cell-edit
+ * parser is what decides, from the leading character, exactly as it does for a human; (3) a model
+ * that wants a LITERAL string starting with `=` gets the identical escape hatch a human has: prefix
+ * it with an apostrophe (`'`), documented in this tool's own description below and applied
+ * automatically by the app for exactly that one case (see `OfficeCommandConsumer`'s own header).
+ * Verified live, not merely reasoned — see task-4-report.md for the drill.
  *
  * ## The shape, modelled on `browser.ts` deliberately and closely
  *
@@ -66,17 +84,25 @@ import { canHostPanel } from "./browser";
 // ================================================================================================
 
 const SheetsArgs = z.object({
-  verb: z.enum(["info", "read"]),
+  verb: z.enum([
+    "info", "read", "set",
+    "insert_rows", "insert_cols", "delete_rows", "delete_cols",
+    "add_sheet", "delete_sheet", "rename_sheet",
+  ]),
   /** Absolute (or, mirroring `resolveWithinAny`, resolved against the session's primary working
-   *  directory if relative) — spec §2's own table. Required for both verbs; a missing path is
+   *  directory if relative) — spec §2's own table. Required for EVERY verb; a missing path is
    *  malformed, never defaulted (this file's own wire-strictness rule, matching the Swift broker's
    *  identical posture for the same operand). */
   path: z.string().min(1).max(4096),
-  /** `read` only — the sheet NAME (never an index): resolved to a part index app-side, where
-   *  `getPartName` lives (`OfficeWireFrame.sheetsRead`'s own header explains why that resolution
-   *  cannot happen here). */
+  /** The sheet NAME (never an index): resolved to a part index app-side, where `getPartName` lives
+   *  (`OfficeWireFrame.sheetsRead`'s own header explains why that resolution cannot happen here).
+   *  Required for `read`/`set`/`insert_rows`/`insert_cols`/`delete_rows`/`delete_cols` — the six
+   *  verbs that act ON a sheet's own rows/columns/cells. NOT used by `add_sheet`/`delete_sheet`/
+   *  `rename_sheet`, which name the sheet they act on through `name` instead (a NEW sheet has no
+   *  existing `sheet` to name, and a delete/rename's target IS `name` — a second `sheet` operand
+   *  would just be a confusing, always-redundant alias for it). */
   sheet: z.string().min(1).max(512).optional(),
-  /** `read` only — an A1 range: a single cell ("A1") or a two-corner span ("A1:C10"). Validated
+  /** An A1 range: a single cell ("A1") or a two-corner span ("A1:C10"). `read`/`set` only. Validated
    *  SYNTACTICALLY here (a cheap regex, catching an obviously malformed string before a round trip)
    *  — the real A1 SEMANTICS (letters<->column math) and the cell-count CAP live app-side
    *  (`PanelDocumentTab.swift`'s `officeParseRange`/`officeReadRangeMaxCells`), deliberately not
@@ -84,14 +110,61 @@ const SheetsArgs = z.object({
    *  reason to duplicate it just to move a refusal a few hundred milliseconds earlier for the one
    *  case (a syntactically valid but oversized range) this daemon-side check cannot catch anyway. */
   range: z.string().min(1).max(64).optional(),
-  /** The one genuinely OPTIONAL operand (spec §2's own table only says `formulas?` — no default-
-   *  on-invalid behavior is specified). Absent → `false` (values); this is the sole deliberate
-   *  exception to "missing required operand is malformed." A PRESENT non-boolean is not silently
+  /** `read` ONLY — whether to return formula text instead of computed values. The one genuinely
+   *  OPTIONAL operand on `read` (spec §2's own table only says `formulas?` — no default-on-invalid
+   *  behavior is specified). Absent → `false` (values); this is the sole deliberate exception, ON
+   *  READ, to "missing required operand is malformed." A PRESENT non-boolean is not silently
    *  coerced — `z.boolean().optional()` refuses it as malformed at the schema, the same as any
-   *  other type mismatch this tool's args would produce. */
+   *  other type mismatch this tool's args would produce.
+   *
+   *  **`set` does NOT have a `formulas` operand** — see this file's own header for why a single
+   *  `values` grid (content-driven formula detection, exactly like a real spreadsheet) replaces the
+   *  spec table's compressed "values | formulas" notation. This field name is reused ONLY by `read`. */
   formulas: z.boolean().optional(),
+  /** `set` ONLY — a rectangular, row-major grid of cell content. Each cell is a plain value
+   *  (string/number/boolean, JSON-typed so a model does not have to stringify a number itself) —
+   *  see this file's own header for how formula-ness is decided from a leading `=`, and how a
+   *  LITERAL leading `=` is escaped (a leading apostrophe, applied automatically app-side).
+   *  Non-empty, and every row must be the SAME length (a ragged grid is malformed, never padded) —
+   *  checked here; the grid's own dimensions must also match `range`'s real cell dimensions exactly
+   *  (Calc's own paste/fill behavior on a size MISMATCH is not something this tool relies on), which
+   *  — like every other real A1 computation — is an app-side check (`OfficeCommandConsumer`'s own
+   *  validation, before the broker or LOK is ever reached). Capped at `sheetsSetMaxCells` (below) —
+   *  smaller than `read`'s 2,000-cell cap, deliberately: each written cell costs a real per-cell LOK
+   *  round trip (select, verify, type), not one bulk read, so the safe ceiling is much lower. */
+  values: z.array(z.array(z.union([z.string(), z.number(), z.boolean()])).min(1)).min(1).optional(),
+  /** `insert_rows`/`delete_rows`/`insert_cols`/`delete_cols` ONLY — WHERE the operation starts.
+   *  Rows: a 1-based row number (matching A1 notation's own 1-based rows) as either a JSON number or
+   *  a decimal string — either is accepted at the SCHEMA level; the per-verb rung below is what
+   *  actually enforces which shape a given verb needs and refuses the other cleanly. Columns: one or
+   *  more letters ("C", "AA"), matching this tool's A1-first design everywhere else (`range` never
+   *  exposes raw column integers to a caller — Task 3's own deliberate choice, carried forward here
+   *  rather than introducing the ONE place in this tool that would). */
+  at: z.union([z.number().int().positive(), z.string().min(1).max(8)]).optional(),
+  /** `insert_rows`/`delete_rows`/`insert_cols`/`delete_cols` ONLY — how many rows/columns, starting
+   *  at `at`. */
+  count: z.number().int().positive().optional(),
+  /** `add_sheet` (the NEW sheet's name) / `delete_sheet` (the EXISTING sheet to remove) /
+   *  `rename_sheet` (the EXISTING sheet to rename) — never `insert_rows` and friends, which use
+   *  `sheet` instead (see that field's own header for why the two verb families use different
+   *  field names for "which sheet"). `add_sheet` always appends at the end — v1 does not support
+   *  choosing a position; this tool's own description says so. */
+  name: z.string().min(1).max(256).optional(),
+  /** `rename_sheet` ONLY — the sheet's new name. */
+  newName: z.string().min(1).max(256).optional(),
 });
 type SheetsArgs = z.infer<typeof SheetsArgs>;
+
+/** `set`'s own cell-count ceiling — see `values`'s own doc comment for why this is smaller than
+ *  `read`'s `officeReadRangeMaxCells` (2,000): each cell this tool writes costs a real per-cell LOK
+ *  round trip inside the app's single dedicated-thread request (select, verify the selection landed,
+ *  type, on the agent view — see `OfficeCommandConsumer`/`LOKBridge`'s own headers), not one bulk
+ *  probe the way a read is. 200 comfortably covers a small table or a handful of formulas — the
+ *  ordinary `set` call — while keeping one call's own worst-case latency and `panel_command.args`
+ *  wire footprint (8 KiB total, `PANEL_COMMAND_ARGS_MAX_JSON_BYTES`) bounded. Checked here, before
+ *  dispatch, for the identical reason `read`'s own cap is checked before dispatch: refuse cheaply
+ *  rather than pay for a doomed round trip. */
+const sheetsSetMaxCells = 200;
 
 /** A cheap SHAPE check only — "does this look like an A1 cell or a two-corner span," never real
  *  column math. One or two cell references (`[A-Za-z]+[1-9][0-9]*`) joined by exactly one colon. */
@@ -242,19 +315,39 @@ export function registerSheetsTool(r: ToolRegistry, deps: SheetsToolDeps): void 
   r.register({
     name: "sheets",
     description:
-      "Read a spreadsheet Norma has access to (.xlsx, .ods, .xlsm — any format the office engine "
-      + "can open). Pick a verb:\n"
+      "Read and edit a spreadsheet Norma has access to (.xlsx, .ods, .xlsm — any format the office "
+      + "engine can open). Every write verb SAVES immediately — there is no separate save step, and "
+      + "no undo from here (the file changes right away; a human's ⌘Z in an open tab is unaffected). "
+      + "Pick a verb:\n"
       + "• info — path. Sheet names, each one's used range, and which sheet is active. Start here: "
       + "it also doubles as a check that the Mac app can actually open documents right now.\n"
       + "• read — path, sheet, range (A1 notation, e.g. \"A1:C10\" or a single cell \"B2\"), and an "
       + "optional formulas:true to get formula text instead of computed values. Returns a tab-"
       + "separated grid, row by row.\n"
-      + "Every path must be inside this session's own working directories — an office read COPIES the "
-      + "file and parses it with LibreOffice, so it is not an ordinary file read and the usual "
-      + "unrestricted-reads rule does not cover it.\n"
+      + "• set — path, sheet, range, values (a rectangular grid of strings/numbers/booleans, same "
+      + "shape and dimensions as range). A cell starting with \"=\" becomes a formula, exactly like "
+      + "typing it into the cell yourself — to write a LITERAL string that starts with \"=\", prefix "
+      + "it with an apostrophe (e.g. \"'=NOT A FORMULA\"). No cell may contain a tab, carriage "
+      + "return, or newline — write to one cell at a time for that content instead. values' own "
+      + "dimensions must exactly match range's.\n"
+      + "• insert_rows / delete_rows — path, sheet, at (1-based row number), count (how many rows). "
+      + "insert_rows adds count new blank rows starting AT that row number, shifting existing rows "
+      + "down; delete_rows removes count rows starting there.\n"
+      + "• insert_cols / delete_cols — path, sheet, at (column letters, e.g. \"C\"), count (how many "
+      + "columns), same shifting/removal semantics as the row verbs.\n"
+      + "• add_sheet — path, name. Appends a new, empty sheet at the end (v1 has no way to choose a "
+      + "position).\n"
+      + "• delete_sheet — path, name. Refused if it would delete the workbook's LAST sheet.\n"
+      + "• rename_sheet — path, name (the sheet to rename), newName.\n"
+      + "Every path must be inside this session's own working directories — an office read/write "
+      + "COPIES the file and parses it with LibreOffice, so it is not an ordinary file read/write and "
+      + "the usual unrestricted-reads rule does not cover it.\n"
       + "The Mac app has to be running and showing this session, or nothing here can work — info's own "
       + "refusal tells you if that's the problem.\n"
-      + "A very large range is refused outright rather than silently truncated — ask for a smaller one.\n"
+      + "A document a human has open with UNSAVED changes refuses every write, naming the tab — save "
+      + "or discard those edits first.\n"
+      + "A very large range/grid is refused outright rather than silently truncated — ask for a "
+      + "smaller one.\n"
       + "read's grid is trimmed to the range's REAL content, not padded to the requested rectangle — "
       + "a range whose only real content sits away from its top-left corner comes back without "
       + "leading blank rows/columns, so a value's position in the returned grid does not necessarily "
@@ -263,27 +356,95 @@ export function registerSheetsTool(r: ToolRegistry, deps: SheetsToolDeps): void 
       + "A cell whose own content contains a tab or a literal \" is wrapped in \"...\" with internal "
       + "\" doubled (the same convention CSV/TSV files use) so it can't be confused with a real "
       + "column boundary — that quoting is an ENCODING, not part of the cell's real value: "
-      + "say \"hi\" round-trips as \"say \"\"hi\"\"\", not as the literal text between the quotes.",
+      + "say \"hi\" round-trips as \"say \"\"hi\"\"\", not as the literal text between the quotes.\n"
+      + "**A timeout means the outcome is UNKNOWN, never that a write failed to happen** — the app "
+      + "may have completed it and lost the race home. Re-read the document before ever retrying a "
+      + "write verb; never blind-retry set/insert_rows/insert_cols/add_sheet/etc. on a timeout alone, "
+      + "since a retry can double the change if the first attempt actually landed.",
     modes: ["code", "dispatch"],
     args: SheetsArgs,
     async run(a: SheetsArgs, ctx) {
       const sessionId = ctx.sessionId;
       const action = `office.sheets.${a.verb}` as OfficeCommandAction;
+      const sheetVerbs = new Set(["read", "set", "insert_rows", "insert_cols", "delete_rows", "delete_cols"]);
+      const resizeVerbs = new Set(["insert_rows", "insert_cols", "delete_rows", "delete_cols"]);
+      const rowVerbs = new Set(["insert_rows", "delete_rows"]);
+      const colVerbs = new Set(["insert_cols", "delete_cols"]);
 
-      // Rung 1 — operands, per verb. `read` needs sheet+range; `info` needs neither beyond `path`
-      // (already required by the schema for both verbs). Missing → malformed, never defaulted.
-      if (a.verb === "read") {
-        if (!a.sheet) {
-          throw new Error('sheets read needs a `sheet` naming which sheet to read — e.g. verb:"read", '
-            + 'path:"...", sheet:"Sheet1", range:"A1:C10".');
-        }
+      // Rung 1 — operands, per verb. Missing → malformed, never defaulted (this file's own
+      // wire-strictness rule).
+      if (sheetVerbs.has(a.verb) && !a.sheet) {
+        throw new Error(`sheets ${a.verb} needs a \`sheet\` naming which sheet to act on — e.g. `
+          + `verb:"${a.verb}", path:"...", sheet:"Sheet1", ...`);
+      }
+      if ((a.verb === "read" || a.verb === "set")) {
         if (!a.range) {
-          throw new Error('sheets read needs a `range` in A1 notation — e.g. range:"A1:C10" or a '
-            + 'single cell range:"B2".');
+          throw new Error(`sheets ${a.verb} needs a \`range\` in A1 notation — e.g. range:"A1:C10" `
+            + 'or a single cell range:"B2".');
         }
         if (!A1_RANGE_SHAPE.test(a.range)) {
           throw new Error(`"${a.range}" is not a valid A1 range — examples: "A1", "A1:C10". Sheet-`
             + "qualification (\"Sheet1!A1\") goes in the separate `sheet` operand, not in `range`.");
+        }
+      }
+      if (a.verb === "set") {
+        if (!a.values) {
+          throw new Error('sheets set needs `values` — a rectangular grid, e.g. values:[["A","B"],'
+            + '["1","2"]]. See this tool\'s own description for how "=" is handled.');
+        }
+        const width = a.values[0]?.length ?? 0;
+        for (const row of a.values) {
+          if (row.length !== width) {
+            throw new Error("sheets set's `values` must be a RECTANGULAR grid — every row must have "
+              + `the same number of cells (row 1 has ${width}, another row has ${row.length}).`);
+          }
+          for (const cell of row) {
+            if (typeof cell === "string" && /[\t\r\n]/.test(cell)) {
+              throw new Error("sheets set's `values` cells may not contain a tab, carriage return, "
+                + "or newline — write to one cell at a time for that content instead.");
+            }
+          }
+        }
+        const cellCount = a.values.length * width;
+        if (cellCount > sheetsSetMaxCells) {
+          throw new Error(`values spans ${cellCount} cells, past the ${sheetsSetMaxCells}-cell limit `
+            + "on one set call — write a smaller grid, or split it across multiple calls.");
+        }
+      }
+      if (resizeVerbs.has(a.verb)) {
+        if (a.at === undefined) {
+          throw new Error(`sheets ${a.verb} needs \`at\` — ${rowVerbs.has(a.verb)
+            ? "a 1-based row number (e.g. at:3)" : 'column letters (e.g. at:"C")'}.`);
+        }
+        if (!a.count) {
+          throw new Error(`sheets ${a.verb} needs a positive \`count\` — how many `
+            + `${rowVerbs.has(a.verb) ? "rows" : "columns"} (e.g. count:2).`);
+        }
+        if (rowVerbs.has(a.verb)) {
+          const asString = String(a.at);
+          if (!/^[1-9][0-9]*$/.test(asString)) {
+            throw new Error(`sheets ${a.verb}'s \`at\` must be a positive 1-based row number `
+              + `(matching A1 notation's own row numbering) — got: ${JSON.stringify(a.at)}.`);
+          }
+        } else {
+          if (typeof a.at !== "string" || !/^[A-Za-z]+$/.test(a.at)) {
+            throw new Error(`sheets ${a.verb}'s \`at\` must be column letters (e.g. "C", "AA") — `
+              + `got: ${JSON.stringify(a.at)}.`);
+          }
+        }
+      }
+      if (a.verb === "add_sheet" && !a.name) {
+        throw new Error('sheets add_sheet needs a `name` for the new sheet — e.g. name:"Q3".');
+      }
+      if (a.verb === "delete_sheet" && !a.name) {
+        throw new Error('sheets delete_sheet needs `name` — which sheet to delete.');
+      }
+      if (a.verb === "rename_sheet") {
+        if (!a.name) {
+          throw new Error('sheets rename_sheet needs `name` — the EXISTING sheet to rename.');
+        }
+        if (!a.newName) {
+          throw new Error('sheets rename_sheet needs `newName` — the sheet\'s new name.');
         }
       }
 
@@ -305,13 +466,22 @@ export function registerSheetsTool(r: ToolRegistry, deps: SheetsToolDeps): void 
         return `sheets ${a.verb} was not sent — the turn was interrupted first.`;
       }
 
-      const fields: Record<string, string | number | boolean> = {};
+      let args: Record<string, unknown>;
       if (a.verb === "read") {
-        fields.sheet = a.sheet!;
-        fields.range = a.range!;
-        fields.formulas = a.formulas === true;
+        args = officeCommandArgs(resolvedPath, { sheet: a.sheet!, range: a.range!, formulas: a.formulas === true });
+      } else if (a.verb === "set") {
+        args = officeSheetsSetArgs(resolvedPath, a.sheet!, a.range!, a.values!);
+      } else if (resizeVerbs.has(a.verb)) {
+        args = officeCommandArgs(resolvedPath, { sheet: a.sheet!, at: a.at!, count: a.count! });
+      } else if (a.verb === "add_sheet") {
+        args = officeCommandArgs(resolvedPath, { name: a.name! });
+      } else if (a.verb === "delete_sheet") {
+        args = officeCommandArgs(resolvedPath, { name: a.name! });
+      } else if (a.verb === "rename_sheet") {
+        args = officeCommandArgs(resolvedPath, { name: a.name!, newName: a.newName! });
+      } else {
+        args = officeCommandArgs(resolvedPath);
       }
-      const args = officeCommandArgs(resolvedPath, Object.keys(fields).length > 0 ? fields : undefined);
 
       const deadlineMs = OFFICE_DEADLINES_MS[action];
       const { settled } = deps.dispatch({ sessionId, action, args, deadlineMs });
@@ -327,7 +497,7 @@ export function registerSheetsTool(r: ToolRegistry, deps: SheetsToolDeps): void 
       }
 
       if (!outcome.ok) {
-        throw new Error(outcome.result ?? `sheets ${a.verb} could not read ${a.path}`);
+        throw new Error(outcome.result ?? `sheets ${a.verb} could not be completed for ${a.path}`);
       }
 
       return outcome.result ?? `sheets ${a.verb} completed for ${a.path}`;

@@ -247,3 +247,26 @@ export function officeCommandArgs(
   }
   return out;
 }
+
+/**
+ * office-agent-tools T4 — `sheets set`'s own dedicated, typed builder, exactly the shape this file's
+ * own header above says a richer verb should get rather than stretching `officeCommandArgs`'s
+ * primitives-only contract to fit. `values` is `sheets.ts`'s own already-zod-validated grid
+ * (non-empty, rectangular, cell-count-capped) — carried here as a nested row-major array of JSON
+ * primitives, never flattened or stringified: `panel_command.args` is `z.record(z.string(),
+ * z.unknown())` at the wire layer (`events.ts`), so a nested array is exactly as legal as any other
+ * field here, bounded by the SAME `PANEL_COMMAND_ARGS_MAX_JSON_BYTES` cap every `panel_command` pays
+ * (checked by `sheets.ts` itself before ever calling this, via `sheetsSetMaxCells` — a cell-count
+ * ceiling sized to keep the serialized form comfortably under that byte cap, not a byte count this
+ * function re-derives). The app (`OfficeCommandConsumer`) is where the grid's real A1 dimensions get
+ * checked against `range` and where each cell becomes a `(address, value)` pair for LOK — this
+ * function's only job is shaping the wire payload, not validating it a second time.
+ */
+export function officeSheetsSetArgs(
+  path: string,
+  sheet: string,
+  range: string,
+  values: ReadonlyArray<ReadonlyArray<string | number | boolean>>,
+): Record<string, unknown> {
+  return { path, sheet, range, values };
+}
