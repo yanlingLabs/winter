@@ -50,22 +50,39 @@ final class OfficeHelperClient {
     /// request/reply path entirely, so this fires independently of `ping`/`open`/`close` calls).
     /// Settable, not an `AsyncStream` (carry: don't add more single-consumer coupling than the
     /// brief already has, but don't build multicast yet either — Task 4's job). `nil` by default.
-    var onDocumentEvent: ((String, OfficeDocumentEvent) -> Void)? {
+    ///
+    /// crash-fix round 1 (§4/finding 3, broker-crash-investigation.md): `@Sendable` on all four
+    /// properties here — not just on `OfficeWireConnection`'s own callbacks below — closes the gap
+    /// the investigation found: `OfficeWireConnection`'s reader delivers pushes from the
+    /// cooperative pool with no isolation promise, but this class was not itself isolated and its
+    /// four properties were plain (non-`Sendable`) closure types, so a closure literal at a
+    /// `@MainActor`-isolated assignment site (e.g. `ShellSessionHost.wireOfficeTileCallbacks`)
+    /// could infer `@MainActor` isolation for itself with at most a warning under Swift 5.9's
+    /// default checking — proven reachable: that inferred isolation is exactly what
+    /// `-enable-actor-data-race-checks` caught, tracing back to this `didSet` (traps 3/3 on the
+    /// live tests before this fix). A closure at a `@Sendable`-typed slot can no longer infer
+    /// `@MainActor`, which is what removes the runtime trap; assigning a genuinely actor-isolated
+    /// closure here now instead surfaces as a Sendable-conformance *warning* at the call site
+    /// (an error under the Swift 6 language mode this project has not yet adopted) rather than
+    /// silent inference — every real assignment site already does nothing but
+    /// `Task { @MainActor [weak self] in … }`, which was and remains warning-free.
+    var onDocumentEvent: (@Sendable (String, OfficeDocumentEvent) -> Void)? {
         didSet { connection.onDocumentEvent = { [onDocumentEvent] docId, event in onDocumentEvent?(docId, event) } }
     }
 
     /// Task 4 — the tile-pipeline counterparts to `onDocumentEvent` above, same settable-closure
     /// shape (not an `AsyncStream`, same carry-driven restraint) proxied straight through to the
-    /// underlying `OfficeWireConnection`'s own dedicated push callbacks.
-    var onTile: ((UInt64, String, TileKey, Int, Int, Int, Data) -> Void)? {
+    /// underlying `OfficeWireConnection`'s own dedicated push callbacks. `@Sendable` for the same
+    /// reason `onDocumentEvent` above is — see that property's own header.
+    var onTile: (@Sendable (UInt64, String, TileKey, Int, Int, Int, Data) -> Void)? {
         didSet { connection.onTile = { [onTile] seq, docId, key, generation, width, height, pixels in
             onTile?(seq, docId, key, generation, width, height, pixels)
         } }
     }
-    var onTileFailed: ((UInt64, String, TileKey, String) -> Void)? {
+    var onTileFailed: (@Sendable (UInt64, String, TileKey, String) -> Void)? {
         didSet { connection.onTileFailed = { [onTileFailed] seq, docId, key, reason in onTileFailed?(seq, docId, key, reason) } }
     }
-    var onInvalidated: ((UInt64, String, [TileKey]) -> Void)? {
+    var onInvalidated: (@Sendable (UInt64, String, [TileKey]) -> Void)? {
         didSet { connection.onInvalidated = { [onInvalidated] seq, docId, keys in onInvalidated?(seq, docId, keys) } }
     }
 
