@@ -2155,6 +2155,12 @@ final class LOKBridge: OfficeDocumentBridge {
     /// is a real, if cheap, LOK call (a 64x64 tile paint), not a clock tick, so this is a real cost
     /// per attempt, unlike a bounded wall-clock retry would be.
     private static let goToCellVerificationAttempts = 4
+    /// office-agent-tools T4 — `sheetsManageSheetOnDedicatedThread`'s own verification budget. See
+    /// that function's own header for why this is separate from, and larger than,
+    /// `goToCellVerificationAttempts`: a structural sheet insert/delete/rename is a heavier
+    /// operation than a cell selection move, live-measured to need more than 4 attempts at least
+    /// once across this task's own repeated runs.
+    private static let sheetsManageVerificationAttempts = 20
 
     /// Splits `getTextSelection`'s own TSV shape (rows joined by `"\n"`, cells within a row joined by
     /// `"\t"`) into a grid — the ONE place both `sheetsInfo` and `sheetsRead` turn that raw string into
@@ -2656,12 +2662,84 @@ final class LOKBridge: OfficeDocumentBridge {
     /// task's own research specifically flagged both `.add`/`.rename`'s silent-failure/silent-
     /// alteration risk. A count/membership mismatch after the pump throws honestly rather than report
     /// success on an operation this bridge cannot otherwise confirm landed.
+    ///
+    /// **Dispatched on the PRIMARY view, all three ops — NOT the agent-view isolation every other
+    /// write verb in this file has, a deliberate, disclosed, LIVE-FORCED retreat, not the original
+    /// design.** Two rounds of live evidence, in order, are why:
+    ///
+    /// 1. Moving `.delete` (`.uno:Remove`) to the agent view made this bridge's own live drill TIME
+    ///    OUT — `OfficeHelperClient`'s bounded 30s `requestTimeout` rescuing it, not a crash, but a
+    ///    genuine hang on the dedicated thread — reproduced whether `.delete` itself dispatched from
+    ///    the agent view OR the primary, as long as an agent view EXISTED at all for that docId (left
+    ///    over from an earlier `sheets set`/`read`/`resize`/`rename_sheet` call, or this function's
+    ///    own prior `.add`/`.rename`). Destroying any pre-existing agent view immediately before
+    ///    `.uno:Remove` (kept below) is what actually closed that hang.
+    /// 2. Moving `.add`/`.rename` to the agent view (to stop `.rename`'s own `setPart` call from
+    ///    moving an ADOPTED tab's visible sheet — a real problem, proven live in isolation once) then
+    ///    made THEIR OWN post-dispatch verification stop converging AT ALL across repeated isolated
+    ///    reruns — not "needs a few more pump attempts" the way `.uno:GoToCell`'s own race does, but
+    ///    exhausting a 20-attempt budget outright, run after run. No root cause is claimed for either
+    ///    finding (plausible: this LOK build's multi-view support is proven, heavily, for the
+    ///    CELL-level primitives — GoToCell, paste, ext-text-input, postKeyEvent — every OTHER write
+    ///    verb in this file rides, and far less exercised for WORKBOOK-STRUCTURAL edits dispatched
+    ///    from a genuinely headless second view) — only that the boundary is real, found empirically,
+    ///    across two independent live-evidence rounds, not reasoned about in advance.
+    ///
+    /// **The disclosed residual this leaves**: unlike `sheets set`/`insert_rows`/`insert_cols`/
+    /// `delete_rows`/`delete_cols` (all genuinely isolated to the agent view, proven live), the THREE
+    /// verbs this function serves can move an ADOPTED document's own primary-view state —
+    /// `rename_sheet`'s `setPart` most concretely, `add_sheet`'s standard "new sheet becomes active"
+    /// UX plausibly. Not closed in this task; see task-4-report.md's own concerns for the full
+    /// accounting rather than a claim this is fixed.
+    ///
+    /// - `.add` → `.uno:Add {Name}` — always appends at the end (this tool's own v1 scope: no
+    ///   position operand), never `.uno:Insert` (which additionally needs a numeric `Index` — see
+    ///   `.delete`'s own case below for why this bridge avoids a numeric UNO arg wherever a real
+    ///   alternative exists).
+    /// - `.rename` → `.uno:Name {Name}`, `Index` OMITTED — the research's own finding: omitting
+    ///   `Index` targets the CURRENT sheet, and the dialog only fires when the WHOLE args object is
+    ///   null, not merely missing one optional key — so this function makes the TARGET sheet current
+    ///   first (`setPart`) rather than compute a 1-based `Index` it would otherwise have to guess a
+    ///   JSON type string for.
+    /// - `.delete` → `.uno:Remove {Index}` — the ONE case with no name-based alternative; `Index` is
+    ///   REQUIRED (1-based, no "0 means current" convention — passing 0 targets sheet 1). The JSON
+    ///   "type" string for this NUMERIC arg (`SfxUInt16Item`) could not be confirmed from source
+    ///   alone (this task's own research: "an honest gap, not a guess dressed up as fact") — resolved
+    ///   live against the real engine: `"unsigned short"`, first attempt, no dialog hang.
+    ///
+    /// **Two refusals happen BEFORE any UNO command is dispatched, not after** —
+    /// `SaveError.lastSheet`/`.duplicateSheetName`: this task's own research found Calc's real
+    /// handlers give NO honest error signal for either case (`RenameTable` returns `false` with
+    /// nothing surfacing through the UNO dispatch; `CreateValidTabName` silently ALTERS a colliding
+    /// name rather than refusing it) — a pre-check against this bridge's own already-known sheet list
+    /// is the only way to refuse cleanly rather than risk a silent no-op or a silently different name
+    /// than the one the caller asked for.
+    ///
+    /// **The op's own success is confirmed by RE-READING the sheet list afterward, poll-with-pump —
+    /// never a single read trusted from dispatch alone.** Same fix-round-2b lesson `.uno:GoToCell`'s
+    /// own verification already learned, with its OWN, independently-sized budget
+    /// (`sheetsManageVerificationAttempts`, larger than `goToCellVerificationAttempts` — a structural
+    /// sheet mutation is a heavier operation than a cell selection move, live-measured to need more
+    /// attempts even once it converges reliably again after the primary-view revert).
     private func sheetsManageSheetOnDedicatedThread(docId: String, op: OfficeSheetsManageSheetOp,
                                                      name: String, newName: String?) throws -> [String] {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
         guard doc.kind == .spreadsheet else { throw SaveError.notSpreadsheet(docId: docId, kind: doc.kind) }
         doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
         let before = sheetNamesOnDedicatedThread(doc)
+
+        // Live-measured (see this function's own header, point 1): an EXISTING agent view — left
+        // over from an earlier `sheets set`/`read`/`resize` call on this SAME docId — made
+        // `.uno:Remove` hang regardless of which view dispatched it. Destroyed unconditionally, for
+        // EVERY op (not merely `.delete`), before this function does anything else: cheap
+        // insurance, since `sheetsSet`/`sheetsRead`/`sheetsResize` mint a fresh one again on their
+        // own next call (`ensureAgentViewOnDedicatedThread`'s own get-or-mint contract) — this is
+        // never a permanent loss of anything.
+        if var mutableDoc = documents[docId], let agentViewId = mutableDoc.agentViewId, agentViewId >= 0 {
+            doc.handle.pointee.pClass.pointee.destroyView?(doc.handle, agentViewId)
+            mutableDoc.agentViewId = nil
+            documents[docId] = mutableDoc
+        }
 
         switch op {
         case .add:
@@ -2690,22 +2768,46 @@ final class LOKBridge: OfficeDocumentBridge {
             doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(zeroBasedIndex))
             postUnoCommandOnDedicatedThread(doc, ".uno:Name", ["Name": ["type": "string", "value": newName]])
         }
-        pumpDedicatedThreadForPendingDispatch(doc, viewId: doc.viewId, part: 0)
 
-        let after = sheetNamesOnDedicatedThread(doc)
-        switch op {
-        case .add:
-            guard after.count == before.count + 1 else {
-                throw SaveError.writeVerificationFailed(docId: docId, address: "(add_sheet \"\(name)\")")
+        // **Poll-with-pump, not a single read — live-measured, the same fix-round-2b lesson
+        // `.uno:GoToCell`'s own verification already learned (`selectionTextOnDedicatedThread`'s own
+        // header).** The first version of this check read `sheetNamesOnDedicatedThread` exactly
+        // once, immediately after the pump each op's own dispatch already does — and `add_sheet`
+        // failed verification live, on the very first drill after the `.delete`-hang fix above: the
+        // UNO dispatch itself needs more than one pump's worth of turns before the sheet COUNT
+        // reflects it, the identical "fire-and-forget, not synchronous" property `postUnoCommand`
+        // has everywhere else in this file. Bounded (4 attempts, mirroring `goToCellVerification
+        // Attempts`), pumped on the PRIMARY view uniformly — always valid regardless of which op ran
+        // (`.delete` may have just destroyed the agent view entirely; `.add`/`.rename`'s agent view
+        // may or may not still exist depending on future changes to this function) — never re-
+        // dispatching the op itself, only giving LOK's own dispatcher more turns to catch up.
+        func verified(_ names: [String]) -> Bool {
+            switch op {
+            case .add: return names.count == before.count + 1
+            case .delete: return names.count == before.count - 1 && !names.contains(name)
+            case .rename: return names.contains(newName ?? "") && !names.contains(name)
             }
-        case .delete:
-            guard after.count == before.count - 1, !after.contains(name) else {
-                throw SaveError.writeVerificationFailed(docId: docId, address: "(delete_sheet \"\(name)\")")
-            }
-        case .rename:
-            guard after.contains(newName ?? ""), !after.contains(name) else {
-                throw SaveError.writeVerificationFailed(docId: docId, address: "(rename_sheet \"\(name)\")")
-            }
+        }
+        // **Round 2, live-measured again**: `goToCellVerificationAttempts` (4) — sized for a CELL
+        // SELECTION move — was not enough here even once out of six total live runs at that budget.
+        // Inserting/removing/renaming a SHEET is a heavier, structural document mutation than a
+        // selection change, not merely the same race at the same speed; `sheetsManageVerification
+        // Attempts` is this function's own, independently-sized budget, not a shared one, so raising
+        // it cannot silently loosen `.uno:GoToCell`'s own proven-tight bound elsewhere in this file.
+        var after = sheetNamesOnDedicatedThread(doc)
+        var attempts = 1
+        while !verified(after) && attempts < Self.sheetsManageVerificationAttempts {
+            pumpDedicatedThreadForPendingDispatch(doc, viewId: doc.viewId, part: 0)
+            after = sheetNamesOnDedicatedThread(doc)
+            attempts += 1
+        }
+        if attempts > 1 {
+            FileHandle.standardError.write(Data(
+                "[LOKBridge sheets] manageSheet(\(op)) needed \(attempts) attempt(s) before verification succeeded (or the budget was exhausted)\n".utf8))
+        }
+        guard verified(after) else {
+            let label = "(\(op)_sheet \"\(op == .rename ? (newName ?? "") : name)\")"
+            throw SaveError.writeVerificationFailed(docId: docId, address: label)
         }
         return after
     }

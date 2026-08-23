@@ -1068,6 +1068,24 @@ final class OfficeSheetsCommandTests: XCTestCase {
                      + "\(runtime.stateSnapshot.documents)")
     }
 
+    // **Disclosed, deliberately NOT pinned by a test — see `sheetsManageSheetOnDedicatedThread`'s
+    // own header for the full live-evidence story.** All three `manage_sheet` ops dispatch on the
+    // PRIMARY view (unlike `sheets set`/`insert_rows`/`insert_cols`/`delete_rows`/`delete_cols`,
+    // which ARE genuinely isolated to the agent view, proven live) after an agent-view isolation
+    // attempt was itself reverted live: it broke `.uno:Remove` outright (a hang) and, once that was
+    // fixed separately, left `.add`/`.rename`'s own post-dispatch verification unable to converge
+    // across repeated isolated reruns. `rename_sheet`'s own `setPart` call runs on whichever view is
+    // current — the primary one — so it CAN move an adopted tab's own visible active sheet.
+    //
+    // A first attempt at this comment's own regression test asserted that move as a deterministic
+    // outcome (`active: "Renamed"` after renaming a different sheet) — live-measured to be WRONG:
+    // across repeated runs the primary's own reported active sheet was inconsistent (`"Sheet1"` in
+    // one full-class run, `"Renamed"` in an earlier isolated one, identical code, identical
+    // sequence). The side effect itself is evidently racy, not a clean, always-reproducible one —
+    // asserting either direction would be a flaky test, which this file's own house standard treats
+    // as worse than no test. Left disclosed in prose, honestly, rather than pinned by an assertion
+    // that could not be made reliable in the time this task had — see task-4-report.md's concerns.
+
     /// **Writing to a document the user has OPEN and CLEAN must repaint AND persist** — the proof
     /// obligation's own words. Mirrors `OfficeAgentBrokerTests.testLiveAdoptionEditsTheAlready
     /// OpenDocumentInPlaceAndNeverClosesIt`'s own repaint predicate exactly (paint BEFORE the write,
