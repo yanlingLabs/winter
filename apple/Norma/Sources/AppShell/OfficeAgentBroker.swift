@@ -163,7 +163,7 @@ final class OfficeAgentBroker {
         path: String,
         access: Access,
         requestId: String,
-        action: @escaping (_ runtime: OfficeRuntime, _ docId: String) async throws -> String
+        action: @escaping (_ runtime: OfficeRuntime, _ docId: String, _ adopted: Bool) async throws -> String
     ) async throws -> String {
         if let existing = inFlight[requestId] {
             return try await existing.value
@@ -180,9 +180,21 @@ final class OfficeAgentBroker {
     /// One real attempt — everything `perform` memoizes. `static` and given only what it needs
     /// (never `self`), so replaying it is provably just "run this again with the same inputs," not
     /// something that could accidentally read broker state a second attempt shouldn't see.
+    ///
+    /// **Second fix-round review (Important #2) — `action` now receives `adopted`, its own already-
+    /// computed local below, unchanged.** `set`'s own tool description used to claim earlier cells in
+    /// a partially-failed call "have already been written and saved" — false: `action` throws before
+    /// rule 4's save switch below is ever reached, so nothing from ANY `set` call is ever saved once
+    /// one cell fails, and what happens to the earlier, genuinely-written-but-unsaved cells differs by
+    /// `adopted` (an adopted document is left dirty in the user's own tab; a document THIS call opened
+    /// has those cells discarded when rule 2's own `defer` closes it below, unsaved). `action` needs
+    /// this to compose an honest failure message — see `OfficeCommandConsumer.handleSheetsSet`'s own
+    /// closure. Every OTHER `action` closure in `OfficeCommandConsumer.swift` ignores the new
+    /// parameter; the compiler enforces the sweep (a call site missing it fails to build), which is
+    /// why this is a signature change here rather than a narrower, verb-specific side channel.
     private static func runOnce(
         host: Host, sessionId: String, path: String, access: Access,
-        action: @escaping (_ runtime: OfficeRuntime, _ docId: String) async throws -> String
+        action: @escaping (_ runtime: OfficeRuntime, _ docId: String, _ adopted: Bool) async throws -> String
     ) async throws -> String {
         // Rule 5 — fence, before anything opens. `resolvedPath` (never the raw `path`) is what every
         // later step acts on; `path` survives only to word the refusal the way `resolveWithinAny`
@@ -339,7 +351,7 @@ final class OfficeAgentBroker {
             }
         }
 
-        let result = try await action(runtime, docId)
+        let result = try await action(runtime, docId, adopted)
 
         guard access == .write else { return result }
 
@@ -600,6 +612,13 @@ enum OfficeAgentBrokerError: Error, Equatable {
     /// .failed`'s own reason; the `.noModel` case builds its own explanatory text at the call site
     /// since `SaveOutcome` itself carries no reason for that case.
     case saveFailed(path: String, reason: String)
+    /// Second fix-round review (Important #2) — distinct from `.saveFailed` on purpose: this fires
+    /// from WITHIN `action`, before rule 4's save switch runs at all, so wording it "couldn't save"
+    /// would repeat the exact conflation the review caught in `sheets.ts`'s own description (earlier
+    /// cells were never saved to begin with — nothing here ever tried). `reason` is already a fully
+    /// composed, house-voice sentence (`OfficeCommandConsumer.handleSheetsSet`'s own closure), never
+    /// re-derived here.
+    case writeFailed(path: String, reason: String)
     /// The host deallocated between being asked and the minting door running — see `Host`'s own doc.
     case hostGone
 
@@ -616,6 +635,8 @@ enum OfficeAgentBrokerError: Error, Equatable {
             return "Couldn't open \((path as NSString).lastPathComponent): \(reason)"
         case .saveFailed(let path, let reason):
             return "Couldn't save \((path as NSString).lastPathComponent): \(reason)"
+        case .writeFailed(let path, let reason):
+            return "Couldn't finish writing to \((path as NSString).lastPathComponent): \(reason)"
         case .hostGone:
             return "Norma's office runtime is no longer available."
         }

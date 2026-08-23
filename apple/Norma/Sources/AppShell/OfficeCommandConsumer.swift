@@ -158,7 +158,7 @@ struct OfficeCommandConsumer {
         do {
             let resultText = try await broker.perform(
                 sessionId: command.sessionId, path: path, access: .read, requestId: command.commandId
-            ) { runtime, docId in
+            ) { runtime, docId, adopted in
                 let (sheets, activeSheet) = try await runtime.sheetsInfo(docId: docId)
                 return Self.formatSheetsInfo(path: path, sheets: sheets, activeSheet: activeSheet)
             }
@@ -211,7 +211,7 @@ struct OfficeCommandConsumer {
         do {
             let resultText = try await broker.perform(
                 sessionId: command.sessionId, path: path, access: .read, requestId: command.commandId
-            ) { runtime, docId in
+            ) { runtime, docId, adopted in
                 let rows = try await runtime.sheetsRead(docId: docId, sheet: sheet, range: rangeString, formulas: formulas)
                 return Self.formatSheetsRead(sheet: sheet, range: rangeString, formulas: formulas, rows: rows)
             }
@@ -294,10 +294,34 @@ struct OfficeCommandConsumer {
         do {
             let resultText = try await broker.perform(
                 sessionId: command.sessionId, path: path, access: .write, requestId: command.commandId
-            ) { runtime, docId in
-                let cellsWritten = try await runtime.sheetsSet(docId: docId, sheet: sheet, range: rangeString,
-                                                                cellAddresses: cellAddresses, cellValues: cellValues)
-                return Self.formatSheetsSet(path: path, sheet: sheet, range: rangeString, cellsWritten: cellsWritten)
+            ) { runtime, docId, adopted in
+                do {
+                    let cellsWritten = try await runtime.sheetsSet(docId: docId, sheet: sheet, range: rangeString,
+                                                                    cellAddresses: cellAddresses, cellValues: cellValues)
+                    return Self.formatSheetsSet(path: path, sheet: sheet, range: rangeString, cellsWritten: cellsWritten)
+                } catch {
+                    // Second fix-round review (Important #2) — `set` is the ONE verb where an
+                    // earlier, in-call cell can already have applied before a LATER cell's failure
+                    // reaches here; only meaningful to disclose when this call ever had more than one
+                    // cell to begin with (a single-cell call's own failure already means zero earlier
+                    // cells, and the wrapped message says so). `adopted` decides which of the two real
+                    // outcomes actually happened — see `OfficeAgentBroker.runOnce`'s own header for why
+                    // this parameter exists at all: an adopted document is left dirty, wedging further
+                    // writes (rule 3) until the human saves or discards; a document THIS call opened
+                    // has those earlier cells DISCARDED, unsaved, when rule 2's own `defer` closes it.
+                    // Never auto-saves the partial write to dodge this — a silent, unrequested partial
+                    // save would be worse than a truthful refusal (coordinator review, explicit).
+                    guard cellAddresses.count > 1 else { throw error }
+                    let lifecycle = adopted
+                        ? " If earlier cells in this call already applied before this failure, they "
+                            + "are sitting unsaved in your own open tab right now — the tab is dirty, "
+                            + "and Norma will refuse further writes to this document until you save "
+                            + "or discard those changes yourself."
+                        : " If earlier cells in this call already applied before this failure, they "
+                            + "were discarded when Norma closed the document afterward — nothing from "
+                            + "this call persisted, and the next call will start fresh."
+                    throw OfficeAgentBrokerError.writeFailed(path: path, reason: Self.message(for: error) + lifecycle)
+                }
             }
             let (ok, text) = Self.capped(resultText)
             sendResult(command.sessionId, command.commandId, ok, text, nil)
@@ -372,7 +396,7 @@ struct OfficeCommandConsumer {
         do {
             let resultText = try await broker.perform(
                 sessionId: command.sessionId, path: path, access: .write, requestId: command.commandId
-            ) { runtime, docId in
+            ) { runtime, docId, adopted in
                 let dims = try await runtime.sheetsResize(docId: docId, sheet: sheet, dimension: dimension,
                                                           op: op, selectionRange: selectionRange)
                 return Self.formatSheetsResize(path: path, sheet: sheet, usedEndColumn: dims.usedEndColumn,
@@ -415,7 +439,7 @@ struct OfficeCommandConsumer {
         do {
             let resultText = try await broker.perform(
                 sessionId: command.sessionId, path: path, access: .write, requestId: command.commandId
-            ) { runtime, docId in
+            ) { runtime, docId, adopted in
                 let sheets = try await runtime.sheetsManageSheet(docId: docId, op: op, name: name, newName: newName)
                 return Self.formatSheetsManageSheet(path: path, sheets: sheets)
             }

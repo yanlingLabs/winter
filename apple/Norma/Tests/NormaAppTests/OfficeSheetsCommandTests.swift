@@ -467,7 +467,7 @@ final class OfficeSheetsCommandTests: XCTestCase {
         // with the drain, per rule 4, and does not close since it adopted rather than minted).
         let seeded = try await host.officeAgentBroker.perform(
             sessionId: "S1", path: path, access: .write, requestId: UUID().uuidString
-        ) { _, docId in
+        ) { _, docId, _ in
             try await self.typeFormulaOnePlusOne(client: client, docId: docId)
             return "seeded"
         }
@@ -897,6 +897,87 @@ final class OfficeSheetsCommandTests: XCTestCase {
         XCTAssertTrue(d1Read.ok, "\(d1Read)")
         XCTAssertTrue((d1Read.result ?? "").contains("ok value"),
                       "D1 (written before the bad cell) must have landed for real — non-atomicity is disclosed, not silently masked: \(String(describing: d1Read.result))")
+
+        // Second fix-round review (Important #2) — the read directly above is an ADOPTED, IN-MEMORY
+        // read: it can only ever show "written," never distinguish that from "written AND saved,"
+        // which is EXACTLY the ambiguity that let `sheets.ts`'s own false "have already been written
+        // and saved" claim go unnoticed through the first fix round. The coordinator's own
+        // instruction: "the existing in-memory read showing D1 present can stay; the pair is the
+        // cleanest possible demonstration of written-vs-saved." This is the other half of that pair
+        // — a genuinely independent reopen straight from disk, the SAME mechanism every other
+        // saved-bytes proof in this file already uses (`sheets-resize-reopen-midchain` etc.).
+        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.dirty, true,
+                       "the tab must be left DIRTY by the failed call — `action` threw before rule "
+                           + "4's save switch ever ran, so nothing from this call was ever saved")
+        guard let independentClient = host.officeHelperSupervisor?.client else {
+            return XCTFail("no live client for the independent reopen")
+        }
+        let independentDocId = "sheets-set-partial-failure-reopen"
+        _ = try await independentClient.open(docId: independentDocId, path: path)
+        let savedD1Rows = try await independentClient.sheetsRead(docId: independentDocId, sheet: "Sheet1",
+                                                                   range: "D1", formulas: false)
+        let savedD1 = savedD1Rows.map { $0.joined(separator: "\t") }.joined(separator: "\n")
+        XCTAssertFalse(savedD1.contains("ok value"),
+                       "D1 must be ABSENT from the SAVED FILE — it was written to the in-memory "
+                           + "document only, never saved, since the call failed before rule 4's save "
+                           + "switch ever ran: \(savedD1)")
+        try await independentClient.close(docId: independentDocId)
+
+        // The wedge, proven live, not merely asserted: rule 3's own dirty refusal must now fire for
+        // ANY further write to this SAME document — the tab is dirty with edits the human never
+        // asked for, and only the human (saving or discarding) can clear it. "Re-read before
+        // retrying" (the per-cell failure text) is NOT a recovery path for this document anymore.
+        let followUpSent = await send(command("office.sheets.set", args: [
+            "path": path, "sheet": "Sheet1", "range": "E1", "values": [["should refuse"]],
+        ], sessionId: "S1", commandId: "pcmd-badformula-followup"), through: host)
+        XCTAssertFalse(followUpSent.ok, "a follow-up write to the now-dirty tab must be refused, "
+                       + "proving the wedge rather than merely asserting it: \(followUpSent)")
+        XCTAssertTrue((followUpSent.result ?? "").lowercased().contains("unsaved"),
+                      "the refusal must be the rule-3 dirty refusal specifically: \(String(describing: followUpSent.result))")
+    }
+
+    /// Second fix-round review (Important #2) — the OPENED (not adopted) half of the same claim: a
+    /// document this tool opens SOLELY for one `set` call, with no prior tab already showing it, has
+    /// its earlier, in-call cells DISCARDED — not wedged — when the failure's `defer` closes it. Two
+    /// things this proves that the adopted case above cannot: the file on disk is genuinely
+    /// UNCHANGED (nothing this call did ever reached disk, not even transiently), and the VERY NEXT
+    /// call for the SAME path does NOT refuse — no dirty tab exists to wedge it, unlike the adopted
+    /// case's own proven wedge.
+    func testLiveSheetsSetOnAnUnopenedDocumentDiscardsPartialWorkAndTheNextCallDoesNotWedge() async throws {
+        try requireLiveEngine()
+        let path = try makeWritableCopy(of: "gate.xlsx")
+        let stateDir = makeScratchDirectory()
+        let host = makeLiveHost(stateDir: stateDir, dirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)])
+        await host.directory.refresh()
+        // Deliberately NO `runtime.open(path)` here — this call must MINT its own open, not adopt an
+        // already-open tab, the opposite setup from the adopted test above.
+
+        let originalBytes = try Data(contentsOf: URL(fileURLWithPath: path))
+
+        let sent = await send(command("office.sheets.set", args: [
+            "path": path, "sheet": "Sheet1", "range": "D1:D2",
+            "values": [["ok value"], ["=A1&\"café\""]],
+        ], sessionId: "S1", commandId: "pcmd-opened-badformula-1"), through: host)
+        XCTAssertFalse(sent.ok, "\(sent)")
+        XCTAssertTrue((sent.result ?? "").lowercased().contains("discarded"),
+                      "the opened-not-adopted failure text must say DISCARDED, not the adopted "
+                          + "case's unsaved/dirty wording: \(String(describing: sent.result))")
+
+        let bytesAfterFailure = try Data(contentsOf: URL(fileURLWithPath: path))
+        XCTAssertEqual(originalBytes, bytesAfterFailure,
+                       "the file on disk must be BYTE-IDENTICAL to before this call — the broker-"
+                           + "opened document's `defer` closes it unsaved on the throw, discarding "
+                           + "D1's own in-memory write along with it, never touching disk at all")
+
+        // No wedge: the NEXT call for this same path must NOT be refused — there is no dirty tab
+        // left behind to refuse it, the behavioral difference from the adopted case above.
+        let nextCallSent = await send(command("office.sheets.read",
+                                              args: ["path": path, "sheet": "Sheet1", "range": "D1"],
+                                              sessionId: "S1", commandId: "pcmd-opened-badformula-next"), through: host)
+        XCTAssertTrue(nextCallSent.ok, "the NEXT call must succeed cleanly — no wedge left behind by "
+                      + "a discarded (not dirty-adopted) partial failure: \(nextCallSent)")
+        XCTAssertFalse((nextCallSent.result ?? "").contains("ok value"),
+                       "and it must read the GENUINELY UNCHANGED file — D1 was never saved: \(String(describing: nextCallSent.result))")
     }
 
     /// office-agent-tools T4 fix-round review (Important #3) — DELETION-RED for the new position

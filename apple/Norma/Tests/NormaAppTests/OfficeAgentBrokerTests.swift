@@ -227,7 +227,7 @@ final class OfficeAgentBrokerTests: XCTestCase {
         var seenDocId: String?
         let result = try await host.officeAgentBroker.perform(
             sessionId: "S1", path: path, access: .read, requestId: UUID().uuidString
-        ) { _, docId in
+        ) { _, docId, _ in
             seenDocId = docId
             return "read"
         }
@@ -251,7 +251,7 @@ final class OfficeAgentBrokerTests: XCTestCase {
 
         let result = try await host.officeAgentBroker.perform(
             sessionId: "S1", path: path, access: .read, requestId: UUID().uuidString
-        ) { _, docId in "read \(docId)" }
+        ) { _, docId, _ in "read \(docId)" }
 
         XCTAssertTrue(result.hasPrefix("read "))
         XCTAssertEqual(office.openCalls.count, 1, "a not-open path must be opened exactly once")
@@ -302,7 +302,7 @@ final class OfficeAgentBrokerTests: XCTestCase {
 
         do {
             _ = try await broker.perform(sessionId: "S1", path: "/etc/passwd", access: .read,
-                                         requestId: UUID().uuidString) { _, _ in "unreached" }
+                                         requestId: UUID().uuidString) { _, _, _ in "unreached" }
             XCTFail("an out-of-fence path must refuse")
         } catch let error as OfficeAgentBrokerError {
             XCTAssertEqual(error, .outOfFence(path: "/etc/passwd"))
@@ -324,7 +324,7 @@ final class OfficeAgentBrokerTests: XCTestCase {
 
         do {
             _ = try await broker.perform(sessionId: "S1", path: "/etc/passwd", access: .read,
-                                         requestId: UUID().uuidString) { _, _ in "unreached" }
+                                         requestId: UUID().uuidString) { _, _, _ in "unreached" }
             XCTFail("an out-of-fence path must refuse")
         } catch let error as OfficeAgentBrokerError {
             XCTAssertTrue(error.message.contains("working directories"), "must state the v1 scope "
@@ -352,7 +352,7 @@ final class OfficeAgentBrokerTests: XCTestCase {
         let broker = OfficeAgentBroker(host: counting.host)
 
         _ = try await broker.perform(sessionId: "S1", path: path, access: .read,
-                                     requestId: UUID().uuidString) { _, _ in "read" }
+                                     requestId: UUID().uuidString) { _, _, _ in "read" }
 
         XCTAssertEqual(counting.existingRuntimeCalls, 1)
         XCTAssertEqual(counting.mintCalls, 0, "an adopted read must never reach the minting door")
@@ -372,7 +372,7 @@ final class OfficeAgentBrokerTests: XCTestCase {
         let broker = OfficeAgentBroker(host: counting.host)
 
         _ = try await broker.perform(sessionId: "S1", path: path, access: .read,
-                                     requestId: UUID().uuidString) { _, _ in "read" }
+                                     requestId: UUID().uuidString) { _, _, _ in "read" }
 
         XCTAssertEqual(counting.callOrder, ["existing", "mint"],
                        "the existing-runtime door must be asked before the minting door")
@@ -439,7 +439,7 @@ final class OfficeAgentBrokerTests: XCTestCase {
         let performTask = Task<String, Error> { @MainActor in
             let value = try await host.officeAgentBroker.perform(
                 sessionId: "S1", path: path, access: .read, requestId: UUID().uuidString
-            ) { _, docId in "read \(docId)" }
+            ) { _, docId, _ in "read \(docId)" }
             resultBox.value = value
             return value
         }
@@ -502,7 +502,7 @@ final class OfficeAgentBrokerTests: XCTestCase {
         let performTask = Task<String, Error> { @MainActor in
             let value = try await host.officeAgentBroker.perform(
                 sessionId: "S1", path: path, access: .read, requestId: UUID().uuidString
-            ) { _, docId in
+            ) { _, docId, _ in
                 await heldAction()
                 return "read \(docId)"
             }
@@ -577,7 +577,7 @@ final class OfficeAgentBrokerTests: XCTestCase {
         do {
             _ = try await host.officeAgentBroker.perform(
                 sessionId: "S1", path: path, access: .write, requestId: UUID().uuidString
-            ) { _, _ in actionRan = true; return "should not run" }
+            ) { _, _, _ in actionRan = true; return "should not run" }
             XCTFail("a write on a dirty adopted document must refuse")
         } catch let error as OfficeAgentBrokerError {
             guard case .documentDirty(let refusedPath) = error else {
@@ -612,7 +612,7 @@ final class OfficeAgentBrokerTests: XCTestCase {
 
         let result = try await host.officeAgentBroker.perform(
             sessionId: "S1", path: path, access: .read, requestId: UUID().uuidString
-        ) { _, _ in "read the dirty in-memory state" }
+        ) { _, _, _ in "read the dirty in-memory state" }
 
         XCTAssertEqual(result, "read the dirty in-memory state", "reads must proceed on a dirty document")
     }
@@ -629,7 +629,7 @@ final class OfficeAgentBrokerTests: XCTestCase {
 
         do {
             _ = try await broker.perform(sessionId: "S1", path: "/repo/locked.xlsm", access: .write,
-                                         requestId: UUID().uuidString) { _, _ in "unreached" }
+                                         requestId: UUID().uuidString) { _, _, _ in "unreached" }
             XCTFail("a write on a read-only format must refuse")
         } catch let error as OfficeAgentBrokerError {
             guard case .saveFailed(let path, let reason) = error else {
@@ -667,7 +667,7 @@ final class OfficeAgentBrokerTests: XCTestCase {
         do {
             _ = try await host.officeAgentBroker.perform(
                 sessionId: "S1", path: path, access: .write, requestId: UUID().uuidString
-            ) { _, _ in actionRan = true; return "should not run" }
+            ) { _, _, _ in actionRan = true; return "should not run" }
             XCTFail("a write on a read-only-format document must refuse")
         } catch let error as OfficeAgentBrokerError {
             guard case .saveFailed(let refusedPath, let reason) = error else {
@@ -695,7 +695,7 @@ final class OfficeAgentBrokerTests: XCTestCase {
 
         let result = try await host.officeAgentBroker.perform(
             sessionId: "S1", path: path, access: .read, requestId: UUID().uuidString
-        ) { _, _ in "read a read-only format" }
+        ) { _, _, _ in "read a read-only format" }
 
         XCTAssertEqual(result, "read a read-only format")
     }
@@ -716,7 +716,7 @@ final class OfficeAgentBrokerTests: XCTestCase {
 
         let result = try await host.officeAgentBroker.perform(
             sessionId: "S1", path: path, access: .write, requestId: UUID().uuidString
-        ) { _, docId in
+        ) { _, docId, _ in
             office.saveTempPaths[docId] = renderedPath
             return "wrote 3 cells"
         }
@@ -751,7 +751,7 @@ final class OfficeAgentBrokerTests: XCTestCase {
         let performTask = Task<String, Error> { @MainActor in
             let value = try await host.officeAgentBroker.perform(
                 sessionId: "S1", path: path, access: .write, requestId: UUID().uuidString
-            ) { runtime, docId in
+            ) { runtime, docId, _ in
                 // A rendered file the driver's own `saveTempPaths` names — mirrors every OTHER
                 // write-success test's own setup (`testWriteVerbSavesThroughAndReturnsTheActions
                 // ResultOnSuccess`): the recorder's un-set fallback path never exists on disk, so
@@ -823,7 +823,7 @@ final class OfficeAgentBrokerTests: XCTestCase {
         do {
             _ = try await host.officeAgentBroker.perform(
                 sessionId: "S1", path: path, access: .write, requestId: UUID().uuidString
-            ) { _, docId in
+            ) { _, docId, _ in
                 office.saveFailures[docId] = "disk full"
                 return "should not be reported as success"
             }
@@ -856,7 +856,7 @@ final class OfficeAgentBrokerTests: XCTestCase {
 
         _ = try await host.officeAgentBroker.perform(
             sessionId: "S1", path: path, access: .read, requestId: UUID().uuidString
-        ) { _, _ in "read" }
+        ) { _, _, _ in "read" }
 
         XCTAssertEqual(office.saveCalls.count, 0, "a read verb must never save")
     }
@@ -873,7 +873,7 @@ final class OfficeAgentBrokerTests: XCTestCase {
 
         var runCount = 0
         let requestId = UUID().uuidString
-        let action: (OfficeRuntime, String) async throws -> String = { _, docId in
+        let action: (OfficeRuntime, String, Bool) async throws -> String = { _, docId, _ in
             runCount += 1
             office.saveTempPaths[docId] = office.saveTempPaths[docId] ?? {
                 let rendered = FileManager.default.temporaryDirectory
@@ -918,7 +918,7 @@ final class OfficeAgentBrokerTests: XCTestCase {
         var runCount = 0
         var gateOpen = false
         let requestId = UUID().uuidString
-        let action: (OfficeRuntime, String) async throws -> String = { _, docId in
+        let action: (OfficeRuntime, String, Bool) async throws -> String = { _, docId, _ in
             runCount += 1
             office.saveTempPaths[docId] = renderedPath
             while !gateOpen { try? await Task.sleep(nanoseconds: 5_000_000) }
@@ -960,7 +960,7 @@ final class OfficeAgentBrokerTests: XCTestCase {
         await host.directory.refresh()
 
         var runCount = 0
-        let action: (OfficeRuntime, String) async throws -> String = { _, docId in
+        let action: (OfficeRuntime, String, Bool) async throws -> String = { _, docId, _ in
             runCount += 1
             let rendered = FileManager.default.temporaryDirectory
                 .appendingPathComponent("distinct-\(UUID().uuidString).xlsx").path
@@ -993,7 +993,7 @@ final class OfficeAgentBrokerTests: XCTestCase {
         do {
             _ = try await host.officeAgentBroker.perform(
                 sessionId: "S1", path: "/somewhere/else.xlsx", access: .read, requestId: UUID().uuidString
-            ) { _, _ in "unreached" }
+            ) { _, _, _ in "unreached" }
             XCTFail("a path outside the real session's own dirs must refuse")
         } catch let error as OfficeAgentBrokerError {
             XCTAssertEqual(error, .outOfFence(path: "/somewhere/else.xlsx"))
@@ -1143,7 +1143,7 @@ final class OfficeAgentBrokerTests: XCTestCase {
 
         let result = try await broker.perform(
             sessionId: "S1", path: docPath, access: .write, requestId: UUID().uuidString
-        ) { actionRuntime, docId in
+        ) { actionRuntime, docId, _ in
             XCTAssertEqual(docId, originalDocId, "adoption must reuse the ALREADY-open document")
             try await self.typeOneCharacter(client: client, docId: docId)
             let dirtied = await self.waitUntilLive(timeout: 15) {
@@ -1230,7 +1230,7 @@ final class OfficeAgentBrokerTests: XCTestCase {
 
         let result = try await broker.perform(
             sessionId: "S1", path: docPath, access: .write, requestId: UUID().uuidString
-        ) { actionRuntime, docId in
+        ) { actionRuntime, docId, _ in
             // Looked up here, not before `perform`: the broker itself mints the runtime (this path
             // is not yet open), and only that minting brings the supervisor — and its client — into
             // existence. By the time this closure runs the broker has already opened the document,
@@ -1330,7 +1330,7 @@ final class OfficeAgentBrokerTests: XCTestCase {
         // The read verb this drill targets: open → action (no mutation) → immediate close, no save.
         let result = try await broker.perform(
             sessionId: "S1", path: firstPath, access: .read, requestId: UUID().uuidString
-        ) { _, docId in "read \(docId)" }
+        ) { _, docId, _ in "read \(docId)" }
         XCTAssertTrue(result.hasPrefix("read "))
 
         let runtime = try XCTUnwrap(host.existingOfficeRuntime(for: "S1"), "opening must have minted a runtime")
