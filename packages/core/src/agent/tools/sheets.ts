@@ -381,7 +381,6 @@ export function registerSheetsTool(r: ToolRegistry, deps: SheetsToolDeps): void 
       const sheetVerbs = new Set(["read", "set", "insert_rows", "insert_cols", "delete_rows", "delete_cols"]);
       const resizeVerbs = new Set(["insert_rows", "insert_cols", "delete_rows", "delete_cols"]);
       const rowVerbs = new Set(["insert_rows", "delete_rows"]);
-      const colVerbs = new Set(["insert_cols", "delete_cols"]);
 
       // Rung 1 — operands, per verb. Missing → malformed, never defaulted (this file's own
       // wire-strictness rule).
