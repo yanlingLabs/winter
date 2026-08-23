@@ -116,15 +116,24 @@ final class OfficeAgentBrokerTests: XCTestCase {
             OfficeRuntime.Driver(
                 helperState: { .ready },
                 startHelper: { },
-                open: { [unowned self] docId, path in
+                open: { [weak self] docId, path in
+                    // crash-fix round 1 (Family B): `OfficeRuntime.perform` fires this Driver's
+                    // calls as fire-and-forget `Task`s that routinely outlive the test (see
+                    // broker-crash-investigation.md §2) — `[unowned self]` on a LOCAL recorder read
+                    // after the test returns was `swift_abortRetainUnowned`. `[weak self]` + a
+                    // straggler-safe fallback turns that host-killing abort into a dropped no-op,
+                    // which is the correct semantics for "the test that owned me is over."
+                    guard let self else { throw CancellationError() }
                     if let gate = self.openGate { await gate() }
                     self.lock.lock(); self._openCalls.append((docId, path)); self.lock.unlock()
                     return self.defaultMetadata
                 },
-                close: { [unowned self] docId in
+                close: { [weak self] docId in
+                    guard let self else { return }
                     self.lock.lock(); self._closeCalls.append(docId); self.lock.unlock()
                 },
-                save: { [unowned self] docId, _ in
+                save: { [weak self] docId, _ in
+                    guard let self else { throw CancellationError() }
                     self.lock.lock(); self._saveCalls.append(docId); self.lock.unlock()
                     if let reason = self.saveFailures[docId] {
                         throw OfficeHelperClientError.saveFailed(reason: reason)
