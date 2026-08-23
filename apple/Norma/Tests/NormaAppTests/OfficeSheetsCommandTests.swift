@@ -698,4 +698,136 @@ final class OfficeSheetsCommandTests: XCTestCase {
         // tab/newline fixture content.
         XCTAssertTrue(result.contains("\"say \"\"hi\"\"\""), result)
     }
+
+    // MARK: - office-agent-tools T4: sheets write verbs — live drills
+
+    /// `unzip -p` for a single entry inside a saved OOXML (zip-based) document — mirrors
+    /// `OfficeHelperLiveTests.readOOXMLEntry`'s own shape (shell out to a well-understood system
+    /// tool rather than reimplement zip reading), kept as a local copy per this suite's own
+    /// established per-file-helper convention.
+    private func readOOXMLEntry(atPath path: String, entry: String) throws -> String {
+        let unzip = Process()
+        unzip.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+        unzip.arguments = ["-p", path, entry]
+        let pipe = Pipe()
+        unzip.standardOutput = pipe
+        try unzip.run()
+        unzip.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        return try XCTUnwrap(String(data: data, encoding: .utf8), "\(entry) was not valid UTF-8")
+    }
+
+    /// **The core `sheets set` proof — the house standard applied at its strictest: saved bytes, not
+    /// a return code, AND the formula drill specifically asked for.** `gate.xlsx`'s own real content
+    /// (ground-truthed directly against the fixture's own `xl/worksheets/sheet1.xml`, not assumed):
+    /// one sheet, "Sheet1", used range exactly `A1:B2` — so `D1:E2` is real, safely EMPTY space to
+    /// write into, on the SAME sheet, without touching or depending on the seed content at all.
+    ///
+    /// Four cells, four different claims:
+    /// - D1 = `"42"` — a plain value, must land as a real NUMBER (reads back `"42"`, not the
+    ///   literal string with quotes or any Calc-side reformatting surprise).
+    /// - E1 = `"=SUM(D1:D1)"` — a REAL formula referencing the cell this same call just wrote,
+    ///   proving order-within-one-call is D1-before-E1 (row-major, this file's own documented
+    ///   contract) and that Calc recalculates: reads back `"42"` in values mode (SUM of a single 42),
+    ///   `"=SUM(D1:D1)"` verbatim in formulas mode.
+    /// - D2 = `"hello world"` — plain text, byte-identical round trip.
+    /// - E2 = `"'=NOT A REAL FORMULA"` — the CALLER-supplied apostrophe-escape drill (`sheets.ts`'s
+    ///   own documented convention: the caller types the apostrophe, exactly like a human would,
+    ///   never auto-inserted server-side — see `OfficeCommandConsumer.handleSheetsSet`'s own header
+    ///   for the real bug this drill caught in an earlier draft that DID auto-insert one). Must land
+    ///   as LITERAL TEXT reading back WITHOUT the leading apostrophe (Calc's own force-text
+    ///   convention strips it) — if Calc had instead tried to PARSE `NOT A REAL FORMULA` as a
+    ///   formula expression, this would read back as an error token (`#NAME?` or similar), never the
+    ///   original text — a genuinely discriminating assertion, not a vacuous one.
+    ///
+    /// **The formula proof obligation, satisfied at the strongest level available**: after saving,
+    /// the raw `xl/worksheets/sheet1.xml` entry is unzipped directly and asserted to contain a real
+    /// `<f>` (formula) XML element for E1 — proof the engine stored it AS a formula in the OOXML
+    /// itself, independent of `formulas:true`'s own read-side display-mode toggle (which this same
+    /// drill also exercises, but which proves only what LOK's own text-selection API reports, not
+    /// what actually landed in the saved file).
+    func testLiveSheetsSetWritesValuesAndAFormulaReadsBackCorrectlyAndPersistsInTheRealXML() async throws {
+        try requireLiveEngine()
+        let path = try makeWritableCopy(of: "gate.xlsx")
+        let stateDir = makeScratchDirectory()
+        let host = makeLiveHost(stateDir: stateDir, dirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)])
+        await host.directory.refresh()
+
+        // Open directly first — the write must ADOPT, never reload, exactly like every other write
+        // drill in this file.
+        let runtime = host.officeRuntime(for: "S1")
+        runtime.open(path)
+        let opened = await waitUntilLive { runtime.stateSnapshot.documents[path] != nil || runtime.stateSnapshot.phase == .failed }
+        XCTAssertTrue(opened, "setup: gate.xlsx never settled")
+        let originalDocId = try XCTUnwrap(runtime.stateSnapshot.documents[path]?.docId)
+
+        let setSent = await send(command("office.sheets.set", args: [
+            "path": path, "sheet": "Sheet1", "range": "D1:E2",
+            "values": [["42", "=SUM(D1:D1)"], ["hello world", "'=NOT A REAL FORMULA"]],
+        ], sessionId: "S1", commandId: "pcmd-set-1"), through: host)
+        XCTAssertTrue(setSent.ok, "\(setSent)")
+        XCTAssertTrue(setSent.result?.contains("4 cells") == true, "\(setSent)")
+        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.docId, originalDocId,
+                       "the write must have ADOPTED the already-open document, never reloaded it")
+        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.dirty, false,
+                       "a write verb saves through — the document must be clean again by the time this returns")
+
+        // Read back in VALUES mode.
+        let valuesSent = await send(command("office.sheets.read",
+                                            args: ["path": path, "sheet": "Sheet1", "range": "D1:E2"],
+                                            sessionId: "S1", commandId: "pcmd-read-values"), through: host)
+        XCTAssertTrue(valuesSent.ok, "\(valuesSent)")
+        let valuesResult = try XCTUnwrap(valuesSent.result)
+        XCTAssertTrue(valuesResult.contains("42\t42"), "D1=42, E1=SUM(D1:D1) must compute to 42: \(valuesResult)")
+        XCTAssertTrue(valuesResult.contains("hello world"), valuesResult)
+        XCTAssertTrue(valuesResult.contains("=NOT A REAL FORMULA"),
+                      "the apostrophe-escaped cell must read back as the ORIGINAL literal text, proving "
+                          + "it was never parsed as a formula: \(valuesResult)")
+        XCTAssertFalse(valuesResult.contains("#NAME"), "a #NAME? error means the apostrophe escape did "
+                       + "NOT fire and Calc tried to parse the literal text as a formula: \(valuesResult)")
+
+        // Read back in FORMULAS mode.
+        let formulasSent = await send(command("office.sheets.read",
+                                              args: ["path": path, "sheet": "Sheet1", "range": "D1:E2", "formulas": true],
+                                              sessionId: "S1", commandId: "pcmd-read-formulas"), through: host)
+        XCTAssertTrue(formulasSent.ok, "\(formulasSent)")
+        let formulasResult = try XCTUnwrap(formulasSent.result)
+        XCTAssertTrue(formulasResult.contains("=SUM(D1:D1)"), "the formula TEXT must appear verbatim: \(formulasResult)")
+        XCTAssertTrue(formulasResult.contains("=NOT A REAL FORMULA"),
+                      "a literal string starting with = must read the same in formulas mode too — it "
+                          + "was never a formula to begin with: \(formulasResult)")
+
+        // The formula proof obligation — the SAVED FILE'S OWN XML, not LOK's own read-back API.
+        // Live-observed (not assumed): Calc's own OOXML export normalizes a same-cell range
+        // ("D1:D1") to a bare single-cell reference ("D1") inside the formula text — real, correct
+        // Calc/Excel behaviour, not a bug in this mechanism — so the assertion checks for the real
+        // `<f>` ELEMENT plus the SUM reference, not a byte-exact echo of what was typed.
+        let sheetXML = try readOOXMLEntry(atPath: path, entry: "xl/worksheets/sheet1.xml")
+        XCTAssertTrue(sheetXML.contains("<c r=\"E1\"") && sheetXML.contains("<f "),
+                     "the saved OOXML itself must carry a real <f> formula element for E1, not just a "
+                         + "computed value: \(sheetXML.prefix(4000))")
+        XCTAssertTrue(sheetXML.contains("SUM(D1)"),
+                     "the formula's own reference must survive (Calc normalizes D1:D1 -> D1): \(sheetXML.prefix(4000))")
+        // ...and the CELL VALUE Calc cached alongside the formula must be the real computed result,
+        // not a stale/zero placeholder — proof this was a genuinely LIVE, evaluated formula.
+        XCTAssertTrue(sheetXML.contains("<f aca=\"false\">SUM(D1)</f><v>42</v>")
+                       || sheetXML.contains("SUM(D1)</f><v>42</v>"),
+                     "the formula's cached computed value must be 42: \(sheetXML.prefix(4000))")
+
+        // Reopen through the raw helper client, under a SEPARATE docId — a genuinely independent
+        // open, never the adopted runtime's own docId — confirming the write survived a real
+        // close+reopen path, the round-trip step every write drill in this file's own house
+        // standard requires. (The adopted runtime/tab is left exactly as the broker's own rule 2
+        // leaves it — untouched, since this call never opened it.)
+        guard let client = host.officeHelperSupervisor?.client else {
+            return XCTFail("no live client to reopen through")
+        }
+        let reopenDocId = "sheets-set-reopen"
+        let metadata = try await client.open(docId: reopenDocId, path: path)
+        XCTAssertEqual(metadata.type, .spreadsheet)
+        let reopenRows = try await client.sheetsRead(docId: reopenDocId, sheet: "Sheet1", range: "D1:E2", formulas: false)
+        XCTAssertEqual(reopenRows, [["42", "42"], ["hello world", "=NOT A REAL FORMULA"]],
+                       "the write must survive an independent close+reopen, exact values")
+        try await client.close(docId: reopenDocId)
+    }
 }

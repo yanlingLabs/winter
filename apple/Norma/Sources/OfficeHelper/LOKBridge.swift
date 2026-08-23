@@ -2408,21 +2408,38 @@ final class LOKBridge: OfficeDocumentBridge {
     /// task-3-report.md §6/§9/§10 — this bridge does not claim to have closed it for writes any
     /// more than reads did).
     ///
-    /// **Typing is `postWindowExtTextInputEvent` (`.input` then `.end`), followed by a real Return
-    /// keypress** — mirroring `typeFormulaOnePlusOne`'s own proven "type, then Return commits a
-    /// pending Calc cell edit" shape (`OfficeSheetsCommandTests.swift`), not a guess: ext-text-input
-    /// delivers the whole string in one call rather than one `postKeyEvent` per character (this
-    /// bridge has no AppKit-keyCode table available to it — `NormaOfficeHelper` never compiles
-    /// `Sources/AppShell`, where `OfficeInputCodes` lives — and no reason to build a second,
-    /// LOK-keyCode-only one when ext-text-input already exists and is already live-tested for
-    /// committing arbitrary text, `OfficeRuntimeLiveTests.testExtTextInputMarksCommitsAndCancels
-    /// AgainstRealLOKThroughSaveAndReopen`), but the trailing Return is kept EXPLICIT rather than
-    /// trusted to `.end` alone — Calc's own cell-edit-mode commit semantics for ext-text-input
-    /// specifically (as opposed to a text document's paragraph-level commit, the ONLY case that
-    /// existing test covers) were unverified going in; a redundant Return after an already-committed
-    /// edit is harmless (it only moves the cursor, which this function re-positions past anyway),
-    /// while OMITTING it risked leaving every written cell parked in perpetual edit mode. Verified
-    /// live, not assumed — see task-4-report.md.
+    /// **Two typing mechanisms, not one — a real, live falsification, not a design preference.**
+    /// The first version of this function used `postWindowExtTextInputEvent` (`.input` then `.end`)
+    /// UNCONDITIONALLY, on the reasoning that it already delivers a whole string in one call and is
+    /// already live-tested for committing arbitrary text
+    /// (`OfficeRuntimeLiveTests.testExtTextInputMarksCommitsAndCancelsAgainstRealLOKThroughSave
+    /// AndReopen`, a text-document test). Live-tested against Calc specifically, that reasoning
+    /// FALSIFIED itself in one direction and CONFIRMED itself in another: a plain value (`"42"`,
+    /// `"hello world"`) and an apostrophe-forced literal (`"'=NOT A REAL FORMULA"` — the apostrophe
+    /// is honored, stripped, and the rest stored as text) both land correctly via ext-text-input; a
+    /// genuine formula (`"=SUM(D1:D1)"`, no apostrophe) does NOT — it lands as the LITERAL STRING
+    /// `"=SUM(D1:D1)"` in a text cell, never entering Calc's formula-edit mode at all (confirmed
+    /// directly against the saved OOXML: `t="s"`, a shared-string reference, never a real `<f>`
+    /// element). Evidently Calc's ext-text-input path honors a leading apostrophe's "force text"
+    /// meaning but does not run the SAME leading-`=`-triggers-formula-mode transition a real KEY
+    /// PRESS does — the two "first character is special" rules live in different code, and only one
+    /// of them is wired to this input door.
+    ///
+    /// **The fix: a text starting with an UNESCAPED `=` is typed CHARACTER BY CHARACTER via real
+    /// `postKeyEvent` calls instead** — the exact mechanism `typeFormulaOnePlusOne`
+    /// (`OfficeSheetsCommandTests.swift`) and `OfficeRuntimeLiveTests.postRealEdit` already prove
+    /// produces a genuine formula, extended from their own small, closed test-marker alphabets to
+    /// `formulaKeyEvent(for:)`'s wider table (below) — every character a realistic formula needs:
+    /// digits, letters (case-preserving), and the operator/reference punctuation Calc formulas use.
+    /// Every OTHER cell — plain values, and the apostrophe-escaped case specifically — keeps using
+    /// ext-text-input, proven correct for both by this same live drill.
+    ///
+    /// **Typed characters commit with a trailing Return either way** — `com.sun.star.awt.Key.RETURN`
+    /// (1280), the SAME raw keyCode both proven precedents already use to commit a pending Calc cell
+    /// edit. For the ext-text-input path this is kept EXPLICIT rather than trusted to `.end` alone —
+    /// Calc's own cell-edit-mode commit semantics for ext-text-input specifically were unverified
+    /// going in; a redundant Return after an already-committed edit is harmless (it only moves the
+    /// cursor, which this function re-positions past anyway).
     ///
     /// **Verification is deliberately LENIENT — "landed something," not "landed byte-identical."**
     /// A written NUMBER can read back reformatted (`"3.0"` typed, `"3"` read), and a written FORMULA
@@ -2437,17 +2454,22 @@ final class LOKBridge: OfficeDocumentBridge {
                                                address: String, text: String) throws {
         _ = selectionTextOnDedicatedThread(doc, docId: docId, viewId: viewId, part: part, range: address, formulas: false)
 
-        text.withCString { textPtr in
-            doc.handle.pointee.pClass.pointee.postWindowExtTextInputEvent?(
-                doc.handle, 0, Int32(OfficeExtTextInputType.input.rawValue), textPtr)
+        if text.hasPrefix("=") {
+            for character in text {
+                let (charCode, keyCode) = try Self.formulaKeyEvent(for: character, docId: docId, address: address)
+                doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyInput.rawValue), Int32(charCode), Int32(keyCode))
+                doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyUp.rawValue), Int32(charCode), Int32(keyCode))
+            }
+        } else {
+            text.withCString { textPtr in
+                doc.handle.pointee.pClass.pointee.postWindowExtTextInputEvent?(
+                    doc.handle, 0, Int32(OfficeExtTextInputType.input.rawValue), textPtr)
+            }
+            "".withCString { emptyPtr in
+                doc.handle.pointee.pClass.pointee.postWindowExtTextInputEvent?(
+                    doc.handle, 0, Int32(OfficeExtTextInputType.end.rawValue), emptyPtr)
+            }
         }
-        "".withCString { emptyPtr in
-            doc.handle.pointee.pClass.pointee.postWindowExtTextInputEvent?(
-                doc.handle, 0, Int32(OfficeExtTextInputType.end.rawValue), emptyPtr)
-        }
-        // Return — `com.sun.star.awt.Key.RETURN` (1280), the SAME raw keyCode
-        // `OfficeSheetsCommandTests.typeFormulaOnePlusOne`/`OfficeRuntimeLiveTests.postRealEdit`
-        // already prove commits a pending Calc cell edit.
         doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyInput.rawValue), 0, 1280)
         doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyUp.rawValue), 0, 1280)
 
@@ -2456,6 +2478,92 @@ final class LOKBridge: OfficeDocumentBridge {
         guard !after.isEmpty else {
             throw SaveError.writeVerificationFailed(docId: docId, address: address)
         }
+    }
+
+    /// office-agent-tools T4 — `(charCode, keyCode)` for one formula character, real
+    /// `com.sun.star.awt.Key` base codes (`offapi/com/sun/star/awt/Key.idl`) copied verbatim from
+    /// this codebase's OWN authoritative, independently-cross-checked table
+    /// (`apple/Norma/Sources/AppShell/OfficeInputCodes.swift`'s own header has the full source
+    /// citation and cross-check story) — this is a re-ENCODING of already-established values, not a
+    /// re-DERIVATION: `NormaOfficeHelper` cannot import `Sources/AppShell` (Task 3's own established
+    /// compile-boundary constraint), and there is no AppKit `NSEvent` here to run that file's own
+    /// `baseCode(appKitKeyCode:)` against in the first place — a synthetic formula character has no
+    /// physical key position to look up, only the CHARACTER itself, so this table is keyed directly
+    /// by `Character`, not by AppKit keyCode. Deliberately bounded to what a realistic formula
+    /// needs (digits, letters, common operators/reference punctuation, quotes for string literals,
+    /// space) rather than the full printable-ASCII range `OfficeInputCodes` covers for real keyboard
+    /// input — an unmapped character THROWS rather than silently drops or guesses, since a dropped
+    /// formula character is a corrupted formula, not a degraded-but-safe result.
+    private static func formulaKeyEvent(for character: Character, docId: String, address: String) throws -> (charCode: Int, keyCode: Int) {
+        guard let ascii = character.asciiValue else {
+            throw SaveError.writeVerificationFailed(docId: docId, address: address)
+        }
+        let charCode = Int(ascii)
+        let shift = 0x1000
+        let base: Int
+        switch character {
+        case "0": base = 256
+        case "1": base = 257
+        case "2": base = 258
+        case "3": base = 259
+        case "4": base = 260
+        case "5": base = 261
+        case "6": base = 262
+        case "7": base = 263
+        case "8": base = 264
+        case "9": base = 265
+        case "a", "A": base = character == "A" ? 512 | shift : 512
+        case "b", "B": base = character == "B" ? 513 | shift : 513
+        case "c", "C": base = character == "C" ? 514 | shift : 514
+        case "d", "D": base = character == "D" ? 515 | shift : 515
+        case "e", "E": base = character == "E" ? 516 | shift : 516
+        case "f", "F": base = character == "F" ? 517 | shift : 517
+        case "g", "G": base = character == "G" ? 518 | shift : 518
+        case "h", "H": base = character == "H" ? 519 | shift : 519
+        case "i", "I": base = character == "I" ? 520 | shift : 520
+        case "j", "J": base = character == "J" ? 521 | shift : 521
+        case "k", "K": base = character == "K" ? 522 | shift : 522
+        case "l", "L": base = character == "L" ? 523 | shift : 523
+        case "m", "M": base = character == "M" ? 524 | shift : 524
+        case "n", "N": base = character == "N" ? 525 | shift : 525
+        case "o", "O": base = character == "O" ? 526 | shift : 526
+        case "p", "P": base = character == "P" ? 527 | shift : 527
+        case "q", "Q": base = character == "Q" ? 528 | shift : 528
+        case "r", "R": base = character == "R" ? 529 | shift : 529
+        case "s", "S": base = character == "S" ? 530 | shift : 530
+        case "t", "T": base = character == "T" ? 531 | shift : 531
+        case "u", "U": base = character == "U" ? 532 | shift : 532
+        case "v", "V": base = character == "V" ? 533 | shift : 533
+        case "w", "W": base = character == "W" ? 534 | shift : 534
+        case "x", "X": base = character == "X" ? 535 | shift : 535
+        case "y", "Y": base = character == "Y" ? 536 | shift : 536
+        case "z", "Z": base = character == "Z" ? 537 | shift : 537
+        case " ": base = 1284 // SPACE
+        case "=": base = 1295 // EQUAL
+        case "+": base = 1287 // ADD
+        case "-": base = 1288 // SUBTRACT
+        case "*": base = 1289 // MULTIPLY
+        case "/": base = 1290 // DIVIDE
+        case ".": base = 1291 // POINT
+        case ",": base = 1292 // COMMA
+        case "(": base = 265 | shift // shift+0 -> "("; NUM9(265) is the physical "9" key — shift+9 IS "(" on US layout
+        case ")": base = 256 | shift // shift+NUM0 -> ")"
+        case "$": base = 260 | shift // shift+NUM4 -> "$"
+        case "%": base = 261 | shift // shift+NUM5 -> "%"
+        case "\"": base = 1318 | shift // shift+QUOTERIGHT -> '"'
+        case "'": base = 1318 // QUOTERIGHT, unshifted
+        case ":": base = 1317 | shift // shift+SEMICOLON -> ":"
+        case ";": base = 1317 // SEMICOLON
+        case "_": base = 1288 | shift // shift+SUBTRACT -> "_"
+        case "!": base = 257 | shift // shift+NUM1 -> "!"
+        case "^": base = 262 | shift // shift+NUM6 -> "^"
+        case "<": base = 1293 // LESS
+        case ">": base = 1294 // GREATER
+        case "&": base = 263 | shift // shift+NUM7 -> "&"
+        default:
+            throw SaveError.writeVerificationFailed(docId: docId, address: address)
+        }
+        return (charCode, base)
     }
 
     /// office-agent-tools T4 — insert/delete `count` whole rows/columns, selected via

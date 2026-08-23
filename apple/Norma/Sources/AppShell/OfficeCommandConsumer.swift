@@ -232,12 +232,18 @@ struct OfficeCommandConsumer {
     /// here — both are real column math this file owns (never the daemon, never the helper — see
     /// `OfficeWireFrame.sheetsSet`'s own header for why the helper cannot do this arithmetic either).
     ///
-    /// **The apostrophe-escape for a literal leading `=` is applied HERE, once, for every cell** —
-    /// `sheets.ts`'s own header explains the convention (a leading `=` becomes a formula, exactly
-    /// like typing it; a LITERAL string starting with `=` needs a leading apostrophe) — this is the
-    /// one place that convention is actually implemented, not merely documented: the daemon ships
-    /// the caller's raw grid unchanged (it has no reason to know about Calc's own typing convention),
-    /// and the helper only ever types EXACTLY what this function hands it.
+    /// **No apostrophe-escaping happens here — the caller supplies one, in their OWN `values`
+    /// string, exactly the way `sheets.ts`'s own tool description says**: a leading `=` becomes a
+    /// formula; a caller who wants a LITERAL string starting with `=` types the apostrophe
+    /// THEMSELVES (`"'=NOT A FORMULA"`), the identical convention a human uses typing into a real
+    /// cell. A first draft of this function auto-inserted an apostrophe in front of EVERY `=`-
+    /// prefixed cell regardless of the caller's own intent — caught live, by this exact drill: it
+    /// made every formula impossible to write at all (`"=SUM(D1:D1)"` landed as the literal string
+    /// `"=SUM(D1:D1)"`, never a real formula), directly contradicting the tool's own documented
+    /// behaviour. `cellValues` is therefore the caller's grid, stringified, UNCHANGED — the helper
+    /// (`LOKBridge.writeOneCellOnDedicatedThread`) is what decides, from the leading character
+    /// alone, whether to type via real keystrokes (a genuine formula) or ext-text-input (everything
+    /// else, apostrophe-escaped literal text included).
     private func handleSheetsSet(_ command: SessionEvent.PanelCommand) async {
         guard let path = Self.requiredPath(command.args) else {
             return sendResult(command.sessionId, command.commandId, false, Self.requiredPathRefusal, nil)
@@ -276,8 +282,7 @@ struct OfficeCommandConsumer {
         for r in 0..<range.rowCount {
             for c in 0..<range.columnCount {
                 cellAddresses.append(officeCellReference(column: range.startColumn + c, row: range.startRow + r))
-                let raw = values[r][c]
-                cellValues.append(raw.hasPrefix("=") ? "'\(raw)" : raw)
+                cellValues.append(values[r][c])
             }
         }
         let rangeString = "\(officeCellReference(column: range.startColumn, row: range.startRow)):"
