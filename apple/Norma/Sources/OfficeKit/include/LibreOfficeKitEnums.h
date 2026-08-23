@@ -709,6 +709,15 @@ typedef enum
      */
     LOK_CALLBACK_REFERENCE_MARKS = 45,
 
+    // office-agent-tools T3 third re-review — sweep finding, not a fix: this enumerator (and
+    // LOK_CALLBACK_COLOR_PALETTES below) do not exist in the engine's own copy of this header at
+    // the pinned commit (this codebase's own reference source, /private/tmp/lo-recut/core).
+    // Harmless, unlike the struct drift C1/C1-split found: enum values here are EXPLICITLY
+    // NUMBERED literals, not positional, so an extra case here cannot shift any OTHER case's real
+    // meaning the way an extra struct member shifted every FOLLOWING field's offset. Confirmed
+    // unreferenced anywhere in this codebase. Left in place rather than deleted — removing dead,
+    // harmless, explicitly-numbered code carries copy-paste risk in a 1300-line file for zero
+    // functional benefit; documented here instead so a future reader isn't left to wonder.
     /**
      * Callback related to native dialogs generated in JavaScript from
      * the description.
@@ -961,6 +970,8 @@ typedef enum
      */
     LOK_CALLBACK_A11Y_TEXT_SELECTION_CHANGED = 64,
 
+    // office-agent-tools T3 third re-review — the second half of `LOK_CALLBACK_JSDIALOG`'s own
+    // sweep finding above; same reasoning, not repeated here.
     /**
      * Informs the LibreOfficeKit client that the color palettes have changed.
     */

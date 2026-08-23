@@ -501,6 +501,28 @@ final class OfficeSheetsCommandTests: XCTestCase {
     /// mechanism a real adopted tab's own UI would show — runs a full agent `sheets read` through
     /// the real wire naming a DIFFERENT sheet and range, then captures the primary's own clipboard
     /// selection again. Byte-identical before and after is the whole claim.
+    /// office-agent-tools T3 second re-review (MISS 2) — rewritten after this test's OWN first
+    /// version was proven, by direct measurement, not to discriminate. That version clicked to
+    /// Sheet1's A1, read Sheet2 through the agent, then observed the primary via
+    /// `clipboardCopy(docId, part: 0)` — which itself calls `setPart(0)` before reading. Mutating
+    /// `sheetsReadOnDedicatedThread` to read on `doc.viewId` (the primary view) still left this
+    /// test GREEN: `clipboardCopy`'s own `setPart(0)` snaps the primary back to Sheet1 regardless
+    /// of what the read did to it on Sheet2, and Calc's own PER-SHEET cursor memory then restores
+    /// whatever was remembered as current on Sheet1 (still A1, untouched) — camouflaging exactly
+    /// the corruption this test exists to catch. A cross-sheet probe was live-measured, in the same
+    /// investigation, to show the primary genuinely left parked on Sheet2 despite this test's own
+    /// "before == after" verdict staying green throughout.
+    ///
+    /// Fixed by reading the SAME sheet the primary is already on (`Sheet1!A2:B2`, not `Sheet2!...`)
+    /// — no part switch ever happens in the observation, so Calc's memory-restore camouflage never
+    /// engages. If the agent read genuinely runs on the agent view, the primary's own selection
+    /// (still A1, "NORMA GATE") is untouched. If it mistakenly ran on the primary view instead,
+    /// `.uno:GoToCell("A2:B2")` would have moved the primary's own selection there for real, and
+    /// this observation reads "office stage A embed probe" (A2's real content) instead — a
+    /// genuinely different string, not it silently reverting. **Proven to discriminate, not
+    /// assumed**: this exact test, run against a deliberately reintroduced `doc.viewId` mutation in
+    /// `sheetsReadOnDedicatedThread`, failed with exactly that mismatch — see this task's own
+    /// report for the transcript — before being reverted.
     func testLiveAgentReadNeverTouchesThePrimaryViewsOwnSelection() async throws {
         try requireLiveEngine()
         let path = try makeWritableCopy(of: "two-sheet.ods")
@@ -518,18 +540,22 @@ final class OfficeSheetsCommandTests: XCTestCase {
             return XCTFail("no live client to drive the primary cursor through")
         }
 
+        // Primary cursor -> Sheet1's A1 ("NORMA GATE", the fixture's own known content).
         try await click(client: client, docId: docId, xTwips: 100, yTwips: 100)
         let beforeSelection = try await client.clipboardCopy(docId: docId, part: 0)
-        XCTAssertFalse(beforeSelection.isEmpty, "setup: the primary click did not land on real content")
+        XCTAssertTrue(beforeSelection.contains("NORMA GATE"), "setup: the primary click did not land on A1: \(beforeSelection)")
 
+        // The agent read: the SAME sheet (Sheet1), a DIFFERENT range (A2:B2) — deliberately never
+        // switching the primary's own part in the observation below, which is what makes this
+        // drill discriminate (see this function's own header).
         let sent = await send(command("office.sheets.read",
-                                       args: ["path": path, "sheet": "Sheet2", "range": "A1:B1"],
+                                       args: ["path": path, "sheet": "Sheet1", "range": "A2:B2"],
                                        sessionId: "S1"), through: host)
         XCTAssertTrue(sent.ok, "\(sent)")
 
         let afterSelection = try await client.clipboardCopy(docId: docId, part: 0)
         XCTAssertEqual(beforeSelection, afterSelection,
-                       "an agent read moved the PRIMARY view's own selection — the whole point of reading on the agent view instead")
+                       "an agent read moved the PRIMARY view's own selection to A2:B2 — the whole point of reading on the agent view instead")
     }
 
     /// A path outside every working directory gets the FENCE refusal — live, through the real broker

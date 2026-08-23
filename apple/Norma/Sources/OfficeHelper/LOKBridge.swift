@@ -290,12 +290,27 @@ final class LOKBridge: OfficeDocumentBridge {
         case installPathMissing(String)
         case initFailed(String)
         case versionInfoUnavailable
+        /// office-agent-tools T3 third re-review — the office-class ABI tripwires (`nSize` size
+        /// check, tail-symbol identity check) throw this rather than `precondition`-crash. A
+        /// PRECONDITION failure here would kill the whole helper process outright — every document
+        /// it might already be serving (on a respawn after some UNRELATED crash) lost with it — for
+        /// a check whose own failure mode includes at least one FALSE positive this bridge cannot
+        /// rule out: `lo_registerFileSaveDialogCallback` is a non-external symbol in today's shipped
+        /// dylib, and nothing strips it today, but if a future, otherwise-VALID engine rebuild
+        /// strips local symbols, `dladdr` resolves the NEAREST PRECEDING EXPORTED symbol instead of
+        /// failing outright — a legitimate configuration producing what looks like an ABI mismatch
+        /// to this specific technique. Throwing here, in `init` (itself already a throwing
+        /// initializer), lets the caller refuse to boot gracefully — the existing "helper
+        /// unavailable" path this codebase already has for every OTHER boot failure — rather than a
+        /// raw process death.
+        case abiMismatch(String)
 
         var description: String {
             switch self {
             case .installPathMissing(let path): return "LibreOffice install root not found at \(path)"
             case .initFailed(let installPath): return "lok_init_2 returned NULL for installPath \(installPath)"
             case .versionInfoUnavailable: return "getVersionInfo() did not return a usable BuildId"
+            case .abiMismatch(let reason): return reason
             }
         }
     }
@@ -659,24 +674,36 @@ final class LOKBridge: OfficeDocumentBridge {
         // true (216 == 216) on the UNFIXED header, even while every member from the phantom's
         // position onward silently called the wrong function. Confirmed empirically: the boot-time
         // size probe below passed before this fix, not just after.
-        precondition(
-            rawKit.pointee.pClass.pointee.nSize == MemoryLayout<LibreOfficeKitClass>.size,
-            "LibreOfficeKit office-class ABI mismatch: engine reports nSize=\(rawKit.pointee.pClass.pointee.nSize) "
-                + "but this build's LibreOfficeKit.h describes a \(MemoryLayout<LibreOfficeKitClass>.size)-byte "
-                + "struct.")
+        guard rawKit.pointee.pClass.pointee.nSize == MemoryLayout<LibreOfficeKitClass>.size else {
+            throw BootError.abiMismatch(
+                "LibreOfficeKit office-class ABI mismatch: engine reports nSize=\(rawKit.pointee.pClass.pointee.nSize) "
+                    + "but this build's LibreOfficeKit.h describes a \(MemoryLayout<LibreOfficeKitClass>.size)-byte "
+                    + "struct.")
+        }
 
         // The guard the size check cannot provide: resolve this struct's own LAST declared member
-        // and assert its REAL symbol name still contains what the header calls it. A net-zero
-        // future drift (a different member added and a different one removed, or this exact member
-        // itself silently renamed upstream) would still be caught here, because this checks WHAT IS
-        // ACTUALLY THERE by address, not merely how much of it there is.
+        // and assert its REAL symbol name still contains what the header calls it.
+        //
+        // **Says what this actually covers, corrected after an overclaim in an earlier draft of
+        // this comment (second re-review) — this is TAIL-IDENTITY drift, not every net-zero
+        // drift.** It catches: this exact tail member being silently renamed or removed upstream
+        // with nothing replacing it, and (redundantly with the size check, but for free) anything
+        // that shifts the tail's own declared offset at all. It does NOT catch an INTERIOR
+        // add-one/remove-one pair entirely ABOVE this tail member: if a phantom is added and a real
+        // member removed somewhere between the struct's start and this tail, the NET shift to
+        // everything AT OR AFTER this position is zero — this member still lands on its own correct
+        // offset and resolves correctly, while every interior member between the swap silently
+        // misaligns, undetected by either guard. Closing that would need the same exhaustive
+        // per-member `dladdr` sweep this task's own investigation already did by hand for both
+        // structs, run as a permanent check — not attempted here, disclosed instead.
         let lastOfficeMemberSymbol = Self.resolvedSymbolName(
             unsafeBitCast(rawKit.pointee.pClass.pointee.registerFileSaveDialogCallback, to: UnsafeRawPointer?.self))
-        precondition(
-            lastOfficeMemberSymbol.contains("registerFileSaveDialogCallback"),
-            "LibreOfficeKit office-class ABI mismatch: this struct's own last declared member "
-                + "(registerFileSaveDialogCallback) resolved to \"\(lastOfficeMemberSymbol)\" instead — the header "
-                + "no longer matches the compiled engine's real member order.")
+        guard lastOfficeMemberSymbol.contains("registerFileSaveDialogCallback") else {
+            throw BootError.abiMismatch(
+                "LibreOfficeKit office-class ABI mismatch: this struct's own last declared member "
+                    + "(registerFileSaveDialogCallback) resolved to \"\(lastOfficeMemberSymbol)\" instead — the header "
+                    + "no longer matches the compiled engine's real member order.")
+        }
     }
 
     /// office-agent-tools T3 review (C1-split) — `dladdr`-resolves a raw function pointer back to
@@ -983,24 +1010,44 @@ final class LOKBridge: OfficeDocumentBridge {
         // production code, since this one size check already re-derives the same fact on every
         // boot going forward).
         //
-        // **Deliberately not mirrored for `LibreOfficeKitClass` (the office-level boot struct,
-        // `self.kit` above)** — per this review's own explicit warning, a size-only check there
-        // would falsely pass even if that struct drifted the same way, so it would be a check
-        // that looks like coverage without providing it; a real tripwire for that struct would
-        // need the same per-member dladdr sweep this investigation did here, not attempted as
-        // part of this task's scope (nothing in this codebase currently calls far enough into
-        // `LibreOfficeKitClass` for that struct's own tail to matter the way `getDataArea` did
-        // here).
+        // **NOW mirrored for `LibreOfficeKitClass` too (the office-level boot struct, `self.kit`,
+        // guarded in `init`)** — correcting an earlier version of this comment that called the
+        // absence deliberate: a THIRD re-review found the office class genuinely drifted the same
+        // way (a phantom `sendDialogEvent` cancelling a missing real tail member in COUNT, so a
+        // size check alone passed even while misaligned) and added both a size check and a
+        // tail-identity check there. See `init`'s own tripwire for the full account.
         //
-        // A `precondition` (fires in Release too, not just Debug) because a real mismatch means
-        // this bridge is either about to call the wrong function outright or pass arguments a
-        // real function never declared — continuing past that is unsafe, not merely incorrect.
-        precondition(
-            rawDoc.pointee.pClass.pointee.nSize == MemoryLayout<LibreOfficeKitDocumentClass>.size,
-            "LibreOfficeKit ABI mismatch: engine reports nSize=\(rawDoc.pointee.pClass.pointee.nSize) but "
-                + "this build's LibreOfficeKit.h describes a \(MemoryLayout<LibreOfficeKitDocumentClass>.size)-byte "
-                + "struct — the vendored header no longer matches the compiled engine and every LOK call in this "
-                + "file needs re-verifying against the real ABI before this assertion is loosened.")
+        // Third re-review, also — **throws rather than `precondition`-crashes, corrected from an
+        // earlier version of this check.** A precondition failure kills the WHOLE HELPER PROCESS
+        // outright, taking every other document it might be serving down with it (a respawn after
+        // some unrelated crash could hold several); this function is already `throws`, called from
+        // a connection thread that already handles a failed `open` as an ordinary per-document
+        // error. Reuses `LoadError`, the identical throw type this same function already uses a few
+        // lines up for `documentLoad` itself failing — the SAME "this bridge always survives, one
+        // failed open is not a crash" posture that error already has.
+        guard rawDoc.pointee.pClass.pointee.nSize == MemoryLayout<LibreOfficeKitDocumentClass>.size else {
+            throw LoadError.documentLoadFailed(
+                "LibreOfficeKit ABI mismatch: engine reports nSize=\(rawDoc.pointee.pClass.pointee.nSize) but "
+                    + "this build's LibreOfficeKit.h describes a \(MemoryLayout<LibreOfficeKitDocumentClass>.size)-byte "
+                    + "struct — the vendored header no longer matches the compiled engine and every LOK call in this "
+                    + "file needs re-verifying against the real ABI before this assertion is loosened.")
+        }
+
+        // The tail-identity check the size check alone cannot provide (same reasoning as `init`'s
+        // own office-class pair, and the SAME disclosed limitation: this catches the struct's own
+        // LAST declared member being renamed/removed/shifted, not an interior add-one/remove-one
+        // pair that cancels in count above this position — see `init`'s own tripwire for the full
+        // account of what tail-identity drift does and does not cover). `setColorPreviewState` is
+        // this struct's own current last declared member (confirmed by this task's own exhaustive
+        // 78-member sweep, `task-3-report.md`'s own account).
+        let lastDocumentMemberSymbol = Self.resolvedSymbolName(
+            unsafeBitCast(rawDoc.pointee.pClass.pointee.setColorPreviewState, to: UnsafeRawPointer?.self))
+        guard lastDocumentMemberSymbol.contains("setColorPreviewState") else {
+            throw LoadError.documentLoadFailed(
+                "LibreOfficeKit ABI mismatch: this struct's own last declared member (setColorPreviewState) "
+                    + "resolved to \"\(lastDocumentMemberSymbol)\" instead — the header no longer matches the "
+                    + "compiled engine's real member order.")
+        }
 
         // Register BEFORE initializeForRendering so any invalidation LOK fires synchronously
         // during that call is captured, not missed.
@@ -1060,7 +1107,11 @@ final class LOKBridge: OfficeDocumentBridge {
         // document itself owns via its `mxComponent` teardown cascade — this is ONLY about the
         // clipboard factory's OWN separate, view-id-keyed bookkeeping for a view minted OUTSIDE
         // `documentLoad`'s own view.
-        if let agentViewId = doc.agentViewId {
+        // `>= 0` (re-review MISS 1's own "every consumer" instruction) — both writers of
+        // `agentViewId` now throw rather than cache a failed mint, so this should never actually
+        // observe a negative id, but `destroyView`'s own behavior on an unresolved id was never
+        // verified by this bridge, and guarding here costs nothing.
+        if let agentViewId = doc.agentViewId, agentViewId >= 0 {
             doc.handle.pointee.pClass.pointee.destroyView?(doc.handle, agentViewId)
         }
         doc.handle.pointee.pClass.pointee.destroy?(doc.handle)
@@ -1651,7 +1702,21 @@ final class LOKBridge: OfficeDocumentBridge {
     private func createAgentViewOnDedicatedThread(docId: String) throws -> Int32 {
         guard var doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
         guard doc.agentViewId == nil else { throw SaveError.agentViewAlreadyExists(docId) }
-        let viewId = doc.handle.pointee.pClass.pointee.createView?(doc.handle) ?? -1
+        // Re-review fix (MISS 1) — the IDENTICAL `?? -1` hazard `ensureAgentViewOnDedicatedThread`
+        // already fixed survived HERE, writing into the SAME `doc.agentViewId` cache, reachable
+        // from the WIRE (this is `OfficeWireFrame.createView`'s own handler, compiled into Release
+        // — not a debug/test-only path). A cached `-1` here would have been returned by
+        // `ensureAgentViewOnDedicatedThread`'s own `if let existing` branch WITHOUT ever reaching
+        // that function's guard, and `agentKeyEventOnDedicatedThread`'s own `!= nil` check (below)
+        // would have let it straight through too — `setView(doc.handle, -1)` silently no-ops
+        // (engine-verified: `SfxLokHelper::setView`, `sfx2/source/view/lokhelper.cxx:201-203`,
+        // returns for an unresolved view id with no error), leaving whatever view was ALREADY
+        // current — meaning a keystroke meant for the agent view would land on the PRIMARY view
+        // instead: a silent EDIT, not merely a silent read, the moment this door's own caller
+        // (the two-writer characterization path) posted one after a failed mint.
+        guard let viewId = doc.handle.pointee.pClass.pointee.createView?(doc.handle), viewId >= 0 else {
+            throw SaveError.agentViewCreationFailed(docId)
+        }
         doc.agentViewId = viewId
         documents[docId] = doc
         return viewId
@@ -1678,7 +1743,13 @@ final class LOKBridge: OfficeDocumentBridge {
     /// history for that superseded design).
     private func ensureAgentViewOnDedicatedThread(docId: String) throws -> Int32 {
         guard var doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
-        if let existing = doc.agentViewId { return existing }
+        // `>= 0`, not merely non-nil (re-review MISS 1) — defense in depth alongside the fix at
+        // `createAgentViewOnDedicatedThread`'s own mint, below: with BOTH writers of `agentViewId`
+        // now throwing rather than caching `-1`, this branch should never actually observe a
+        // negative `existing` — but a consumer here that only checked `!= nil` is exactly the shape
+        // that let a cached `-1` reach `setView` silently in the first place, so this read site
+        // guards the same way rather than trusting its two writers to be its only protection.
+        if let existing = doc.agentViewId, existing >= 0 { return existing }
         // Re-review fix (Minor #4) — a failed/absent `createView()` throws here, on THIS call,
         // rather than caching `-1` into `agentViewId` (which would silently short-circuit every
         // future call into returning that same unusable id — see `SaveError.agentViewCreationFailed`'s
@@ -1699,7 +1770,12 @@ final class LOKBridge: OfficeDocumentBridge {
     /// called for this docId — never silently falls back to the primary view.
     private func agentKeyEventOnDedicatedThread(docId: String, part: Int, type: OfficeKeyEventType, charCode: Int, keyCode: Int) throws {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
-        guard let agentViewId = doc.agentViewId else { throw SaveError.noAgentView(docId) }
+        // `>= 0`, not merely non-nil (re-review MISS 1) — the SEVERE half of that finding: a cached
+        // `-1` here used to pass this guard (non-nil), then `setView(doc.handle, -1)` would
+        // silently no-op (stay on whatever view is ALREADY current), and the keystroke below would
+        // land THERE — on the user's own primary view, an actual silent EDIT, not merely a silent
+        // read the way the sibling read-path hazards were.
+        guard let agentViewId = doc.agentViewId, agentViewId >= 0 else { throw SaveError.noAgentView(docId) }
         doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
         if doc.kind != .text {
             doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(truncatingIfNeeded: part))
