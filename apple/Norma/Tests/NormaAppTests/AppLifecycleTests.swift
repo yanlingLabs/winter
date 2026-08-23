@@ -649,6 +649,9 @@ final class AppLifecycleTests: XCTestCase {
             redo: { _ in },
             sheetsInfo: { _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
             sheetsRead: { _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
+            sheetsSet: { _, _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
+            sheetsResize: { _, _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
+            sheetsManageSheet: { _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
             stateDirectory: FileManager.default.temporaryDirectory
                 .appendingPathComponent("live-dirty-gate-state-\(UUID().uuidString)", isDirectory: true))
     }

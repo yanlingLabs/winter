@@ -108,13 +108,21 @@ final class OfficeCommandConsumerTests: XCTestCase {
         "office.docs.insert", "office.docs.append",
     ]
 
-    /// T3 — the 20 that are STILL T1's own refusal shell (`allOfficeVerbsAsOfT1` minus the two
-    /// `sheets` reads T3 made real). Every pre-existing test below that needs "an office verb that
-    /// still answers synchronously with the not-implemented refusal, for ANY verb" now picks from
-    /// this list rather than hand-naming `office.sheets.read`/`office.sheets.info`, which would
-    /// otherwise silently start asserting on ASYNC behaviour these tests were never built to await.
+    /// T3 gave `sheets.info`/`.read` real (async) behaviour; T4 gives `sheets.set`/`.insert_rows`/
+    /// `.insert_cols`/`.delete_rows`/`.delete_cols`/`.add_sheet`/`.delete_sheet`/`.rename_sheet` the
+    /// same — 10 of the 22 verbs are real now, leaving 12 STILL on T1's own synchronous refusal
+    /// shell (every `slides`/`docs` verb, plus `sheets.format`, T5+'s own job). Every pre-existing
+    /// test below that needs "an office verb that still answers synchronously with the
+    /// not-implemented refusal, for ANY verb" picks from this list rather than hand-naming a real
+    /// one, which would otherwise silently start asserting on ASYNC behaviour these tests were never
+    /// built to await.
     static let stillStubOfficeVerbs = allOfficeVerbsAsOfT1.filter {
-        $0 != "office.sheets.info" && $0 != "office.sheets.read"
+        ![
+            "office.sheets.info", "office.sheets.read", "office.sheets.set",
+            "office.sheets.insert_rows", "office.sheets.insert_cols",
+            "office.sheets.delete_rows", "office.sheets.delete_cols",
+            "office.sheets.add_sheet", "office.sheets.delete_sheet", "office.sheets.rename_sheet",
+        ].contains($0)
     }
 
     // MARK: - isOfficeAction
@@ -148,11 +156,13 @@ final class OfficeCommandConsumerTests: XCTestCase {
 
     func testTheRefusalNamesTheToolAndVerbSeparately() {
         let consumer = makeConsumer()
-        consumer.handle(command("office.sheets.set"))
+        // T4 correction: `office.sheets.set` is real now (`handleSheetsSet`) — `format` is the one
+        // sheets verb still on T1's own refusal shell (T5+'s own job).
+        consumer.handle(command("office.sheets.format"))
         XCTAssertEqual(sent.count, 1)
         XCTAssertEqual(sent.first?.ok, false)
         XCTAssertTrue(sent.first?.result?.contains("sheets") == true, "\(sent)")
-        XCTAssertTrue(sent.first?.result?.contains("set") == true, "\(sent)")
+        XCTAssertTrue(sent.first?.result?.contains("format") == true, "\(sent)")
         let lower = sent.first?.result?.lowercased() ?? ""
         XCTAssertTrue(lower.contains("not implemented") || lower.contains("not yet implement"), "\(sent)")
     }
@@ -205,18 +215,19 @@ final class OfficeCommandConsumerTests: XCTestCase {
     /// `args` is never read by this consumer's STUB verbs at all (`OfficeCommandConsumer.handle`'s
     /// synchronous `default:` branch only ever touches `command.sessionId`/`command.commandId`/
     /// `command.action`) — so a huge `args.path` cannot reach a STUB verb's message, structurally, not
-    /// merely by discipline. **T3 correction**: this test originally used `office.sheets.read` as its
-    /// example, which read as "args is never read AT ALL" — no longer true now that `sheets.read` is
-    /// real and genuinely needs `args`. Switched to `office.sheets.set` (still a stub) to keep this
-    /// test's own claim honest; the EQUIVALENT guarantee for the two REAL verbs — a huge/malicious
-    /// operand still cannot grow the ANSWER past a bound, even though it genuinely gets read — is
-    /// `testASheetsReadResultIsCappedNotAllowedToGrowUnbounded` below, a different mechanism
-    /// (`sheetsResultMaxLength`, checked on the BUILT result) proving the equivalent property for a
-    /// verb that must read `args` to do its job at all.
+    /// merely by discipline. **T3 correction, T4 re-correction**: this test originally used
+    /// `office.sheets.read` as its example, which read as "args is never read AT ALL" — no longer
+    /// true once `sheets.read` went real; T3 switched to `office.sheets.set`, which T4 then made
+    /// real too. Switched again, to `office.sheets.format` (the one sheets verb still a stub), to
+    /// keep this test's own claim honest. The EQUIVALENT guarantee for every REAL verb — a
+    /// huge/malicious operand still cannot grow the ANSWER past a bound, even though it genuinely
+    /// gets read — is `testASheetsReadResultIsCappedNotAllowedToGrowUnbounded` below, a different
+    /// mechanism (`sheetsResultMaxLength`, checked on the BUILT result) proving the equivalent
+    /// property for a verb that must read `args` to do its job at all.
     func testTheRefusalNeverGrowsWithArgs() {
         let consumer = makeConsumer()
         let hugePath = String(repeating: "x", count: 100_000)
-        consumer.handle(command("office.sheets.set", args: ["path": hugePath, "sheet": "S"]))
+        consumer.handle(command("office.sheets.format", args: ["path": hugePath, "sheet": "S"]))
         XCTAssertEqual(sent.count, 1)
         XCTAssertFalse(sent.first?.result?.contains(hugePath) == true)
         XCTAssertLessThan(sent.first?.result?.count ?? Int.max, 1_000,
@@ -252,6 +263,18 @@ final class OfficeCommandConsumerTests: XCTestCase {
         },
         sheetsRead: @escaping (String, String, String, Bool) async throws -> [[String]] = { _, _, _, _ in
             throw OfficeHelperClientError.serverError(reason: "sheetsRead not stubbed for this test")
+        },
+        // office-agent-tools T4 — same "explicit stub per test, throw if unstubbed" shape as
+        // sheetsInfo/sheetsRead above.
+        sheetsSet: @escaping (String, String, String, [String], [String]) async throws -> Int = { _, _, _, _, _ in
+            throw OfficeHelperClientError.serverError(reason: "sheetsSet not stubbed for this test")
+        },
+        sheetsResize: @escaping (String, String, OfficeSheetsResizeDimension, OfficeSheetsResizeOp, String) async throws
+            -> (usedEndColumn: Int, usedEndRow: Int) = { _, _, _, _, _ in
+            throw OfficeHelperClientError.serverError(reason: "sheetsResize not stubbed for this test")
+        },
+        sheetsManageSheet: @escaping (String, OfficeSheetsManageSheetOp, String, String?) async throws -> [String] = { _, _, _, _ in
+            throw OfficeHelperClientError.serverError(reason: "sheetsManageSheet not stubbed for this test")
         }
     ) -> (consumer: OfficeCommandConsumer, runtime: OfficeRuntime) {
         let driver = OfficeRuntime.Driver(
@@ -266,6 +289,7 @@ final class OfficeCommandConsumerTests: XCTestCase {
             clipboardCopy: { _, _ in nil }, clipboardCut: { _, _ in nil }, clipboardPaste: { _, _, _ in },
             undo: { _ in }, redo: { _ in },
             sheetsInfo: sheetsInfo, sheetsRead: sheetsRead,
+            sheetsSet: sheetsSet, sheetsResize: sheetsResize, sheetsManageSheet: sheetsManageSheet,
             stateDirectory: FileManager.default.temporaryDirectory)
         let runtime = OfficeRuntime(sessionId: "s1", driver: driver)
         let broker = OfficeAgentBroker(host: .init(

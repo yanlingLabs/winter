@@ -1587,6 +1587,17 @@ final class OfficeRuntime: ObservableObject {
         /// office-agent-tools T3 — same no-reducer posture as `sheetsInfo` above. `range` is already
         /// an A1 string; see `OfficeWireFrame.sheetsRead`'s own header for why.
         var sheetsRead: (_ docId: String, _ sheet: String, _ range: String, _ formulas: Bool) async throws -> [[String]]
+        /// office-agent-tools T4 — same no-reducer, THROWS-through posture as `sheetsInfo`/
+        /// `sheetsRead` above (a write caller needs to know WHY it failed): there is nothing in
+        /// `OfficeRuntimeState` for a cell write to update either — LOK's own invalidation callbacks
+        /// are what repaint the canvas (the SAME mechanism a human's own edit already rides), not a
+        /// reducer transition this file would have to model.
+        var sheetsSet: (_ docId: String, _ sheet: String, _ range: String, _ cellAddresses: [String],
+                        _ cellValues: [String]) async throws -> Int
+        var sheetsResize: (_ docId: String, _ sheet: String, _ dimension: OfficeSheetsResizeDimension,
+                           _ op: OfficeSheetsResizeOp, _ selectionRange: String) async throws -> (usedEndColumn: Int, usedEndRow: Int)
+        var sheetsManageSheet: (_ docId: String, _ op: OfficeSheetsManageSheetOp, _ name: String,
+                                _ newName: String?) async throws -> [String]
         /// **Office Stage B Task 2b — the shared helper's own `--state-path`.** A plain stored
         /// value, unlike every sibling above: it is a FACT about the shared supervisor's
         /// configuration (`OfficeHelperSupervisor.statePath`, exposing `Configuration
@@ -1805,6 +1816,19 @@ final class OfficeRuntime: ObservableObject {
     /// header for why.
     func sheetsRead(docId: String, sheet: String, range: String, formulas: Bool) async throws -> [[String]] {
         try await driver.sheetsRead(docId, sheet, range, formulas)
+    }
+
+    // MARK: - office-agent-tools T4: sheets write verbs — same no-reducer, throws-through posture
+
+    func sheetsSet(docId: String, sheet: String, range: String, cellAddresses: [String], cellValues: [String]) async throws -> Int {
+        try await driver.sheetsSet(docId, sheet, range, cellAddresses, cellValues)
+    }
+    func sheetsResize(docId: String, sheet: String, dimension: OfficeSheetsResizeDimension,
+                      op: OfficeSheetsResizeOp, selectionRange: String) async throws -> (usedEndColumn: Int, usedEndRow: Int) {
+        try await driver.sheetsResize(docId, sheet, dimension, op, selectionRange)
+    }
+    func sheetsManageSheet(docId: String, op: OfficeSheetsManageSheetOp, name: String, newName: String?) async throws -> [String] {
+        try await driver.sheetsManageSheet(docId, op, name, newName)
     }
 
     /// One `saveAndAwaitOutcome` caller, still waiting. Kept per PATH (a table, not a single slot) —

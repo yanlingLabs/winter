@@ -238,6 +238,13 @@ final class OfficeWireCodecTests: XCTestCase {
             "sheetsRead": #"{"type":"sheetsRead","seq":1,"docId":"d","sheet":"Sheet1","range":"A1","formulas":false}"#,
             "sheetsInfoOk": #"{"type":"sheetsInfoOk","seq":1,"docId":"d","sheets":[],"activeSheet":"Sheet1"}"#,
             "sheetsReadOk": #"{"type":"sheetsReadOk","seq":1,"docId":"d","rows":[]}"#,
+            // office-agent-tools T4 — sheets write verbs.
+            "sheetsSet": #"{"type":"sheetsSet","seq":1,"docId":"d","sheet":"Sheet1","range":"A1","cellAddresses":["A1"],"cellValues":["x"]}"#,
+            "sheetsResize": #"{"type":"sheetsResize","seq":1,"docId":"d","sheet":"Sheet1","dimension":"row","op":"insert","selectionRange":"1:1"}"#,
+            "sheetsManageSheet": #"{"type":"sheetsManageSheet","seq":1,"docId":"d","op":"add","name":"Q3"}"#,
+            "sheetsSetOk": #"{"type":"sheetsSetOk","seq":1,"docId":"d","cellsWritten":1}"#,
+            "sheetsResizeOk": #"{"type":"sheetsResizeOk","seq":1,"docId":"d","usedEndColumn":1,"usedEndRow":1}"#,
+            "sheetsManageSheetOk": #"{"type":"sheetsManageSheetOk","seq":1,"docId":"d","sheets":["Sheet1","Q3"]}"#,
         ]
         XCTAssertEqual(Set(fixtures.keys), Set(OfficeWireFrame.wireTypes),
                        "fixtures must cover exactly OfficeWireFrame.wireTypes, no more, no less")

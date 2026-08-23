@@ -108,6 +108,13 @@ struct OfficeCommandConsumer {
             Task { await handleSheetsInfo(command) }
         case "office.sheets.read":
             Task { await handleSheetsRead(command) }
+        case "office.sheets.set":
+            Task { await handleSheetsSet(command) }
+        case "office.sheets.insert_rows", "office.sheets.insert_cols",
+             "office.sheets.delete_rows", "office.sheets.delete_cols":
+            Task { await handleSheetsResize(command) }
+        case "office.sheets.add_sheet", "office.sheets.delete_sheet", "office.sheets.rename_sheet":
+            Task { await handleSheetsManageSheet(command) }
         default:
             sendResult(command.sessionId, command.commandId, false,
                        Self.refusal(for: command.action), nil)
@@ -215,12 +222,202 @@ struct OfficeCommandConsumer {
         }
     }
 
+    // MARK: - office-agent-tools T4: sheets write verbs
+
+    /// `office.sheets.set` — a rectangular grid of values over one A1 range on one named sheet.
+    ///
+    /// **Every real A1/cell-count check runs BEFORE the broker is ever reached**, same discipline
+    /// `handleSheetsRead` already established for its own cap: `values`' dimensions are computed and
+    /// compared against `range`'s real dimensions here, and `officeWriteRangeMaxCells` is enforced
+    /// here — both are real column math this file owns (never the daemon, never the helper — see
+    /// `OfficeWireFrame.sheetsSet`'s own header for why the helper cannot do this arithmetic either).
+    ///
+    /// **The apostrophe-escape for a literal leading `=` is applied HERE, once, for every cell** —
+    /// `sheets.ts`'s own header explains the convention (a leading `=` becomes a formula, exactly
+    /// like typing it; a LITERAL string starting with `=` needs a leading apostrophe) — this is the
+    /// one place that convention is actually implemented, not merely documented: the daemon ships
+    /// the caller's raw grid unchanged (it has no reason to know about Calc's own typing convention),
+    /// and the helper only ever types EXACTLY what this function hands it.
+    private func handleSheetsSet(_ command: SessionEvent.PanelCommand) async {
+        guard let path = Self.requiredPath(command.args) else {
+            return sendResult(command.sessionId, command.commandId, false, Self.requiredPathRefusal, nil)
+        }
+        guard let sheet = Self.requiredSheet(command.args) else {
+            return sendResult(command.sessionId, command.commandId, false, Self.requiredSheetRefusal, nil)
+        }
+        guard let rangeText = Self.requiredRangeText(command.args) else {
+            return sendResult(command.sessionId, command.commandId, false, Self.requiredRangeRefusal, nil)
+        }
+        guard let range = officeParseRange(rangeText) else {
+            return sendResult(command.sessionId, command.commandId, false,
+                               "\"\(Self.brief(rangeText))\" is not a valid A1 range — examples: "
+                                   + "\"A1\", \"A1:C10\".", nil)
+        }
+        guard range.cellCount <= officeWriteRangeMaxCells else {
+            return sendResult(command.sessionId, command.commandId, false,
+                               "\"\(rangeText)\" spans \(range.cellCount) cells, past the "
+                                   + "\(officeWriteRangeMaxCells)-cell limit on one set call — write a "
+                                   + "smaller grid, or split it across multiple calls.", nil)
+        }
+        guard let values = Self.requiredValuesGrid(command.args) else {
+            return sendResult(command.sessionId, command.commandId, false, Self.requiredValuesRefusal, nil)
+        }
+        guard values.count == range.rowCount, values.allSatisfy({ $0.count == range.columnCount }) else {
+            let actualWidth = values.first?.count ?? 0
+            return sendResult(command.sessionId, command.commandId, false,
+                               "`values` is \(values.count)×\(actualWidth) but range \"\(rangeText)\" is "
+                                   + "\(range.rowCount)×\(range.columnCount) — they must match exactly.", nil)
+        }
+
+        var cellAddresses: [String] = []
+        var cellValues: [String] = []
+        cellAddresses.reserveCapacity(range.cellCount)
+        cellValues.reserveCapacity(range.cellCount)
+        for r in 0..<range.rowCount {
+            for c in 0..<range.columnCount {
+                cellAddresses.append(officeCellReference(column: range.startColumn + c, row: range.startRow + r))
+                let raw = values[r][c]
+                cellValues.append(raw.hasPrefix("=") ? "'\(raw)" : raw)
+            }
+        }
+        let rangeString = "\(officeCellReference(column: range.startColumn, row: range.startRow)):"
+            + officeCellReference(column: range.endColumn, row: range.endRow)
+
+        guard let broker = officeAgentBroker(command.sessionId) else {
+            return sendResult(command.sessionId, command.commandId, false, Self.hostGoneRefusal, nil)
+        }
+        do {
+            let resultText = try await broker.perform(
+                sessionId: command.sessionId, path: path, access: .write, requestId: command.commandId
+            ) { runtime, docId in
+                let cellsWritten = try await runtime.sheetsSet(docId: docId, sheet: sheet, range: rangeString,
+                                                                cellAddresses: cellAddresses, cellValues: cellValues)
+                return Self.formatSheetsSet(path: path, sheet: sheet, range: rangeString, cellsWritten: cellsWritten)
+            }
+            let (ok, text) = Self.capped(resultText)
+            sendResult(command.sessionId, command.commandId, ok, text, nil)
+        } catch {
+            sendResult(command.sessionId, command.commandId, false, Self.message(for: error), nil)
+        }
+    }
+
+    /// `office.sheets.insert_rows`/`.insert_cols`/`.delete_rows`/`.delete_cols` — one handler for all
+    /// four (`command.action` is what tells them apart; see `OfficeWireFrame.sheetsResize`'s own
+    /// header for why the wire itself consolidates the same way).
+    private func handleSheetsResize(_ command: SessionEvent.PanelCommand) async {
+        guard let path = Self.requiredPath(command.args) else {
+            return sendResult(command.sessionId, command.commandId, false, Self.requiredPathRefusal, nil)
+        }
+        guard let sheet = Self.requiredSheet(command.args) else {
+            return sendResult(command.sessionId, command.commandId, false, Self.requiredSheetRefusal, nil)
+        }
+        guard let count = Self.requiredCount(command.args), count > 0 else {
+            return sendResult(command.sessionId, command.commandId, false, Self.requiredCountRefusal, nil)
+        }
+        let dimension: OfficeSheetsResizeDimension
+        let op: OfficeSheetsResizeOp
+        switch command.action {
+        case "office.sheets.insert_rows": dimension = .row; op = .insert
+        case "office.sheets.insert_cols": dimension = .col; op = .insert
+        case "office.sheets.delete_rows": dimension = .row; op = .delete
+        case "office.sheets.delete_cols": dimension = .col; op = .delete
+        default:
+            // Unreachable — `handle`'s own switch routes only these four actions here — but this
+            // file's own posture is "never crash on a wire value," so this still answers rather than
+            // trapping.
+            return sendResult(command.sessionId, command.commandId, false, Self.refusal(for: command.action), nil)
+        }
+
+        let selectionRange: String
+        switch dimension {
+        case .row:
+            guard case .number(let atNumber)? = command.args?["at"],
+                  atNumber >= 1, atNumber.truncatingRemainder(dividingBy: 1) == 0 else {
+                return sendResult(command.sessionId, command.commandId, false,
+                                   "`at` must be a positive 1-based row number.", nil)
+            }
+            let startRow = Int(atNumber)
+            selectionRange = "\(startRow):\(startRow + count - 1)"
+        case .col:
+            guard case .string(let atLetters)? = command.args?["at"],
+                  let startColumn = officeColumnIndex(fromLetters: atLetters) else {
+                return sendResult(command.sessionId, command.commandId, false,
+                                   "`at` must be column letters (e.g. \"C\").", nil)
+            }
+            selectionRange = "\(officeColumnLetters(startColumn)):\(officeColumnLetters(startColumn + count - 1))"
+        }
+
+        guard let broker = officeAgentBroker(command.sessionId) else {
+            return sendResult(command.sessionId, command.commandId, false, Self.hostGoneRefusal, nil)
+        }
+        do {
+            let resultText = try await broker.perform(
+                sessionId: command.sessionId, path: path, access: .write, requestId: command.commandId
+            ) { runtime, docId in
+                let dims = try await runtime.sheetsResize(docId: docId, sheet: sheet, dimension: dimension,
+                                                          op: op, selectionRange: selectionRange)
+                return Self.formatSheetsResize(path: path, sheet: sheet, usedEndColumn: dims.usedEndColumn,
+                                               usedEndRow: dims.usedEndRow)
+            }
+            let (ok, text) = Self.capped(resultText)
+            sendResult(command.sessionId, command.commandId, ok, text, nil)
+        } catch {
+            sendResult(command.sessionId, command.commandId, false, Self.message(for: error), nil)
+        }
+    }
+
+    /// `office.sheets.add_sheet`/`.delete_sheet`/`.rename_sheet` — one handler for all three, same
+    /// consolidation reasoning as `handleSheetsResize` above.
+    private func handleSheetsManageSheet(_ command: SessionEvent.PanelCommand) async {
+        guard let path = Self.requiredPath(command.args) else {
+            return sendResult(command.sessionId, command.commandId, false, Self.requiredPathRefusal, nil)
+        }
+        guard let name = Self.requiredName(command.args) else {
+            return sendResult(command.sessionId, command.commandId, false, Self.requiredNameRefusal, nil)
+        }
+        let op: OfficeSheetsManageSheetOp
+        var newName: String?
+        switch command.action {
+        case "office.sheets.add_sheet": op = .add
+        case "office.sheets.delete_sheet": op = .delete
+        case "office.sheets.rename_sheet":
+            op = .rename
+            guard let requestedNewName = Self.requiredNewName(command.args) else {
+                return sendResult(command.sessionId, command.commandId, false, Self.requiredNewNameRefusal, nil)
+            }
+            newName = requestedNewName
+        default:
+            return sendResult(command.sessionId, command.commandId, false, Self.refusal(for: command.action), nil)
+        }
+
+        guard let broker = officeAgentBroker(command.sessionId) else {
+            return sendResult(command.sessionId, command.commandId, false, Self.hostGoneRefusal, nil)
+        }
+        do {
+            let resultText = try await broker.perform(
+                sessionId: command.sessionId, path: path, access: .write, requestId: command.commandId
+            ) { runtime, docId in
+                let sheets = try await runtime.sheetsManageSheet(docId: docId, op: op, name: name, newName: newName)
+                return Self.formatSheetsManageSheet(path: path, sheets: sheets)
+            }
+            let (ok, text) = Self.capped(resultText)
+            sendResult(command.sessionId, command.commandId, ok, text, nil)
+        } catch {
+            sendResult(command.sessionId, command.commandId, false, Self.message(for: error), nil)
+        }
+    }
+
     // MARK: - office-agent-tools T3: operands (wire strictness — missing required, never defaulted)
 
     private static let requiredPathRefusal = "this office verb needs a `path`."
     private static let requiredSheetRefusal = "`sheets read` needs a `sheet` naming which sheet to read."
     private static let requiredRangeRefusal = "`sheets read` needs a `range` in A1 notation (examples: \"A1\", \"A1:C10\")."
     private static let hostGoneRefusal = "Norma's office runtime is no longer available."
+    // office-agent-tools T4
+    private static let requiredValuesRefusal = "`sheets set` needs `values` — a rectangular grid of cell content."
+    private static let requiredCountRefusal = "this office verb needs a positive `count`."
+    private static let requiredNameRefusal = "this office verb needs a `name`."
+    private static let requiredNewNameRefusal = "`sheets rename_sheet` needs a `newName`."
 
     private static func requiredPath(_ args: [String: SessionEvent.JSONValue]?) -> String? {
         guard case .string(let raw)? = args?["path"], !raw.isEmpty else { return nil }
@@ -232,6 +429,50 @@ struct OfficeCommandConsumer {
     }
     private static func requiredRangeText(_ args: [String: SessionEvent.JSONValue]?) -> String? {
         guard case .string(let raw)? = args?["range"], !raw.isEmpty else { return nil }
+        return raw
+    }
+    /// office-agent-tools T4 — `sheets set`'s own grid, decoded from the wire's generic `JSONValue`
+    /// into plain strings: `sheets.ts`'s own zod schema already accepts string/number/boolean cells
+    /// (never nested arrays/objects — those refuse at the daemon before this ever runs), so a cell
+    /// that is not one of `.string`/`.number`/`.bool` here would only ever mean a decode mismatch
+    /// between the two languages' own schemas, not real caller input — refused the same as any other
+    /// malformed shape (`nil`), never coerced or skipped silently. `.number`'s own `Double` is
+    /// formatted WITHOUT a trailing `.0` for a whole number (`42`, not `42.0`) — the form Calc's own
+    /// cell-edit parser actually expects for an integer literal, matching what a human would type.
+    private static func requiredValuesGrid(_ args: [String: SessionEvent.JSONValue]?) -> [[String]]? {
+        guard case .array(let rows)? = args?["values"], !rows.isEmpty else { return nil }
+        var grid: [[String]] = []
+        grid.reserveCapacity(rows.count)
+        for row in rows {
+            guard case .array(let cells) = row, !cells.isEmpty else { return nil }
+            var stringRow: [String] = []
+            stringRow.reserveCapacity(cells.count)
+            for cell in cells {
+                switch cell {
+                case .string(let s): stringRow.append(s)
+                case .number(let n): stringRow.append(Self.formatNumberCell(n))
+                case .bool(let b): stringRow.append(b ? "true" : "false")
+                case .null, .object, .array: return nil
+                }
+            }
+            grid.append(stringRow)
+        }
+        return grid
+    }
+    private static func formatNumberCell(_ value: Double) -> String {
+        value.truncatingRemainder(dividingBy: 1) == 0 && abs(value) < 1e15
+            ? String(Int64(value)) : String(value)
+    }
+    private static func requiredCount(_ args: [String: SessionEvent.JSONValue]?) -> Int? {
+        guard case .number(let n)? = args?["count"], n >= 1, n.truncatingRemainder(dividingBy: 1) == 0 else { return nil }
+        return Int(n)
+    }
+    private static func requiredName(_ args: [String: SessionEvent.JSONValue]?) -> String? {
+        guard case .string(let raw)? = args?["name"], !raw.isEmpty else { return nil }
+        return raw
+    }
+    private static func requiredNewName(_ args: [String: SessionEvent.JSONValue]?) -> String? {
+        guard case .string(let raw)? = args?["newName"], !raw.isEmpty else { return nil }
         return raw
     }
     /// `formulas` is the ONE genuinely optional operand (spec §2's table: `formulas?`) — a missing or
@@ -287,6 +528,25 @@ struct OfficeCommandConsumer {
     private static func quotedIfNeededForTSV(_ cell: String) -> String {
         guard cell.contains("\t") || cell.contains("\"") else { return cell }
         return "\"\(cell.replacingOccurrences(of: "\"", with: "\"\""))\""
+    }
+
+    // MARK: - office-agent-tools T4: write-verb result formatting
+
+    private static func formatSheetsSet(path: String, sheet: String, range: String, cellsWritten: Int) -> String {
+        let name = (path as NSString).lastPathComponent
+        return "wrote \(cellsWritten) cell\(cellsWritten == 1 ? "" : "s") to \(sheet)!\(range) in \(name)"
+    }
+
+    private static func formatSheetsResize(path: String, sheet: String, usedEndColumn: Int, usedEndRow: Int) -> String {
+        let name = (path as NSString).lastPathComponent
+        let usedRange = (usedEndColumn < 0 || usedEndRow < 0)
+            ? "empty" : "A1:\(officeCellReference(column: usedEndColumn, row: usedEndRow))"
+        return "\(sheet) in \(name) is now \(usedRange)"
+    }
+
+    private static func formatSheetsManageSheet(path: String, sheets: [String]) -> String {
+        let name = (path as NSString).lastPathComponent
+        return "\(sheets.count) sheet\(sheets.count == 1 ? "" : "s") in \(name): \(sheets.joined(separator: ", "))"
     }
 
     /// The final belt — `sheetsResultMaxLength`, checked in the wire's own UTF-16-code-unit unit

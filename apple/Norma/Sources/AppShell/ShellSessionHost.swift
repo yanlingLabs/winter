@@ -1122,6 +1122,35 @@ final class ShellSessionHost: ObservableObject {
                     return try await client.sheetsRead(docId: docId, sheet: sheet, range: range, formulas: formulas)
                 }
             },
+            // office-agent-tools T4 — same `queue.run` routing and same throws-all-the-way-back
+            // posture `sheetsInfo`/`sheetsRead`/`save`/`open` already have: a write caller needs to
+            // know WHY it failed, never a silent swallow the way `postKey`/`close` fire-and-forget.
+            sheetsSet: { [weak supervisor] docId, sheet, range, cellAddresses, cellValues in
+                try await queue.run {
+                    guard let client = supervisor?.client else {
+                        throw OfficeHelperClientError.serverError(reason: "helper not connected")
+                    }
+                    return try await client.sheetsSet(docId: docId, sheet: sheet, range: range,
+                                                       cellAddresses: cellAddresses, cellValues: cellValues)
+                }
+            },
+            sheetsResize: { [weak supervisor] docId, sheet, dimension, op, selectionRange in
+                try await queue.run {
+                    guard let client = supervisor?.client else {
+                        throw OfficeHelperClientError.serverError(reason: "helper not connected")
+                    }
+                    return try await client.sheetsResize(docId: docId, sheet: sheet, dimension: dimension,
+                                                          op: op, selectionRange: selectionRange)
+                }
+            },
+            sheetsManageSheet: { [weak supervisor] docId, op, name, newName in
+                try await queue.run {
+                    guard let client = supervisor?.client else {
+                        throw OfficeHelperClientError.serverError(reason: "helper not connected")
+                    }
+                    return try await client.sheetsManageSheet(docId: docId, op: op, name: name, newName: newName)
+                }
+            },
             // Office Stage B Task 2b — the LIVE supervisor's own configured directory, never
             // `OfficeHelperSupervisor.Configuration.defaultStateDirectory()` read fresh: every live
             // test overrides `socketDirectory` with a scratch dir precisely so its own helper's

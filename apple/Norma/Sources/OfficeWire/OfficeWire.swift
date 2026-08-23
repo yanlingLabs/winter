@@ -260,6 +260,47 @@ public enum OfficeWireFrame: Equatable, Sendable {
     /// the second implementation the brief forbids, even in a different language boundary.
     case sheetsRead(seq: UInt64, docId: String, sheet: String, range: String, formulas: Bool)
 
+    // MARK: office-agent-tools T4 — sheets write verbs
+
+    /// Writes each `(cellAddresses[i], cellValues[i])` pair, in order, on ONE named sheet.
+    /// **`cellAddresses` is a flat, already-formatted list of A1 cell references ("B2"), computed
+    /// APP-side — never column integers, and never a single range string this frame would have to
+    /// walk itself.** Same cross-target constraint `sheetsRead`'s own `range` field carries (see
+    /// that case's own header): `NormaOfficeHelper` never compiles `Sources/AppShell`, where the A1
+    /// column math (`officeCellReference`) lives, so per-cell addressing has to arrive pre-computed
+    /// rather than be re-derived helper-side from `range` + a grid position. `cellValues[i]` is
+    /// exactly what gets TYPED into `cellAddresses[i]` — a leading `=` becomes a formula, exactly
+    /// like a human typing it (this bridge's own write mechanism is real synthetic text entry, not a
+    /// paste — see `LOKBridge.sheetsSetOnDedicatedThread`'s own header for why, and for the
+    /// apostrophe-escape convention the app applies before this frame is ever built). `cellAddresses`
+    /// and `cellValues` MUST be the same length — the helper refuses (`malformed`) rather than
+    /// guess if they are not. `range` is carried too, ALREADY FORMATTED (mirroring `sheetsRead`),
+    /// purely so the post-write verification read (this bridge's own defense-in-depth, not the
+    /// caller's job to ask for separately) can re-select the exact block it just wrote.
+    case sheetsSet(seq: UInt64, docId: String, sheet: String, range: String, cellAddresses: [String], cellValues: [String])
+    /// office-agent-tools T4 — insert/delete N whole rows or columns, starting at `selectionRange`'s
+    /// own row/column span. **One wire pair covers all four daemon-visible verbs**
+    /// (`insert_rows`/`insert_cols`/`delete_rows`/`delete_cols`) — `office.sheets.*`'s own four
+    /// `panel_command.action` strings are unaffected (Task 1's already-shipped, frozen enum); this is
+    /// an APP-INTERNAL wire, free to consolidate what the daemon-visible surface does not. `dimension`/
+    /// `op` are real Swift enums, not raw strings — an unrecognized value refuses to decode
+    /// (`malformed`) rather than silently falling through to a default case helper-side.
+    ///
+    /// **`selectionRange` is a PRE-FORMATTED row-only ("3:5") or column-only ("C:E") span** — the
+    /// research this task's own report cites (`sc/source/core/tool/address.cxx`'s range parser)
+    /// confirms `.uno:GoToCell`'s own `ToPoint` argument accepts exactly this Name-Box-style
+    /// addressing, expanding the OTHER axis to the sheet's full width/height itself — this bridge
+    /// never has to compute that expansion. Built app-side (`officeCellReference`'s own row/column
+    /// letter math), same cross-target reasoning as `sheetsSet.cellAddresses` above.
+    case sheetsResize(seq: UInt64, docId: String, sheet: String, dimension: OfficeSheetsResizeDimension,
+                      op: OfficeSheetsResizeOp, selectionRange: String)
+    /// office-agent-tools T4 — add/delete/rename a sheet. One wire pair for three daemon-visible
+    /// verbs, same reasoning as `sheetsResize` above. `name` is the NEW sheet's name for `.add`, the
+    /// EXISTING sheet's name for `.delete`/`.rename`; `newName` is `.rename`-only (`nil` otherwise —
+    /// decode refuses a `.rename` with no `newName`, and a non-`.rename` op that supplies one, rather
+    /// than silently ignoring either mismatch).
+    case sheetsManageSheet(seq: UInt64, docId: String, op: OfficeSheetsManageSheetOp, name: String, newName: String?)
+
     // MARK: Responses (helper -> client)
 
     /// `hello` succeeded: `token` matched. `lokVersion` is now (Task 3) the REAL
@@ -432,6 +473,23 @@ public enum OfficeWireFrame: Equatable, Sendable {
     /// without re-deriving the range's own shape from the reply.
     case sheetsReadOk(seq: UInt64, docId: String, rows: [[String]])
 
+    // MARK: office-agent-tools T4 — sheets write replies
+
+    /// Answers a successful `sheetsSet`: how many cells were written — `cellAddresses.count`, echoed
+    /// back rather than re-derived by the caller, so a caller who counts differently (an off-by-one
+    /// in its own grid math) sees a mismatch rather than trusting its own count silently.
+    case sheetsSetOk(seq: UInt64, docId: String, cellsWritten: Int)
+    /// Answers a successful `sheetsResize`: the sheet's own dimensions AFTER the operation —
+    /// `getDataArea`'s own used-range answer (`sheetsInfo`'s identical mechanism), not merely "ok."
+    /// A model that just inserted 2 rows can see the sheet actually grew, without a second `info`
+    /// call.
+    case sheetsResizeOk(seq: UInt64, docId: String, usedEndColumn: Int, usedEndRow: Int)
+    /// Answers a successful `sheetsManageSheet`: the workbook's full sheet-name list AFTER the
+    /// operation, in part order — the same "smallest useful truth" shape `sheetsInfo` already
+    /// returns, and the only way a caller learns whether `add`'s requested name survived Calc's own
+    /// silent sanitization (`CreateValidTabName`) verbatim or was altered.
+    case sheetsManageSheetOk(seq: UInt64, docId: String, sheets: [String])
+
     /// The wire vocabulary, in frame-declaration order. A test walks this list the same way
     /// `EditorBridgeInbound.wireTypes`'s own test does — one fixture per name, decode, assert the
     /// case names itself the same way — so this array and `decode`/`wireType` cannot drift apart
@@ -447,6 +505,8 @@ public enum OfficeWireFrame: Equatable, Sendable {
         "subscribeTiles", "unsubscribe", "tileRequest",
         // office-agent-tools T3 — sheets info/read.
         "sheetsInfo", "sheetsRead",
+        // office-agent-tools T4 — sheets write verbs.
+        "sheetsSet", "sheetsResize", "sheetsManageSheet",
         "helloOk", "refused", "pong", "opened", "openFailed", "closed", "saved", "saveFailed",
         "keyEventOk", "mouseEventOk", "extTextInputEventOk",
         "clipboardCopyOk", "clipboardCutOk", "clipboardPasteOk", "undoOk", "redoOk",
@@ -454,6 +514,7 @@ public enum OfficeWireFrame: Equatable, Sendable {
         "error", "documentEvent",
         "subscribed", "unsubscribed", "tileRequestAccepted", "tile", "tileFailed", "invalidated",
         "sheetsInfoOk", "sheetsReadOk",
+        "sheetsSetOk", "sheetsResizeOk", "sheetsManageSheetOk",
     ]
 
     public var wireType: String {
@@ -478,6 +539,9 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .tileRequest: return "tileRequest"
         case .sheetsInfo: return "sheetsInfo"
         case .sheetsRead: return "sheetsRead"
+        case .sheetsSet: return "sheetsSet"
+        case .sheetsResize: return "sheetsResize"
+        case .sheetsManageSheet: return "sheetsManageSheet"
         case .helloOk: return "helloOk"
         case .refused: return "refused"
         case .pong: return "pong"
@@ -506,6 +570,9 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .invalidated: return "invalidated"
         case .sheetsInfoOk: return "sheetsInfoOk"
         case .sheetsReadOk: return "sheetsReadOk"
+        case .sheetsSetOk: return "sheetsSetOk"
+        case .sheetsResizeOk: return "sheetsResizeOk"
+        case .sheetsManageSheetOk: return "sheetsManageSheetOk"
         }
     }
 
@@ -531,6 +598,9 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .tileRequest(let seq, _, _): return seq
         case .sheetsInfo(let seq, _): return seq
         case .sheetsRead(let seq, _, _, _, _): return seq
+        case .sheetsSet(let seq, _, _, _, _, _): return seq
+        case .sheetsResize(let seq, _, _, _, _, _): return seq
+        case .sheetsManageSheet(let seq, _, _, _, _): return seq
         case .helloOk(let seq, _): return seq
         case .refused(let seq, _): return seq
         case .pong(let seq): return seq
@@ -559,6 +629,9 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .invalidated(let seq, _, _): return seq
         case .sheetsInfoOk(let seq, _, _, _): return seq
         case .sheetsReadOk(let seq, _, _): return seq
+        case .sheetsSetOk(let seq, _, _): return seq
+        case .sheetsResizeOk(let seq, _, _, _): return seq
+        case .sheetsManageSheetOk(let seq, _, _): return seq
         }
     }
 
@@ -673,6 +746,33 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .sheetsReadOk(_, let docId, let rows):
             payload["docId"] = docId
             payload["rows"] = rows
+        case .sheetsSet(_, let docId, let sheet, let range, let cellAddresses, let cellValues):
+            payload["docId"] = docId
+            payload["sheet"] = sheet
+            payload["range"] = range
+            payload["cellAddresses"] = cellAddresses
+            payload["cellValues"] = cellValues
+        case .sheetsResize(_, let docId, let sheet, let dimension, let op, let selectionRange):
+            payload["docId"] = docId
+            payload["sheet"] = sheet
+            payload["dimension"] = dimension.rawValue
+            payload["op"] = op.rawValue
+            payload["selectionRange"] = selectionRange
+        case .sheetsManageSheet(_, let docId, let op, let name, let newName):
+            payload["docId"] = docId
+            payload["op"] = op.rawValue
+            payload["name"] = name
+            if let newName { payload["newName"] = newName }
+        case .sheetsSetOk(_, let docId, let cellsWritten):
+            payload["docId"] = docId
+            payload["cellsWritten"] = cellsWritten
+        case .sheetsResizeOk(_, let docId, let usedEndColumn, let usedEndRow):
+            payload["docId"] = docId
+            payload["usedEndColumn"] = usedEndColumn
+            payload["usedEndRow"] = usedEndRow
+        case .sheetsManageSheetOk(_, let docId, let sheets):
+            payload["docId"] = docId
+            payload["sheets"] = sheets
         case .subscribed(_, let docId, let keys), .invalidated(_, let docId, let keys):
             payload["docId"] = docId
             payload["keys"] = keys.map { $0.jsonObject() }
@@ -806,6 +906,30 @@ public struct OfficeSheetInfo: Equatable, Sendable {
         }
         return OfficeSheetInfo(name: name, usedEndColumn: usedEndColumn, usedEndRow: usedEndRow)
     }
+}
+
+// MARK: - office-agent-tools T4 — the resize/manage-sheet wire's own strict enums
+
+/// `sheetsResize`'s axis. A raw `String` field this bridge cannot recognize refuses to decode
+/// (`malformed`) rather than falling through to a default case helper-side — advisor guidance for
+/// this task's own wire consolidation (see `sheetsResize`'s own header for why one wire pair covers
+/// four daemon-visible verbs).
+public enum OfficeSheetsResizeDimension: String, Equatable, Sendable {
+    case row
+    case col
+}
+
+/// `sheetsResize`'s operation.
+public enum OfficeSheetsResizeOp: String, Equatable, Sendable {
+    case insert
+    case delete
+}
+
+/// `sheetsManageSheet`'s operation.
+public enum OfficeSheetsManageSheetOp: String, Equatable, Sendable {
+    case add
+    case delete
+    case rename
 }
 
 /// `hello`'s role field. `agent` is the daemon (Stage C consumer; the handshake alone lands now).
@@ -1825,6 +1949,57 @@ public enum OfficeWireCodec {
                 return .rejected(seq: seq, reason: "malformed")
             }
             return .frame(.sheetsReadOk(seq: seq, docId: docId, rows: rows))
+        case "sheetsSet":
+            guard let docId = object["docId"] as? String, let sheet = object["sheet"] as? String,
+                  let range = object["range"] as? String,
+                  let cellAddresses = object["cellAddresses"] as? [String],
+                  let cellValues = object["cellValues"] as? [String],
+                  cellAddresses.count == cellValues.count else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.sheetsSet(seq: seq, docId: docId, sheet: sheet, range: range,
+                                     cellAddresses: cellAddresses, cellValues: cellValues))
+        case "sheetsResize":
+            guard let docId = object["docId"] as? String, let sheet = object["sheet"] as? String,
+                  let dimensionRaw = object["dimension"] as? String,
+                  let dimension = OfficeSheetsResizeDimension(rawValue: dimensionRaw),
+                  let opRaw = object["op"] as? String, let op = OfficeSheetsResizeOp(rawValue: opRaw),
+                  let selectionRange = object["selectionRange"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.sheetsResize(seq: seq, docId: docId, sheet: sheet, dimension: dimension,
+                                        op: op, selectionRange: selectionRange))
+        case "sheetsManageSheet":
+            guard let docId = object["docId"] as? String,
+                  let opRaw = object["op"] as? String, let op = OfficeSheetsManageSheetOp(rawValue: opRaw),
+                  let name = object["name"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            let newName = object["newName"] as? String
+            // `.rename` MUST carry a `newName`; every other op must NOT — a mismatch either
+            // direction refuses rather than silently ignoring/inventing one (this frame's own
+            // header: "refuses... rather than silently ignoring either mismatch").
+            guard (op == .rename) == (newName != nil) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.sheetsManageSheet(seq: seq, docId: docId, op: op, name: name, newName: newName))
+        case "sheetsSetOk":
+            guard let docId = object["docId"] as? String, let cellsWritten = intValue(object["cellsWritten"]) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.sheetsSetOk(seq: seq, docId: docId, cellsWritten: cellsWritten))
+        case "sheetsResizeOk":
+            guard let docId = object["docId"] as? String,
+                  let usedEndColumn = intValue(object["usedEndColumn"]),
+                  let usedEndRow = intValue(object["usedEndRow"]) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.sheetsResizeOk(seq: seq, docId: docId, usedEndColumn: usedEndColumn, usedEndRow: usedEndRow))
+        case "sheetsManageSheetOk":
+            guard let docId = object["docId"] as? String, let sheets = object["sheets"] as? [String] else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.sheetsManageSheetOk(seq: seq, docId: docId, sheets: sheets))
         default:
             // The type itself is unrecognized — the brief's exact case: error{seq,reason:"unknown"}.
             return .rejected(seq: seq, reason: "unknown")

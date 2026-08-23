@@ -240,6 +240,16 @@ func officeParseRange(_ range: String) -> OfficeCellRange? {
 /// still covering every ordinary read — a 40-column x 50-row report, a 10-column x 200-row export.
 let officeReadRangeMaxCells = 2_000
 
+/// office-agent-tools T4 — `sheets set`'s own real cap, mirroring `officeReadRangeMaxCells` exactly
+/// (checked in `OfficeCommandConsumer.handleSheetsSet`, before the broker/LOK are ever reached) but
+/// smaller, deliberately: `sheets.ts`'s own copy of this same number (`sheetsSetMaxCells`) has the
+/// full reasoning — each written cell costs a real per-cell LOK round trip (select, verify, type,
+/// verify again), not one bulk probe, so the safe ceiling is much lower than a read's. Kept as TWO
+/// independently-maintained constants (TS and Swift), on the SAME precedent `officeReadRangeMaxCells`
+/// already set: the daemon's own copy refuses cheaply before a round trip is even attempted; this
+/// one is the REAL enforcement, since only this side can compute `range`'s true cell count.
+let officeWriteRangeMaxCells = 200
+
 /// PURE: the formula bar's own ref-display decision, extracted from `OfficeFormulaBar.referenceText`
 /// (advisor review, this task) so it can be pinned directly, independent of SwiftUI/`@Published`
 /// timing. Blank when `part != activePart` (a stale part — mirrors

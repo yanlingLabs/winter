@@ -192,6 +192,36 @@ public protocol OfficeDocumentBridge: AnyObject {
     /// `SaveError.sheetNotFound` (carrying the real sheet list) for an unknown name, or the same
     /// existence/kind errors `sheetsInfo` throws.
     func sheetsRead(docId: String, sheet: String, range: String, formulas: Bool) throws -> [[String]]
+
+    // MARK: - office-agent-tools T4: sheets write verbs
+
+    /// Writes `cellValues[i]` into `cellAddresses[i]` for every `i`, in order, on `sheet` — real
+    /// synthetic text entry, not a paste (`LOKBridge.sheetsSetOnDedicatedThread`'s own header has the
+    /// full mechanism and why). `range` is used only for this bridge's own post-write verification
+    /// read (defense in depth — see that function's own header), never re-validated against
+    /// `cellAddresses`' own shape (the caller already did that). Returns the number of cells written
+    /// (`cellAddresses.count`, echoed back rather than silently trusted). Throws the same
+    /// existence/kind errors `sheetsRead` throws, plus `SaveError.sheetNotFound`, plus a write-
+    /// specific verification failure if the post-write read does not confirm the intended content
+    /// landed.
+    func sheetsSet(docId: String, sheet: String, range: String, cellAddresses: [String], cellValues: [String]) throws -> Int
+    /// Inserts or deletes `count` whole rows/columns starting at `selectionRange`'s own row/column
+    /// span (a pre-formatted "R1:R2" or "C1:C2" string — see `OfficeWireFrame.sheetsResize`'s own
+    /// header for why the app, not this bridge, computes it). Returns the sheet's own used-range
+    /// dimensions AFTER the operation (the same shape `sheetsInfo` reports per sheet). Throws the
+    /// same existence/kind errors `sheetsRead` throws, plus `SaveError.sheetNotFound`.
+    func sheetsResize(docId: String, sheet: String, dimension: OfficeSheetsResizeDimension,
+                      op: OfficeSheetsResizeOp, selectionRange: String) throws -> (usedEndColumn: Int, usedEndRow: Int)
+    /// Adds/deletes/renames a sheet. `name` is the NEW sheet's name for `.add`, the EXISTING sheet's
+    /// name for `.delete`/`.rename`; `newName` is `.rename`-only. Returns the workbook's full
+    /// sheet-name list AFTER the operation, in part order. Throws `SaveError.sheetNotFound` for
+    /// `.delete`/`.rename` naming a sheet that does not exist, `SaveError.lastSheet` for a `.delete`
+    /// that would leave the workbook with zero sheets, and `SaveError.duplicateSheetName` for an
+    /// `.add`/`.rename` whose target name already exists — all three checked BEFORE dispatching any
+    /// UNO command (see `LOKBridge.sheetsManageSheetOnDedicatedThread`'s own header for why: Calc's
+    /// own slot handlers silently no-op or silently rename-with-a-suffix rather than erroring these
+    /// cases, so this bridge would otherwise have no honest signal to report).
+    func sheetsManageSheet(docId: String, op: OfficeSheetsManageSheetOp, name: String, newName: String?) throws -> [String]
 }
 
 /// The result of a successful `OfficeDocumentBridge.paintTile` call — helper-internal (never
@@ -400,6 +430,57 @@ public final class FakeOfficeDocumentBridge: OfficeDocumentBridge {
             throw OfficeHelperServerError.posix("fake bridge: no sheet named \"\(sheet)\" in \(docId) — this workbook has: Sheet1")
         }
         return [["fake", formulas ? "=FAKE()" : "42"]]
+    }
+
+    /// office-agent-tools T4 — wire-level dispatch only, same reasoning as every other fake stub
+    /// above: existence/sheet-name checked (real CONTENT correctness is `LOKBridge`'s own live-tested
+    /// job), returns `cellAddresses.count` as a deterministic, real (if fake) answer.
+    private var fakeSheetNames: [String] = ["Sheet1"]
+
+    public func sheetsSet(docId: String, sheet: String, range: String, cellAddresses: [String], cellValues: [String]) throws -> Int {
+        lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
+        guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
+        guard sheet == "Sheet1" else {
+            throw OfficeHelperServerError.posix("fake bridge: no sheet named \"\(sheet)\" in \(docId) — this workbook has: Sheet1")
+        }
+        return cellAddresses.count
+    }
+    public func sheetsResize(docId: String, sheet: String, dimension: OfficeSheetsResizeDimension,
+                             op: OfficeSheetsResizeOp, selectionRange: String) throws -> (usedEndColumn: Int, usedEndRow: Int) {
+        lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
+        guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
+        guard sheet == "Sheet1" else {
+            throw OfficeHelperServerError.posix("fake bridge: no sheet named \"\(sheet)\" in \(docId) — this workbook has: Sheet1")
+        }
+        return (usedEndColumn: 2, usedEndRow: 9)
+    }
+    public func sheetsManageSheet(docId: String, op: OfficeSheetsManageSheetOp, name: String, newName: String?) throws -> [String] {
+        lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
+        guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
+        switch op {
+        case .add:
+            guard !fakeSheetNames.contains(name) else {
+                throw OfficeHelperServerError.posix("fake bridge: a sheet named \"\(name)\" already exists in \(docId)")
+            }
+            fakeSheetNames.append(name)
+        case .delete:
+            guard fakeSheetNames.contains(name) else {
+                throw OfficeHelperServerError.posix("fake bridge: no sheet named \"\(name)\" in \(docId)")
+            }
+            guard fakeSheetNames.count > 1 else {
+                throw OfficeHelperServerError.posix("fake bridge: cannot delete the only sheet in \(docId)")
+            }
+            fakeSheetNames.removeAll { $0 == name }
+        case .rename:
+            guard let index = fakeSheetNames.firstIndex(of: name) else {
+                throw OfficeHelperServerError.posix("fake bridge: no sheet named \"\(name)\" in \(docId)")
+            }
+            guard let newName, !fakeSheetNames.contains(newName) else {
+                throw OfficeHelperServerError.posix("fake bridge: a sheet named \"\(newName ?? "")\" already exists in \(docId)")
+            }
+            fakeSheetNames[index] = newName
+        }
+        return fakeSheetNames
     }
 
     /// A small, deterministic, key-dependent pixel pattern (never blank, never identical across
@@ -1239,6 +1320,46 @@ public final class OfficeHelperServer {
             do {
                 let rows = try documentBridge.sheetsRead(docId: docId, sheet: sheet, range: range, formulas: formulas)
                 writeReply(.sheetsReadOk(seq: seq, docId: docId, rows: rows), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.sheetsSet(let seq, let docId, let sheet, let range, let cellAddresses, let cellValues)):
+            // office-agent-tools T4 — a WRITE, unlike sheetsInfo/sheetsRead above, but the same
+            // existence-check posture: any connection touching an already-open doc may write it
+            // (the broker's own dirty/fence checks already ran before this frame was ever built —
+            // see `OfficeAgentBroker`'s own rules; this bridge has no further consent to withhold).
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                let cellsWritten = try documentBridge.sheetsSet(docId: docId, sheet: sheet, range: range,
+                                                                 cellAddresses: cellAddresses, cellValues: cellValues)
+                writeReply(.sheetsSetOk(seq: seq, docId: docId, cellsWritten: cellsWritten), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.sheetsResize(let seq, let docId, let sheet, let dimension, let op, let selectionRange)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                let dims = try documentBridge.sheetsResize(docId: docId, sheet: sheet, dimension: dimension,
+                                                            op: op, selectionRange: selectionRange)
+                writeReply(.sheetsResizeOk(seq: seq, docId: docId, usedEndColumn: dims.usedEndColumn,
+                                           usedEndRow: dims.usedEndRow), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.sheetsManageSheet(let seq, let docId, let op, let name, let newName)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                let sheets = try documentBridge.sheetsManageSheet(docId: docId, op: op, name: name, newName: newName)
+                writeReply(.sheetsManageSheetOk(seq: seq, docId: docId, sheets: sheets), writer: writer)
             } catch {
                 writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
             }

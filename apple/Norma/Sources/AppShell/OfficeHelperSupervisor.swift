@@ -349,6 +349,44 @@ final class OfficeHelperClient {
         }
     }
 
+    // MARK: - office-agent-tools T4: sheets write verbs
+
+    func sheetsSet(docId: String, sheet: String, range: String, cellAddresses: [String], cellValues: [String]) async throws -> Int {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.sheetsSet(seq: seq, docId: docId, sheet: sheet, range: range,
+                                             cellAddresses: cellAddresses, cellValues: cellValues))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .sheetsSetOk(_, _, let cellsWritten): return cellsWritten
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    func sheetsResize(docId: String, sheet: String, dimension: OfficeSheetsResizeDimension,
+                      op: OfficeSheetsResizeOp, selectionRange: String) async throws -> (usedEndColumn: Int, usedEndRow: Int) {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.sheetsResize(seq: seq, docId: docId, sheet: sheet, dimension: dimension,
+                                                op: op, selectionRange: selectionRange))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .sheetsResizeOk(_, _, let usedEndColumn, let usedEndRow): return (usedEndColumn, usedEndRow)
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    func sheetsManageSheet(docId: String, op: OfficeSheetsManageSheetOp, name: String, newName: String?) async throws -> [String] {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.sheetsManageSheet(seq: seq, docId: docId, op: op, name: name, newName: newName))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .sheetsManageSheetOk(_, _, let sheets): return sheets
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
     // MARK: - Task 4: tiles
 
     /// Registers this connection as a tile-push subscriber for `docId` (which must already be open

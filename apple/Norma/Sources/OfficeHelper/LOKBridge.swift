@@ -387,6 +387,23 @@ final class LOKBridge: OfficeDocumentBridge {
         /// `available` is the real, current sheet-name list (in part order) — carried so the caller
         /// can build "no sheet named X — this workbook has: A, B, C" without a second round trip.
         case sheetNotFound(docId: String, sheet: String, available: [String])
+        /// office-agent-tools T4 — `sheetsSet` wrote a non-empty value into a cell, and the
+        /// post-write verification read of that SAME cell came back empty. `LOKBridge.writeOneCell
+        /// OnDedicatedThread`'s own header explains the mechanism this catches (a GoToCell that never
+        /// landed within budget, or a commit that never took) — a real, if rare, failure this bridge
+        /// can actually detect rather than silently report success on.
+        case writeVerificationFailed(docId: String, address: String)
+        /// office-agent-tools T4 — `delete_sheet` named the workbook's ONLY remaining sheet. Checked
+        /// BEFORE dispatching `.uno:Remove` (`LOKBridge.sheetsManageSheetOnDedicatedThread`'s own
+        /// header explains why: Calc's own slot handler has no documented, verified error signal for
+        /// this case, so a pre-check is the only honest way to refuse it rather than risk a silent
+        /// no-op or an unverified worse outcome).
+        case lastSheet(docId: String)
+        /// office-agent-tools T4 — `add_sheet`/`rename_sheet` named a sheet name that already exists
+        /// in the workbook. Checked BEFORE dispatching, for the same reason as `.lastSheet` above:
+        /// `ScDocFunc::RenameTable`/`CreateValidTabName`'s own behavior on a collision is a silent
+        /// no-op or a silently ALTERED name, neither of which is an honest way to refuse.
+        case duplicateSheetName(docId: String, name: String)
         var description: String {
             switch self {
             case .docNotOpen(let docId): return "save requested for a docId that is not open: \(docId)"
@@ -409,6 +426,13 @@ final class LOKBridge: OfficeDocumentBridge {
             case .sheetNotFound(let docId, let sheet, let available):
                 let list = available.isEmpty ? "(no sheets)" : available.joined(separator: ", ")
                 return "no sheet named \"\(sheet)\" in \(docId) — this workbook has: \(list)"
+            case .writeVerificationFailed(let docId, let address):
+                return "wrote to \(address) in \(docId) but could not confirm the content landed — "
+                    + "the outcome is unknown; re-read the cell before trusting or retrying this write"
+            case .lastSheet(let docId):
+                return "\(docId) has only one sheet left — a workbook needs at least one; refusing to delete it"
+            case .duplicateSheetName(let docId, let name):
+                return "a sheet named \"\(name)\" already exists in \(docId)"
             }
         }
     }
@@ -832,6 +856,21 @@ final class LOKBridge: OfficeDocumentBridge {
     }
     func sheetsRead(docId: String, sheet: String, range: String, formulas: Bool) throws -> [[String]] {
         try thread.sync { try self.sheetsReadOnDedicatedThread(docId: docId, sheet: sheet, range: range, formulas: formulas) }
+    }
+
+    // MARK: - office-agent-tools T4: sheets write verbs
+
+    func sheetsSet(docId: String, sheet: String, range: String, cellAddresses: [String], cellValues: [String]) throws -> Int {
+        try thread.sync { try self.sheetsSetOnDedicatedThread(docId: docId, sheet: sheet, range: range,
+                                                               cellAddresses: cellAddresses, cellValues: cellValues) }
+    }
+    func sheetsResize(docId: String, sheet: String, dimension: OfficeSheetsResizeDimension,
+                      op: OfficeSheetsResizeOp, selectionRange: String) throws -> (usedEndColumn: Int, usedEndRow: Int) {
+        try thread.sync { try self.sheetsResizeOnDedicatedThread(docId: docId, sheet: sheet, dimension: dimension,
+                                                                  op: op, selectionRange: selectionRange) }
+    }
+    func sheetsManageSheet(docId: String, op: OfficeSheetsManageSheetOp, name: String, newName: String?) throws -> [String] {
+        try thread.sync { try self.sheetsManageSheetOnDedicatedThread(docId: docId, op: op, name: name, newName: newName) }
     }
 
     // MARK: - Office Stage B Task 10 — the CFB release blocker
@@ -2310,6 +2349,275 @@ final class LOKBridge: OfficeDocumentBridge {
 
         let text = selectionTextOnDedicatedThread(doc, docId: docId, viewId: agentViewId, part: part, range: range, formulas: formulas)
         return parseTSVGrid(text)
+    }
+
+    // MARK: - office-agent-tools T4: sheets write verbs
+
+    /// office-agent-tools T4 — writes each `(cellAddresses[i], cellValues[i])` pair, in order, on the
+    /// AGENT view (same isolation reasoning `sheetsReadOnDedicatedThread`'s own I1 fix established:
+    /// nothing this does is ever visible to a human's own primary-view selection).
+    ///
+    /// **The mechanism is real synthetic TEXT ENTRY, not a paste — a deliberate choice, not the
+    /// first one tried.** `clipboardPasteOnDedicatedThread`'s own `paste()` door was the obvious
+    /// first candidate (`set`'s own name mirrors `read`'s single-range shape) but was set aside
+    /// BEFORE being built, on evidence already on hand rather than a fresh live drill: this task's
+    /// own advisor review named three concrete, unverified paste risks (does a TSV blob reliably
+    /// FILL a multi-cell block on the agent view specifically; does a pasted `=1+1` reliably become
+    /// a FORMULA rather than literal text, since clipboard import and cell-edit-mode text entry are
+    /// documented as different Calc code paths; does pasting OVER a non-empty cell raise a headless
+    /// overwrite-confirmation dialog — a modal on the dedicated thread is a HANG, not a failure, the
+    /// one risk this bridge cannot afford to discover live). Character-by-character, per-cell
+    /// GoToCell-then-type sidesteps all three by construction: (1) each cell is targeted
+    /// individually, so there is no multi-cell fill behavior to depend on; (2) typing IS the
+    /// mechanism `typeFormulaOnePlusOne`'s own live-tested precedent already proves produces a real
+    /// formula from a leading `=` — no second, unverified code path; (3) typing into a cell and
+    /// pressing Return never raises Calc's paste-specific overwrite dialog (confirmed by this
+    /// mechanism's own live drills — see task-4-report.md). The cost is real (`sheetsSetMaxCells`,
+    /// `sheets.ts`'s own cap, is far smaller than `read`'s 2,000-cell ceiling BECAUSE each cell here
+    /// pays for a real per-cell LOK round trip, not a bulk probe) — accepted deliberately, in
+    /// exchange for composing entirely out of ALREADY-PROVEN primitives rather than a fourth,
+    /// untested LOK code path.
+    private func sheetsSetOnDedicatedThread(docId: String, sheet: String, range: String,
+                                            cellAddresses: [String], cellValues: [String]) throws -> Int {
+        guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        guard doc.kind == .spreadsheet else { throw SaveError.notSpreadsheet(docId: docId, kind: doc.kind) }
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+
+        let names = sheetNamesOnDedicatedThread(doc)
+        guard let part = names.firstIndex(of: sheet) else {
+            throw SaveError.sheetNotFound(docId: docId, sheet: sheet, available: names)
+        }
+
+        let agentViewId = try ensureAgentViewOnDedicatedThread(docId: docId)
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
+        doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(part))
+
+        for (address, value) in zip(cellAddresses, cellValues) {
+            try writeOneCellOnDedicatedThread(doc, docId: docId, viewId: agentViewId, part: part,
+                                              address: address, text: value)
+        }
+        return cellAddresses.count
+    }
+
+    /// **Positions on `address`, types `text`, commits, then re-verifies — all on the agent view,
+    /// all within ONE call.** Positioning reuses `selectionTextOnDedicatedThread` VERBATIM (called
+    /// twice: once to position before typing, once again after, to verify) — this is "read Task 3's
+    /// agent-view work and use the SAME mechanism" applied literally, including its own disclosed
+    /// residual: a `.uno:GoToCell` that never lands within `goToCellVerificationAttempts` is not
+    /// re-derived or newly solved here, it is INHERITED (see that function's own header, and
+    /// task-3-report.md §6/§9/§10 — this bridge does not claim to have closed it for writes any
+    /// more than reads did).
+    ///
+    /// **Typing is `postWindowExtTextInputEvent` (`.input` then `.end`), followed by a real Return
+    /// keypress** — mirroring `typeFormulaOnePlusOne`'s own proven "type, then Return commits a
+    /// pending Calc cell edit" shape (`OfficeSheetsCommandTests.swift`), not a guess: ext-text-input
+    /// delivers the whole string in one call rather than one `postKeyEvent` per character (this
+    /// bridge has no AppKit-keyCode table available to it — `NormaOfficeHelper` never compiles
+    /// `Sources/AppShell`, where `OfficeInputCodes` lives — and no reason to build a second,
+    /// LOK-keyCode-only one when ext-text-input already exists and is already live-tested for
+    /// committing arbitrary text, `OfficeRuntimeLiveTests.testExtTextInputMarksCommitsAndCancels
+    /// AgainstRealLOKThroughSaveAndReopen`), but the trailing Return is kept EXPLICIT rather than
+    /// trusted to `.end` alone — Calc's own cell-edit-mode commit semantics for ext-text-input
+    /// specifically (as opposed to a text document's paragraph-level commit, the ONLY case that
+    /// existing test covers) were unverified going in; a redundant Return after an already-committed
+    /// edit is harmless (it only moves the cursor, which this function re-positions past anyway),
+    /// while OMITTING it risked leaving every written cell parked in perpetual edit mode. Verified
+    /// live, not assumed — see task-4-report.md.
+    ///
+    /// **Verification is deliberately LENIENT — "landed something," not "landed byte-identical."**
+    /// A written NUMBER can read back reformatted (`"3.0"` typed, `"3"` read), and a written FORMULA
+    /// reads back as its COMPUTED value in values mode, never the formula text — neither is a bug,
+    /// so an exact-match check would false-fail both. What this DOES catch, honestly: the dangerous
+    /// silent-failure shape — a non-empty `text` whose target cell reads back EMPTY, meaning the
+    /// position never landed, the commit never landed, or both. A genuinely empty `text` (the caller
+    /// explicitly asked to write nothing there) is never verified — there is nothing to distinguish
+    /// "the write of nothing worked" from "the write of nothing didn't happen," the identical
+    /// baseline-ambiguity `selectionTextOnDedicatedThread`'s own header already names for reads.
+    private func writeOneCellOnDedicatedThread(_ doc: OpenDocument, docId: String, viewId: Int32, part: Int,
+                                               address: String, text: String) throws {
+        _ = selectionTextOnDedicatedThread(doc, docId: docId, viewId: viewId, part: part, range: address, formulas: false)
+
+        text.withCString { textPtr in
+            doc.handle.pointee.pClass.pointee.postWindowExtTextInputEvent?(
+                doc.handle, 0, Int32(OfficeExtTextInputType.input.rawValue), textPtr)
+        }
+        "".withCString { emptyPtr in
+            doc.handle.pointee.pClass.pointee.postWindowExtTextInputEvent?(
+                doc.handle, 0, Int32(OfficeExtTextInputType.end.rawValue), emptyPtr)
+        }
+        // Return — `com.sun.star.awt.Key.RETURN` (1280), the SAME raw keyCode
+        // `OfficeSheetsCommandTests.typeFormulaOnePlusOne`/`OfficeRuntimeLiveTests.postRealEdit`
+        // already prove commits a pending Calc cell edit.
+        doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyInput.rawValue), 0, 1280)
+        doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyUp.rawValue), 0, 1280)
+
+        guard !text.isEmpty else { return }
+        let after = selectionTextOnDedicatedThread(doc, docId: docId, viewId: viewId, part: part, range: address, formulas: false)
+        guard !after.isEmpty else {
+            throw SaveError.writeVerificationFailed(docId: docId, address: address)
+        }
+    }
+
+    /// office-agent-tools T4 — insert/delete `count` whole rows/columns, selected via
+    /// `selectionRange`'s own row-only ("3:5") or column-only ("C:E") span (this task's own report
+    /// cites the pinned engine source — `sc/source/core/tool/address.cxx`'s range parser — confirming
+    /// `.uno:GoToCell`'s `ToPoint` accepts this Name-Box addressing and expands the OTHER axis to the
+    /// sheet's full width/height itself). None of the four commands
+    /// (`InsertRowsBefore`/`DeleteRows`/`InsertColumnsBefore`/`DeleteColumns`) takes an argument —
+    /// they act entirely on the CURRENT SELECTION, which is why positioning has to happen first, on
+    /// the SAME proven GoToCell mechanism every other verb in this file uses, with the SAME disclosed
+    /// straggler residual (not re-derived here — see `writeOneCellOnDedicatedThread`'s own header for
+    /// the pointer). `getDataArea` needs no `setPart`/selection of its own (T3 review C2's own
+    /// finding: it takes `nPart` directly) — reused here exactly as `sheetsInfoOnDedicatedThread`
+    /// already does, including its `(0,0)` empty-vs-A1-only disambiguation.
+    private func sheetsResizeOnDedicatedThread(docId: String, sheet: String, dimension: OfficeSheetsResizeDimension,
+                                               op: OfficeSheetsResizeOp, selectionRange: String) throws -> (usedEndColumn: Int, usedEndRow: Int) {
+        guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        guard doc.kind == .spreadsheet else { throw SaveError.notSpreadsheet(docId: docId, kind: doc.kind) }
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+
+        let names = sheetNamesOnDedicatedThread(doc)
+        guard let part = names.firstIndex(of: sheet) else {
+            throw SaveError.sheetNotFound(docId: docId, sheet: sheet, available: names)
+        }
+
+        let agentViewId = try ensureAgentViewOnDedicatedThread(docId: docId)
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
+        doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(part))
+
+        _ = selectionTextOnDedicatedThread(doc, docId: docId, viewId: agentViewId, part: part,
+                                           range: selectionRange, formulas: false)
+
+        let command: String
+        switch (dimension, op) {
+        case (.row, .insert): command = ".uno:InsertRowsBefore"
+        case (.row, .delete): command = ".uno:DeleteRows"
+        case (.col, .insert): command = ".uno:InsertColumnsBefore"
+        case (.col, .delete): command = ".uno:DeleteColumns"
+        }
+        command.withCString { commandPtr in
+            doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, nil, false)
+        }
+        // Best-effort pump — the SAME throwaway `paintPartTile` primitive `.uno:GoToCell`'s own poll
+        // already trusts, giving LOK's dispatcher one more turn before the used-range read below,
+        // which would otherwise race the structural edit exactly the way an unpumped read could race
+        // a still-queued GoToCell.
+        pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: part)
+
+        var lastCol: Int = 0
+        var lastRow: Int = 0
+        doc.handle.pointee.pClass.pointee.getDataArea?(doc.handle, part, &lastCol, &lastRow)
+        if lastCol == 0 && lastRow == 0 {
+            let hasA1Content = try sheetHasA1ContentOnDedicatedThread(docId: docId, part: part)
+            return (usedEndColumn: hasA1Content ? 0 : -1, usedEndRow: hasA1Content ? 0 : -1)
+        }
+        return (usedEndColumn: lastCol, usedEndRow: lastRow)
+    }
+
+    /// office-agent-tools T4 — add/delete/rename a sheet, dispatched entirely through UNO commands
+    /// this task's own research confirmed dispatchable WITHOUT a modal dialog, PROVIDED every
+    /// required argument is present (a missing one opens a real, headless-undismissable dialog —
+    /// `AbstractScInsertTableDlg`/a `xQueryBox` confirmation — a HANG this function must never risk):
+    ///
+    /// - `.add` → `.uno:Add {Name}` — always appends at the end (this tool's own v1 scope: no
+    ///   position operand), never `.uno:Insert` (which additionally needs a numeric `Index` — see
+    ///   below for why this bridge avoids a numeric UNO arg wherever a real alternative exists).
+    /// - `.rename` → `.uno:Name {Name}`, `Index` OMITTED — the research's own finding: omitting
+    ///   `Index` targets the CURRENT sheet, and the dialog only fires when the WHOLE args object is
+    ///   null, not merely missing one optional key — so this function makes the TARGET sheet current
+    ///   first (`setPart`, the identical mechanism every read/write verb already uses to target a
+    ///   sheet) rather than compute a 1-based `Index` it would otherwise have to guess a JSON type
+    ///   string for.
+    /// - `.delete` → `.uno:Remove {Index}` — the ONE case with no name-based alternative; `Index` is
+    ///   REQUIRED (1-based, no "0 means current" convention — passing 0 targets sheet 1). The JSON
+    ///   "type" string for this NUMERIC arg (`SfxUInt16Item`) could not be confirmed from source
+    ///   alone (this task's own research: "an honest gap, not a guess dressed up as fact") — resolved
+    ///   live against the real engine, not assumed; see task-4-report.md for what actually worked.
+    ///
+    /// **Two refusals happen BEFORE any UNO command is dispatched, not after** —
+    /// `SaveError.lastSheet`/`.duplicateSheetName`: this task's own research found Calc's real
+    /// handlers give NO honest error signal for either case (`RenameTable` returns `false` with
+    /// nothing surfacing through the UNO dispatch; `CreateValidTabName` silently ALTERS a colliding
+    /// name rather than refusing it) — a pre-check against this bridge's own already-known sheet list
+    /// is the only way to refuse cleanly rather than risk a silent no-op or a silently different name
+    /// than the one the caller asked for.
+    ///
+    /// **The op's own success is confirmed by RE-READING the sheet list afterward, not trusted from
+    /// dispatch alone** — the identical "a UNO command was posted, not a claim it took effect" caveat
+    /// every fire-and-forget verb in this file already carries, made concrete here because this
+    /// task's own research specifically flagged both `.add`/`.rename`'s silent-failure/silent-
+    /// alteration risk. A count/membership mismatch after the pump throws honestly rather than report
+    /// success on an operation this bridge cannot otherwise confirm landed.
+    private func sheetsManageSheetOnDedicatedThread(docId: String, op: OfficeSheetsManageSheetOp,
+                                                     name: String, newName: String?) throws -> [String] {
+        guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        guard doc.kind == .spreadsheet else { throw SaveError.notSpreadsheet(docId: docId, kind: doc.kind) }
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        let before = sheetNamesOnDedicatedThread(doc)
+
+        switch op {
+        case .add:
+            guard !before.contains(name) else { throw SaveError.duplicateSheetName(docId: docId, name: name) }
+            postUnoCommandOnDedicatedThread(doc, ".uno:Add", ["Name": ["type": "string", "value": name]])
+        case .delete:
+            guard before.contains(name) else {
+                throw SaveError.sheetNotFound(docId: docId, sheet: name, available: before)
+            }
+            guard before.count > 1 else { throw SaveError.lastSheet(docId: docId) }
+            let oneBasedIndex = before.firstIndex(of: name)! + 1
+            postUnoCommandOnDedicatedThread(doc, ".uno:Remove",
+                                            ["Index": ["type": "unsigned short", "value": oneBasedIndex]])
+        case .rename:
+            guard let zeroBasedIndex = before.firstIndex(of: name) else {
+                throw SaveError.sheetNotFound(docId: docId, sheet: name, available: before)
+            }
+            // `newName` is guaranteed non-nil for `.rename` by the wire's own decode
+            // (`OfficeWireFrame`'s `sheetsManageSheet` case — `(op == .rename) == (newName != nil)`)
+            // — a genuinely nil `newName` here would be a decode bug elsewhere, not a data error
+            // this function should describe with a SaveError.
+            guard let newName else {
+                preconditionFailure("sheetsManageSheet(.rename) reached with no newName — the wire decode's own invariant was violated")
+            }
+            guard !before.contains(newName) else { throw SaveError.duplicateSheetName(docId: docId, name: newName) }
+            doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(zeroBasedIndex))
+            postUnoCommandOnDedicatedThread(doc, ".uno:Name", ["Name": ["type": "string", "value": newName]])
+        }
+        pumpDedicatedThreadForPendingDispatch(doc, viewId: doc.viewId, part: 0)
+
+        let after = sheetNamesOnDedicatedThread(doc)
+        switch op {
+        case .add:
+            guard after.count == before.count + 1 else {
+                throw SaveError.writeVerificationFailed(docId: docId, address: "(add_sheet \"\(name)\")")
+            }
+        case .delete:
+            guard after.count == before.count - 1, !after.contains(name) else {
+                throw SaveError.writeVerificationFailed(docId: docId, address: "(delete_sheet \"\(name)\")")
+            }
+        case .rename:
+            guard after.contains(newName ?? ""), !after.contains(name) else {
+                throw SaveError.writeVerificationFailed(docId: docId, address: "(rename_sheet \"\(name)\")")
+            }
+        }
+        return after
+    }
+
+    /// office-agent-tools T4 — the shared JSON-args UNO dispatch this task's own three new sheet-
+    /// management commands use. NOT applied retroactively to `.uno:GoToCell`'s own existing inline
+    /// dispatch (`selectionTextOnDedicatedThread`) — that call is already proven and unrelated to
+    /// this task's own scope; this helper exists only for the code THIS task adds. Fire-and-forget,
+    /// same `postUnoCommand(..., bNotifyWhenFinished: false)` posture every UNO dispatch in this file
+    /// already has.
+    private func postUnoCommandOnDedicatedThread(_ doc: OpenDocument, _ command: String, _ args: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: args),
+              let argsString = String(data: data, encoding: .utf8) else {
+            return // unreachable for this file's own String/Int-only payloads — never throws, matching GoToCell's own fire-and-forget posture on a build failure
+        }
+        command.withCString { commandPtr in
+            argsString.withCString { argsPtr in
+                doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, argsPtr, false)
+            }
+        }
     }
 
     // MARK: - Callback translation
