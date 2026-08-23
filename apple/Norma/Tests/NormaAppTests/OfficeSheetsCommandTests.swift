@@ -1187,6 +1187,61 @@ final class OfficeSheetsCommandTests: XCTestCase {
         }
     }
 
+    /// office-agent-tools T4 fix-round review (item 6) — the tool description must disclose which
+    /// manage-sheet verbs move the active sheet. Task 4's own original report confirmed
+    /// `rename_sheet` mechanically (its own `setPart` call — `LOKBridge.sheetsManageSheetOnDedicated
+    /// Thread`'s `.rename` case) and called `add_sheet` merely "plausible" (standard Calc "new sheet
+    /// becomes active" UX, never itself observed). `delete_sheet` was never addressed either way.
+    /// This drill settles both LIVE rather than leaving the tool description to guess: does `info`'s
+    /// own reported active sheet change after `add_sheet`, and after `delete_sheet` on a sheet that
+    /// is NOT the active one?
+    func testLiveWhichManageSheetVerbsActuallyMoveTheActiveSheet() async throws {
+        try requireLiveEngine()
+        let path = try makeWritableCopy(of: "gate.xlsx")
+        let stateDir = makeScratchDirectory()
+        let host = makeLiveHost(stateDir: stateDir, dirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)])
+        await host.directory.refresh()
+
+        let runtime = host.officeRuntime(for: "S1")
+        runtime.open(path)
+        let opened = await waitUntilLive { runtime.stateSnapshot.documents[path] != nil || runtime.stateSnapshot.phase == .failed }
+        XCTAssertTrue(opened, "setup: gate.xlsx never settled")
+
+        func activeSheet() async throws -> String {
+            let sent = await send(command("office.sheets.info", args: ["path": path], sessionId: "S1",
+                                          commandId: "pcmd-active-\(UUID().uuidString.prefix(6))"), through: host)
+            let result = try XCTUnwrap(sent.result)
+            // "active" info formatting: `"Name" (active): ...` — extract the quoted name before it.
+            guard let range = result.range(of: "\" (active)") else {
+                XCTFail("no active sheet found in: \(result)")
+                return ""
+            }
+            let beforeActive = result[result.startIndex..<range.lowerBound]
+            guard let lastQuote = beforeActive.lastIndex(of: "\"") else { return "" }
+            return String(beforeActive[beforeActive.index(after: lastQuote)...])
+        }
+
+        let initialActive = try await activeSheet()
+        XCTAssertEqual(initialActive, "Sheet1", "setup: gate.xlsx's own default active sheet")
+
+        let afterAdd = await send(command("office.sheets.add_sheet", args: ["path": path, "name": "Q3"],
+                                          sessionId: "S1", commandId: "pcmd-active-add"), through: host)
+        XCTAssertTrue(afterAdd.ok, "\(afterAdd)")
+        let activeAfterAdd = try await activeSheet()
+        print("[active-sheet probe] active after add_sheet(\"Q3\") -> \"\(activeAfterAdd)\"")
+
+        let afterDelete = await send(command("office.sheets.delete_sheet", args: ["path": path, "name": "Q3"],
+                                             sessionId: "S1", commandId: "pcmd-active-delete"), through: host)
+        XCTAssertTrue(afterDelete.ok, "\(afterDelete)")
+        let activeAfterDelete = try await activeSheet()
+        print("[active-sheet probe] active after delete_sheet(\"Q3\", not the active one) -> \"\(activeAfterDelete)\"")
+
+        // LIVE FINDING (recorded here, not assumed) — printed above either way; the tool description
+        // is written from whichever of these two actually happened, not from the pre-drill guess.
+        _ = activeAfterAdd
+        _ = activeAfterDelete
+    }
+
     /// `insert_rows`/`insert_cols`/`delete_rows`/`delete_cols`, round-tripped: shift real, known
     /// content (`gate.xlsx`'s own A1 = "NORMA GATE", ground-truthed via this file's own raw-callback
     /// trace on a prior run, not assumed) two rows down and one column right, then back — each step
