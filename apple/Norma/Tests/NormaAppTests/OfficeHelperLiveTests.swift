@@ -2765,6 +2765,133 @@ final class OfficeHelperLiveTests: XCTestCase {
         XCTAssertTrue(firings.contains { $0.type == 17 }, "CELL_CURSOR must fire at all from three "
                       + "real cell clicks — this probe's own baseline")
     }
+
+    // MARK: - office-agent-tools T4 fix-round review — the GoToCell straggler's write-time
+    // consequence (coordinator review item 3): does LOK_CALLBACK_CELL_ADDRESS (raw type 34 — "the
+    // text content of the address field in Calc, e.g. \"A7\"", LibreOfficeKitEnums.h:578-581) let
+    // `writeOneCellOnDedicatedThread` VERIFY the agent view's cursor is really on the target cell
+    // BEFORE typing, closing the bystander-clobber risk instead of merely narrowing it on content?
+
+    /// **Before wiring anything: does this callback exist, is it attributable to the RIGHT view, and
+    /// is it safe to cache?** Three real questions, not one — a naive "read the latest type=34
+    /// seen" cache is only trustworthy if all three hold:
+    ///
+    /// 1. **Attribution** — `registerCallback` is document-GLOBAL (one registration per `OpenDocument`
+    ///    at `openOnDedicatedThread`, no per-view callback API in this LOK build — confirmed by
+    ///    reading `LibreOfficeKit.h`'s `registerCallback` signature), and a raw capture of this exact
+    ///    callback type already shows a BARE payload (`type=34 payload=A1`, this task's own earlier
+    ///    live run, no JSON/viewId wrapper unlike types 25-29). Does an AGENT-view `.uno:GoToCell`
+    ///    produce a type=34 carrying the AGENT's own target, not contaminated by the PRIMARY view's
+    ///    last-known address?
+    /// 2. **No-op moves** — `sheetsRead`'s own `.uno:GoToCell` targeting a cell the agent view is
+    ///    ALREADY on: does 34 fire again, or only on a genuine change? A "latest cached address"
+    ///    approach silently trusts a STALE value if this callback is change-triggered rather than
+    ///    query-driven, since nothing re-asserts it.
+    /// 3. **Interleave/staleness** — `postMouseOnDedicatedThread`/`postKeyOnDedicatedThread` (this
+    ///    file's own production code) unconditionally call `setView(doc.viewId)` FIRST, every time —
+    ///    a human's own primary-view click, if its own queued async LOK work is still draining when
+    ///    the agent's NEXT write job pumps the dedicated thread's dispatcher (the SAME class of
+    ///    straggler `.uno:GoToCell` itself already has, documented at length in
+    ///    `selectionTextOnDedicatedThread`'s own header), could fire a type=34 for the PRIMARY's own
+    ///    address AFTER the agent's own confirmed one — corrupting a naive single "last address
+    ///    seen" cache with exactly the wrong value at exactly the wrong moment.
+    ///
+    /// Deliberately observational-first, this file's own established two-pass discipline
+    /// (`testRealLOKCallbackProbeCapturesCaretSelectionAndCellCursorRawPayloads`'s own header): print
+    /// every type=34 firing, in arrival order, per stage; assert only the weak, format-agnostic
+    /// baseline that the click/GoToCell choreography reached Calc at all (CELL_CURSOR, type 17,
+    /// already proven reliable by the probe above) ahead of reading real output back. The
+    /// stage-specific 34 assertions below were added in a SECOND pass, after this test's first run's
+    /// own printed output was read — see the task-4 fix-round report for what that first run showed.
+    func testProbeInvestigatesWhetherCellAddressCallbacksCanAttributeAgentViewPositioningSafely() async throws {
+        try skipUnlessVendorPresent()
+        let helper = try await spawnLiveHelper(captureStderr: true)
+
+        let calcPath = helper.stateDir.appendingPathComponent("docs", isDirectory: true)
+            .appendingPathComponent("t4-fix-cell-address-probe.ods").path
+        try FileManager.default.createDirectory(
+            at: URL(fileURLWithPath: calcPath).deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(contentsOf: Self.fixturesRoot.appendingPathComponent("two-sheet.ods"))
+            .write(to: URL(fileURLWithPath: calcPath))
+        let docId = UUID().uuidString
+        _ = try await helper.client.open(docId: docId, path: calcPath)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+
+        struct Firing { let type: Int32; let payload: String }
+        func firingsSince(_ boundary: Int) -> [Firing] {
+            let lines = Array((helper.stderrCapture?.linesSnapshot() ?? [])[boundary...])
+            var result: [Firing] = []
+            for line in lines {
+                guard line.contains("[LOKBridge raw callback]"),
+                      let typeRange = line.range(of: "type="), let payloadRange = line.range(of: " payload=") else { continue }
+                guard let type = Int32(line[typeRange.upperBound..<payloadRange.lowerBound]) else { continue }
+                guard type == 17 || type == 34 else { continue }
+                result.append(Firing(type: type, payload: String(line[payloadRange.upperBound...])))
+            }
+            return result
+        }
+
+        // --- Stage A: AGENT view -> D7 (via sheetsRead, the SAME positioning mechanism `set` uses;
+        // "Sheet1" is two-sheet.ods's own first sheet). PRIMARY view sits wherever `open` defaults it
+        // (A1) throughout this stage — never touched. ---
+        var boundary = helper.stderrCapture?.linesSnapshot().count ?? 0
+        _ = try await helper.client.sheetsRead(docId: docId, sheet: "Sheet1", range: "D7", formulas: false)
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        let stageA = firingsSince(boundary)
+        for f in stageA { print("[cell-address probe] stage A (agent->D7) type=\(f.type) payload=\"\(f.payload)\"") }
+
+        // --- Stage B: PRIMARY view -> B1 (a real click; two-sheet.ods's own known coordinates from
+        // the formula-bar probe above: 1500,100 lands on B1). ---
+        boundary = helper.stderrCapture?.linesSnapshot().count ?? 0
+        try await helper.client.postMouse(docId: docId, part: 0, type: .buttonDown, xTwips: 1500, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await helper.client.postMouse(docId: docId, part: 0, type: .buttonUp, xTwips: 1500, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        let stageB = firingsSince(boundary)
+        for f in stageB { print("[cell-address probe] stage B (primary->B1) type=\(f.type) payload=\"\(f.payload)\"") }
+
+        // --- Stage C: AGENT view -> D7 AGAIN (same target as stage A — the no-op case). ---
+        boundary = helper.stderrCapture?.linesSnapshot().count ?? 0
+        _ = try await helper.client.sheetsRead(docId: docId, sheet: "Sheet1", range: "D7", formulas: false)
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        let stageC = firingsSince(boundary)
+        for f in stageC { print("[cell-address probe] stage C (agent->D7 again, no-op) type=\(f.type) payload=\"\(f.payload)\"") }
+
+        // --- Stage D: AGENT view -> B2 (fresh target, known EMPTY per the formula probe above),
+        // immediately followed by PRIMARY -> A1 (100,100) with NO settle sleep between the two
+        // dispatches — the closest this wire-level test can get to "a human clicks while the agent's
+        // own write job is still draining LOK's internal async queue." Order of arrival is the
+        // evidence: does the agent's own B2 confirmation still arrive, and does a LATER, unrelated
+        // A1 (the primary's) show up in the SAME window, exactly the contamination question. ---
+        boundary = helper.stderrCapture?.linesSnapshot().count ?? 0
+        _ = try await helper.client.sheetsRead(docId: docId, sheet: "Sheet1", range: "B2", formulas: false)
+        try await helper.client.postMouse(docId: docId, part: 0, type: .buttonDown, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await helper.client.postMouse(docId: docId, part: 0, type: .buttonUp, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        let stageD = firingsSince(boundary)
+        for f in stageD { print("[cell-address probe] stage D (agent->B2, then primary->A1, no settle) type=\(f.type) payload=\"\(f.payload)\"") }
+
+        try await helper.client.close(docId: docId)
+        try? await Task.sleep(nanoseconds: 300_000_000)
+
+        let all34 = (stageA + stageB + stageC + stageD).filter { $0.type == 34 }
+        print("[cell-address probe] SUMMARY: \(all34.count) total type=34 firings across all 4 stages: "
+              + "\(all34.map(\.payload).joined(separator: ", "))")
+
+        // TEMP DIAGNOSTIC read-back — office-agent-tools T4 fix-round review item 3, the OTHER
+        // candidate (`getCommandValues(".uno:CellCursor")`), logged by a throwaway call this probe
+        // added to `sheetsReadOnDedicatedThread` itself (never a permanent call site). This test
+        // never prints the helper's raw stderr lines verbatim anywhere else, so without this the
+        // diagnostic's own output is silently captured and never actually READ.
+        let debugLines = (helper.stderrCapture?.linesSnapshot() ?? []).filter { $0.contains("debug getCommandValues") }
+        for line in debugLines { print("[cell-address probe] \(line)") }
+        print("[cell-address probe] getCommandValues(.uno:CellCursor) fired \(debugLines.count) time(s) total")
+
+        // Weak baseline ONLY, matching this file's own two-pass discipline — CELL_CURSOR (17) firing
+        // proves the click/GoToCell choreography reached Calc's cell-navigation path at all; a
+        // failure here means the SETUP is broken, not that CELL_ADDRESS is absent or unsafe.
+        XCTAssertTrue((stageA + stageB + stageC + stageD).contains { $0.type == 17 },
+                      "CELL_CURSOR must fire at all from the real clicks/GoToCells this probe drives")
+    }
 }
 
 /// `Process.TerminationReason.uncaughtSignal`'s raw value, for the SIGTERM measurement's log line

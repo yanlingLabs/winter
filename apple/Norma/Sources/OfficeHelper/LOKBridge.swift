@@ -393,6 +393,27 @@ final class LOKBridge: OfficeDocumentBridge {
         /// landed within budget, or a commit that never took) — a real, if rare, failure this bridge
         /// can actually detect rather than silently report success on.
         case writeVerificationFailed(docId: String, address: String)
+        /// office-agent-tools T4 fix-round review (Important #2) — a formula's character REQUIRES a
+        /// `postKeyEvent` this bridge does not know how to synthesize. Deliberately DISTINCT from
+        /// `.writeVerificationFailed` (the reviewer's own finding: that case name was a mislabel for
+        /// this failure — the OLD code threw it mid-keystroke-loop, AFTER already posting every
+        /// character before the unmapped one, leaving a real, uncommitted, PARTIAL formula in Calc's
+        /// own edit mode on a document a human may have open). `formulaKeyEvent(for:)` is now called
+        /// entirely in a pre-validation PASS, before the first `postKeyEvent` of the real attempt —
+        /// this case can only be thrown BEFORE anything is typed, never mid-edit.
+        case unsupportedFormulaCharacter(docId: String, address: String, character: Character)
+        /// office-agent-tools T4 fix-round review (Important #3) — after positioning (the SAME
+        /// `.uno:GoToCell`-via-`selectionTextOnDedicatedThread` mechanism every write verb already
+        /// uses, including its own disclosed straggler residual), the agent view's OWN cursor —
+        /// queried fresh via `getCommandValues(".uno:CellCursor")`, confirmed live to report the
+        /// CURRENT view's real position, not a stale or cross-view-contaminated one (this task's own
+        /// fix-round report has the probe) — does not match `address`. Thrown BEFORE any keystroke is
+        /// posted: the reviewer's own finding was that the OLD lenient content-only check could not
+        /// tell "positioned on the WRONG cell that happens to already hold text" from "positioned
+        /// correctly" — reading a bystander cell's OWN old content back as "non-empty, so this must
+        /// have worked" and letting the broker save a clobber. This closes that gap by verifying
+        /// WHERE the cursor is, not merely THAT the target has content, before typing anything.
+        case positionVerificationFailed(docId: String, address: String, landedAt: String?)
         /// office-agent-tools T4 — `delete_sheet` named the workbook's ONLY remaining sheet. Checked
         /// BEFORE dispatching `.uno:Remove` (`LOKBridge.sheetsManageSheetOnDedicatedThread`'s own
         /// header explains why: Calc's own slot handler has no documented, verified error signal for
@@ -429,6 +450,15 @@ final class LOKBridge: OfficeDocumentBridge {
             case .writeVerificationFailed(let docId, let address):
                 return "wrote to \(address) in \(docId) but could not confirm the content landed — "
                     + "the outcome is unknown; re-read the cell before trusting or retrying this write"
+            case .unsupportedFormulaCharacter(let docId, let address, let character):
+                return "the formula for \(address) in \(docId) contains a character this tool cannot "
+                    + "type (\"\(character)\") — nothing was written; re-read the cell before "
+                    + "retrying, the outcome is known (unchanged), not unknown"
+            case .positionVerificationFailed(let docId, let address, let landedAt):
+                let landedDescription = landedAt ?? "an unrecognized position"
+                return "could not confirm the cursor reached \(address) in \(docId) before typing "
+                    + "(landed at \(landedDescription) instead) — nothing was written; re-read the "
+                    + "cell before retrying, the outcome is known (unchanged), not unknown"
             case .lastSheet(let docId):
                 return "\(docId) has only one sheet left — a workbook needs at least one; refusing to delete it"
             case .duplicateSheetName(let docId, let name):
@@ -2359,6 +2389,46 @@ final class LOKBridge: OfficeDocumentBridge {
 
     // MARK: - office-agent-tools T4: sheets write verbs
 
+    /// office-agent-tools T4 fix-round review (Important #3) — `getCommandValues(".uno:CellCursor")`,
+    /// a synchronous QUERY against the document's own current model state, not a callback. Confirmed
+    /// live (`OfficeHelperLiveTests.testProbeInvestigatesWhetherCellAddressCallbacksCanAttribute
+    /// AgentViewPositioningSafely`) to report the CURRENT view's real `(column, row)` on demand —
+    /// this is the mechanism that closes the reviewer's own "GoToCell straggler on writes" finding,
+    /// after the SAME probe first ruled out the more obvious candidate: `LOK_CALLBACK_CELL_ADDRESS`
+    /// (raw type 34) and `LOK_CALLBACK_CELL_CURSOR` (raw type 17) NEVER fire for a
+    /// `.uno:GoToCell`-driven move at all, on the agent view or (by the same probe's own primary-view
+    /// UNO-command evidence) plausibly any view — only REAL `postMouse`/`postKey` input events
+    /// produce them. A callback-cache design was therefore never viable here regardless of its own
+    /// staleness/attribution properties, which the probe also characterized for the record (see the
+    /// probe's own header and task-4-fix-round-report.md).
+    ///
+    /// **Why a query is the STRONGER guarantee, not merely a working substitute**: called from
+    /// WITHIN the same dedicated-thread closure that just dispatched the position (this file's own
+    /// job model — one Swift closure runs to completion before the next one starts; nothing else can
+    /// interleave mid-closure), this read is immune to the "a stale, still-draining async callback
+    /// surfaces during a LATER, unrelated job's own pump calls" hazard class `.uno:GoToCell`'s own
+    /// straggler documentation already covers at length — a cached PUSHED value could never make
+    /// that same guarantee.
+    ///
+    /// Reuses `OfficeDocumentEvent.parseCellCursor` VERBATIM (`OfficeWire`, already imported by this
+    /// file for the real `LOK_CALLBACK_CELL_CURSOR` callback path below) — `getCommandValues`'s own
+    /// `commandValues` field is the IDENTICAL comma-separated six-field shape
+    /// (`"x, y, width, height, col, row"`) the raw callback payload already has, one JSON envelope
+    /// deeper (`{"commandName": ".uno:CellCursor", "commandValues": "…"}`, confirmed live).
+    private func cellCursorOnDedicatedThread(_ doc: OpenDocument) -> OfficeCellCursor? {
+        guard let cString = ".uno:CellCursor".withCString({ commandPtr in
+            doc.handle.pointee.pClass.pointee.getCommandValues?(doc.handle, commandPtr)
+        }) else { return nil }
+        defer { free(cString) }
+        guard let data = String(cString: cString).data(using: .utf8),
+              let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let commandValues = object["commandValues"] as? String,
+              case .cellCursor(let cursor)? = OfficeDocumentEvent.parseCellCursor(commandValues) else {
+            return nil
+        }
+        return cursor
+    }
+
     /// office-agent-tools T4 — writes each `(cellAddresses[i], cellValues[i])` pair, in order, on the
     /// AGENT view (same isolation reasoning `sheetsReadOnDedicatedThread`'s own I1 fix established:
     /// nothing this does is ever visible to a human's own primary-view selection).
@@ -2405,14 +2475,27 @@ final class LOKBridge: OfficeDocumentBridge {
         return cellAddresses.count
     }
 
-    /// **Positions on `address`, types `text`, commits, then re-verifies — all on the agent view,
-    /// all within ONE call.** Positioning reuses `selectionTextOnDedicatedThread` VERBATIM (called
-    /// twice: once to position before typing, once again after, to verify) — this is "read Task 3's
-    /// agent-view work and use the SAME mechanism" applied literally, including its own disclosed
-    /// residual: a `.uno:GoToCell` that never lands within `goToCellVerificationAttempts` is not
-    /// re-derived or newly solved here, it is INHERITED (see that function's own header, and
-    /// task-3-report.md §6/§9/§10 — this bridge does not claim to have closed it for writes any
-    /// more than reads did).
+    /// **Positions on `address`, VERIFIES the cursor actually landed there, types `text`, commits,
+    /// then re-verifies content — all on the agent view, all within ONE call.** Positioning reuses
+    /// `selectionTextOnDedicatedThread` VERBATIM (called twice: once to position before typing, once
+    /// again after, to verify content) — this is "read Task 3's agent-view work and use the SAME
+    /// mechanism" applied literally, including its own disclosed residual: a `.uno:GoToCell` that
+    /// never lands within `goToCellVerificationAttempts` is not re-derived or newly solved here, it
+    /// is INHERITED (see that function's own header, and task-3-report.md §6/§9/§10).
+    ///
+    /// **Fix-round review (Important #3) — positioning is now VERIFIED, not merely attempted, before
+    /// any keystroke is posted.** The ORIGINAL version of this function trusted
+    /// `selectionTextOnDedicatedThread`'s own best-effort GoToCell dance and moved straight to
+    /// typing; the reviewer's own finding was that on a NON-EMPTY bystander cell, a GoToCell that
+    /// never actually landed would leave the cursor on the WRONG cell, which already has content —
+    /// this function would then type INTO that bystander cell, and the post-write content check
+    /// below (still present, still lenient) reads NON-EMPTY and passes, because it only ever asks
+    /// "does the target have content now," never "IS this actually the target." The broker then
+    /// SAVES a real, silent clobber. Closed via `cellCursorOnDedicatedThread` (`getCommandValues
+    /// (".uno:CellCursor")`, that function's own header has the full mechanism and the live probe
+    /// that ruled out the callback-based alternative first): a `(column, row)` mismatch against
+    /// `address` throws `SaveError.positionVerificationFailed` BEFORE typing, converting the
+    /// straggler from a silent-clobber risk into an honest refusal.
     ///
     /// **Two typing mechanisms, not one — a real, live falsification, not a design preference.**
     /// The first version of this function used `postWindowExtTextInputEvent` (`.input` then `.end`)
@@ -2447,22 +2530,52 @@ final class LOKBridge: OfficeDocumentBridge {
     /// going in; a redundant Return after an already-committed edit is harmless (it only moves the
     /// cursor, which this function re-positions past anyway).
     ///
-    /// **Verification is deliberately LENIENT — "landed something," not "landed byte-identical."**
-    /// A written NUMBER can read back reformatted (`"3.0"` typed, `"3"` read), and a written FORMULA
-    /// reads back as its COMPUTED value in values mode, never the formula text — neither is a bug,
-    /// so an exact-match check would false-fail both. What this DOES catch, honestly: the dangerous
-    /// silent-failure shape — a non-empty `text` whose target cell reads back EMPTY, meaning the
-    /// position never landed, the commit never landed, or both. A genuinely empty `text` (the caller
-    /// explicitly asked to write nothing there) is never verified — there is nothing to distinguish
-    /// "the write of nothing worked" from "the write of nothing didn't happen," the identical
-    /// baseline-ambiguity `selectionTextOnDedicatedThread`'s own header already names for reads.
+    /// **Post-write content verification is deliberately LENIENT — "landed something," not "landed
+    /// byte-identical."** A written NUMBER can read back reformatted (`"3.0"` typed, `"3"` read), and
+    /// a written FORMULA reads back as its COMPUTED value in values mode, never the formula text —
+    /// neither is a bug, so an exact-match check would false-fail both. What this DOES catch,
+    /// honestly: the dangerous silent-failure shape — a non-empty `text` whose target cell reads
+    /// back EMPTY, meaning the commit never landed. (Positioning itself is no longer this check's
+    /// job — see the position-verification fix above, which runs BEFORE typing and is strict, not
+    /// lenient, on purpose: content-leniency and position-strictness answer different questions.) A
+    /// genuinely empty `text` (the caller explicitly asked to write nothing there) is never content-
+    /// verified — there is nothing to distinguish "the write of nothing worked" from "the write of
+    /// nothing didn't happen," the identical baseline-ambiguity `selectionTextOnDedicatedThread`'s
+    /// own header already names for reads.
     private func writeOneCellOnDedicatedThread(_ doc: OpenDocument, docId: String, viewId: Int32, part: Int,
                                                address: String, text: String) throws {
+        // Fix-round review (Important #2) — pre-validate EVERY formula character in a pure pass,
+        // BEFORE the first keystroke of the real attempt. The ORIGINAL code called
+        // `formulaKeyEvent(for:)` INSIDE the typing loop itself, so an unmapped character partway
+        // through a formula threw `.writeVerificationFailed` AFTER already posting every character
+        // before it — a mislabel (nothing was "verified," something was left HALF-TYPED) for a real,
+        // uncommitted, PARTIAL formula stranded in Calc's own edit mode on a document a human may
+        // have open. Once this loop starts below, it cannot throw — every character is known before
+        // ANY keystroke is posted, or none are (`.unsupportedFormulaCharacter`, thrown here, before
+        // touching the document at all).
+        var formulaKeyEvents: [(charCode: Int, keyCode: Int)] = []
+        if text.hasPrefix("=") {
+            formulaKeyEvents = try text.map { try Self.formulaKeyEvent(for: $0, docId: docId, address: address) }
+        }
+
+        // Fix-round review (Important #3) — position, then VERIFY the agent view's cursor actually
+        // reached `address` before typing anything. See this function's own header above for the
+        // full "why," and `cellCursorOnDedicatedThread`'s own header for the mechanism and the live
+        // probe that ruled out the callback-based alternative first.
         _ = selectionTextOnDedicatedThread(doc, docId: docId, viewId: viewId, part: part, range: address, formulas: false)
+        guard let target = Self.parseSingleCellReference(address) else {
+            throw SaveError.positionVerificationFailed(docId: docId, address: address, landedAt: nil)
+        }
+        let landed = cellCursorOnDedicatedThread(doc)
+        let landedColumnRow: (column: Int, row: Int)?
+        if case .at(_, let column, let row)? = landed { landedColumnRow = (column, row) } else { landedColumnRow = nil }
+        guard let landedColumnRow, landedColumnRow.column == target.column, landedColumnRow.row == target.row else {
+            let landedDescription = landedColumnRow.map { Self.formatCellReference(column: $0.column, row: $0.row) }
+            throw SaveError.positionVerificationFailed(docId: docId, address: address, landedAt: landedDescription)
+        }
 
         if text.hasPrefix("=") {
-            for character in text {
-                let (charCode, keyCode) = try Self.formulaKeyEvent(for: character, docId: docId, address: address)
+            for (charCode, keyCode) in formulaKeyEvents {
                 doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyInput.rawValue), Int32(charCode), Int32(keyCode))
                 doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyUp.rawValue), Int32(charCode), Int32(keyCode))
             }
@@ -2502,7 +2615,7 @@ final class LOKBridge: OfficeDocumentBridge {
     /// formula character is a corrupted formula, not a degraded-but-safe result.
     private static func formulaKeyEvent(for character: Character, docId: String, address: String) throws -> (charCode: Int, keyCode: Int) {
         guard let ascii = character.asciiValue else {
-            throw SaveError.writeVerificationFailed(docId: docId, address: address)
+            throw SaveError.unsupportedFormulaCharacter(docId: docId, address: address, character: character)
         }
         let charCode = Int(ascii)
         let shift = 0x1000
@@ -2567,9 +2680,45 @@ final class LOKBridge: OfficeDocumentBridge {
         case ">": base = 1294 // GREATER
         case "&": base = 263 | shift // shift+NUM7 -> "&"
         default:
-            throw SaveError.writeVerificationFailed(docId: docId, address: address)
+            throw SaveError.unsupportedFormulaCharacter(docId: docId, address: address, character: character)
         }
         return (charCode, base)
+    }
+
+    /// office-agent-tools T4 fix-round review (Important #3) — a LOCAL re-encoding of
+    /// `officeParseCellReference`'s exact algorithm (`Sources/AppShell/PanelDocumentTab.swift`),
+    /// unreachable from `NormaOfficeHelper` (Task 3's own established compile-boundary constraint,
+    /// the SAME one `formulaKeyEvent(for:)`'s own header already cites for a value copied from that
+    /// module) — re-ENCODED, not re-DERIVED. Every real caller's `address` is produced by
+    /// `officeCellReference` on the app side (uppercase letters, 1-based row, no colon, no
+    /// whitespace) — this parser is strict, not lenient, matching `officeParseCellReference`'s own
+    /// "wire strictness applies here" posture: `nil` for anything else, never guessed or clamped.
+    private static func parseSingleCellReference(_ address: String) -> (column: Int, row: Int)? {
+        let letters = address.prefix(while: { $0.isASCII && $0.isLetter })
+        let rest = address[letters.endIndex...]
+        guard !letters.isEmpty, !rest.isEmpty, rest.allSatisfy({ $0.isASCII && $0.isNumber }) else { return nil }
+        var column = 0
+        for scalar in letters.uppercased().unicodeScalars {
+            guard scalar.value >= 65, scalar.value <= 90 else { return nil }
+            column = column * 26 + Int(scalar.value - 65 + 1)
+        }
+        column -= 1
+        guard let oneBasedRow = Int(rest), oneBasedRow >= 1 else { return nil }
+        return (column: column, row: oneBasedRow - 1)
+    }
+
+    /// The inverse of `parseSingleCellReference` above, for an honest error message only (never fed
+    /// back into LOK) — a local re-encoding of `officeCellReference`/`officeColumnLetters`'s combined
+    /// algorithm, the same compile-boundary reason as its own counterpart just above.
+    private static func formatCellReference(column: Int, row: Int) -> String {
+        var remaining = column + 1
+        var letters = ""
+        while remaining > 0 {
+            let digit = (remaining - 1) % 26
+            letters = String(UnicodeScalar(UInt8(65 + digit))) + letters
+            remaining = (remaining - 1) / 26
+        }
+        return "\(letters)\(row + 1)"
     }
 
     /// office-agent-tools T4 — insert/delete `count` whole rows/columns, selected via

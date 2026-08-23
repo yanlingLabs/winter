@@ -843,6 +843,108 @@ final class OfficeSheetsCommandTests: XCTestCase {
         try await client.close(docId: reopenDocId)
     }
 
+    /// office-agent-tools T4 fix-round review (Important #2) — a formula character
+    /// `formulaKeyEvent(for:)` cannot type (`café`'s own `é`, the reviewer's own example: real,
+    /// non-ASCII, exactly the shape `character.asciiValue` refuses) must never leave a real,
+    /// uncommitted, PARTIAL formula stranded in Calc's own edit mode. Two cells in ONE `set` call,
+    /// D1 (a plain value, no problem) then D2 (the bad formula) — deliberately in THIS order, so a
+    /// wrongly-still-atomic implementation could not hide the bug behind "nothing ran yet": D1 must
+    /// land for real (this task's own write path is non-atomic ACROSS cells by design — a SEPARATE,
+    /// disclosed property from THIS fix, which only closes the WITHIN-one-cell partial-typing gap —
+    /// see the tool description disclosure this same review round adds) while D2 itself must come
+    /// back COMPLETELY untouched, not a fragment of "=A1&"" (what the OLD code would have left: a
+    /// dropped `é` character stops the keystroke loop mid-formula, but everything BEFORE it was
+    /// already typed and left sitting, uncommitted, in Calc's own cell-edit mode).
+    func testLiveSheetsSetPreValidatesEveryFormulaCharacterBeforeTypingAnyOfThem() async throws {
+        try requireLiveEngine()
+        let path = try makeWritableCopy(of: "gate.xlsx")
+        let stateDir = makeScratchDirectory()
+        let host = makeLiveHost(stateDir: stateDir, dirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)])
+        await host.directory.refresh()
+
+        let runtime = host.officeRuntime(for: "S1")
+        runtime.open(path)
+        let opened = await waitUntilLive { runtime.stateSnapshot.documents[path] != nil || runtime.stateSnapshot.phase == .failed }
+        XCTAssertTrue(opened, "setup: gate.xlsx never settled")
+
+        let sent = await send(command("office.sheets.set", args: [
+            "path": path, "sheet": "Sheet1", "range": "D1:D2",
+            "values": [["ok value"], ["=A1&\"café\""]],
+        ], sessionId: "S1", commandId: "pcmd-badformula-1"), through: host)
+        XCTAssertFalse(sent.ok, "an unmapped formula character must refuse, not silently drop the character: \(sent)")
+        let result = try XCTUnwrap(sent.result)
+        XCTAssertTrue(result.contains("D2"), "the refusal must name the cell that actually failed: \(result)")
+        XCTAssertFalse(result.lowercased().contains("uno:"), result)
+        XCTAssertFalse(result.lowercased().contains("exception"), result)
+
+        // D2 — the bad cell — must be COMPLETELY untouched: not "=A1&"" (a partial formula from the
+        // OLD, mid-loop-throw code), not left in Calc's own uncommitted edit mode (which would make
+        // the FOLLOWING read itself behave strangely), genuinely empty.
+        let d2Read = await send(command("office.sheets.read",
+                                        args: ["path": path, "sheet": "Sheet1", "range": "D2"],
+                                        sessionId: "S1", commandId: "pcmd-badformula-read-d2"), through: host)
+        XCTAssertTrue(d2Read.ok, "\(d2Read)")
+        let d2Result = try XCTUnwrap(d2Read.result)
+        XCTAssertFalse(d2Result.contains("A1"), "D2 must carry NO fragment of the never-committed formula: \(d2Result)")
+        XCTAssertFalse(d2Result.contains("café"), d2Result)
+
+        // D1 — written BEFORE the bad cell, in the SAME call — legitimately landed: this task's own
+        // write path is non-atomic ACROSS cells (disclosed in the tool description, not hidden), a
+        // different property from the WITHIN-one-cell fix this test targets.
+        let d1Read = await send(command("office.sheets.read",
+                                        args: ["path": path, "sheet": "Sheet1", "range": "D1"],
+                                        sessionId: "S1", commandId: "pcmd-badformula-read-d1"), through: host)
+        XCTAssertTrue(d1Read.ok, "\(d1Read)")
+        XCTAssertTrue((d1Read.result ?? "").contains("ok value"),
+                      "D1 (written before the bad cell) must have landed for real — non-atomicity is disclosed, not silently masked: \(String(describing: d1Read.result))")
+    }
+
+    /// office-agent-tools T4 fix-round review (Important #3) — DELETION-RED for the new position
+    /// check itself (`writeOneCellOnDedicatedThread`'s `positionVerificationFailed` guard,
+    /// `LOKBridge.swift`). `.uno:GoToCell` reliably lands within budget in this environment on every
+    /// live run this task has ever observed — there is no NATURAL way to force a genuine mispositioned
+    /// cursor to prove the refusal fires on a true mismatch, so this test proves the guard is real and
+    /// load-bearing the same way this branch's own house standard already proves other refusals:
+    /// temporarily invert the comparison in `writeOneCellOnDedicatedThread` (`==` to `!=`, both
+    /// `column` and `row`), confirm this SAME live drill goes RED (every correctly-positioned write
+    /// now wrongly refuses), then revert. Recorded here as PROSE, not a permanent mutant test (an
+    /// inverted guard would make EVERY OTHER write test in this file fail too, which is the point,
+    /// but leaving the inversion in the tree is not) — see task-4-fix-round-report.md for the actual
+    /// before/after run this test produced under the temporary inversion.
+    func testLiveSheetsSetWritesToTheCorrectCellNotABystanderOneOverOrOneOverOnAHappyPath() async throws {
+        try requireLiveEngine()
+        let path = try makeWritableCopy(of: "gate.xlsx")
+        let stateDir = makeScratchDirectory()
+        let host = makeLiveHost(stateDir: stateDir, dirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)])
+        await host.directory.refresh()
+
+        let runtime = host.officeRuntime(for: "S1")
+        runtime.open(path)
+        let opened = await waitUntilLive { runtime.stateSnapshot.documents[path] != nil || runtime.stateSnapshot.phase == .failed }
+        XCTAssertTrue(opened, "setup: gate.xlsx never settled")
+
+        // A 3x3 block, each cell carrying its OWN address as its value — if position verification
+        // ever let a write land on the WRONG cell, this is what would catch it: every cell's real,
+        // saved content is compared against its OWN expected address, not just "is D1:F3 non-empty."
+        let addresses = ["D1", "E1", "F1", "D2", "E2", "F2", "D3", "E3", "F3"]
+        let values: [[String]] = [["D1", "E1", "F1"], ["D2", "E2", "F2"], ["D3", "E3", "F3"]]
+        let sent = await send(command("office.sheets.set", args: [
+            "path": path, "sheet": "Sheet1", "range": "D1:F3", "values": values,
+        ], sessionId: "S1", commandId: "pcmd-grid-1"), through: host)
+        XCTAssertTrue(sent.ok, "\(sent)")
+
+        let readSent = await send(command("office.sheets.read",
+                                          args: ["path": path, "sheet": "Sheet1", "range": "D1:F3"],
+                                          sessionId: "S1", commandId: "pcmd-grid-read"), through: host)
+        XCTAssertTrue(readSent.ok, "\(readSent)")
+        let result = try XCTUnwrap(readSent.result)
+        // Every one of the 9 cells' own address must appear — a bystander clobber would show a cell
+        // holding a NEIGHBOR's address instead of its own, or a blank where a real one belongs.
+        for address in addresses {
+            XCTAssertTrue(result.contains(address), "cell \(address) must hold its OWN address, proving position verification did not misplace it: \(result)")
+        }
+    }
+
     /// **`add_sheet`/`delete_sheet`/`rename_sheet`, chained on one document — including the ONE
     /// genuinely unverified unknown this task's own research flagged plainly rather than guessed
     /// at**: the JSON "type" string `.uno:Remove`'s numeric `Index` argument needs, which
