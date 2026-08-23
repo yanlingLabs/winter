@@ -1050,6 +1050,61 @@ final class OfficeSheetsCommandTests: XCTestCase {
         try await client.close(docId: reopenDocId)
     }
 
+    /// office-agent-tools T4 fix-round review (item 5) — the discriminating drill for moving the
+    /// agent-view destroy to AFTER each case's own refusal guards
+    /// (`LOKBridge.sheetsManageSheetOnDedicatedThread`'s own header has the full reasoning). Mints an
+    /// agent view directly, THEN drives a refusal (`delete_sheet` naming the workbook's only sheet —
+    /// `SaveError.lastSheet`, guaranteed to throw before any dispatch), then asks for a SECOND agent
+    /// view on the SAME docId: `createAgentView` refuses with `agentViewAlreadyExists`
+    /// (`OfficeWireFrame.createView`'s own documented refusal — Task 3's own invariant, "no second
+    /// agent view for one docId") if, and ONLY if, the first one this test minted is STILL ALIVE.
+    ///
+    /// **Why this is genuinely discriminating, not merely plausible**: BEFORE this fix-round's own
+    /// reorder, the refusal in the middle of this test would have destroyed the agent view
+    /// UNCONDITIONALLY (the original code's own placement, before the `switch`) even though the call
+    /// went on to throw and dispatch nothing — so the SECOND `createAgentView` below would have
+    /// SUCCEEDED (minting a fresh one into the now-empty slot) instead of refusing. This test would
+    /// have FAILED against the pre-fix code, which is exactly what makes it evidence for the fix now,
+    /// not a restatement of it.
+    func testLiveSheetsManageSheetRefusalDoesNotDestroyAnExistingAgentView() async throws {
+        try requireLiveEngine()
+        let path = try makeWritableCopy(of: "gate.xlsx")
+        let stateDir = makeScratchDirectory()
+        let host = makeLiveHost(stateDir: stateDir, dirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)])
+        await host.directory.refresh()
+
+        let runtime = host.officeRuntime(for: "S1")
+        runtime.open(path)
+        let opened = await waitUntilLive { runtime.stateSnapshot.documents[path] != nil || runtime.stateSnapshot.phase == .failed }
+        XCTAssertTrue(opened, "setup: gate.xlsx never settled")
+        let docId = try XCTUnwrap(runtime.stateSnapshot.documents[path]?.docId)
+
+        guard let client = host.officeHelperSupervisor?.client else {
+            return XCTFail("no live client")
+        }
+        _ = try await client.createAgentView(docId: docId)
+
+        // gate.xlsx has exactly one sheet ("Sheet1") — deleting it is a guaranteed, guard-only
+        // refusal: `SaveError.lastSheet` throws before the switch's own `.delete` case ever reaches
+        // its dispatch line.
+        let refused = await send(command("office.sheets.delete_sheet", args: ["path": path, "name": "Sheet1"],
+                                         sessionId: "S1", commandId: "pcmd-refuse-1"), through: host)
+        XCTAssertFalse(refused.ok, "deleting the only sheet must refuse: \(refused)")
+
+        do {
+            _ = try await client.createAgentView(docId: docId)
+            XCTFail("a second createAgentView must refuse — the refusal above must NOT have "
+                   + "destroyed the first agent view this test minted")
+        } catch let error as OfficeHelperClientError {
+            guard case .serverError(let reason) = error else {
+                return XCTFail("expected .serverError(agentViewAlreadyExists), got: \(error)")
+            }
+            XCTAssertTrue(reason.contains("already has an agent view"),
+                          "the refusal must be agentViewAlreadyExists specifically, proving the "
+                              + "FIRST view survived the delete_sheet refusal above: \(reason)")
+        }
+    }
+
     /// `insert_rows`/`insert_cols`/`delete_rows`/`delete_cols`, round-tripped: shift real, known
     /// content (`gate.xlsx`'s own A1 = "NORMA GATE", ground-truthed via this file's own raw-callback
     /// trace on a prior run, not assumed) two rows down and one column right, then back — each step

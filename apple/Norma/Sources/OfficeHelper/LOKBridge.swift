@@ -2870,6 +2870,20 @@ final class LOKBridge: OfficeDocumentBridge {
     /// (`sheetsManageVerificationAttempts`, larger than `goToCellVerificationAttempts` — a structural
     /// sheet mutation is a heavier operation than a cell selection move, live-measured to need more
     /// attempts even once it converges reliably again after the primary-view revert).
+    /// office-agent-tools T4 fix-round review (item 5) — extracted so each of `sheetsManageSheet
+    /// OnDedicatedThread`'s three cases can call it AFTER its own refusal guards, immediately before
+    /// its own UNO dispatch, rather than unconditionally before the whole `switch`. See that
+    /// function's own header for the full reasoning; unchanged in mechanism from the original
+    /// inline form (get-or-mint on the next `sheets set`/`read`/`resize` call already handles
+    /// re-creating whatever this destroys, so calling it zero times on a refused call loses nothing).
+    private func destroyAgentViewIfAnyOnDedicatedThread(_ doc: OpenDocument, docId: String) {
+        if var mutableDoc = documents[docId], let agentViewId = mutableDoc.agentViewId, agentViewId >= 0 {
+            doc.handle.pointee.pClass.pointee.destroyView?(doc.handle, agentViewId)
+            mutableDoc.agentViewId = nil
+            documents[docId] = mutableDoc
+        }
+    }
+
     private func sheetsManageSheetOnDedicatedThread(docId: String, op: OfficeSheetsManageSheetOp,
                                                      name: String, newName: String?) throws -> [String] {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
@@ -2877,28 +2891,28 @@ final class LOKBridge: OfficeDocumentBridge {
         doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
         let before = sheetNamesOnDedicatedThread(doc)
 
-        // Live-measured (see this function's own header, point 1): an EXISTING agent view — left
-        // over from an earlier `sheets set`/`read`/`resize` call on this SAME docId — made
-        // `.uno:Remove` hang regardless of which view dispatched it. Destroyed unconditionally, for
-        // EVERY op (not merely `.delete`), before this function does anything else: cheap
-        // insurance, since `sheetsSet`/`sheetsRead`/`sheetsResize` mint a fresh one again on their
-        // own next call (`ensureAgentViewOnDedicatedThread`'s own get-or-mint contract) — this is
-        // never a permanent loss of anything.
-        if var mutableDoc = documents[docId], let agentViewId = mutableDoc.agentViewId, agentViewId >= 0 {
-            doc.handle.pointee.pClass.pointee.destroyView?(doc.handle, agentViewId)
-            mutableDoc.agentViewId = nil
-            documents[docId] = mutableDoc
-        }
-
+        // Fix-round review (item 5, "provably safe on the task's own evidence, since refusals never
+        // dispatch") — moved from UNCONDITIONALLY before the switch to immediately before EACH case's
+        // own UNO dispatch, AFTER that case's own guards. The ORIGINAL placement destroyed the agent
+        // view even on a call that was about to REFUSE (name not found, last sheet, duplicate name) —
+        // a real side effect on a path that mutates nothing else, contradicting this file's own
+        // "refuse before mutating anything" posture every OTHER refusal (dirty, fence) already holds
+        // to. Safe to move: every guard below THROWS before reaching its own case's dispatch line, so
+        // a refusal can never reach `destroyAgentViewIfAnyOnDedicatedThread` at all now — the hang
+        // this destroy exists to prevent (this function's own header, point 1) is a property of
+        // DISPATCHING `.uno:Remove` with a stale agent view present, never of a call that refuses
+        // and never dispatches anything.
         switch op {
         case .add:
             guard !before.contains(name) else { throw SaveError.duplicateSheetName(docId: docId, name: name) }
+            destroyAgentViewIfAnyOnDedicatedThread(doc, docId: docId)
             postUnoCommandOnDedicatedThread(doc, ".uno:Add", ["Name": ["type": "string", "value": name]])
         case .delete:
             guard before.contains(name) else {
                 throw SaveError.sheetNotFound(docId: docId, sheet: name, available: before)
             }
             guard before.count > 1 else { throw SaveError.lastSheet(docId: docId) }
+            destroyAgentViewIfAnyOnDedicatedThread(doc, docId: docId)
             let oneBasedIndex = before.firstIndex(of: name)! + 1
             postUnoCommandOnDedicatedThread(doc, ".uno:Remove",
                                             ["Index": ["type": "unsigned short", "value": oneBasedIndex]])
@@ -2914,6 +2928,7 @@ final class LOKBridge: OfficeDocumentBridge {
                 preconditionFailure("sheetsManageSheet(.rename) reached with no newName — the wire decode's own invariant was violated")
             }
             guard !before.contains(newName) else { throw SaveError.duplicateSheetName(docId: docId, name: newName) }
+            destroyAgentViewIfAnyOnDedicatedThread(doc, docId: docId)
             doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(zeroBasedIndex))
             postUnoCommandOnDedicatedThread(doc, ".uno:Name", ["Name": ["type": "string", "value": newName]])
         }
