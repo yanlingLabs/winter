@@ -523,6 +523,37 @@ final class OfficeSheetsCommandTests: XCTestCase {
     /// assumed**: this exact test, run against a deliberately reintroduced `doc.viewId` mutation in
     /// `sheetsReadOnDedicatedThread`, failed with exactly that mismatch — see this task's own
     /// report for the transcript — before being reverted.
+    ///
+    /// **Round 4 — the coordinator flagged this assertion as possibly polarity-inverted after a
+    /// round-3 full-app-suite run failed here; re-derived from the fixture, confirmed NOT
+    /// inverted.** `two-sheet.ods` Sheet1 A1 = "NORMA GATE", A2 = "office stage A embed probe"
+    /// (confirmed by unzipping the fixture directly, not from memory). `beforeSelection` is pinned
+    /// to "NORMA GATE" by the setup assertion below, so `XCTAssertEqual(beforeSelection,
+    /// afterSelection)` already demands `afterSelection == "NORMA GATE"` — the CLEAN value —
+    /// matching exactly what the coordinator's own cited reviewer measured ("clean -> NORMA GATE,
+    /// mutant -> office stage A embed probe"). The apparent conflict was a misreading of
+    /// `XCTAssertEqual`'s failure text, which prints arguments in call order (before, after), not
+    /// expected-then-actual: the second-printed value is what was MEASURED that run, not what the
+    /// assertion demanded. The two-way proof was rerun to confirm (task-3-report.md §10):
+    /// unmutated -> PASS, `doc.viewId` mutant -> FAIL, matching the original round-3 finding.
+    ///
+    /// **The full-suite failure itself was real, not a false alarm** — this test genuinely saw the
+    /// primary's selection move once, under full-suite load, on UNMUTATED code. See
+    /// `LOKBridge.sheetsReadOnDedicatedThread` / `selectionTextOnDedicatedThread`'s own headers for
+    /// the evidence chain: a raw LOK callback trace, `goToCellVerificationAttempts` hitting its
+    /// 4-attempt ceiling, and a reading of the pinned engine source
+    /// (`desktop/source/lib/init.cxx`'s `doc_postUnoCommand`) confirming `.uno:GoToCell` dispatches
+    /// asynchronously in this build (`SynchronMode=false`, unipoll never enabled) and that the
+    /// generic dispatch fallback which handles it does not thread the specific `pViewShell` that
+    /// function resolves. This is the SAME disclosed, not-claimed-solved residual
+    /// `selectionTextOnDedicatedThread`'s own header already named — now observed live for the
+    /// first time. The two assertions below discriminate the two ways this can fail instead of
+    /// leaving one ambiguous mismatch: a content check on the read's OWN returned value (fails
+    /// first, with its own message, if the read itself came back stale — the straggler signature)
+    /// and an absolute check that `afterSelection` literally still contains "NORMA GATE" (fails if
+    /// the primary's own selection moved — the isolation signature, whether from a genuine
+    /// cross-view read or a queued command landing late against whatever view a later call makes
+    /// current).
     func testLiveAgentReadNeverTouchesThePrimaryViewsOwnSelection() async throws {
         try requireLiveEngine()
         let path = try makeWritableCopy(of: "two-sheet.ods")
@@ -553,7 +584,18 @@ final class OfficeSheetsCommandTests: XCTestCase {
                                        sessionId: "S1"), through: host)
         XCTAssertTrue(sent.ok, "\(sent)")
 
+        // Discriminates the read's OWN result from the primary's isolation — see this function's
+        // own "Round 4" header. A stale read here (the straggler signature: GoToCell never landed
+        // on the agent view within its poll budget) fails HERE, first, with its own diagnostic,
+        // instead of surfacing only as a confusing isolation mismatch below.
+        XCTAssertTrue(try XCTUnwrap(sent.result).contains("office stage A embed probe"),
+                      "the agent's own read of Sheet1!A2:B2 did not return A2's real content — a straggler GoToCell may not have landed on the agent view within its poll budget: \(sent)")
+
         let afterSelection = try await client.clipboardCopy(docId: docId, part: 0)
+        // Absolute, arg-order-proof insurance: independent of XCTAssertEqual's printed order below,
+        // this fails specifically when the primary's own selection is no longer parked on A1.
+        XCTAssertTrue(afterSelection.contains("NORMA GATE"),
+                      "the PRIMARY view's own selection moved off A1 during an agent read — either the read ran on the primary view directly, or a queued GoToCell(A2:B2) landed late, after the read returned, against whatever view a later LOK call (here, this test's own clipboardCopy) made current next: \(afterSelection)")
         XCTAssertEqual(beforeSelection, afterSelection,
                        "an agent read moved the PRIMARY view's own selection to A2:B2 — the whole point of reading on the agent view instead")
     }

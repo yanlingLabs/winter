@@ -1959,10 +1959,32 @@ final class LOKBridge: OfficeDocumentBridge {
         // throwing here would wrongly fail a read that in fact succeeded. The undetectable residual
         // (GoToCell never actually lands within the attempt budget AND the requested range's real
         // content differs from `baseline`) is a disclosed tail — task-3-report.md's concerns, not a
-        // claimed-solved case. Because the pump runs BEFORE each retry read, exhaustion still leaves
-        // this function having pumped at least once more before returning — which also helps flush
-        // a genuinely-still-pending GoToCell before the caller's own `setPart` restore runs, rather
-        // than leaving it to land later, unobserved, on the user's own sheet.
+        // claimed-solved case.
+        //
+        // **Round 4 — one unconditional pump added AFTER the loop, on the exhaustion path only.**
+        // Stale prose corrected: the paragraph this replaces used to justify the pump-before-retry
+        // pattern by "flushing a genuinely-still-pending GoToCell before the caller's own `setPart`
+        // restore runs" — that restore no longer exists (`sheetsReadOnDedicatedThread` reads on the
+        // agent view now, fix round 3/I1, and never restores anything on the primary), so that
+        // justification was already stale before this round, independent of what follows. The REAL
+        // reason to pump once more here, confirmed live: a round-3 full-app-suite run observed the
+        // PRIMARY view's own selection move to this read's target range after this loop, on
+        // UNMUTATED code, hit its full 4-attempt ceiling. The diagnostic two lines below cannot by
+        // itself distinguish "landed on the final read" from genuine exhaustion in that round-3 run
+        // — but genuine exhaustion of this exact loop WAS directly observed since: a round-4 mutant
+        // drill (deliberately reading on `doc.viewId` instead of the agent view, to re-prove this
+        // test discriminates) caught this loop returning the pre-dispatch baseline unchanged after
+        // all 4 attempts, in 3 of its 4 total runs, via the read's own now-added content assertion — see
+        // `OfficeSheetsCommandTests.testLiveAgentReadNeverTouchesThePrimaryViewsOwnSelection`'s own
+        // header for the full evidence chain. `postUnoCommand`'s `SynchronMode=false` (confirmed
+        // active in this build — unipoll is never enabled anywhere in this file) means a
+        // still-queued `GoToCell` can drain at ANY later point, against whatever view a SUBSEQUENT,
+        // unrelated LOK call on this thread makes current next — giving the dispatcher one more turn
+        // here, before this function returns control to whatever runs next, shrinks that window. It
+        // does NOT close it: this is the same fix-round-2a lesson (repeated `getTextSelection` reads
+        // do not themselves pump LOK's internal queue; only some OTHER LOK call does) applied once
+        // more, not a new mechanism — and it stays bounded and cheap, one more throwaway 64x64 tile
+        // paint, spent only on the path that already burned its full read budget.
         var text = readSelectionTextOnDedicatedThread(doc)
         var attempts = 1
         while text == baseline && attempts < Self.goToCellVerificationAttempts {
@@ -1975,6 +1997,11 @@ final class LOKBridge: OfficeDocumentBridge {
             // fires in practice, and which attempt it resolved on, never silent.
             FileHandle.standardError.write(Data(
                 "[LOKBridge sheets] GoToCell(\(range)) needed \(attempts) attempt(s) before the selection changed (or the budget was exhausted)\n".utf8))
+        }
+        if text == baseline {
+            // Best-effort straggler flush (round 4) — see the comment above the loop. Only spent on
+            // the exhaustion path itself; a read that already succeeded needs no further pumping.
+            pumpDedicatedThreadForPendingDispatch(doc, viewId: viewId, part: part)
         }
 
         // The formula-toggle restore (fix round 4, review I5) is registered as a `defer` above,
@@ -2238,9 +2265,35 @@ final class LOKBridge: OfficeDocumentBridge {
     /// residual this review named directly: `.uno:GoToCell`'s own SELECTION move on the primary
     /// view was never restorable (no mechanism existed to recall the prior selection), disclosed
     /// as an open concern in `task-3-report.md`. Reading on the agent view instead — minted or
-    /// reused via `ensureAgentViewOnDedicatedThread` — makes the whole class of residual moot: the
-    /// agent view's part and selection are never the user's own, so nothing needs restoring, and
-    /// there is nothing left to disclose about a live-tab side effect.
+    /// reused via `ensureAgentViewOnDedicatedThread` — removes the DELIBERATE version of this
+    /// residual: this function itself never asserts the primary view or moves its selection.
+    ///
+    /// **NOT fully moot — narrowed, not eliminated (round 4, live-observed).** An earlier version of
+    /// this comment claimed reading on the agent view made "the whole class of residual moot." A
+    /// round-3 full-app-suite run falsified that directly:
+    /// `OfficeSheetsCommandTests.testLiveAgentReadNeverTouchesThePrimaryViewsOwnSelection` observed
+    /// the PRIMARY view's own selection move to this read's target range, following a read where
+    /// the actual cell move (the `.uno:GoToCell` dispatch onward, inside
+    /// `selectionTextOnDedicatedThread`) ran entirely through the agent view. This function's own
+    /// sole `doc.viewId` reference is the `setView` at the top of this function's body, asserting
+    /// the PRIMARY view before sheet-name resolution — legitimate, unrelated to the read itself,
+    /// and overwritten by the agent-view `setView` just below it, before anything that could move a
+    /// selection runs. See that test's own header for the full evidence chain,
+    /// including a raw LOK callback trace, a round-4 mutant drill that directly observed this same
+    /// loop exhaust on a DIFFERENT view (see `selectionTextOnDedicatedThread`'s own header), and a
+    /// reading of the pinned engine
+    /// source (`desktop/source/lib/init.cxx`'s `doc_postUnoCommand`): `SynchronMode=false` is
+    /// confirmed active in this build (unipoll is never enabled anywhere in this file), so
+    /// `.uno:GoToCell` genuinely executes asynchronously relative to `postUnoCommand`'s own return;
+    /// the generic dispatch fallback that handles `GoToCell` (`comphelper::dispatchCommand`) does
+    /// not thread the specific `pViewShell` that function resolves through an explicit parameter —
+    /// its own view/frame targeting is resolved by separate machinery not directly verified here.
+    /// `selectionTextOnDedicatedThread`'s own poll loop mitigates by giving LOK's internal
+    /// dispatcher repeated turns before returning, and now pumps once more on exhaustion
+    /// specifically (see that function's own header) — but this remains a best-effort mitigation of
+    /// an async race, not a closed one: a genuinely still-queued `GoToCell` can still land later,
+    /// against whatever view a SUBSEQUENT, unrelated LOK call on this thread makes current next.
+    /// Disclosed, not solved — see task-3-report.md.
     private func sheetsReadOnDedicatedThread(docId: String, sheet: String, range: String, formulas: Bool) throws -> [[String]] {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
         guard doc.kind == .spreadsheet else { throw SaveError.notSpreadsheet(docId: docId, kind: doc.kind) }
