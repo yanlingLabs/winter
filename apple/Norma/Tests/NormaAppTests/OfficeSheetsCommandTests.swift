@@ -945,6 +945,88 @@ final class OfficeSheetsCommandTests: XCTestCase {
         }
     }
 
+    /// office-agent-tools T4 fix-round review (item 6) — the tool description must disclose real
+    /// behavior, never a guess: this test finds out, LIVE, whether writing an empty string `""` to a
+    /// cell that already has content CLEARS it. `writeOneCellOnDedicatedThread`'s own code posts a
+    /// REAL empty ext-text-input event plus a real Return keypress for `text == ""` — nothing skips
+    /// the actual LOK calls; only the POST-write verification READ is skipped afterward (`guard
+    /// !text.isEmpty else { return }` sits AFTER the typing block, not before it) — so the outcome is
+    /// a genuinely open question this drill settles rather than assumes.
+    func testLiveSheetsSetWithAnEmptyStringDetermineWhetherItClearsOrNoOps() async throws {
+        try requireLiveEngine()
+        let path = try makeWritableCopy(of: "gate.xlsx")
+        let stateDir = makeScratchDirectory()
+        let host = makeLiveHost(stateDir: stateDir, dirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)])
+        await host.directory.refresh()
+
+        let runtime = host.officeRuntime(for: "S1")
+        runtime.open(path)
+        let opened = await waitUntilLive { runtime.stateSnapshot.documents[path] != nil || runtime.stateSnapshot.phase == .failed }
+        XCTAssertTrue(opened, "setup: gate.xlsx never settled")
+
+        // Seed D1 with known content first.
+        let seedSent = await send(command("office.sheets.set",
+                                          args: ["path": path, "sheet": "Sheet1", "range": "D1", "values": [["hello"]]],
+                                          sessionId: "S1", commandId: "pcmd-empty-seed"), through: host)
+        XCTAssertTrue(seedSent.ok, "\(seedSent)")
+        let afterSeed = await send(command("office.sheets.read", args: ["path": path, "sheet": "Sheet1", "range": "D1"],
+                                           sessionId: "S1", commandId: "pcmd-empty-read-seed"), through: host)
+        XCTAssertTrue(afterSeed.result?.contains("hello") == true, "setup: D1 must carry the seed first: \(afterSeed)")
+
+        // Now write an empty string to the SAME cell.
+        let emptySent = await send(command("office.sheets.set",
+                                           args: ["path": path, "sheet": "Sheet1", "range": "D1", "values": [[""]]],
+                                           sessionId: "S1", commandId: "pcmd-empty-1"), through: host)
+        XCTAssertTrue(emptySent.ok, "an empty-string write must not itself be refused: \(emptySent)")
+
+        let afterEmpty = await send(command("office.sheets.read", args: ["path": path, "sheet": "Sheet1", "range": "D1"],
+                                            sessionId: "S1", commandId: "pcmd-empty-read-after"), through: host)
+        XCTAssertTrue(afterEmpty.ok, "\(afterEmpty)")
+        // LIVE FINDING (recorded here, not assumed): an empty string DOES clear the cell — the real
+        // ext-text-input("")+Return sequence commits an empty edit, the same way a human selecting a
+        // cell and pressing Delete/Return would. Printed for visibility in case a future engine
+        // version changes this; the tool description (`sheets.ts`) states this finding directly.
+        print("[empty-string probe] D1 after writing \"\" -> \"\(afterEmpty.result ?? "<nil>")\"")
+        XCTAssertFalse(afterEmpty.result?.contains("hello") == true,
+                       "LIVE FINDING: an empty-string write clears the cell — \"hello\" must be gone: \(afterEmpty)")
+    }
+
+    /// office-agent-tools T4 fix-round review (item 6) — the tool description's apostrophe-escape
+    /// convention says a caller writes a LEADING apostrophe to force text mode (`"'=NOT A FORMULA"`
+    /// already proven live, `testLiveSheetsSetWritesValues...`). This drill settles the DOUBLED case
+    /// LIVE: does a cell whose real content should legitimately START WITH an apostrophe character
+    /// (`'twas the night...`) round-trip correctly if the caller escapes it as `''twas the night...`
+    /// — one apostrophe consumed as the force-text marker, one surviving as real content — matching
+    /// the same convention a human typing directly into Calc relies on?
+    func testLiveSheetsSetADoubledLeadingApostropheRoundTripsToASingleLeadingApostrophe() async throws {
+        try requireLiveEngine()
+        let path = try makeWritableCopy(of: "gate.xlsx")
+        let stateDir = makeScratchDirectory()
+        let host = makeLiveHost(stateDir: stateDir, dirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)])
+        await host.directory.refresh()
+
+        let runtime = host.officeRuntime(for: "S1")
+        runtime.open(path)
+        let opened = await waitUntilLive { runtime.stateSnapshot.documents[path] != nil || runtime.stateSnapshot.phase == .failed }
+        XCTAssertTrue(opened, "setup: gate.xlsx never settled")
+
+        let sent = await send(command("office.sheets.set",
+                                      args: ["path": path, "sheet": "Sheet1", "range": "D1", "values": [["''twas the night"]]],
+                                      sessionId: "S1", commandId: "pcmd-apos-1"), through: host)
+        XCTAssertTrue(sent.ok, "\(sent)")
+
+        let readSent = await send(command("office.sheets.read", args: ["path": path, "sheet": "Sheet1", "range": "D1"],
+                                          sessionId: "S1", commandId: "pcmd-apos-read"), through: host)
+        XCTAssertTrue(readSent.ok, "\(readSent)")
+        let result = try XCTUnwrap(readSent.result)
+        print("[apostrophe probe] D1 after writing \"''twas the night\" -> \"\(result)\"")
+        // LIVE FINDING (recorded here, not assumed): the FIRST apostrophe is consumed as the
+        // force-text marker (same as the single-apostrophe case already proven); the SECOND survives
+        // as real content — the cell reads back with exactly ONE leading apostrophe.
+        XCTAssertTrue(result.contains("'twas the night"), "the surviving apostrophe + text must be present: \(result)")
+        XCTAssertFalse(result.contains("''twas the night"), "only ONE apostrophe should survive — the first is the escape marker, not real content: \(result)")
+    }
+
     /// **`add_sheet`/`delete_sheet`/`rename_sheet`, chained on one document — including the ONE
     /// genuinely unverified unknown this task's own research flagged plainly rather than guessed
     /// at**: the JSON "type" string `.uno:Remove`'s numeric `Index` argument needs, which
