@@ -2877,14 +2877,14 @@ final class OfficeHelperLiveTests: XCTestCase {
         print("[cell-address probe] SUMMARY: \(all34.count) total type=34 firings across all 4 stages: "
               + "\(all34.map(\.payload).joined(separator: ", "))")
 
-        // TEMP DIAGNOSTIC read-back — office-agent-tools T4 fix-round review item 3, the OTHER
-        // candidate (`getCommandValues(".uno:CellCursor")`), logged by a throwaway call this probe
-        // added to `sheetsReadOnDedicatedThread` itself (never a permanent call site). This test
-        // never prints the helper's raw stderr lines verbatim anywhere else, so without this the
-        // diagnostic's own output is silently captured and never actually READ.
-        let debugLines = (helper.stderrCapture?.linesSnapshot() ?? []).filter { $0.contains("debug getCommandValues") }
-        for line in debugLines { print("[cell-address probe] \(line)") }
-        print("[cell-address probe] getCommandValues(.uno:CellCursor) fired \(debugLines.count) time(s) total")
+        // The OTHER candidate this review round investigated — `getCommandValues(".uno:CellCursor")`
+        // — is NOT read back here: this probe originally called a TEMP diagnostic hook in
+        // `sheetsReadOnDedicatedThread` to capture it, but that hook was removed once the answer was
+        // read (it returned the CORRECT agent-view position every time, unlike CELL_ADDRESS/
+        // CELL_CURSOR above — see `cellCursorOnDedicatedThread`'s own header, the SHIPPED mechanism,
+        // for the full finding and the fix-round report for the verbatim captured output). Leaving a
+        // read-back for a hook that no longer exists would silently print "0 time(s)" forever and
+        // read as evidence the query doesn't work — the opposite of what shipped.
 
         // Weak baseline ONLY, matching this file's own two-pass discipline — CELL_CURSOR (17) firing
         // proves the click/GoToCell choreography reached Calc's cell-navigation path at all; a

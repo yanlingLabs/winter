@@ -1236,10 +1236,13 @@ final class OfficeSheetsCommandTests: XCTestCase {
         let activeAfterDelete = try await activeSheet()
         print("[active-sheet probe] active after delete_sheet(\"Q3\", not the active one) -> \"\(activeAfterDelete)\"")
 
-        // LIVE FINDING (recorded here, not assumed) — printed above either way; the tool description
-        // is written from whichever of these two actually happened, not from the pre-drill guess.
-        _ = activeAfterAdd
-        _ = activeAfterDelete
+        // LIVE FINDING, pinned — stable across 3 separate isolated runs (this one plus 2 reruns
+        // before this assertion was added), unlike `rename_sheet`'s OWN active-sheet effect, which
+        // Task 4's original report found genuinely non-deterministic across otherwise-identical runs.
+        // The tool description (`sheets.ts`) states this finding directly; if a future engine version
+        // changes it, THIS assertion is what would catch that, not a silently-rotting print statement.
+        XCTAssertEqual(activeAfterAdd, "Sheet1", "add_sheet must not move the active sheet")
+        XCTAssertEqual(activeAfterDelete, "Sheet1", "delete_sheet on a non-active sheet must not move the active sheet")
     }
 
     /// `insert_rows`/`insert_cols`/`delete_rows`/`delete_cols`, round-tripped: shift real, known
