@@ -95,19 +95,18 @@ export type SessionApprovalPolicy = "plan" | "dont-ask" | "ask" | "accept-edits"
 // (dispatch's own default — server.ts's session.dispatch) — a card a headless coordinator can never
 // answer, so in practice a silent hang/timeout-deny on every real call. Same fix shape as
 // task_stop's own entry above.
-// office-agent-tools T3: `sheets` (today: info/read only — Task 4 adds write verbs to the SAME tool
-// name, which will need ITS OWN reclassification then, not a silent free ride on this entry).
-// READ_ONLY, not NETWORK: the class boundary this file draws (LOW-2's own comment on `NETWORK`,
-// above) is CALLER-DIRECTED EGRESS to a destination the daemon does not already trust (a url, an
-// external endpoint) versus "the local filesystem the user already controls" — `sheets` opens a
-// path that must ALREADY resolve inside this session's own working directories (its own fence,
-// `sheets.ts`'s `officeSheetsResolvedPathWithinFence`, refuses anything else before dispatch), never
-// a caller-supplied destination outside that. A spreadsheet cell COULD carry adversarial text, but
-// that is the identical risk `read`/`glob`/`grep` already accept without a NETWORK-style
-// classification (this file's own words: "the local filesystem the user already controls") — the
-// document is local, fenced, and already inside the boundary the user granted Norma, unlike a url a
-// model could point at anything.
-const READ_ONLY = new Set(["read", "glob", "grep", "ls", "bash_output", "Skill", "ToolSearch", "ask_user", "AskQuestion", "task_create", "task_update", "task_list", "task_get", "exit_plan_mode", "enter_plan_mode", "spawn_agent", "send_message", "task_stop", "agent_list", "agent_output", "lsp", "push_notification", "list_sessions", "manage_session", "sheets"]);
+// office-agent-tools T3: `sheets` (T3: info/read only, READ_ONLY — see the MUTATING set below for
+// T4's reclassification now that it has write verbs too). READ_ONLY's own reasoning for the read
+// half, kept for the record: not NETWORK — the class boundary this file draws (LOW-2's own comment
+// on `NETWORK`, above) is CALLER-DIRECTED EGRESS to a destination the daemon does not already trust
+// (a url, an external endpoint) versus "the local filesystem the user already controls" — `sheets`
+// opens a path that must ALREADY resolve inside this session's own working directories (its own
+// fence, `sheets.ts`'s `officeSheetsResolvedPathWithinFence`, refuses anything else before
+// dispatch), never a caller-supplied destination outside that. A spreadsheet cell COULD carry
+// adversarial text, but that is the identical risk `read`/`glob`/`grep` already accept without a
+// NETWORK-style classification — the document is local, fenced, and already inside the boundary the
+// user granted Norma, unlike a url a model could point at anything.
+const READ_ONLY = new Set(["read", "glob", "grep", "ls", "bash_output", "Skill", "ToolSearch", "ask_user", "AskQuestion", "task_create", "task_update", "task_list", "task_get", "exit_plan_mode", "enter_plan_mode", "spawn_agent", "send_message", "task_stop", "agent_list", "agent_output", "lsp", "push_notification", "list_sessions", "manage_session"]);
 // `computer` (Phase 5 CU) is MUTATING: a computer-use action drives real mouse/keyboard/screen, so
 // it must pass the gate on EVERY call (spec §4.6: "every CU action passes the permission gate") —
 // ask → per-action approval card, auto → allow, plan → deny (CU makes changes). Note this is the
@@ -163,7 +162,34 @@ const READ_ONLY = new Set(["read", "glob", "grep", "ls", "bash_output", "Skill",
 // loop and, unclassified, drew an approval card under `auto` — dispatch's own default — in a session
 // with no human to answer it. Classified, only ONE cell moves: `auto` (ask → allow). plan stays deny,
 // bypass stays allow, ask/accept-edits/dont-ask stay ask.
-const MUTATING = new Set(["write", "edit", "bash", "notebook_edit", "enter_worktree", "exit_worktree", "computer", "schedule", "Workflow", "session_spawn"]);
+// office-agent-tools T4: `sheets` moves HERE from READ_ONLY (see that set's own comment for the
+// read-half reasoning it still carries). Task 3 shipped `sheets` with only `info`/`read`; this task
+// adds real write verbs (`set`, `insert_rows`, `insert_cols`, `delete_rows`, `delete_cols`,
+// `add_sheet`, `delete_sheet`, `rename_sheet`) to the SAME tool name — and this gate classifies by
+// TOOL NAME, not by verb (`evaluate(toolName, policy)` never sees `args`, so it cannot tell an
+// `info` call from a `set` call). There is no per-verb gating available here to reach for.
+//
+// Precedent is `notebook_edit`, not `schedule`: `notebook_edit` is a structured-document editor
+// that rides plain MUTATING with no carve-out of its own (this set's own comment: "notebook_edit
+// rides the generic MUTATING path (niche)") — the same shape `sheets` is in now, a document editor
+// whose write half must be gated like `write`/`edit`. `schedule`'s own "one tool, one gate decision,
+// no op-dependent carve-out" comment is a worse fit: that tool's ops (list/enable/disable/delete)
+// are UNIFORMLY mutating-adjacent (they all touch a standing routine); `sheets` mixes genuine reads
+// with genuine writes on one name, which `notebook_edit` also does (a notebook read is `read`/`ls`
+// on the .ipynb file itself — `notebook_edit` only ever performs the WRITE half — so `sheets` is
+// actually a step further: even ITS OWN read verbs are swept into MUTATING's per-policy answer).
+//
+// **The disclosed cost, stated plainly rather than left to be discovered**: `sheets info`/`sheets
+// read` now ask under `ask`/`dont-ask` and deny under `plan`, exactly like `sheets set` does, even
+// though neither call mutates anything. This is the direct, name-keyed consequence of gate.ts having
+// no verb-level granularity — not an oversight, and not something this task invents a workaround
+// for (a per-verb gate would need `evaluate` to see `args`, a wider change than one tool's
+// reclassification justifies). A plan-mode session that wants to inspect a spreadsheet without
+// approval no longer can via `sheets` — the safe direction to err in for a tool that can now mutate
+// a file, matching this file's own standing "wrongly classified as write is safe; wrongly classified
+// as read is not" posture (see `office-commands.ts`'s identical reasoning for its OWN read/write
+// deadline split, cited here because it is the same argument applied one layer up).
+const MUTATING = new Set(["write", "edit", "bash", "notebook_edit", "enter_worktree", "exit_worktree", "computer", "schedule", "Workflow", "session_spawn", "sheets"]);
 // web_fetch (4g Task 5, T6 adds web_search here) is Norma's ONLY network-capable tool — it does NOT
 // belong in READ_ONLY (it makes a live outbound request; the response bytes are DATA that could
 // carry adversarial "instructions", so an unattended session shouldn't get an implicit pass) and it
