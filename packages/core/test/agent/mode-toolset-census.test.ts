@@ -97,7 +97,8 @@ describe("daemon tool census (R-T3 whole-branch review FIX 1): real registration
   // office-agent-tools T3: ADDED "sheets" (SANCTIONED pin move — sheets.ts registers `modes:
   // ["code", "dispatch"]`, matching bash/computer/schedule/lsp's own shape: available in both, not
   // chat, which has no filesystem-shaped surface by construction).
-  test("code mode is offered EXACTLY the full daemon tool surface (37 tools)", async () => {
+  // office-agent-tools T6: ADDED "slides" — identical reasoning, `modes: ["code", "dispatch"]`.
+  test("code mode is offered EXACTLY the full daemon tool surface (38 tools)", async () => {
     const d = await boot();
     expect(d.registry).not.toBeNull();
     const offered = [...d.registry!.namesForMode("code", { builtinDeferral: true })];
@@ -126,6 +127,7 @@ describe("daemon tool census (R-T3 whole-branch review FIX 1): real registration
         "Workflow",
         "browser",
         "sheets",
+        "slides",
       ].sort(),
     );
   });
@@ -161,14 +163,15 @@ describe("daemon tool census (R-T3 whole-branch review FIX 1): real registration
   //   distinction is pinned separately, in dispatch-deferred.test.ts.
   // office-agent-tools T3: ADDED "sheets" here too — `modes: ["code", "dispatch"]`, the identical
   // reasoning as the code-mode pin just above.
-  test("dispatch mode is offered EXACTLY this set (18 tools)", async () => {
+  // office-agent-tools T6: ADDED "slides" — identical reasoning.
+  test("dispatch mode is offered EXACTLY this set (19 tools)", async () => {
     const d = await boot();
     const offered = [...d.registry!.namesForMode("dispatch", { builtinDeferral: true })];
     expect(offered.sort()).toEqual(
       [
         "Search", "ReadPage", "ToolSearch", "AskQuestion", "bash", "computer", "glob", "grep", "ls",
         "push_notification", "read", "send_message", "session_spawn", "task_stop",
-        "list_sessions", "manage_session", "browser", "sheets",
+        "list_sessions", "manage_session", "browser", "sheets", "slides",
       ].sort(),
     );
   });

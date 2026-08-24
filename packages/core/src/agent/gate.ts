@@ -189,7 +189,12 @@ const READ_ONLY = new Set(["read", "glob", "grep", "ls", "bash_output", "Skill",
 // a file, matching this file's own standing "wrongly classified as write is safe; wrongly classified
 // as read is not" posture (see `office-commands.ts`'s identical reasoning for its OWN read/write
 // deadline split, cited here because it is the same argument applied one layer up).
-const MUTATING = new Set(["write", "edit", "bash", "notebook_edit", "enter_worktree", "exit_worktree", "computer", "schedule", "Workflow", "session_spawn", "sheets"]);
+// office-agent-tools T6 — `slides` joins `sheets` here for the IDENTICAL reason (task-4-report.md's
+// own reclassification, restated rather than re-derived): a mixed read/write verb set on one tool
+// name, gate.ts still name-keyed not verb-keyed. `slides info`/`slides read` pay the same disclosed
+// cost `sheets info`/`sheets read` already do (ask under ask/dont-ask, deny under plan) — the safe
+// direction for a tool that can now mutate a presentation file.
+const MUTATING = new Set(["write", "edit", "bash", "notebook_edit", "enter_worktree", "exit_worktree", "computer", "schedule", "Workflow", "session_spawn", "sheets", "slides"]);
 // web_fetch (4g Task 5, T6 adds web_search here) is Norma's ONLY network-capable tool — it does NOT
 // belong in READ_ONLY (it makes a live outbound request; the response bytes are DATA that could
 // carry adversarial "instructions", so an unattended session shouldn't get an implicit pass) and it

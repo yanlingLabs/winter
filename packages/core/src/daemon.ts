@@ -50,6 +50,7 @@ import { registerSearchTool } from "./agent/tools/search";
 import { registerReadPageTool } from "./agent/tools/read-page";
 import { registerBrowserTool } from "./agent/tools/browser";
 import { registerSheetsTool } from "./agent/tools/sheets";
+import { registerSlidesTool } from "./agent/tools/slides";
 import { PageCache } from "./agent/tools/page-core";
 import { createResearchRunner } from "./agent/research";
 import { registerComputerTool } from "./agent/tools/computer";
@@ -744,6 +745,16 @@ export async function startDaemon(opts: {
     // any dirGrant-adopted directory), which would let this tool accept a path the app-side broker
     // was always going to refuse anyway.
     registerSheetsTool(registry, {
+      dispatch: (cmd) => panelCommands.dispatch(cmd),
+      harnesses: (sid) => hub.attachedHarnesses(sid),
+      dirsOf: (sid) => store.dirs(sid),
+    });
+    // office-agent-tools T6 — `slides`, the identical deps shape as `sheets` immediately above (same
+    // `dirsOf` sourcing rationale: `store.dirs(sid)`, never `writableRoots`, so the daemon's fence
+    // agrees with the app-side broker's independent one on what "this session's working directories"
+    // means — see the comment on the `sheets` registration above for the fuller reasoning, not
+    // repeated here).
+    registerSlidesTool(registry, {
       dispatch: (cmd) => panelCommands.dispatch(cmd),
       harnesses: (sid) => hub.attachedHarnesses(sid),
       dirsOf: (sid) => store.dirs(sid),

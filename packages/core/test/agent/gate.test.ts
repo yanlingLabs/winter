@@ -83,6 +83,14 @@ describe("PermissionGate v1", () => {
     expect(gate.evaluate("sheets", "plan")).toBe("deny");
   });
 
+  // office-agent-tools T6: `slides` joins `sheets` in MUTATING — identical reasoning (a mixed
+  // read/write verb set on one name, gate.ts still name-keyed not verb-keyed), not re-derived here.
+  test("slides is mutating (T6): ask under ask-policy, allow under auto-policy, denied under plan — including its own read verbs, by name-keyed design", () => {
+    expect(gate.evaluate("slides", "ask")).toBe("ask");
+    expect(gate.evaluate("slides", "auto")).toBe("allow");
+    expect(gate.evaluate("slides", "plan")).toBe("deny");
+  });
+
   test("schedule is mutating: ask under ask-policy, allow under auto-policy, denied under plan", () => {
     expect(gate.evaluate("schedule", "ask")).toBe("ask");
     expect(gate.evaluate("schedule", "auto")).toBe("allow");
@@ -296,8 +304,8 @@ describe("PermissionGate v1", () => {
       // MUTATING ("Workflow" excluded — see this test's own doc comment above). B2-T7 adds
       // "session_spawn" (see gate.ts's own entry for why MUTATING and not READ_ONLY beside
       // spawn_agent). office-agent-tools T4 adds "sheets" (moved from READ_ONLY — see the dedicated
-      // test above).
-      "write", "edit", "bash", "notebook_edit", "enter_worktree", "exit_worktree", "computer", "schedule", "session_spawn", "sheets",
+      // test above). office-agent-tools T6 adds "slides" (same reasoning as sheets).
+      "write", "edit", "bash", "notebook_edit", "enter_worktree", "exit_worktree", "computer", "schedule", "session_spawn", "sheets", "slides",
       // NETWORK + externals (B1-T5 adds "Search"; B2-T2 "ReadPage"; B2-T6 "browser"; B2-T7 the two
       // MCP resource tools — this list's claim to enumerate every member had gone stale by four
       // names, which is the same drift the new COMPLETENESS pin in mode-toolset-census.test.ts
