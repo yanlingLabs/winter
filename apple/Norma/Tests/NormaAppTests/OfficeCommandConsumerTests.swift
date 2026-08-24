@@ -972,6 +972,99 @@ final class OfficeCommandConsumerTests: XCTestCase {
         XCTAssertFalse(driverCalled, "an out-of-range index must refuse before the broker/driver is reached")
     }
 
+    /// **T5 round-2 re-review (Important) — a wrong TYPE must refuse, on every optional slides
+    /// operand, not just a wrong number.** The round-2 silent-append fix was gated on
+    /// `if case .number?`, so it closed exactly one type arm; the re-review measured `at:"3"` still
+    /// giving `ok=true`, `seenAt=nil`, "now has 1 slide" — the model asks for position 3 and is told
+    /// it succeeded, having appended at the end.
+    ///
+    /// Daemon-unreachable (zod refuses a string `at`) and fixed anyway: `panel_command.args` is
+    /// `z.record(z.string(), z.unknown())` with only a byte cap, so NOTHING between a tool's own
+    /// schema and this file bounds or types a value — which is exactly why the app-side guard exists,
+    /// and a guard that only defends the daemon's own shapes fails its own stated threat model.
+    func testSlidesRefusesAWrongTypedOptionalOperandOnEveryTypeArm() async {
+        var driverCalled = false
+        // Per-operand, because "wrong type" is per-operand: a STRING is wrong for `at` (the
+        // reviewer's own measured vector) and right for `title`/`body`. The last row is `layout`'s
+        // other failure mode — the right type carrying a value the enum does not know, which is the
+        // realistic one for a model that invents a preset name.
+        let cases: [(action: String, key: String, bad: Any, label: String, extra: [String: Any])] = [
+            ("office.slides.add_slide", "at", "3", "string", [:]),
+            ("office.slides.add_slide", "at", true, "bool", [:]),
+            ("office.slides.add_slide", "at", [1, 2], "array", [:]),
+            ("office.slides.add_slide", "at", ["n": 3], "object", [:]),
+            ("office.slides.add_slide", "layout", 3, "number", [:]),
+            ("office.slides.add_slide", "layout", true, "bool", [:]),
+            ("office.slides.add_slide", "layout", ["a"], "array", [:]),
+            ("office.slides.add_slide", "layout", "tytle_slide", "unknown preset", [:]),
+            ("office.slides.set_text", "title", 3, "number", ["slide": 1]),
+            ("office.slides.set_text", "title", true, "bool", ["slide": 1]),
+            ("office.slides.set_text", "body", 3, "number", ["slide": 1]),
+            ("office.slides.set_text", "body", ["a"], "array", ["slide": 1]),
+        ]
+        for c in cases {
+            let path = makeScratchFile()
+            let world = makeSheetsWorld(
+                workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+                slidesSetText: { _, _, _, _ in driverCalled = true; return [] },
+                slidesManagePage: { _, _, _, _, _, _ in driverCalled = true; return 1 },
+                save: { [self] _, _ in self.makeScratchFile() })
+            var args: [String: Any] = ["path": path, c.key: c.bad]
+            for (k, v) in c.extra { args[k] = v }
+            sent.removeAll()
+            world.consumer.handle(command(c.action, args: args, commandId: "pcmd-\(c.key)-\(c.label)"))
+            await waitUntil { !self.sent.isEmpty }
+            XCTAssertEqual(sent.first?.ok, false,
+                           "\(c.action) \(c.key) as \(c.label) must REFUSE, never collapse to "
+                               + "\"absent\" and silently do something else: \(sent)")
+            XCTAssertTrue(sent.first?.result?.contains(c.key) == true,
+                          "the refusal must name the operand at fault: \(sent)")
+        }
+        XCTAssertFalse(driverCalled, "a wrong-typed operand must refuse before the broker/driver is reached")
+    }
+
+    /// The counterpart that stops the guard from over-refusing: the RIGHT type on each of these
+    /// still works, so "refuse a wrong type" cannot quietly become "refuse the operand".
+    func testSlidesStillAcceptsEveryOptionalOperandAtItsRightType() async {
+        let path = makeScratchFile()
+        var seenLayout: OfficeSlidesLayoutPreset?
+        var seenTitle: String?
+        let world = makeSheetsWorld(
+            workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+            slidesSetText: { _, _, title, _ in seenTitle = title; return ["title"] },
+            slidesManagePage: { _, _, _, _, _, layout in seenLayout = layout; return 1 },
+            save: { [self] _, _ in self.makeScratchFile() })
+        world.consumer.handle(command("office.slides.add_slide",
+                                       args: ["path": path, "at": 2, "layout": "title_only"]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, true, "\(sent)")
+        XCTAssertEqual(seenLayout, .titleOnly)
+
+        sent.removeAll()
+        world.consumer.handle(command("office.slides.set_text",
+                                       args: ["path": path, "slide": 1, "title": "Hello"],
+                                       commandId: "pcmd-title-ok"))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, true, "\(sent)")
+        XCTAssertEqual(seenTitle, "Hello")
+    }
+
+    /// An explicit JSON `null` is ABSENT, not "present but undecodable" — otherwise `{"at": null}`
+    /// would behave differently from omitting `at`, for no reason a caller could predict.
+    func testSlidesTreatsAnExplicitNullOptionalAsAbsent() async {
+        let path = makeScratchFile()
+        var seenAt: Int?
+        let world = makeSheetsWorld(
+            workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+            slidesManagePage: { _, _, _, at, _, _ in seenAt = at; return 1 },
+            save: { [self] _, _ in self.makeScratchFile() })
+        world.consumer.handle(command("office.slides.add_slide",
+                                       args: ["path": path, "at": NSNull(), "layout": NSNull()]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, true, "an explicit null must mean append, exactly as omitted does: \(sent)")
+        XCTAssertNil(seenAt)
+    }
+
     /// The ceiling is inclusive at its own boundary, and `add_slide`'s `at` is genuinely optional —
     /// so the guard cannot have quietly turned "omitted" into "refused" for the one verb that
     /// appends when `at` is absent.

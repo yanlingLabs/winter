@@ -676,6 +676,15 @@ struct OfficeCommandConsumer {
         guard let oneBasedSlide = Self.oneBasedIndex(command.args, "slide") else {
             return sendResult(command.sessionId, command.commandId, false, Self.requiredSlideRefusal, nil)
         }
+        // Round-2 re-review — the same present-but-undecodable close as `at`/`layout`. These two
+        // DO disclose a survivor (`formatSlidesSetText` names which fields applied), so a wrong-typed
+        // `title` was never fully silent; refused anyway, so all six slides operands answer a wrong
+        // type the same way rather than three different ways.
+        for key in ["title", "body"] where Self.isPresent(command.args, key)
+            && Self.optionalString(command.args, key) == nil {
+            return sendResult(command.sessionId, command.commandId, false,
+                               "`slides set_text`'s `\(key)` must be a string.", nil)
+        }
         let title = Self.optionalString(command.args, "title")
         let body = Self.optionalString(command.args, "body")
         guard title != nil || body != nil else {
@@ -735,14 +744,17 @@ struct OfficeCommandConsumer {
         case "office.slides.add_slide":
             op = .add
             // `at` is the ONE genuinely optional index on this verb (absent = append at the end), so
-            // a `nil` from `oneBasedIndex` is ambiguous here in a way it is nowhere else — and the
-            // re-review's new ceiling made that ambiguity load-bearing. **Caught by this fix's own
-            // test, not reasoned about afterwards:** with the ceiling and without this guard,
-            // `at:1e30` stopped aborting the app and started SILENTLY APPENDING, which is a worse
-            // failure than the refusal it should be — the model asked for a specific position and
-            // got a different one, reported as success. Same remedy, and the same reasoning, as
-            // `handleSheetsFormat`'s own present-but-out-of-range `width` refusal.
-            if case .number? = command.args?["at"], Self.oneBasedIndex(command.args, "at") == nil {
+            // a `nil` from `oneBasedIndex` is ambiguous here in a way it is nowhere else. **Caught
+            // by this fix's own test, not reasoned about afterwards:** with the round-2 ceiling and
+            // without this guard, `at:1e30` stopped aborting the app and started SILENTLY APPENDING
+            // — the model asked for a specific position, got a different one, and was told it
+            // succeeded, which is a worse failure than the crash it replaced. Same remedy, and the
+            // same reasoning, as `handleSheetsFormat`'s present-but-out-of-range `width` refusal.
+            //
+            // Round-2 re-review: `isPresent`, not `if case .number?` — the original closed only the
+            // numeric arm, so `at:"3"` walked past it into "absent" and appended silently. See
+            // `isPresent`'s own header.
+            if Self.isPresent(command.args, "at"), Self.oneBasedIndex(command.args, "at") == nil {
                 return sendResult(command.sessionId, command.commandId, false, Self.requiredAtRefusal, nil)
             }
             at = Self.oneBasedIndex(command.args, "at").map { $0 - 1 }
@@ -767,7 +779,19 @@ struct OfficeCommandConsumer {
             // file's own posture is "never crash on a wire value," so this still answers.
             return sendResult(command.sessionId, command.commandId, false, Self.refusal(for: command.action), nil)
         }
-        let layout = op == .add ? Self.optionalLayout(command.args) : nil
+        // `layout` is the OTHER fully-silent operand on this verb (round-2 re-review): the success
+        // text `formatSlidesManagePage` produces names no layout, so a misspelled or wrong-typed
+        // one would silently give the model Impress's default slide and report success. Refused
+        // instead — same shape as `at` above.
+        let layout: OfficeSlidesLayoutPreset?
+        if op == .add {
+            if Self.isPresent(command.args, "layout"), Self.optionalLayout(command.args) == nil {
+                return sendResult(command.sessionId, command.commandId, false, Self.invalidLayoutRefusal, nil)
+            }
+            layout = Self.optionalLayout(command.args)
+        } else {
+            layout = nil
+        }
 
         guard let broker = officeAgentBroker(command.sessionId) else {
             return sendResult(command.sessionId, command.commandId, false, Self.hostGoneRefusal, nil)
@@ -893,6 +917,9 @@ struct OfficeCommandConsumer {
         + "\(officeSlideMaxIndex))."
     private static let requiredAtRefusal = "`slides add_slide`'s `at` must be a positive 1-based "
         + "position, at most \(officeSlideMaxIndex) — omit it entirely to append at the end."
+    private static let invalidLayoutRefusal = "`slides add_slide`'s `layout` must be one of the "
+        + "documented layout presets (see the `slides` tool description) — omit it entirely to use "
+        + "the default layout."
     private static let requiredSetTextAttributeRefusal =
         "`slides set_text` needs at least one of `title`, `body` — an absent key means \"leave "
         + "alone,\" so a call naming neither would do nothing."
@@ -917,6 +944,31 @@ struct OfficeCommandConsumer {
     /// keeps every `slide`/`at`/`to` arithmetic downstream (`$0 - 1`, the helper's own
     /// `slide < partCount` bound) total by construction.
     static let officeSlideMaxIndex = 10_000
+
+    /// **T5 round-2 re-review (Important) — "present but undecodable" as a first-class case, for
+    /// EVERY type arm rather than just the numeric one.**
+    ///
+    /// The round-2 fix for `add_slide`'s silent append was gated on `if case .number?`, which closed
+    /// exactly one arm: `at:"3"` (a STRING) still walked past it into "absent" and appended
+    /// silently — `ok=true`, no position, the model told it succeeded. The same collapse is
+    /// structural for every OPTIONAL operand, because every decoder in this file answers a wrong
+    /// TYPE and an ABSENT key with the same `nil`.
+    ///
+    /// It is daemon-unreachable — zod refuses a string `at` — **and that is precisely the reasoning
+    /// this fix round has now condemned twice.** The app-side guard exists because the daemon is not
+    /// the only possible producer of a `panel_command`: `args` is `z.record(z.string(),
+    /// z.unknown())` with only a byte cap, so nothing between a tool's own schema and this file
+    /// constrains a value at all. A guard whose stated threat model is "not only the daemon" that
+    /// then only defends the daemon's own shapes is not a guard.
+    ///
+    /// `.null` counts as ABSENT, deliberately: an explicit JSON null is how a caller says "not
+    /// provided," and refusing it would make `{"at": null}` behave differently from omitting `at`
+    /// for no reason a caller could predict.
+    private static func isPresent(_ args: [String: SessionEvent.JSONValue]?, _ key: String) -> Bool {
+        guard let value = args?[key] else { return false }
+        if case .null = value { return false }
+        return true
+    }
 
     private static func oneBasedIndex(_ args: [String: SessionEvent.JSONValue]?, _ key: String) -> Int? {
         guard case .number(let n)? = args?[key], n >= 1, n <= Double(officeSlideMaxIndex),
