@@ -2336,6 +2336,13 @@ final class LOKBridge: OfficeDocumentBridge {
     /// operation than a cell selection move, live-measured to need more than 4 attempts at least
     /// once across this task's own repeated runs.
     private static let sheetsManageVerificationAttempts = 20
+    /// office-agent-tools T6 — `slidesReorderOnDedicatedThread`'s own verification budget. A
+    /// dedicated constant, not a reuse of `sheetsManageVerificationAttempts`, per that constant's
+    /// own header: each structural-mutation call site earns its own independently-sized budget so
+    /// raising one can never silently loosen another. Started at the same value (20) as its closest
+    /// analogue (a structural, non-per-cell document mutation) since this call site has not yet
+    /// earned its own independently-measured number across repeated live runs.
+    private static let slidesManageVerificationAttempts = 20
 
     /// Splits `getTextSelection`'s own TSV shape (rows joined by `"\n"`, cells within a row joined by
     /// `"\t"`) into a grid — the ONE place both `sheetsInfo` and `sheetsRead` turn that raw string into
@@ -3752,14 +3759,110 @@ final class LOKBridge: OfficeDocumentBridge {
             }
             guard partCount > 1 else { throw SaveError.lastSlide(docId: docId) }
         }
-        if op == .reorder, let slide {
+        if op == .reorder, let slide, let to {
             guard slide >= 0, slide < partCount else {
                 throw SaveError.slideNotFound(docId: docId, slide: slide, slideCount: partCount)
             }
+            // Reuses `.slideNotFound` for an out-of-range `to` too — its own message text ("no slide
+            // N in docId — this presentation has M slides") is neutral about WHICH operand supplied
+            // N, so it reads correctly for either.
+            guard to >= 0, to < partCount else {
+                throw SaveError.slideNotFound(docId: docId, slide: to, slideCount: partCount)
+            }
+            return try slidesReorderOnDedicatedThread(docId: docId, doc: doc, from: slide, to: to, partCount: partCount)
         }
         throw OfficeHelperServerError.posix(
             "slides \(op.rawValue) mechanism not yet implemented (office-agent-tools T6, pending live "
-            + "research into InsertPage/DeletePage/MovePage command names)")
+            + "research into InsertPage/DeletePage command names)")
+    }
+
+    /// office-agent-tools T6, Probe B — reachability was UNDETERMINED FROM SOURCE going in:
+    /// `slides-lok-research.md` §2 "R1" found no arbitrary-index move UNO command at all — the only
+    /// primitives are selection-based `MovePageUp`/`Down`/`First`/`Last`
+    /// (`SlideSorterViewShell::ExecMovePage*`), and whether SELECTION (not LOK's own "current part")
+    /// actually follows `setPart` in a genuinely headless session — one that never shows a Slide
+    /// Sorter panel — was flagged as unknowable without a live run. **Confirmed live: it does, one
+    /// step (index 1 -> index 2), verified two ways at once — see the probe test's own header
+    /// (`OfficeSlidesCommandTests.testProbeInvestigatesWhetherReorderIsReachableHeadless`) for why
+    /// index 1, never index 0.** Multi-step (`abs(to - from) > 1`) composes the SAME primitive
+    /// repeatedly — research's own finding that `MovePageUp`/`Down` clamp safely at the document
+    /// boundary rather than erroring — but multi-step itself is NOT independently live-verified yet,
+    /// only the single-step case the probe actually ran.
+    ///
+    /// **Dispatched on the PRIMARY view, `destroyAgentViewIfAnyOnDedicatedThread` first — NOT the
+    /// agent-view isolation `selectSlidePlaceholderOnDedicatedThread`'s own READ path uses just
+    /// above/below this call, and a deliberate decision, not an oversight.**
+    /// `sheetsManageSheetOnDedicatedThread`'s own header carries the full two-round live history this
+    /// borrows wholesale rather than re-earning empirically: dispatching a STRUCTURAL, page/sheet-
+    /// list-level mutation (`.uno:Remove`) from the agent view produced a genuine 30s HANG whenever
+    /// an agent view merely existed for that doc; dispatching `.uno:Add`/`.uno:Name` from the agent
+    /// view made THEIR OWN post-dispatch verification never converge at all across repeated isolated
+    /// reruns, full budget burned every time. `MovePage*` is implemented on `SlideSorterViewShell` —
+    /// the SAME structural, view-shell-entangled class as those three commands, arguably more so —
+    /// so this starts from the already-proven-safe shape rather than re-discovering the hang live.
+    /// **Sheets' own disclosed residual carries over unchanged, not closed here either**: primary-
+    /// view `setPart` can move an ADOPTED document's own visible primary-view slide selection. See
+    /// that function's own header and task-4-report.md's own accounting for the full story.
+    ///
+    /// **Verification is CONTENT-based (the placeholder TITLE text at `from`/`to`), never
+    /// `getPartName`** (research's own documented trap, §7: for a never-renamed page, `getPartName`
+    /// recomputes `"Slide N"` positionally on EVERY call, so a no-op and a real reorder can read back
+    /// identically) **and never `getPartInfo`'s `hash` field either, though the controller's own
+    /// resume message named that specific mechanism — a disclosed substitution, not a silent one.**
+    /// §7 also states neither of LOK's two in-session identity primitives (`getPartHash`'s raw
+    /// pointer, `getPartInfo.hash`'s `GetUniqueID` counter) "survives save+reload" — fatal for this
+    /// TASK's own non-negotiable proof obligation (the two-part discriminator through save+reopen
+    /// every write verb needs), so whatever verified this probe would have to be thrown away and
+    /// rebuilt as content-based the moment a real save+reopen drill exists for `reorder` anyway.
+    /// Title text already IS this bridge's own proven, reload-durable content primitive (Probe A) —
+    /// reusing it here is not a new mechanism, just the existing one applied one level up. Also
+    /// avoids adding `getPartInfo` as new wire surface for what would otherwise be a probe-only read.
+    private func slidesReorderOnDedicatedThread(docId: String, doc: OpenDocument, from: Int, to: Int,
+                                                 partCount: Int) throws -> Int {
+        if from == to { return partCount } // no-op — nothing to move, nothing to verify
+
+        func titleAt(_ part: Int) throws -> String? {
+            guard try selectSlidePlaceholderOnDedicatedThread(docId: docId, slide: part, tabCount: 1) != nil else {
+                return nil
+            }
+            guard let agentViewId = documents[docId]?.agentViewId else { throw SaveError.noAgentView(docId) }
+            return readSelectedShapeTextOnDedicatedThread(doc, agentViewId: agentViewId, part: part)
+        }
+        let movingTitle = try titleAt(from)
+
+        destroyAgentViewIfAnyOnDedicatedThread(doc, docId: docId)
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(from))
+        pumpDedicatedThreadForPendingDispatch(doc, viewId: doc.viewId, part: from)
+
+        let steps = to - from
+        let command = steps > 0 ? ".uno:MovePageDown" : ".uno:MovePageUp"
+        for _ in 0..<abs(steps) {
+            postUnoCommandOnDedicatedThread(doc, command, [:], notifyWhenFinished: true)
+            pumpDedicatedThreadForPendingDispatch(doc, viewId: doc.viewId, part: from)
+        }
+
+        func verified() throws -> Bool {
+            let newPartCount = Int(doc.handle.pointee.pClass.pointee.getParts?(doc.handle) ?? 0)
+            guard newPartCount == partCount else { return false }
+            return try titleAt(to) == movingTitle
+        }
+        var ok = try verified()
+        var attempts = 1
+        while !ok, attempts < Self.slidesManageVerificationAttempts {
+            pumpDedicatedThreadForPendingDispatch(doc, viewId: doc.viewId, part: to)
+            ok = try verified()
+            attempts += 1
+        }
+        if attempts > 1 {
+            FileHandle.standardError.write(Data(
+                "[LOKBridge slides] reorder needed \(attempts) attempt(s) before verification succeeded (or the budget was exhausted)\n".utf8))
+        }
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        guard ok else {
+            throw SaveError.writeVerificationFailed(docId: docId, address: "reorder(\(from + 1) -> \(to + 1))")
+        }
+        return partCount
     }
 
     /// office-agent-tools T4 — the shared JSON-args UNO dispatch this task's own three new sheet-

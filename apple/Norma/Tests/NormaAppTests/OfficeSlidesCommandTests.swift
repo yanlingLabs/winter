@@ -170,6 +170,83 @@ final class OfficeSlidesCommandTests: XCTestCase {
         XCTAssertTrue(readText.contains("second bullet"), readText)
     }
 
+    // MARK: - Probe B live drill — is `reorder` reachable at all in a headless session?
+
+    /// office-agent-tools T6, Probe B — `slides-lok-research.md` §2's own "R1": no arbitrary-index
+    /// move UNO command exists at all; the only primitives are selection-based
+    /// `MovePageUp`/`Down`/`First`/`Last`, and whether headless `setPart` drives that selection at
+    /// all (there is no Slide Sorter panel to show, headless) was flagged as undeterminable from
+    /// source — "the single biggest risk to `reorder` being implementable at this pin. Probe it
+    /// FIRST, before building anything on top of it."
+    ///
+    /// Deliberately targets slide 2 (index 1), never slide 1 (index 0): a freshly-opened document's
+    /// own DEFAULT selection is plausibly page 0, so a move that happened to target index 0 could
+    /// "succeed" for a reason unrelated to `setPart` actually driving `MovePage*`'s own selection —
+    /// indistinguishable from a lucky no-op. A move targeting index 1 cannot be explained by a stale
+    /// default selection left over from document load.
+    ///
+    /// The three-position readout (not just "did slide 2 change") answers reachability AND the
+    /// `setPart`-drives-selection question in the SAME run: if the WRONG page had moved instead
+    /// (selection did not follow `setPart`), this would show up as a violated expectation at a
+    /// DIFFERENT index than the one predicted below, not merely as "nothing changed."
+    ///
+    /// Reads via `independentClient` — a raw `OfficeHelperClient`, never adopted into any
+    /// `OfficeRuntime` — mirroring the resume message's own "probes run on harness-opened disposable
+    /// fixtures, agent view only, never adopted" instruction.
+    func testProbeInvestigatesWhetherReorderIsReachableHeadless() async throws {
+        try requireLiveEngine()
+        let path = try makeWritableCopy(of: "three-slide.odp")
+        let gatePath = try makeWritableCopy(of: "gate.odp")
+        let stateDir = makeScratchDirectory()
+        let host = makeLiveHost(stateDir: stateDir, dirs: [
+            SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true),
+            SessionDirEntry(path: (gatePath as NSString).deletingLastPathComponent, locked: true),
+        ])
+        await host.directory.refresh()
+
+        // `officeHelperSupervisor.client` is nil until something has driven a command through the
+        // full stack at least once (every existing use of this raw client across both command-test
+        // files does the same priming send first — this is the established house pattern, not a
+        // probe-specific workaround). Primes against `gate.odp`, a throwaway, UNRELATED single-slide
+        // fixture — never `three-slide.odp` — so the probe's own document is never touched by the
+        // broker/runtime at all, only by the raw client below, start to finish.
+        let primed = await send(command("office.slides.info", args: ["path": gatePath], sessionId: "S1",
+                                        commandId: "pcmd_prime"), through: host)
+        XCTAssertTrue(primed.ok, "\(primed)")
+
+        guard let client = host.officeHelperSupervisor?.client else {
+            return XCTFail("no live client for the probe")
+        }
+        let docId = "slides-reorder-probe"
+        _ = try await client.open(docId: docId, path: path)
+
+        // Baseline — all three, in original order, ground-truthed against the fixture's own content.
+        let before0 = try await client.slidesRead(docId: docId, slide: 0)
+        let before1 = try await client.slidesRead(docId: docId, slide: 1)
+        let before2 = try await client.slidesRead(docId: docId, slide: 2)
+        XCTAssertEqual(before0.title, "Norma T6 Slide One")
+        XCTAssertEqual(before1.title, "Norma T6 Slide Two")
+        XCTAssertEqual(before2.title, "Norma T6 Slide Three")
+
+        // Index 1 -> index 2: one MovePageDown-equivalent step.
+        let count = try await client.slidesManagePage(docId: docId, op: .reorder, slide: 1, at: nil, to: 2, layout: nil)
+        XCTAssertEqual(count, 3, "reorder must never change the slide count")
+
+        let after0 = try await client.slidesRead(docId: docId, slide: 0)
+        let after1 = try await client.slidesRead(docId: docId, slide: 1)
+        let after2 = try await client.slidesRead(docId: docId, slide: 2)
+
+        XCTAssertEqual(after0.title, "Norma T6 Slide One",
+                       "index 0 must be untouched by a move that targeted index 1 — if THIS fails instead of "
+                           + "index 1/2, setPart did not scope the move the way this call assumed")
+        XCTAssertEqual(after1.title, "Norma T6 Slide Three",
+                       "the content that was at index 2 must have shifted up to index 1")
+        XCTAssertEqual(after2.title, "Norma T6 Slide Two",
+                       "the slide this call targeted (index 1) must now be at index 2")
+
+        try await client.close(docId: docId)
+    }
+
     /// **The two-part discriminator, through save+reopen** — task-6-brief.md's own non-negotiable
     /// proof shape, and the exact gap Stage B's own T4 shipped a wrong-part edit before inventing:
     /// `set_text` on slide 2 must change slide 2 AND leave slides 1/3 untouched, proven from the
