@@ -1,15 +1,17 @@
 import Foundation
 import NormaProtocol
 
-/// office-agent-tools T1/T3 (task-1-brief.md/task-3-brief.md; design
+/// office-agent-tools T1/T3/T4/T5/T6 (task-1/3/4/5/6-brief.md; design
 /// `docs/superpowers/specs/2026-08-22-office-agent-tools-design.md` §1, §2, §3, §6) — the office half
 /// of the `panel_command` bridge B2 built for the browser tool (`PanelCommandConsumer.swift`'s own
 /// header). T1 shipped this as a ROUTING SHELL where every verb answered a synchronous "not
-/// implemented yet" refusal; T3 gives `sheets`' two READ verbs (`info`/`read`) real behaviour — the
-/// FIRST verbs this file ever actually performs. Every other verb (`sheets`' write half, all of
-/// `slides`/`docs`) is UNCHANGED from T1: still routed to `Self.refusal(for:)`, still synchronous,
-/// still answered on this file's own single `sendResult` call — see that function's own doc, below,
-/// for why nothing about its shape needed to change for two verbs to stop using it.
+/// implemented yet" refusal; T3 gave `sheets`' two READ verbs (`info`/`read`) real behaviour — the
+/// FIRST verbs this file ever actually performed. T4/T5 gave `sheets`' whole write half (`set`,
+/// resize, manage-sheet, `format`) the same; T6 gives every `slides` verb (`info`/`read`/`set_text`/
+/// `add_slide`/`delete_slide`/`reorder`) the same. `docs` is the ONLY kind still on T1's own
+/// synchronous refusal shell — still routed to `Self.refusal(for:)`, still answered on this file's
+/// own single `sendResult` call — see that function's own doc, below, for why nothing about its shape
+/// needed to change for every other verb to stop using it.
 ///
 /// ## Why T1's "no `Call` latch" reasoning still holds for two ASYNCHRONOUS verbs
 ///

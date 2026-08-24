@@ -449,6 +449,18 @@ final class LOKBridge: OfficeDocumentBridge {
         /// `ScDocFunc::RenameTable`/`CreateValidTabName`'s own behavior on a collision is a silent
         /// no-op or a silently ALTERED name, neither of which is an honest way to refuse.
         case duplicateSheetName(docId: String, name: String)
+        /// office-agent-tools T6 — `slidesInfo`/`slidesRead`/`slidesSetText`/`slidesManagePage`
+        /// requested for a document that is not a presentation. Mirrors `.notSpreadsheet` exactly —
+        /// composed entirely from this bridge's own words, never LOK-thrown text.
+        case notPresentation(docId: String, kind: OfficeDocumentKind)
+        /// office-agent-tools T6 — `slidesRead`/`slidesSetText`/`slidesManagePage`'s `slide` named an
+        /// index this presentation does not have. `slideCount` is the real, current count — carried
+        /// so the caller can build "no slide N — this presentation has M slides" without a second
+        /// round trip, mirroring `.sheetNotFound`'s identical purpose.
+        case slideNotFound(docId: String, slide: Int, slideCount: Int)
+        /// office-agent-tools T6 — `delete_slide` named the presentation's ONLY remaining slide.
+        /// Mirrors `.lastSheet` exactly — checked BEFORE dispatching any UNO command.
+        case lastSlide(docId: String)
         var description: String {
             switch self {
             case .docNotOpen(let docId): return "save requested for a docId that is not open: \(docId)"
@@ -506,6 +518,20 @@ final class LOKBridge: OfficeDocumentBridge {
                 return "\(docId) has only one sheet left — a workbook needs at least one; refusing to delete it"
             case .duplicateSheetName(let docId, let name):
                 return "a sheet named \"\(name)\" already exists in \(docId)"
+            case .notPresentation(let docId, let kind):
+                let noun: String
+                switch kind {
+                case .text: noun = "a text document"
+                case .spreadsheet: noun = "a spreadsheet"
+                case .presentation: noun = "a presentation" // unreachable — this case IS the accepted kind
+                case .drawing: noun = "a drawing"
+                case .other: noun = "not a recognized office document"
+                }
+                return "the `slides` tool only works on presentations, but \(docId) is \(noun)"
+            case .slideNotFound(let docId, let slide, let slideCount):
+                return "no slide \(slide + 1) in \(docId) — this presentation has \(slideCount) slide\(slideCount == 1 ? "" : "s")"
+            case .lastSlide(let docId):
+                return "\(docId) has only one slide left — a presentation needs at least one; refusing to delete it"
             }
         }
     }
@@ -956,6 +982,31 @@ final class LOKBridge: OfficeDocumentBridge {
                                                     bold: bold, italic: italic, numberFormat: numberFormat,
                                                     align: align, width: width)
         }
+    }
+
+    // MARK: - office-agent-tools T6: slides
+    //
+    // CHECKPOINT STUB, not the real mechanism — mirrors Task 1's own precedent for this exact
+    // situation ("T1 builds only the wire and a routing shell that refuses every verb... T3 gives
+    // sheets' two READ verbs real behaviour"). The wire/protocol/dispatch/consumer plumbing above
+    // this file is real and complete; ONLY the LOK mechanism itself is pending live-research-informed
+    // implementation (the two hazard classes this bridge has already been burned by once each:
+    // a missing/malformed UNO arg opening a headless modal, and a guessed-wrong command name silently
+    // no-op'ing — neither is worth risking on an UN-researched command name). Every call below throws
+    // honestly rather than guessing.
+    func slidesInfo(docId: String) throws -> [OfficeSlideInfo] {
+        try thread.sync { try self.slidesInfoOnDedicatedThread(docId: docId) }
+    }
+    func slidesRead(docId: String, slide: Int) throws -> (title: String?, body: String?) {
+        try thread.sync { try self.slidesReadOnDedicatedThread(docId: docId, slide: slide) }
+    }
+    func slidesSetText(docId: String, slide: Int, title: String?, body: String?) throws -> [String] {
+        try thread.sync { try self.slidesSetTextOnDedicatedThread(docId: docId, slide: slide, title: title, body: body) }
+    }
+    func slidesManagePage(docId: String, op: OfficeSlidesManagePageOp, slide: Int?, at: Int?, to: Int?,
+                          layout: OfficeSlidesLayoutPreset?) throws -> Int {
+        try thread.sync { try self.slidesManagePageOnDedicatedThread(docId: docId, op: op, slide: slide, at: at,
+                                                                      to: to, layout: layout) }
     }
 
     // MARK: - Office Stage B Task 10 — the CFB release blocker
@@ -3394,6 +3445,86 @@ final class LOKBridge: OfficeDocumentBridge {
         }
 
         return applied
+    }
+
+    // MARK: - office-agent-tools T6: slides
+    //
+    // `slidesInfoOnDedicatedThread` is REAL — `getParts`/`getPartName` are the identical, already-
+    // proven primitives `sheetNamesOnDedicatedThread` rides (LOK's part model is shared machinery
+    // across Calc/Impress; nothing here is Impress-specific or newly risky). `layout` reports `nil`
+    // for every slide, unconditionally — no live-confirmed query for an Impress slide's own layout
+    // was found; see `OfficeSlideInfo`'s own header for the fail-closed posture this represents, and
+    // this repo's live-research findings for what was actually tried before landing here. The other
+    // three methods are honest placeholders, not guesses: `slidesRead`/`slidesSetText` need a proven
+    // placeholder-text mechanism, `slidesManagePage` needs proven `.uno:` command names, and this
+    // bridge's own house rule (task-4/5's own hazard classes: a missing/malformed arg opening a
+    // headless modal, or a guessed-wrong command name silently no-op'ing) is not worth risking on
+    // either without a live drill first.
+
+    private func slidesInfoOnDedicatedThread(docId: String) throws -> [OfficeSlideInfo] {
+        guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        guard doc.kind == .presentation else { throw SaveError.notPresentation(docId: docId, kind: doc.kind) }
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+
+        let partCount = Int(doc.handle.pointee.pClass.pointee.getParts?(doc.handle) ?? 0)
+        var slides: [OfficeSlideInfo] = []
+        slides.reserveCapacity(partCount)
+        for part in 0..<partCount {
+            let name: String
+            if let cName = doc.handle.pointee.pClass.pointee.getPartName?(doc.handle, Int32(part)) {
+                defer { free(cName) }
+                name = String(cString: cName)
+            } else {
+                name = "Slide \(part + 1)" // defensive fallback — getPartName should not fail for a real part index
+            }
+            slides.append(OfficeSlideInfo(name: name, layout: nil))
+        }
+        return slides
+    }
+
+    private func slidesReadOnDedicatedThread(docId: String, slide: Int) throws -> (title: String?, body: String?) {
+        guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        guard doc.kind == .presentation else { throw SaveError.notPresentation(docId: docId, kind: doc.kind) }
+        let partCount = Int(doc.handle.pointee.pClass.pointee.getParts?(doc.handle) ?? 0)
+        guard slide >= 0, slide < partCount else {
+            throw SaveError.slideNotFound(docId: docId, slide: slide, slideCount: partCount)
+        }
+        throw OfficeHelperServerError.posix(
+            "slides read mechanism not yet implemented (office-agent-tools T6, pending live research "
+            + "into placeholder text access)")
+    }
+
+    private func slidesSetTextOnDedicatedThread(docId: String, slide: Int, title: String?, body: String?) throws -> [String] {
+        guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        guard doc.kind == .presentation else { throw SaveError.notPresentation(docId: docId, kind: doc.kind) }
+        let partCount = Int(doc.handle.pointee.pClass.pointee.getParts?(doc.handle) ?? 0)
+        guard slide >= 0, slide < partCount else {
+            throw SaveError.slideNotFound(docId: docId, slide: slide, slideCount: partCount)
+        }
+        throw OfficeHelperServerError.posix(
+            "slides set_text mechanism not yet implemented (office-agent-tools T6, pending live research "
+            + "into placeholder text access)")
+    }
+
+    private func slidesManagePageOnDedicatedThread(docId: String, op: OfficeSlidesManagePageOp, slide: Int?, at: Int?,
+                                                    to: Int?, layout: OfficeSlidesLayoutPreset?) throws -> Int {
+        guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        guard doc.kind == .presentation else { throw SaveError.notPresentation(docId: docId, kind: doc.kind) }
+        let partCount = Int(doc.handle.pointee.pClass.pointee.getParts?(doc.handle) ?? 0)
+        if op == .delete, let slide {
+            guard slide >= 0, slide < partCount else {
+                throw SaveError.slideNotFound(docId: docId, slide: slide, slideCount: partCount)
+            }
+            guard partCount > 1 else { throw SaveError.lastSlide(docId: docId) }
+        }
+        if op == .reorder, let slide {
+            guard slide >= 0, slide < partCount else {
+                throw SaveError.slideNotFound(docId: docId, slide: slide, slideCount: partCount)
+            }
+        }
+        throw OfficeHelperServerError.posix(
+            "slides \(op.rawValue) mechanism not yet implemented (office-agent-tools T6, pending live "
+            + "research into InsertPage/DeletePage/MovePage command names)")
     }
 
     /// office-agent-tools T4 — the shared JSON-args UNO dispatch this task's own three new sheet-
