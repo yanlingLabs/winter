@@ -562,7 +562,13 @@ final class LOKBridge: OfficeDocumentBridge {
             case .lastSlide(let docId):
                 return "\(docId) has only one slide left — a presentation needs at least one; refusing to delete it"
             case .slidePlaceholderNotFound(let docId, let slide, let field):
-                return "slide \(slide + 1) in \(docId) has no \(field) placeholder — nothing was written"
+                // Trailing period deliberate, unlike this file's other descriptions (fix round 1,
+                // review F-0): `handleSlidesSetText` concatenates this directly with a lifecycle
+                // sentence starting " If an earlier attribute…" when more than one field was named —
+                // without terminal punctuation here the composed string read "nothing was written If
+                // an earlier attribute…", a run-on the reviewer's own live reproduction quoted
+                // verbatim as evidence nobody had read the composed string end-to-end.
+                return "slide \(slide + 1) in \(docId) has no \(field) placeholder — nothing was written."
             }
         }
     }
@@ -3740,6 +3746,35 @@ final class LOKBridge: OfficeDocumentBridge {
         return (title: title, body: body)
     }
 
+    /// office-agent-tools T6 fix round 1 (review F-0, **Critical**) — the reviewer reproduced live:
+    /// `add_slide layout:"title_only"` then `set_text title:… body:…` wrote the title, refused on the
+    /// missing body placeholder, and the refusal's own leading clause read "…nothing was written" —
+    /// flatly false, since the title demonstrably WAS, `read` confirmed it, and the adopted tab was
+    /// left dirty with an edit the caller never asked to keep, refusing every later write until the
+    /// human intervened. Ruling 1 makes this reachable with no pre-check available to the agent: a
+    /// slide's layout cannot be read back, so "the agent should have checked first" is not a defence.
+    ///
+    /// **Fix: two passes, not one.** Pass 1 verifies EVERY named field's placeholder exists —
+    /// position, confirm, move on, write NOTHING — before pass 2 writes to any of them. All-or-
+    /// nothing, decided before the first keystroke, mirroring T4's own `unsupportedFormulaCharacter`
+    /// pure pre-validation (`sheetsSetOnDedicatedThread`'s sibling path) and this file's own
+    /// `slidesManagePageOnDedicatedThread` guards (every refusal there also runs before any dispatch).
+    /// This closes the reviewer's exact one-call reproduction: a `title_only` slide now refuses
+    /// on pass 1 (no body placeholder) with `title` untouched, "nothing was written" true by
+    /// construction because pass 1 never reaches `writeSelectedShapeTextOnDedicatedThread` at all.
+    ///
+    /// **The residual this does NOT close, and does not pretend to**: pass 2 still re-positions per
+    /// field (a placeholder proved to exist a moment ago in pass 1 still needs a fresh Tab-cycle to
+    /// reach it in pass 2 — selection is not carried between the two passes), and Tab-cycling is this
+    /// file's own established flake class (`goToCellVerificationAttempts`, T3's own finding). So a
+    /// transient positioning flake in pass 2 — AFTER pass 1 proved existence and AFTER an earlier
+    /// field in this SAME call already wrote — remains structurally possible. `applied` is still
+    /// tracked through pass 2 for exactly this reason: the moment a pass-2 positioning failure lands
+    /// with `applied` non-empty, it is wrapped in `.partialSetFailure`, mirroring
+    /// `sheetsSetOnDedicatedThread`'s own identical `index > 0` wrapping for the SAME root cause (a
+    /// per-field "nothing was written" description is field-scoped truth, not call-scoped truth, the
+    /// instant an earlier field in this SAME call already applied) — never left to reach the caller
+    /// as a bare `slidePlaceholderNotFound` whose own text would once again contradict reality.
     private func slidesSetTextOnDedicatedThread(docId: String, slide: Int, title: String?, body: String?) throws -> [String] {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
         guard doc.kind == .presentation else { throw SaveError.notPresentation(docId: docId, kind: doc.kind) }
@@ -3748,26 +3783,58 @@ final class LOKBridge: OfficeDocumentBridge {
             throw SaveError.slideNotFound(docId: docId, slide: slide, slideCount: partCount)
         }
 
-        var applied: [String] = []
-        // office-agent-tools T6 write-verb pattern, mirroring `writeOneCellOnDedicatedThread`'s own
-        // "position, verify, type, re-verify" shape: a slide with NO placeholder for the requested
-        // field is a REFUSAL, not a silent no-op — spec's own "refuses naming the reason, rather
-        // than inventing one" contract for `set_text`.
-        if let title {
+        // Pass 1 — existence only, nothing written. A slide missing EITHER named placeholder
+        // refuses here, before pass 2 ever runs, so "nothing was written" stays true for every
+        // refusal this pass can produce.
+        if title != nil {
             guard try selectSlidePlaceholderOnDedicatedThread(docId: docId, slide: slide, tabCount: 1) != nil else {
                 throw SaveError.slidePlaceholderNotFound(docId: docId, slide: slide, field: "title")
             }
-            guard let agentViewId = documents[docId]?.agentViewId else { throw SaveError.noAgentView(docId) }
-            writeSelectedShapeTextOnDedicatedThread(doc, agentViewId: agentViewId, part: slide, text: title)
-            applied.append("title")
         }
-        if let body {
+        if body != nil {
             guard try selectSlidePlaceholderOnDedicatedThread(docId: docId, slide: slide, tabCount: 2) != nil else {
                 throw SaveError.slidePlaceholderNotFound(docId: docId, slide: slide, field: "body")
             }
+        }
+
+        // Pass 2 — both named placeholders are now KNOWN to exist; write to them.
+        func writeField(tabCount: Int, text: String, fieldName: String) throws {
+            guard try selectSlidePlaceholderOnDedicatedThread(docId: docId, slide: slide, tabCount: tabCount) != nil else {
+                throw SaveError.slidePlaceholderNotFound(docId: docId, slide: slide, field: fieldName)
+            }
             guard let agentViewId = documents[docId]?.agentViewId else { throw SaveError.noAgentView(docId) }
-            writeSelectedShapeTextOnDedicatedThread(doc, agentViewId: agentViewId, part: slide, text: body)
-            applied.append("body")
+            writeSelectedShapeTextOnDedicatedThread(doc, agentViewId: agentViewId, part: slide, text: text)
+        }
+        var applied: [String] = []
+        if let title {
+            do {
+                try writeField(tabCount: 1, text: title, fieldName: "title")
+                applied.append("title")
+            } catch let error as SaveError {
+                guard applied.isEmpty else {
+                    throw SaveError.partialSetFailure(reason:
+                        "title failed after \(applied.joined(separator: ", ")) in this SAME set_text "
+                        + "call already applied: \(error.description) Note: \"nothing was written\" "
+                        + "above describes title alone, not the whole call — "
+                        + "\(applied.joined(separator: ", ")) already landed.")
+                }
+                throw error
+            }
+        }
+        if let body {
+            do {
+                try writeField(tabCount: 2, text: body, fieldName: "body")
+                applied.append("body")
+            } catch let error as SaveError {
+                guard applied.isEmpty else {
+                    throw SaveError.partialSetFailure(reason:
+                        "body failed after \(applied.joined(separator: ", ")) in this SAME set_text "
+                        + "call already applied: \(error.description) Note: \"nothing was written\" "
+                        + "above describes body alone, not the whole call — "
+                        + "\(applied.joined(separator: ", ")) already landed.")
+                }
+                throw error
+            }
         }
         doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
         return applied

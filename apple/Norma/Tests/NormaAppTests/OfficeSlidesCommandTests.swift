@@ -132,6 +132,61 @@ final class OfficeSlidesCommandTests: XCTestCase {
         return sent
     }
 
+    // MARK: - F-0 regression (fix round 1, Critical) — set_text no longer partially applies
+
+    /// **The reviewer's own live reproduction, replayed as a permanent regression test.**
+    /// `add_slide layout:"title_only"` then `set_text title:… body:…` on that new slide used to
+    /// write the title, refuse on the missing body placeholder, leave the adopted tab dirty, and
+    /// its own refusal text led with "…nothing was written" while the title demonstrably had been.
+    /// Ruling 1 (layout is write-only, no read-back) makes this reachable with no pre-check
+    /// available to the model — `info`/`read` cannot tell it in advance that `title_only` has no
+    /// body placeholder without this exact call. `slidesSetTextOnDedicatedThread`'s two-pass fix
+    /// (verify both named placeholders exist before writing either) should refuse cleanly here,
+    /// before any keystroke, leaving the new slide's title untouched AND the adopted document
+    /// clean enough for the NEXT write (on a different slide) to succeed — the wedge's own
+    /// signature was exactly that every later write got refused for "unsaved changes in an open
+    /// tab" until the human intervened.
+    func testLiveSetTextRefusesCleanlyRatherThanPartiallyApplyingWhenOnlyOnePlaceholderExists() async throws {
+        try requireLiveEngine()
+        let path = try makeWritableCopy(of: "three-slide.odp")
+        let stateDir = makeScratchDirectory()
+        let host = makeLiveHost(stateDir: stateDir, dirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)])
+        await host.directory.refresh()
+
+        let runtime = host.officeRuntime(for: "S1")
+        runtime.open(path)
+        let opened = await waitUntilLive { runtime.stateSnapshot.documents[path] != nil || runtime.stateSnapshot.phase == .failed }
+        XCTAssertTrue(opened, "setup: three-slide.odp must open cleanly")
+
+        let addResult = await send(command("office.slides.add_slide",
+                                           args: ["path": path, "at": 4, "layout": "title_only"],
+                                           sessionId: "S1", commandId: "pcmd_f0_add"), through: host)
+        XCTAssertTrue(addResult.ok, "\(addResult)")
+
+        // The reviewer's exact repro: title AND body on a slide with no body placeholder.
+        let setResult = await send(command("office.slides.set_text",
+                                           args: ["path": path, "slide": 4, "title": "PROBETITLE", "body": "PROBEBODY"],
+                                           sessionId: "S1", commandId: "pcmd_f0_set"), through: host)
+        XCTAssertFalse(setResult.ok, "a slide with no body placeholder must refuse this call")
+        let refusalText = setResult.result ?? ""
+        XCTAssertFalse(refusalText.contains("nothing was written If"),
+                       "the run-on the reviewer quoted verbatim must be gone: \(refusalText)")
+        XCTAssertFalse(refusalText.lowercased().contains("probetitle"),
+                       "a refusal must never claim success by naming the value that was NOT written: \(refusalText)")
+
+        // The title must NOT have been written — the whole point of pre-validation.
+        let readResult = await send(command("office.slides.read", args: ["path": path, "slide": 4],
+                                            sessionId: "S1", commandId: "pcmd_f0_read"), through: host)
+        XCTAssertTrue(readResult.ok, "\(readResult)")
+        XCTAssertFalse((readResult.result ?? "").contains("PROBETITLE"),
+                       "title must be untouched after a refused set_text: \(readResult)")
+
+        // The document must NOT be wedged — a write to a DIFFERENT slide must still succeed.
+        let laterResult = await send(command("office.slides.set_text", args: ["path": path, "slide": 1, "title": "LATER WRITE SUCCEEDS"],
+                                             sessionId: "S1", commandId: "pcmd_f0_later"), through: host)
+        XCTAssertTrue(laterResult.ok, "the adopted document must not be left dirty by the refused call: \(laterResult)")
+    }
+
     // MARK: - Refusal-path live drills — pre-checks that exist but had no live confirmation yet
 
     /// `notPresentation` (a slides verb on a spreadsheet), `slideNotFound` (out-of-range `slide`/`at`/
