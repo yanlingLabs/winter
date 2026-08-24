@@ -490,6 +490,15 @@ final class LOKBridge: OfficeDocumentBridge {
         /// (a different slide identity question entirely). Spec's own "refuses naming the reason,
         /// rather than inventing one" contract for `set_text`.
         case slidePlaceholderNotFound(docId: String, slide: Int, field: String)
+        /// office-agent-tools T6 fix round 2 (re-review New-1) — a structural slides verb could not
+        /// establish per-slide IDENTITY (`getPartInfo`'s `hash`) for every slide BEFORE dispatching.
+        /// Deliberately NOT `.writeVerificationFailed`: that case's own text says "wrote to … but
+        /// could not confirm", which would be a lie here — this refuses before `destroyAgentView`,
+        /// before `setPart`, before any `.uno:` dispatch, so nothing was written and the outcome is
+        /// KNOWN (unchanged), not unknown. The distinction is the same one T4's fix round drew when
+        /// it split `.unsupportedFormulaCharacter` out of `.writeVerificationFailed` for exactly this
+        /// reason (see that case's own header).
+        case slideIdentityUnavailable(docId: String, verb: String)
         var description: String {
             switch self {
             case .docNotOpen(let docId): return "save requested for a docId that is not open: \(docId)"
@@ -569,6 +578,10 @@ final class LOKBridge: OfficeDocumentBridge {
                 // an earlier attribute…", a run-on the reviewer's own live reproduction quoted
                 // verbatim as evidence nobody had read the composed string end-to-end.
                 return "slide \(slide + 1) in \(docId) has no \(field) placeholder — nothing was written."
+            case .slideIdentityUnavailable(let docId, let verb):
+                return "could not read per-slide identity from \(docId), so \(verb) could not be "
+                    + "verified — nothing was changed. The outcome is known (unchanged), not unknown; "
+                    + "retrying is safe."
             }
         }
     }
@@ -3847,9 +3860,13 @@ final class LOKBridge: OfficeDocumentBridge {
             // retry on this one call site and on no other:
             //
             // 1. **A `nil` here cannot be structural.** Pass 1 proved this exact placeholder exists,
-            //    on this same dedicated thread, within this same call — nothing can have mutated the
-            //    deck in between. So the retry can only ever absorb a transient loss; it is
-            //    structurally incapable of masking a genuine absence, which is what makes it safe
+            //    on this same dedicated thread, within this same call. **Precisely (fix round 2,
+            //    re-review New-3)**: the deck is not unmutated in between — pass 2's own title write
+            //    is a mutation, and saying otherwise overstated the premise. The claim that actually
+            //    holds, and that is all the retry needs: a TEXT write into an existing shape neither
+            //    ADDS NOR REMOVES shapes, so it cannot change whether the body placeholder exists or
+            //    how many Tab presses reach it. So the retry can only ever absorb a transient loss;
+            //    it is structurally incapable of masking a genuine absence, which is what makes it safe
             //    here and NOT safe in `read`/`info`/pass 1, where `nil` is genuinely ambiguous and a
             //    retry would tax every legitimate refusal for no information gain.
             // 2. **Re-posting is the only action the measurement leaves on the table.** The attempt
@@ -3986,9 +4003,19 @@ final class LOKBridge: OfficeDocumentBridge {
     /// a string (unlike the type-27 callback envelope's own `viewId`, which IS a string — measured
     /// separately, never assumed to generalize from one LOK JSON payload to another). Page-level
     /// fields, `hash` included, are OMITTED entirely (not merely `null`) when the page lookup
-    /// itself fails (research §3: "else `SAL_WARN`-logged and *omitted*") — a missing key here
-    /// means "could not determine right now," feeding this file's own verify-and-retry discipline,
-    /// never a crash and never a false identity match manufactured from a decode failure.
+    /// itself fails (research §3: "else `SAL_WARN`-logged and *omitted*"), so this returns `nil`
+    /// rather than crashing.
+    /// **Corrected, fix round 2 (re-review New-1)**: this comment used to claim a missing key
+    /// "feeds this file's own verify-and-retry discipline." That was FALSE at every call site, and
+    /// dangerously so — `nil` does not feed a retry, it makes the comparison VACUOUS: a permutation
+    /// of `[nil, nil, nil]` equals `[nil, nil, nil]`, so `verified()` passes on attempt 1 with
+    /// nothing having happened and the retry loop is never entered. The arc's own
+    /// description-contradicting-code class, sitting in the doc comment of the mechanism introduced
+    /// to fix a check that was blind to its own failure mode.
+    /// What is true NOW: every structural call site REFUSES BEFORE DISPATCHING on any `nil` in its
+    /// baseline (`SaveError.slideIdentityUnavailable`), so a decode failure can never be laundered
+    /// into a false identity match — see `slidesReorderOnDedicatedThread`'s own guard for why
+    /// `reorder` was the exposed one and its two siblings were not.
     private func partHashOnDedicatedThread(_ doc: OpenDocument, part: Int) -> Int? {
         guard let cInfo = doc.handle.pointee.pClass.pointee.getPartInfo?(doc.handle, Int32(part)) else {
             return nil
@@ -4070,6 +4097,25 @@ final class LOKBridge: OfficeDocumentBridge {
         for part in 0..<partCount {
             beforeHashes.append(partHashOnDedicatedThread(doc, part: part))
         }
+        // **fix round 2, re-review New-1 (Important) — the `nil == nil` false-pass, closed.**
+        // `verified()` below compares `hashesNow() == expectedHashes`. If `getPartInfo` yields `nil`
+        // for every part, a PERMUTATION of `[nil, nil, nil]` is still `[nil, nil, nil]`, so
+        // `verified()` returns true on attempt 1 with no move needing to have happened — `reorder`
+        // reports success unconditionally and the retry loop is never entered. That is precisely the
+        // silently-no-op-verb-reporting-success outcome spec ruling 3 called unacceptable, and unlike
+        // its two siblings `reorder` has no independent guard to catch it: `delete_slide` is saved by
+        // its `newPartCount == partCount - 1` count check and `add_slide` by `newSlideIsGenuinelyNew()`,
+        // but `reorder` never changes the part count at all.
+        // **Not a defect this fix round introduced** — the previous `titleAt(to) == movingTitle` had
+        // the identical hole at HIGHER reachability (a Tab-cycle `nil` is the observed flake class; a
+        // `getPartInfo` `nil` needs a page-lookup failure). It is closed here rather than inherited.
+        // Refuses BEFORE `destroyAgentViewIfAnyOnDedicatedThread`/`setPart`/any dispatch, matching
+        // this file's own refuse-before-mutating posture (`slidesManagePageOnDedicatedThread`'s
+        // guards) — so the error can honestly say nothing was changed.
+        guard !beforeHashes.contains(where: { $0 == nil }) else {
+            throw SaveError.slideIdentityUnavailable(docId: docId, verb: "reorder")
+        }
+
         var expectedHashes = beforeHashes
         let movingHash = expectedHashes.remove(at: from)
         expectedHashes.insert(movingHash, at: to)
@@ -4140,6 +4186,18 @@ final class LOKBridge: OfficeDocumentBridge {
             survivorHashes.append(partHashOnDedicatedThread(doc, part: part))
         }
 
+        // fix round 2, re-review New-1 — **for symmetry, not because this verb is exposed the way
+        // `reorder` is.** `delete_slide` already has an independent guard `reorder` lacks: the
+        // `newPartCount == partCount - 1` length check in `hashesNow()` below means an all-`nil`
+        // survivor list still has to come back at the RIGHT LENGTH, so a total no-op cannot pass.
+        // What an all-`nil` set WOULD still hide is a wrong-slide deletion (right count, wrong
+        // victim) — the exact discrimination the hash switch was made to gain. Refusing before any
+        // dispatch keeps the two structural verbs' contracts identical rather than leaving a reader
+        // to work out which one is guarded and why.
+        guard !survivorHashes.contains(where: { $0 == nil }) else {
+            throw SaveError.slideIdentityUnavailable(docId: docId, verb: "delete_slide")
+        }
+
         destroyAgentViewIfAnyOnDedicatedThread(doc, docId: docId)
         doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
         doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(slide))
@@ -4199,7 +4257,7 @@ final class LOKBridge: OfficeDocumentBridge {
     /// prior header claimed "no re-read even in principle," overstating ruling 1 into a place it does
     /// not reach — a SAVED-BYTES seal (this task's own established `content.xml` filesystem-seal
     /// technique, not a LOK API) DOES observe layout's effect, live-confirmed by
-    /// `testLiveAddSlideWithLayoutBlankStripsPlaceholdersProvenBySaveAndIndependentReopen`: `layout:
+    /// `testLiveAddSlideWithLayoutBlankStripsPlaceholdersProvenBySavedBytes`: `layout:
     /// "blank"` on a fresh slide produces a `read`ing of `title: nil` ("no title placeholder" — the
     /// placeholder was never created, distinct from an EMPTY one) where every other layout's default
     /// new-slide shape produces `title: ""` (placeholder present, empty) — the nil/empty distinction

@@ -175,6 +175,17 @@ final class OfficeSlidesCommandTests: XCTestCase {
                        "a refusal must never claim success by naming the value that was NOT written: \(refusalText)")
 
         // The title must NOT have been written — the whole point of pre-validation.
+        // **Instrument coupling, disclosed (fix round 2, re-review New-4)**: this check reads through
+        // `office.slides.read`, i.e. through `selectSlidePlaceholderOnDedicatedThread` — the same
+        // mechanism task-6-report.md §9.6 residual (1) names as able to report "(no such placeholder)"
+        // spuriously under a positioning flake. A flake here would make the NEXT assertion pass for
+        // the wrong reason (absence of "PROBETITLE" because nothing was read, not because nothing was
+        // written). Left as-is rather than papered over: the probability is low (0 transient misses in
+        // ~430 logged positionings across two loaded suite passes, plus the reviewer's own
+        // independent ~113), and this test's OTHER assertions — the refusal itself, the run-on check,
+        // and the later-write-succeeds wedge check — do not read through that mechanism at all and
+        // would still fail. Recorded so a future reader does not mistake this for an independent
+        // instrument.
         let readResult = await send(command("office.slides.read", args: ["path": path, "slide": 4],
                                             sessionId: "S1", commandId: "pcmd_f0_read"), through: host)
         XCTAssertTrue(readResult.ok, "\(readResult)")
@@ -829,7 +840,21 @@ final class OfficeSlidesCommandTests: XCTestCase {
     /// correctly, not characterizing every default-layout edge case). Using position 2 here matches
     /// the ALREADY-LIVE-PROVEN setup rather than asserting a NEW, unverified generalization about
     /// position 4's own control shape.
-    func testLiveAddSlideWithLayoutBlankStripsPlaceholdersProvenBySaveAndIndependentReopen() async throws {
+    /// **Renamed AND strengthened, fix round 2 (re-review New-2).** The old name ended
+    /// "…ProvenBySaveAndIndependentReopen" and the body never opened an independent client: the
+    /// layout evidence came entirely from `office.slides.read` on the SAME adopted session, and the
+    /// only saved-bytes assertion was a `<draw:page>` count, which says nothing about layout. The
+    /// arc's description-contradicting-code class, in a test name.
+    ///
+    /// Fixed the way the review's F-4 actually pointed: a real `presentation:class` seal on the saved
+    /// `content.xml`. That does double duty — it makes the name true, and it **decouples the drill's
+    /// layout claim from `selectSlidePlaceholderOnDedicatedThread`** (re-review New-4): the old
+    /// `(no such placeholder` assertion reads through exactly the mechanism residual (1) calls
+    /// unreliable, so a positioning flake could have produced that string spuriously and passed the
+    /// test for the wrong reason. The raw-bytes check cannot flake that way — it never touches the
+    /// Tab-cycling path at all. The `read`-based assertions are KEPT alongside it (they prove the
+    /// model-facing wording, which is its own contract), but they are no longer the only evidence.
+    func testLiveAddSlideWithLayoutBlankStripsPlaceholdersProvenBySavedBytes() async throws {
         try requireLiveEngine()
 
         // --- WITH layout:"blank" — the new slide must have NO title placeholder at all. ---
@@ -856,6 +881,16 @@ final class OfficeSlidesCommandTests: XCTestCase {
             let contentXML = try readODFEntry(atPath: path, entry: "content.xml")
             let pageCount = contentXML.components(separatedBy: "<draw:page ").count - 1
             XCTAssertEqual(pageCount, 4, "saved content.xml must show exactly 4 <draw:page> elements")
+
+            // The real layout seal (New-2): AUTOLAYOUT_BLANK must have stripped the new page's own
+            // title/outline placeholder frames in the SAVED BYTES. Page index 2 of the components
+            // split is the 2nd `<draw:page>` — the slide `at: 2` inserted. The control arm below
+            // asserts the OPPOSITE on the same index, so neither assertion can pass by construction.
+            let blankPage = contentXML.components(separatedBy: "<draw:page ")[2]
+            XCTAssertFalse(blankPage.contains("presentation:class=\"title\""),
+                           "a blank-layout slide must carry NO title placeholder frame in the saved bytes: \(blankPage.prefix(400))")
+            XCTAssertFalse(blankPage.contains("presentation:class=\"outline\""),
+                           "a blank-layout slide must carry NO outline placeholder frame in the saved bytes: \(blankPage.prefix(400))")
         }
 
         // --- CONTROL, no layout named — the new slide's title placeholder must exist, empty. ---
@@ -881,6 +916,16 @@ final class OfficeSlidesCommandTests: XCTestCase {
                            "the control (no layout named) must have a REAL title placeholder, just an empty one: \(readText)")
             XCTAssertTrue(readText.contains("title: (empty)"),
                           "the control's title placeholder must be present but empty, not absent: \(readText)")
+
+            // The control half of the layout seal (New-2) — same page index, opposite expectation.
+            // This is what makes the blank arm's two `XCTAssertFalse`es discriminating rather than
+            // vacuous: a layout-omitted insert at the SAME position demonstrably DOES write a title
+            // placeholder frame into the saved bytes, so their absence above is caused by
+            // `.uno:AssignLayout`, not by the assertion looking in the wrong place.
+            let controlXML = try readODFEntry(atPath: path, entry: "content.xml")
+            let controlPage = controlXML.components(separatedBy: "<draw:page ")[2]
+            XCTAssertTrue(controlPage.contains("presentation:class=\"title\""),
+                          "the control slide MUST carry a title placeholder frame in the saved bytes: \(controlPage.prefix(400))")
         }
     }
 
