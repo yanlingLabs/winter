@@ -544,9 +544,10 @@ public final class FakeOfficeDocumentBridge: OfficeDocumentBridge {
     }
 
     /// office-agent-tools T6 — wire-level dispatch only, same reasoning as every sheets stub above:
-    /// two synthetic slides ("Slide1"/"Slide2"), the first reporting a fixed non-nil layout, the
-    /// second `nil` (so a wire-level test can assert on BOTH shapes of the layout field without real
-    /// LOK). `fakeSlideCount`/`fakeSlideText` back `slidesRead`/`slidesSetText`/`slidesManagePage`
+    /// two synthetic slides ("Slide1"/"Slide2"), `title` reflecting whatever `slidesSetText` has set
+    /// for that slide so far in the SAME test (`nil` until then — a fresh presentation's slides have
+    /// no title placeholder text set, the ordinary case `slidesInfo`'s real conformance also reports).
+    /// `fakeSlideCount`/`fakeSlideText` back `slidesRead`/`slidesSetText`/`slidesManagePage`
     /// with real (if fake) per-slide state, deterministic and mutable across calls in one test.
     private var fakeSlideCount = 2
     private var fakeSlideTitles: [Int: String] = [:]
@@ -555,7 +556,7 @@ public final class FakeOfficeDocumentBridge: OfficeDocumentBridge {
     public func slidesInfo(docId: String) throws -> [OfficeSlideInfo] {
         lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
         guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
-        return (0..<fakeSlideCount).map { OfficeSlideInfo(name: "Slide\($0 + 1)", layout: $0 == 0 ? "title_content" : nil) }
+        return (0..<fakeSlideCount).map { OfficeSlideInfo(name: "Slide\($0 + 1)", title: fakeSlideTitles[$0]) }
     }
     public func slidesRead(docId: String, slide: Int) throws -> (title: String?, body: String?) {
         lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()

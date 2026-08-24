@@ -162,8 +162,8 @@ final class OfficeWireCodecTests: XCTestCase {
             .slidesRead(seq: 80, docId: "doc-1", slide: 0),
             .slidesRead(seq: 81, docId: "doc-1", slide: 2),
             .slidesInfoOk(seq: 82, docId: "doc-1", slides: [
-                OfficeSlideInfo(name: "Slide1", layout: "title_content"),
-                OfficeSlideInfo(name: "Slide2", layout: nil), // the fail-closed "layout unknown" sentinel
+                OfficeSlideInfo(name: "Slide1", title: "Q3 Revenue"),
+                OfficeSlideInfo(name: "Slide2", title: nil), // no title placeholder on this slide at all
             ]),
             .slidesReadOk(seq: 83, docId: "doc-1", title: "Q3 Revenue", body: "bullet one"),
             .slidesReadOk(seq: 84, docId: "doc-1", title: nil, body: ""), // no title placeholder at all vs an empty body placeholder

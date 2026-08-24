@@ -758,23 +758,27 @@ final class OfficeCommandConsumerTests: XCTestCase {
         XCTAssertFalse(driverCalled, "a missing path must refuse before the broker/driver is ever reached")
     }
 
-    func testSlidesInfoHappyPathReportsSlideNamesAndLayouts() async {
+    /// Controller ruling 2 (slides-lok-research.md §7): `name` is a POSITIONAL fallback for a
+    /// never-renamed slide, never a title — `info` must report BOTH, distinctly, never present `name`
+    /// as if it were a title. Controller ruling 1 (research §3): `info` reports NO layout at all — LOK
+    /// gives no read-back for it, ever.
+    func testSlidesInfoHappyPathReportsNameAndTitleDistinctlyAndNeverMentionsLayout() async {
         let path = makeScratchFile()
         let world = makeSheetsWorld(
             workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
             slidesInfo: { _ in
-                [OfficeSlideInfo(name: "Title Slide", layout: "title_content"),
-                 OfficeSlideInfo(name: "Slide 2", layout: nil)]
+                [OfficeSlideInfo(name: "Slide 1", title: "Q3 Revenue"),
+                 OfficeSlideInfo(name: "Slide 2", title: nil)]
             })
         world.consumer.handle(command("office.slides.info", args: ["path": path]))
         await waitUntil { !self.sent.isEmpty }
         XCTAssertEqual(sent.first?.ok, true, "\(sent)")
         let result = sent.first?.result ?? ""
-        XCTAssertTrue(result.contains("Title Slide"), result)
-        XCTAssertTrue(result.contains("title_content"), result)
+        XCTAssertTrue(result.contains("Slide 1"), result)
+        XCTAssertTrue(result.contains("Q3 Revenue"), result)
         XCTAssertTrue(result.contains("Slide 2"), result)
-        XCTAssertTrue(result.lowercased().contains("unknown"), "a nil layout must render as an honest "
-                      + "\"unknown\", never a guess: \(result)")
+        XCTAssertFalse(result.lowercased().contains("layout"), "info must never mention layout — LOK "
+                       + "gives no read-back for it at all: \(result)")
     }
 
     func testSlidesReadRefusesAMissingSlideWithoutTouchingTheBroker() async {

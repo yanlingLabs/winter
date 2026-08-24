@@ -3449,17 +3449,14 @@ final class LOKBridge: OfficeDocumentBridge {
 
     // MARK: - office-agent-tools T6: slides
     //
-    // `slidesInfoOnDedicatedThread` is REAL — `getParts`/`getPartName` are the identical, already-
-    // proven primitives `sheetNamesOnDedicatedThread` rides (LOK's part model is shared machinery
-    // across Calc/Impress; nothing here is Impress-specific or newly risky). `layout` reports `nil`
-    // for every slide, unconditionally — no live-confirmed query for an Impress slide's own layout
-    // was found; see `OfficeSlideInfo`'s own header for the fail-closed posture this represents, and
-    // this repo's live-research findings for what was actually tried before landing here. The other
-    // three methods are honest placeholders, not guesses: `slidesRead`/`slidesSetText` need a proven
-    // placeholder-text mechanism, `slidesManagePage` needs proven `.uno:` command names, and this
-    // bridge's own house rule (task-4/5's own hazard classes: a missing/malformed arg opening a
-    // headless modal, or a guessed-wrong command name silently no-op'ing) is not worth risking on
-    // either without a live drill first.
+    // `slidesInfoOnDedicatedThread`'s NAME half is REAL — `getParts`/`getPartName` are the identical,
+    // already-proven primitives `sheetNamesOnDedicatedThread` rides (LOK's part model is shared
+    // machinery across Calc/Impress; nothing here is Impress-specific or newly risky). Its TITLE half
+    // depends on the same placeholder-text mechanism `slidesRead`/`slidesSetText` need — see those
+    // methods' own headers, pending live research into placeholder text access. `layout` was removed
+    // from this bridge's own vocabulary entirely (see `OfficeSlideInfo`'s own header): LOK gives no
+    // layout read-back at all, for any slide, ever — not a gap this bridge could close with more
+    // research, a structural absence in the engine's own LOK-facing surface.
 
     private func slidesInfoOnDedicatedThread(docId: String) throws -> [OfficeSlideInfo] {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
@@ -3477,7 +3474,8 @@ final class LOKBridge: OfficeDocumentBridge {
             } else {
                 name = "Slide \(part + 1)" // defensive fallback — getPartName should not fail for a real part index
             }
-            slides.append(OfficeSlideInfo(name: name, layout: nil))
+            // TODO(T6 probe A): title text pending the shared placeholder-text mechanism.
+            slides.append(OfficeSlideInfo(name: name, title: nil))
         }
         return slides
     }

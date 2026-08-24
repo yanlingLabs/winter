@@ -10,10 +10,40 @@ import { officeTimeoutMessage } from "./sheets";
  * `slides` (office-agent-tools T6, task-6-brief.md; design
  * `docs/superpowers/specs/2026-08-22-office-agent-tools-design.md` §2 (`slides` table), §3, §4, §5) —
  * the agent's vocabulary for presentations, the SAME `panel_command` bridge `sheets` already proved
- * (T1-T5) driving LibreOfficeKit's Impress engine instead of Calc. Verbs: `info` (slide count,
- * titles, layout names — also the drivability probe, spec §1/§3), `read` (a slide's placeholder
+ * (T1-T5) driving LibreOfficeKit's Impress engine instead of Calc. Verbs: `info` (slide count, each
+ * slide's own name AND title — also the drivability probe, spec §1/§3), `read` (a slide's placeholder
  * text), `set_text` (title and/or body), `add_slide` (optional position/layout), `delete_slide`,
  * `reorder`.
+ *
+ * ## Four controller rulings, post-implementation, from `slides-lok-research.md` (2026-08-24) — the
+ * authority this file now follows, superseding this header's own earlier text where they conflict
+ *
+ * A dedicated research pass into the pinned LibreOffice source (commit `11482c8f71bc76ed6260bc03b1576a52a788ab4f`)
+ * found real, cited answers this task's first pass had to leave as open placeholders. Four rulings
+ * follow from it, adjudicated by the controller, not re-litigated here:
+ *
+ * 1. **`layout` is WRITE-ONLY.** `getPartInfo` (the only per-slide JSON LOK exposes) carries no
+ *    layout field at either of its two emission sites, and no `getCommandValues` query exposes one
+ *    either — LOK gives NO layout read-back, for any slide, ever. `add_slide`'s own `layout` operand
+ *    still *sets* one; `info` reports none, structurally, not by this tool's own choice to omit it.
+ * 2. **`info` reports `name` AND `title`; every verb targets BY INDEX ONLY, never by `name`.**
+ *    `getPartName` is NOT a title — for a never-renamed slide it is recomputed POSITIONALLY
+ *    ("Slide N") on every call, live, from the slide's current position. A model reading `name` and
+ *    mistaking it for a stable title would misidentify a slide the instant a `reorder` lands.
+ * 3. **`reorder` is PROBE-FIRST and may not exist.** No arbitrary-index move command exists in this
+ *    engine at all — only selection-based `MovePageUp`/`Down`/`First`/`Last`, whose reachability from
+ *    a headless LOK session (one that never shows a Slide Sorter panel) was undetermined from source
+ *    alone. If the live probe finds it unreachable, `reorder` is excised — verb, deadline, wire case,
+ *    fixtures — rather than shipped as a verb that silently no-ops.
+ * 4. **Three commands are BANNED BY NAME**, never dispatched even to experiment:
+ *    `.uno:RenamePage`/`RenameMasterPage` (opens a blocking modal dialog on this bridge's one
+ *    dedicated LOK thread — wedges every open office document until the app restarts, since nothing
+ *    kills a request on timeout, only on the process actually dying); `.uno:ModifyPage` (0/1/2 args
+ *    silently no-ops, a well-formed 4-arg call with a wrong-typed item is a RELEASE-BUILD crash —
+ *    `.uno:AssignLayout` sidesteps this entirely, see `LOKBridge.slidesManagePageOnDedicatedThread`'s
+ *    own header); and the phantom `InsertSlide`/`DeleteSlide`/`RenameSlide`/`MoveSlide*` menu ids that
+ *    appear verbatim in this repo's own vendored `simpress/popupmenu/page.xml` but have NO backing SFX
+ *    slot anywhere in the engine — presence in shipped UI config is not proof of dispatchability.
  *
  * ## Inherited wholesale from `sheets.ts`, not reinvented — the brief's own instruction
  *
@@ -46,30 +76,40 @@ import { officeTimeoutMessage } from "./sheets";
  * `slide`/`at`/`to` are all 1-based (matching how a human counts slides, and matching `sheets`' own
  * 1-based row numbering) — never a raw 0-based LOK part index, which the app alone translates.
  *
- * ## `info`'s "titles" — a disclosed interpretation, not spec's only reading
+ * ## `info`'s `name` vs `title` — spec §2 said "titles, layout names"; ruling 1+2 correct both nouns
  *
- * Spec §2 lists `info`'s return as "slide count, titles, layout names." This ships `info`'s per-slide
- * "title" as the slide's own PART NAME (`getPartName` — "Slide 1," or a human-renamed name), never a
- * placeholder-text read of every slide's title box: `read` is the dedicated placeholder-text verb, and
- * making `info` — the drivability probe every session should be able to call cheaply, mirroring
- * `browser tabs` — pay for a per-slide text extraction would make the cheap probe verb heavy and
- * couple its cost to how much content each slide happens to hold. This is the one design choice in
- * this task a whole-branch review may legitimately re-litigate, exactly `sheets.ts`'s own precedent
- * for a disclosed-not-pre-ratified deviation (see that file's `values`/`formulas` history).
+ * Spec §2's compressed table says `info` returns "slide count, titles, layout names." Research
+ * settled both: `info` returns `name` (positional/rename-fallback, `getPartName`) AND `title`
+ * (real placeholder text, when one exists) as two DISTINCT fields — never just "titles" — and no
+ * layout at all, ever (ruling 1). `read` remains the dedicated placeholder-text verb for a SINGLE
+ * slide; `info` now pays the same per-slide text-read cost for every slide's title in one call
+ * (unavoidable once `title` had to be real, not a name-shaped stand-in for it) — a real cost increase
+ * from the tool's original "cheap like `browser tabs`" design goal, disclosed here rather than
+ * silently absorbed.
  */
 
 // ================================================================================================
 // Operands
 // ================================================================================================
 
-/** office-agent-tools T6 — `add_slide`'s own `layout` preset. A CLOSED enum, not a free-form layout
- *  name or numeric AutoLayout id — the identical posture `sheets format`'s `numberFormat` ships
- *  (task-5-report.md §2's own precedent, ratified by the coordinator): a wrong numeric id silently
- *  no-ops or misapplies rather than refusing (the same "postUnoCommand on an unrecognized/inapplicable
- *  argument is not an error" hazard class that burned an earlier task's first guess at a command
- *  name), so a small, source-verified preset set is the safer surface than exposing LOK's own raw
- *  AutoLayout enum to a model. */
-const SlidesLayoutPreset = z.enum(["title", "title_content", "title_only", "blank", "two_content"]);
+/** office-agent-tools T6 — `add_slide`'s own `layout` preset. WRITE-ONLY (ruling 1: `info` never
+ *  reports one back — LOK has no read-back for it at all). A CLOSED enum, not a free-form layout name
+ *  or LOK's raw 35-value internal `AutoLayout` id — the identical posture `sheets format`'s
+ *  `numberFormat` ships (task-5-report.md §2's own precedent, ratified by the coordinator): a wrong
+ *  numeric id silently no-ops or misapplies rather than refusing. These 16 are not invented — they are
+ *  the exact UI-exposed subset `slides-lok-research.md` §4 cites to the vendored product's own
+ *  `simpress/popupmenu/page.xml` `SlideLayoutMenu` block (the same layouts a human sees in Impress's
+ *  own layout picker), applied via `.uno:AssignLayout`'s `WhatLayout` argument
+ *  (`OfficeSlidesLayoutPreset.autoLayoutValue` on the Swift side carries the exact integer each name
+ *  maps to — raw string values here MUST match that enum's `rawValue`s byte-for-byte, a wire string
+ *  decoded independently on both ends). */
+const SlidesLayoutPreset = z.enum([
+  "title_slide", "title_content", "title_two_content", "title_content_two_content",
+  "title_content_over_content", "title_two_content_content", "title_two_content_over_content",
+  "title_four_content", "title_only", "blank",
+  "vertical_title_vertical_content_over_vertical_content", "vertical_title_vertical_content",
+  "title_vertical_content", "title_two_vertical_content", "centered_text", "title_six_content",
+]);
 export type SlidesLayoutPreset = z.infer<typeof SlidesLayoutPreset>;
 
 const SlidesArgs = z.object({
@@ -230,10 +270,17 @@ export function registerSlidesTool(r: ToolRegistry, deps: SlidesToolDeps): void 
       "Read and edit a presentation Norma has access to (.pptx, .odp — any format the office engine "
       + "can open). Every write verb SAVES immediately — there is no separate save step, and no undo "
       + "from here (the file changes right away; a human's ⌘Z in an open tab is unaffected). "
-      + "Slides are numbered 1-based, matching how a human counts them. Pick a verb:\n"
-      + "• info — path. Slide count, each slide's own name, and its layout (when known). "
-      + "Start here: it also doubles as a check that the Mac app can actually open documents right "
-      + "now.\n"
+      + "Slides are numbered 1-based, matching how a human counts them — every verb below targets a "
+      + "slide BY THAT NUMBER ONLY, never by its name (see info's own entry for why a slide's name is "
+      + "not a stable way to refer to it). Pick a verb:\n"
+      + "• info — path. Slide count, and for each slide its own `name` and `title`, as two DISTINCT "
+      + "things: `name` is this engine's own bookkeeping label — for a slide nobody has explicitly "
+      + "renamed, it is just \"Slide 3\", recomputed from POSITION on every call, so it changes after "
+      + "a reorder and is never a reliable way to identify a slide across calls; `title` is the real "
+      + "text in the slide's own title placeholder (absent if it has none). info never reports a "
+      + "layout — the underlying engine has no way to read one back once set, only to set one (see "
+      + "add_slide). Start here: it also doubles as a check that the Mac app can actually open "
+      + "documents right now.\n"
       + "• read — path, slide. Returns the slide's title and body placeholder text (when "
       + "present).\n"
       + "• set_text — path, slide, and at least one of title/body. An ABSENT key means "
@@ -242,8 +289,14 @@ export function registerSlidesTool(r: ToolRegistry, deps: SlidesToolDeps): void 
       + "survives. A slide with no title or body placeholder to begin with refuses naming the reason, "
       + "rather than inventing one.\n"
       + "• add_slide — path, optional at (1-based position; omitted appends at the end, "
-      + "shifting nothing), optional layout (\"title\"/\"title_content\"/\"title_only\"/\"blank\"/"
-      + "\"two_content\"). Returns the new slide count.\n"
+      + "shifting nothing), optional layout — a WRITE-ONLY choice (\"title_slide\"/\"title_content\"/"
+      + "\"title_two_content\"/\"title_content_two_content\"/\"title_content_over_content\"/"
+      + "\"title_two_content_content\"/\"title_two_content_over_content\"/\"title_four_content\"/"
+      + "\"title_only\"/\"blank\"/\"vertical_title_vertical_content_over_vertical_content\"/"
+      + "\"vertical_title_vertical_content\"/\"title_vertical_content\"/\"title_two_vertical_content\"/"
+      + "\"centered_text\"/\"title_six_content\" — the exact layouts a human sees in Impress's own "
+      + "layout picker; info can never report which one a slide currently has, since the engine gives "
+      + "no way to ask). Returns the new slide count.\n"
       + "• delete_slide — path, slide. Refused if it would delete the presentation's LAST "
       + "slide.\n"
       + "• reorder — path, slide (which slide), to (the 1-based position it moves to).\n"

@@ -938,12 +938,21 @@ struct OfficeCommandConsumer {
 
     // MARK: - office-agent-tools T6: slides result formatting
 
+    /// Controller ruling 2 (slides-lok-research.md §7) — `name` and `title` are reported as two
+    /// DISTINCT fields, never conflated: `name` is `getPartName`'s own answer, a POSITIONAL fallback
+    /// ("Slide 3") for any slide that was never explicitly renamed, recomputed fresh after every
+    /// reorder — not a title, and not stable identity. The leading `\(index + 1).` is what every verb
+    /// actually addresses this slide BY (1-based) — `name` is informational only, never a target a
+    /// verb accepts. Ruling 1 (research §3) — no `layout` field anywhere here: LOK gives no read-back
+    /// for it, for any slide, ever.
     private static func formatSlidesInfo(path: String, slides: [OfficeSlideInfo]) -> String {
         let name = (path as NSString).lastPathComponent
-        var lines = ["\(slides.count) slide\(slides.count == 1 ? "" : "s") in \(name):"]
+        var lines = ["\(slides.count) slide\(slides.count == 1 ? "" : "s") in \(name) (target by number, "
+                     + "never by name):"]
         for (index, slide) in slides.enumerated() {
-            let layoutText = slide.layout ?? "unknown"
-            lines.append("\(index + 1). \"\(slide.name)\" (layout: \(layoutText))")
+            let titleText = slide.title.map { $0.isEmpty ? "(empty title placeholder)" : "\"\($0)\"" }
+                ?? "(no title placeholder)"
+            lines.append("\(index + 1). name: \"\(slide.name)\", title: \(titleText)")
         }
         return lines.joined(separator: "\n")
     }

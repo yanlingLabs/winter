@@ -1101,30 +1101,44 @@ public struct OfficeSheetInfo: Equatable, Sendable {
 }
 
 /// office-agent-tools T6 — one slide's own facts, as `slidesInfoOk` reports them: its own PART NAME
-/// (`getPartName` — see `slidesInfo`'s own header for why this is NOT a placeholder-text read) and,
-/// when this bridge can determine one, its layout's name. `layout` is genuinely `nil`-able (not an
-/// empty-string sentinel the way `OfficeSheetInfo`'s `-1` is): this task found no live-confirmed way
-/// to query an Impress slide's own layout for every LOK build (see `LOKBridge.slidesInfoOnDedicated
-/// Thread`'s own header for what was tried) — a slide whose layout genuinely cannot be determined
-/// reports `nil` rather than a guessed or empty-string placeholder, fail-closed per the brief's own
-/// license ("if a verification primitive genuinely does not exist... fail closed").
+/// (`getPartName`) and its title placeholder text, when one exists.
+///
+/// **`name` is NOT a title — controller ruling 2, slides-lok-research.md §7.** `SdPage::GetName()`
+/// (`sd/source/core/sdpage.cxx:2648-2695`) returns a user-set real name UNCONDITIONALLY when one was
+/// ever set, but for a NEVER-RENAMED page it computes a positional default LIVE, on every call:
+/// `"Slide " + currentPageNumber`. For an untitled deck, `name` is just a restatement of the index,
+/// recomputed fresh after every reorder — never a title, never stable identity for a renamed-vs-not
+/// slide the caller can't otherwise distinguish. `slides.ts`'s own tool description says this
+/// plainly, not just this doc comment: every verb targets a slide BY INDEX ONLY, never by `name`.
+///
+/// **`title` is genuinely `nil`-able, and NOT the same "unknown, might exist" fail-closed posture
+/// `layout` used to have here.** The mechanism `LOKBridge.slidesInfoOnDedicatedThread` uses to read it
+/// is the SAME one `slidesRead` uses (see that case's own header) — `nil` means this slide's title
+/// placeholder genuinely does not exist, `""` means it exists and is empty, exactly the distinction
+/// `slidesReadOk` already draws for the identical reason.
+///
+/// **`layout` was REMOVED from this struct — controller ruling 1, research §3.** `getPartInfo` (the
+/// only LOK-side per-part JSON) carries no layout field at either of its two emission sites, and no
+/// `getCommandValues` query exposes one either: LOK gives NO layout read-back at all, ever, for any
+/// slide. `add_slide`'s own `layout` operand is write-only by necessity, not by this bridge's own
+/// choice to narrow it — there was never a wire shape to design here that could have reported one.
 public struct OfficeSlideInfo: Equatable, Sendable {
     public let name: String
-    public let layout: String?
-    public init(name: String, layout: String?) {
+    public let title: String?
+    public init(name: String, title: String?) {
         self.name = name
-        self.layout = layout
+        self.title = title
     }
 
     func jsonObject() -> [String: Any] {
         var object: [String: Any] = ["name": name]
-        if let layout { object["layout"] = layout }
+        if let title { object["title"] = title }
         return object
     }
 
     static func decode(_ object: [String: Any]) -> OfficeSlideInfo? {
         guard let name = object["name"] as? String else { return nil }
-        return OfficeSlideInfo(name: name, layout: object["layout"] as? String)
+        return OfficeSlideInfo(name: name, title: object["title"] as? String)
     }
 }
 
@@ -1185,18 +1199,58 @@ public enum OfficeSlidesManagePageOp: String, Equatable, Sendable {
     case reorder
 }
 
-/// `add_slide`'s own `layout` preset — a CLOSED enum, not LOK's raw numeric `AutoLayout` id or a
-/// free-form name, mirroring `OfficeSheetsNumberFormatPreset`'s own precedent (that case's own header
-/// has the full "postUnoCommand on an unrecognized/inapplicable value silently misbehaves rather than
-/// erroring" reasoning this narrowing exists to avoid). Raw values are snake_case to match
-/// `slides.ts`'s own zod enum verbatim — this is a WIRE string, decoded on both ends independently,
-/// so the two must agree byte-for-byte.
+/// `add_slide`'s own `layout` preset — WRITE-ONLY (slides-lok-research.md §3/ruling 1: `getPartInfo`
+/// carries no layout field at either JSON-emission site, and no `getCommandValues` query exposes one
+/// either — LOK gives no layout READ-BACK at all, so this preset only ever flows INTO a document via
+/// `.uno:AssignLayout`, never back out through `slidesInfo`). A CLOSED enum, not LOK's raw numeric
+/// `AutoLayout` id (35 values, `include/xmloff/autolayout.hxx`) or a free-form name — mirroring
+/// `OfficeSheetsNumberFormatPreset`'s own precedent. These 16 are the exact UI-EXPOSED subset the
+/// vendored product's own `simpress/popupmenu/page.xml` `SlideLayoutMenu` offers a human (research
+/// §4) — not the full internal enum, and not guessed: every raw integer below is cited to that XML's
+/// own `WhatLayout:long=` values. Raw string values are snake_case to match `slides.ts`'s own zod
+/// enum verbatim — this is a WIRE string, decoded on both ends independently, so the two must agree
+/// byte-for-byte.
 public enum OfficeSlidesLayoutPreset: String, Equatable, Sendable {
-    case title
-    case titleContent = "title_content"
-    case titleOnly = "title_only"
-    case blank
-    case twoContent = "two_content"
+    case titleSlide = "title_slide"                     // AutoLayout 0
+    case titleContent = "title_content"                 // AutoLayout 1
+    case titleTwoContent = "title_two_content"           // AutoLayout 3
+    case titleContentTwoContent = "title_content_two_content"           // AutoLayout 12
+    case titleContentOverContent = "title_content_over_content"         // AutoLayout 14
+    case titleTwoContentContent = "title_two_content_content"           // AutoLayout 15
+    case titleTwoContentOverContent = "title_two_content_over_content"  // AutoLayout 16
+    case titleFourContent = "title_four_content"         // AutoLayout 18
+    case titleOnly = "title_only"                        // AutoLayout 19
+    case blank = "blank"                                 // AutoLayout 20
+    case verticalTitleVerticalContentOverVerticalContent = "vertical_title_vertical_content_over_vertical_content" // AutoLayout 27
+    case verticalTitleVerticalContent = "vertical_title_vertical_content"   // AutoLayout 28
+    case titleVerticalContent = "title_vertical_content"                   // AutoLayout 29
+    case titleTwoVerticalContent = "title_two_vertical_content"            // AutoLayout 30
+    case centeredText = "centered_text"                  // AutoLayout 32
+    case titleSixContent = "title_six_content"           // AutoLayout 34
+
+    /// The real LOK `AutoLayout` integer this preset maps to — `.uno:AssignLayout`'s own `WhatLayout`
+    /// argument (`SfxUInt32Item`, `sd/sdi/sdraw.sdi:2137-2138`). Never invented, never the full
+    /// 35-value internal enum — see this type's own header for the citation.
+    public var autoLayoutValue: Int {
+        switch self {
+        case .titleSlide: return 0
+        case .titleContent: return 1
+        case .titleTwoContent: return 3
+        case .titleContentTwoContent: return 12
+        case .titleContentOverContent: return 14
+        case .titleTwoContentContent: return 15
+        case .titleTwoContentOverContent: return 16
+        case .titleFourContent: return 18
+        case .titleOnly: return 19
+        case .blank: return 20
+        case .verticalTitleVerticalContentOverVerticalContent: return 27
+        case .verticalTitleVerticalContent: return 28
+        case .titleVerticalContent: return 29
+        case .titleTwoVerticalContent: return 30
+        case .centeredText: return 32
+        case .titleSixContent: return 34
+        }
+    }
 }
 
 /// `hello`'s role field. `agent` is the daemon (Stage C consumer; the handshake alone lands now).
