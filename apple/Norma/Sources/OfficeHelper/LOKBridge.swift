@@ -3615,7 +3615,7 @@ final class LOKBridge: OfficeDocumentBridge {
         doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyInput.rawValue), 0, Int32(SlidesKeyCode.f2))
         doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyUp.rawValue), 0, Int32(SlidesKeyCode.f2))
         pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: part)
-        postUnoCommandOnDedicatedThread(doc, ".uno:SelectAll", [:])
+        postUnoCommandOnDedicatedThread(doc, ".uno:SelectAll", [:], notifyWhenFinished: true)
         pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: part)
         let text = readSelectionTextOnDedicatedThread(doc)
         doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyInput.rawValue), 0, Int32(SlidesKeyCode.escape))
@@ -3644,7 +3644,7 @@ final class LOKBridge: OfficeDocumentBridge {
         doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyInput.rawValue), 0, Int32(SlidesKeyCode.f2))
         doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyUp.rawValue), 0, Int32(SlidesKeyCode.f2))
         pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: part)
-        postUnoCommandOnDedicatedThread(doc, ".uno:SelectAll", [:])
+        postUnoCommandOnDedicatedThread(doc, ".uno:SelectAll", [:], notifyWhenFinished: true)
         pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: part)
         doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
         doc.handle.pointee.pClass.pointee.postWindowExtTextInputEvent?(doc.handle, 0, Int32(OfficeExtTextInputType.input.rawValue), text)
@@ -3765,17 +3765,34 @@ final class LOKBridge: OfficeDocumentBridge {
     /// office-agent-tools T4 — the shared JSON-args UNO dispatch this task's own three new sheet-
     /// management commands use. NOT applied retroactively to `.uno:GoToCell`'s own existing inline
     /// dispatch (`selectionTextOnDedicatedThread`) — that call is already proven and unrelated to
-    /// this task's own scope; this helper exists only for the code THIS task adds. Fire-and-forget,
-    /// same `postUnoCommand(..., bNotifyWhenFinished: false)` posture every UNO dispatch in this file
-    /// already has.
-    private func postUnoCommandOnDedicatedThread(_ doc: OpenDocument, _ command: String, _ args: [String: Any]) {
+    /// this task's own scope; this helper exists only for the code THIS task adds.
+    ///
+    /// **`notifyWhenFinished` — controller finding, `docs-lok-research.md` L4 (2026-08-24), added for
+    /// office-agent-tools T6's own NEW call sites only.** `doc_postUnoCommand` injects
+    /// `SynchronMode=false` (`desktop/source/lib/init.cxx`), but `SfxDispatchController_Impl::dispatch`
+    /// (`sfx2/source/control/unoctitm.cxx:655-657`) OVERRIDES it to `SfxCallMode::SYNCHRON` whenever a
+    /// listener exists — and a listener exists exactly when `bNotifyWhenFinished` is `true`. Defaults
+    /// `false` so this file's own TEN pre-existing call sites (all still passing the literal `false`
+    /// this comment used to hardcode) are BYTE-IDENTICAL in behavior — retrofitting them is a separate,
+    /// deliberately out-of-scope change the controller is queuing on its own terms, `.uno:Save`/
+    /// `.uno:Undo` in particular having their own fire-and-forget reasoning that needs its own
+    /// re-examination, not a blanket flip. **Caveat this file inherits, not resolves**: the DISPATCH
+    /// (the Execute handler actually running) is provably synchronous under `true`; whether any
+    /// RESULTING LOK CALLBACK is flushed before this call returns is NOT proven from source
+    /// (`DispatchResultListener::dispatchFinished` still *enqueues* via `mpCallbackFlushHandlers`) — a
+    /// state actually CHANGED by the command (e.g. what `.uno:SelectAll` selects) is safe to read
+    /// synchronously afterward; a PUSH NOTIFICATION about that change is a separate question this flag
+    /// does not settle. Verify by re-read regardless, exactly as this bridge already does everywhere
+    /// else.
+    private func postUnoCommandOnDedicatedThread(_ doc: OpenDocument, _ command: String, _ args: [String: Any],
+                                                 notifyWhenFinished: Bool = false) {
         guard let data = try? JSONSerialization.data(withJSONObject: args),
               let argsString = String(data: data, encoding: .utf8) else {
             return // unreachable for this file's own String/Int-only payloads — never throws, matching GoToCell's own fire-and-forget posture on a build failure
         }
         command.withCString { commandPtr in
             argsString.withCString { argsPtr in
-                doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, argsPtr, false)
+                doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, argsPtr, notifyWhenFinished)
             }
         }
     }

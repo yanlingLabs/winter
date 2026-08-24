@@ -169,4 +169,74 @@ final class OfficeSlidesCommandTests: XCTestCase {
         XCTAssertTrue(readText.contains("Norma T6 Slide Two"), readText)
         XCTAssertTrue(readText.contains("second bullet"), readText)
     }
+
+    /// **The two-part discriminator, through save+reopen** — task-6-brief.md's own non-negotiable
+    /// proof shape, and the exact gap Stage B's own T4 shipped a wrong-part edit before inventing:
+    /// `set_text` on slide 2 must change slide 2 AND leave slides 1/3 untouched, proven from the
+    /// SAVED FILE'S OWN BYTES (a genuinely independent reopen, bypassing the adopted runtime this
+    /// call itself used — the same discipline `OfficeSheetsCommandTests`' own partial-failure drill
+    /// established), never merely from the in-memory state the write itself produced.
+    func testLiveSetTextChangesOnlyTheTargetedSlideProvenBySaveAndIndependentReopen() async throws {
+        try requireLiveEngine()
+        // `.odp` (packaged), NOT `.fodp` (flat XML) — `OfficeSaveFormat(pathExtension:)` has no case
+        // for the flat variant (`saveAsOnDedicatedThread` throws "format not captured at open"),
+        // confirmed live before this fixture existed. `three-slide.odp` is a byte-for-byte content
+        // conversion of `three-slide.fodp` (same 3 slides, same real title/outline placeholders,
+        // same text) into a real ODF package — content.xml/styles.xml/meta.xml/settings.xml/
+        // META-INF/manifest.xml — so both fixtures describe the identical presentation, one flat
+        // (read-only drills, easy to diff) and one packaged (write drills, which need a real save
+        // target). `.fodp` stays the source of record; `.odp` is the compiled artifact.
+        let path = try makeWritableCopy(of: "three-slide.odp")
+        let stateDir = makeScratchDirectory()
+        let host = makeLiveHost(stateDir: stateDir, dirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)])
+        await host.directory.refresh()
+
+        // ADOPT first — deliberately, not a broker-minted open. A call that mints its OWN open closes
+        // it again afterward (rule 2), fire-and-forget, over the SAME shared wire connection/seq
+        // stream this test's own "independent" reopen below also uses
+        // (`officeHelperSupervisor?.client` is the identical `OfficeHelperClient` the broker's own
+        // Driver closures call into) — racing an `open()` against that still-in-flight `close()`
+        // produced a genuine live failure (`"unexpected reply: closed(seq: 4, ...)"`), and waiting on
+        // `documents[path] == nil` does NOT close the race: that flag is set OPTIMISTICALLY
+        // (`OfficeRuntime.Driver.close`'s own doc comment — "optimistic removal in the reducer"),
+        // before the close's own wire round trip actually completes. Adopting sidesteps the whole
+        // race structurally: an ADOPTED document is never auto-closed by the broker at all, so there
+        // is no close to race against.
+        let runtime = host.officeRuntime(for: "S1")
+        runtime.open(path)
+        let opened = await waitUntilLive { runtime.stateSnapshot.documents[path] != nil || runtime.stateSnapshot.phase == .failed }
+        XCTAssertTrue(opened, "setup: three-slide.odp must open cleanly")
+
+        let setResult = await send(command("office.slides.set_text",
+                                           args: ["path": path, "slide": 2, "title": "CHANGED TITLE", "body": "CHANGED BODY"],
+                                           sessionId: "S1", commandId: "pcmd_set"), through: host)
+        XCTAssertTrue(setResult.ok, "\(setResult)")
+
+        guard let independentClient = host.officeHelperSupervisor?.client else {
+            return XCTFail("no live client for the independent reopen")
+        }
+        let independentDocId = "slides-set-text-two-part-reopen"
+        _ = try await independentClient.open(docId: independentDocId, path: path)
+
+        // Slide 2 (index 1, 0-based) — CHANGED, read from the SAVED file.
+        let savedSlide2 = try await independentClient.slidesRead(docId: independentDocId, slide: 1)
+        XCTAssertEqual(savedSlide2.title, "CHANGED TITLE",
+                       "slide 2's title must be changed in the SAVED file, not just in memory")
+        XCTAssertEqual(savedSlide2.body, "CHANGED BODY",
+                       "slide 2's body must be changed in the SAVED file, not just in memory")
+
+        // Slide 1 (index 0) — the two-part discriminator's OTHER half: genuinely untouched.
+        let savedSlide1 = try await independentClient.slidesRead(docId: independentDocId, slide: 0)
+        XCTAssertEqual(savedSlide1.title, "Norma T6 Slide One",
+                       "slide 1 must be UNTOUCHED by a write aimed at slide 2 — a wrong-part edit "
+                           + "would show up here, not on slide 2 itself")
+        XCTAssertEqual(savedSlide1.body, "first bullet", "slide 1's body must also be untouched")
+
+        // Slide 3 (index 2) — the SAME discriminator on the other side of the target.
+        let savedSlide3 = try await independentClient.slidesRead(docId: independentDocId, slide: 2)
+        XCTAssertEqual(savedSlide3.title, "Norma T6 Slide Three", "slide 3 must be UNTOUCHED")
+        XCTAssertEqual(savedSlide3.body, "third bullet", "slide 3's body must also be untouched")
+
+        try await independentClient.close(docId: independentDocId)
+    }
 }
