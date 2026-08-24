@@ -404,6 +404,54 @@ final class OfficeHelperClient {
         }
     }
 
+    // MARK: - office-agent-tools T6: slides
+
+    func slidesInfo(docId: String) async throws -> [OfficeSlideInfo] {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.slidesInfo(seq: seq, docId: docId))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .slidesInfoOk(_, _, let slides): return slides
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    func slidesRead(docId: String, slide: Int) async throws -> (title: String?, body: String?) {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.slidesRead(seq: seq, docId: docId, slide: slide))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .slidesReadOk(_, _, let title, let body): return (title, body)
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    func slidesSetText(docId: String, slide: Int, title: String?, body: String?) async throws -> [String] {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.slidesSetText(seq: seq, docId: docId, slide: slide, title: title, body: body))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .slidesSetTextOk(_, _, let applied): return applied
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    func slidesManagePage(docId: String, op: OfficeSlidesManagePageOp, slide: Int?, at: Int?, to: Int?,
+                          layout: OfficeSlidesLayoutPreset?) async throws -> Int {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.slidesManagePage(seq: seq, docId: docId, op: op, slide: slide, at: at,
+                                                     to: to, layout: layout))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .slidesManagePageOk(_, _, let slideCount): return slideCount
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
     // MARK: - Task 4: tiles
 
     /// Registers this connection as a tile-push subscriber for `docId` (which must already be open

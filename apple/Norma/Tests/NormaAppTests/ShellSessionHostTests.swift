@@ -4125,6 +4125,10 @@ final class ShellSessionHostTests: XCTestCase {
                 sheetsResize: { _, _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
                 sheetsManageSheet: { _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
                 sheetsFormat: { _, _, _, _, _, _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
+                slidesInfo: { _ in throw OfficeHelperClientError.serverError(reason: "fake driver: slides not implemented") },
+                slidesRead: { _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: slides not implemented") },
+                slidesSetText: { _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: slides not implemented") },
+                slidesManagePage: { _, _, _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: slides not implemented") },
                 stateDirectory: stateDirectory)
         }
     }

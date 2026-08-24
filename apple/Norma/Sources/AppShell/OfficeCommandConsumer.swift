@@ -117,6 +117,14 @@ struct OfficeCommandConsumer {
             Task { await handleSheetsManageSheet(command) }
         case "office.sheets.format":
             Task { await handleSheetsFormat(command) }
+        case "office.slides.info":
+            Task { await handleSlidesInfo(command) }
+        case "office.slides.read":
+            Task { await handleSlidesRead(command) }
+        case "office.slides.set_text":
+            Task { await handleSlidesSetText(command) }
+        case "office.slides.add_slide", "office.slides.delete_slide", "office.slides.reorder":
+            Task { await handleSlidesManagePage(command) }
         default:
             sendResult(command.sessionId, command.commandId, false,
                        Self.refusal(for: command.action), nil)
@@ -553,6 +561,174 @@ struct OfficeCommandConsumer {
         }
     }
 
+    // MARK: - office-agent-tools T6: slides
+
+    /// `office.slides.info` — slide count, each slide's own name, and its layout when known.
+    ///
+    /// **`info` is ALSO the drivability probe** (spec §1/§3) — same split `handleSheetsInfo`'s own
+    /// header already establishes: the "app not running" half lives on the daemon side
+    /// (`slides.ts`'s own reach check), so this function only ever runs once the app IS known
+    /// reachable.
+    private func handleSlidesInfo(_ command: SessionEvent.PanelCommand) async {
+        guard let path = Self.requiredPath(command.args) else {
+            return sendResult(command.sessionId, command.commandId, false, Self.requiredPathRefusal, nil)
+        }
+        guard let broker = officeAgentBroker(command.sessionId) else {
+            return sendResult(command.sessionId, command.commandId, false, Self.hostGoneRefusal, nil)
+        }
+        do {
+            let resultText = try await broker.perform(
+                sessionId: command.sessionId, path: path, access: .read, requestId: command.commandId
+            ) { runtime, docId, adopted in
+                let slides = try await runtime.slidesInfo(docId: docId)
+                return Self.formatSlidesInfo(path: path, slides: slides)
+            }
+            let (ok, text) = Self.capped(resultText)
+            sendResult(command.sessionId, command.commandId, ok, text, nil)
+        } catch {
+            sendResult(command.sessionId, command.commandId, false, Self.message(for: error), nil)
+        }
+    }
+
+    /// `office.slides.read` — one slide's title and body placeholder text. `slide` arrives 1-based
+    /// (`slides.ts`'s own operand — spec: "1-based, everywhere"); this function is the ONE place that
+    /// converts to the wire's 0-based part index, mirroring how `handleSheetsRead`'s own `range`
+    /// conversion happens app-side, never daemon-side.
+    private func handleSlidesRead(_ command: SessionEvent.PanelCommand) async {
+        guard let path = Self.requiredPath(command.args) else {
+            return sendResult(command.sessionId, command.commandId, false, Self.requiredPathRefusal, nil)
+        }
+        guard let oneBasedSlide = Self.oneBasedIndex(command.args, "slide") else {
+            return sendResult(command.sessionId, command.commandId, false, Self.requiredSlideRefusal, nil)
+        }
+        guard let broker = officeAgentBroker(command.sessionId) else {
+            return sendResult(command.sessionId, command.commandId, false, Self.hostGoneRefusal, nil)
+        }
+        do {
+            let resultText = try await broker.perform(
+                sessionId: command.sessionId, path: path, access: .read, requestId: command.commandId
+            ) { runtime, docId, adopted in
+                let result = try await runtime.slidesRead(docId: docId, slide: oneBasedSlide - 1)
+                return Self.formatSlidesRead(slide: oneBasedSlide, title: result.title, body: result.body)
+            }
+            let (ok, text) = Self.capped(resultText)
+            sendResult(command.sessionId, command.commandId, ok, text, nil)
+        } catch {
+            sendResult(command.sessionId, command.commandId, false, Self.message(for: error), nil)
+        }
+    }
+
+    /// `office.slides.set_text` — title and/or body onto one slide's own placeholder(s), each
+    /// independently optional (absent means "leave alone" — `sheetsFormat`'s identical contract,
+    /// re-checked HERE the same way `handleSheetsFormat` re-checks its own five attributes, not
+    /// merely trusted from the daemon's own validation).
+    private func handleSlidesSetText(_ command: SessionEvent.PanelCommand) async {
+        guard let path = Self.requiredPath(command.args) else {
+            return sendResult(command.sessionId, command.commandId, false, Self.requiredPathRefusal, nil)
+        }
+        guard let oneBasedSlide = Self.oneBasedIndex(command.args, "slide") else {
+            return sendResult(command.sessionId, command.commandId, false, Self.requiredSlideRefusal, nil)
+        }
+        let title = Self.optionalString(command.args, "title")
+        let body = Self.optionalString(command.args, "body")
+        guard title != nil || body != nil else {
+            return sendResult(command.sessionId, command.commandId, false, Self.requiredSetTextAttributeRefusal, nil)
+        }
+        // How many independent attributes this call named — mirrors `handleSheetsFormat`'s own
+        // `attributeCount` exactly, one layer up: a partial failure is only structurally possible
+        // when more than one attribute was in flight.
+        let attributeCount = [title != nil, body != nil].filter { $0 }.count
+
+        guard let broker = officeAgentBroker(command.sessionId) else {
+            return sendResult(command.sessionId, command.commandId, false, Self.hostGoneRefusal, nil)
+        }
+        do {
+            let resultText = try await broker.perform(
+                sessionId: command.sessionId, path: path, access: .write, requestId: command.commandId
+            ) { runtime, docId, adopted in
+                do {
+                    let applied = try await runtime.slidesSetText(docId: docId, slide: oneBasedSlide - 1, title: title, body: body)
+                    return Self.formatSlidesSetText(path: path, slide: oneBasedSlide, applied: applied)
+                } catch {
+                    // Same partial-application honesty `handleSheetsSet`/`handleSheetsFormat` already
+                    // established — see either's own header for the full adopted-vs-opened account.
+                    guard attributeCount > 1 else { throw error }
+                    let lifecycle = adopted
+                        ? " If an earlier attribute in this call already applied before this failure, "
+                            + "it is sitting unsaved in your own open tab right now — the tab is dirty, "
+                            + "and Norma will refuse further writes to this document until you save or "
+                            + "discard those changes yourself."
+                        : " If an earlier attribute in this call already applied before this failure, "
+                            + "it was discarded when Norma closed the document afterward — nothing from "
+                            + "this call persisted, and the next call will start fresh."
+                    throw OfficeAgentBrokerError.writeFailed(path: path, reason: Self.message(for: error) + lifecycle)
+                }
+            }
+            let (ok, text) = Self.capped(resultText)
+            sendResult(command.sessionId, command.commandId, ok, text, nil)
+        } catch {
+            sendResult(command.sessionId, command.commandId, false, Self.message(for: error), nil)
+        }
+    }
+
+    /// `office.slides.add_slide`/`.delete_slide`/`.reorder` — one handler for all three, same
+    /// consolidation reasoning as `handleSheetsResize`/`handleSheetsManageSheet`: `command.action` is
+    /// what tells them apart, and the wire's own `slidesManagePage` frame already consolidates the
+    /// three app<->helper calls into one pair (`OfficeWireFrame.slidesManagePage`'s own header has the
+    /// per-op field contract this function builds).
+    private func handleSlidesManagePage(_ command: SessionEvent.PanelCommand) async {
+        guard let path = Self.requiredPath(command.args) else {
+            return sendResult(command.sessionId, command.commandId, false, Self.requiredPathRefusal, nil)
+        }
+        let op: OfficeSlidesManagePageOp
+        var slide: Int?
+        var at: Int?
+        var to: Int?
+        switch command.action {
+        case "office.slides.add_slide":
+            op = .add
+            at = Self.oneBasedIndex(command.args, "at").map { $0 - 1 }
+        case "office.slides.delete_slide":
+            op = .delete
+            guard let oneBasedSlide = Self.oneBasedIndex(command.args, "slide") else {
+                return sendResult(command.sessionId, command.commandId, false, Self.requiredSlideRefusal, nil)
+            }
+            slide = oneBasedSlide - 1
+        case "office.slides.reorder":
+            op = .reorder
+            guard let oneBasedSlide = Self.oneBasedIndex(command.args, "slide") else {
+                return sendResult(command.sessionId, command.commandId, false, Self.requiredSlideRefusal, nil)
+            }
+            guard let oneBasedTo = Self.oneBasedIndex(command.args, "to") else {
+                return sendResult(command.sessionId, command.commandId, false, Self.requiredToRefusal, nil)
+            }
+            slide = oneBasedSlide - 1
+            to = oneBasedTo - 1
+        default:
+            // Unreachable — `handle`'s own switch routes only these three actions here — but this
+            // file's own posture is "never crash on a wire value," so this still answers.
+            return sendResult(command.sessionId, command.commandId, false, Self.refusal(for: command.action), nil)
+        }
+        let layout = op == .add ? Self.optionalLayout(command.args) : nil
+
+        guard let broker = officeAgentBroker(command.sessionId) else {
+            return sendResult(command.sessionId, command.commandId, false, Self.hostGoneRefusal, nil)
+        }
+        do {
+            let resultText = try await broker.perform(
+                sessionId: command.sessionId, path: path, access: .write, requestId: command.commandId
+            ) { runtime, docId, adopted in
+                let slideCount = try await runtime.slidesManagePage(docId: docId, op: op, slide: slide, at: at,
+                                                                     to: to, layout: layout)
+                return Self.formatSlidesManagePage(path: path, slideCount: slideCount)
+            }
+            let (ok, text) = Self.capped(resultText)
+            sendResult(command.sessionId, command.commandId, ok, text, nil)
+        } catch {
+            sendResult(command.sessionId, command.commandId, false, Self.message(for: error), nil)
+        }
+    }
+
     // MARK: - office-agent-tools T3: operands (wire strictness — missing required, never defaulted)
 
     private static let requiredPathRefusal = "this office verb needs a `path`."
@@ -632,6 +808,31 @@ struct OfficeCommandConsumer {
     private static let requiredFormatAttributeRefusal =
         "`sheets format` needs at least one of `bold`, `italic`, `numberFormat`, `align`, `width` — "
         + "an absent key means \"leave alone,\" so a call naming none of them would do nothing."
+
+    // MARK: - office-agent-tools T6: slides' own operands
+
+    private static let requiredSlideRefusal = "this office verb needs a `slide` (1-based)."
+    private static let requiredToRefusal = "`slides reorder` needs a `to` (1-based)."
+    private static let requiredSetTextAttributeRefusal =
+        "`slides set_text` needs at least one of `title`, `body` — an absent key means \"leave "
+        + "alone,\" so a call naming neither would do nothing."
+
+    /// A positive, whole 1-based index — `slide`/`at`/`to`, all sharing this SAME shape (the daemon's
+    /// own zod schema already enforces `.int().positive()`; this is the app's own independent check,
+    /// mirroring `requiredCount`'s identical discipline for `sheets`' resize verbs — never trusting
+    /// the daemon's validation as the only gate).
+    private static func oneBasedIndex(_ args: [String: SessionEvent.JSONValue]?, _ key: String) -> Int? {
+        guard case .number(let n)? = args?[key], n >= 1, n.truncatingRemainder(dividingBy: 1) == 0 else { return nil }
+        return Int(n)
+    }
+    private static func optionalString(_ args: [String: SessionEvent.JSONValue]?, _ key: String) -> String? {
+        guard case .string(let raw)? = args?[key] else { return nil }
+        return raw
+    }
+    private static func optionalLayout(_ args: [String: SessionEvent.JSONValue]?) -> OfficeSlidesLayoutPreset? {
+        guard case .string(let raw)? = args?["layout"] else { return nil }
+        return OfficeSlidesLayoutPreset(rawValue: raw)
+    }
 
     // MARK: - office-agent-tools T5: format's own operands — every one OPTIONAL, absent-means-untouched
 
@@ -731,6 +932,43 @@ struct OfficeCommandConsumer {
     private static func formatSheetsFormat(path: String, sheet: String, range: String, applied: [String]) -> String {
         let name = (path as NSString).lastPathComponent
         return "applied \(applied.joined(separator: ", ")) to \(sheet)!\(range) in \(name)"
+    }
+
+    // MARK: - office-agent-tools T6: slides result formatting
+
+    private static func formatSlidesInfo(path: String, slides: [OfficeSlideInfo]) -> String {
+        let name = (path as NSString).lastPathComponent
+        var lines = ["\(slides.count) slide\(slides.count == 1 ? "" : "s") in \(name):"]
+        for (index, slide) in slides.enumerated() {
+            let layoutText = slide.layout ?? "unknown"
+            lines.append("\(index + 1). \"\(slide.name)\" (layout: \(layoutText))")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// `slide` is 1-based (the caller's own operand, echoed back — never the wire's 0-based index).
+    /// `nil` and `""` are reported differently — `describePlaceholder`'s own doc.
+    private static func formatSlidesRead(slide: Int, title: String?, body: String?) -> String {
+        "Slide \(slide):\ntitle: \(describePlaceholder(title))\nbody: \(describePlaceholder(body))"
+    }
+
+    /// `nil` — "this slide has no such placeholder at all" — is worded distinctly from `""` — "the
+    /// placeholder exists and is empty" — the exact distinction `OfficeWireFrame.slidesReadOk`'s own
+    /// header says is load-bearing (a model deciding whether `set_text` on this slide is even
+    /// possible needs to tell the two apart, not see the same string for both).
+    private static func describePlaceholder(_ text: String?) -> String {
+        guard let text else { return "(no such placeholder on this slide)" }
+        return text.isEmpty ? "(empty)" : text
+    }
+
+    private static func formatSlidesSetText(path: String, slide: Int, applied: [String]) -> String {
+        let name = (path as NSString).lastPathComponent
+        return "applied \(applied.joined(separator: ", ")) to slide \(slide) in \(name)"
+    }
+
+    private static func formatSlidesManagePage(path: String, slideCount: Int) -> String {
+        let name = (path as NSString).lastPathComponent
+        return "\(name) now has \(slideCount) slide\(slideCount == 1 ? "" : "s")"
     }
 
     /// The final belt — `sheetsResultMaxLength`, checked in the wire's own UTF-16-code-unit unit

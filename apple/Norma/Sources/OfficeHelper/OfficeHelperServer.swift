@@ -232,6 +232,35 @@ public protocol OfficeDocumentBridge: AnyObject {
     func sheetsFormat(docId: String, sheet: String, range: String, columnSpan: String?,
                       bold: Bool?, italic: Bool?, numberFormat: OfficeSheetsNumberFormatPreset?,
                       align: OfficeSheetsAlign?, width: Double?) throws -> [String]
+
+    // MARK: - office-agent-tools T6: slides
+
+    /// Every slide's own PART NAME and, when determinable, its layout name — see `OfficeWireFrame
+    /// .slidesInfo`/`OfficeSlideInfo`'s own headers for why this is not a placeholder-text read and
+    /// why `layout` is genuinely `nil`-able. Throws only on a `docId` this bridge has no handle for,
+    /// or one that is not a presentation.
+    func slidesInfo(docId: String) throws -> [OfficeSlideInfo]
+    /// ONE slide's title/body placeholder text — `nil` per field when that slide has no such
+    /// placeholder at all, `""` when it exists and is empty (see `OfficeWireFrame.slidesReadOk`'s own
+    /// header for why the distinction is load-bearing). `slide` is 0-based. Throws the same
+    /// existence/kind errors `slidesInfo` throws, plus a slide-index-out-of-range error.
+    func slidesRead(docId: String, slide: Int) throws -> (title: String?, body: String?)
+    /// Writes `title` and/or `body` onto ONE slide's own placeholder(s), each independently optional
+    /// (`nil` means untouched). Returns which of `["title","body"]` actually applied. Throws the same
+    /// existence/kind errors `slidesRead` throws, plus a refusal naming which placeholder is missing
+    /// when the caller named an attribute this slide has no placeholder for (spec's own "refuses
+    /// naming the reason, rather than inventing one" contract).
+    func slidesSetText(docId: String, slide: Int, title: String?, body: String?) throws -> [String]
+    /// Adds/deletes/reorders a slide (`op`) — `slide`/`at`/`to` are all 0-based, exactly matching
+    /// `OfficeWireFrame.slidesManagePage`'s own paired-field contract (that case's own header states
+    /// which fields apply to which op; this bridge trusts the wire's own decode guard rather than
+    /// re-validating the pairing a second time — the identical "a business rule already enforced
+    /// upstream" posture `sheetsManageSheet`'s own conformance already has for ITS op enum). Returns
+    /// the presentation's slide count AFTER the operation. Throws `SaveError.lastSlide` for a
+    /// `.delete` that would leave zero slides, plus the same existence/kind errors `slidesInfo`
+    /// throws.
+    func slidesManagePage(docId: String, op: OfficeSlidesManagePageOp, slide: Int?, at: Int?, to: Int?,
+                          layout: OfficeSlidesLayoutPreset?) throws -> Int
 }
 
 /// The result of a successful `OfficeDocumentBridge.paintTile` call — helper-internal (never
@@ -512,6 +541,64 @@ public final class FakeOfficeDocumentBridge: OfficeDocumentBridge {
         if align != nil { applied.append("align") }
         if width != nil { applied.append("width") }
         return applied
+    }
+
+    /// office-agent-tools T6 — wire-level dispatch only, same reasoning as every sheets stub above:
+    /// two synthetic slides ("Slide1"/"Slide2"), the first reporting a fixed non-nil layout, the
+    /// second `nil` (so a wire-level test can assert on BOTH shapes of the layout field without real
+    /// LOK). `fakeSlideCount`/`fakeSlideText` back `slidesRead`/`slidesSetText`/`slidesManagePage`
+    /// with real (if fake) per-slide state, deterministic and mutable across calls in one test.
+    private var fakeSlideCount = 2
+    private var fakeSlideTitles: [Int: String] = [:]
+    private var fakeSlideBodies: [Int: String] = [:]
+
+    public func slidesInfo(docId: String) throws -> [OfficeSlideInfo] {
+        lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
+        guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
+        return (0..<fakeSlideCount).map { OfficeSlideInfo(name: "Slide\($0 + 1)", layout: $0 == 0 ? "title_content" : nil) }
+    }
+    public func slidesRead(docId: String, slide: Int) throws -> (title: String?, body: String?) {
+        lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
+        guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
+        guard slide >= 0, slide < fakeSlideCount else {
+            throw OfficeHelperServerError.posix("fake bridge: no slide \(slide) in \(docId) — this presentation has \(fakeSlideCount) slides")
+        }
+        return (title: fakeSlideTitles[slide] ?? "fake title \(slide)", body: fakeSlideBodies[slide])
+    }
+    public func slidesSetText(docId: String, slide: Int, title: String?, body: String?) throws -> [String] {
+        lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
+        guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
+        guard slide >= 0, slide < fakeSlideCount else {
+            throw OfficeHelperServerError.posix("fake bridge: no slide \(slide) in \(docId) — this presentation has \(fakeSlideCount) slides")
+        }
+        var applied: [String] = []
+        if let title { fakeSlideTitles[slide] = title; applied.append("title") }
+        if let body { fakeSlideBodies[slide] = body; applied.append("body") }
+        return applied
+    }
+    public func slidesManagePage(docId: String, op: OfficeSlidesManagePageOp, slide: Int?, at: Int?, to: Int?,
+                                 layout: OfficeSlidesLayoutPreset?) throws -> Int {
+        lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
+        guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
+        switch op {
+        case .add:
+            fakeSlideCount += 1
+        case .delete:
+            guard fakeSlideCount > 1 else {
+                throw OfficeHelperServerError.posix("fake bridge: cannot delete the only slide in \(docId)")
+            }
+            guard let slide, slide >= 0, slide < fakeSlideCount else {
+                throw OfficeHelperServerError.posix("fake bridge: no slide \(slide ?? -1) in \(docId) — this presentation has \(fakeSlideCount) slides")
+            }
+            fakeSlideCount -= 1
+            fakeSlideTitles.removeValue(forKey: slide)
+            fakeSlideBodies.removeValue(forKey: slide)
+        case .reorder:
+            guard let slide, slide >= 0, slide < fakeSlideCount, let to, to >= 0, to < fakeSlideCount else {
+                throw OfficeHelperServerError.posix("fake bridge: reorder out of range in \(docId)")
+            }
+        }
+        return fakeSlideCount
     }
 
     /// A small, deterministic, key-dependent pixel pattern (never blank, never identical across
@@ -1405,6 +1492,51 @@ public final class OfficeHelperServer {
                                                                columnSpan: columnSpan, bold: bold, italic: italic,
                                                                numberFormat: numberFormat, align: align, width: width)
                 writeReply(.sheetsFormatOk(seq: seq, docId: docId, applied: applied), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.slidesInfo(let seq, let docId)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                let slides = try documentBridge.slidesInfo(docId: docId)
+                writeReply(.slidesInfoOk(seq: seq, docId: docId, slides: slides), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.slidesRead(let seq, let docId, let slide)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                let result = try documentBridge.slidesRead(docId: docId, slide: slide)
+                writeReply(.slidesReadOk(seq: seq, docId: docId, title: result.title, body: result.body), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.slidesSetText(let seq, let docId, let slide, let title, let body)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                let applied = try documentBridge.slidesSetText(docId: docId, slide: slide, title: title, body: body)
+                writeReply(.slidesSetTextOk(seq: seq, docId: docId, applied: applied), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.slidesManagePage(let seq, let docId, let op, let slide, let at, let to, let layout)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                let slideCount = try documentBridge.slidesManagePage(docId: docId, op: op, slide: slide, at: at,
+                                                                      to: to, layout: layout)
+                writeReply(.slidesManagePageOk(seq: seq, docId: docId, slideCount: slideCount), writer: writer)
             } catch {
                 writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
             }

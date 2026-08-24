@@ -1604,6 +1604,13 @@ final class OfficeRuntime: ObservableObject {
         var sheetsFormat: (_ docId: String, _ sheet: String, _ range: String, _ columnSpan: String?,
                            _ bold: Bool?, _ italic: Bool?, _ numberFormat: OfficeSheetsNumberFormatPreset?,
                            _ align: OfficeSheetsAlign?, _ width: Double?) async throws -> [String]
+        /// office-agent-tools T6 — slides, same no-reducer, throws-through posture as every sheets
+        /// sibling above.
+        var slidesInfo: (_ docId: String) async throws -> [OfficeSlideInfo]
+        var slidesRead: (_ docId: String, _ slide: Int) async throws -> (title: String?, body: String?)
+        var slidesSetText: (_ docId: String, _ slide: Int, _ title: String?, _ body: String?) async throws -> [String]
+        var slidesManagePage: (_ docId: String, _ op: OfficeSlidesManagePageOp, _ slide: Int?, _ at: Int?,
+                               _ to: Int?, _ layout: OfficeSlidesLayoutPreset?) async throws -> Int
         /// **Office Stage B Task 2b — the shared helper's own `--state-path`.** A plain stored
         /// value, unlike every sibling above: it is a FACT about the shared supervisor's
         /// configuration (`OfficeHelperSupervisor.statePath`, exposing `Configuration
@@ -1869,6 +1876,22 @@ final class OfficeRuntime: ObservableObject {
                       bold: Bool?, italic: Bool?, numberFormat: OfficeSheetsNumberFormatPreset?,
                       align: OfficeSheetsAlign?, width: Double?) async throws -> [String] {
         try await driver.sheetsFormat(docId, sheet, range, columnSpan, bold, italic, numberFormat, align, width)
+    }
+
+    // MARK: - office-agent-tools T6: slides — same no-reducer, throws-through posture as sheets
+
+    func slidesInfo(docId: String) async throws -> [OfficeSlideInfo] {
+        try await driver.slidesInfo(docId)
+    }
+    func slidesRead(docId: String, slide: Int) async throws -> (title: String?, body: String?) {
+        try await driver.slidesRead(docId, slide)
+    }
+    func slidesSetText(docId: String, slide: Int, title: String?, body: String?) async throws -> [String] {
+        try await driver.slidesSetText(docId, slide, title, body)
+    }
+    func slidesManagePage(docId: String, op: OfficeSlidesManagePageOp, slide: Int?, at: Int?, to: Int?,
+                          layout: OfficeSlidesLayoutPreset?) async throws -> Int {
+        try await driver.slidesManagePage(docId, op, slide, at, to, layout)
     }
 
     /// One `saveAndAwaitOutcome` caller, still waiting. Kept per PATH (a table, not a single slot) —

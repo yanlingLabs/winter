@@ -110,12 +110,13 @@ final class OfficeCommandConsumerTests: XCTestCase {
 
     /// T3 gave `sheets.info`/`.read` real (async) behaviour; T4 gave `sheets.set`/`.insert_rows`/
     /// `.insert_cols`/`.delete_rows`/`.delete_cols`/`.add_sheet`/`.delete_sheet`/`.rename_sheet` the
-    /// same; T5 adds `sheets.format` — 11 of the 22 verbs are real now, leaving 11 STILL on T1's own
-    /// synchronous refusal shell (every `slides`/`docs` verb — Stage C's remaining stages' own job).
-    /// Every pre-existing test below that needs "an office verb that still answers synchronously with
-    /// the not-implemented refusal, for ANY verb" picks from this list rather than hand-naming a real
-    /// one, which would otherwise silently start asserting on ASYNC behaviour these tests were never
-    /// built to await.
+    /// same; T5 adds `sheets.format`; T6 adds every `slides` verb (`info`/`read`/`set_text`/
+    /// `add_slide`/`delete_slide`/`reorder`) — 17 of the 22 verbs are real now, leaving 5 STILL on
+    /// T1's own synchronous refusal shell (every `docs` verb — Stage C's last remaining stage's own
+    /// job). Every pre-existing test below that needs "an office verb that still answers
+    /// synchronously with the not-implemented refusal, for ANY verb" picks from this list rather than
+    /// hand-naming a real one, which would otherwise silently start asserting on ASYNC behaviour these
+    /// tests were never built to await.
     static let stillStubOfficeVerbs = allOfficeVerbsAsOfT1.filter {
         ![
             "office.sheets.info", "office.sheets.read", "office.sheets.set",
@@ -123,6 +124,8 @@ final class OfficeCommandConsumerTests: XCTestCase {
             "office.sheets.delete_rows", "office.sheets.delete_cols",
             "office.sheets.add_sheet", "office.sheets.delete_sheet", "office.sheets.rename_sheet",
             "office.sheets.format",
+            "office.slides.info", "office.slides.read", "office.slides.set_text",
+            "office.slides.add_slide", "office.slides.delete_slide", "office.slides.reorder",
         ].contains($0)
     }
 
@@ -157,26 +160,33 @@ final class OfficeCommandConsumerTests: XCTestCase {
 
     func testTheRefusalNamesTheToolAndVerbSeparately() {
         let consumer = makeConsumer()
-        // T5 correction: `office.sheets.format` is real now (`handleSheetsFormat`) — every `sheets`
-        // verb is real as of T5, so this moves to `office.slides.info`, the first still-stub verb of
-        // Stage C's next kind (`slides`'s own job, not yet reached).
-        consumer.handle(command("office.slides.info"))
+        // T6 correction: every `slides` verb is real now (`handleSlidesInfo`/etc.) — `docs` is the
+        // ONLY kind left on T1's own stub shell, so this moves to `office.docs.info`, the last
+        // remaining stub kind's own first verb.
+        consumer.handle(command("office.docs.info"))
         XCTAssertEqual(sent.count, 1)
         XCTAssertEqual(sent.first?.ok, false)
-        XCTAssertTrue(sent.first?.result?.contains("slides") == true, "\(sent)")
+        XCTAssertTrue(sent.first?.result?.contains("docs") == true, "\(sent)")
         XCTAssertTrue(sent.first?.result?.contains("info") == true, "\(sent)")
         let lower = sent.first?.result?.lowercased() ?? ""
         XCTAssertTrue(lower.contains("not implemented") || lower.contains("not yet implement"), "\(sent)")
     }
 
-    func testDifferentKindsAreWordedWithTheirOwnKindAndVerb() {
+    /// T6 correction: `slides` is real now too (every verb, all six) — `docs` is the ONLY kind left
+    /// on T1's own stub shell, so this test can no longer demonstrate two DIFFERENT KINDS both
+    /// refusing (there is only one kind left to pick from). Renamed in spirit, not just body: now
+    /// proves two DIFFERENT VERBS of the same (last remaining stub) kind are each worded with their
+    /// own verb name — the kind-naming half of the same claim is already covered by
+    /// `testTheRefusalNamesTheToolAndVerbSeparately` (which asserts "docs" appears) and does not need
+    /// re-proving here.
+    func testDifferentVerbsOfTheSameStubKindAreWordedWithTheirOwnVerb() {
         let consumer = makeConsumer()
-        consumer.handle(command("office.slides.add_slide", commandId: "c1"))
-        consumer.handle(command("office.docs.replace", commandId: "c2"))
-        XCTAssertTrue(sent[0].result?.contains("slides") == true, "\(sent[0])")
-        XCTAssertTrue(sent[0].result?.contains("add_slide") == true, "\(sent[0])")
+        consumer.handle(command("office.docs.replace", commandId: "c1"))
+        consumer.handle(command("office.docs.append", commandId: "c2"))
+        XCTAssertTrue(sent[0].result?.contains("docs") == true, "\(sent[0])")
+        XCTAssertTrue(sent[0].result?.contains("replace") == true, "\(sent[0])")
         XCTAssertTrue(sent[1].result?.contains("docs") == true, "\(sent[1])")
-        XCTAssertTrue(sent[1].result?.contains("replace") == true, "\(sent[1])")
+        XCTAssertTrue(sent[1].result?.contains("append") == true, "\(sent[1])")
     }
 
     func testTheAnswerCarriesTheCommandsOwnSessionAndId() {
@@ -228,10 +238,13 @@ final class OfficeCommandConsumerTests: XCTestCase {
     /// `testASheetsReadResultIsCappedNotAllowedToGrowUnbounded` below, a different mechanism
     /// (`sheetsResultMaxLength`, checked on the BUILT result) proving the equivalent property for a
     /// verb that must read `args` to do its job at all.
+    ///
+    /// T6 correction: `slides` is real now too — moved to `office.docs.info`, the last remaining
+    /// stub kind, same reasoning as this file's other T6-corrected tests above.
     func testTheRefusalNeverGrowsWithArgs() {
         let consumer = makeConsumer()
         let hugePath = String(repeating: "x", count: 100_000)
-        consumer.handle(command("office.slides.info", args: ["path": hugePath, "sheet": "S"]))
+        consumer.handle(command("office.docs.info", args: ["path": hugePath, "sheet": "S"]))
         XCTAssertEqual(sent.count, 1)
         XCTAssertFalse(sent.first?.result?.contains(hugePath) == true)
         XCTAssertLessThan(sent.first?.result?.count ?? Int.max, 1_000,
@@ -286,6 +299,20 @@ final class OfficeCommandConsumerTests: XCTestCase {
                                  OfficeSheetsAlign?, Double?) async throws -> [String] = { _, _, _, _, _, _, _, _, _ in
             throw OfficeHelperClientError.serverError(reason: "sheetsFormat not stubbed for this test")
         },
+        // office-agent-tools T6 — same "explicit stub per test, throw if unstubbed" shape as every
+        // sheets sibling above.
+        slidesInfo: @escaping (String) async throws -> [OfficeSlideInfo] = { _ in
+            throw OfficeHelperClientError.serverError(reason: "slidesInfo not stubbed for this test")
+        },
+        slidesRead: @escaping (String, Int) async throws -> (title: String?, body: String?) = { _, _ in
+            throw OfficeHelperClientError.serverError(reason: "slidesRead not stubbed for this test")
+        },
+        slidesSetText: @escaping (String, Int, String?, String?) async throws -> [String] = { _, _, _, _ in
+            throw OfficeHelperClientError.serverError(reason: "slidesSetText not stubbed for this test")
+        },
+        slidesManagePage: @escaping (String, OfficeSlidesManagePageOp, Int?, Int?, Int?, OfficeSlidesLayoutPreset?) async throws -> Int = { _, _, _, _, _, _ in
+            throw OfficeHelperClientError.serverError(reason: "slidesManagePage not stubbed for this test")
+        },
         // Fix-round review (item 4) — every EXISTING caller of this helper only ever exercises
         // sheetsInfo/sheetsRead (read-only, no save-through) or a refusal path (never reaches save
         // either), so the original hardcoded `"/tmp/unused-save"` — a path that does not exist —
@@ -309,6 +336,8 @@ final class OfficeCommandConsumerTests: XCTestCase {
             sheetsInfo: sheetsInfo, sheetsRead: sheetsRead,
             sheetsSet: sheetsSet, sheetsResize: sheetsResize, sheetsManageSheet: sheetsManageSheet,
             sheetsFormat: sheetsFormat,
+            slidesInfo: slidesInfo, slidesRead: slidesRead, slidesSetText: slidesSetText,
+            slidesManagePage: slidesManagePage,
             stateDirectory: FileManager.default.temporaryDirectory)
         let runtime = OfficeRuntime(sessionId: "s1", driver: driver)
         let broker = OfficeAgentBroker(host: .init(
@@ -710,5 +739,256 @@ final class OfficeCommandConsumerTests: XCTestCase {
         XCTAssertTrue(result.contains("bold failed"), result)
         XCTAssertFalse(result.contains("already applied"), "a single-attribute call has nothing earlier "
                        + "in the same call to have already applied: \(result)")
+    }
+
+    // ============================================================================================
+    // office-agent-tools T6: slides — pre-broker refusals (fast, no live engine needed) and the
+    // happy path through a fake driver. The saved-bytes/two-part-discriminator proof obligations are
+    // OfficeSlidesCommandTests.swift's own live drills — this file only proves the operand plumbing,
+    // the SAME split `sheets`' own unit-test/live-test files already hold to.
+    // ============================================================================================
+
+    func testSlidesInfoRefusesAMissingPathWithoutTouchingTheBroker() async {
+        var driverCalled = false
+        let world = makeSheetsWorld(slidesInfo: { _ in driverCalled = true; return [] })
+        world.consumer.handle(command("office.slides.info"))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, false)
+        XCTAssertTrue(sent.first?.result?.contains("path") == true, "\(sent)")
+        XCTAssertFalse(driverCalled, "a missing path must refuse before the broker/driver is ever reached")
+    }
+
+    func testSlidesInfoHappyPathReportsSlideNamesAndLayouts() async {
+        let path = makeScratchFile()
+        let world = makeSheetsWorld(
+            workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+            slidesInfo: { _ in
+                [OfficeSlideInfo(name: "Title Slide", layout: "title_content"),
+                 OfficeSlideInfo(name: "Slide 2", layout: nil)]
+            })
+        world.consumer.handle(command("office.slides.info", args: ["path": path]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, true, "\(sent)")
+        let result = sent.first?.result ?? ""
+        XCTAssertTrue(result.contains("Title Slide"), result)
+        XCTAssertTrue(result.contains("title_content"), result)
+        XCTAssertTrue(result.contains("Slide 2"), result)
+        XCTAssertTrue(result.lowercased().contains("unknown"), "a nil layout must render as an honest "
+                      + "\"unknown\", never a guess: \(result)")
+    }
+
+    func testSlidesReadRefusesAMissingSlideWithoutTouchingTheBroker() async {
+        var driverCalled = false
+        let world = makeSheetsWorld(slidesRead: { _, _ in driverCalled = true; return (nil, nil) })
+        world.consumer.handle(command("office.slides.read", args: ["path": "/tmp/a.pptx"]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, false)
+        XCTAssertTrue(sent.first?.result?.contains("slide") == true, "\(sent)")
+        XCTAssertFalse(driverCalled, "a missing slide must refuse before the broker/driver is ever reached")
+    }
+
+    /// 1-based on the wire in, 1-based in the echoed result, 0-based to the driver — the ONE place
+    /// this conversion happens (`handleSlidesRead`'s own header). Also proves the nil-vs-empty-string
+    /// placeholder distinction renders as two DIFFERENT sentences, never the same text for both.
+    func testSlidesReadHappyPathConvertsToZeroBasedAndDistinguishesMissingFromEmptyPlaceholder() async {
+        let path = makeScratchFile()
+        let world = makeSheetsWorld(
+            workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+            slidesRead: { _, slide in
+                XCTAssertEqual(slide, 1, "slide:2 (1-based) must reach the driver as 1 (0-based)")
+                return (title: "Q3 Revenue", body: nil)
+            })
+        world.consumer.handle(command("office.slides.read", args: ["path": path, "slide": 2]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, true, "\(sent)")
+        let result = sent.first?.result ?? ""
+        XCTAssertTrue(result.contains("Q3 Revenue"), result)
+        XCTAssertTrue(result.contains("Slide 2"), "the echoed slide number must be 1-based again: \(result)")
+        XCTAssertFalse(result.contains("(empty)"), "a nil body must not be worded as if it were present-but-empty: \(result)")
+    }
+
+    func testSlidesSetTextRefusesAMissingSlideWithoutTouchingTheBroker() async {
+        var driverCalled = false
+        let world = makeSheetsWorld(slidesSetText: { _, _, _, _ in driverCalled = true; return [] })
+        world.consumer.handle(command("office.slides.set_text", args: ["path": "/tmp/a.pptx", "title": "Hi"]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, false)
+        XCTAssertTrue(sent.first?.result?.contains("slide") == true, "\(sent)")
+        XCTAssertFalse(driverCalled)
+    }
+
+    /// Re-checked HERE, not merely trusted from the daemon's own validation — mirrors
+    /// `handleSheetsFormat`'s identical re-check of its own five attributes (this file's own
+    /// established belt-and-braces posture).
+    func testSlidesSetTextRefusesNamingNeitherTitleNorBodyWithoutTouchingTheBroker() async {
+        var driverCalled = false
+        let world = makeSheetsWorld(slidesSetText: { _, _, _, _ in driverCalled = true; return [] })
+        world.consumer.handle(command("office.slides.set_text", args: ["path": "/tmp/a.pptx", "slide": 1]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, false)
+        XCTAssertTrue(sent.first?.result?.contains("at least one") == true, "\(sent)")
+        XCTAssertFalse(driverCalled)
+    }
+
+    func testSlidesSetTextHappyPathThreadsTitleAndBodyAndConvertsToZeroBased() async {
+        let path = makeScratchFile()
+        let savedPath = makeScratchFile(named: "saved.pptx")
+        let world = makeSheetsWorld(
+            workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+            slidesSetText: { _, slide, title, body in
+                XCTAssertEqual(slide, 0, "slide:1 (1-based) must reach the driver as 0 (0-based)")
+                XCTAssertEqual(title, "New Title")
+                XCTAssertEqual(body, "New Body")
+                return ["title", "body"]
+            },
+            save: { _, _ in savedPath })
+        world.consumer.handle(command("office.slides.set_text",
+                                       args: ["path": path, "slide": 1, "title": "New Title", "body": "New Body"]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, true, "\(sent)")
+    }
+
+    /// The partial-failure lifecycle sentence — mirrors `testSheetsFormatMultiAttributeFailure
+    /// AppendsThePartialApplicationLifecycleSentence` exactly, `handleSlidesSetText`'s own catch block.
+    func testSlidesSetTextMultiAttributeFailureAppendsThePartialApplicationLifecycleSentence() async {
+        let path = makeScratchFile()
+        let world = makeSheetsWorld(
+            workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+            slidesSetText: { _, _, _, _ in
+                throw OfficeHelperClientError.serverError(reason: "the body phase failed")
+            })
+        world.consumer.handle(command("office.slides.set_text",
+                                       args: ["path": path, "slide": 1, "title": "T", "body": "B"]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, false)
+        let result = sent.first?.result ?? ""
+        XCTAssertTrue(result.contains("the body phase failed"), result)
+        XCTAssertTrue(result.contains("already applied"), "a two-attribute call's failure must carry the "
+                      + "conditional partial-application sentence: \(result)")
+    }
+
+    func testSlidesSetTextSingleAttributeFailureNeverAppendsTheLifecycleSentence() async {
+        let path = makeScratchFile()
+        let world = makeSheetsWorld(
+            workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+            slidesSetText: { _, _, _, _ in
+                throw OfficeHelperClientError.serverError(reason: "title failed")
+            })
+        world.consumer.handle(command("office.slides.set_text", args: ["path": path, "slide": 1, "title": "T"]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, false)
+        let result = sent.first?.result ?? ""
+        XCTAssertTrue(result.contains("title failed"), result)
+        XCTAssertFalse(result.contains("already applied"), "a single-attribute call has nothing earlier "
+                       + "in the same call to have already applied: \(result)")
+    }
+
+    // MARK: add_slide / delete_slide / reorder — one consumer method, `slidesManagePage`
+
+    func testAddSlideHappyPathThreadsOptionalAtAndLayoutConvertedToZeroBased() async {
+        let path = makeScratchFile()
+        let savedPath = makeScratchFile(named: "saved.pptx")
+        let world = makeSheetsWorld(
+            workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+            slidesManagePage: { _, op, slide, at, to, layout in
+                XCTAssertEqual(op, .add)
+                XCTAssertNil(slide)
+                XCTAssertEqual(at, 1, "at:2 (1-based) must reach the driver as 1 (0-based)")
+                XCTAssertNil(to)
+                XCTAssertEqual(layout, .titleContent)
+                return 3
+            },
+            save: { _, _ in savedPath })
+        world.consumer.handle(command("office.slides.add_slide",
+                                       args: ["path": path, "at": 2, "layout": "title_content"]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, true, "\(sent)")
+        XCTAssertTrue(sent.first?.result?.contains("3") == true, "\(sent)")
+    }
+
+    func testAddSlideWithNeitherAtNorLayoutThreadsBothNil() async {
+        let path = makeScratchFile()
+        let savedPath = makeScratchFile(named: "saved.pptx")
+        let world = makeSheetsWorld(
+            workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+            slidesManagePage: { _, op, slide, at, to, layout in
+                XCTAssertEqual(op, .add)
+                XCTAssertNil(slide)
+                XCTAssertNil(at)
+                XCTAssertNil(to)
+                XCTAssertNil(layout)
+                return 2
+            },
+            save: { _, _ in savedPath })
+        world.consumer.handle(command("office.slides.add_slide", args: ["path": path]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, true, "\(sent)")
+    }
+
+    func testDeleteSlideRefusesAMissingSlideWithoutTouchingTheBroker() async {
+        var driverCalled = false
+        let world = makeSheetsWorld(slidesManagePage: { _, _, _, _, _, _ in driverCalled = true; return 1 })
+        world.consumer.handle(command("office.slides.delete_slide", args: ["path": "/tmp/a.pptx"]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, false)
+        XCTAssertTrue(sent.first?.result?.contains("slide") == true, "\(sent)")
+        XCTAssertFalse(driverCalled)
+    }
+
+    func testDeleteSlideHappyPathConvertsToZeroBasedAndNamesNeitherAtNorToNorLayout() async {
+        let path = makeScratchFile()
+        let savedPath = makeScratchFile(named: "saved.pptx")
+        let world = makeSheetsWorld(
+            workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+            slidesManagePage: { _, op, slide, at, to, layout in
+                XCTAssertEqual(op, .delete)
+                XCTAssertEqual(slide, 2, "slide:3 (1-based) must reach the driver as 2 (0-based)")
+                XCTAssertNil(at)
+                XCTAssertNil(to)
+                XCTAssertNil(layout)
+                return 1
+            },
+            save: { _, _ in savedPath })
+        world.consumer.handle(command("office.slides.delete_slide", args: ["path": path, "slide": 3]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, true, "\(sent)")
+    }
+
+    func testReorderRefusesAMissingToWithoutTouchingTheBroker() async {
+        var driverCalled = false
+        let world = makeSheetsWorld(slidesManagePage: { _, _, _, _, _, _ in driverCalled = true; return 1 })
+        world.consumer.handle(command("office.slides.reorder", args: ["path": "/tmp/a.pptx", "slide": 1]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, false)
+        XCTAssertTrue(sent.first?.result?.contains("`to`") == true, "\(sent)")
+        XCTAssertFalse(driverCalled)
+    }
+
+    func testReorderRefusesAMissingSlideWithoutTouchingTheBroker() async {
+        var driverCalled = false
+        let world = makeSheetsWorld(slidesManagePage: { _, _, _, _, _, _ in driverCalled = true; return 1 })
+        world.consumer.handle(command("office.slides.reorder", args: ["path": "/tmp/a.pptx", "to": 1]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, false)
+        XCTAssertFalse(driverCalled)
+    }
+
+    func testReorderHappyPathConvertsBothSlideAndToToZeroBased() async {
+        let path = makeScratchFile()
+        let savedPath = makeScratchFile(named: "saved.pptx")
+        let world = makeSheetsWorld(
+            workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+            slidesManagePage: { _, op, slide, at, to, layout in
+                XCTAssertEqual(op, .reorder)
+                XCTAssertEqual(slide, 2, "slide:3 (1-based) must reach the driver as 2 (0-based)")
+                XCTAssertEqual(to, 0, "to:1 (1-based) must reach the driver as 0 (0-based)")
+                XCTAssertNil(at)
+                XCTAssertNil(layout)
+                return 3
+            },
+            save: { _, _ in savedPath })
+        world.consumer.handle(command("office.slides.reorder", args: ["path": path, "slide": 3, "to": 1]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, true, "\(sent)")
     }
 }

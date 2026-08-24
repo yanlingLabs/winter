@@ -1161,6 +1161,41 @@ final class ShellSessionHost: ObservableObject {
                                                           align: align, width: width)
                 }
             },
+            // office-agent-tools T6 — slides, same `queue.run` routing and same throws-all-the-way-
+            // back posture every sheets sibling above already has.
+            slidesInfo: { [weak supervisor] docId in
+                try await queue.run {
+                    guard let client = supervisor?.client else {
+                        throw OfficeHelperClientError.serverError(reason: "helper not connected")
+                    }
+                    return try await client.slidesInfo(docId: docId)
+                }
+            },
+            slidesRead: { [weak supervisor] docId, slide in
+                try await queue.run {
+                    guard let client = supervisor?.client else {
+                        throw OfficeHelperClientError.serverError(reason: "helper not connected")
+                    }
+                    return try await client.slidesRead(docId: docId, slide: slide)
+                }
+            },
+            slidesSetText: { [weak supervisor] docId, slide, title, body in
+                try await queue.run {
+                    guard let client = supervisor?.client else {
+                        throw OfficeHelperClientError.serverError(reason: "helper not connected")
+                    }
+                    return try await client.slidesSetText(docId: docId, slide: slide, title: title, body: body)
+                }
+            },
+            slidesManagePage: { [weak supervisor] docId, op, slide, at, to, layout in
+                try await queue.run {
+                    guard let client = supervisor?.client else {
+                        throw OfficeHelperClientError.serverError(reason: "helper not connected")
+                    }
+                    return try await client.slidesManagePage(docId: docId, op: op, slide: slide, at: at,
+                                                              to: to, layout: layout)
+                }
+            },
             // Office Stage B Task 2b — the LIVE supervisor's own configured directory, never
             // `OfficeHelperSupervisor.Configuration.defaultStateDirectory()` read fresh: every live
             // test overrides `socketDirectory` with a scratch dir precisely so its own helper's
