@@ -928,6 +928,79 @@ final class OfficeCommandConsumerTests: XCTestCase {
     // the SAME split `sheets`' own unit-test/live-test files already hold to.
     // ============================================================================================
 
+    /// **T5 fix-round RE-REVIEW, the NEW Critical — the fifth door.** Every value below used to
+    /// reach `oneBasedIndex`'s unbounded `Int(Double)` and ABORT NORMA.APP, from five live slides
+    /// handlers, because `z.number().int().positive()` is not a bound (`Number.isInteger(1e30)` is
+    /// `true`). Same shape, same blast radius, and same test posture as the `sheets` vectors in
+    /// `PanelDocumentTabTests`: a trap is not catchable by XCTest, so if the ceiling is ever removed
+    /// these do not fail — they take the whole runner down. That is the loudest red available.
+    func testSlidesRefusesAnAppAbortingIndexOnEveryVerbThatTakesOne() async {
+        let path = makeScratchFile()
+        var driverCalled = false
+        let world = makeSheetsWorld(
+            workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+            slidesInfo: { _ in driverCalled = true; return [] },
+            slidesRead: { _, _ in driverCalled = true; return (nil, nil) },
+            slidesSetText: { _, _, _, _ in driverCalled = true; return [] },
+            slidesManagePage: { _, _, _, _, _, _ in driverCalled = true; return 1 })
+        // (action, the key carrying the index, any other operands the verb needs first)
+        let cases: [(String, String, [String: Any])] = [
+            ("office.slides.read", "slide", [:]),
+            ("office.slides.set_text", "slide", ["title": "x"]),
+            ("office.slides.delete_slide", "slide", [:]),
+            ("office.slides.reorder", "slide", ["to": 2]),
+            ("office.slides.reorder", "to", ["slide": 1]),
+            ("office.slides.add_slide", "at", [:]),
+        ]
+        for bad in [1e30, 9_223_372_036_854_775_807.0, Double(OfficeCommandConsumer.officeSlideMaxIndex + 1)] {
+            for (action, key, extra) in cases {
+                sent.removeAll()
+                var args: [String: Any] = ["path": path, key: bad]
+                for (k, v) in extra { args[k] = v }
+                world.consumer.handle(command(action, args: args, commandId: "pcmd-\(action)-\(key)-\(bad)"))
+                await waitUntil { !self.sent.isEmpty }
+                XCTAssertEqual(sent.first?.ok, false, "\(action) \(key):\(bad) must refuse: \(sent)")
+                XCTAssertTrue(sent.first?.result?.contains("1-based") == true,
+                              "\(action) \(key):\(bad) must get the INDEX refusal — for `add_slide`'s "
+                                  + "optional `at` in particular, a nil from the decoder must not be "
+                                  + "read as \"omitted\" and silently appended: \(sent)")
+            }
+        }
+        XCTAssertFalse(driverCalled, "an out-of-range index must refuse before the broker/driver is reached")
+    }
+
+    /// The ceiling is inclusive at its own boundary, and `add_slide`'s `at` is genuinely optional —
+    /// so the guard cannot have quietly turned "omitted" into "refused" for the one verb that
+    /// appends when `at` is absent.
+    func testSlidesIndexCeilingIsInclusiveAndStillAllowsAnOmittedAt() async {
+        // A fresh save source per call — the broker's save-through consumes the file `save` names,
+        // so a single stub path cannot serve two calls (learned here, not assumed).
+        var seenAt: Int?
+        func runAddSlide(_ args: [String: Any], _ commandId: String) async -> Sent? {
+            let path = makeScratchFile()
+            var args = args
+            args["path"] = path
+            let world = makeSheetsWorld(
+                workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+                slidesManagePage: { _, _, _, at, _, _ in seenAt = at; return 1 },
+                save: { [self] _, _ in self.makeScratchFile() })
+            sent.removeAll(); seenAt = nil
+            world.consumer.handle(command("office.slides.add_slide", args: args, commandId: commandId))
+            await waitUntil { !self.sent.isEmpty }
+            return sent.first
+        }
+
+        let atCeiling = await runAddSlide(["at": OfficeCommandConsumer.officeSlideMaxIndex], "pcmd-ceiling")
+        XCTAssertEqual(atCeiling?.ok, true, "exactly the ceiling must pass: \(String(describing: atCeiling))")
+        XCTAssertEqual(seenAt, OfficeCommandConsumer.officeSlideMaxIndex - 1, "0-based on the wire")
+
+        let omitted = await runAddSlide([:], "pcmd-no-at")
+        XCTAssertEqual(omitted?.ok, true, "an OMITTED `at` still means append — the new "
+                           + "present-but-invalid refusal must not have swallowed the absent case: "
+                           + "\(String(describing: omitted))")
+        XCTAssertNil(seenAt, "omitted must stay nil, never collapse to a bounded default")
+    }
+
     func testSlidesInfoRefusesAMissingPathWithoutTouchingTheBroker() async {
         var driverCalled = false
         let world = makeSheetsWorld(slidesInfo: { _ in driverCalled = true; return [] })

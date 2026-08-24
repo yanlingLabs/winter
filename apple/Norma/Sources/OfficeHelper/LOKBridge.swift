@@ -465,6 +465,10 @@ final class LOKBridge: OfficeDocumentBridge {
         /// this case, so a pre-check is the only honest way to refuse it rather than risk a silent
         /// no-op or an unverified worse outcome).
         case lastSheet(docId: String)
+        /// T5 fix-round re-review (Minor) — `officeWidthMm100`'s own refusal; see its header. Never
+        /// reached from `sheets format`, whose app-side `optionalWidth` already bounds [1, 1000];
+        /// this exists so the helper's own conversion is total rather than dependent on that.
+        case widthOutOfRange(docId: String, points: Double)
         /// office-agent-tools T4 — `add_sheet`/`rename_sheet` named a sheet name that already exists
         /// in the workbook. Checked BEFORE dispatching, for the same reason as `.lastSheet` above:
         /// `ScDocFunc::RenameTable`/`CreateValidTabName`'s own behavior on a collision is a silent
@@ -552,6 +556,9 @@ final class LOKBridge: OfficeDocumentBridge {
                         + "known (unchanged), not unknown"
                 }
             case .partialSetFailure(let reason): return reason
+            case .widthOutOfRange(let docId, let points):
+                return "a column width of \(points) points is outside the supported range (1 to 1000) "
+                    + "in \(docId) — nothing was resized"
             case .lastSheet(let docId):
                 return "\(docId) has only one sheet left — a workbook needs at least one; refusing to delete it"
             case .duplicateSheetName(let docId, let name):
@@ -3350,8 +3357,20 @@ final class LOKBridge: OfficeDocumentBridge {
     /// `width` schema (`.min(1).max(1000)` points) keeps this comfortably inside `UInt16`'s range at
     /// both ends: 1pt -> 35 (never rounds to the unrepresentable 0), 1000pt -> 35,278 (well under
     /// 65,535).
-    private static func officeWidthMm100(fromPoints points: Double) -> Int {
-        Int((points * 2540.0 / 72.0).rounded())
+    ///
+    /// **T5 fix-round RE-REVIEW (Minor) — bounded here too, against this round's own stated rule.**
+    /// The round bounded `parseSingleCellReference` helper-side on the explicit principle that "the
+    /// caller happens to bound it" is the reasoning that left three doors open, then did not apply
+    /// that principle to the sibling conversion in this same file: `Int(Double)` traps outside
+    /// `Int`'s range, and an unbounded `points` reaches it. Blast radius is `NormaOfficeHelper`, not
+    /// the app — a smaller crash, still a crash, and still a rule this file was already following
+    /// twelve hundred lines up. `nil` for anything outside the app's own documented [1, 1000]-point
+    /// operand range (`OfficeCommandConsumer.officeWidthMinPoints`/`MaxPoints`, mirrored here for
+    /// the same compile-boundary reason `parseSingleCellReference`'s own header cites); NaN and
+    /// infinity fall out for free, since neither comparison holds.
+    private static func officeWidthMm100(fromPoints points: Double) -> Int? {
+        guard points >= 1.0, points <= 1000.0 else { return nil }
+        return Int((points * 2540.0 / 72.0).rounded())
     }
 
     /// office-agent-tools T5 — the SAME sentinel-then-anchor two-check position-verification pattern
@@ -3539,7 +3558,9 @@ final class LOKBridge: OfficeDocumentBridge {
             try positionAndVerifySpanOnDedicatedThread(doc, docId: docId, viewId: agentViewId, part: part,
                                                         anchorAddress: "\(columnAnchorToken)1", span: columnSpan)
 
-            let mm100 = Self.officeWidthMm100(fromPoints: width)
+            guard let mm100 = Self.officeWidthMm100(fromPoints: width) else {
+                throw SaveError.widthOutOfRange(docId: docId, points: width)
+            }
             postUnoCommandOnDedicatedThread(doc, ".uno:ColumnWidth",
                                             ["ColumnWidth": ["type": "unsigned short", "value": String(mm100)]])
             applied.append("width")

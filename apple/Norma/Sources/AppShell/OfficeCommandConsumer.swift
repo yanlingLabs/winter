@@ -734,6 +734,17 @@ struct OfficeCommandConsumer {
         switch command.action {
         case "office.slides.add_slide":
             op = .add
+            // `at` is the ONE genuinely optional index on this verb (absent = append at the end), so
+            // a `nil` from `oneBasedIndex` is ambiguous here in a way it is nowhere else — and the
+            // re-review's new ceiling made that ambiguity load-bearing. **Caught by this fix's own
+            // test, not reasoned about afterwards:** with the ceiling and without this guard,
+            // `at:1e30` stopped aborting the app and started SILENTLY APPENDING, which is a worse
+            // failure than the refusal it should be — the model asked for a specific position and
+            // got a different one, reported as success. Same remedy, and the same reasoning, as
+            // `handleSheetsFormat`'s own present-but-out-of-range `width` refusal.
+            if case .number? = command.args?["at"], Self.oneBasedIndex(command.args, "at") == nil {
+                return sendResult(command.sessionId, command.commandId, false, Self.requiredAtRefusal, nil)
+            }
             at = Self.oneBasedIndex(command.args, "at").map { $0 - 1 }
         case "office.slides.delete_slide":
             op = .delete
@@ -876,18 +887,40 @@ struct OfficeCommandConsumer {
 
     // MARK: - office-agent-tools T6: slides' own operands
 
-    private static let requiredSlideRefusal = "this office verb needs a `slide` (1-based)."
-    private static let requiredToRefusal = "`slides reorder` needs a `to` (1-based)."
+    private static let requiredSlideRefusal = "this office verb needs a `slide` (1-based, at most "
+        + "\(officeSlideMaxIndex))."
+    private static let requiredToRefusal = "`slides reorder` needs a `to` (1-based, at most "
+        + "\(officeSlideMaxIndex))."
+    private static let requiredAtRefusal = "`slides add_slide`'s `at` must be a positive 1-based "
+        + "position, at most \(officeSlideMaxIndex) — omit it entirely to append at the end."
     private static let requiredSetTextAttributeRefusal =
         "`slides set_text` needs at least one of `title`, `body` — an absent key means \"leave "
         + "alone,\" so a call naming neither would do nothing."
 
-    /// A positive, whole 1-based index — `slide`/`at`/`to`, all sharing this SAME shape (the daemon's
-    /// own zod schema already enforces `.int().positive()`; this is the app's own independent check,
-    /// mirroring `requiredCount`'s identical discipline for `sheets`' resize verbs — never trusting
-    /// the daemon's validation as the only gate).
+    /// A positive, whole 1-based index — `slide`/`at`/`to`, all sharing this SAME shape.
+    ///
+    /// **T5 fix-round RE-REVIEW, new Critical — this was the fifth door of the class the fix round
+    /// declared swept, and its own doc comment asserted the safety property it did not have.** The
+    /// original said it was "mirroring `requiredCount`'s identical discipline … never trusting the
+    /// daemon's validation as the only gate." That sentence became false the moment `requiredCount`
+    /// four lines up gained a ceiling and this did not: `Int(Double)` TRAPS outside `Int`'s range,
+    /// the daemon's `z.number().int().positive()` is not a bound (`Number.isInteger(1e30)` is
+    /// `true`), and `slides read path:"<in-fence>.pptx" slide:1e30` therefore aborted Norma.app —
+    /// from five live handlers (`read`/`set_text`/`delete_slide`/`reorder`/`add_slide`). A comment
+    /// claiming a guard is not a guard; the ceiling below is.
+    ///
+    /// `officeSlideMaxIndex` mirrors `slides.ts`'s own `.max(10_000)` deliberately, the same
+    /// two-sided arrangement `officeResizeMaxCount`/`officeResizeMaxAt` hold for `sheets`: the
+    /// daemon's copy makes the refusal immediate and specific, this one is what actually makes the
+    /// conversion total, because the daemon is not the only possible producer of a `panel_command`.
+    /// 10,000 is orders of magnitude past any real deck, so it refuses nothing anyone wants, and it
+    /// keeps every `slide`/`at`/`to` arithmetic downstream (`$0 - 1`, the helper's own
+    /// `slide < partCount` bound) total by construction.
+    static let officeSlideMaxIndex = 10_000
+
     private static func oneBasedIndex(_ args: [String: SessionEvent.JSONValue]?, _ key: String) -> Int? {
-        guard case .number(let n)? = args?[key], n >= 1, n.truncatingRemainder(dividingBy: 1) == 0 else { return nil }
+        guard case .number(let n)? = args?[key], n >= 1, n <= Double(officeSlideMaxIndex),
+              n.truncatingRemainder(dividingBy: 1) == 0 else { return nil }
         return Int(n)
     }
     private static func optionalString(_ args: [String: SessionEvent.JSONValue]?, _ key: String) -> String? {

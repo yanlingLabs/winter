@@ -143,8 +143,17 @@ const SlidesArgs = z.object({
   /** The 1-based slide number this verb acts on. Required for `read`/`set_text`/`delete_slide`/
    *  `reorder` — the four verbs that target ONE already-existing slide. NOT used by `info` (whole-
    *  document) or `add_slide` (which has no existing slide to name — see `at` below for where a NEW
-   *  slide lands). */
-  slide: z.number().int().positive().optional(),
+   *  slide lands).
+   *
+   *  **Bounded (T5 fix round, re-review's NEW Critical).** `z.number().int().positive()` is not a
+   *  bound: `Number.isInteger(1e30)` is `true`, so `1e30` satisfied every clause and reached the
+   *  app's own `OfficeCommandConsumer.oneBasedIndex`, whose `Int(Double)` TRAPS outside `Int`'s
+   *  range — aborting Norma.app and every open document's unsaved edits, from `slides read
+   *  slide:1e30`. Identical class to `sheets`' own `at`/`count`, on five live handlers. The
+   *  app-side ceiling is the load-bearing fix (`officeSlideMaxIndex`); this makes the refusal
+   *  immediate and specific. 10,000 is far past any real deck and keeps every downstream
+   *  `slide`/`at`/`to` arithmetic total. */
+  slide: z.number().int().positive().max(10_000).optional(),
   /** `set_text` ONLY — the new title placeholder text. Same absent-means-untouched contract `sheets
    *  format`'s attributes already established: naming only `title` leaves `body` exactly as it was,
    *  and vice versa — at least one of the two must be present (checked below; naming neither would do
@@ -157,13 +166,13 @@ const SlidesArgs = z.object({
    *  this position shift down by one). Omitted appends at the end — matches `sheets add_sheet`'s own
    *  v1 "no position operand, always appends" default for the omitted case, while `slides` (unlike
    *  `sheets`) also supports naming a real position, per spec §2's own `at?` column. */
-  at: z.number().int().positive().optional(),
+  at: z.number().int().positive().max(10_000).optional(),
   /** `add_slide` ONLY — which layout the new slide starts with. Omitted uses Impress's own default
    *  for a freshly inserted slide (whatever that build's own "new slide" command produces). */
   layout: SlidesLayoutPreset.optional(),
   /** `reorder` ONLY — the 1-based position `slide` moves TO. Required for `reorder` (checked below) —
    *  there is no sensible reorder without a target. */
-  to: z.number().int().positive().optional(),
+  to: z.number().int().positive().max(10_000).optional(),
 });
 type SlidesArgs = z.infer<typeof SlidesArgs>;
 

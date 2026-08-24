@@ -139,6 +139,37 @@ describe("read", () => {
     expect(h.recorded).toEqual([]);
   });
 
+  // T5 fix-round RE-REVIEW, the NEW Critical — every value here used to satisfy
+  // `z.number().int().positive()` (`Number.isInteger(1e30)` is `true`), reach the app's own
+  // `oneBasedIndex`, and ABORT NORMA.APP inside its `Int(Double)`. Proven red at the app: removing
+  // the app-side ceiling crashes the XCTest runner outright ("Restarting after unexpected exit,
+  // crash, or test timeout"), which is what an aborting `Int(Double)` looks like from outside.
+  test("an app-aborting slide/at/to index is refused before dispatch — every verb that takes one", async () => {
+    const cases: Array<Record<string, unknown>> = [
+      { verb: "read", slide: 1e30 },
+      { verb: "read", slide: 9223372036854775807 },
+      { verb: "read", slide: 10001 },
+      { verb: "set_text", slide: 1e30, title: "x" },
+      { verb: "delete_slide", slide: 1e30 },
+      { verb: "reorder", slide: 1e30, to: 2 },
+      { verb: "reorder", slide: 1, to: 1e30 },
+      { verb: "add_slide", at: 1e30 },
+    ];
+    for (const c of cases) {
+      const h = makeHarness();
+      const result = await h.run({ path: `${WORKDIR}/deck.pptx`, ...c } as never);
+      expect(result.isError).toBe(true);
+      expect(h.recorded).toEqual([]);
+    }
+  });
+
+  test("the index ceiling is inclusive — exactly 10000 still dispatches", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "read", path: `${WORKDIR}/deck.pptx`, slide: 10000 });
+    expect(result.isError).toBe(false);
+    expect(h.recorded).toHaveLength(1);
+  });
+
   test("slide must be a positive integer — zero and negative are refused by zod", async () => {
     const h = makeHarness();
     const result = await h.run({ verb: "read", path: `${WORKDIR}/deck.pptx`, slide: 0 });
