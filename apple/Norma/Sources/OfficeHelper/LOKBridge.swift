@@ -31,6 +31,15 @@ private enum LOKCallbackType {
     /// was added (`OfficeHelperLiveTests
     /// .testProbeInvestigatesWhetherCellFormulaCallbacksExistForTheFormulaBarsContent`).
     static let cellFormula: Int32 = 19
+    /// office-agent-tools T6 — LibreOfficeKitEnums.h:216 (LOK_CALLBACK_GRAPHIC_SELECTION). Payload
+    /// `"x, y, width, height, angle, { optional JSON properties }"` (twips, angle in 100ths of a
+    /// degree) — this bridge only ever needs the first four fields. Confirmed by
+    /// `slides-lok-research.md` §5.4 to fire, unconditionally, from `SdrMarkView
+    /// ::SetMarkHandlesForLOKit` on ANY mark-list change, Tab-driven `MarkNextObj` included — never a
+    /// mouse-only signal. This is `slidesRead`/`slidesSetText`'s own "verify before you type"
+    /// instrument, the slides analogue of `CellCursor`'s synchronous pull for sheets, adapted to a
+    /// genuinely push-only signal (no equivalent synchronous query exists for Impress selection).
+    static let graphicSelection: Int32 = 6
 }
 
 // LOKTileMode (LOK_TILEMODE_RGBA/BGRA, LibreOfficeKitEnums.h:40-41) lived here for
@@ -461,6 +470,14 @@ final class LOKBridge: OfficeDocumentBridge {
         /// office-agent-tools T6 — `delete_slide` named the presentation's ONLY remaining slide.
         /// Mirrors `.lastSheet` exactly — checked BEFORE dispatching any UNO command.
         case lastSlide(docId: String)
+        /// office-agent-tools T6 — `slidesRead`/`slidesSetText` positioned onto slide `slide`
+        /// successfully (it exists — `.slideNotFound` above already ruled that out), but Tab-cycling
+        /// (`selectSlidePlaceholderOnDedicatedThread`) never produced a NEW selection for the
+        /// requested `field` ("title" or "body") — a real, structural fact about this slide (e.g. a
+        /// Blank layout with fewer than 1-2 selectable shapes), never conflated with `.slideNotFound`
+        /// (a different slide identity question entirely). Spec's own "refuses naming the reason,
+        /// rather than inventing one" contract for `set_text`.
+        case slidePlaceholderNotFound(docId: String, slide: Int, field: String)
         var description: String {
             switch self {
             case .docNotOpen(let docId): return "save requested for a docId that is not open: \(docId)"
@@ -532,6 +549,8 @@ final class LOKBridge: OfficeDocumentBridge {
                 return "no slide \(slide + 1) in \(docId) — this presentation has \(slideCount) slide\(slideCount == 1 ? "" : "s")"
             case .lastSlide(let docId):
                 return "\(docId) has only one slide left — a presentation needs at least one; refusing to delete it"
+            case .slidePlaceholderNotFound(let docId, let slide, let field):
+                return "slide \(slide + 1) in \(docId) has no \(field) placeholder — nothing was written"
             }
         }
     }
@@ -660,6 +679,14 @@ final class LOKBridge: OfficeDocumentBridge {
         /// affects which view/cursor position the recovered file remembers as "current," a cosmetic
         /// detail next to the actual data-loss autosave exists to prevent.
         var lastKnownPart: Int = 0
+        /// office-agent-tools T6 — the most recent `LOK_CALLBACK_GRAPHIC_SELECTION` rect observed for
+        /// THIS docId, parsed by `handleCallback`. Consumed and CLEARED by
+        /// `selectSlidePlaceholderOnDedicatedThread`'s own Tab-cycling mechanism immediately before
+        /// every `KEY_TAB` it posts — so a non-nil value read back afterward can only be a fresh
+        /// firing from THAT specific keypress, never a stale rect left over from an earlier,
+        /// unrelated job on this same docId. `nil` means "no selection-changed callback observed
+        /// since this was last cleared."
+        var lastGraphicSelectionRectTwips: OfficeTwipsRect? = nil
     }
 
     private let thread: LOKDedicatedThread
@@ -3451,12 +3478,133 @@ final class LOKBridge: OfficeDocumentBridge {
     //
     // `slidesInfoOnDedicatedThread`'s NAME half is REAL — `getParts`/`getPartName` are the identical,
     // already-proven primitives `sheetNamesOnDedicatedThread` rides (LOK's part model is shared
-    // machinery across Calc/Impress; nothing here is Impress-specific or newly risky). Its TITLE half
-    // depends on the same placeholder-text mechanism `slidesRead`/`slidesSetText` need — see those
-    // methods' own headers, pending live research into placeholder text access. `layout` was removed
-    // from this bridge's own vocabulary entirely (see `OfficeSlideInfo`'s own header): LOK gives no
-    // layout read-back at all, for any slide, ever — not a gap this bridge could close with more
-    // research, a structural absence in the engine's own LOK-facing surface.
+    // machinery across Calc/Impress; nothing here is Impress-specific or newly risky). `layout` was
+    // removed from this bridge's own vocabulary entirely (see `OfficeSlideInfo`'s own header): LOK
+    // gives no layout read-back at all, for any slide, ever.
+    //
+    // ## The placeholder-text mechanism — Tab-cycling, per `slides-lok-research.md` §5
+    //
+    // Went straight to the CONFIRMED path (§5.2), not the speculative one (§5.1, `.uno:OutlineMode`):
+    // that research found `SdXImpressDocument` — the class implementing every LOK callback for
+    // Impress — has ZERO references to `ST_OUTLINE`/`OutlineViewShell` anywhere, a strong signal it
+    // does not integrate with LOK's own tiled-rendering/callback model at all, versus Tab-cycling's
+    // fully-traced call chain (`FuDraw`'s raw key handler -> `SdrMarkView::MarkNextObj`) and its own
+    // confirmed verification instrument (`LOK_CALLBACK_GRAPHIC_SELECTION`, §5.4). A live-tested,
+    // real mechanism now beats a lower-confidence one nobody has spent a cycle probing.
+    //
+    // **Real key events only (`postKeyEvent`/`agentKeyEvent`), never `postUnoCommand`-driven
+    // selection** — Tab is confirmed to reach `MarkNextObj` ONLY via the raw key path (research
+    // §5.2). **Verified before typing, every time** (`selectSlidePlaceholderOnDedicatedThread`,
+    // below) — the same "confirm the selection actually moved before acting on it" discipline this
+    // bridge already applies for Calc's own `CellCursor` check, adapted to a push-only signal.
+    //
+    // **Disclosed, not closed — the residual `slides-lok-research.md` §5.2 itself names**: Tab order
+    // is semantic (title, then body) ONLY on a slide whose shapes were never manually reordered by
+    // the user — `SetAutoLayout`'s own placeholder-creation loop happens to create Title before
+    // Outline for every content-bearing layout, which is what makes "first Tab = title" true for an
+    // untouched, freshly-laid-out slide. There is no LOK-exposed way to ask "which `PresObjKind` is
+    // this" directly (research §5.3) — this bridge verifies ONLY that a real, NEW selection landed,
+    // never that it landed on the semantically-intended shape. Stated here, in the tool's own
+    // description (`slides.ts`), and left as a named residual, not silently assumed away.
+
+    /// office-agent-tools T6 — the raw `com.sun.star.awt.Key` base codes this mechanism needs,
+    /// transcribed from the SAME `offapi/com/sun/star/awt/Key.idl` source `OfficeInputCodes.swift`'s
+    /// own table cites (this bridge cannot import `Sources/AppShell` — see this file's own header,
+    /// and `formulaKeyEvent(for:)`'s identical precedent for why a second, independently-transcribed
+    /// copy lives here). No modifier bits — every use is a bare keypress, `charCode: 0`.
+    private enum SlidesKeyCode {
+        static let escape = 1281
+        static let tab = 1282
+        static let f2 = 769
+    }
+
+    /// Escapes any current selection/edit mode, then posts `KEY_TAB` `tabCount` times on the AGENT
+    /// view, verifying EACH press against a fresh `LOK_CALLBACK_GRAPHIC_SELECTION` firing before
+    /// posting the next one. Returns the FINAL press's own selection rect, or `nil` the instant any
+    /// press produces no new firing — read as "this slide has fewer than `tabCount` selectable
+    /// shapes" (a structural fact about the slide, e.g. a Blank layout), never a straggler worth
+    /// retrying: unlike `.uno:GoToCell`'s own fire-and-forget dispatch, a REAL key event through the
+    /// normal input path is what T4's own investigation found DOES fire callbacks reliably — no
+    /// pump-and-poll is built here unless live evidence demands one.
+    ///
+    /// `tabCount: 1` reaches the title placeholder (on a freshly-laid-out, undisturbed slide);
+    /// `tabCount: 2` reaches the body. Always starts from a fresh `Escape`, never continues from
+    /// wherever a PRIOR call on this same long-lived agent view happened to leave the mark list —
+    /// so `read`ing title then body (two independent calls) cannot accidentally land on the SAME
+    /// shape twice because the second call forgot where the first one left off.
+    private func selectSlidePlaceholderOnDedicatedThread(docId: String, slide: Int, tabCount: Int) throws -> OfficeTwipsRect? {
+        guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        let agentViewId = try ensureAgentViewOnDedicatedThread(docId: docId)
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
+        doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(slide))
+
+        func clearObservedRect() {
+            guard var cleared = documents[docId] else { return }
+            cleared.lastGraphicSelectionRectTwips = nil
+            documents[docId] = cleared
+        }
+        func postAgentKey(_ keyCode: Int) {
+            doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyInput.rawValue), 0, Int32(keyCode))
+            doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyUp.rawValue), 0, Int32(keyCode))
+        }
+
+        clearObservedRect()
+        postAgentKey(SlidesKeyCode.escape)
+
+        var landedRect: OfficeTwipsRect?
+        for _ in 0..<tabCount {
+            clearObservedRect()
+            postAgentKey(SlidesKeyCode.tab)
+            guard let rect = documents[docId]?.lastGraphicSelectionRectTwips else {
+                return nil
+            }
+            landedRect = rect
+        }
+        return landedRect
+    }
+
+    /// Enters text-edit mode on whatever shape is currently selected (`F2` — Impress's own standard
+    /// "edit this object's text" key, the identical convention this bridge's own `set`/`format`
+    /// mechanisms rely on being universal rather than re-deriving per app), selects all of that
+    /// shape's own text (`.uno:SelectAll` — a common, well-known, argument-less UNO command, none of
+    /// the hazard-class-1/2 risk this bridge's own `add_sheet`/`ColumnWidth` investigations found for
+    /// LESS common commands), reads it back via `getTextSelection` (`readSelectionTextOnDedicatedThread`,
+    /// this bridge's own established single read-path — see that function's own header), then exits
+    /// edit mode (`Escape`) to leave the document in the SAME object-selected-but-not-editing state
+    /// `selectSlidePlaceholderOnDedicatedThread` itself produces, never mid-edit.
+    private func readSelectedShapeTextOnDedicatedThread(_ doc: OpenDocument, agentViewId: Int32) -> String {
+        doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyInput.rawValue), 0, Int32(SlidesKeyCode.f2))
+        doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyUp.rawValue), 0, Int32(SlidesKeyCode.f2))
+        postUnoCommandOnDedicatedThread(doc, ".uno:SelectAll", [:])
+        let text = readSelectionTextOnDedicatedThread(doc)
+        doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyInput.rawValue), 0, Int32(SlidesKeyCode.escape))
+        doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyUp.rawValue), 0, Int32(SlidesKeyCode.escape))
+        return text
+    }
+
+    /// The write half of `readSelectedShapeTextOnDedicatedThread`'s own edit-mode dance: F2,
+    /// select-all, then REPLACE the selection with `text` via ext-text-input — this bridge's own
+    /// proven mechanism for general (non-formula) text insertion, already live-tested for Calc cells
+    /// (`writeOneCellOnDedicatedThread`'s own header). `postWindowExtTextInputEvent`'s `nWindowId: 0`
+    /// resolves relative to whichever view `setView` most recently asserted (confirmed by reading
+    /// `postExtTextInputOnDedicatedThread`'s own existing, primary-view-only call site — the IDENTICAL
+    /// LOK C call, the only difference is WHICH view this bridge asserted first) — so this internal
+    /// method reaches the agent view by asserting it itself, never by adding a new wire frame: the
+    /// wire's own `slidesSetText` request already carries the text end to end, and how THIS bridge
+    /// fulfills it is an implementation detail, not a new door for `OfficeHelperClient` to open.
+    /// `.input` then `.end` with EMPTY text — `OfficeWireFrame.extTextInputEvent`'s own header has the
+    /// full "why `.end`'s own text argument is always sent empty" account (LOK ignores it either way).
+    /// Exits edit mode via `Escape` afterward, same as the read path.
+    private func writeSelectedShapeTextOnDedicatedThread(_ doc: OpenDocument, agentViewId: Int32, text: String) {
+        doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyInput.rawValue), 0, Int32(SlidesKeyCode.f2))
+        doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyUp.rawValue), 0, Int32(SlidesKeyCode.f2))
+        postUnoCommandOnDedicatedThread(doc, ".uno:SelectAll", [:])
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
+        doc.handle.pointee.pClass.pointee.postWindowExtTextInputEvent?(doc.handle, 0, Int32(OfficeExtTextInputType.input.rawValue), text)
+        doc.handle.pointee.pClass.pointee.postWindowExtTextInputEvent?(doc.handle, 0, Int32(OfficeExtTextInputType.end.rawValue), "")
+        doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyInput.rawValue), 0, Int32(SlidesKeyCode.escape))
+        doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyUp.rawValue), 0, Int32(SlidesKeyCode.escape))
+    }
 
     private func slidesInfoOnDedicatedThread(docId: String) throws -> [OfficeSlideInfo] {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
@@ -3474,9 +3622,21 @@ final class LOKBridge: OfficeDocumentBridge {
             } else {
                 name = "Slide \(part + 1)" // defensive fallback — getPartName should not fail for a real part index
             }
-            // TODO(T6 probe A): title text pending the shared placeholder-text mechanism.
-            slides.append(OfficeSlideInfo(name: name, title: nil))
+            let title: String?
+            if let rect = try selectSlidePlaceholderOnDedicatedThread(docId: docId, slide: part, tabCount: 1) {
+                _ = rect // positioning succeeded; the rect itself is not needed once past verification
+                guard let agentViewId = documents[docId]?.agentViewId else { throw SaveError.noAgentView(docId) }
+                title = readSelectedShapeTextOnDedicatedThread(doc, agentViewId: agentViewId)
+            } else {
+                title = nil
+            }
+            slides.append(OfficeSlideInfo(name: name, title: title))
         }
+        // `selectSlidePlaceholderOnDedicatedThread` leaves the agent view parked mid-selection on the
+        // LAST slide it touched — restore the primary view as current before returning, matching
+        // `sheetsInfoOnDedicatedThread`'s own "a read-only probe must never leave things parked
+        // somewhere a later call did not expect" discipline (that function's own header).
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
         return slides
     }
 
@@ -3487,9 +3647,18 @@ final class LOKBridge: OfficeDocumentBridge {
         guard slide >= 0, slide < partCount else {
             throw SaveError.slideNotFound(docId: docId, slide: slide, slideCount: partCount)
         }
-        throw OfficeHelperServerError.posix(
-            "slides read mechanism not yet implemented (office-agent-tools T6, pending live research "
-            + "into placeholder text access)")
+
+        func readField(tabCount: Int) throws -> String? {
+            guard try selectSlidePlaceholderOnDedicatedThread(docId: docId, slide: slide, tabCount: tabCount) != nil else {
+                return nil
+            }
+            guard let agentViewId = documents[docId]?.agentViewId else { throw SaveError.noAgentView(docId) }
+            return readSelectedShapeTextOnDedicatedThread(doc, agentViewId: agentViewId)
+        }
+        let title = try readField(tabCount: 1)
+        let body = try readField(tabCount: 2)
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        return (title: title, body: body)
     }
 
     private func slidesSetTextOnDedicatedThread(docId: String, slide: Int, title: String?, body: String?) throws -> [String] {
@@ -3499,9 +3668,30 @@ final class LOKBridge: OfficeDocumentBridge {
         guard slide >= 0, slide < partCount else {
             throw SaveError.slideNotFound(docId: docId, slide: slide, slideCount: partCount)
         }
-        throw OfficeHelperServerError.posix(
-            "slides set_text mechanism not yet implemented (office-agent-tools T6, pending live research "
-            + "into placeholder text access)")
+
+        var applied: [String] = []
+        // office-agent-tools T6 write-verb pattern, mirroring `writeOneCellOnDedicatedThread`'s own
+        // "position, verify, type, re-verify" shape: a slide with NO placeholder for the requested
+        // field is a REFUSAL, not a silent no-op — spec's own "refuses naming the reason, rather
+        // than inventing one" contract for `set_text`.
+        if let title {
+            guard try selectSlidePlaceholderOnDedicatedThread(docId: docId, slide: slide, tabCount: 1) != nil else {
+                throw SaveError.slidePlaceholderNotFound(docId: docId, slide: slide, field: "title")
+            }
+            guard let agentViewId = documents[docId]?.agentViewId else { throw SaveError.noAgentView(docId) }
+            writeSelectedShapeTextOnDedicatedThread(doc, agentViewId: agentViewId, text: title)
+            applied.append("title")
+        }
+        if let body {
+            guard try selectSlidePlaceholderOnDedicatedThread(docId: docId, slide: slide, tabCount: 2) != nil else {
+                throw SaveError.slidePlaceholderNotFound(docId: docId, slide: slide, field: "body")
+            }
+            guard let agentViewId = documents[docId]?.agentViewId else { throw SaveError.noAgentView(docId) }
+            writeSelectedShapeTextOnDedicatedThread(doc, agentViewId: agentViewId, text: body)
+            applied.append("body")
+        }
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        return applied
     }
 
     private func slidesManagePageOnDedicatedThread(docId: String, op: OfficeSlidesManagePageOp, slide: Int?, at: Int?,
@@ -3581,11 +3771,42 @@ final class LOKBridge: OfficeDocumentBridge {
             event = OfficeDocumentEvent.parseCellCursor(payload)
         case LOKCallbackType.cellFormula:
             event = OfficeDocumentEvent.parseCellFormula(payload)
+        case LOKCallbackType.graphicSelection:
+            // office-agent-tools T6 — internal state only, never an `OfficeDocumentEvent` (nothing
+            // outside this bridge needs it, and Stage A's wire vocabulary is not the right place to
+            // grow a case for a signal that never crosses the app<->helper wire). Write-back, not an
+            // in-place mutation — `OpenDocument` is a struct (see this type's own `documents`
+            // dictionary), the same get/mutate/write-back idiom `createAgentViewOnDedicatedThread`
+            // already uses for its own per-docId state.
+            if var doc = documents[docId] {
+                doc.lastGraphicSelectionRectTwips = Self.parseGraphicSelectionRect(payload)
+                documents[docId] = doc
+            }
+            event = nil
         default:
             event = nil
         }
         guard let event else { return }
         onEvent?(docId, event)
+    }
+
+    /// Parses `LOK_CALLBACK_GRAPHIC_SELECTION`'s raw payload: `"x, y, width, height, angle, {...}"`
+    /// — mirrors `OfficeDocumentEvent.parseCellCursor`'s own comma-split shape exactly (this bridge's
+    /// own established parsing idiom for a LOK rect-shaped callback), taking only the first four
+    /// fields; `angle` and the optional trailing JSON properties are not needed for verification and
+    /// are silently ignored, never validated. An empty selection's own payload shape was not
+    /// characterized live before this was written — `nil` on anything that does not parse as at
+    /// least four comma-separated integers, which a genuine empty-selection firing (if this callback
+    /// ever produces one) would also hit, safely: `selectSlidePlaceholderOnDedicatedThread` treats
+    /// "no rect observed" as "nothing new was selected" either way.
+    private static func parseGraphicSelectionRect(_ payload: String) -> OfficeTwipsRect? {
+        let fields = payload.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        guard fields.count >= 4,
+              let x = Int64(fields[0]), let y = Int64(fields[1]),
+              let width = Int64(fields[2]), let height = Int64(fields[3]) else {
+            return nil
+        }
+        return OfficeTwipsRect(x: x, y: y, width: width, height: height)
     }
 
     // The two raw-payload parsers formerly lived here as `private static func`s. Moved to
