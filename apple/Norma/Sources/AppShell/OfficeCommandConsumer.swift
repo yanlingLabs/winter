@@ -550,15 +550,26 @@ struct OfficeCommandConsumer {
             ? "\(officeColumnLetters(range.startColumn)):\(officeColumnLetters(range.endColumn))"
             : nil
 
-        // How many independent attributes THIS call named — mirrors `handleSheetsSet`'s own
-        // `cellAddresses.count > 1` test exactly, one layer up: a partial failure is only STRUCTURALLY
-        // possible when more than one attribute was in flight, regardless of which one a later error
-        // actually names. Known entirely from THIS call's own already-decoded operands — no error-
-        // parsing needed, the same simplification `handleSheetsSet`'s own catch block already makes
-        // (it never asks LOKBridge's thrown message "how many cells landed," it only asks itself
-        // "could more than one plausibly have").
-        let attributeCount = [bold != nil, italic != nil, numberFormat != nil, align != nil, width != nil]
-            .filter { $0 }.count
+        // Can a partial application actually happen on THIS call? Known entirely from this call's own
+        // already-decoded operands — no error-parsing needed, the same simplification
+        // `handleSheetsSet`'s own catch block already makes (it never asks LOKBridge's thrown message
+        // "how many cells landed," it only asks itself "could anything plausibly have").
+        //
+        // **T5 fix-round review, Important-4 — this used to be `attributeCount > 1`, which was
+        // over-broad, and the review was right.** Read `sheetsFormatOnDedicatedThread` structurally:
+        // phase 1 does all of its throwing (sheet resolve, anchor parse, position verification)
+        // BEFORE its first `postUnoCommand`, and there is no throwing statement anywhere between the
+        // bold/italic/numberFormat/align dispatches. So `bold + italic` cannot half-apply — either
+        // phase 1 threw before dispatching anything, or it dispatched all of them. The ONE seam where
+        // an earlier attribute is already posted and a later one can still fail is phase 2's own
+        // position verification, which runs after phase 1 has already dispatched. That makes the real
+        // condition "at least one CELL attribute AND `width`," not "more than one attribute."
+        //
+        // Over-broad was not FALSE (the sentence is conditional) — but it is noise a model may act
+        // on: telling it a document might be half-formatted after a `bold + italic` failure invites a
+        // recovery step for a state that cannot exist.
+        let cellAttributeNamed = bold != nil || italic != nil || numberFormat != nil || align != nil
+        let partialApplicationPossible = cellAttributeNamed && width != nil
 
         guard let broker = officeAgentBroker(command.sessionId) else {
             return sendResult(command.sessionId, command.commandId, false, Self.hostGoneRefusal, nil)
@@ -580,7 +591,7 @@ struct OfficeCommandConsumer {
                     // flow throws BEFORE rule 4's save switch is ever reached — so a LATER attribute's
                     // failure does not undo whatever an EARLIER one in this SAME call already
                     // dispatched, and none of it is saved either way.
-                    guard attributeCount > 1 else { throw error }
+                    guard partialApplicationPossible else { throw error }
                     let lifecycle = adopted
                         ? " If an earlier attribute in this call already applied before this failure, "
                             + "it is sitting unsaved in your own open tab right now — the tab is dirty, "

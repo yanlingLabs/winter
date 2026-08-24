@@ -320,7 +320,15 @@ final class OfficeCommandConsumerTests: XCTestCase {
         // step, which needs `save` to return a REAL file the broker can copy onto the target path;
         // the default here is UNCHANGED (same non-existent path, same behavior for every existing
         // call site) — only a test that overrides it can reach a write verb's happy path.
-        save: @escaping (String, Int) async throws -> String = { _, _ in "/tmp/unused-save" }
+        save: @escaping (String, Int) async throws -> String = { _, _ in "/tmp/unused-save" },
+        // T5 fix-round review, Important-4 — the ADOPTED branch. `existingRuntime` was hardcoded to
+        // `nil`, so every test through this helper produced `adopted == false` and the broker's
+        // opened-branch lifecycle: the adopted branch's own disclosure sentence was reachable by no
+        // test at all. Setting this to `true` hands the broker the SAME runtime back as an existing
+        // one, which is exactly what a real already-open human tab looks like to it — the caller
+        // still has to `open` the document on the returned runtime for the broker's rule-1 lookup
+        // (`stateSnapshot.documents[path]`) to find it.
+        adoptExistingRuntime: Bool = false
     ) -> (consumer: OfficeCommandConsumer, runtime: OfficeRuntime) {
         let driver = OfficeRuntime.Driver(
             helperState: { .ready }, startHelper: { },
@@ -341,7 +349,7 @@ final class OfficeCommandConsumerTests: XCTestCase {
             stateDirectory: FileManager.default.temporaryDirectory)
         let runtime = OfficeRuntime(sessionId: "s1", driver: driver)
         let broker = OfficeAgentBroker(host: .init(
-            existingRuntime: { _ in nil },
+            existingRuntime: { _ in adoptExistingRuntime ? runtime : nil },
             runtime: { _ in runtime },
             workingDirectories: { _ in workingDirs }))
         let consumer = OfficeCommandConsumer(
@@ -700,6 +708,95 @@ final class OfficeCommandConsumerTests: XCTestCase {
         XCTAssertEqual(sent.first?.ok, true, "\(sent)")
     }
 
+    /// **T5 fix-round review, Important-1 — the width phase's own COLUMN cap.** `width` does not
+    /// select `range`; it selects the whole-column span `range`'s columns cover, which LOK serialises
+    /// in full (and discards) once per GoToCell verification attempt. `A1:BXW1` is 2,000 cells — it
+    /// passes the cell cap — and 2,000 ENTIRE COLUMNS, on the one dedicated LOK thread behind the one
+    /// app-wide helper FIFO with no kill on request timeout. Refused before the broker is reached,
+    /// and the driver must never see it.
+    func testSheetsFormatRefusesAWidthCallSpanningTooManyColumnsBeforeTheBroker() async {
+        let path = makeScratchFile()
+        var driverCalled = false
+        let world = makeSheetsWorld(
+            workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+            sheetsFormat: { _, _, _, _, _, _, _, _, _ in driverCalled = true; return ["width"] })
+        world.consumer.handle(command("office.sheets.format",
+                                       args: ["path": path, "sheet": "Sheet1", "range": "A1:BXW1", "width": 72]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, false)
+        // 1999, not 2000 — the review's own `A1:BXW1` example is off by one (BXW is column index
+        // 1998). Immaterial to the finding, and asserted at the real number rather than rounded to
+        // the one the prose used.
+        XCTAssertTrue(sent.first?.result?.contains("1999 columns") == true, "\(sent)")
+        XCTAssertTrue(sent.first?.result?.contains("\(officeFormatWidthMaxColumns)-column limit") == true, "\(sent)")
+        XCTAssertFalse(driverCalled, "the cap must refuse before the broker/LOK are ever reached")
+    }
+
+    /// The cap is on the WIDTH phase only — the same 2,000-cell range is perfectly fine for cell
+    /// attributes, which are one dispatch over the selection regardless of how wide it is. A cap that
+    /// also shrank `bold` would be a silent regression of `format`'s documented reach.
+    func testSheetsFormatStillAcceptsAWideRangeWhenNoWidthIsNamed() async {
+        let path = makeScratchFile()
+        let savedPath = makeScratchFile()
+        var seenRange: String?
+        let world = makeSheetsWorld(
+            workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+            sheetsFormat: { _, _, range, _, _, _, _, _, _ in seenRange = range; return ["bold"] },
+            save: { _, _ in savedPath })
+        world.consumer.handle(command("office.sheets.format",
+                                       args: ["path": path, "sheet": "Sheet1", "range": "A1:BXW1", "bold": true]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, true, "\(sent)")
+        XCTAssertEqual(seenRange, "A1:BXW1")
+    }
+
+    /// Exactly at the cap is allowed; one past it is not — the boundary itself, not just a value far
+    /// on either side of it.
+    func testSheetsFormatWidthColumnCapIsInclusiveAtItsOwnBoundary() async {
+        let path = makeScratchFile()
+        let savedPath = makeScratchFile()
+        let atCap = "A1:\(officeColumnLetters(officeFormatWidthMaxColumns - 1))1"     // exactly 64 columns
+        let pastCap = "A1:\(officeColumnLetters(officeFormatWidthMaxColumns))1"       // 65
+        let world = makeSheetsWorld(
+            workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+            sheetsFormat: { _, _, _, _, _, _, _, _, _ in ["width"] },
+            save: { _, _ in savedPath })
+        world.consumer.handle(command("office.sheets.format",
+                                       args: ["path": path, "sheet": "Sheet1", "range": atCap, "width": 72]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, true, "exactly \(officeFormatWidthMaxColumns) columns must pass: \(sent)")
+
+        sent.removeAll()
+        world.consumer.handle(command("office.sheets.format",
+                                       args: ["path": path, "sheet": "Sheet1", "range": pastCap, "width": 72],
+                                       commandId: "pcmd-past"))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, false, "one column past the cap must refuse: \(sent)")
+    }
+
+    /// **T5 fix round, Critical-1's sweep** — a present-but-out-of-range `width` gets its OWN
+    /// refusal, never the misleading "name at least one attribute" the at-least-one guard would
+    /// otherwise produce once `optionalWidth` collapsed it to `nil`. The bound itself is what stops
+    /// `officeWidthMm100`'s `Int(Double)` from trapping the app.
+    func testSheetsFormatRefusesAnOutOfRangeWidthWithItsOwnMessage() async {
+        let path = makeScratchFile()
+        var driverCalled = false
+        let world = makeSheetsWorld(
+            workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+            sheetsFormat: { _, _, _, _, _, _, _, _, _ in driverCalled = true; return ["width"] })
+        for bad in [1e30, 0.5, -3.0, 1001.0] {
+            sent.removeAll()
+            world.consumer.handle(command("office.sheets.format",
+                                           args: ["path": path, "sheet": "Sheet1", "range": "A1", "width": bad],
+                                           commandId: "pcmd-\(bad)"))
+            await waitUntil { !self.sent.isEmpty }
+            XCTAssertEqual(sent.first?.ok, false, "width \(bad): \(sent)")
+            XCTAssertTrue(sent.first?.result?.contains("`width` must be between 1 and 1000 points") == true,
+                          "width \(bad) must get the width refusal, not the at-least-one-attribute one: \(sent)")
+        }
+        XCTAssertFalse(driverCalled)
+    }
+
     /// The partial-failure lifecycle sentence — `handleSheetsFormat`'s own catch block, mirroring
     /// `handleSheetsSet`'s established shape: appended only when more than one attribute could
     /// plausibly have been in flight, phrased conditionally ("if an earlier attribute already
@@ -720,6 +817,89 @@ final class OfficeCommandConsumerTests: XCTestCase {
         XCTAssertTrue(result.contains("the width phase failed"), result)
         XCTAssertTrue(result.contains("already applied"), "a two-attribute call's failure must carry the "
                       + "conditional partial-application sentence: \(result)")
+    }
+
+    /// **T5 fix-round review, Important-4 — the OPENED branch's own DISTINGUISHING sentence.** The
+    /// pre-fix pair of tests asserted only the substring `"already applied"`, which is common to both
+    /// lifecycle branches — so neither branch was actually pinned, and swapping the two texts would
+    /// have kept both green. This asserts the clause only the opened branch can produce, and asserts
+    /// the adopted branch's own clause is ABSENT, which is what makes it a discriminator.
+    func testSheetsFormatPartialFailureOnADocumentNormaOpenedSaysNothingPersisted() async {
+        let path = makeScratchFile()
+        let world = makeSheetsWorld(
+            workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+            sheetsFormat: { _, _, _, _, _, _, _, _, _ in
+                throw OfficeHelperClientError.serverError(reason: "the width phase failed")
+            })
+        world.consumer.handle(command("office.sheets.format",
+                                       args: ["path": path, "sheet": "Sheet1", "range": "A1", "bold": true, "width": 72]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, false)
+        let result = sent.first?.result ?? ""
+        XCTAssertTrue(result.contains("discarded when Norma closed the document afterward"),
+                      "a document THIS call opened is closed on the way out, so nothing survives: \(result)")
+        XCTAssertTrue(result.contains("nothing from this call persisted"), result)
+        XCTAssertFalse(result.contains("your own open tab"),
+                       "the ADOPTED branch's own sentence must not appear on a document Norma opened "
+                           + "itself — that would tell the model to go look at a tab that does not "
+                           + "exist: \(result)")
+    }
+
+    /// **The ADOPTED branch — produced by no test before this one.** The broker keeps an adopted
+    /// document OPEN on failure (its `defer` closes only what this call itself opened), so the
+    /// in-memory changes survive in the user's own tab and rule 3's dirty check then refuses further
+    /// writes. That is a materially different instruction to the model than the opened branch's
+    /// "nothing persisted," and it is the half T4 spent three rounds proving for `set`.
+    func testSheetsFormatPartialFailureOnAnADOPTEDDocumentSaysItIsSittingUnsavedInTheOpenTab() async {
+        let path = makeScratchFile()
+        let world = makeSheetsWorld(
+            workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+            sheetsFormat: { _, _, _, _, _, _, _, _, _ in
+                throw OfficeHelperClientError.serverError(reason: "the width phase failed")
+            },
+            adoptExistingRuntime: true)
+        // What an already-open human tab looks like to the broker: the document present in the
+        // runtime's own state BEFORE the verb runs, so rule 1 adopts instead of opening.
+        world.runtime.open(path)
+        await waitUntil { world.runtime.stateSnapshot.documents[path] != nil }
+
+        world.consumer.handle(command("office.sheets.format",
+                                       args: ["path": path, "sheet": "Sheet1", "range": "A1", "bold": true, "width": 72]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, false)
+        let result = sent.first?.result ?? ""
+        XCTAssertTrue(result.contains("sitting unsaved in your own open tab right now"),
+                      "an ADOPTED document is not closed on failure — its changes are still in the "
+                          + "user's tab: \(result)")
+        XCTAssertTrue(result.contains("refuse further writes"), result)
+        XCTAssertFalse(result.contains("discarded when Norma closed the document"),
+                       "the OPENED branch's own sentence must not appear on an adopted document — it "
+                           + "would tell the model its changes are gone when they are sitting dirty "
+                           + "in front of the user: \(result)")
+    }
+
+    /// **T5 fix-round review, Important-4's over-broad trigger.** `bold + italic` is two attributes,
+    /// so the old `attributeCount > 1` test appended the partial-application sentence — but both are
+    /// dispatched inside phase 1 with no throwing statement between them, so a partial application
+    /// there is STRUCTURALLY IMPOSSIBLE. The trigger is now "a cell attribute AND `width`", the only
+    /// seam where phase 2 can fail after phase 1 has already posted.
+    func testSheetsFormatTwoCellAttributesWithoutWidthNeverAppendsTheLifecycleSentence() async {
+        let path = makeScratchFile()
+        let world = makeSheetsWorld(
+            workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+            sheetsFormat: { _, _, _, _, _, _, _, _, _ in
+                throw OfficeHelperClientError.serverError(reason: "phase 1 never positioned")
+            })
+        world.consumer.handle(command("office.sheets.format",
+                                       args: ["path": path, "sheet": "Sheet1", "range": "A1",
+                                              "bold": true, "italic": true, "align": "center"]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, false)
+        let result = sent.first?.result ?? ""
+        XCTAssertTrue(result.contains("phase 1 never positioned"), result)
+        XCTAssertFalse(result.contains("already applied"),
+                       "three CELL attributes and no `width` cannot half-apply — phase 1 dispatches "
+                           + "them with no throwing statement in between: \(result)")
     }
 
     /// The single-attribute counterpart — no lifecycle sentence, since only one attribute was ever
