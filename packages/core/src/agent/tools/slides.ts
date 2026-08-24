@@ -37,11 +37,20 @@ import { officeTimeoutMessage } from "./sheets";
  *    written for it (`OfficeSlidesCommandTests.testProbeInvestigatesWhetherReorderIsReachableHeadless`).
  *    Verdict: reachable — `setPart` DOES drive `MovePage*`'s own selection-based targeting, confirmed
  *    by a three-position content readout, not by `getPartName` (see ruling 2 above for why that would
- *    have been a trap) and not by `getPartInfo`'s `hash` field either, despite that being the
- *    controller's own original instruction — a disclosed substitution, approved: neither of LOK's two
- *    in-session identity primitives survives save+reload, which the mandatory two-part-discriminator
- *    proof (save+reopen) every write verb here needs regardless, so content-based verification serves
- *    both the probe and the eventual proof with one mechanism. `reorder`'s own real mechanism
+ *    have been a trap). The PROBE itself (this ruling's own subject) used content-based verification,
+ *    not `getPartInfo`'s `hash` field, despite hash being the controller's own original instruction —
+ *    a disclosed substitution, approved at the time: neither of LOK's two in-session identity
+ *    primitives survives save+reload, which the mandatory two-part-discriminator proof (save+reopen)
+ *    every write verb here needs regardless, so content-based verification served both the probe and
+ *    the eventual proof with one mechanism. **Fix round 1 (F-5/F-6, `task-6-report.md` §8) reconciled
+ *    the original instruction and the substitution instead of picking one**: content-based
+ *    verification let `add_slide`/`reorder` false-pass on empty or duplicate titles (`add_slide`
+ *    itself mints empty-titled slides), so the in-session write-verification loop for all three
+ *    structural verbs (`add_slide`/`delete_slide`/`reorder`) now runs on `hash` after all — genuine
+ *    per-object identity, immune to the title-collision class. Content-based verification still does
+ *    the one job hash structurally cannot: the save+reopen two-part-discriminator proof, since neither
+ *    primitive survives reload. Two mechanisms, two jobs now, not one mechanism serving both.
+ *    `reorder`'s own real mechanism
  *    dispatches on the PRIMARY view (not the agent-view isolation every other write verb in this file
  *    uses) — borrowed from `sheetsManageSheetOnDedicatedThread`'s own two-round live history of
  *    agent-view structural dispatch hanging or failing to converge; see that function's own header and
