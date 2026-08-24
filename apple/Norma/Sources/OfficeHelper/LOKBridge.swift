@@ -3783,6 +3783,7 @@ final class LOKBridge: OfficeDocumentBridge {
                 throw SaveError.slideNotFound(docId: docId, slide: slide, slideCount: partCount)
             }
             guard partCount > 1 else { throw SaveError.lastSlide(docId: docId) }
+            return try slidesDeleteOnDedicatedThread(docId: docId, doc: doc, slide: slide, partCount: partCount)
         }
         if op == .reorder, let slide, let to {
             guard slide >= 0, slide < partCount else {
@@ -3888,6 +3889,76 @@ final class LOKBridge: OfficeDocumentBridge {
             throw SaveError.writeVerificationFailed(docId: docId, address: "reorder(\(from + 1) -> \(to + 1))")
         }
         return partCount
+    }
+
+    /// office-agent-tools T6 — `delete_slide`'s real mechanism. `.uno:DeletePage` (research's own
+    /// slot table, `sd/sdi/sdraw.sdi:661`) takes NO args at all — selection-based, exactly like
+    /// `MovePage*` — so this rides `slidesReorderOnDedicatedThread`'s own just-proven shape wholesale
+    /// rather than re-deriving it: same primary-view dispatch (`destroyAgentViewIfAnyOnDedicatedThread`
+    /// first, NOT the agent-view isolation the read path uses — see that function's own header for
+    /// the full two-round sheets precedent this borrows), same `notifyWhenFinished: true` (controller
+    /// instruction #1), same disclosed residual (primary-view `setPart` can move an adopted
+    /// document's own visible slide selection).
+    ///
+    /// **Verification is NOT just count-minus-one.** Research's own finding: `DeleteActualPage()`
+    /// (`drviews4.cxx:99-142`) swallows its own failures — a dispatch that silently no-ops would still
+    /// need to be caught, and a raw count check cannot distinguish "the RIGHT slide was deleted" from
+    /// "some OTHER slide was deleted and the count still dropped by one," or from "nothing was deleted
+    /// and a concurrent, unrelated part-count change coincidentally matched." So this captures every
+    /// SURVIVING slide's own title BEFORE dispatch (never the deleted slide's own title — that one is
+    /// expected to disappear, and a placeholder-less slide would make capturing it meaningless), then
+    /// asserts the exact SAME survivor sequence, in the SAME order, comes back after — content-based,
+    /// the same discriminator discipline `slidesReorderOnDedicatedThread`'s own header explains why it
+    /// prefers over `getPartName`/`getPartInfo.hash`.
+    private func slidesDeleteOnDedicatedThread(docId: String, doc: OpenDocument, slide: Int, partCount: Int) throws -> Int {
+        func titleAt(_ part: Int) throws -> String? {
+            guard try selectSlidePlaceholderOnDedicatedThread(docId: docId, slide: part, tabCount: 1) != nil else {
+                return nil
+            }
+            guard let agentViewId = documents[docId]?.agentViewId else { throw SaveError.noAgentView(docId) }
+            return readSelectedShapeTextOnDedicatedThread(doc, agentViewId: agentViewId, part: part)
+        }
+        var survivorTitles: [String?] = []
+        survivorTitles.reserveCapacity(partCount - 1)
+        for part in 0..<partCount where part != slide {
+            survivorTitles.append(try titleAt(part))
+        }
+
+        destroyAgentViewIfAnyOnDedicatedThread(doc, docId: docId)
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(slide))
+        pumpDedicatedThreadForPendingDispatch(doc, viewId: doc.viewId, part: slide)
+        postUnoCommandOnDedicatedThread(doc, ".uno:DeletePage", [:], notifyWhenFinished: true)
+        pumpDedicatedThreadForPendingDispatch(doc, viewId: doc.viewId, part: max(0, slide - 1))
+
+        func survivorsNow() throws -> [String?] {
+            let newPartCount = Int(doc.handle.pointee.pClass.pointee.getParts?(doc.handle) ?? 0)
+            guard newPartCount == partCount - 1 else { return [] } // sentinel length mismatch — `verified()` below never mistakes this for a real (if empty-titled) survivor list
+            var titles: [String?] = []
+            titles.reserveCapacity(newPartCount)
+            for part in 0..<newPartCount {
+                titles.append(try titleAt(part))
+            }
+            return titles
+        }
+        func verified() throws -> Bool { try survivorsNow() == survivorTitles }
+
+        var ok = try verified()
+        var attempts = 1
+        while !ok, attempts < Self.slidesManageVerificationAttempts {
+            pumpDedicatedThreadForPendingDispatch(doc, viewId: doc.viewId, part: max(0, slide - 1))
+            ok = try verified()
+            attempts += 1
+        }
+        if attempts > 1 {
+            FileHandle.standardError.write(Data(
+                "[LOKBridge slides] delete needed \(attempts) attempt(s) before verification succeeded (or the budget was exhausted)\n".utf8))
+        }
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        guard ok else {
+            throw SaveError.writeVerificationFailed(docId: docId, address: "delete_slide(\(slide + 1))")
+        }
+        return partCount - 1
     }
 
     /// office-agent-tools T4 — the shared JSON-args UNO dispatch this task's own three new sheet-

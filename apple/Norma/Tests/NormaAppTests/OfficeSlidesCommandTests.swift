@@ -331,6 +331,63 @@ final class OfficeSlidesCommandTests: XCTestCase {
         XCTAssertFalse(contentXML.contains("Norma T6 Slide Two"), "slide 2's OLD title must be gone from the saved bytes, not just superseded in a read")
     }
 
+    // MARK: - `delete_slide` live drill — the two-part discriminator, through save+reopen
+
+    /// Mirrors `set_text`'s own two-part-discriminator test exactly in spirit: `delete_slide` on
+    /// slide 2 must remove ONLY slide 2's own content, leave slide 1's and (what was) slide 3's own
+    /// content genuinely intact — just shifted down one position — and this must be true from the
+    /// SAVED FILE'S OWN BYTES, not merely from the in-memory state the write itself produced. Adopts
+    /// first (same race-avoidance reasoning `testLiveSetTextChangesOnlyTheTargetedSlideProvenBySave
+    /// AndIndependentReopen`'s own header explains) so `delete_slide` never mints-and-closes its own
+    /// open, and the independent reopen below never races that close.
+    func testLiveDeleteSlideRemovesOnlyTheTargetedSlideProvenBySaveAndIndependentReopen() async throws {
+        try requireLiveEngine()
+        let path = try makeWritableCopy(of: "three-slide.odp")
+        let stateDir = makeScratchDirectory()
+        let host = makeLiveHost(stateDir: stateDir, dirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)])
+        await host.directory.refresh()
+
+        let runtime = host.officeRuntime(for: "S1")
+        runtime.open(path)
+        let opened = await waitUntilLive { runtime.stateSnapshot.documents[path] != nil || runtime.stateSnapshot.phase == .failed }
+        XCTAssertTrue(opened, "setup: three-slide.odp must open cleanly")
+
+        let deleteResult = await send(command("office.slides.delete_slide", args: ["path": path, "slide": 2],
+                                              sessionId: "S1", commandId: "pcmd_delete"), through: host)
+        XCTAssertTrue(deleteResult.ok, "\(deleteResult)")
+
+        guard let independentClient = host.officeHelperSupervisor?.client else {
+            return XCTFail("no live client for the independent reopen")
+        }
+        let independentDocId = "slides-delete-two-part-reopen"
+        _ = try await independentClient.open(docId: independentDocId, path: path)
+
+        let infoAfter = try await independentClient.slidesInfo(docId: independentDocId)
+        XCTAssertEqual(infoAfter.count, 2, "delete_slide must leave exactly 2 slides")
+
+        // Index 0 — untouched (was slide 1, still slide 1).
+        let savedSlide1 = try await independentClient.slidesRead(docId: independentDocId, slide: 0)
+        XCTAssertEqual(savedSlide1.title, "Norma T6 Slide One", "slide 1 must be UNTOUCHED by a delete that targeted slide 2")
+        XCTAssertEqual(savedSlide1.body, "first bullet", "slide 1's body must also be untouched")
+
+        // Index 1 — what WAS slide 3, now shifted down to occupy slide 2's old position. This is the
+        // two-part discriminator's own proof that the RIGHT slide was removed: if slide 1 had been
+        // deleted instead (or some other wrong-part failure), this position would read "Slide One" or
+        // stay empty, not "Slide Three".
+        let savedSlide2 = try await independentClient.slidesRead(docId: independentDocId, slide: 1)
+        XCTAssertEqual(savedSlide2.title, "Norma T6 Slide Three", "the surviving third slide must have shifted into the deleted slide's old position")
+        XCTAssertEqual(savedSlide2.body, "third bullet")
+
+        try await independentClient.close(docId: independentDocId)
+
+        // Filesystem-level seal, same discipline `91ad38ce` established for `set_text`.
+        let contentXML = try readODFEntry(atPath: path, entry: "content.xml")
+        XCTAssertFalse(contentXML.contains("Norma T6 Slide Two"), "deleted slide's title must be gone from the saved bytes")
+        XCTAssertFalse(contentXML.contains("second bullet"), "deleted slide's body must be gone from the saved bytes")
+        XCTAssertTrue(contentXML.contains("Norma T6 Slide One"), "saved content.xml must still contain slide 1's untouched title")
+        XCTAssertTrue(contentXML.contains("Norma T6 Slide Three"), "saved content.xml must still contain the surviving third slide's title")
+    }
+
     /// `unzip -p` for a single entry inside a saved ODF (zip-based, same container format as OOXML)
     /// document — mirrors `OfficeSheetsCommandTests.readOOXMLEntry`'s own shape exactly (shell out to
     /// a well-understood system tool rather than reimplement zip reading), kept as a local copy per
