@@ -344,6 +344,47 @@ public enum OfficeWireFrame: Equatable, Sendable {
                       bold: Bool?, italic: Bool?, numberFormat: OfficeSheetsNumberFormatPreset?,
                       align: OfficeSheetsAlign?, width: Double?)
 
+    // MARK: office-agent-tools T6 — slides
+
+    /// Asks for `docId`'s slide count and, per slide, its own PART NAME (`getPartName` — never a
+    /// placeholder-text extraction; `slidesRead` is the dedicated placeholder-text verb) and its
+    /// layout, WHEN this bridge can determine one (see `OfficeSlideInfo`'s own header for the
+    /// disclosed fail-closed posture on layout — this task found no live-confirmed way to query it
+    /// for every LOK build, so a slide with an unknown layout reports `nil`, never a guess).
+    /// Read-only. `setView` prefix (unconditional, matching `sheetsInfo`'s own discipline) because
+    /// `getParts`/`getPartName`/`getPartInfo` read process-global-current-view-adjacent state the
+    /// same way `sheetsInfo`'s own `getPart()` probe does.
+    case slidesInfo(seq: UInt64, docId: String)
+    /// Asks for ONE slide's title and body placeholder text. `slide` is 0-based (the app resolves the
+    /// daemon's own 1-based `slide` operand before this frame is ever built — the identical
+    /// resolve-at-the-app-boundary discipline `sheetsRead`'s own `sheet` name resolves to a part
+    /// index at, see that case's own header).
+    case slidesRead(seq: UInt64, docId: String, slide: Int)
+    /// Writes `title` and/or `body` onto ONE slide's own placeholder(s) — each field independent,
+    /// `nil` meaning "leave this placeholder alone," the identical absent-means-untouched contract
+    /// `sheetsFormat`'s five attribute fields already established (that case's own header). At least
+    /// one of the two is guaranteed non-nil by the time this frame is built (`slides.ts`'s own job,
+    /// mirroring `sheetsFormat`'s identical "not re-checked here" precedent — a business rule the
+    /// daemon/consumer already enforced, not a structural shape this wire layer re-derives).
+    case slidesSetText(seq: UInt64, docId: String, slide: Int, title: String?, body: String?)
+    /// office-agent-tools T6 — one wire pair covers all three structural verbs (`add_slide`/
+    /// `delete_slide`/`reorder`), mirroring `sheetsManageSheet`'s own consolidation of `add_sheet`/
+    /// `delete_sheet`/`rename_sheet` (that case's own header: "APP-INTERNAL wire, free to consolidate
+    /// what the daemon-visible surface does not" — `office.slides.*`'s own three frozen
+    /// `panel_command.action` strings are unaffected). `op` decides which of `slide`/`at`/`to`/
+    /// `layout` are meaningful; decode refuses any OTHER combination rather than silently ignoring a
+    /// mismatched field, the identical discipline `sheetsManageSheet`'s own `op == .rename <->
+    /// newName != nil` guard and `sheetsFormat`'s own `columnSpan != nil <-> width != nil` guard
+    /// already established on this file:
+    ///  - `.add`: `slide` and `to` MUST be nil. `at` (0-based insert position; nil appends at the
+    ///    end) and `layout` are each independently optional.
+    ///  - `.delete`: `slide` MUST be non-nil (0-based, the slide to remove). `at`/`to`/`layout` MUST
+    ///    all be nil.
+    ///  - `.reorder`: `slide` and `to` MUST both be non-nil (0-based source and target). `at`/
+    ///    `layout` MUST both be nil.
+    case slidesManagePage(seq: UInt64, docId: String, op: OfficeSlidesManagePageOp, slide: Int?,
+                          at: Int?, to: Int?, layout: OfficeSlidesLayoutPreset?)
+
     // MARK: Responses (helper -> client)
 
     /// `hello` succeeded: `token` matched. `lokVersion` is now (Task 3) the REAL
@@ -539,6 +580,26 @@ public enum OfficeWireFrame: Equatable, Sendable {
     /// caller can see exactly what landed without re-deriving it from its own request.
     case sheetsFormatOk(seq: UInt64, docId: String, applied: [String])
 
+    // MARK: office-agent-tools T6 — slides replies
+
+    /// Answers a successful `slidesInfo`.
+    case slidesInfoOk(seq: UInt64, docId: String, slides: [OfficeSlideInfo])
+    /// Answers a successful `slidesRead`. `nil` means "this slide has no such placeholder at all" —
+    /// distinct from `""` ("the placeholder exists and is empty") — the identical distinction
+    /// `sheetsInfo`'s own `(usedEndColumn: -1, usedEndRow: -1)` sentinel exists to make for an empty
+    /// SHEET, applied here per-placeholder instead: a caller (and `slides.ts`'s own `set_text`
+    /// refusal, spec's own "refuses naming the reason" contract) needs to tell "nothing to read" from
+    /// "read an empty string" apart.
+    case slidesReadOk(seq: UInt64, docId: String, title: String?, body: String?)
+    /// Answers a successful `slidesSetText`: which of `title`/`body` actually applied — a subset of
+    /// `["title","body"]`, in that fixed order — the identical "smallest useful truth" shape
+    /// `sheetsFormatOk.applied` already returns for its own multi-optional-field write.
+    case slidesSetTextOk(seq: UInt64, docId: String, applied: [String])
+    /// Answers a successful `slidesManagePage`: the presentation's slide count AFTER the operation —
+    /// the same "smallest useful truth, not merely ok" posture `sheetsResizeOk`/`sheetsManageSheetOk`
+    /// already have for their own structural ops.
+    case slidesManagePageOk(seq: UInt64, docId: String, slideCount: Int)
+
     /// The wire vocabulary, in frame-declaration order. A test walks this list the same way
     /// `EditorBridgeInbound.wireTypes`'s own test does — one fixture per name, decode, assert the
     /// case names itself the same way — so this array and `decode`/`wireType` cannot drift apart
@@ -558,6 +619,8 @@ public enum OfficeWireFrame: Equatable, Sendable {
         "sheetsSet", "sheetsResize", "sheetsManageSheet",
         // office-agent-tools T5 — sheets format.
         "sheetsFormat",
+        // office-agent-tools T6 — slides.
+        "slidesInfo", "slidesRead", "slidesSetText", "slidesManagePage",
         "helloOk", "refused", "pong", "opened", "openFailed", "closed", "saved", "saveFailed",
         "keyEventOk", "mouseEventOk", "extTextInputEventOk",
         "clipboardCopyOk", "clipboardCutOk", "clipboardPasteOk", "undoOk", "redoOk",
@@ -567,6 +630,7 @@ public enum OfficeWireFrame: Equatable, Sendable {
         "sheetsInfoOk", "sheetsReadOk",
         "sheetsSetOk", "sheetsResizeOk", "sheetsManageSheetOk",
         "sheetsFormatOk",
+        "slidesInfoOk", "slidesReadOk", "slidesSetTextOk", "slidesManagePageOk",
     ]
 
     public var wireType: String {
@@ -595,6 +659,10 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .sheetsResize: return "sheetsResize"
         case .sheetsManageSheet: return "sheetsManageSheet"
         case .sheetsFormat: return "sheetsFormat"
+        case .slidesInfo: return "slidesInfo"
+        case .slidesRead: return "slidesRead"
+        case .slidesSetText: return "slidesSetText"
+        case .slidesManagePage: return "slidesManagePage"
         case .helloOk: return "helloOk"
         case .refused: return "refused"
         case .pong: return "pong"
@@ -627,6 +695,10 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .sheetsResizeOk: return "sheetsResizeOk"
         case .sheetsManageSheetOk: return "sheetsManageSheetOk"
         case .sheetsFormatOk: return "sheetsFormatOk"
+        case .slidesInfoOk: return "slidesInfoOk"
+        case .slidesReadOk: return "slidesReadOk"
+        case .slidesSetTextOk: return "slidesSetTextOk"
+        case .slidesManagePageOk: return "slidesManagePageOk"
         }
     }
 
@@ -656,6 +728,10 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .sheetsResize(let seq, _, _, _, _, _): return seq
         case .sheetsManageSheet(let seq, _, _, _, _): return seq
         case .sheetsFormat(let seq, _, _, _, _, _, _, _, _, _): return seq
+        case .slidesInfo(let seq, _): return seq
+        case .slidesRead(let seq, _, _): return seq
+        case .slidesSetText(let seq, _, _, _, _): return seq
+        case .slidesManagePage(let seq, _, _, _, _, _, _): return seq
         case .helloOk(let seq, _): return seq
         case .refused(let seq, _): return seq
         case .pong(let seq): return seq
@@ -688,6 +764,10 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .sheetsResizeOk(let seq, _, _, _): return seq
         case .sheetsManageSheetOk(let seq, _, _): return seq
         case .sheetsFormatOk(let seq, _, _): return seq
+        case .slidesInfoOk(let seq, _, _): return seq
+        case .slidesReadOk(let seq, _, _, _): return seq
+        case .slidesSetTextOk(let seq, _, _): return seq
+        case .slidesManagePageOk(let seq, _, _): return seq
         }
     }
 
@@ -843,6 +923,36 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .sheetsFormatOk(_, let docId, let applied):
             payload["docId"] = docId
             payload["applied"] = applied
+        case .slidesInfo(_, let docId):
+            payload["docId"] = docId
+        case .slidesRead(_, let docId, let slide):
+            payload["docId"] = docId
+            payload["slide"] = slide
+        case .slidesSetText(_, let docId, let slide, let title, let body):
+            payload["docId"] = docId
+            payload["slide"] = slide
+            if let title { payload["title"] = title }
+            if let body { payload["body"] = body }
+        case .slidesManagePage(_, let docId, let op, let slide, let at, let to, let layout):
+            payload["docId"] = docId
+            payload["op"] = op.rawValue
+            if let slide { payload["slide"] = slide }
+            if let at { payload["at"] = at }
+            if let to { payload["to"] = to }
+            if let layout { payload["layout"] = layout.rawValue }
+        case .slidesInfoOk(_, let docId, let slides):
+            payload["docId"] = docId
+            payload["slides"] = slides.map { $0.jsonObject() }
+        case .slidesReadOk(_, let docId, let title, let body):
+            payload["docId"] = docId
+            if let title { payload["title"] = title }
+            if let body { payload["body"] = body }
+        case .slidesSetTextOk(_, let docId, let applied):
+            payload["docId"] = docId
+            payload["applied"] = applied
+        case .slidesManagePageOk(_, let docId, let slideCount):
+            payload["docId"] = docId
+            payload["slideCount"] = slideCount
         case .subscribed(_, let docId, let keys), .invalidated(_, let docId, let keys):
             payload["docId"] = docId
             payload["keys"] = keys.map { $0.jsonObject() }
@@ -944,6 +1054,18 @@ public enum OfficeWireFrame: Equatable, Sendable {
         }
         return rows
     }
+
+    /// office-agent-tools T6 — `slidesInfoOk.slides`, mirroring `decodeSheetInfos` exactly.
+    static func decodeSlideInfos(_ object: Any?) -> [OfficeSlideInfo]? {
+        guard let array = object as? [[String: Any]] else { return nil }
+        var slides: [OfficeSlideInfo] = []
+        slides.reserveCapacity(array.count)
+        for item in array {
+            guard let slide = OfficeSlideInfo.decode(item) else { return nil }
+            slides.append(slide)
+        }
+        return slides
+    }
 }
 
 /// office-agent-tools T3 — one sheet's own facts, as `sheetsInfoOk` reports them: its name, and its
@@ -975,6 +1097,34 @@ public struct OfficeSheetInfo: Equatable, Sendable {
             return nil
         }
         return OfficeSheetInfo(name: name, usedEndColumn: usedEndColumn, usedEndRow: usedEndRow)
+    }
+}
+
+/// office-agent-tools T6 — one slide's own facts, as `slidesInfoOk` reports them: its own PART NAME
+/// (`getPartName` — see `slidesInfo`'s own header for why this is NOT a placeholder-text read) and,
+/// when this bridge can determine one, its layout's name. `layout` is genuinely `nil`-able (not an
+/// empty-string sentinel the way `OfficeSheetInfo`'s `-1` is): this task found no live-confirmed way
+/// to query an Impress slide's own layout for every LOK build (see `LOKBridge.slidesInfoOnDedicated
+/// Thread`'s own header for what was tried) — a slide whose layout genuinely cannot be determined
+/// reports `nil` rather than a guessed or empty-string placeholder, fail-closed per the brief's own
+/// license ("if a verification primitive genuinely does not exist... fail closed").
+public struct OfficeSlideInfo: Equatable, Sendable {
+    public let name: String
+    public let layout: String?
+    public init(name: String, layout: String?) {
+        self.name = name
+        self.layout = layout
+    }
+
+    func jsonObject() -> [String: Any] {
+        var object: [String: Any] = ["name": name]
+        if let layout { object["layout"] = layout }
+        return object
+    }
+
+    static func decode(_ object: [String: Any]) -> OfficeSlideInfo? {
+        guard let name = object["name"] as? String else { return nil }
+        return OfficeSlideInfo(name: name, layout: object["layout"] as? String)
     }
 }
 
@@ -1023,6 +1173,30 @@ public enum OfficeSheetsNumberFormatPreset: String, Equatable, Sendable {
     case percent
     case currency
     case date
+}
+
+// MARK: - office-agent-tools T6 — the slides wire's own strict enums
+
+/// `slidesManagePage`'s operation. Same refuse-don't-default-on-unrecognized discipline as
+/// `OfficeSheetsResizeOp`/`OfficeSheetsManageSheetOp` above.
+public enum OfficeSlidesManagePageOp: String, Equatable, Sendable {
+    case add
+    case delete
+    case reorder
+}
+
+/// `add_slide`'s own `layout` preset — a CLOSED enum, not LOK's raw numeric `AutoLayout` id or a
+/// free-form name, mirroring `OfficeSheetsNumberFormatPreset`'s own precedent (that case's own header
+/// has the full "postUnoCommand on an unrecognized/inapplicable value silently misbehaves rather than
+/// erroring" reasoning this narrowing exists to avoid). Raw values are snake_case to match
+/// `slides.ts`'s own zod enum verbatim — this is a WIRE string, decoded on both ends independently,
+/// so the two must agree byte-for-byte.
+public enum OfficeSlidesLayoutPreset: String, Equatable, Sendable {
+    case title
+    case titleContent = "title_content"
+    case titleOnly = "title_only"
+    case blank
+    case twoContent = "two_content"
 }
 
 /// `hello`'s role field. `agent` is the daemon (Stage C consumer; the handshake alone lands now).
@@ -2129,6 +2303,72 @@ public enum OfficeWireCodec {
                 return .rejected(seq: seq, reason: "malformed")
             }
             return .frame(.sheetsFormatOk(seq: seq, docId: docId, applied: applied))
+        case "slidesInfo":
+            guard let docId = object["docId"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.slidesInfo(seq: seq, docId: docId))
+        case "slidesRead":
+            guard let docId = object["docId"] as? String, let slide = intValue(object["slide"]) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.slidesRead(seq: seq, docId: docId, slide: slide))
+        case "slidesSetText":
+            guard let docId = object["docId"] as? String, let slide = intValue(object["slide"]) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.slidesSetText(seq: seq, docId: docId, slide: slide,
+                                         title: object["title"] as? String, body: object["body"] as? String))
+        case "slidesManagePage":
+            guard let docId = object["docId"] as? String,
+                  let opRaw = object["op"] as? String, let op = OfficeSlidesManagePageOp(rawValue: opRaw) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            let slide = intValue(object["slide"])
+            let at = intValue(object["at"])
+            let to = intValue(object["to"])
+            let layout: OfficeSlidesLayoutPreset?
+            if let raw = object["layout"] as? String {
+                guard let parsed = OfficeSlidesLayoutPreset(rawValue: raw) else {
+                    return .rejected(seq: seq, reason: "malformed")
+                }
+                layout = parsed
+            } else {
+                layout = nil
+            }
+            // Per-op paired-field guard — this case's own header states the contract; a mismatch
+            // refuses rather than silently ignoring an inapplicable field, the same discipline
+            // `sheetsManageSheet`/`sheetsFormat`'s own paired-field guards already established.
+            let shapeIsValid: Bool
+            switch op {
+            case .add: shapeIsValid = slide == nil && to == nil
+            case .delete: shapeIsValid = slide != nil && at == nil && to == nil && layout == nil
+            case .reorder: shapeIsValid = slide != nil && to != nil && at == nil && layout == nil
+            }
+            guard shapeIsValid else { return .rejected(seq: seq, reason: "malformed") }
+            return .frame(.slidesManagePage(seq: seq, docId: docId, op: op, slide: slide, at: at, to: to, layout: layout))
+        case "slidesInfoOk":
+            guard let docId = object["docId"] as? String,
+                  let slides = OfficeWireFrame.decodeSlideInfos(object["slides"]) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.slidesInfoOk(seq: seq, docId: docId, slides: slides))
+        case "slidesReadOk":
+            guard let docId = object["docId"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.slidesReadOk(seq: seq, docId: docId,
+                                        title: object["title"] as? String, body: object["body"] as? String))
+        case "slidesSetTextOk":
+            guard let docId = object["docId"] as? String, let applied = object["applied"] as? [String] else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.slidesSetTextOk(seq: seq, docId: docId, applied: applied))
+        case "slidesManagePageOk":
+            guard let docId = object["docId"] as? String, let slideCount = intValue(object["slideCount"]) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.slidesManagePageOk(seq: seq, docId: docId, slideCount: slideCount))
         default:
             // The type itself is unrecognized — the brief's exact case: error{seq,reason:"unknown"}.
             return .rejected(seq: seq, reason: "unknown")
