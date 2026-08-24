@@ -445,7 +445,7 @@ export function registerSheetsTool(r: ToolRegistry, deps: SheetsToolDeps): void 
       + "COLUMN property, not a cell one: it widens every "
       + "column range touches, in full, even if range is only a few rows tall — and because that is "
       + "a much larger operation than the range's cell count suggests, a call naming width is capped "
-      + "at 64 columns (the cell attributes keep the full range). align is horizontal only in v1.\n"
+      + "at 256 columns (the cell attributes keep the full range). align is horizontal only in v1.\n"
       + "One honest limit on format's own answer: unlike set and the resize verbs, which re-read "
       + "what they changed, format reports the attributes it DISPATCHED and then saved. That is "
       + "strong evidence (a failed save is reported as a failure, and every attribute is proven live "

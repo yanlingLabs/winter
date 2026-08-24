@@ -305,19 +305,32 @@ let officeWriteRangeMaxCells = 200
 
 /// office-agent-tools T5 fix round (review Important-1) — `sheets format`'s WIDTH-phase cap, on
 /// COLUMNS, alongside — never instead of — the 2,000-cell cap the same verb already applies to
-/// `range`. The two measure different things because the width phase selects something different:
-/// not `range`, but the whole-column Name-Box span `range`'s columns cover, which
-/// `LOKBridge.selectionTextOnDedicatedThread` then serialises in full (and discards) once per
-/// GoToCell verification attempt. `range:"A1:BXW1"` is 2,000 cells — under the cell cap — and 2,000
-/// ENTIRE COLUMNS, which is the wedge shape T2's ledger already named ("the probe is O(selection)")
-/// at a far larger multiplier, on the one dedicated LOK thread behind the one app-wide helper FIFO
-/// that has no kill on request timeout.
+/// `range`. The two measure different things: the width phase does not select `range`, it selects
+/// the whole-column Name-Box span `range`'s columns cover, so `range:"A1:BXW1"` is 1,999 cells (under
+/// the cell cap) and 1,999 ENTIRE columns.
 ///
-/// 64 is sized against the USE: `width` exists so a report's columns fit their content, and neither
-/// a human toolbar drag nor an agent imitating one sets more than a few dozen columns in one go.
-/// Enforced in `OfficeCommandConsumer.handleSheetsFormat`, before the broker/LOK are reached, on the
-/// same pre-dispatch principle as both cell caps above.
-let officeFormatWidthMaxColumns = 64
+/// **The number is MEASURED, and the measurement corrected the finding that asked for it.** The
+/// review's severity claim was a wedged helper — "office wedges for every document until the app is
+/// restarted" — resting on `getTextSelection` serialising whole columns of the sheet's full 1,048,576
+/// rows. **It does not.** Two purpose-built fixtures, driven through the real helper (V-1,
+/// `task-5-fixround-report.md` §3), with the width phase's cost measured as its MARGINAL cost over
+/// the same call's cell-attribute baseline:
+///
+///     100,000 used rows x 3 used columns   width 3 cols +0.13s   64 cols +0.50s   1,999 cols +0.50s
+///     20,000 used rows x 200 used columns  width 3 cols +0.04s   64 cols +0.34s   1,999 cols +2.44s
+///
+/// The selection is bounded by the USED data area, not by the grid, and the worst case measured — an
+/// entire 4-million-cell workbook, every column, on the one dedicated LOK thread — is under three
+/// seconds against a 155-second deadline. No wedge, at any width, on any shape tried.
+///
+/// So this cap is kept for the two reasons that survive the measurement, and its size comes FROM the
+/// measurement rather than from taste: an operand reaching LOK should be bounded rather than merely
+/// observed to be survivable at the sizes anyone has tried, and a `width` call naming hundreds of
+/// columns is far more likely a model error than an intention — refusing it in milliseconds beats
+/// spending seconds on it. 256 sits an order of magnitude above any real formatting call and, at the
+/// 200-column measurement above, costs 1.6 seconds — so it cannot refuse work anyone actually wants
+/// while still bounding the shape. It is NOT a wedge guard; nothing measured here wedges.
+let officeFormatWidthMaxColumns = 256
 
 /// PURE: the formula bar's own ref-display decision, extracted from `OfficeFormulaBar.referenceText`
 /// (advisor review, this task) so it can be pinned directly, independent of SwiftUI/`@Published`

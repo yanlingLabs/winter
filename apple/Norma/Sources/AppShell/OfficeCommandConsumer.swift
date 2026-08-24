@@ -522,19 +522,12 @@ struct OfficeCommandConsumer {
             return sendResult(command.sessionId, command.commandId, false, Self.requiredFormatAttributeRefusal, nil)
         }
         // T5 fix-round review, Important-1 — the width phase's OWN cap, on COLUMNS, independent of
-        // the cell-count cap above. `width` does not select `range`; it selects the WHOLE-COLUMN
-        // Name-Box span `range`'s columns cover (`columnSpan` below), and that selection is realized
-        // through `selectionTextOnDedicatedThread`, which serialises the entire selection to a UTF-8
-        // string it then throws away — up to `goToCellVerificationAttempts` (4) times, plus the
-        // sentinel park. The 2,000-CELL cap does not bound that at all: `range:"A1:BXW1"` is 2,000
-        // cells and 2,000 ENTIRE COLUMNS, on the single dedicated LOK thread behind the one app-wide
-        // helper FIFO whose supervisor has no kill on request timeout — a wedge that takes every
-        // open document with it until the app restarts, for one mistyped range.
-        //
-        // 64 is chosen against the USE, not the machine: `width` exists so a report's columns fit
-        // their content, and no human toolbar interaction — or agent imitating one — sets more than
-        // a few dozen columns at once. Cell attributes keep the full 2,000-cell range; only the
-        // width PHASE is bounded, which is the only phase whose cost is O(sheet), not O(range).
+        // the cell-count cap above, because the width phase selects whole columns rather than
+        // `range`. See `officeFormatWidthMaxColumns`' own header for the LIVE MEASUREMENT behind the
+        // number — including the part that falsifies the finding's stated severity: the whole-column
+        // selection is bounded by the used data area, not the grid, so nothing here wedges. The cap
+        // bounds an operand and catches an obvious model error early; it is not a wedge guard.
+        // Cell attributes keep the full 2,000-cell range; only the width PHASE is bounded.
         if width != nil, range.columnCount > officeFormatWidthMaxColumns {
             return sendResult(command.sessionId, command.commandId, false,
                                "\"\(rangeText)\" spans \(range.columnCount) columns, past the "
