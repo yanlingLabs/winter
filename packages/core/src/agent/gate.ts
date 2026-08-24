@@ -194,7 +194,10 @@ const READ_ONLY = new Set(["read", "glob", "grep", "ls", "bash_output", "Skill",
 // name, gate.ts still name-keyed not verb-keyed. `slides info`/`slides read` pay the same disclosed
 // cost `sheets info`/`sheets read` already do (ask under ask/dont-ask, deny under plan) — the safe
 // direction for a tool that can now mutate a presentation file.
-const MUTATING = new Set(["write", "edit", "bash", "notebook_edit", "enter_worktree", "exit_worktree", "computer", "schedule", "Workflow", "session_spawn", "sheets", "slides"]);
+// office-agent-tools T7 — `docs` joins them, same reason again and the same disclosed cost:
+// `docs info`/`docs read` ask under ask/dont-ask and deny under plan even though neither mutates,
+// because this gate is keyed by TOOL NAME and `docs` also carries `replace`/`insert`/`append`.
+const MUTATING = new Set(["write", "edit", "bash", "notebook_edit", "enter_worktree", "exit_worktree", "computer", "schedule", "Workflow", "session_spawn", "sheets", "slides", "docs"]);
 // web_fetch (4g Task 5, T6 adds web_search here) is Norma's ONLY network-capable tool — it does NOT
 // belong in READ_ONLY (it makes a live outbound request; the response bytes are DATA that could
 // carry adversarial "instructions", so an unattended session shouldn't get an implicit pass) and it

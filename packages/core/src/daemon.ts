@@ -51,6 +51,7 @@ import { registerReadPageTool } from "./agent/tools/read-page";
 import { registerBrowserTool } from "./agent/tools/browser";
 import { registerSheetsTool } from "./agent/tools/sheets";
 import { registerSlidesTool } from "./agent/tools/slides";
+import { registerDocsTool } from "./agent/tools/docs";
 import { PageCache } from "./agent/tools/page-core";
 import { createResearchRunner } from "./agent/research";
 import { registerComputerTool } from "./agent/tools/computer";
@@ -755,6 +756,13 @@ export async function startDaemon(opts: {
     // means — see the comment on the `sheets` registration above for the fuller reasoning, not
     // repeated here).
     registerSlidesTool(registry, {
+      dispatch: (cmd) => panelCommands.dispatch(cmd),
+      harnesses: (sid) => hub.attachedHarnesses(sid),
+      dirsOf: (sid) => store.dirs(sid),
+    });
+    // office-agent-tools T7 — `docs`, the identical deps shape as `sheets`/`slides` above and for
+    // the identical reasons (see the `sheets` registration's own comment).
+    registerDocsTool(registry, {
       dispatch: (cmd) => panelCommands.dispatch(cmd),
       harnesses: (sid) => hub.attachedHarnesses(sid),
       dirsOf: (sid) => store.dirs(sid),
