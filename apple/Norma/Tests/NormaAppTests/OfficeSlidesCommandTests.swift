@@ -132,6 +132,73 @@ final class OfficeSlidesCommandTests: XCTestCase {
         return sent
     }
 
+    // MARK: - Refusal-path live drills — pre-checks that exist but had no live confirmation yet
+
+    /// `notPresentation` (a slides verb on a spreadsheet), `slideNotFound` (out-of-range `slide`/`at`/
+    /// `to` on `read`/`set_text`/`delete_slide`/`reorder`/`add_slide`), and `lastSlide` (deleting a
+    /// presentation's only remaining slide) all had pre-checks written and unit-tested against the
+    /// fake bridge (`OfficeCommandConsumerTests`) since early in this task, but never independently
+    /// confirmed against the REAL engine — every one of them refuses BEFORE any UNO dispatch, so nothing
+    /// here should be timing-sensitive the way the write mechanisms are, but "should never be
+    /// timing-sensitive" is exactly the kind of claim this task's own house rule says to verify, not
+    /// assume.
+    func testLiveRefusalPathsForNotPresentationSlideNotFoundAndLastSlide() async throws {
+        try requireLiveEngine()
+
+        // --- notPresentation: office.slides.info on a spreadsheet. ---
+        do {
+            let path = try makeWritableCopy(of: "gate.xlsx")
+            let stateDir = makeScratchDirectory()
+            let host = makeLiveHost(stateDir: stateDir, dirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)])
+            await host.directory.refresh()
+            let result = await send(command("office.slides.info", args: ["path": path], sessionId: "S1", commandId: "pcmd_notpres"), through: host)
+            XCTAssertFalse(result.ok, "info on a spreadsheet must refuse")
+            let text = (result.result ?? "").lowercased()
+            XCTAssertTrue(text.contains("presentation"), "\(result)")
+        }
+
+        // --- slideNotFound: read/set_text/delete_slide/reorder/add_slide, all on three-slide.odp
+        // (3 slides, valid indices 1-3; slide 5 / at 5 are out of range). ---
+        let path = try makeWritableCopy(of: "three-slide.odp")
+        let stateDir = makeScratchDirectory()
+        let host = makeLiveHost(stateDir: stateDir, dirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)])
+        await host.directory.refresh()
+
+        let readResult = await send(command("office.slides.read", args: ["path": path, "slide": 5], sessionId: "S1", commandId: "pcmd_nf_read"), through: host)
+        XCTAssertFalse(readResult.ok, "read on an out-of-range slide must refuse")
+        XCTAssertTrue((readResult.result ?? "").contains("slide 5"), "\(readResult)")
+
+        let setResult = await send(command("office.slides.set_text", args: ["path": path, "slide": 5, "title": "x"], sessionId: "S1", commandId: "pcmd_nf_set"), through: host)
+        XCTAssertFalse(setResult.ok, "set_text on an out-of-range slide must refuse")
+        XCTAssertTrue((setResult.result ?? "").contains("slide 5"), "\(setResult)")
+
+        let deleteResult = await send(command("office.slides.delete_slide", args: ["path": path, "slide": 5], sessionId: "S1", commandId: "pcmd_nf_delete"), through: host)
+        XCTAssertFalse(deleteResult.ok, "delete_slide on an out-of-range slide must refuse")
+        XCTAssertTrue((deleteResult.result ?? "").contains("slide 5"), "\(deleteResult)")
+
+        let reorderResult = await send(command("office.slides.reorder", args: ["path": path, "slide": 5, "to": 1], sessionId: "S1", commandId: "pcmd_nf_reorder_slide"), through: host)
+        XCTAssertFalse(reorderResult.ok, "reorder with an out-of-range `slide` must refuse")
+        XCTAssertTrue((reorderResult.result ?? "").contains("slide 5"), "\(reorderResult)")
+
+        let reorderToResult = await send(command("office.slides.reorder", args: ["path": path, "slide": 1, "to": 5], sessionId: "S1", commandId: "pcmd_nf_reorder_to"), through: host)
+        XCTAssertFalse(reorderToResult.ok, "reorder with an out-of-range `to` must refuse")
+        XCTAssertTrue((reorderToResult.result ?? "").contains("slide 5"), "\(reorderToResult)")
+
+        let addResult = await send(command("office.slides.add_slide", args: ["path": path, "at": 99], sessionId: "S1", commandId: "pcmd_nf_add"), through: host)
+        XCTAssertFalse(addResult.ok, "add_slide with an out-of-range `at` must refuse")
+        XCTAssertTrue((addResult.result ?? "").contains("slide 99"), "\(addResult)")
+
+        // --- lastSlide: gate.odp has exactly one slide (confirmed against its own content.xml
+        // before this test was written) — deleting it must refuse. ---
+        let gatePath = try makeWritableCopy(of: "gate.odp")
+        let gateStateDir = makeScratchDirectory()
+        let gateHost = makeLiveHost(stateDir: gateStateDir, dirs: [SessionDirEntry(path: (gatePath as NSString).deletingLastPathComponent, locked: true)])
+        await gateHost.directory.refresh()
+        let lastSlideResult = await send(command("office.slides.delete_slide", args: ["path": gatePath, "slide": 1], sessionId: "S1", commandId: "pcmd_last_slide"), through: gateHost)
+        XCTAssertFalse(lastSlideResult.ok, "deleting a presentation's only slide must refuse")
+        XCTAssertTrue((lastSlideResult.result ?? "").lowercased().contains("only one slide"), "\(lastSlideResult)")
+    }
+
     // MARK: - Probe A live drill — the Tab-cycling text mechanism, against real content
 
     /// **The first live test of `selectSlidePlaceholderOnDedicatedThread`/`readSelectedShapeText
