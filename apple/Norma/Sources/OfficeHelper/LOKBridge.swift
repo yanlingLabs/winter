@@ -3869,6 +3869,23 @@ final class LOKBridge: OfficeDocumentBridge {
             // keys) and must surface as a failure rather than be absorbed silently. The evidence
             // line inside `selectSlidePlaceholderOnDedicatedThread` logs every retried attempt, so a
             // recurrence stays observable instead of becoming invisible the moment it stops failing.
+            //
+            // **FORCED RED/GREEN (office-agent-tools T6, 2026-08-24)** — the original flake could not
+            // be reproduced on demand (2 full suite passes under saturating load never hit it), so it
+            // was FORCED instead: a temporary probe made this line's first positioning return `nil`
+            // for `body` only, plus a temporary flag to disable the retry below.
+            //   RED  (force on, retry OFF): 6 failures, and the refusal text reproduced the ORIGINAL
+            //        full-suite failure byte for byte — "body failed after title in this SAME
+            //        set_text call already applied: slide 2 in <id> has no body placeholder —
+            //        nothing was written." Same assertion count (6) as the real failure.
+            //   GREEN (force on, retry ON):  `Executed 1 test, with 0 failures`, AND exactly ONE
+            //        "re-posting Escape+Tab once" evidence line — which is what proves the force
+            //        still fired and the RETRY is what absorbed it, rather than the probe having
+            //        silently stopped working (a green that would otherwise prove nothing).
+            // Probe reverted, tree confirmed byte-identical (`git diff` empty).
+            // **Do not overclaim this**: it proves the retry absorbs a single discrete loss. That it
+            // cures the ORIGINAL flake is argued from the measured attempt distribution
+            // (`slidePlaceholderPositionAttempts`' header), not from a reproduced-and-cured instance.
             var positioned = try selectSlidePlaceholderOnDedicatedThread(docId: docId, slide: slide, tabCount: tabCount)
             if positioned == nil {
                 FileHandle.standardError.write(Data(
