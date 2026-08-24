@@ -4112,6 +4112,29 @@ final class LOKBridge: OfficeDocumentBridge {
         // Refuses BEFORE `destroyAgentViewIfAnyOnDedicatedThread`/`setPart`/any dispatch, matching
         // this file's own refuse-before-mutating posture (`slidesManagePageOnDedicatedThread`'s
         // guards) — so the error can honestly say nothing was changed.
+        //
+        // **RED PROOF for the hash mechanism itself (fix round 2, folded into New-1)** — the
+        // re-review's point was sharp: "the live suite passes, which shows `getPartInfo` works in
+        // this build; it does not show the check can FAIL." Three temporary probes, run on
+        // `testLiveReorderMultiStepMovesAcrossTwoPositionsProvenBySaveAndIndependentReopen`,
+        // each reverted (tree confirmed byte-identical, `git diff` empty):
+        //
+        //   R1  hash forced nil, THIS GUARD REMOVED, move dispatch skipped
+        //       -> 5 failures, and `XCTAssertTrue(reorderResult.ok)` PASSED — `reorder` reported
+        //          SUCCESS on a document that never moved. New-1's false-pass, reproduced live.
+        //   R2  hash forced nil, this guard PRESENT
+        //       -> 6 failures, `ok: false`, "could not read per-slide identity … so reorder could
+        //          not be verified — nothing was changed." The guard converts R1's silent success
+        //          into an honest refusal.
+        //   R3  REAL hash, this guard present, move dispatch skipped
+        //       -> 6 failures, `ok: false`, "wrote to reorder(1 -> 3) … but could not confirm".
+        //          The hash comparison genuinely DETECTS a no-op move — it is load-bearing, not
+        //          vacuously passing.
+        //
+        // The failure COUNT is itself the discriminator, not incidental: R1 has one fewer failure
+        // than R2/R3 precisely because the `reorderResult.ok` assertion passed in R1 and failed in
+        // the other two. That is the difference between "silently reported success" and "correctly
+        // refused", visible in the count alone.
         guard !beforeHashes.contains(where: { $0 == nil }) else {
             throw SaveError.slideIdentityUnavailable(docId: docId, verb: "reorder")
         }
