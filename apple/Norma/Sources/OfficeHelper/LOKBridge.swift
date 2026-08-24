@@ -3885,6 +3885,59 @@ final class LOKBridge: OfficeDocumentBridge {
         preconditionFailure("slidesManagePageOnDedicatedThread(\(op.rawValue)) reached with a nil required field — the wire decode's own invariant was violated")
     }
 
+    /// office-agent-tools T6 fix round 1 (review F-5/F-6) — `getPartInfo`'s `hash` field
+    /// (`SdrPage::GetUniqueID()`, research §7): a monotonic per-object counter, genuine OBJECT
+    /// IDENTITY, unlike title/name content. Live-measured (a temporary probe, since reverted,
+    /// this fix round's own commit) before this parser was written — the JSON shape is
+    /// `{"masterPageCount":...,...,"name":"T6Slide1","hash":67}`: `hash` is a raw JSON NUMBER, NOT
+    /// a string (unlike the type-27 callback envelope's own `viewId`, which IS a string — measured
+    /// separately, never assumed to generalize from one LOK JSON payload to another). Page-level
+    /// fields, `hash` included, are OMITTED entirely (not merely `null`) when the page lookup
+    /// itself fails (research §3: "else `SAL_WARN`-logged and *omitted*") — a missing key here
+    /// means "could not determine right now," feeding this file's own verify-and-retry discipline,
+    /// never a crash and never a false identity match manufactured from a decode failure.
+    private func partHashOnDedicatedThread(_ doc: OpenDocument, part: Int) -> Int? {
+        guard let cInfo = doc.handle.pointee.pClass.pointee.getPartInfo?(doc.handle, Int32(part)) else {
+            return nil
+        }
+        defer { free(cInfo) }
+        guard let data = String(cString: cInfo).data(using: .utf8),
+              let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            return nil
+        }
+        return (object["hash"] as? NSNumber)?.intValue
+    }
+
+    /// **Verification redesign, fix round 1 (review F-5, F-6).** The original content-based check
+    /// (`titleAt(to) == movingTitle`) shipped with two real defects, both closed here:
+    /// - **F-5**: content is not identity. A slide `add_slide` itself creates has an EMPTY title
+    ///   placeholder (live-confirmed by the reviewer), so two such slides compare `"" == ""` —
+    ///   verification could pass on a deck it was specifically written to catch errors on, without
+    ///   any move having happened correctly, or at all.
+    /// - **F-6**: `titleAt` rides `selectSlidePlaceholderOnDedicatedThread`'s own Tab-cycling, this
+    ///   file's established flake class. The baseline (`movingTitle`) was captured ONCE, before
+    ///   dispatch, with no retry — a single flake there poisoned every one of the 20 post-dispatch
+    ///   retry attempts (only the AFTER side ever re-read), reporting a completed mutation as a
+    ///   failure and leaving an adopted document dirty.
+    ///
+    /// `getPartInfo`'s `hash` (`partHashOnDedicatedThread`, immediately above) resolves both:
+    /// it is genuine per-object identity (never accidentally shared by two distinct pages, empty-
+    /// titled or not), and it is a DIRECT positional query with no Tab-cycling involved at all — the
+    /// baseline capture below cannot flake the way `titleAt`'s ever could, closing F-6 as a
+    /// structural side effect of closing F-5, not a second mechanism bolted on. This does not
+    /// reverse the earlier title-over-hash adjudication for the SAVE+REOPEN proof — research §7
+    /// still means hash dies on reload, so that proof (this task's own non-negotiable obligation)
+    /// stays content-based, in the live test suite, through `slidesRead`/`content.xml`. The two
+    /// mechanisms now serve the two jobs they each actually fit: hash for in-session identity, this
+    /// task's original content-based approach for reload-durable proof.
+    ///
+    /// Verifies the FULL expected permutation, not merely `hashAt(to) == movingHash` — closes a
+    /// gap a single-position check cannot see: a wrong slide moving to a DIFFERENT position while,
+    /// by coincidence, the right slide still lands at `to`. `expectedHashes` is computed directly
+    /// (remove at `from`, insert at `to`) rather than simulated step-by-step through the actual
+    /// `MovePage*` dispatch sequence — the same array operation regardless of how many single-step
+    /// swaps produce it.
+    ///
     /// office-agent-tools T6, Probe B — reachability was UNDETERMINED FROM SOURCE going in:
     /// `slides-lok-research.md` §2 "R1" found no arbitrary-index move UNO command at all — the only
     /// primitives are selection-based `MovePageUp`/`Down`/`First`/`Last`
@@ -3895,12 +3948,14 @@ final class LOKBridge: OfficeDocumentBridge {
     /// (`OfficeSlidesCommandTests.testProbeInvestigatesWhetherReorderIsReachableHeadless`) for why
     /// index 1, never index 0.** Multi-step (`abs(to - from) > 1`) composes the SAME primitive
     /// repeatedly — research's own finding that `MovePageUp`/`Down` clamp safely at the document
-    /// boundary rather than erroring — but multi-step itself is NOT independently live-verified yet,
-    /// only the single-step case the probe actually ran.
+    /// boundary rather than erroring — and IS independently live-verified
+    /// (`testLiveReorderMultiStepMovesAcrossTwoPositionsProvenBySaveAndIndependentReopen`, distance
+    /// 2 forwards; `testLiveReorderMultiStepMovesBackwardsProvenBySaveAndIndependentReopen`,
+    /// distance 2 backwards, exercising `MovePageUp` specifically).
     ///
     /// **Dispatched on the PRIMARY view, `destroyAgentViewIfAnyOnDedicatedThread` first — NOT the
-    /// agent-view isolation `selectSlidePlaceholderOnDedicatedThread`'s own READ path uses just
-    /// above/below this call, and a deliberate decision, not an oversight.**
+    /// agent-view isolation `selectSlidePlaceholderOnDedicatedThread`'s own READ path uses
+    /// elsewhere in this file, and a deliberate decision, not an oversight.**
     /// `sheetsManageSheetOnDedicatedThread`'s own header carries the full two-round live history this
     /// borrows wholesale rather than re-earning empirically: dispatching a STRUCTURAL, page/sheet-
     /// list-level mutation (`.uno:Remove`) from the agent view produced a genuine 30s HANG whenever
@@ -3910,34 +3965,21 @@ final class LOKBridge: OfficeDocumentBridge {
     /// the SAME structural, view-shell-entangled class as those three commands, arguably more so —
     /// so this starts from the already-proven-safe shape rather than re-discovering the hang live.
     /// **Sheets' own disclosed residual carries over unchanged, not closed here either**: primary-
-    /// view `setPart` can move an ADOPTED document's own visible primary-view slide selection. See
-    /// that function's own header and task-4-report.md's own accounting for the full story.
-    ///
-    /// **Verification is CONTENT-based (the placeholder TITLE text at `from`/`to`), never
-    /// `getPartName`** (research's own documented trap, §7: for a never-renamed page, `getPartName`
-    /// recomputes `"Slide N"` positionally on EVERY call, so a no-op and a real reorder can read back
-    /// identically) **and never `getPartInfo`'s `hash` field either, though the controller's own
-    /// resume message named that specific mechanism — a disclosed substitution, not a silent one.**
-    /// §7 also states neither of LOK's two in-session identity primitives (`getPartHash`'s raw
-    /// pointer, `getPartInfo.hash`'s `GetUniqueID` counter) "survives save+reload" — fatal for this
-    /// TASK's own non-negotiable proof obligation (the two-part discriminator through save+reopen
-    /// every write verb needs), so whatever verified this probe would have to be thrown away and
-    /// rebuilt as content-based the moment a real save+reopen drill exists for `reorder` anyway.
-    /// Title text already IS this bridge's own proven, reload-durable content primitive (Probe A) —
-    /// reusing it here is not a new mechanism, just the existing one applied one level up. Also
-    /// avoids adding `getPartInfo` as new wire surface for what would otherwise be a probe-only read.
+    /// view `setPart` can move an ADOPTED document's own visible primary-view slide selection —
+    /// disclosed on all three structural verbs' own tool description as of fix round 1 (review F-8),
+    /// not `reorder` alone. See that function's own header and task-4-report.md's own accounting.
     private func slidesReorderOnDedicatedThread(docId: String, doc: OpenDocument, from: Int, to: Int,
                                                  partCount: Int) throws -> Int {
         if from == to { return partCount } // no-op — nothing to move, nothing to verify
 
-        func titleAt(_ part: Int) throws -> String? {
-            guard try selectSlidePlaceholderOnDedicatedThread(docId: docId, slide: part, tabCount: 1) != nil else {
-                return nil
-            }
-            guard let agentViewId = documents[docId]?.agentViewId else { throw SaveError.noAgentView(docId) }
-            return readSelectedShapeTextOnDedicatedThread(doc, agentViewId: agentViewId, part: part)
+        var beforeHashes: [Int?] = []
+        beforeHashes.reserveCapacity(partCount)
+        for part in 0..<partCount {
+            beforeHashes.append(partHashOnDedicatedThread(doc, part: part))
         }
-        let movingTitle = try titleAt(from)
+        var expectedHashes = beforeHashes
+        let movingHash = expectedHashes.remove(at: from)
+        expectedHashes.insert(movingHash, at: to)
 
         destroyAgentViewIfAnyOnDedicatedThread(doc, docId: docId)
         doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
@@ -3951,16 +3993,18 @@ final class LOKBridge: OfficeDocumentBridge {
             pumpDedicatedThreadForPendingDispatch(doc, viewId: doc.viewId, part: from)
         }
 
-        func verified() throws -> Bool {
+        func hashesNow() -> [Int?] {
             let newPartCount = Int(doc.handle.pointee.pClass.pointee.getParts?(doc.handle) ?? 0)
-            guard newPartCount == partCount else { return false }
-            return try titleAt(to) == movingTitle
+            guard newPartCount == partCount else { return [] }
+            return (0..<newPartCount).map { partHashOnDedicatedThread(doc, part: $0) }
         }
-        var ok = try verified()
+        func verified() -> Bool { hashesNow() == expectedHashes }
+
+        var ok = verified()
         var attempts = 1
         while !ok, attempts < Self.slidesManageVerificationAttempts {
             pumpDedicatedThreadForPendingDispatch(doc, viewId: doc.viewId, part: to)
-            ok = try verified()
+            ok = verified()
             attempts += 1
         }
         if attempts > 1 {
@@ -3981,30 +4025,26 @@ final class LOKBridge: OfficeDocumentBridge {
     /// first, NOT the agent-view isolation the read path uses — see that function's own header for
     /// the full two-round sheets precedent this borrows), same `notifyWhenFinished: true` (controller
     /// instruction #1), same disclosed residual (primary-view `setPart` can move an adopted
-    /// document's own visible slide selection).
+    /// document's own visible slide selection — disclosed on all three structural verbs as of fix
+    /// round 1, review F-8).
     ///
-    /// **Verification is NOT just count-minus-one.** Research's own finding: `DeleteActualPage()`
+    /// **Verification is NOT just count-minus-one, and — fix round 1, review F-5/R10's own note —
+    /// not content-based either anymore.** Research's own finding: `DeleteActualPage()`
     /// (`drviews4.cxx:99-142`) swallows its own failures — a dispatch that silently no-ops would still
     /// need to be caught, and a raw count check cannot distinguish "the RIGHT slide was deleted" from
-    /// "some OTHER slide was deleted and the count still dropped by one," or from "nothing was deleted
-    /// and a concurrent, unrelated part-count change coincidentally matched." So this captures every
-    /// SURVIVING slide's own title BEFORE dispatch (never the deleted slide's own title — that one is
-    /// expected to disappear, and a placeholder-less slide would make capturing it meaningless), then
-    /// asserts the exact SAME survivor sequence, in the SAME order, comes back after — content-based,
-    /// the same discriminator discipline `slidesReorderOnDedicatedThread`'s own header explains why it
-    /// prefers over `getPartName`/`getPartInfo.hash`.
+    /// "some OTHER slide was deleted and the count still dropped by one." The original title-based
+    /// survivor check shared reorder's own F-5 exposure: two surviving slides with equal (including
+    /// empty) titles could false-match a wrong-slide deletion, and title-reading's own Tab-cycling
+    /// carried reorder's own F-6 baseline-flake risk. Same fix, same reasoning as
+    /// `slidesReorderOnDedicatedThread`'s own header — see that function's `partHashOnDedicatedThread`
+    /// doc comment for the full account: this captures every SURVIVING slide's own HASH before
+    /// dispatch (never the deleted slide's — that one is expected to disappear), then asserts the
+    /// exact same survivor hash sequence, in the same order, comes back after.
     private func slidesDeleteOnDedicatedThread(docId: String, doc: OpenDocument, slide: Int, partCount: Int) throws -> Int {
-        func titleAt(_ part: Int) throws -> String? {
-            guard try selectSlidePlaceholderOnDedicatedThread(docId: docId, slide: part, tabCount: 1) != nil else {
-                return nil
-            }
-            guard let agentViewId = documents[docId]?.agentViewId else { throw SaveError.noAgentView(docId) }
-            return readSelectedShapeTextOnDedicatedThread(doc, agentViewId: agentViewId, part: part)
-        }
-        var survivorTitles: [String?] = []
-        survivorTitles.reserveCapacity(partCount - 1)
+        var survivorHashes: [Int?] = []
+        survivorHashes.reserveCapacity(partCount - 1)
         for part in 0..<partCount where part != slide {
-            survivorTitles.append(try titleAt(part))
+            survivorHashes.append(partHashOnDedicatedThread(doc, part: part))
         }
 
         destroyAgentViewIfAnyOnDedicatedThread(doc, docId: docId)
@@ -4014,23 +4054,18 @@ final class LOKBridge: OfficeDocumentBridge {
         postUnoCommandOnDedicatedThread(doc, ".uno:DeletePage", [:], notifyWhenFinished: true)
         pumpDedicatedThreadForPendingDispatch(doc, viewId: doc.viewId, part: max(0, slide - 1))
 
-        func survivorsNow() throws -> [String?] {
+        func hashesNow() -> [Int?] {
             let newPartCount = Int(doc.handle.pointee.pClass.pointee.getParts?(doc.handle) ?? 0)
-            guard newPartCount == partCount - 1 else { return [] } // sentinel length mismatch — `verified()` below never mistakes this for a real (if empty-titled) survivor list
-            var titles: [String?] = []
-            titles.reserveCapacity(newPartCount)
-            for part in 0..<newPartCount {
-                titles.append(try titleAt(part))
-            }
-            return titles
+            guard newPartCount == partCount - 1 else { return [] } // sentinel length mismatch — `verified()` below never mistakes this for a real survivor list
+            return (0..<newPartCount).map { partHashOnDedicatedThread(doc, part: $0) }
         }
-        func verified() throws -> Bool { try survivorsNow() == survivorTitles }
+        func verified() -> Bool { hashesNow() == survivorHashes }
 
-        var ok = try verified()
+        var ok = verified()
         var attempts = 1
         while !ok, attempts < Self.slidesManageVerificationAttempts {
             pumpDedicatedThreadForPendingDispatch(doc, viewId: doc.viewId, part: max(0, slide - 1))
-            ok = try verified()
+            ok = verified()
             attempts += 1
         }
         if attempts > 1 {
@@ -4061,35 +4096,47 @@ final class LOKBridge: OfficeDocumentBridge {
     ///
     /// Same primary-view dispatch as `reorder`/`delete_slide` (`destroyAgentViewIfAnyOnDedicatedThread`
     /// first — see `slidesReorderOnDedicatedThread`'s own header for the full sheets precedent this
-    /// still rides), same `notifyWhenFinished: true`, same disclosed residual.
+    /// still rides), same `notifyWhenFinished: true`, same disclosed residual (all three structural
+    /// verbs as of fix round 1, review F-8).
     ///
-    /// **Layout assignment is best-effort and UNVERIFIABLE, by construction, not by gap in this
-    /// function.** Ruling 1 (`slides-lok-research.md` §3): LOK exposes NO layout read-back at all, for
-    /// any slide, ever — so unlike position (verified below by content), there is no re-read this
-    /// function could perform even in principle to confirm `.uno:AssignLayout` took effect. Dispatched
-    /// with `notifyWhenFinished: true` and a pump like every other write here, but its own success is
-    /// asserted nowhere — the tool description says so plainly (`slides.ts`'s own `add_slide` entry).
+    /// **Layout assignment: dispatched, live-drilled, correction on two claims — fix round 1, review
+    /// F-4.** Ruling 1 (`slides-lok-research.md` §3) means LOK exposes NO layout read-back API — this
+    /// IN-PROCESS function cannot self-verify `.uno:AssignLayout` the way it self-verifies position,
+    /// and that much was always true. What was NOT true, and has been corrected: this function's own
+    /// prior header claimed "no re-read even in principle," overstating ruling 1 into a place it does
+    /// not reach — a SAVED-BYTES seal (this task's own established `content.xml` filesystem-seal
+    /// technique, not a LOK API) DOES observe layout's effect, live-confirmed by
+    /// `testLiveAddSlideWithLayoutBlankStripsPlaceholdersProvenBySaveAndIndependentReopen`: `layout:
+    /// "blank"` on a fresh slide produces a `read`ing of `title: nil` ("no title placeholder" — the
+    /// placeholder was never created, distinct from an EMPTY one) where every other layout's default
+    /// new-slide shape produces `title: ""` (placeholder present, empty) — the nil/empty distinction
+    /// this bridge documents elsewhere as load-bearing, now doing double duty as the layout
+    /// discriminator. The prior header also claimed this "type":"long" tag had been observed live
+    /// with "no failure mode... absence of an error/dialog/crash" — false; no dispatch had run at
+    /// all before this fix round's own drill. It has now actually run, and the claim is true.
     /// `WhatPage`/`WhatLayout` (`SfxUInt32Item` per the slot table, `sd/sdi/sdraw.sdi:2137-2138`) use
-    /// JSON type `"long"` — an educated guess consistent with this bridge's own established UNO-args
-    /// JSON convention (`sheets`' own `Index`, a `SfxUInt16Item`, resolved live to `"unsigned short"`;
-    /// no failure mode was observed live using `"long"` here, but unlike position this was NOT
-    /// independently proven correct by a read-back, only by the absence of an error/dialog/crash and
-    /// research's own note that `AssignLayout` "internally rewrites itself... which is exactly why it
-    /// sidesteps L2" — i.e. even a malformed arg here is expected to be safe, not silently wrong in a
-    /// way this bridge could fail to notice).
+    /// JSON type `"long"` — an educated guess (parallel to `sheets`' own `Index`, a `SfxUInt16Item`,
+    /// resolved live to `"unsigned short"`) that the live drill now actually confirms rather than
+    /// merely licenses: `blank` demonstrably strips the new slide's own placeholder frames, exactly
+    /// `SdPage::SetAutoLayout`'s documented behavior for empty placeholders (research §4).
+    ///
+    /// **Position verification, fix round 1 (review F-5/F-6) — hash-based, not content-based, for the
+    /// same reasons `slidesReorderOnDedicatedThread`'s own header explains in full** (that function's
+    /// `partHashOnDedicatedThread` doc comment is the canonical account, not repeated here): captures
+    /// every EXISTING slide's own hash before dispatch, then — skipping exactly the new slide's own
+    /// expected resting index — asserts the same survivor hash sequence, in order, comes back after.
+    /// The mirror image of `slidesDeleteOnDedicatedThread`'s own "skip the deleted index" check.
+    /// **One check `add_slide` gets that `delete_slide`/`reorder` structurally cannot**: the NEW
+    /// slide's own hash must be ABSENT from the before-set entirely — proving it is a genuinely new
+    /// object LOK just created, not the same object duplicated or an existing one silently moved into
+    /// place, a distinction content-based verification could never have drawn (a duplicated object
+    /// could carry duplicated, matching content) but object identity draws for free.
     private func slidesAddOnDedicatedThread(docId: String, doc: OpenDocument, at: Int?,
                                              layout: OfficeSlidesLayoutPreset?, partCount: Int) throws -> Int {
-        func titleAt(_ part: Int) throws -> String? {
-            guard try selectSlidePlaceholderOnDedicatedThread(docId: docId, slide: part, tabCount: 1) != nil else {
-                return nil
-            }
-            guard let agentViewId = documents[docId]?.agentViewId else { throw SaveError.noAgentView(docId) }
-            return readSelectedShapeTextOnDedicatedThread(doc, agentViewId: agentViewId, part: part)
-        }
-        var beforeTitles: [String?] = []
-        beforeTitles.reserveCapacity(partCount)
+        var beforeHashes: [Int?] = []
+        beforeHashes.reserveCapacity(partCount)
         for part in 0..<partCount {
-            beforeTitles.append(try titleAt(part))
+            beforeHashes.append(partHashOnDedicatedThread(doc, part: part))
         }
 
         // Omitted `at` -> append at the end (one past the last valid index, `partCount`). Clamped
@@ -4119,27 +4166,27 @@ final class LOKBridge: OfficeDocumentBridge {
             pumpDedicatedThreadForPendingDispatch(doc, viewId: doc.viewId, part: targetIndex)
         }
 
-        // Verification is content-based and position-only (layout, per the header above, cannot be
-        // verified at all): skip exactly the NEW slide's own expected resting position and assert
-        // every remaining title, in order, reconstructs `beforeTitles` exactly — the mirror image of
-        // `slidesDeleteOnDedicatedThread`'s own "skip the deleted index" check.
-        func survivorsNow() throws -> [String?] {
+        func survivorsNow() -> [Int?] {
             let newPartCount = Int(doc.handle.pointee.pClass.pointee.getParts?(doc.handle) ?? 0)
             guard newPartCount == partCount + 1 else { return [] }
-            var titles: [String?] = []
-            titles.reserveCapacity(partCount)
+            var hashes: [Int?] = []
+            hashes.reserveCapacity(partCount)
             for part in 0..<newPartCount where part != targetIndex {
-                titles.append(try titleAt(part))
+                hashes.append(partHashOnDedicatedThread(doc, part: part))
             }
-            return titles
+            return hashes
         }
-        func verified() throws -> Bool { try survivorsNow() == beforeTitles }
+        func newSlideIsGenuinelyNew() -> Bool {
+            guard let newHash = partHashOnDedicatedThread(doc, part: targetIndex) else { return false }
+            return !beforeHashes.contains(where: { $0 == newHash })
+        }
+        func verified() -> Bool { survivorsNow() == beforeHashes && newSlideIsGenuinelyNew() }
 
-        var ok = try verified()
+        var ok = verified()
         var attempts = 1
         while !ok, attempts < Self.slidesManageVerificationAttempts {
             pumpDedicatedThreadForPendingDispatch(doc, viewId: doc.viewId, part: targetIndex)
-            ok = try verified()
+            ok = verified()
             attempts += 1
         }
         if attempts > 1 {
