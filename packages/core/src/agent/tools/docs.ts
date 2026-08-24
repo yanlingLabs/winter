@@ -41,9 +41,16 @@ import { officeTimeoutMessage } from "./sheets";
  * 4. **Writer's caret and selection ARE per-view** (confirmed through an 8-hop chain from
  *    `SfxLokHelper::setView` to `SwView::Activate` -> `SwDocShell::SetView`), so Stage B's
  *    `createAgentView` + `setView` architecture carries over unchanged and an agent edit does not
- *    move the user's caret. **But the undo stack is SHARED across views** (`sw::UndoManager` hangs
- *    off `SwDoc`, not off `SwView`) — an agent edit lands in the user's own ⌘Z stack. The tool
- *    description below says so plainly; it must not imply otherwise.
+ *    move the user's caret. The ruling's second half — "the undo stack is SHARED across views, so an
+ *    agent edit lands in the user's own ⌘Z stack" — is structurally true (`sw::UndoManager` hangs off
+ *    `SwDoc`, not off `SwView`) but its USER-FACING conclusion is **false, and was falsified live**
+ *    (T7, `OfficeDocsCommandTests
+ *    .testLiveAHumanUndoOnTheirOwnViewCannotTakeBackAnAgentEditAndSilentlyDoesNothing`): in LOK mode
+ *    and outside repair mode, `sw::UndoManager::GetLastUndoInfo`
+ *    (`sw/source/core/undo/docundo.cxx:456-472`) REFUSES an undo whose top action belongs to another
+ *    view, and its one escape hatch (`IsViewUndoActionIndependent`, `:367-430`) requires both actions
+ *    to be `SwUndoId::TYPING` — a `PASTE_CLIPBOARD` never qualifies. So a human's ⌘Z cannot take back
+ *    a `docs` edit and silently does nothing. The description below says exactly that.
  *
  * ## Two deliberate v1 narrowings, surfaced rather than smuggled
  *
@@ -251,9 +258,11 @@ export function registerDocsTool(r: ToolRegistry, deps: DocsToolDeps): void {
     name: "docs",
     description:
       "Read and edit a text document Norma has access to (.odt, .docx — any format the office engine "
-      + "can open). Every write verb SAVES immediately — there is no separate save step. An edit made "
-      + "here DOES go into the undo history a human sees in an open tab (that history is shared "
-      + "between them and Norma), but Norma cannot undo its own edits from here. Pick a verb:\n"
+      + "can open). Every write verb SAVES immediately — there is no separate save step, and there is "
+      + "NO WAY TO UNDO IT: neither from here, nor by a human pressing ⌘Z in an open tab (the office "
+      + "engine only lets a view undo edits made by that same view, and Norma edits on its own). "
+      + "Their ⌘Z will simply do nothing. Treat every write as permanent, and read before you write. "
+      + "Pick a verb:\n"
       + "• info — path. Page, paragraph and character counts. Start here: it also doubles as a check "
       + "that the Mac app can actually open documents right now. The page count comes from the "
       + "engine's own layout and can under-report on a document nothing has displayed yet; the "

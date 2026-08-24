@@ -4129,6 +4129,10 @@ final class ShellSessionHostTests: XCTestCase {
                 slidesRead: { _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: slides not implemented") },
                 slidesSetText: { _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: slides not implemented") },
                 slidesManagePage: { _, _, _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: slides not implemented") },
+                docsInfo: { _ in throw OfficeHelperClientError.serverError(reason: "fake driver: docs not implemented") },
+                docsRead: { _ in throw OfficeHelperClientError.serverError(reason: "fake driver: docs not implemented") },
+                docsReplace: { _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: docs not implemented") },
+                docsInsert: { _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: docs not implemented") },
                 stateDirectory: stateDirectory)
         }
     }

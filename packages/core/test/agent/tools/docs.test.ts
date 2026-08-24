@@ -104,8 +104,11 @@ describe("registration", () => {
   test("the description states the three facts the code enforces — shared undo, literal find, no first-only replace", () => {
     const h = makeHarness();
     const description = h.registry.specFor("docs", WORKDIR, "code")?.description ?? "";
-    // Ruling 4: the undo stack is SHARED across views. The description must not imply otherwise.
-    expect(description).toContain("shared between them and Norma");
+    // Ruling 4's user-facing half, CORRECTED by T7's own live drill: LOK refuses a cross-view undo
+    // outside repair mode (`docundo.cxx:456-472`), so a human's ⌘Z cannot take back a docs edit and
+    // silently does nothing. The description must say that, not the ruling's original "shared" text.
+    expect(description).toContain("NO WAY TO UNDO IT");
+    expect(description).toContain("⌘Z will simply do nothing");
     // Ruling 1: literal, case-sensitive.
     expect(description).toContain("LITERAL and CASE-SENSITIVE");
     // The v1 narrowing, stated where a model will read it rather than discovered by refusal.
