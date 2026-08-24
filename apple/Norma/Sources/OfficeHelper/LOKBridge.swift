@@ -4518,14 +4518,22 @@ final class LOKBridge: OfficeDocumentBridge {
     /// second, possibly-disagreeing measurement (research §4.2: Writer exposes no paragraph query at
     /// all).
     ///
-    /// **`resetSelection` afterward is load-bearing, not tidiness.** `doc_paste` REPLACES the current
-    /// selection (`desktop/source/lib/init.cxx`'s `doc_paste`, whose `.uno:Paste` is an ordinary
-    /// paste-over-selection), and this function leaves the WHOLE DOCUMENT selected on the agent view.
-    /// A `read` followed by an `insert` on the same open document — which is exactly the sequence
-    /// every write verb below performs internally — would otherwise paste over the entire document
-    /// body. That failure would also PASS a naive `hasPrefix`/`hasSuffix` placement check, because
-    /// the document afterwards *is* the inserted text; it is caught here, at the source, and again by
-    /// the full expected-text equality every write verb asserts.
+    /// **`resetSelection` afterward is defence in depth — and it is NOT load-bearing, measured, not
+    /// assumed.** The hazard is real in shape: `doc_paste` REPLACES the current selection, and this
+    /// function leaves the WHOLE DOCUMENT selected on the agent view, so a `read` followed by an
+    /// `insert` (exactly the sequence every write verb below performs internally) could in principle
+    /// paste over the entire body — a failure that would also PASS a naive `hasPrefix`/`hasSuffix`
+    /// placement check, because the document afterwards *is* the inserted text.
+    ///
+    /// **But it does not happen, and the honest reason is a different mechanism**: deleting BOTH
+    /// `resetSelection` calls (here and in `docsInsertOnDedicatedThread`) and re-running
+    /// `testLiveDocsReadThenInsertDoesNotPasteOverTheWholeDocument` live still PASSES — because
+    /// `.uno:GoToStartOfDoc`/`.uno:GoToEndOfDoc` resolve to `SwWrtShell::StartOfSection()`/
+    /// `EndOfSection()`, which move the cursor WITHOUT extending, collapsing the selection before
+    /// `paste` ever runs. Kept anyway (it costs one C call and it makes the invariant local rather
+    /// than a property of two other commands), but recorded as what it is: this bridge's protection
+    /// against the paste-over-everything class is the positioning dispatch, and the full
+    /// expected-text equality every write verb asserts is what would CATCH it if that ever changed.
     ///
     /// A `nil` from `getTextSelection` is NOT an error — `SwXTextDocument::getSelection()` always
     /// constructs a `SwTransferable` for a live `SwWrtShell`, so "nothing selected" surfaces as `""`
@@ -4670,11 +4678,16 @@ final class LOKBridge: OfficeDocumentBridge {
     ///  1. **Our own count** (`docsCountOccurrences`) over the text read immediately before — the
     ///     ONLY count that exists, since the engine's `nFound` is collapsed to a bool at
     ///     `viewsrch.cxx:395` and `unoAnyToJson` cannot serialize even that bool's value (research L3).
-    ///  2. **The engine's boolean**, from `LOK_CALLBACK_UNO_COMMAND_RESULT`. `success: true` ⟺ at
-    ///     least one replacement. A disagreement with (1) means the two matchers disagree about what
-    ///     `find` means, and is thrown as `.replaceCountDisagreement` — ruling 1's own instruction,
-    ///     and a discriminating tripwire rather than a silent lie. An ABSENT `success` (the engine's
-    ///     `DONTKNOW` state) is not a disagreement and is not manufactured into one.
+    ///  2. **The engine's boolean**, from `LOK_CALLBACK_UNO_COMMAND_RESULT` — ruling 1's own
+    ///     cross-check, wired but ⚠️ **currently UNREACHABLE on this bridge, measured** (see
+    ///     `handleCallback`'s `.unoCommandResult` arm for the full account and the raw-callback
+    ///     trace: `setView`'s `MoveShellToFirstShell` puts the agent view at the head of the very
+    ///     list `getViewId` scans, and the agent view has no `registerCallback`, so LOK never
+    ///     constructs the listener). When it does arrive, `success: true` ⟺ at least one
+    ///     replacement and a disagreement with (1) throws `.replaceCountDisagreement`. When it does
+    ///     NOT — today, always — that is "no cross-check available", never manufactured into
+    ///     agreement OR disagreement. An ABSENT `success` key (the engine's `DONTKNOW` state) is
+    ///     treated the same way.
     ///  3. **Full expected-text equality on re-read.** This is the placement assertion: it proves the
     ///     replacements landed WHERE they were, in order, with nothing else disturbed. It also covers
     ///     the case a residual-occurrence check would get wrong — `replaceWith` CONTAINING `find`
@@ -4910,18 +4923,36 @@ final class LOKBridge: OfficeDocumentBridge {
             // Stage A's wire vocabulary is not the place to grow a case for a signal that never
             // crosses the app<->helper wire).
             //
-            // **Why this arrives at all, given the agent view has no `registerCallback` of its own**
-            // — read at the pin rather than assumed: `doc_postUnoCommand` constructs its
-            // `DispatchResultListener` against `pDocument->mpCallbackFlushHandlers[nView]` where
-            // `nView = SfxLokHelper::getViewId(pDocument->mnDocumentId)`
-            // (`desktop/source/lib/init.cxx:5312, 5502-5507`), and that helper
-            // (`sfx2/source/view/lokhelper.cxx:291-308`) is **not** "the current view" — it is a
-            // scan from `SfxViewShell::GetFirst()` returning the FIRST view shell whose DocId
-            // matches. For every document this bridge opens that is the PRIMARY view, which
-            // `openOnDedicatedThread` registers this very callback on. So the result lands here even
-            // while the AGENT view is current, which is exactly the arrangement `docs`' verbs run in.
-            // (The same DocId-filtered-scan fact is already relied on by `OpenDocument.viewId`'s own
-            // header for a different reason.)
+            // ⚠️ **MEASURED: this callback does NOT currently arrive for a `docs` verb, and the
+            // reason is worth writing down rather than leaving as a mystery.**
+            //
+            // I first reasoned it WOULD: `doc_postUnoCommand` builds its `DispatchResultListener`
+            // only when `bNotifyWhenFinished && pDocument->mpCallbackFlushHandlers.count(nView)`,
+            // with `nView = SfxLokHelper::getViewId(pDocument->mnDocumentId)`
+            // (`desktop/source/lib/init.cxx:5312, 5502-5507`) — and that helper
+            // (`sfx2/source/view/lokhelper.cxx:291-308`) is a scan from `SfxViewShell::GetFirst()`
+            // for the first shell matching the DocId, not "the current view". I concluded that scan
+            // returns the PRIMARY view, which `openOnDedicatedThread` does register a callback on.
+            //
+            // Live measurement says otherwise: across every `docs replace` drill the evidence line
+            // in `docsReplaceOnDedicatedThread` reads `observed=none`, and a full raw-callback trace
+            // of one drill shows types 1, 2, 5, 8, 24, 25, 27, 28, 35, 44, 60, 70, 73 — and **no
+            // type 16 at all**. Callbacks plainly flow, so a handler exists; the listener is simply
+            // never constructed. The mechanism the first reading missed is `setView`'s own hop 4:
+            // `SfxApplication::SetViewFrame_Impl` calls `MoveShellToFirstShell(*pViewShell)`, which
+            // moves the newly-current shell to the FRONT of the very list `getViewId` scans. Every
+            // `docs` verb asserts `setView(agentView)` first, so `getViewId` returns the AGENT
+            // view — which has no `registerCallback` of its own — and `count(nView)` is 0.
+            //
+            // Left in place deliberately rather than deleted: it costs nothing, it is correct if a
+            // result ever does arrive, and `docsReplaceOnDedicatedThread` treats "no result" as "no
+            // cross-check available" rather than as agreement. What actually does the verifying is
+            // the full expected-text re-read — a strictly STRONGER check than the boolean (it knows
+            // what the text should be, not merely that something changed), proven so by a forced red:
+            // dropping `SearchItem.TransliterateFlags` makes the engine match case-insensitively and
+            // it is the re-read, not this callback, that catches it. Making the boolean reachable
+            // would mean registering a second callback on the agent view — a real change to
+            // multi-view callback traffic, for a signal that is redundant here. Named, not done.
             if var doc = documents[docId], let parsed = Self.parseUnoCommandResult(payload) {
                 doc.lastUnoCommandResult = parsed
                 documents[docId] = doc

@@ -413,13 +413,21 @@ final class OfficeDocsCommandTests: XCTestCase {
                       "insert at the end must continue the last paragraph: \(path)")
     }
 
-    /// **The read-then-write interleave, which is a data-loss vector and not a formality.**
+    /// **The read-then-write interleave — a real data-loss SHAPE, and an honest account of what this
+    /// drill does and does not prove.**
     /// `read` selects the WHOLE DOCUMENT (`.uno:SelectAll`) on the agent view, and LOK's `paste`
-    /// REPLACES the current selection. Without the `resetSelection` that follows every read, an
-    /// `insert` on an already-read document pastes over the entire body — and a naive "does the
-    /// document contain the inserted text" check PASSES on that wreckage, because the document then
-    /// *is* the inserted text. So this drill reads first, writes second, and asserts every original
-    /// paragraph SURVIVED.
+    /// REPLACES the current selection, so an `insert` after a `read` could paste over the entire
+    /// body — and a naive "does the document contain the inserted text" check PASSES on that
+    /// wreckage, because the document then *is* the inserted text. This drill therefore asserts every
+    /// ORIGINAL paragraph survived, which is the assertion that would actually fail.
+    ///
+    /// ⚠️ **What it does NOT prove, measured rather than assumed:** deleting both `resetSelection`
+    /// calls in `LOKBridge` and re-running this drill still PASSES. The selection is collapsed
+    /// before `paste` by the positioning dispatch itself (`.uno:GoToStartOfDoc`/`GoToEndOfDoc` →
+    /// `SwWrtShell::StartOfSection()`/`EndOfSection()`, which move without extending), not by
+    /// `resetSelection`. So this is a regression test for the CLASS — it fails if positioning ever
+    /// stops collapsing, or if a future verb pastes without positioning first — not a proof that
+    /// `resetSelection` is load-bearing. That guard is defence in depth and its own header says so.
     func testLiveDocsReadThenInsertDoesNotPasteOverTheWholeDocument() async throws {
         let (path, host, _) = try await openLive("two-page.odt")
         let read = await send(command("office.docs.read", args: ["path": path], sessionId: "S1",
