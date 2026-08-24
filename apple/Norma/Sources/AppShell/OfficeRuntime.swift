@@ -1611,6 +1611,13 @@ final class OfficeRuntime: ObservableObject {
         var slidesSetText: (_ docId: String, _ slide: Int, _ title: String?, _ body: String?) async throws -> [String]
         var slidesManagePage: (_ docId: String, _ op: OfficeSlidesManagePageOp, _ slide: Int?, _ at: Int?,
                                _ to: Int?, _ layout: OfficeSlidesLayoutPreset?) async throws -> Int
+        /// office-agent-tools T7 — docs, same no-reducer, throws-through posture as every sibling
+        /// above.
+        var docsInfo: (_ docId: String) async throws -> (pages: Int, paragraphs: Int, characters: Int)
+        var docsRead: (_ docId: String) async throws -> String
+        var docsReplace: (_ docId: String, _ find: String, _ replaceWith: String) async throws -> Int
+        var docsInsert: (_ docId: String, _ text: String, _ atStart: Bool,
+                         _ asNewParagraph: Bool) async throws -> Int
         /// **Office Stage B Task 2b — the shared helper's own `--state-path`.** A plain stored
         /// value, unlike every sibling above: it is a FACT about the shared supervisor's
         /// configuration (`OfficeHelperSupervisor.statePath`, exposing `Configuration
@@ -1892,6 +1899,21 @@ final class OfficeRuntime: ObservableObject {
     func slidesManagePage(docId: String, op: OfficeSlidesManagePageOp, slide: Int?, at: Int?, to: Int?,
                           layout: OfficeSlidesLayoutPreset?) async throws -> Int {
         try await driver.slidesManagePage(docId, op, slide, at, to, layout)
+    }
+
+    // MARK: - office-agent-tools T7: docs — same no-reducer, throws-through posture as sheets/slides
+
+    func docsInfo(docId: String) async throws -> (pages: Int, paragraphs: Int, characters: Int) {
+        try await driver.docsInfo(docId)
+    }
+    func docsRead(docId: String) async throws -> String {
+        try await driver.docsRead(docId)
+    }
+    func docsReplace(docId: String, find: String, replaceWith: String) async throws -> Int {
+        try await driver.docsReplace(docId, find, replaceWith)
+    }
+    func docsInsert(docId: String, text: String, atStart: Bool, asNewParagraph: Bool) async throws -> Int {
+        try await driver.docsInsert(docId, text, atStart, asNewParagraph)
     }
 
     /// One `saveAndAwaitOutcome` caller, still waiting. Kept per PATH (a table, not a single slot) —

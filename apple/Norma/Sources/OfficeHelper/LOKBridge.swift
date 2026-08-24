@@ -52,6 +52,18 @@ private enum LOKCallbackType {
     /// a firing for some OTHER view, e.g. the primary, as if it were this bridge's own), and parses
     /// `selection` with the identical comma-split logic either raw type would need.
     static let graphicViewSelection: Int32 = 27
+    /// office-agent-tools T7 — LibreOfficeKitEnums.h:323 (LOK_CALLBACK_UNO_COMMAND_RESULT). The ONE
+    /// completion signal a `postUnoCommand(..., bNotifyWhenFinished: true)` dispatch produces, and
+    /// the ONLY reachable evidence of whether `.uno:ExecuteSearch` replaced anything at all
+    /// (`docs-lok-research.md` L3: the real replacement COUNT is collapsed to a bool at
+    /// `sw/source/uibase/uiview/viewsrch.cxx:395` and never leaves C++). Payload is a JSON object
+    /// composed by `DispatchResultListener::dispatchFinished`
+    /// (`desktop/source/lib/init.cxx:5086-5107`, read at the pinned SHA):
+    /// `{"commandName": ".uno:...", "success": <bool>, "result": {...}, "wasModified": <bool>, ...}`
+    /// — with **`success` ABSENT entirely** when the dispatch result state is `DONTKNOW` (`:5091-5095`),
+    /// which is why `parseUnoCommandResult` below returns an OPTIONAL success rather than defaulting
+    /// one.
+    static let unoCommandResult: Int32 = 16
 }
 
 // LOKTileMode (LOK_TILEMODE_RGBA/BGRA, LibreOfficeKitEnums.h:40-41) lived here for
@@ -503,6 +515,24 @@ final class LOKBridge: OfficeDocumentBridge {
         /// it split `.unsupportedFormulaCharacter` out of `.writeVerificationFailed` for exactly this
         /// reason (see that case's own header).
         case slideIdentityUnavailable(docId: String, verb: String)
+        /// office-agent-tools T7 — a `docs` verb was asked for a document that is not a Writer text
+        /// document. Mirrors `.notSpreadsheet`/`.notPresentation` exactly, composed entirely from
+        /// this bridge's own words.
+        case notTextDocument(docId: String, kind: OfficeDocumentKind)
+        /// office-agent-tools T7 — ruling 1's cross-check FIRED: this bridge counted `counted`
+        /// literal occurrences of `find` in the text it had just read, and the engine's own
+        /// `UNO_COMMAND_RESULT` boolean disagreed about whether ANYTHING was replaced. The count is
+        /// unobtainable from the engine (`docs-lok-research.md` L3), so the tool computes it — and a
+        /// disagreement means the two matchers do not agree about what `find` MEANS, which would put
+        /// a wrong number in front of the model and a wrong edit in the user's saved file. Refused
+        /// loudly rather than reported. **The outcome is genuinely UNKNOWN here** — the dispatch
+        /// already ran — which is why the description says so instead of claiming nothing happened.
+        case replaceCountDisagreement(docId: String, counted: Int, engineSucceeded: Bool)
+        /// office-agent-tools T7 — a `docs` write verb re-read the document afterward and the text
+        /// it got back is not the text the verb intended to produce. Carries both lengths (never the
+        /// texts themselves — a document body has no business in an error string, and the wire caps
+        /// would refuse it) plus a short, already-composed description of what was attempted.
+        case docsVerificationFailed(docId: String, what: String, expectedLength: Int, actualLength: Int)
         var description: String {
             switch self {
             case .docNotOpen(let docId): return "save requested for a docId that is not open: \(docId)"
@@ -589,6 +619,28 @@ final class LOKBridge: OfficeDocumentBridge {
                 return "could not read per-slide identity from \(docId), so \(verb) could not be "
                     + "verified — nothing was changed. The outcome is known (unchanged), not unknown; "
                     + "retrying is safe."
+            case .notTextDocument(let docId, let kind):
+                let noun: String
+                switch kind {
+                case .text: noun = "a text document" // unreachable — this case IS the accepted kind
+                case .spreadsheet: noun = "a spreadsheet"
+                case .presentation: noun = "a presentation"
+                case .drawing: noun = "a drawing"
+                case .other: noun = "not a recognized office document"
+                }
+                return "the `docs` tool only works on text documents, but \(docId) is \(noun)"
+            case .replaceCountDisagreement(let docId, let counted, let engineSucceeded):
+                return "refusing to report a replacement count for \(docId) that Norma cannot stand "
+                    + "behind: Norma counted \(counted) literal match\(counted == 1 ? "" : "es") of the "
+                    + "search text, but the engine reported it "
+                    + (engineSucceeded ? "DID" : "did NOT")
+                    + " replace anything. The two disagree about what the search text matches, so the "
+                    + "outcome of this call is UNKNOWN — re-read the document before doing anything else."
+            case .docsVerificationFailed(let docId, let what, let expectedLength, let actualLength):
+                return "\(what) in \(docId) did not produce the text Norma expected when it read the "
+                    + "document back (expected \(expectedLength) characters, found \(actualLength)) — "
+                    + "the outcome is UNKNOWN and the document may have been changed. Re-read it before "
+                    + "retrying."
             }
         }
     }
@@ -725,6 +777,15 @@ final class LOKBridge: OfficeDocumentBridge {
         /// unrelated job on this same docId. `nil` means "no selection-changed callback observed
         /// since this was last cleared."
         var lastGraphicSelectionRectTwips: OfficeTwipsRect? = nil
+        /// office-agent-tools T7 — the most recent `LOK_CALLBACK_UNO_COMMAND_RESULT` observed for
+        /// THIS docId, parsed by `handleCallback`. Same consume-and-clear discipline
+        /// `lastGraphicSelectionRectTwips` above uses: `docsReplaceOnDedicatedThread` clears it
+        /// immediately before dispatching `.uno:ExecuteSearch`, so a non-nil value read back
+        /// afterward can only be a fresh firing from THAT dispatch, never a stale one left over from
+        /// an earlier command on this same docId. `commandName` is retained and CHECKED by the
+        /// consumer — every `notifyWhenFinished: true` dispatch in this file produces one of these,
+        /// so "a result arrived" is not the same as "MY result arrived."
+        var lastUnoCommandResult: (commandName: String, success: Bool?)? = nil
     }
 
     private let thread: LOKDedicatedThread
@@ -1072,6 +1133,22 @@ final class LOKBridge: OfficeDocumentBridge {
                           layout: OfficeSlidesLayoutPreset?) throws -> Int {
         try thread.sync { try self.slidesManagePageOnDedicatedThread(docId: docId, op: op, slide: slide, at: at,
                                                                       to: to, layout: layout) }
+    }
+
+    // MARK: - office-agent-tools T7: docs
+
+    func docsInfo(docId: String) throws -> (pages: Int, paragraphs: Int, characters: Int) {
+        try thread.sync { try self.docsInfoOnDedicatedThread(docId: docId) }
+    }
+    func docsRead(docId: String) throws -> String {
+        try thread.sync { try self.docsReadOnDedicatedThread(docId: docId) }
+    }
+    func docsReplace(docId: String, find: String, replaceWith: String) throws -> Int {
+        try thread.sync { try self.docsReplaceOnDedicatedThread(docId: docId, find: find, replaceWith: replaceWith) }
+    }
+    func docsInsert(docId: String, text: String, atStart: Bool, asNewParagraph: Bool) throws -> Int {
+        try thread.sync { try self.docsInsertOnDedicatedThread(docId: docId, text: text, atStart: atStart,
+                                                               asNewParagraph: asNewParagraph) }
     }
 
     // MARK: - Office Stage B Task 10 — the CFB release blocker
@@ -4404,6 +4481,342 @@ final class LOKBridge: OfficeDocumentBridge {
         return partCount + 1
     }
 
+
+    // MARK: - office-agent-tools T7: docs — Writer's own vocabulary
+    //
+    // Every mechanism below is cited to `docs-lok-research.md` (LibreOffice
+    // `11482c8f71bc76ed6260bc03b1576a52a788ab4f`) and was NOT re-derived. Four facts govern all of
+    // them:
+    //
+    //  1. **`setPart` is NEVER called for a text document, at all.** Not gated-and-skipped: absent.
+    //     `SwXTextDocument::setPart` is `GotoPage(nPart + 1)` — a CARET MOVE
+    //     (`sw/source/uibase/uno/unotxdoc.cxx:3410-3419`), and an ungated one is the proven cause of
+    //     Stage B's reversed-text bug (fixed in `27aa1941`; `OpenDocument.kind`'s own header carries
+    //     the full account). The type gate already exists at every part-scoped call site in this file
+    //     and this task adds no second one — `docs` code simply has no `setPart` to gate.
+    //  2. **The caret and selection ARE per-view** (research §5.2, an 8-hop chain from
+    //     `SfxLokHelper::setView` to `SwView::Activate` -> `SwDocShell::SetView`), so every verb runs
+    //     on the AGENT view (`ensureAgentViewOnDedicatedThread`) and the user's own caret is never
+    //     moved. **The undo stack is NOT per-view** (`sw::UndoManager` hangs off `SwDoc`) — an agent
+    //     edit lands in the user's ⌘Z stack. Stated in `docs.ts`'s tool description; not implied away.
+    //  3. **Every dispatch passes `notifyWhenFinished: true`** (research L4) — it is what makes the
+    //     dispatch `SfxCallMode::SYNCHRON` and it is the only reason `replace`'s boolean exists at all.
+    //     It is still not proof the write landed: every verb here VERIFIES BY RE-READ.
+    //  4. **`read` deep-copies the whole document** into a temporary `SwDoc` before serializing
+    //     (`SwTransferable::GetData`, `sw/source/uibase/dochdl/swdtflvr.cxx:488-540`), so its cost
+    //     scales with DOCUMENT size, not with the text returned. Every write verb here pays for two
+    //     of those reads (before, to compute the expected result; after, to verify it). That is a
+    //     deliberate trade: the alternative is trusting a dispatch this bridge has been burned by
+    //     three times for silently no-op'ing.
+
+    /// The one text-read door: `.uno:SelectAll` + `getTextSelection("text/plain;charset=utf-8")` on
+    /// the AGENT view (research §3.1/§3.7 — `SID_SELECTALL` takes no arguments, has no `Asynchron;`
+    /// in its slot, opens no dialog, and cannot null-deref: "the safest command in this report").
+    /// UTF-8, no BOM, paragraphs separated by `\n` on macOS (`SwAsciiOptions`' `GetSystemLineEnd()`,
+    /// research §3.4) — which is why the paragraph count `docsInfo` reports is literally
+    /// `text.split("\n").count` and therefore self-consistent with what `read` returns, rather than a
+    /// second, possibly-disagreeing measurement (research §4.2: Writer exposes no paragraph query at
+    /// all).
+    ///
+    /// **`resetSelection` afterward is load-bearing, not tidiness.** `doc_paste` REPLACES the current
+    /// selection (`desktop/source/lib/init.cxx`'s `doc_paste`, whose `.uno:Paste` is an ordinary
+    /// paste-over-selection), and this function leaves the WHOLE DOCUMENT selected on the agent view.
+    /// A `read` followed by an `insert` on the same open document — which is exactly the sequence
+    /// every write verb below performs internally — would otherwise paste over the entire document
+    /// body. That failure would also PASS a naive `hasPrefix`/`hasSuffix` placement check, because
+    /// the document afterwards *is* the inserted text; it is caught here, at the source, and again by
+    /// the full expected-text equality every write verb asserts.
+    ///
+    /// A `nil` from `getTextSelection` is NOT an error — `SwXTextDocument::getSelection()` always
+    /// constructs a `SwTransferable` for a live `SwWrtShell`, so "nothing selected" surfaces as `""`
+    /// (research §3.1). An empty document legitimately reads `""`.
+    private func docsReadTextOnDedicatedThread(_ doc: OpenDocument, docId: String) throws -> String {
+        let agentViewId = try ensureAgentViewOnDedicatedThread(docId: docId)
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
+        // NO setPart — see this section's own header, fact 1.
+        postUnoCommandOnDedicatedThread(doc, ".uno:SelectAll", [:], notifyWhenFinished: true)
+        pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: 0)
+        let text = readSelectionTextOnDedicatedThread(doc)
+        doc.handle.pointee.pClass.pointee.resetSelection?(doc.handle)
+        return text
+    }
+
+    /// Shared entry guard for every `docs` verb: the document must be open AND must be a Writer text
+    /// document. `.notTextDocument` mirrors `.notSpreadsheet`/`.notPresentation` — composed from this
+    /// bridge's own words, never LOK-thrown text.
+    private func requireTextDocumentOnDedicatedThread(_ docId: String) throws -> OpenDocument {
+        guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        guard doc.kind == .text else { throw SaveError.notTextDocument(docId: docId, kind: doc.kind) }
+        return doc
+    }
+
+    private func docsReadOnDedicatedThread(docId: String) throws -> String {
+        let doc = try requireTextDocumentOnDedicatedThread(docId)
+        return try docsReadTextOnDedicatedThread(doc, docId: docId)
+    }
+
+    /// `pages` is `getParts()` — for Writer that IS the page count
+    /// (`SwXTextDocument::getParts` is `pWrtShell->GetPageCnt()`, `unotxdoc.cxx:3421-3430`), O(1) and
+    /// free (`SwRootFrame::GetPageNum()` returns the cached `mnPhyPageNums` counter; no `CalcLayout`).
+    /// **Disclosed honestly rather than presented as exact**: that counter counts the page frames
+    /// CURRENTLY CONSTRUCTED, and Writer paginates lazily, so a session that has painted no tiles can
+    /// under-report (research §4.1, LT-7). `docsReadTextOnDedicatedThread` runs FIRST here and its
+    /// pump performs a real `paintPartTile`, which is the closest thing to a layout nudge this bridge
+    /// has; the `docs.ts` description still says the count can lag on a document nothing has rendered.
+    ///
+    /// `paragraphs`/`characters` are derived from the SAME text `read` returns — so `info` is NOT
+    /// cheaper than `read` for Writer (unlike `sheets info`, which has `getDataArea`). That cost is
+    /// accepted deliberately: a `docs info` reporting only a page count tells a model almost nothing,
+    /// and the read is the cost the very next call was going to pay anyway.
+    private func docsInfoOnDedicatedThread(docId: String) throws -> (pages: Int, paragraphs: Int, characters: Int) {
+        let doc = try requireTextDocumentOnDedicatedThread(docId)
+        let text = try docsReadTextOnDedicatedThread(doc, docId: docId)
+        let pages = Int(doc.handle.pointee.pClass.pointee.getParts?(doc.handle) ?? 0)
+        return (pages: pages, paragraphs: Self.docsParagraphCount(text), characters: text.count)
+    }
+
+    /// Paragraph count == `\n`-separated line count, never a count that drops empty lines: an empty
+    /// paragraph in the middle of a document is a real paragraph, and `read`'s own text shows it as
+    /// an empty line. `""` (a genuinely empty document) is ONE paragraph, matching what Writer shows.
+    /// **Residual, disclosed not closed** (research §3.4, LT-5): whether a TABLE or a text frame in
+    /// the body contributes extra `\n`s through the ASCII writer was not traced at the pin, so on a
+    /// table-bearing document this count is "the paragraph count of the text `read` returns," which
+    /// is the property that actually matters (one document, not two disagreeing measurements) — it is
+    /// not independently claimed to equal Writer's own internal node count.
+    static func docsParagraphCount(_ text: String) -> Int {
+        text.split(separator: "\n", omittingEmptySubsequences: false).count
+    }
+
+    /// Non-overlapping, left-to-right, literal, case-SENSITIVE occurrence count — the count the
+    /// engine's `REPLACE_ALL` will actually make, by construction of the payload
+    /// `docsReplaceOnDedicatedThread` sends (`AlgorithmType2: ABSOLUTE`, `TransliterateFlags: 0`,
+    /// `SearchFlags: 0`, `Pattern/Content/AsianOptions/Backward: false`). Left-to-right and
+    /// non-overlapping matter: `find:"aa"` in `"aaaa"` is TWO replacements, not three, and a naive
+    /// overlapping count would disagree with the engine and trip ruling 1's own tripwire on a correct
+    /// replacement.
+    ///
+    /// `.literal` is Foundation's exact code-unit compare — no case folding, no canonical
+    /// equivalence, no diacritic insensitivity — which is the closest available match to the engine's
+    /// `SearchAlgorithms2::ABSOLUTE` with `TransliterationFlags::NONE`.
+    static func docsCountOccurrences(of find: String, in text: String) -> Int {
+        guard !find.isEmpty else { return 0 }
+        var count = 0
+        var searchStart = text.startIndex
+        while searchStart < text.endIndex,
+              let found = text.range(of: find, options: [.literal], range: searchStart..<text.endIndex) {
+            count += 1
+            searchStart = found.upperBound
+        }
+        return count
+    }
+
+    /// The `SearchItem` payload, built TOTALLY — never partially, never relying on a default.
+    ///
+    /// **This is the L1/L2 landmine, and the reason every member below is present:** a missing or
+    /// unconvertible `SearchItem` reaches `SvxSearchCmd eCommand = s_pSrchItem->GetCommand();`
+    /// (`sw/source/uibase/uiview/viewsrch.cxx:266`) guarded only by an `OSL_ENSURE` that compiles out
+    /// — a RELEASE-BUILD null dereference on a cold helper. Worse, `SwView::s_pSrchItem`
+    /// (`sw/inc/view.hxx:167`) is a PROCESS-GLOBAL static shared by every Writer view and every
+    /// Writer document in this helper, so on a WARM helper the same bug silently replaces using the
+    /// PREVIOUS search's strings — possibly another document's. And the degradation is total, not
+    /// per-member: if any single member's `PutValue` returns false the WHOLE `SvxSearchItem` is
+    /// dropped from the item set (`sfx2/source/appl/appuno.cxx:360-365`), and an unrecognised JSON
+    /// `"type"` tag appends a VOID Any rather than being skipped
+    /// (`comphelper/source/misc/sequenceashashmap.cxx:385-387`), which then fails `PutValue`. One
+    /// mistyped tag here IS the null deref.
+    ///
+    /// **Two members the research's own §2.7 recommended shape OMITS, added after reading the
+    /// constructor:** `SvxSearchItem::SvxSearchItem` (`svl/source/items/srchitem.cxx:93-107`)
+    /// defaults `m_aSearchOpt` to **`TransliterationFlags::IGNORE_CASE`** and then lets
+    /// `SvtSearchOptions` override the algorithm (wildcard/regex/similarity) from user config. Left
+    /// unset, the engine would match case-INSENSITIVELY (and possibly as a REGEX) while this
+    /// bridge's own count is literal and case-sensitive — the two would disagree on a perfectly
+    /// ordinary `find`, and ruling 1's tripwire would fire AFTER the document was already mutated.
+    ///
+    /// Types are transcribed from the members' own `PutValue` arms, not guessed:
+    /// `AlgorithmType2` is `return (rVal >>= m_aSearchOpt.AlgorithmType2)` on a `sal_Int16`
+    /// (`srchitem.cxx:605-606`) so its tag MUST be `"short"` (`"long"` yields `sal_Int32` and the
+    /// strict extraction fails); `SearchFlags` is a strict `>>=` on `sal_Int32` so `"long"`;
+    /// `Command` and `TransliterateFlags` go through `ExtractNumericAny` so `"long"` is accepted.
+    /// `SearchAlgorithms2::ABSOLUTE == 1` — read from
+    /// `offapi/com/sun/star/util/SearchAlgorithms2.idl:20` at the pinned SHA.
+    ///
+    /// `Locale` is deliberately NOT sent: `FUNC_Search` overwrites it unconditionally
+    /// (`viewsrch.cxx:861`). `SearchItem.Selection` is not a settable member at all (research §2.6),
+    /// which is one reason v1 offers no scoped replace.
+    private static func docsSearchArguments(find: String, replaceWith: String) -> [String: Any] {
+        [
+            "SearchItem.SearchString": ["type": "string", "value": find],
+            "SearchItem.ReplaceString": ["type": "string", "value": replaceWith],
+            // SvxSearchCmd: FIND = 0, FIND_ALL = 1, REPLACE = 2, REPLACE_ALL = 3
+            // (`include/svl/srchitem.hxx:36-42`). v1 only ever sends REPLACE_ALL — see
+            // `docsReplaceOnDedicatedThread`'s own header for why REPLACE (2) is NOT "replace the
+            // first occurrence".
+            "SearchItem.Command": ["type": "long", "value": 3],
+            "SearchItem.Backward": ["type": "boolean", "value": false],
+            "SearchItem.Pattern": ["type": "boolean", "value": false],
+            "SearchItem.Content": ["type": "boolean", "value": false],
+            "SearchItem.AsianOptions": ["type": "boolean", "value": false],
+            "SearchItem.SearchFlags": ["type": "long", "value": 0],
+            "SearchItem.TransliterateFlags": ["type": "long", "value": 0],
+            "SearchItem.AlgorithmType2": ["type": "short", "value": 1],
+            "Quiet": ["type": "boolean", "value": true],
+        ]
+    }
+
+    /// `.uno:ExecuteSearch` with a fully-specified `REPLACE_ALL` `SearchItem`, then THREE independent
+    /// checks, because no single one of them is sufficient:
+    ///
+    ///  1. **Our own count** (`docsCountOccurrences`) over the text read immediately before — the
+    ///     ONLY count that exists, since the engine's `nFound` is collapsed to a bool at
+    ///     `viewsrch.cxx:395` and `unoAnyToJson` cannot serialize even that bool's value (research L3).
+    ///  2. **The engine's boolean**, from `LOK_CALLBACK_UNO_COMMAND_RESULT`. `success: true` ⟺ at
+    ///     least one replacement. A disagreement with (1) means the two matchers disagree about what
+    ///     `find` means, and is thrown as `.replaceCountDisagreement` — ruling 1's own instruction,
+    ///     and a discriminating tripwire rather than a silent lie. An ABSENT `success` (the engine's
+    ///     `DONTKNOW` state) is not a disagreement and is not manufactured into one.
+    ///  3. **Full expected-text equality on re-read.** This is the placement assertion: it proves the
+    ///     replacements landed WHERE they were, in order, with nothing else disturbed. It also covers
+    ///     the case a residual-occurrence check would get wrong — `replaceWith` CONTAINING `find`
+    ///     (replacing "a" with "aa" leaves plenty of "a"s behind and is still correct).
+    ///
+    /// **REPLACE_ALL, always — `all: false` is refused at the daemon, not silently approximated.**
+    /// `SvxSearchCmd::REPLACE` (2) is not "replace the first occurrence": it is the UI Replace
+    /// button — replace the CURRENT SELECTION if it matches, then find the next
+    /// (`viewsrch.cxx:321-358`, and with no selection it replaces AT THE CURSOR) — stateful and
+    /// order-dependent. Approximating "first only" with it would put a wrong edit in the user's file.
+    ///
+    /// **Disclosed residual (research L2), cosmetic:** a `docs replace` writes the process-global
+    /// `s_pSrchItem`, so this helper's Find & Replace state for every Writer document afterwards
+    /// carries these strings. Nothing reads them back, and a fully-specified payload means no later
+    /// dispatch of ours ever depends on them.
+    private func docsReplaceOnDedicatedThread(docId: String, find: String, replaceWith: String) throws -> Int {
+        let doc = try requireTextDocumentOnDedicatedThread(docId)
+        let before = try docsReadTextOnDedicatedThread(doc, docId: docId)
+        let counted = Self.docsCountOccurrences(of: find, in: before)
+        let agentViewId = try ensureAgentViewOnDedicatedThread(docId: docId)
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
+
+        if var cleared = documents[docId] {
+            cleared.lastUnoCommandResult = nil
+            documents[docId] = cleared
+        }
+        postUnoCommandOnDedicatedThread(doc, ".uno:ExecuteSearch",
+                                        Self.docsSearchArguments(find: find, replaceWith: replaceWith),
+                                        notifyWhenFinished: true)
+
+        // The result is QUEUED, not delivered inline — `DispatchResultListener::dispatchFinished`
+        // calls `mpCallbackFlushHandlers[nView]->queue(...)` (`init.cxx:5106`), so "the dispatch was
+        // synchronous" does not mean "the callback already fired." Same pump-and-poll shape
+        // `selectSlidePlaceholderOnDedicatedThread` uses for its own push-only signal, and the same
+        // permanent evidence line, so the budget stays MEASURED rather than guessed.
+        var engineResult = Self.matchingSearchResult(documents[docId]?.lastUnoCommandResult)
+        var attempts = 1
+        while engineResult == nil, attempts < Self.docsUnoResultAttempts {
+            pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: 0)
+            engineResult = Self.matchingSearchResult(documents[docId]?.lastUnoCommandResult)
+            attempts += 1
+        }
+        FileHandle.standardError.write(Data(
+            "[LOKBridge docs] ExecuteSearch result needed \(attempts) attempt(s), observed=\(engineResult == nil ? "none" : String(describing: engineResult!))\n".utf8))
+
+        // An ABSENT `success` key (DispatchResultState::DONTKNOW) is "no cross-check available", not
+        // a disagreement — never manufactured into one. A result that never arrived at all is the
+        // same: the re-read below is the check that always runs.
+        if let engineSucceeded = engineResult ?? nil, engineSucceeded != (counted > 0) {
+            throw SaveError.replaceCountDisagreement(docId: docId, counted: counted,
+                                                     engineSucceeded: engineSucceeded)
+        }
+
+        let expected = before.replacingOccurrences(of: find, with: replaceWith, options: [.literal])
+        let after = try docsReadTextOnDedicatedThread(doc, docId: docId)
+        guard after == expected else {
+            throw SaveError.docsVerificationFailed(docId: docId, what: "replacing \"\(Self.docsBrief(find))\"",
+                                                   expectedLength: expected.count, actualLength: after.count)
+        }
+        return counted
+    }
+
+    /// `nil` when no result has been observed, or when the observed one belongs to some OTHER command
+    /// — every `notifyWhenFinished: true` dispatch in this file produces one of these, so "a result
+    /// arrived" is not "MY result arrived". `.some(nil)` means the search's own result arrived but
+    /// carried no `success` key.
+    private static func matchingSearchResult(_ observed: (commandName: String, success: Bool?)?) -> Bool?? {
+        guard let observed, observed.commandName == ".uno:ExecuteSearch" else { return nil }
+        return .some(observed.success)
+    }
+    /// Poll budget for the queued `UNO_COMMAND_RESULT`. Sized to `slidePlaceholderPositionAttempts`
+    /// deliberately — the same push-only-signal shape, and this mechanism has not earned an
+    /// independently-derived budget of its own; the stderr line above is what will show the next
+    /// reader whether it is still adequate. Running OUT of budget is not a failure: the cross-check
+    /// is simply unavailable for that call and the re-read verification still runs.
+    private static let docsUnoResultAttempts = 6
+
+    /// How much of a caller-supplied string an error may quote — mirrors
+    /// `OfficeCommandConsumer.brief`'s own purpose on the other side of the wire. A document's own
+    /// body has no business in an error string.
+    private static func docsBrief(_ value: String, max limit: Int = 60) -> String {
+        guard value.count > limit else { return value }
+        return String(value.prefix(limit)) + "…"
+    }
+
+    /// `insert`/`append` — `paste`, NOT `.uno:InsertText` (ruling 2, research §6.3/§9.3). Three
+    /// reasons, all confirmed at the pin: `paste` is ONE undo step (`SwTrnsfrActionAndUndo` brackets
+    /// it with `StartUndo(SwUndoId::PASTE_CLIPBOARD)`/`EndUndo`, `swdtflvr.cxx:230-252`) where
+    /// `.uno:InsertText` costs roughly one per word (`SwWrtShell::InsertByWord` calls `Insert()` per
+    /// letter-numeric run and `SwUndoInsert::CanGrouping` refuses to merge across that boundary —
+    /// so a user's single ⌘Z after an agent `insert` would get back the last WORD); `paste` returns a
+    /// real boolean where `.uno:InsertText` is a SILENT no-op on a missing or mistyped argument
+    /// (`if (pItem)`, `sw/source/uibase/shells/textsh.cxx:153-156`, research L7); and `paste` is
+    /// synchronous by construction (no `SynchronMode` property is added on its internal path).
+    ///
+    /// Positioning is `.uno:GoToStartOfDoc`/`.uno:GoToEndOfDoc` — neither declares `Asynchron;` in
+    /// its slot and neither takes any argument at all (research §6.4), so the malformed-argument
+    /// failure class does not apply to them. `resetSelection` runs FIRST regardless: `doc_paste`
+    /// REPLACES the current selection, and this bridge's own read path leaves the whole document
+    /// selected.
+    ///
+    /// `asNewParagraph` prepends a real `\n` to the pasted bytes rather than dispatching
+    /// `.uno:InsertPara` — that command was located but its Execute handler was NOT vetted in the
+    /// research's own dialog-hazard sweep (research §8, §11), and this file does not dispatch
+    /// unvetted command names. Plain-text paste turns `\n` into a paragraph break, which is the same
+    /// mechanism `read` inverts when it reports paragraphs.
+    ///
+    /// Returns the paragraph count AFTER the insert, read back from the same verification read.
+    private func docsInsertOnDedicatedThread(docId: String, text: String, atStart: Bool,
+                                             asNewParagraph: Bool) throws -> Int {
+        let doc = try requireTextDocumentOnDedicatedThread(docId)
+        let before = try docsReadTextOnDedicatedThread(doc, docId: docId)
+        let agentViewId = try ensureAgentViewOnDedicatedThread(docId: docId)
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
+        doc.handle.pointee.pClass.pointee.resetSelection?(doc.handle)
+        postUnoCommandOnDedicatedThread(doc, atStart ? ".uno:GoToStartOfDoc" : ".uno:GoToEndOfDoc",
+                                        [:], notifyWhenFinished: true)
+        pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: 0)
+
+        // A brand-new empty document has one empty paragraph; prepending a break there would leave a
+        // stray blank first paragraph, so the break is only added when there is real text to append
+        // after. Computed from `before`, which is the same text the expectation below is built from.
+        let separator = (asNewParagraph && !before.isEmpty) ? "\n" : ""
+        let payload = atStart ? text + separator : separator + text
+        let byteCount = payload.utf8.count
+        let pasted = "text/plain;charset=utf-8".withCString { mimePtr in
+            payload.withCString { textPtr in
+                doc.handle.pointee.pClass.pointee.paste?(doc.handle, mimePtr, textPtr, byteCount) ?? false
+            }
+        }
+        guard pasted else { throw SaveError.pasteFailed(docId) }
+
+        let expected = atStart ? payload + before : before + payload
+        let after = try docsReadTextOnDedicatedThread(doc, docId: docId)
+        guard after == expected else {
+            throw SaveError.docsVerificationFailed(
+                docId: docId, what: atStart ? "inserting at the start" : "appending at the end",
+                expectedLength: expected.count, actualLength: after.count)
+        }
+        return Self.docsParagraphCount(after)
+    }
+
     /// office-agent-tools T4 — the shared JSON-args UNO dispatch this task's own three new sheet-
     /// management commands use. NOT applied retroactively to `.uno:GoToCell`'s own existing inline
     /// dispatch (`selectionTextOnDedicatedThread`) — that call is already proven and unrelated to
@@ -4491,6 +4904,29 @@ final class LOKBridge: OfficeDocumentBridge {
                 documents[docId] = doc
             }
             event = nil
+        case LOKCallbackType.unoCommandResult:
+            // office-agent-tools T7 — internal state only, never an `OfficeDocumentEvent` (same
+            // reasoning `.graphicSelection` above gives: nothing outside this bridge needs it, and
+            // Stage A's wire vocabulary is not the place to grow a case for a signal that never
+            // crosses the app<->helper wire).
+            //
+            // **Why this arrives at all, given the agent view has no `registerCallback` of its own**
+            // — read at the pin rather than assumed: `doc_postUnoCommand` constructs its
+            // `DispatchResultListener` against `pDocument->mpCallbackFlushHandlers[nView]` where
+            // `nView = SfxLokHelper::getViewId(pDocument->mnDocumentId)`
+            // (`desktop/source/lib/init.cxx:5312, 5502-5507`), and that helper
+            // (`sfx2/source/view/lokhelper.cxx:291-308`) is **not** "the current view" — it is a
+            // scan from `SfxViewShell::GetFirst()` returning the FIRST view shell whose DocId
+            // matches. For every document this bridge opens that is the PRIMARY view, which
+            // `openOnDedicatedThread` registers this very callback on. So the result lands here even
+            // while the AGENT view is current, which is exactly the arrangement `docs`' verbs run in.
+            // (The same DocId-filtered-scan fact is already relied on by `OpenDocument.viewId`'s own
+            // header for a different reason.)
+            if var doc = documents[docId], let parsed = Self.parseUnoCommandResult(payload) {
+                doc.lastUnoCommandResult = parsed
+                documents[docId] = doc
+            }
+            event = nil
         case LOKCallbackType.graphicViewSelection:
             // office-agent-tools T6 — the ONE actually observed live (`.graphicSelection`'s own
             // header has the full account). `viewId` is checked against THIS docId's own agent view
@@ -4535,6 +4971,24 @@ final class LOKBridge: OfficeDocumentBridge {
             return nil
         }
         return OfficeTwipsRect(x: x, y: y, width: width, height: height)
+    }
+
+    /// Parses `LOK_CALLBACK_UNO_COMMAND_RESULT`'s JSON payload — shape confirmed by reading
+    /// `DispatchResultListener::dispatchFinished` at the pin (`desktop/source/lib/init.cxx:5086-5107`),
+    /// not inferred from a sample. `success` is deliberately OPTIONAL, not defaulted: that writer
+    /// emits the key only when the dispatch result state is not `DONTKNOW` (`:5091-5095`), and a
+    /// missing key means "the engine declined to say," which is a different fact from `false` and
+    /// must not be silently collapsed into it — `docsReplaceOnDedicatedThread` treats an absent
+    /// `success` as "no cross-check available" and says so, rather than manufacturing a disagreement
+    /// or a false agreement. Returns `nil` only when the payload is not an object with a
+    /// `commandName` — i.e. not a result frame at all.
+    private static func parseUnoCommandResult(_ payload: String) -> (commandName: String, success: Bool?)? {
+        guard let data = payload.data(using: .utf8),
+              let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let commandName = object["commandName"] as? String else {
+            return nil
+        }
+        return (commandName, object["success"] as? Bool)
     }
 
     /// Parses `LOK_CALLBACK_GRAPHIC_VIEW_SELECTION`'s own JSON envelope — confirmed live to be

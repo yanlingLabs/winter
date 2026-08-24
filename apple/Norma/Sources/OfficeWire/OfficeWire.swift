@@ -385,6 +385,34 @@ public enum OfficeWireFrame: Equatable, Sendable {
     case slidesManagePage(seq: UInt64, docId: String, op: OfficeSlidesManagePageOp, slide: Int?,
                           at: Int?, to: Int?, layout: OfficeSlidesLayoutPreset?)
 
+    // MARK: office-agent-tools T7 — docs
+
+    /// Asks for `docId`'s page count and, derived from its own text, paragraph and character counts.
+    /// Read-only. **The page count is `getParts()`** — for Writer, LOK's parts ARE pages
+    /// (`SwXTextDocument::getParts` is `pWrtShell->GetPageCnt()`); there is no paragraph query in LOK
+    /// at all, so `paragraphs` is derived from the SAME text `docsRead` returns rather than measured
+    /// independently (`LOKBridge.docsParagraphCount`'s own header). That makes `docs info` cost a
+    /// whole-document read, unlike `sheetsInfo` — see that function for why the cost is accepted.
+    case docsInfo(seq: UInt64, docId: String)
+    /// Asks for `docId`'s whole body text — UTF-8, paragraphs separated by `\n`. **No range**: LOK
+    /// exposes no character- or paragraph-indexed addressing for Writer at all (research §3.5), so
+    /// the daemon's own `fromParagraph`/`toParagraph` operands are a slice the APP takes over this
+    /// text, never a range this frame could ask the engine for. Read-only.
+    case docsRead(seq: UInt64, docId: String)
+    /// Replaces EVERY literal, case-sensitive occurrence of `find` with `replaceWith`. `find` is
+    /// guaranteed non-empty and free of `\n`/`\r` by the time this frame is built (the daemon's own
+    /// job — see `docs.ts`; the same "a business rule the daemon already enforced" precedent
+    /// `slidesSetText`'s own header names). There is no `all` field: v1 is REPLACE_ALL only, because
+    /// `SvxSearchCmd::REPLACE` is not "replace the first occurrence" — see
+    /// `LOKBridge.docsReplaceOnDedicatedThread`'s own header.
+    case docsReplace(seq: UInt64, docId: String, find: String, replaceWith: String)
+    /// Inserts `text` at the start or the end of the body. `atStart` picks the end;
+    /// `asNewParagraph` prepends a paragraph break (suffixes one, for `atStart`) so that `append`
+    /// starts a real new paragraph while `insert` puts exactly the text at the position and nothing
+    /// else. Both flags are decided by the app from the daemon's `verb`/`at` operands, never guessed
+    /// here.
+    case docsInsert(seq: UInt64, docId: String, text: String, atStart: Bool, asNewParagraph: Bool)
+
     // MARK: Responses (helper -> client)
 
     /// `hello` succeeded: `token` matched. `lokVersion` is now (Task 3) the REAL
@@ -600,6 +628,25 @@ public enum OfficeWireFrame: Equatable, Sendable {
     /// already have for their own structural ops.
     case slidesManagePageOk(seq: UInt64, docId: String, slideCount: Int)
 
+    // MARK: office-agent-tools T7 — docs replies
+
+    /// Answers a successful `docsInfo`. `pages` may UNDER-report on a document nothing has laid out
+    /// yet (`SwRootFrame::GetPageNum()` returns the cached count of page frames currently
+    /// constructed, and Writer paginates lazily) — disclosed in `docs.ts`'s own description rather
+    /// than presented as exact.
+    case docsInfoOk(seq: UInt64, docId: String, pages: Int, paragraphs: Int, characters: Int)
+    /// Answers a successful `docsRead`: the whole body text. `""` is a legitimate answer (an empty
+    /// document), never an error — `SwXTextDocument::getSelection()` always constructs a transferable
+    /// for a live shell, so "nothing selected" surfaces as an empty string.
+    case docsReadOk(seq: UInt64, docId: String, text: String)
+    /// Answers a successful `docsReplace`: how many occurrences were replaced — **counted by us**,
+    /// cross-checked against the engine's own boolean, never reported when the two disagree
+    /// (`LOKBridge.docsReplaceOnDedicatedThread`).
+    case docsReplaceOk(seq: UInt64, docId: String, replaced: Int)
+    /// Answers a successful `docsInsert`: the document's paragraph count AFTER the insert — the same
+    /// "smallest useful truth, not merely ok" posture `slidesManagePageOk` has.
+    case docsInsertOk(seq: UInt64, docId: String, paragraphs: Int)
+
     /// The wire vocabulary, in frame-declaration order. A test walks this list the same way
     /// `EditorBridgeInbound.wireTypes`'s own test does — one fixture per name, decode, assert the
     /// case names itself the same way — so this array and `decode`/`wireType` cannot drift apart
@@ -621,6 +668,8 @@ public enum OfficeWireFrame: Equatable, Sendable {
         "sheetsFormat",
         // office-agent-tools T6 — slides.
         "slidesInfo", "slidesRead", "slidesSetText", "slidesManagePage",
+        // office-agent-tools T7 — docs.
+        "docsInfo", "docsRead", "docsReplace", "docsInsert",
         "helloOk", "refused", "pong", "opened", "openFailed", "closed", "saved", "saveFailed",
         "keyEventOk", "mouseEventOk", "extTextInputEventOk",
         "clipboardCopyOk", "clipboardCutOk", "clipboardPasteOk", "undoOk", "redoOk",
@@ -631,6 +680,7 @@ public enum OfficeWireFrame: Equatable, Sendable {
         "sheetsSetOk", "sheetsResizeOk", "sheetsManageSheetOk",
         "sheetsFormatOk",
         "slidesInfoOk", "slidesReadOk", "slidesSetTextOk", "slidesManagePageOk",
+        "docsInfoOk", "docsReadOk", "docsReplaceOk", "docsInsertOk",
     ]
 
     public var wireType: String {
@@ -663,6 +713,10 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .slidesRead: return "slidesRead"
         case .slidesSetText: return "slidesSetText"
         case .slidesManagePage: return "slidesManagePage"
+        case .docsInfo: return "docsInfo"
+        case .docsRead: return "docsRead"
+        case .docsReplace: return "docsReplace"
+        case .docsInsert: return "docsInsert"
         case .helloOk: return "helloOk"
         case .refused: return "refused"
         case .pong: return "pong"
@@ -699,6 +753,10 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .slidesReadOk: return "slidesReadOk"
         case .slidesSetTextOk: return "slidesSetTextOk"
         case .slidesManagePageOk: return "slidesManagePageOk"
+        case .docsInfoOk: return "docsInfoOk"
+        case .docsReadOk: return "docsReadOk"
+        case .docsReplaceOk: return "docsReplaceOk"
+        case .docsInsertOk: return "docsInsertOk"
         }
     }
 
@@ -732,6 +790,10 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .slidesRead(let seq, _, _): return seq
         case .slidesSetText(let seq, _, _, _, _): return seq
         case .slidesManagePage(let seq, _, _, _, _, _, _): return seq
+        case .docsInfo(let seq, _): return seq
+        case .docsRead(let seq, _): return seq
+        case .docsReplace(let seq, _, _, _): return seq
+        case .docsInsert(let seq, _, _, _, _): return seq
         case .helloOk(let seq, _): return seq
         case .refused(let seq, _): return seq
         case .pong(let seq): return seq
@@ -768,6 +830,10 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .slidesReadOk(let seq, _, _, _): return seq
         case .slidesSetTextOk(let seq, _, _): return seq
         case .slidesManagePageOk(let seq, _, _): return seq
+        case .docsInfoOk(let seq, _, _, _, _): return seq
+        case .docsReadOk(let seq, _, _): return seq
+        case .docsReplaceOk(let seq, _, _): return seq
+        case .docsInsertOk(let seq, _, _): return seq
         }
     }
 
@@ -953,6 +1019,31 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .slidesManagePageOk(_, let docId, let slideCount):
             payload["docId"] = docId
             payload["slideCount"] = slideCount
+        case .docsInfo(_, let docId), .docsRead(_, let docId):
+            payload["docId"] = docId
+        case .docsReplace(_, let docId, let find, let replaceWith):
+            payload["docId"] = docId
+            payload["find"] = find
+            payload["replaceWith"] = replaceWith
+        case .docsInsert(_, let docId, let text, let atStart, let asNewParagraph):
+            payload["docId"] = docId
+            payload["text"] = text
+            payload["atStart"] = atStart
+            payload["asNewParagraph"] = asNewParagraph
+        case .docsInfoOk(_, let docId, let pages, let paragraphs, let characters):
+            payload["docId"] = docId
+            payload["pages"] = pages
+            payload["paragraphs"] = paragraphs
+            payload["characters"] = characters
+        case .docsReadOk(_, let docId, let text):
+            payload["docId"] = docId
+            payload["text"] = text
+        case .docsReplaceOk(_, let docId, let replaced):
+            payload["docId"] = docId
+            payload["replaced"] = replaced
+        case .docsInsertOk(_, let docId, let paragraphs):
+            payload["docId"] = docId
+            payload["paragraphs"] = paragraphs
         case .subscribed(_, let docId, let keys), .invalidated(_, let docId, let keys):
             payload["docId"] = docId
             payload["keys"] = keys.map { $0.jsonObject() }
@@ -2423,6 +2514,60 @@ public enum OfficeWireCodec {
                 return .rejected(seq: seq, reason: "malformed")
             }
             return .frame(.slidesManagePageOk(seq: seq, docId: docId, slideCount: slideCount))
+        case "docsInfo":
+            guard let docId = object["docId"] as? String else { return .rejected(seq: seq, reason: "malformed") }
+            return .frame(.docsInfo(seq: seq, docId: docId))
+        case "docsRead":
+            guard let docId = object["docId"] as? String else { return .rejected(seq: seq, reason: "malformed") }
+            return .frame(.docsRead(seq: seq, docId: docId))
+        case "docsReplace":
+            // `find` non-empty and newline-free is re-checked HERE, not merely trusted from the
+            // daemon: an empty `find` would make our own occurrence count 0 while the engine's
+            // behaviour on an empty search string is unspecified from source, and a `find` spanning a
+            // paragraph break can never match (the engine's matcher does not cross a paragraph node)
+            // while OUR literal count over `\n`-joined text happily would — a guaranteed
+            // count/engine divergence, i.e. a guaranteed trip of the ruling-1 tripwire, on input a
+            // model can produce by accident. Refused at the wire rather than discovered mid-verb.
+            guard let docId = object["docId"] as? String,
+                  let find = object["find"] as? String, !find.isEmpty,
+                  !find.contains("\n"), !find.contains("\r"),
+                  let replaceWith = object["replaceWith"] as? String,
+                  !replaceWith.contains("\n"), !replaceWith.contains("\r") else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.docsReplace(seq: seq, docId: docId, find: find, replaceWith: replaceWith))
+        case "docsInsert":
+            guard let docId = object["docId"] as? String,
+                  let text = object["text"] as? String, !text.isEmpty,
+                  let atStart = object["atStart"] as? Bool,
+                  let asNewParagraph = object["asNewParagraph"] as? Bool else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.docsInsert(seq: seq, docId: docId, text: text, atStart: atStart,
+                                      asNewParagraph: asNewParagraph))
+        case "docsInfoOk":
+            guard let docId = object["docId"] as? String, let pages = intValue(object["pages"]),
+                  let paragraphs = intValue(object["paragraphs"]),
+                  let characters = intValue(object["characters"]) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.docsInfoOk(seq: seq, docId: docId, pages: pages, paragraphs: paragraphs,
+                                      characters: characters))
+        case "docsReadOk":
+            guard let docId = object["docId"] as? String, let text = object["text"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.docsReadOk(seq: seq, docId: docId, text: text))
+        case "docsReplaceOk":
+            guard let docId = object["docId"] as? String, let replaced = intValue(object["replaced"]) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.docsReplaceOk(seq: seq, docId: docId, replaced: replaced))
+        case "docsInsertOk":
+            guard let docId = object["docId"] as? String, let paragraphs = intValue(object["paragraphs"]) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.docsInsertOk(seq: seq, docId: docId, paragraphs: paragraphs))
         default:
             // The type itself is unrecognized — the brief's exact case: error{seq,reason:"unknown"}.
             return .rejected(seq: seq, reason: "unknown")

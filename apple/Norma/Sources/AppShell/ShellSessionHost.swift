@@ -1196,6 +1196,39 @@ final class ShellSessionHost: ObservableObject {
                                                               to: to, layout: layout)
                 }
             },
+            docsInfo: { [weak supervisor] docId in
+                try await queue.run {
+                    guard let client = supervisor?.client else {
+                        throw OfficeHelperClientError.serverError(reason: "helper not connected")
+                    }
+                    return try await client.docsInfo(docId: docId)
+                }
+            },
+            docsRead: { [weak supervisor] docId in
+                try await queue.run {
+                    guard let client = supervisor?.client else {
+                        throw OfficeHelperClientError.serverError(reason: "helper not connected")
+                    }
+                    return try await client.docsRead(docId: docId)
+                }
+            },
+            docsReplace: { [weak supervisor] docId, find, replaceWith in
+                try await queue.run {
+                    guard let client = supervisor?.client else {
+                        throw OfficeHelperClientError.serverError(reason: "helper not connected")
+                    }
+                    return try await client.docsReplace(docId: docId, find: find, replaceWith: replaceWith)
+                }
+            },
+            docsInsert: { [weak supervisor] docId, text, atStart, asNewParagraph in
+                try await queue.run {
+                    guard let client = supervisor?.client else {
+                        throw OfficeHelperClientError.serverError(reason: "helper not connected")
+                    }
+                    return try await client.docsInsert(docId: docId, text: text, atStart: atStart,
+                                                        asNewParagraph: asNewParagraph)
+                }
+            },
             // Office Stage B Task 2b — the LIVE supervisor's own configured directory, never
             // `OfficeHelperSupervisor.Configuration.defaultStateDirectory()` read fresh: every live
             // test overrides `socketDirectory` with a scratch dir precisely so its own helper's

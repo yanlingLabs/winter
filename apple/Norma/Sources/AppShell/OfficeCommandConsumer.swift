@@ -8,10 +8,11 @@ import NormaProtocol
 /// implemented yet" refusal; T3 gave `sheets`' two READ verbs (`info`/`read`) real behaviour — the
 /// FIRST verbs this file ever actually performed. T4/T5 gave `sheets`' whole write half (`set`,
 /// resize, manage-sheet, `format`) the same; T6 gives every `slides` verb (`info`/`read`/`set_text`/
-/// `add_slide`/`delete_slide`/`reorder`) the same. `docs` is the ONLY kind still on T1's own
-/// synchronous refusal shell — still routed to `Self.refusal(for:)`, still answered on this file's
-/// own single `sendResult` call — see that function's own doc, below, for why nothing about its shape
-/// needed to change for every other verb to stop using it.
+/// `add_slide`/`delete_slide`/`reorder`) the same; T7 closes the set with every `docs` verb
+/// (`info`/`read`/`replace`/`insert`/`append`). **No office verb is on T1's refusal shell any more** —
+/// `Self.refusal(for:)` now answers only an `office.`-prefixed action this file's switch does not
+/// recognize at all, which the wire cannot produce today and which is answered rather than dropped
+/// purely because this file never crashes on a wire value.
 ///
 /// ## Why T1's "no `Call` latch" reasoning still holds for two ASYNCHRONOUS verbs
 ///
@@ -127,6 +128,14 @@ struct OfficeCommandConsumer {
             Task { await handleSlidesSetText(command) }
         case "office.slides.add_slide", "office.slides.delete_slide", "office.slides.reorder":
             Task { await handleSlidesManagePage(command) }
+        case "office.docs.info":
+            Task { await handleDocsInfo(command) }
+        case "office.docs.read":
+            Task { await handleDocsRead(command) }
+        case "office.docs.replace":
+            Task { await handleDocsReplace(command) }
+        case "office.docs.insert", "office.docs.append":
+            Task { await handleDocsInsert(command) }
         default:
             sendResult(command.sessionId, command.commandId, false,
                        Self.refusal(for: command.action), nil)
@@ -811,6 +820,333 @@ struct OfficeCommandConsumer {
         }
     }
 
+    // MARK: - office-agent-tools T7: docs
+
+    /// `office.docs.info` — page, paragraph and character counts.
+    ///
+    /// **`info` is ALSO the drivability probe** (spec §1/§3) — same split `handleSheetsInfo`'s own
+    /// header establishes: the "app not running" half lives on the daemon side (`docs.ts`'s own reach
+    /// check), so this only ever runs once the app IS known reachable.
+    private func handleDocsInfo(_ command: SessionEvent.PanelCommand) async {
+        guard let path = Self.requiredPath(command.args) else {
+            return sendResult(command.sessionId, command.commandId, false, Self.requiredPathRefusal, nil)
+        }
+        guard let broker = officeAgentBroker(command.sessionId) else {
+            return sendResult(command.sessionId, command.commandId, false, Self.hostGoneRefusal, nil)
+        }
+        do {
+            let resultText = try await broker.perform(
+                sessionId: command.sessionId, path: path, access: .read, requestId: command.commandId
+            ) { runtime, docId, adopted in
+                let info = try await runtime.docsInfo(docId: docId)
+                return Self.formatDocsInfo(path: path, pages: info.pages, paragraphs: info.paragraphs,
+                                           characters: info.characters)
+            }
+            let (ok, text) = Self.capped(resultText)
+            sendResult(command.sessionId, command.commandId, ok, text, nil)
+        } catch {
+            sendResult(command.sessionId, command.commandId, false, Self.message(for: error), nil)
+        }
+    }
+
+    /// `office.docs.read` — the whole body text, or a 1-based paragraph slice of it.
+    ///
+    /// **The slice is taken HERE, over the text the helper returned — it is not a range the engine
+    /// was asked for, and the description says so.** LOK exposes no character- or paragraph-indexed
+    /// addressing for Writer at all (`docs-lok-research.md` §3.5: `setTextSelection` takes twips, and
+    /// there is no paragraph-indexed door), so a "paragraph range" can only be an honest slice of the
+    /// SAME `\n`-separated text `read` returns and `info` counts. That self-consistency is the
+    /// property that matters: the model sees one document, not two disagreeing measurements.
+    ///
+    /// `fromParagraph` past the end refuses rather than returning an empty result — an empty answer
+    /// is indistinguishable from an empty document, and a model asking for paragraph 40 of a 3-
+    /// paragraph document has made an error worth naming. `toParagraph` past the end CLAMPS, because
+    /// "give me paragraphs 2 to 100" of a 5-paragraph document is a perfectly ordinary way to say
+    /// "from 2 to the end."
+    private func handleDocsRead(_ command: SessionEvent.PanelCommand) async {
+        guard let path = Self.requiredPath(command.args) else {
+            return sendResult(command.sessionId, command.commandId, false, Self.requiredPathRefusal, nil)
+        }
+        // Present-but-undecodable refuses, on EVERY type arm — the `isPresent` shape T5's round 3
+        // landed. Without it, `fromParagraph: "2"` (a string, or a bool, or an out-of-range number)
+        // would decode to `nil`, be treated as "absent", and silently return the WHOLE document while
+        // reporting success — the model asked for a slice, got everything, and was told it worked.
+        // That is the exact silent-wrong-answer class this arc has now shipped twice.
+        for key in ["fromParagraph", "toParagraph"] where Self.isPresent(command.args, key)
+            && Self.paragraphIndex(command.args, key) == nil {
+            return sendResult(command.sessionId, command.commandId, false, Self.paragraphIndexRefusal(key), nil)
+        }
+        let fromParagraph = Self.paragraphIndex(command.args, "fromParagraph")
+        let toParagraph = Self.paragraphIndex(command.args, "toParagraph")
+        if let fromParagraph, let toParagraph, fromParagraph > toParagraph {
+            return sendResult(command.sessionId, command.commandId, false,
+                               "`fromParagraph` (\(fromParagraph)) is after `toParagraph` (\(toParagraph)) — "
+                                   + "they are 1-based and inclusive, so `from` must be at most `to`.", nil)
+        }
+        guard let broker = officeAgentBroker(command.sessionId) else {
+            return sendResult(command.sessionId, command.commandId, false, Self.hostGoneRefusal, nil)
+        }
+        do {
+            let resultText = try await broker.perform(
+                sessionId: command.sessionId, path: path, access: .read, requestId: command.commandId
+            ) { runtime, docId, adopted in
+                let text = try await runtime.docsRead(docId: docId)
+                let paragraphs = Self.docsParagraphs(text)
+                if let fromParagraph, fromParagraph > paragraphs.count {
+                    throw OfficeAgentBrokerError.writeFailed(
+                        path: path,
+                        reason: "there is no paragraph \(fromParagraph) in this document — it has "
+                            + "\(paragraphs.count) paragraph\(paragraphs.count == 1 ? "" : "s").")
+                }
+                let lower = (fromParagraph ?? 1) - 1
+                let upper = min(toParagraph ?? paragraphs.count, paragraphs.count)
+                let slice = Array(paragraphs[lower..<max(lower, upper)])
+                // **The cap is OURS and it is DISCLOSED in the agent-visible result** (T3's I4
+                // lesson, and `docs-lok-research.md` §3.6: `doc_getTextSelection` applies no length
+                // cap of its own, so we cannot ask LOK for less — the cap can only be applied after
+                // the read). Refused, never truncated: a silently clipped document body is
+                // indistinguishable from a complete one to whatever reads it, and a model that
+                // summarises a clipped document reports a conclusion about text it never saw.
+                // Sits BELOW `capped()`'s own 64 KiB wire belt on purpose, so a `read` that is too
+                // big gets an answer naming the operands that fix it rather than the wire's own
+                // range-flavoured sentence.
+                let sliceLength = slice.reduce(0) { $0 + $1.count + 1 }
+                guard sliceLength <= Self.officeDocsReadMaxCharacters else {
+                    throw OfficeAgentBrokerError.writeFailed(
+                        path: path,
+                        reason: "that would return \(sliceLength) characters, past the "
+                            + "\(Self.officeDocsReadMaxCharacters)-character limit on one `docs read` — "
+                            + "this document has \(paragraphs.count) paragraphs; ask for a range of them "
+                            + "with `fromParagraph`/`toParagraph`.")
+                }
+                return Self.formatDocsRead(path: path, paragraphs: slice, firstParagraph: lower + 1,
+                                           totalParagraphs: paragraphs.count,
+                                           sliced: fromParagraph != nil || toParagraph != nil)
+            }
+            let (ok, text) = Self.capped(resultText)
+            sendResult(command.sessionId, command.commandId, ok, text, nil)
+        } catch {
+            sendResult(command.sessionId, command.commandId, false, Self.message(for: error), nil)
+        }
+    }
+
+    /// `office.docs.replace` — every literal, case-sensitive occurrence of `find`.
+    ///
+    /// **`all` is decoded and REFUSED when false, never silently ignored.** `panel_command.args` is
+    /// `z.record(z.string(), z.unknown())` with only a byte cap, so an `all` this file did not look
+    /// at would simply be dropped and the model would get a replace-everything it did not ask for,
+    /// reported as success. The engine reason is real and not ours to paper over:
+    /// `SvxSearchCmd::REPLACE` (2) is the UI Replace BUTTON — replace the current selection if it
+    /// matches, then find the next (`sw/source/uibase/uiview/viewsrch.cxx:321-358`), and with no
+    /// selection it replaces AT THE CURSOR — not "replace the first occurrence." v1 refuses rather
+    /// than approximating it with a stateful, order-dependent command whose mistake lands in the
+    /// user's saved file.
+    private func handleDocsReplace(_ command: SessionEvent.PanelCommand) async {
+        guard let path = Self.requiredPath(command.args) else {
+            return sendResult(command.sessionId, command.commandId, false, Self.requiredPathRefusal, nil)
+        }
+        guard let find = Self.optionalString(command.args, "find"), !find.isEmpty else {
+            return sendResult(command.sessionId, command.commandId, false, Self.requiredFindRefusal, nil)
+        }
+        guard find.rangeOfCharacter(from: Self.docsLineBreaks) == nil else {
+            return sendResult(command.sessionId, command.commandId, false, Self.multilineFindRefusal, nil)
+        }
+        // `replaceWith` may legitimately be EMPTY (delete every occurrence) — but it must be present
+        // and a string, because absent-means-nothing would silently become "delete", which is a very
+        // different edit from the one a model that forgot the operand intended.
+        guard let replaceWith = Self.optionalString(command.args, "replaceWith") else {
+            return sendResult(command.sessionId, command.commandId, false, Self.requiredReplaceWithRefusal, nil)
+        }
+        guard replaceWith.rangeOfCharacter(from: Self.docsLineBreaks) == nil else {
+            return sendResult(command.sessionId, command.commandId, false, Self.multilineReplaceWithRefusal, nil)
+        }
+        if Self.isPresent(command.args, "all") {
+            guard case .bool(let all)? = command.args?["all"] else {
+                return sendResult(command.sessionId, command.commandId, false, Self.allOperandRefusal, nil)
+            }
+            guard all else {
+                return sendResult(command.sessionId, command.commandId, false, Self.allFalseRefusal, nil)
+            }
+        }
+        guard let broker = officeAgentBroker(command.sessionId) else {
+            return sendResult(command.sessionId, command.commandId, false, Self.hostGoneRefusal, nil)
+        }
+        do {
+            let resultText = try await broker.perform(
+                sessionId: command.sessionId, path: path, access: .write, requestId: command.commandId
+            ) { runtime, docId, adopted in
+                let replaced = try await runtime.docsReplace(docId: docId, find: find, replaceWith: replaceWith)
+                return Self.formatDocsReplace(path: path, find: find, replaced: replaced)
+            }
+            let (ok, text) = Self.capped(resultText)
+            sendResult(command.sessionId, command.commandId, ok, text, nil)
+        } catch {
+            sendResult(command.sessionId, command.commandId, false, Self.message(for: error), nil)
+        }
+    }
+
+    /// `office.docs.insert` / `office.docs.append` — one handler for both, same consolidation
+    /// reasoning `handleSheetsResize`/`handleSlidesManagePage` use: `command.action` is what tells
+    /// them apart.
+    ///
+    /// `insert` puts EXACTLY `text` at `at` ("start"/"end", default "end") and nothing else;
+    /// `append` always starts a new paragraph first. Two verbs rather than one flag because that is
+    /// the distinction a caller actually has ("add a paragraph" vs "put this exactly here"), and
+    /// because the spec's own table names both.
+    private func handleDocsInsert(_ command: SessionEvent.PanelCommand) async {
+        guard let path = Self.requiredPath(command.args) else {
+            return sendResult(command.sessionId, command.commandId, false, Self.requiredPathRefusal, nil)
+        }
+        guard let text = Self.optionalString(command.args, "text"), !text.isEmpty else {
+            return sendResult(command.sessionId, command.commandId, false, Self.requiredTextRefusal, nil)
+        }
+        let isAppend = command.action == "office.docs.append"
+        var atStart = false
+        if !isAppend {
+            // Same present-but-undecodable close as `read`'s paragraph indices: without it,
+            // `at: "beginning"` (or a number, or a bool) would fall through to the "end" default and
+            // the text would land at the opposite end of the document from the one asked for, with
+            // `ok: true`.
+            if Self.isPresent(command.args, "at") {
+                guard case .string(let raw)? = command.args?["at"], let position = OfficeDocsInsertAt(rawValue: raw) else {
+                    return sendResult(command.sessionId, command.commandId, false, Self.invalidAtRefusal, nil)
+                }
+                atStart = position == .start
+            }
+        }
+        guard let broker = officeAgentBroker(command.sessionId) else {
+            return sendResult(command.sessionId, command.commandId, false, Self.hostGoneRefusal, nil)
+        }
+        do {
+            let resultText = try await broker.perform(
+                sessionId: command.sessionId, path: path, access: .write, requestId: command.commandId
+            ) { runtime, docId, adopted in
+                let paragraphs = try await runtime.docsInsert(docId: docId, text: text, atStart: atStart,
+                                                               asNewParagraph: isAppend)
+                return Self.formatDocsInsert(path: path, isAppend: isAppend, atStart: atStart,
+                                             paragraphs: paragraphs)
+            }
+            let (ok, text) = Self.capped(resultText)
+            sendResult(command.sessionId, command.commandId, ok, text, nil)
+        } catch {
+            sendResult(command.sessionId, command.commandId, false, Self.message(for: error), nil)
+        }
+    }
+
+    // MARK: - office-agent-tools T7: docs' own operands
+
+    /// `insert`'s `at` — a closed two-value enum, not a free-form position string. Anything finer
+    /// than "start"/"end" would be promising an addressing scheme LOK does not have
+    /// (`docs-lok-research.md` §3.5/§6.4: the only argument-less, non-async, dialog-free positioning
+    /// commands Writer exposes are `.uno:GoToStartOfDoc` and `.uno:GoToEndOfDoc`).
+    enum OfficeDocsInsertAt: String {
+        case start
+        case end
+    }
+
+    private static let requiredFindRefusal = "`docs replace` needs a non-empty `find` — the literal "
+        + "text to search for."
+    private static let requiredReplaceWithRefusal = "`docs replace` needs a `replaceWith` string — "
+        + "pass \"\" explicitly to delete every occurrence."
+    private static let requiredTextRefusal = "this office verb needs a non-empty `text` to insert."
+    private static let invalidAtRefusal = "`docs insert`'s `at` must be \"start\" or \"end\" — omit it "
+        + "entirely to insert at the end."
+    private static let allOperandRefusal = "`docs replace`'s `all` must be a boolean."
+    private static let allFalseRefusal =
+        "`docs replace` cannot replace only the first occurrence — it replaces every one, or nothing. "
+        + "The office engine has no \"replace the first match\" operation: its Replace command "
+        + "replaces whatever is currently selected and then moves on, which depends on where the "
+        + "cursor happens to be. Re-run without `all`, or make `find` specific enough to match only "
+        + "the occurrence you mean."
+    private static let multilineFindRefusal =
+        "`docs replace`'s `find` cannot contain a line break — the engine's search never matches "
+        + "across a paragraph boundary, so a multi-line search would silently find nothing. Replace "
+        + "one paragraph's worth of text at a time."
+    private static let multilineReplaceWithRefusal =
+        "`docs replace`'s `replaceWith` cannot contain a line break — the engine inserts it as "
+        + "literal characters, not as a new paragraph. Use `append` (or `insert`) to add paragraphs."
+
+    private static let docsLineBreaks = CharacterSet(charactersIn: "\n\r")
+
+    private static func paragraphIndexRefusal(_ key: String) -> String {
+        "`docs read`'s `\(key)` must be a positive 1-based paragraph number, at most \(officeDocsMaxParagraphIndex)."
+    }
+
+    /// **Bounded at BOTH layers, deliberately** — `docs.ts` carries the same ceiling so the refusal is
+    /// immediate and specific, and this one is what actually makes the arithmetic total, because the
+    /// daemon is not the only possible producer of a `panel_command` (`args` is
+    /// `z.record(z.string(), z.unknown())` with only a byte cap). `Int(Double)` TRAPS outside `Int`'s
+    /// range — the class that aborted Norma.app from `sheets insert_rows at:1e30` and again from
+    /// `slides read slide:1e30`, both measured as SIGTRAPs. `docs.ts` did not exist during that
+    /// sweep, so these two decoders are outside it by construction and are bounded on arrival rather
+    /// than after a review. 1,000,000 is orders of magnitude past any real document's paragraph
+    /// count, and keeps every downstream `- 1`, `min`, and slice bound total.
+    static let officeDocsMaxParagraphIndex = 1_000_000
+
+    /// How much document text one `docs read` may return. Mirrors `officeReadRangeMaxCells`'
+    /// discipline for `sheets`: a declared ceiling, enforced app-side (the engine has none — research
+    /// §3.6), refused rather than truncated, and **named in the refusal along with the operands that
+    /// work around it**. 40,000 characters is roughly 6,000-7,000 words — far more than any single
+    /// reasoning step needs, and comfortably under `sheetsResultMaxLength`'s 64 KiB wire belt even
+    /// once the per-paragraph numbering prefix is added.
+    static let officeDocsReadMaxCharacters = 40_000
+
+    private static func paragraphIndex(_ args: [String: SessionEvent.JSONValue]?, _ key: String) -> Int? {
+        guard case .number(let n)? = args?[key], n >= 1, n <= Double(officeDocsMaxParagraphIndex),
+              n.truncatingRemainder(dividingBy: 1) == 0 else { return nil }
+        return Int(n)
+    }
+
+    /// The SAME `\n` split `LOKBridge.docsParagraphCount` uses, and for the same reason: what `read`
+    /// returns and what `info` counts must be one measurement, not two.
+    private static func docsParagraphs(_ text: String) -> [String] {
+        text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+    }
+
+    // MARK: - office-agent-tools T7: docs result formatting
+
+    private static func formatDocsInfo(path: String, pages: Int, paragraphs: Int, characters: Int) -> String {
+        let name = (path as NSString).lastPathComponent
+        return "\(name): \(pages) page\(pages == 1 ? "" : "s"), \(paragraphs) "
+            + "paragraph\(paragraphs == 1 ? "" : "s"), \(characters) character\(characters == 1 ? "" : "s"). "
+            + "(The page count comes from the engine's own layout and can under-report on a document "
+            + "nothing has displayed yet; the paragraph count is the number of paragraphs `read` "
+            + "returns.)"
+    }
+
+    /// Paragraph numbers are shown because every `read` is addressable by them — a model that read
+    /// paragraphs 1-3 needs to know what to ask for next without recounting. `sliced` distinguishes
+    /// "this is the whole document" from "this is part of it", so a model never mistakes a slice for
+    /// the whole thing.
+    private static func formatDocsRead(path: String, paragraphs: [String], firstParagraph: Int,
+                                       totalParagraphs: Int, sliced: Bool) -> String {
+        let name = (path as NSString).lastPathComponent
+        let last = firstParagraph + paragraphs.count - 1
+        let header = sliced
+            ? "\(name), paragraphs \(firstParagraph)-\(last) of \(totalParagraphs):"
+            : "\(name), all \(totalParagraphs) paragraph\(totalParagraphs == 1 ? "" : "s"):"
+        guard !paragraphs.isEmpty else { return "\(header) (nothing here)" }
+        let body = paragraphs.enumerated()
+            .map { "\(firstParagraph + $0.offset). \($0.element)" }
+            .joined(separator: "\n")
+        return "\(header)\n\(body)"
+    }
+
+    private static func formatDocsReplace(path: String, find: String, replaced: Int) -> String {
+        let name = (path as NSString).lastPathComponent
+        guard replaced > 0 else {
+            return "nothing to replace in \(name) — \"\(brief(find))\" does not appear in it "
+                + "(the search is literal and case-sensitive). The document was not changed."
+        }
+        return "replaced \(replaced) occurrence\(replaced == 1 ? "" : "s") of \"\(brief(find))\" in \(name)"
+    }
+
+    private static func formatDocsInsert(path: String, isAppend: Bool, atStart: Bool, paragraphs: Int) -> String {
+        let name = (path as NSString).lastPathComponent
+        let where_ = isAppend ? "appended as a new paragraph at the end of" : (atStart ? "inserted at the start of" : "inserted at the end of")
+        return "\(where_) \(name) — it now has \(paragraphs) paragraph\(paragraphs == 1 ? "" : "s")"
+    }
+
     // MARK: - office-agent-tools T3: operands (wire strictness — missing required, never defaulted)
 
     private static let requiredPathRefusal = "this office verb needs a `path`."
@@ -1155,8 +1491,14 @@ struct OfficeCommandConsumer {
     /// be indistinguishable from a complete one to whatever reads this file's own result text.
     private static func capped(_ text: String) -> (ok: Bool, text: String) {
         guard PanelURLPolicy.wireLength(text) > sheetsResultMaxLength else { return (true, text) }
+        // Wording is deliberately family-neutral (T7): this belt is shared by `sheets`, `slides`
+        // and `docs`, and the original text named only `sheets`' own operands ("a smaller range or
+        // narrower columns"), which would be advice a `docs read` caller cannot act on. `docs read`
+        // has its own, lower, operand-naming cap that fires first (`officeDocsReadMaxCharacters`);
+        // this remains the last resort for a result no verb anticipated.
         return (false, "this read's own result would be \(PanelURLPolicy.wireLength(text)) characters, past "
-                + "the \(sheetsResultMaxLength)-character wire limit — ask for a smaller range or narrower columns.")
+                + "the \(sheetsResultMaxLength)-character wire limit — ask for less of the document "
+                + "(a smaller range, fewer columns, or a narrower paragraph range).")
     }
 
     /// One error, one sentence — never `"\(error)"` verbatim when a cleaner extraction exists.

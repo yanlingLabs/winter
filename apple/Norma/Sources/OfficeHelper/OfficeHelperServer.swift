@@ -261,6 +261,25 @@ public protocol OfficeDocumentBridge: AnyObject {
     /// throws.
     func slidesManagePage(docId: String, op: OfficeSlidesManagePageOp, slide: Int?, at: Int?, to: Int?,
                           layout: OfficeSlidesLayoutPreset?) throws -> Int
+
+    // MARK: - office-agent-tools T7: docs
+
+    /// `docId`'s page count (`getParts()` — for Writer, parts ARE pages) plus paragraph and character
+    /// counts derived from its own text. Throws only on a `docId` this bridge has no handle for, or
+    /// one that is not a TEXT document.
+    func docsInfo(docId: String) throws -> (pages: Int, paragraphs: Int, characters: Int)
+    /// `docId`'s whole body text, UTF-8, paragraphs separated by `\n`. `""` is a legitimate answer
+    /// (an empty document), never an error. Same existence/kind errors as `docsInfo`.
+    func docsRead(docId: String) throws -> String
+    /// Replaces every literal, case-sensitive occurrence of `find` with `replaceWith`, returning how
+    /// many — a count computed by the bridge itself and cross-checked against the engine's own
+    /// boolean, because the engine's real count is unreachable. Throws when the two disagree, and
+    /// when the document read back afterwards is not the text the replacement should have produced.
+    func docsReplace(docId: String, find: String, replaceWith: String) throws -> Int
+    /// Inserts `text` at the start (`atStart`) or the end of the body, optionally starting a new
+    /// paragraph first. Returns the paragraph count AFTER the insert. Throws when the document read
+    /// back afterwards is not the text the insert should have produced.
+    func docsInsert(docId: String, text: String, atStart: Bool, asNewParagraph: Bool) throws -> Int
 }
 
 /// The result of a successful `OfficeDocumentBridge.paintTile` call — helper-internal (never
@@ -600,6 +619,46 @@ public final class FakeOfficeDocumentBridge: OfficeDocumentBridge {
             }
         }
         return fakeSlideCount
+    }
+
+    /// office-agent-tools T7 — wire-level dispatch only, same reasoning as every stub above: one
+    /// synthetic body of text per docId, mutated by `docsReplace`/`docsInsert` so a test can drive a
+    /// real sequence of verbs through the real wire without a real LOK. `fakeDocsText` starts as two
+    /// paragraphs; `pages` is a constant, since page count is a layout fact no fake can honestly
+    /// produce.
+    private var fakeDocsText = "NORMA GATE\nsecond paragraph"
+
+    public func docsInfo(docId: String) throws -> (pages: Int, paragraphs: Int, characters: Int) {
+        lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
+        guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
+        return (pages: 1,
+                paragraphs: fakeDocsText.split(separator: "\n", omittingEmptySubsequences: false).count,
+                characters: fakeDocsText.count)
+    }
+    public func docsRead(docId: String) throws -> String {
+        lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
+        guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
+        return fakeDocsText
+    }
+    public func docsReplace(docId: String, find: String, replaceWith: String) throws -> Int {
+        lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
+        guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
+        var count = 0
+        var searchStart = fakeDocsText.startIndex
+        while searchStart < fakeDocsText.endIndex,
+              let found = fakeDocsText.range(of: find, options: [.literal], range: searchStart..<fakeDocsText.endIndex) {
+            count += 1
+            searchStart = found.upperBound
+        }
+        fakeDocsText = fakeDocsText.replacingOccurrences(of: find, with: replaceWith, options: [.literal])
+        return count
+    }
+    public func docsInsert(docId: String, text: String, atStart: Bool, asNewParagraph: Bool) throws -> Int {
+        lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
+        guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
+        let separator = (asNewParagraph && !fakeDocsText.isEmpty) ? "\n" : ""
+        fakeDocsText = atStart ? text + separator + fakeDocsText : fakeDocsText + separator + text
+        return fakeDocsText.split(separator: "\n", omittingEmptySubsequences: false).count
     }
 
     /// A small, deterministic, key-dependent pixel pattern (never blank, never identical across
@@ -1538,6 +1597,52 @@ public final class OfficeHelperServer {
                 let slideCount = try documentBridge.slidesManagePage(docId: docId, op: op, slide: slide, at: at,
                                                                       to: to, layout: layout)
                 writeReply(.slidesManagePageOk(seq: seq, docId: docId, slideCount: slideCount), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.docsInfo(let seq, let docId)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                let info = try documentBridge.docsInfo(docId: docId)
+                writeReply(.docsInfoOk(seq: seq, docId: docId, pages: info.pages,
+                                       paragraphs: info.paragraphs, characters: info.characters), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.docsRead(let seq, let docId)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                let text = try documentBridge.docsRead(docId: docId)
+                writeReply(.docsReadOk(seq: seq, docId: docId, text: text), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.docsReplace(let seq, let docId, let find, let replaceWith)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                let replaced = try documentBridge.docsReplace(docId: docId, find: find, replaceWith: replaceWith)
+                writeReply(.docsReplaceOk(seq: seq, docId: docId, replaced: replaced), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.docsInsert(let seq, let docId, let text, let atStart, let asNewParagraph)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                let paragraphs = try documentBridge.docsInsert(docId: docId, text: text, atStart: atStart,
+                                                               asNewParagraph: asNewParagraph)
+                writeReply(.docsInsertOk(seq: seq, docId: docId, paragraphs: paragraphs), writer: writer)
             } catch {
                 writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
             }

@@ -452,6 +452,54 @@ final class OfficeHelperClient {
         }
     }
 
+    // MARK: - office-agent-tools T7: docs
+
+    func docsInfo(docId: String) async throws -> (pages: Int, paragraphs: Int, characters: Int) {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.docsInfo(seq: seq, docId: docId))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .docsInfoOk(_, _, let pages, let paragraphs, let characters):
+            return (pages: pages, paragraphs: paragraphs, characters: characters)
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    func docsRead(docId: String) async throws -> String {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.docsRead(seq: seq, docId: docId))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .docsReadOk(_, _, let text): return text
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    func docsReplace(docId: String, find: String, replaceWith: String) async throws -> Int {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.docsReplace(seq: seq, docId: docId, find: find, replaceWith: replaceWith))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .docsReplaceOk(_, _, let replaced): return replaced
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    func docsInsert(docId: String, text: String, atStart: Bool, asNewParagraph: Bool) async throws -> Int {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.docsInsert(seq: seq, docId: docId, text: text, atStart: atStart,
+                                              asNewParagraph: asNewParagraph))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .docsInsertOk(_, _, let paragraphs): return paragraphs
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
     // MARK: - Task 4: tiles
 
     /// Registers this connection as a tile-push subscriber for `docId` (which must already be open

@@ -328,6 +328,19 @@ final class OfficeCommandConsumerTests: XCTestCase {
         // one, which is exactly what a real already-open human tab looks like to it — the caller
         // still has to `open` the document on the returned runtime for the broker's rule-1 lookup
         // (`stateSnapshot.documents[path]`) to find it.
+        // office-agent-tools T7 — same "explicit stub per test, throw if unstubbed" shape.
+        docsInfo: @escaping (String) async throws -> (pages: Int, paragraphs: Int, characters: Int) = { _ in
+            throw OfficeHelperClientError.serverError(reason: "docsInfo not stubbed for this test")
+        },
+        docsRead: @escaping (String) async throws -> String = { _ in
+            throw OfficeHelperClientError.serverError(reason: "docsRead not stubbed for this test")
+        },
+        docsReplace: @escaping (String, String, String) async throws -> Int = { _, _, _ in
+            throw OfficeHelperClientError.serverError(reason: "docsReplace not stubbed for this test")
+        },
+        docsInsert: @escaping (String, String, Bool, Bool) async throws -> Int = { _, _, _, _ in
+            throw OfficeHelperClientError.serverError(reason: "docsInsert not stubbed for this test")
+        },
         adoptExistingRuntime: Bool = false
     ) -> (consumer: OfficeCommandConsumer, runtime: OfficeRuntime) {
         let driver = OfficeRuntime.Driver(
@@ -346,6 +359,7 @@ final class OfficeCommandConsumerTests: XCTestCase {
             sheetsFormat: sheetsFormat,
             slidesInfo: slidesInfo, slidesRead: slidesRead, slidesSetText: slidesSetText,
             slidesManagePage: slidesManagePage,
+            docsInfo: docsInfo, docsRead: docsRead, docsReplace: docsReplace, docsInsert: docsInsert,
             stateDirectory: FileManager.default.temporaryDirectory)
         let runtime = OfficeRuntime(sessionId: "s1", driver: driver)
         let broker = OfficeAgentBroker(host: .init(
