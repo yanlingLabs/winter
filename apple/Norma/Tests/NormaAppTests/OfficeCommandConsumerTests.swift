@@ -755,8 +755,11 @@ final class OfficeCommandConsumerTests: XCTestCase {
     func testSheetsFormatWidthColumnCapIsInclusiveAtItsOwnBoundary() async {
         let path = makeScratchFile()
         let savedPath = makeScratchFile()
-        let atCap = "A1:\(officeColumnLetters(officeFormatWidthMaxColumns - 1))1"     // exactly 64 columns
-        let pastCap = "A1:\(officeColumnLetters(officeFormatWidthMaxColumns))1"       // 65
+        // Both computed FROM the constant, never from its value — the comments that used to name
+        // "64"/"65" here went stale the moment the cap was re-sized from V-1's measurement
+        // (re-review, Minor). Named relatively so they cannot go stale again.
+        let atCap = "A1:\(officeColumnLetters(officeFormatWidthMaxColumns - 1))1"     // exactly at the cap
+        let pastCap = "A1:\(officeColumnLetters(officeFormatWidthMaxColumns))1"       // one past it
         let world = makeSheetsWorld(
             workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
             sheetsFormat: { _, _, _, _, _, _, _, _, _ in ["width"] },

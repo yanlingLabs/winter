@@ -783,11 +783,18 @@ final class OfficeSheetsFormatTests: XCTestCase {
         }
     }
 
-    /// **V-4 — a GENUINE partial failure, forced live, on an ADOPTED document.** Phase 1's cell
-    /// attributes land; phase 2's width fails its own position check; the model is told the earlier
-    /// attribute may be sitting unsaved in the user's open tab. This is the one behaviour
-    /// `handleSheetsFormat`'s disclosure describes, and before this drill nothing produced it — T4
-    /// paid three fix rounds to close exactly this gap for `set`.
+    /// **V-4 — the adopted branch's disclosure, produced live by a real phase-2 failure.**
+    ///
+    /// **What this drill does and does NOT establish** (re-review, Important — an earlier version of
+    /// this header claimed "a GENUINE partial failure … phase 1's cell attributes land", which its
+    /// own body 40 lines below contradicts, and the fix-round report then repeated the header rather
+    /// than the measurement): phase 2's width genuinely fails its own position check, the call
+    /// genuinely takes the adopted branch, and the adopted branch's distinguishing sentence is
+    /// genuinely produced and asserted — none of which any test did before. What is NOT established
+    /// is a partial application where an earlier attribute really landed: the measurement below is
+    /// `dirty=false`, so on this vector phase 1 dispatched without modifying the document. The
+    /// disclosure is conditional and therefore never fires falsely here; forcing a genuine partial
+    /// remains unforced by anything, which §3 V-4 of the report states plainly.
     ///
     /// **The vector, and why it splits the two phases** (all drills in this file adopt, so `adopted`
     /// is true here): `range:"XFC1:XFE1"` gives phase 1 the anchor XFC1 — a real, reachable cell —
