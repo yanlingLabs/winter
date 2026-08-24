@@ -565,7 +565,12 @@ struct OfficeCommandConsumer {
 
     // MARK: - office-agent-tools T6: slides
 
-    /// `office.slides.info` — slide count, each slide's own name, and its layout when known.
+    /// `office.slides.info` — slide count, and each slide's own name and title. NEVER a layout
+    /// (fix round 1, review F-9: this comment used to say "layout when known" — stale since ruling
+    /// 1, which removed layout from `info` entirely; `OfficeSlideInfo` carries no layout field and
+    /// `formatSlidesInfo` never emits one, live-pinned by
+    /// `OfficeSlidesCommandTests.swift`'s own assertion that `info`'s output never contains the
+    /// word "layout" — only this comment had drifted, never the actual output).
     ///
     /// **`info` is ALSO the drivability probe** (spec §1/§3) — same split `handleSheetsInfo`'s own
     /// header already establishes: the "app not running" half lives on the daemon side
