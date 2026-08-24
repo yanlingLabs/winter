@@ -265,12 +265,12 @@ final class PanelDocumentTabTests: XCTestCase {
     /// a `cellCount` that cannot overflow.** 18,278 columns x 10^7 rows ~= 1.8e11, eleven orders of
     /// magnitude below `Int.max` — so the consumer's own `range.cellCount`, and everything
     /// downstream of it, is total by construction rather than by inspection.
-    func testEveryAcceptedRangeHasACellCountThatCannotOverflow() {
-        let widest = try? XCTUnwrap(officeParseRange("A1:ZZZ9999999"))
-        XCTAssertEqual(widest??.columnCount, 18278)
-        XCTAssertEqual(widest??.rowCount, 9_999_999)
-        XCTAssertEqual(widest??.cellCount, 18278 * 9_999_999)
-        XCTAssertLessThan(widest??.cellCount ?? .max, Int.max / 1_000_000)
+    func testEveryAcceptedRangeHasACellCountThatCannotOverflow() throws {
+        let widest = try XCTUnwrap(officeParseRange("A1:ZZZ9999999"))
+        XCTAssertEqual(widest.columnCount, 18278)
+        XCTAssertEqual(widest.rowCount, 9_999_999)
+        XCTAssertEqual(widest.cellCount, 18278 * 9_999_999)
+        XCTAssertLessThan(widest.cellCount, Int.max / 1_000_000)
     }
 
     func testOfficeColumnIndexRejectsNonLetters() {
