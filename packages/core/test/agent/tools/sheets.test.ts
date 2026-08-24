@@ -182,6 +182,43 @@ describe("read", () => {
     expect(result.isError).toBe(false);
     expect(h.recorded).toHaveLength(1);
   });
+
+  // T5 fix round, review Critical-1 — these four are a CRASH regression test, not a tidiness one.
+  // Every one of these strings used to reach the Mac app and ABORT it (measured SIGTRAPs, see
+  // task-5-fixround-report.md §2): 14 letters overflowed `officeColumnIndex`'s `value * 26`, and an
+  // Int.max row overflowed `OfficeCellRange.cellCount` one line later. The app-side guards are the
+  // real fix; this daemon-side shape bound turns a 155-second silent timeout into an immediate,
+  // specific refusal.
+  test("a column reference longer than three letters is refused before dispatch — the app-abort vector", async () => {
+    const h = makeHarness();
+    for (const range of ["ZZZZZZZZZZZZZZ1", "AAAAAAAAAAAAAA1", "XFDA1", "A1:AAAAAAAAAAAAAA4"]) {
+      const result = await h.run({ verb: "read", path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1", range });
+      expect(result.isError).toBe(true);
+      expect(h.recorded).toEqual([]);
+    }
+  });
+
+  test("a row number longer than seven digits is refused before dispatch — the OTHER app-abort vector", async () => {
+    const h = makeHarness();
+    for (const range of ["A1:B9223372036854775807", "A12345678", "A1:B99999999"]) {
+      const result = await h.run({ verb: "read", path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1", range });
+      expect(result.isError).toBe(true);
+      expect(h.recorded).toEqual([]);
+    }
+  });
+
+  // The bounds are LEXICAL, never Calc's real grid — deliberately. An out-of-grid reference must
+  // still be expressible so the engine's own position verification is the thing that refuses it;
+  // OfficeSheetsFormatTests' position-verification drill rides exactly this vector, and a grid
+  // bound here would silently delete the only non-mutant way to prove that check is real.
+  test("three letters and seven digits still pass even PAST Calc's real grid — XFE1 and D9999999 stay expressible", async () => {
+    for (const range of ["XFE1", "D9999999", "XFD1048576"]) {
+      const h = makeHarness();
+      const result = await h.run({ verb: "read", path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1", range });
+      expect(result.isError).toBe(false);
+      expect(h.recorded).toHaveLength(1);
+    }
+  });
 });
 
 // ================================================================================================
@@ -337,6 +374,20 @@ describe("resize verbs", () => {
     expect(result.isError).toBe(true);
     expect(result.output).toContain("count");
     expect(h.recorded).toEqual([]);
+  });
+
+  // T5 fix round, review Critical-1's sweep — `at: 1e30` and `count: Int.max` each ABORTED the Mac
+  // app (measured SIGTRAPs, task-5-fixround-report.md §2): the first inside `Int(Double)`, which
+  // traps outside Int's range, the second inside `at + count - 1`. `z.number().int().positive()`
+  // was never a bound — `Number.isInteger(1e30)` is `true`.
+  test("an absurd `at` or `count` is refused before dispatch — the resize app-abort vectors", async () => {
+    for (const args of [{ at: 1e30, count: 1 }, { at: 1, count: 9223372036854775807 },
+                        { at: 1, count: 1e30 }, { at: 10_000_000, count: 1 }]) {
+      const h = makeHarness();
+      const result = await h.run({ verb: "insert_rows", path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", ...args });
+      expect(result.isError).toBe(true);
+      expect(h.recorded).toEqual([]);
+    }
   });
 
   test("a missing sheet is malformed and refused, before dispatch", async () => {

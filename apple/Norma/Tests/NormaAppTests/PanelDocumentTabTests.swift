@@ -210,6 +210,69 @@ final class PanelDocumentTabTests: XCTestCase {
         XCTAssertEqual(officeColumnIndex(fromLetters: "Az"), 51)
     }
 
+    // MARK: - T5 fix round, review Critical-1 — the app-abort regression tests
+    //
+    // Every string below used to abort NORMA.APP ITSELF: Swift traps on `Int` overflow (only `&*`
+    // wraps), in `-O` as well as debug, and `officeColumnIndex`'s `value * 26` was unchecked with
+    // nothing upstream bounding the letter run. Measured before the fix against a verbatim copy of
+    // the original — SIGTRAP (exit 133) on each — in `task-5-fixround-report.md` §2. An agent typo
+    // in `range` was sufficient; no user action, no malice.
+    //
+    // These are XCTAssertNil, not XCTAssertEqual: the point is that the function REFUSES rather
+    // than traps, and a trap is not something XCTest can catch — if the guard is ever removed,
+    // this test does not fail, it takes the whole test runner down with it. That is the loudest
+    // possible red, and it is why the assertion's own name says "abort".
+
+    func testOfficeColumnIndexRefusesRatherThanTrappingOnAnAppAbortingLetterRun() {
+        // The exact review vector: 14 letters, 15 characters, inside `sheets.ts`'s own `.max(64)`.
+        XCTAssertNil(officeColumnIndex(fromLetters: String(repeating: "Z", count: 14)))
+        XCTAssertNil(officeColumnIndex(fromLetters: String(repeating: "A", count: 14)))
+        // The measured trap boundary is letter-dependent (Z x14 traps, A x14 returns a finite
+        // 2.58e18 that overflows `cellCount` one line later instead) — so the bound is on LENGTH,
+        // and both sides of that boundary are pinned here.
+        XCTAssertNil(officeColumnIndex(fromLetters: String(repeating: "A", count: 13)))
+        XCTAssertNil(officeColumnIndex(fromLetters: "XFDA"))   // 4 letters — always invalid, Calc's max is XFD
+        XCTAssertNil(officeColumnIndex(fromLetters: "AAAA"))
+    }
+
+    /// The bound is LEXICAL (<= 3 letters), never Calc's real 16,384-column grid — so "XFE", one
+    /// column PAST XFD, still resolves here and is refused downstream by LOK's own position
+    /// verification. `OfficeSheetsFormatTests`' position-verification drill rides exactly that
+    /// vector; a grid bound here would silently delete the only non-mutant way to prove that check
+    /// is real. Pinned so a later "tidy-up" cannot quietly tighten it.
+    func testOfficeColumnIndexStaysLexicalAndStillResolvesTheOutOfGridThreeLetterColumns() {
+        XCTAssertEqual(officeColumnIndex(fromLetters: "XFD"), 16383)  // Calc's real last column
+        XCTAssertEqual(officeColumnIndex(fromLetters: "XFE"), 16384)  // one past it — still resolves
+        XCTAssertEqual(officeColumnIndex(fromLetters: "ZZZ"), 18277)  // the widest 3-letter column
+    }
+
+    /// The ROW half of the same class — the door the review's own prescription did not name.
+    /// `Int("9223372036854775807")` succeeds, so `range:"A1:B9223372036854775807"` (23 characters)
+    /// parsed cleanly and then aborted the app on the consumer's VERY NEXT LINE, in
+    /// `OfficeCellRange.cellCount`'s `columnCount * rowCount` = `2 * Int.max`.
+    func testOfficeParseCellReferenceRefusesRatherThanTrappingOnAnAppAbortingRowNumber() {
+        XCTAssertNil(officeParseCellReference("B9223372036854775807"))
+        XCTAssertNil(officeParseCellReference("A12345678"))       // 8 digits
+        XCTAssertNil(officeParseRange("A1:B9223372036854775807"))
+        XCTAssertNil(officeParseRange("A1:AAAAAAAAAAAAAA4"))      // the 14-A + 4-rows cellCount vector
+        // Symmetric to the column bound: lexical, and still past Calc's own 1,048,576-row maximum,
+        // so an out-of-grid ROW stays expressible as a position-verification vector too.
+        XCTAssertEqual(officeParseCellReference("D9999999")?.row, 9_999_998)
+        XCTAssertEqual(officeParseCellReference("A1048576")?.row, 1_048_575)
+    }
+
+    /// The whole point of both bounds, stated as one property: **every range this parser accepts has
+    /// a `cellCount` that cannot overflow.** 18,278 columns x 10^7 rows ~= 1.8e11, eleven orders of
+    /// magnitude below `Int.max` — so the consumer's own `range.cellCount`, and everything
+    /// downstream of it, is total by construction rather than by inspection.
+    func testEveryAcceptedRangeHasACellCountThatCannotOverflow() {
+        let widest = try? XCTUnwrap(officeParseRange("A1:ZZZ9999999"))
+        XCTAssertEqual(widest??.columnCount, 18278)
+        XCTAssertEqual(widest??.rowCount, 9_999_999)
+        XCTAssertEqual(widest??.cellCount, 18278 * 9_999_999)
+        XCTAssertLessThan(widest??.cellCount ?? .max, Int.max / 1_000_000)
+    }
+
     func testOfficeColumnIndexRejectsNonLetters() {
         XCTAssertNil(officeColumnIndex(fromLetters: ""))
         XCTAssertNil(officeColumnIndex(fromLetters: "1"))

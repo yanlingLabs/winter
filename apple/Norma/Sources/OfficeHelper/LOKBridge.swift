@@ -2963,10 +2963,19 @@ final class LOKBridge: OfficeDocumentBridge {
     /// `officeCellReference` on the app side (uppercase letters, 1-based row, no colon, no
     /// whitespace) — this parser is strict, not lenient, matching `officeParseCellReference`'s own
     /// "wire strictness applies here" posture: `nil` for anything else, never guessed or clamped.
+    ///
+    /// **T5 fix round, Critical-1 — the same two bounds the app-side original now carries** (letters
+    /// <= 3, row digits <= 7; see `officeColumnMaxLetters`/`officeRowMaxDigits`' own headers for the
+    /// measured app-abort those close). A re-ENCODING that drifted from its original on the one
+    /// property that makes the original total would be worse than no re-encoding at all — and while
+    /// every real caller's `address` is app-produced and already bounded, "the caller happens to
+    /// bound it" is precisely the reasoning that left three doors open on the app side. An overflow
+    /// here would abort `NormaOfficeHelper`, not the app: a smaller blast radius, still a crash.
     private static func parseSingleCellReference(_ address: String) -> (column: Int, row: Int)? {
         let letters = address.prefix(while: { $0.isASCII && $0.isLetter })
         let rest = address[letters.endIndex...]
-        guard !letters.isEmpty, !rest.isEmpty, rest.allSatisfy({ $0.isASCII && $0.isNumber }) else { return nil }
+        guard !letters.isEmpty, letters.count <= 3, !rest.isEmpty, rest.count <= 7,
+              rest.allSatisfy({ $0.isASCII && $0.isNumber }) else { return nil }
         var column = 0
         for scalar in letters.uppercased().unicodeScalars {
             guard scalar.value >= 65, scalar.value <= 90 else { return nil }

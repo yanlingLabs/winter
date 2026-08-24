@@ -379,18 +379,25 @@ struct OfficeCommandConsumer {
             // `"3"`), so `at: "3"` is documented-legal and reaches this consumer verbatim. The
             // ORIGINAL code here accepted `.number` only, refusing a perfectly valid `"3"` outright —
             // a real gap between what the daemon promises and what the app actually honors.
+            //
+            // T5 fix round, Critical-1's sweep — BOTH arms are bounded by `officeResizeMaxAt` (see
+            // `requiredCount`'s own header for the measured aborts): the `.number` arm because
+            // `Int(1e30)` traps, the `.string` arm because `Int("9223372036854775807")` succeeds and
+            // then overflows `startRow + count - 1` below.
             let atRow: Int?
             switch command.args?["at"] {
-            case .number(let atNumber) where atNumber >= 1 && atNumber.truncatingRemainder(dividingBy: 1) == 0:
+            case .number(let atNumber) where atNumber >= 1 && atNumber <= Double(Self.officeResizeMaxAt)
+                && atNumber.truncatingRemainder(dividingBy: 1) == 0:
                 atRow = Int(atNumber)
             case .string(let atString):
-                atRow = Int(atString).flatMap { $0 >= 1 ? $0 : nil }
+                atRow = Int(atString).flatMap { $0 >= 1 && $0 <= Self.officeResizeMaxAt ? $0 : nil }
             default:
                 atRow = nil
             }
             guard let startRow = atRow else {
                 return sendResult(command.sessionId, command.commandId, false,
-                                   "`at` must be a positive 1-based row number.", nil)
+                                   "`at` must be a positive 1-based row number, at most "
+                                       + "\(Self.officeResizeMaxAt).", nil)
             }
             selectionRange = "\(startRow):\(startRow + count - 1)"
         case .col:
@@ -504,8 +511,37 @@ struct OfficeCommandConsumer {
         let numberFormat = Self.optionalNumberFormatPreset(command.args)
         let align = Self.optionalAlign(command.args)
         let width = Self.optionalWidth(command.args)
+        // A PRESENT but out-of-range `width` gets its own refusal — `optionalWidth` collapses it to
+        // `nil`, which the at-least-one guard below would otherwise report as "name an attribute."
+        if case .number(let rawWidth)? = command.args?["width"], width == nil {
+            return sendResult(command.sessionId, command.commandId, false,
+                               "`width` must be between \(Int(Self.officeWidthMinPoints)) and "
+                                   + "\(Int(Self.officeWidthMaxPoints)) points (got \(rawWidth)).", nil)
+        }
         guard bold != nil || italic != nil || numberFormat != nil || align != nil || width != nil else {
             return sendResult(command.sessionId, command.commandId, false, Self.requiredFormatAttributeRefusal, nil)
+        }
+        // T5 fix-round review, Important-1 — the width phase's OWN cap, on COLUMNS, independent of
+        // the cell-count cap above. `width` does not select `range`; it selects the WHOLE-COLUMN
+        // Name-Box span `range`'s columns cover (`columnSpan` below), and that selection is realized
+        // through `selectionTextOnDedicatedThread`, which serialises the entire selection to a UTF-8
+        // string it then throws away — up to `goToCellVerificationAttempts` (4) times, plus the
+        // sentinel park. The 2,000-CELL cap does not bound that at all: `range:"A1:BXW1"` is 2,000
+        // cells and 2,000 ENTIRE COLUMNS, on the single dedicated LOK thread behind the one app-wide
+        // helper FIFO whose supervisor has no kill on request timeout — a wedge that takes every
+        // open document with it until the app restarts, for one mistyped range.
+        //
+        // 64 is chosen against the USE, not the machine: `width` exists so a report's columns fit
+        // their content, and no human toolbar interaction — or agent imitating one — sets more than
+        // a few dozen columns at once. Cell attributes keep the full 2,000-cell range; only the
+        // width PHASE is bounded, which is the only phase whose cost is O(sheet), not O(range).
+        if width != nil, range.columnCount > officeFormatWidthMaxColumns {
+            return sendResult(command.sessionId, command.commandId, false,
+                               "\"\(rangeText)\" spans \(range.columnCount) columns, past the "
+                                   + "\(officeFormatWidthMaxColumns)-column limit on one `width` call — "
+                                   + "`width` resizes every column the range touches IN FULL, so a wide "
+                                   + "range is a much larger operation than its cell count suggests. "
+                                   + "Widen fewer columns per call.", nil)
         }
 
         let rangeString = "\(officeCellReference(column: range.startColumn, row: range.startRow)):"
@@ -744,7 +780,8 @@ struct OfficeCommandConsumer {
     private static let hostGoneRefusal = "Norma's office runtime is no longer available."
     // office-agent-tools T4
     private static let requiredValuesRefusal = "`sheets set` needs `values` — a rectangular grid of cell content."
-    private static let requiredCountRefusal = "this office verb needs a positive `count`."
+    private static let requiredCountRefusal = "this office verb needs a positive `count`, at most "
+        + "\(officeResizeMaxCount)."
     private static let requiredNameRefusal = "this office verb needs a `name`."
     private static let requiredNewNameRefusal = "`sheets rename_sheet` needs a `newName`."
 
@@ -792,8 +829,25 @@ struct OfficeCommandConsumer {
         value.truncatingRemainder(dividingBy: 1) == 0 && abs(value) < 1e15
             ? String(Int64(value)) : String(value)
     }
+    /// **T5 fix round, Critical-1's third and fourth doors** (swept out of the same class, not named
+    /// by the review — see `task-5-fixround-report.md` §0). `Int(n)` on a `Double` TRAPS when `n` is
+    /// outside `Int`'s range, and `sheets.ts` bounds `count`/`at` with nothing but
+    /// `z.number().int().positive()` — which `1e30` satisfies (`Number.isInteger(1e30)` is `true`).
+    /// So `sheets insert_rows at:1e30 count:1` aborted the app inside this one conversion, and
+    /// `count: 9223372036854775807` aborted it one line later in `handleSheetsResize`'s own
+    /// `startRow + count - 1`. Both measured as SIGTRAPs (`task-5-fixround-report.md` §2).
+    ///
+    /// `officeResizeMaxCount` is Calc's own row maximum: the largest number of rows — and far more
+    /// than the largest number of columns — any real insert/delete could ever name, so this refuses
+    /// nothing legitimate while making every `at + count` computation downstream total. Paired with
+    /// `officeResizeMaxAt` (the same 9,999,999 ceiling `officeRowMaxDigits` already imposes on a
+    /// parsed A1 row, so the two ways of naming a row agree).
+    static let officeResizeMaxCount = 1_048_576
+    static let officeResizeMaxAt = 9_999_999
+
     private static func requiredCount(_ args: [String: SessionEvent.JSONValue]?) -> Int? {
-        guard case .number(let n)? = args?["count"], n >= 1, n.truncatingRemainder(dividingBy: 1) == 0 else { return nil }
+        guard case .number(let n)? = args?["count"], n >= 1, n <= Double(officeResizeMaxCount),
+              n.truncatingRemainder(dividingBy: 1) == 0 else { return nil }
         return Int(n)
     }
     private static func requiredName(_ args: [String: SessionEvent.JSONValue]?) -> String? {
@@ -866,8 +920,25 @@ struct OfficeCommandConsumer {
     /// `width` — points (see `sheets.ts`'s own doc for why points, not the engine's raw 1/100mm
     /// storage unit). `.number` on the wire decodes as `Double` regardless of whether the daemon sent
     /// a whole number or a fraction — no separate int/double handling needed here.
+    /// **T5 fix round, Critical-1's sweep (§0) — the app validates its OWN operands.** `width` used
+    /// to be passed through unbounded, straight into `LOKBridge.officeWidthMm100`'s
+    /// `Int((points * 2540/72).rounded())` — the same trapping `Int(Double)` conversion
+    /// `requiredCount` above documents. `sheets.ts` does bound this one (`.min(1).max(1000)`), so
+    /// this was reachable only from a non-`sheets` producer of `panel_command`; guarded anyway,
+    /// because "the daemon happens to bound it" is exactly the reasoning that left the other three
+    /// doors open. The bounds MIRROR the daemon's deliberately — see `width`'s own schema doc in
+    /// `sheets.ts` for why 1 point is the floor (below it the 1/100mm conversion rounds to an
+    /// unrepresentable zero) and 1000 the ceiling.
+    ///
+    /// `nil` for a present-but-out-of-range value, which `handleSheetsFormat` distinguishes from
+    /// absent so the model gets "1 to 1000 points", not the misleading "name at least one attribute".
+    /// NaN/infinity fall out for free: neither comparison holds.
+    static let officeWidthMinPoints = 1.0
+    static let officeWidthMaxPoints = 1000.0
+
     private static func optionalWidth(_ args: [String: SessionEvent.JSONValue]?) -> Double? {
-        guard case .number(let value)? = args?["width"] else { return nil }
+        guard case .number(let value)? = args?["width"],
+              value >= officeWidthMinPoints, value <= officeWidthMaxPoints else { return nil }
         return value
     }
 

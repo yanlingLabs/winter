@@ -165,8 +165,40 @@ func officeCellReference(column: Int, row: Int) -> String {
 /// LEAST-significant letter first by repeated division; this one folds the string left-to-right,
 /// which is the natural direction for the same place-value arithmetic when the letters already have
 /// their significance order (most-significant first, exactly as written).
+///
+/// **T5 fix round, Critical-1 — this function is TOTAL. It refuses; it never traps.** The original
+/// accumulated with plain `value * 26 + …`, which Swift TRAPS on overflow (only `&*` wraps), in
+/// `-O` as well as debug — and every caller reaches it from an agent-controlled `range` string that
+/// nothing upstream bounded (`sheets.ts`'s `A1_RANGE_SHAPE` had an unbounded `[A-Za-z]+` under a
+/// `.max(64)`). `range:"ZZZZZZZZZZZZZZ1"` — 14 letters, well inside 64 characters, a plain model
+/// typo — therefore aborted **Norma.app itself**, taking every open office document's unsaved edits
+/// with it. Measured, not reasoned: `task-5-fixround-report.md` §2 records the SIGTRAP for that
+/// exact string against a verbatim copy of the original.
+///
+/// Two independent guards, and the FIRST is the load-bearing one:
+///
+/// 1. **`officeColumnMaxLetters` (3).** Calc's real maximum column is XFD — three letters, 16,384
+///    columns — so a fourth letter is always invalid, whatever it spells. This is what actually
+///    closes the hole, because checked arithmetic alone would NOT have: a 13-letter run returns a
+///    perfectly finite 2.58e18, which then overflows one line later in `OfficeCellRange.cellCount`'s
+///    own `columnCount * rowCount` at the consumer's very next statement (`range:"A1:AAAAAAAAAAAAAA4"`
+///    — measured, same report §2). Bounding the INPUT is the only fix that bounds everything
+///    downstream of it.
+/// 2. **Overflow-reporting arithmetic.** Unreachable through guard 1 (three letters peak at 18,277)
+///    and kept deliberately anyway: it is what makes the function's `Int?` contract honest for any
+///    future caller, and it means a later widening of guard 1 degrades to a refusal rather than to
+///    an app abort. Labelled here rather than left to look like the real protection.
+///
+/// **Deliberately LEXICAL, not SEMANTIC** — this stays the pure inverse of `officeColumnLetters` and
+/// does NOT learn Calc's 16,384-column grid limit: "XFE" (three letters, one column past XFD)
+/// still resolves here and is refused downstream by LOK's own position verification, which is
+/// exactly what `OfficeSheetsFormatTests`' own position-verification drill rides — see that drill's
+/// header. A grid bound here would have silently deleted the only non-mutant way to prove that
+/// check is real.
+let officeColumnMaxLetters = 3
+
 func officeColumnIndex(fromLetters letters: String) -> Int? {
-    guard !letters.isEmpty else { return nil }
+    guard !letters.isEmpty, letters.count <= officeColumnMaxLetters else { return nil }
     var value = 0
     for scalar in letters.unicodeScalars {
         let upper: UInt32
@@ -175,7 +207,11 @@ func officeColumnIndex(fromLetters letters: String) -> Int? {
         case 97...122: upper = scalar.value - 32   // 'a'...'z' -> 'A'...'Z'
         default: return nil
         }
-        value = value * 26 + Int(upper - 65 + 1)
+        let (scaled, scaleOverflow) = value.multipliedReportingOverflow(by: 26)
+        guard !scaleOverflow else { return nil }
+        let (next, addOverflow) = scaled.addingReportingOverflow(Int(upper - 65 + 1))
+        guard !addOverflow else { return nil }
+        value = next
     }
     return value - 1
 }
@@ -187,10 +223,27 @@ func officeColumnIndex(fromLetters letters: String) -> Int? {
 /// SEMANTICS live for the agent's own operands (the daemon tool validates `range`'s wire SHAPE only
 /// — a bare non-empty string — never its meaning), so wire strictness applies here: a malformed cell
 /// reference refuses, it is never guessed at or clamped to something nearby.
+///
+/// **T5 fix round, Critical-1's ROW half — the door the review's own prescription would have left
+/// open.** `Int(rest)` happily parses `"9223372036854775807"` (19 digits, exactly `Int.max`), so
+/// `range:"A1:B9223372036854775807"` — 23 characters, inside `sheets.ts`'s `.max(64)`, matching its
+/// `[1-9][0-9]*` shape — used to parse cleanly and then abort the app on the CONSUMER'S VERY NEXT
+/// LINE, where `range.cellCount` computes `2 * Int.max`. Measured SIGTRAP, `task-5-fixround-report.md`
+/// §2. Bounding only the letter run would have fixed one half of one class.
+///
+/// `officeRowMaxDigits` (7) is the symmetric, deliberately LEXICAL bound — 9,999,999 is comfortably
+/// past Calc's real 1,048,576-row maximum, so it refuses nothing a real sheet can address, and it
+/// keeps an out-of-grid ROW ("D9999999") available as a live position-verification vector exactly as
+/// `officeColumnMaxLetters` keeps "XFE" available as the column one. Together the two bounds cap
+/// `OfficeCellRange.cellCount` at 18,278 x 10^7 ~= 1.8e11 — every downstream `Int` computation on a
+/// parsed range is total by construction, not by inspection.
+let officeRowMaxDigits = 7
+
 func officeParseCellReference(_ reference: String) -> (column: Int, row: Int)? {
     let letters = reference.prefix(while: { $0.isASCII && $0.isLetter })
     let rest = reference[letters.endIndex...]
-    guard !letters.isEmpty, !rest.isEmpty, rest.allSatisfy({ $0.isASCII && $0.isNumber }) else { return nil }
+    guard !letters.isEmpty, !rest.isEmpty, rest.count <= officeRowMaxDigits,
+          rest.allSatisfy({ $0.isASCII && $0.isNumber }) else { return nil }
     guard let column = officeColumnIndex(fromLetters: letters.uppercased()) else { return nil }
     guard let oneBasedRow = Int(rest), oneBasedRow >= 1 else { return nil }
     return (column: column, row: oneBasedRow - 1)
@@ -249,6 +302,22 @@ let officeReadRangeMaxCells = 2_000
 /// already set: the daemon's own copy refuses cheaply before a round trip is even attempted; this
 /// one is the REAL enforcement, since only this side can compute `range`'s true cell count.
 let officeWriteRangeMaxCells = 200
+
+/// office-agent-tools T5 fix round (review Important-1) — `sheets format`'s WIDTH-phase cap, on
+/// COLUMNS, alongside — never instead of — the 2,000-cell cap the same verb already applies to
+/// `range`. The two measure different things because the width phase selects something different:
+/// not `range`, but the whole-column Name-Box span `range`'s columns cover, which
+/// `LOKBridge.selectionTextOnDedicatedThread` then serialises in full (and discards) once per
+/// GoToCell verification attempt. `range:"A1:BXW1"` is 2,000 cells — under the cell cap — and 2,000
+/// ENTIRE COLUMNS, which is the wedge shape T2's ledger already named ("the probe is O(selection)")
+/// at a far larger multiplier, on the one dedicated LOK thread behind the one app-wide helper FIFO
+/// that has no kill on request timeout.
+///
+/// 64 is sized against the USE: `width` exists so a report's columns fit their content, and neither
+/// a human toolbar drag nor an agent imitating one sets more than a few dozen columns in one go.
+/// Enforced in `OfficeCommandConsumer.handleSheetsFormat`, before the broker/LOK are reached, on the
+/// same pre-dispatch principle as both cell caps above.
+let officeFormatWidthMaxColumns = 64
 
 /// PURE: the formula bar's own ref-display decision, extracted from `OfficeFormulaBar.referenceText`
 /// (advisor review, this task) so it can be pinned directly, independent of SwiftUI/`@Published`

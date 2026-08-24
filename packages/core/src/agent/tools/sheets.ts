@@ -144,10 +144,16 @@ const SheetsArgs = z.object({
    *  more letters ("C", "AA"), matching this tool's A1-first design everywhere else (`range` never
    *  exposes raw column integers to a caller — Task 3's own deliberate choice, carried forward here
    *  rather than introducing the ONE place in this tool that would). */
-  at: z.union([z.number().int().positive(), z.string().min(1).max(8)]).optional(),
+  at: z.union([z.number().int().positive().max(9_999_999), z.string().min(1).max(8)]).optional(),
   /** `insert_rows`/`delete_rows`/`insert_cols`/`delete_cols` ONLY — how many rows/columns, starting
-   *  at `at`. */
-  count: z.number().int().positive().optional(),
+   *  at `at`. Capped at Calc's own row maximum (1,048,576 — more rows, and far more columns, than
+   *  any sheet has), and `at` at 9,999,999, for the same reason `A1_RANGE_SHAPE`'s runs are bounded
+   *  above: unbounded, these two reached a trapping `Int(Double)` conversion and an overflowing
+   *  `at + count` in `OfficeCommandConsumer`, each of which ABORTED THE MAC APP. `1e30` satisfies
+   *  `z.number().int().positive()` — `Number.isInteger(1e30)` is `true` — so "it is an integer" was
+   *  never a bound at all. App-side guards are the load-bearing fix (T5 fix round, review
+   *  Critical-1's sweep); these make the refusal immediate and specific. */
+  count: z.number().int().positive().max(1_048_576).optional(),
   /** `add_sheet` (the NEW sheet's name) / `delete_sheet` (the EXISTING sheet to remove) /
    *  `rename_sheet` (the EXISTING sheet to rename) — never `insert_rows` and friends, which use
    *  `sheet` instead (see that field's own header for why the two verb families use different
@@ -211,8 +217,22 @@ type SheetsArgs = z.infer<typeof SheetsArgs>;
 const sheetsSetMaxCells = 200;
 
 /** A cheap SHAPE check only — "does this look like an A1 cell or a two-corner span," never real
- *  column math. One or two cell references (`[A-Za-z]+[1-9][0-9]*`) joined by exactly one colon. */
-const A1_RANGE_SHAPE = /^[A-Za-z]+[1-9][0-9]*(:[A-Za-z]+[1-9][0-9]*)?$/;
+ *  column math. One or two cell references (`[A-Za-z]{1,3}[1-9][0-9]{0,6}`) joined by exactly one
+ *  colon.
+ *
+ *  **The letter/digit RUNS are bounded, and that is not cosmetic** (T5 fix round, review Critical-1).
+ *  This pattern used to read `[A-Za-z]+[1-9][0-9]*` under a `.max(64)` — which accepted
+ *  `"ZZZZZZZZZZZZZZ1"` and `"A1:B9223372036854775807"`, both of which then ABORTED THE MAC APP in
+ *  the unchecked `Int` arithmetic of `officeColumnIndex`/`OfficeCellRange.cellCount`
+ *  (`PanelDocumentTab.swift`). Those two functions are now total and are the LOAD-BEARING fix —
+ *  this daemon-side bound is here so the model gets an immediate, specific refusal instead of a
+ *  silent 155-second timeout, exactly the division of labour the `range` operand's own doc already
+ *  describes. Deliberately still LEXICAL, and deliberately still looser than Calc's real grid: 3
+ *  letters reaches XFE (one column past XFD) and 7 digits reaches 9,999,999 (past the 1,048,576-row
+ *  maximum), so an out-of-grid reference remains expressible and is refused by the engine's own
+ *  position verification — which is what `OfficeSheetsFormatTests`' position-verification drill
+ *  rides. */
+const A1_RANGE_SHAPE = /^[A-Za-z]{1,3}[1-9][0-9]{0,6}(:[A-Za-z]{1,3}[1-9][0-9]{0,6})?$/;
 
 // ================================================================================================
 // The fence (spec §5 — narrower than write/edit's resolveWithinAny, on purpose)
