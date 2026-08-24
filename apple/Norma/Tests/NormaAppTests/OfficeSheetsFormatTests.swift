@@ -783,4 +783,128 @@ final class OfficeSheetsFormatTests: XCTestCase {
         }
     }
 
+    /// **V-4 — a GENUINE partial failure, forced live, on an ADOPTED document.** Phase 1's cell
+    /// attributes land; phase 2's width fails its own position check; the model is told the earlier
+    /// attribute may be sitting unsaved in the user's open tab. This is the one behaviour
+    /// `handleSheetsFormat`'s disclosure describes, and before this drill nothing produced it — T4
+    /// paid three fix rounds to close exactly this gap for `set`.
+    ///
+    /// **The vector, and why it splits the two phases** (all drills in this file adopt, so `adopted`
+    /// is true here): `range:"XFC1:XFE1"` gives phase 1 the anchor XFC1 — a real, reachable cell —
+    /// and phase 2 the column span "XFC:XFE", whose last column is one past Calc's own XFD. Phase 1
+    /// verifies against its ANCHOR and passes; phase 2 cannot put the cursor on its span and throws.
+    /// Exactly one attribute is in flight when the failure happens, which is the definition of the
+    /// partial case.
+    func testLiveSheetsFormatPartialFailureTellsTheModelTheChangeIsInTheOpenTab() async throws {
+        try requireLiveEngine()
+        let path = try makeWritableCopy(of: "gate.xlsx")
+        let stateDir = makeScratchDirectory()
+        let host = makeLiveHost(stateDir: stateDir, dirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)])
+        await host.directory.refresh()
+        _ = try await adopt(path, through: host)
+
+        let sent = await send(command("office.sheets.format",
+                                      args: ["path": path, "sheet": "Sheet1", "range": "XFC1:XFE1",
+                                             "bold": true, "width": 96],
+                                      sessionId: "S1", commandId: "pcmd-partial"), through: host)
+        XCTAssertFalse(sent.ok, "phase 2 must fail on a span the cursor cannot reach: \(sent)")
+        XCTAssertTrue(sent.result?.contains("positioning check before formatting") == true, "\(sent)")
+        XCTAssertTrue(sent.result?.contains("already applied") == true,
+                      "a cell attribute PLUS width is the one structurally-partial shape — the "
+                          + "disclosure sentence must be present: \(sent)")
+        XCTAssertTrue(sent.result?.contains("sitting unsaved in your own open tab right now") == true,
+                      "this document was ADOPTED (the drill opened it first), so the adopted branch's "
+                          + "own sentence is the correct one — the opened branch's 'nothing persisted' "
+                          + "would be a lie about a document that is still open: \(sent)")
+        XCTAssertFalse(sent.result?.contains("discarded when Norma closed the document") == true, "\(sent)")
+
+        // And the disclosure is TRUE against the bytes: the broker throws before its save-through, so
+        // nothing reached the file even though phase 1 dispatched into the live document.
+        let sheetXml = try readOOXMLEntry(atPath: path, entry: "xl/worksheets/sheet1.xml")
+        XCTAssertNil(columnWidth(sheetXml, columnOneBasedIndex: 16383),
+                     "phase 2 never ran, so no column width may have been saved: \(sheetXml.prefix(2000))")
+
+        // === The SECOND half of the adopted branch's promise, and the honest reading of it.
+        //
+        // The sentence is CONDITIONAL — "**If** an earlier attribute in this call already applied
+        // ... the tab is dirty, and Norma will refuse further writes." Measured here rather than
+        // assumed: on THIS vector the antecedent turns out to be FALSE. Phase 1 verified its anchor
+        // (XFC1 is reachable) but the bold dispatch left the document unmodified — the engine's own
+        // dirty flag never rises — so nothing partial actually happened, the conditional holds
+        // vacuously, and the next write is correctly ACCEPTED rather than refused.
+        //
+        // That is a real, useful measurement and not a hole: it says the disclosure never fires
+        // falsely on this path. It also means the "refuses further writes" clause is the ONE half of
+        // the disclosure this branch still cannot force live (a partial where the earlier attribute
+        // genuinely lands needs a phase-2 failure that follows a phase-1 dispatch which really
+        // modified the document; no operand combination found does that without mutating production
+        // code). Recorded in `task-5-fixround-report.md` §3 V-4 rather than papered over. The
+        // dirty-refusal MECHANISM itself is broker rule 3, which `sheets set`'s own drills already
+        // prove independently of `format`.
+        let runtime = host.officeRuntime(for: "S1")
+        let dirtyAfterPartial = officeDocumentIsDirty(state: runtime.stateSnapshot, path: path)
+        // Evidence line, permanent — the same shape (and purpose) as the `[LOKBridge slides]`
+        // measurement lines this branch already carries. A two-armed oracle is only honest if the
+        // next reader can see WHICH arm ran; when this was written it was always the false one.
+        FileHandle.standardError.write(Data(
+            "[OfficeSheetsFormatTests] forced partial on an adopted doc: dirty=\(dirtyAfterPartial)\n".utf8))
+        let next = await send(command("office.sheets.format",
+                                      args: ["path": path, "sheet": "Sheet1", "range": "A1", "italic": true],
+                                      sessionId: "S1", commandId: "pcmd-after-partial"), through: host)
+        if dirtyAfterPartial {
+            XCTAssertFalse(next.ok, "the document IS dirty after the partial, so the disclosure's own "
+                               + "'Norma will refuse further writes' must hold: \(next)")
+            XCTAssertTrue(next.result?.contains("unsaved") == true || next.result?.contains("dirty") == true, "\(next)")
+        } else {
+            XCTAssertTrue(next.ok, "nothing applied in phase 1 (the document is not dirty), so the "
+                              + "conditional disclosure's antecedent is false and the next write must "
+                              + "proceed normally — refusing here would be the real bug: \(next)")
+        }
+    }
+
+    /// **V-7 — the two `align` values and the `italic:false` clear that were never fired live.**
+    /// `center` (2) was already proven, which pins the enum FAMILY (`CellHoriJustify`, not
+    /// `ParagraphAdjust` — the competing mapping would have produced "justify" for 2 and failed);
+    /// `left` (1) and `right` (3) follow from it by construction, but "follows by construction" is
+    /// what this arc keeps being wrong about, so they are fired.
+    func testLiveSheetsFormatFiresEveryAlignValueAndClearsItalicExplicitly() async throws {
+        try requireLiveEngine()
+        let path = try makeWritableCopy(of: "gate.xlsx")
+        let stateDir = makeScratchDirectory()
+        let host = makeLiveHost(stateDir: stateDir, dirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)])
+        await host.directory.refresh()
+        _ = try await adopt(path, through: host)
+
+        for (cell, value) in [("D20", "left"), ("D21", "right"), ("D22", "center")] {
+            try await format(["path": path, "sheet": "Sheet1", "range": cell, "align": value],
+                             through: host, commandId: "pcmd-align-\(cell)")
+        }
+        let sheetXml = try readOOXMLEntry(atPath: path, entry: "xl/worksheets/sheet1.xml")
+        let stylesXml = try readOOXMLEntry(atPath: path, entry: "xl/styles.xml")
+        for (cell, value) in [("D20", "left"), ("D21", "right"), ("D22", "center")] {
+            let xf = try XCTUnwrap(cellStyleIndex(sheetXml, cellRef: cell),
+                                   "\(cell) must carry a style after align:\(value): \(sheetXml.prefix(2000))")
+            XCTAssertEqual(xfHorizontalAlignment(stylesXml, xfIndex: xf), value,
+                           "align:\(value) must serialise as horizontal=\"\(value)\" — a wrong enum "
+                               + "value would land on a DIFFERENT alignment, not on none: \(stylesXml.prefix(3000))")
+        }
+
+        // italic:false as an explicit CLEAR — the mirror of the bold:false drill, on a cell made
+        // italic first so the clear has something real to undo.
+        try await format(["path": path, "sheet": "Sheet1", "range": "D23", "italic": true], through: host, commandId: "pcmd-i-on")
+        let onXml = try readOOXMLEntry(atPath: path, entry: "xl/worksheets/sheet1.xml")
+        let onStyles = try readOOXMLEntry(atPath: path, entry: "xl/styles.xml")
+        let onXf = try XCTUnwrap(cellStyleIndex(onXml, cellRef: "D23"))
+        let onFont = try XCTUnwrap(xfFontId(onStyles, xfIndex: onXf))
+        XCTAssertTrue(fontIsItalic(onStyles, fontId: onFont), "setup: D23 must be italic first")
+
+        try await format(["path": path, "sheet": "Sheet1", "range": "D23", "italic": false], through: host, commandId: "pcmd-i-off")
+        let offXml = try readOOXMLEntry(atPath: path, entry: "xl/worksheets/sheet1.xml")
+        let offStyles = try readOOXMLEntry(atPath: path, entry: "xl/styles.xml")
+        let offXf = try XCTUnwrap(cellStyleIndex(offXml, cellRef: "D23"))
+        let offFont = try XCTUnwrap(xfFontId(offStyles, xfIndex: offXf))
+        XCTAssertFalse(fontIsItalic(offStyles, fontId: offFont),
+                       "italic:false must CLEAR italic, not be ignored: \(offStyles.prefix(3000))")
+    }
+
 }
