@@ -331,6 +331,132 @@ final class OfficeSlidesCommandTests: XCTestCase {
         XCTAssertFalse(contentXML.contains("Norma T6 Slide Two"), "slide 2's OLD title must be gone from the saved bytes, not just superseded in a read")
     }
 
+    /// **The OTHER discriminator `set_text` needs — not cross-SLIDE, cross-FIELD, on the SAME slide.**
+    /// `slides.ts`'s own documented contract: an absent `title`/`body` key means "leave this
+    /// placeholder alone," never "clear it" — the identical absent-means-untouched contract `sheets
+    /// format`'s attributes established. The two-part discriminator test above only ever exercises
+    /// title+body together; this proves each field independently, through the same save+reopen +
+    /// filesystem-seal discipline, on two fresh copies so neither call's own state can bleed into the
+    /// other's reading.
+    func testLiveSetTextTitleOnlyAndBodyOnlyLeaveTheOtherFieldUntouchedProvenBySaveAndIndependentReopen() async throws {
+        try requireLiveEngine()
+
+        // --- title-only: body must survive untouched. ---
+        do {
+            let path = try makeWritableCopy(of: "three-slide.odp")
+            let stateDir = makeScratchDirectory()
+            let host = makeLiveHost(stateDir: stateDir, dirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)])
+            await host.directory.refresh()
+            let runtime = host.officeRuntime(for: "S1")
+            runtime.open(path)
+            let opened = await waitUntilLive { runtime.stateSnapshot.documents[path] != nil || runtime.stateSnapshot.phase == .failed }
+            XCTAssertTrue(opened, "setup: three-slide.odp must open cleanly (title-only)")
+
+            let setResult = await send(command("office.slides.set_text",
+                                               args: ["path": path, "slide": 2, "title": "TITLE ONLY CHANGED"],
+                                               sessionId: "S1", commandId: "pcmd_set_title_only"), through: host)
+            XCTAssertTrue(setResult.ok, "\(setResult)")
+
+            guard let independentClient = host.officeHelperSupervisor?.client else {
+                return XCTFail("no live client for the independent reopen (title-only)")
+            }
+            let docId = "slides-set-title-only-two-part-reopen"
+            _ = try await independentClient.open(docId: docId, path: path)
+            let saved = try await independentClient.slidesRead(docId: docId, slide: 1)
+            XCTAssertEqual(saved.title, "TITLE ONLY CHANGED", "title must be changed in the saved file")
+            XCTAssertEqual(saved.body, "second bullet", "body must survive UNTOUCHED when only title is named")
+            try await independentClient.close(docId: docId)
+
+            let contentXML = try readODFEntry(atPath: path, entry: "content.xml")
+            XCTAssertTrue(contentXML.contains("TITLE ONLY CHANGED"), "saved content.xml must contain the new title")
+            XCTAssertTrue(contentXML.contains("second bullet"), "saved content.xml must still contain the untouched original body")
+        }
+
+        // --- body-only: title must survive untouched. ---
+        do {
+            let path = try makeWritableCopy(of: "three-slide.odp")
+            let stateDir = makeScratchDirectory()
+            let host = makeLiveHost(stateDir: stateDir, dirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)])
+            await host.directory.refresh()
+            let runtime = host.officeRuntime(for: "S1")
+            runtime.open(path)
+            let opened = await waitUntilLive { runtime.stateSnapshot.documents[path] != nil || runtime.stateSnapshot.phase == .failed }
+            XCTAssertTrue(opened, "setup: three-slide.odp must open cleanly (body-only)")
+
+            let setResult = await send(command("office.slides.set_text",
+                                               args: ["path": path, "slide": 2, "body": "BODY ONLY CHANGED"],
+                                               sessionId: "S1", commandId: "pcmd_set_body_only"), through: host)
+            XCTAssertTrue(setResult.ok, "\(setResult)")
+
+            guard let independentClient = host.officeHelperSupervisor?.client else {
+                return XCTFail("no live client for the independent reopen (body-only)")
+            }
+            let docId = "slides-set-body-only-two-part-reopen"
+            _ = try await independentClient.open(docId: docId, path: path)
+            let saved = try await independentClient.slidesRead(docId: docId, slide: 1)
+            XCTAssertEqual(saved.title, "Norma T6 Slide Two", "title must survive UNTOUCHED when only body is named")
+            XCTAssertEqual(saved.body, "BODY ONLY CHANGED", "body must be changed in the saved file")
+            try await independentClient.close(docId: docId)
+
+            let contentXML = try readODFEntry(atPath: path, entry: "content.xml")
+            XCTAssertTrue(contentXML.contains("BODY ONLY CHANGED"), "saved content.xml must contain the new body")
+            XCTAssertTrue(contentXML.contains("Norma T6 Slide Two"), "saved content.xml must still contain the untouched original title")
+        }
+    }
+
+    // MARK: - `reorder` multi-step live drill — the two-part discriminator, through save+reopen
+
+    /// Probe B (`testProbeInvestigatesWhetherReorderIsReachableHeadless`) only ran a single step
+    /// (index 1 -> index 2). `slidesReorderOnDedicatedThread`'s own multi-step composition (repeated
+    /// `MovePageUp`/`Down` dispatches) was implemented on the strength of research's own "clamps
+    /// safely at the document boundary" finding but never independently live-verified. This is that
+    /// verification: slide 1 (index 0) moves to position 3 (index 2), a distance-2 move requiring TWO
+    /// `MovePageDown` dispatches in sequence. Adjacent-swap arithmetic predicts
+    /// `[One, Two, Three] -> [Two, Three, One]` (step 1 swaps 0<->1: `[Two, One, Three]`; step 2 swaps
+    /// 1<->2, where `One` now sits: `[Two, Three, One]`) — the full three-position readout again,
+    /// through save+reopen and the raw `content.xml` seal, the same standard every other write verb
+    /// here has met.
+    func testLiveReorderMultiStepMovesAcrossTwoPositionsProvenBySaveAndIndependentReopen() async throws {
+        try requireLiveEngine()
+        let path = try makeWritableCopy(of: "three-slide.odp")
+        let stateDir = makeScratchDirectory()
+        let host = makeLiveHost(stateDir: stateDir, dirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)])
+        await host.directory.refresh()
+
+        let runtime = host.officeRuntime(for: "S1")
+        runtime.open(path)
+        let opened = await waitUntilLive { runtime.stateSnapshot.documents[path] != nil || runtime.stateSnapshot.phase == .failed }
+        XCTAssertTrue(opened, "setup: three-slide.odp must open cleanly")
+
+        let reorderResult = await send(command("office.slides.reorder", args: ["path": path, "slide": 1, "to": 3],
+                                               sessionId: "S1", commandId: "pcmd_reorder_multistep"), through: host)
+        XCTAssertTrue(reorderResult.ok, "\(reorderResult)")
+
+        guard let independentClient = host.officeHelperSupervisor?.client else {
+            return XCTFail("no live client for the independent reopen")
+        }
+        let independentDocId = "slides-reorder-multistep-two-part-reopen"
+        _ = try await independentClient.open(docId: independentDocId, path: path)
+
+        let infoAfter = try await independentClient.slidesInfo(docId: independentDocId)
+        XCTAssertEqual(infoAfter.count, 3, "reorder must never change the slide count")
+
+        let savedSlide1 = try await independentClient.slidesRead(docId: independentDocId, slide: 0)
+        XCTAssertEqual(savedSlide1.title, "Norma T6 Slide Two", "index 0 must now hold what was slide 2")
+        let savedSlide2 = try await independentClient.slidesRead(docId: independentDocId, slide: 1)
+        XCTAssertEqual(savedSlide2.title, "Norma T6 Slide Three", "index 1 must now hold what was slide 3")
+        let savedSlide3 = try await independentClient.slidesRead(docId: independentDocId, slide: 2)
+        XCTAssertEqual(savedSlide3.title, "Norma T6 Slide One", "index 2 must now hold the slide this call targeted — moved two full positions")
+        XCTAssertEqual(savedSlide3.body, "first bullet", "the moved slide's own body must have traveled with it, not been left behind or duplicated")
+
+        try await independentClient.close(docId: independentDocId)
+
+        let contentXML = try readODFEntry(atPath: path, entry: "content.xml")
+        XCTAssertTrue(contentXML.contains("Norma T6 Slide One"), "saved content.xml must still contain the moved slide's title")
+        XCTAssertTrue(contentXML.contains("Norma T6 Slide Two"), "saved content.xml must still contain the shifted slide 2's title")
+        XCTAssertTrue(contentXML.contains("Norma T6 Slide Three"), "saved content.xml must still contain the shifted slide 3's title")
+    }
+
     // MARK: - `add_slide` live drill — this IS the probe for InsertPage's relative-insert semantics
 
     /// **`InsertPage`'s own landing position was UNRESOLVED from source** (`slides-lok-research.md`'s
