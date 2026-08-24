@@ -290,6 +290,18 @@ final class OfficeWireCodecTests: XCTestCase {
             "slidesReadOk": #"{"type":"slidesReadOk","seq":1,"docId":"d"}"#,
             "slidesSetTextOk": #"{"type":"slidesSetTextOk","seq":1,"docId":"d","applied":["title"]}"#,
             "slidesManagePageOk": #"{"type":"slidesManagePageOk","seq":1,"docId":"d","slideCount":1}"#,
+            // office-agent-tools T7 — docs. `docsReplace`'s `find` is non-empty and newline-free and
+            // `docsInsert`'s `text` is non-empty because the decoder REFUSES otherwise (see those
+            // cases' own decode guards) — a fixture that skipped those fields would decode as
+            // `.rejected` and this test would fail on the case name, which is the intended shape.
+            "docsInfo": #"{"type":"docsInfo","seq":1,"docId":"d"}"#,
+            "docsRead": #"{"type":"docsRead","seq":1,"docId":"d"}"#,
+            "docsReplace": #"{"type":"docsReplace","seq":1,"docId":"d","find":"a","replaceWith":"b"}"#,
+            "docsInsert": #"{"type":"docsInsert","seq":1,"docId":"d","text":"x","atStart":false,"asNewParagraph":true}"#,
+            "docsInfoOk": #"{"type":"docsInfoOk","seq":1,"docId":"d","pages":1,"paragraphs":2,"characters":9}"#,
+            "docsReadOk": #"{"type":"docsReadOk","seq":1,"docId":"d","text":"one\ntwo"}"#,
+            "docsReplaceOk": #"{"type":"docsReplaceOk","seq":1,"docId":"d","replaced":2}"#,
+            "docsInsertOk": #"{"type":"docsInsertOk","seq":1,"docId":"d","paragraphs":4}"#,
         ]
         XCTAssertEqual(Set(fixtures.keys), Set(OfficeWireFrame.wireTypes),
                        "fixtures must cover exactly OfficeWireFrame.wireTypes, no more, no less")

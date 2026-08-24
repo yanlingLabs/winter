@@ -117,6 +117,11 @@ final class OfficeCommandConsumerTests: XCTestCase {
     /// synchronously with the not-implemented refusal, for ANY verb" picks from this list rather than
     /// hand-naming a real one, which would otherwise silently start asserting on ASYNC behaviour these
     /// tests were never built to await.
+    /// **T7: this list is now EMPTY, and that is the point — no office verb is a stub any more.**
+    /// It is kept, computed the same way, precisely so it stays a tripwire: if a later task adds a
+    /// wire verb to `OFFICE_COMMAND_ACTIONS` without giving `handle`'s switch a case for it, that
+    /// verb reappears here and `testEveryRealOfficeVerbRoutesToARealHandlerNotTheRefusal` below
+    /// fails, rather than the verb silently shipping as a refusal nobody notices.
     static let stillStubOfficeVerbs = allOfficeVerbsAsOfT1.filter {
         ![
             "office.sheets.info", "office.sheets.read", "office.sheets.set",
@@ -126,8 +131,20 @@ final class OfficeCommandConsumerTests: XCTestCase {
             "office.sheets.format",
             "office.slides.info", "office.slides.read", "office.slides.set_text",
             "office.slides.add_slide", "office.slides.delete_slide", "office.slides.reorder",
+            "office.docs.info", "office.docs.read", "office.docs.replace",
+            "office.docs.insert", "office.docs.append",
         ].contains($0)
     }
+
+    /// Actions with the `office.` prefix that `handle`'s switch does NOT recognize. Nothing on the
+    /// wire produces these — the daemon only ever emits the 22 in `OFFICE_COMMAND_ACTIONS` — but
+    /// `action` decodes as a plain `String` with no shape guarantee (`SessionEvent.swift`), so the
+    /// refusal path is what stands between an unexpected value and silence. These are the tests'
+    /// stand-in for the stub verbs that no longer exist.
+    static let unroutedOfficeActions = [
+        "office.docs.frobnicate", "office.docs.explode",
+        "office.spreadsheets.explode", "office.charts.info",
+    ]
 
     // MARK: - isOfficeAction
 
@@ -147,10 +164,11 @@ final class OfficeCommandConsumerTests: XCTestCase {
 
     func testEveryOfficeVerbAnswersNotImplementedRatherThanSilence() {
         let consumer = makeConsumer()
-        for (index, action) in Self.stillStubOfficeVerbs.enumerated() {
+        for (index, action) in Self.unroutedOfficeActions.enumerated() {
             consumer.handle(command(action, commandId: "pcmd_\(index)"))
         }
-        XCTAssertEqual(sent.count, Self.stillStubOfficeVerbs.count, "every still-stub verb must answer exactly once")
+        XCTAssertEqual(sent.count, Self.unroutedOfficeActions.count,
+                       "every unrouted office action must answer exactly once, synchronously")
         XCTAssertTrue(sent.allSatisfy { $0.ok == false }, "\(sent)")
         XCTAssertTrue(sent.allSatisfy { $0.imageBase64 == nil })
         XCTAssertTrue(sent.allSatisfy { ($0.result?.isEmpty ?? true) == false }, "\(sent)")
@@ -158,40 +176,57 @@ final class OfficeCommandConsumerTests: XCTestCase {
         // throw" proof; every result actually saying something is the other half, checked above.
     }
 
+    /// **T7 — the successor to the stub census, and a real tripwire rather than a restatement.**
+    /// The old test proved "every not-yet-built verb refuses." Every verb is built now, so the
+    /// meaningful claim is the opposite one: no REAL verb may fall through to the refusal. A new
+    /// wire verb added without a `handle` case would answer "not implemented yet" forever, with a
+    /// perfectly green suite — this is what fails instead.
+    ///
+    /// Each real verb is dispatched onto its own `Task` and answers asynchronously, so this asserts
+    /// the discriminating fact available synchronously: nothing was answered on the spot, and in
+    /// particular nothing was answered with the refusal.
+    func testEveryRealOfficeVerbRoutesToARealHandlerNotTheRefusal() {
+        XCTAssertTrue(Self.stillStubOfficeVerbs.isEmpty,
+                      "every wire office verb must have a handler: \(Self.stillStubOfficeVerbs)")
+        let consumer = makeConsumer()
+        for (index, action) in Self.allOfficeVerbsAsOfT1.enumerated() {
+            consumer.handle(command(action, commandId: "pcmd_real_\(index)"))
+        }
+        XCTAssertTrue(sent.allSatisfy { ($0.result?.contains("not implemented") ?? false) == false },
+                      "no real verb may answer with T1's refusal: \(sent)")
+    }
+
     func testTheRefusalNamesTheToolAndVerbSeparately() {
         let consumer = makeConsumer()
-        // T6 correction: every `slides` verb is real now (`handleSlidesInfo`/etc.) — `docs` is the
-        // ONLY kind left on T1's own stub shell, so this moves to `office.docs.info`, the last
-        // remaining stub kind's own first verb.
-        consumer.handle(command("office.docs.info"))
+        // T7 correction: EVERY office verb is real now, `docs` included, so no real action reaches
+        // the refusal any more. The refusal's remaining job is an `office.`-prefixed action this
+        // file's switch does not recognize — which is what this now uses.
+        consumer.handle(command("office.docs.frobnicate"))
         XCTAssertEqual(sent.count, 1)
         XCTAssertEqual(sent.first?.ok, false)
         XCTAssertTrue(sent.first?.result?.contains("docs") == true, "\(sent)")
-        XCTAssertTrue(sent.first?.result?.contains("info") == true, "\(sent)")
+        XCTAssertTrue(sent.first?.result?.contains("frobnicate") == true, "\(sent)")
         let lower = sent.first?.result?.lowercased() ?? ""
         XCTAssertTrue(lower.contains("not implemented") || lower.contains("not yet implement"), "\(sent)")
     }
 
-    /// T6 correction: `slides` is real now too (every verb, all six) — `docs` is the ONLY kind left
-    /// on T1's own stub shell, so this test can no longer demonstrate two DIFFERENT KINDS both
-    /// refusing (there is only one kind left to pick from). Renamed in spirit, not just body: now
-    /// proves two DIFFERENT VERBS of the same (last remaining stub) kind are each worded with their
-    /// own verb name — the kind-naming half of the same claim is already covered by
-    /// `testTheRefusalNamesTheToolAndVerbSeparately` (which asserts "docs" appears) and does not need
-    /// re-proving here.
+    /// T7 correction: with every real verb routed, this proves two DIFFERENT UNROUTED verbs are each
+    /// worded with their own verb name rather than sharing one generic sentence — the kind-naming
+    /// half is already covered by `testTheRefusalNamesTheToolAndVerbSeparately`.
     func testDifferentVerbsOfTheSameStubKindAreWordedWithTheirOwnVerb() {
         let consumer = makeConsumer()
-        consumer.handle(command("office.docs.replace", commandId: "c1"))
-        consumer.handle(command("office.docs.append", commandId: "c2"))
+        consumer.handle(command("office.docs.frobnicate", commandId: "c1"))
+        consumer.handle(command("office.docs.explode", commandId: "c2"))
+        XCTAssertEqual(sent.count, 2, "both must answer synchronously")
         XCTAssertTrue(sent[0].result?.contains("docs") == true, "\(sent[0])")
-        XCTAssertTrue(sent[0].result?.contains("replace") == true, "\(sent[0])")
+        XCTAssertTrue(sent[0].result?.contains("frobnicate") == true, "\(sent[0])")
         XCTAssertTrue(sent[1].result?.contains("docs") == true, "\(sent[1])")
-        XCTAssertTrue(sent[1].result?.contains("append") == true, "\(sent[1])")
+        XCTAssertTrue(sent[1].result?.contains("explode") == true, "\(sent[1])")
     }
 
     func testTheAnswerCarriesTheCommandsOwnSessionAndId() {
         let consumer = makeConsumer()
-        consumer.handle(command("office.docs.info", commandId: "pcmd_xyz", sessionId: "s-office-1"))
+        consumer.handle(command("office.docs.frobnicate", commandId: "pcmd_xyz", sessionId: "s-office-1"))
         XCTAssertEqual(sent.first?.sessionId, "s-office-1")
         XCTAssertEqual(sent.first?.commandId, "pcmd_xyz")
     }
@@ -202,7 +237,7 @@ final class OfficeCommandConsumerTests: XCTestCase {
     /// the test pins the observable behaviour rather than the implementation detail.
     func testAnOfficeCommandWithNoTabIdStillAnswers() {
         let consumer = makeConsumer()
-        consumer.handle(command("office.docs.info", tabId: nil))
+        consumer.handle(command("office.docs.frobnicate", tabId: nil))
         XCTAssertEqual(sent.count, 1)
         XCTAssertEqual(sent.first?.ok, false)
     }
@@ -239,12 +274,12 @@ final class OfficeCommandConsumerTests: XCTestCase {
     /// (`sheetsResultMaxLength`, checked on the BUILT result) proving the equivalent property for a
     /// verb that must read `args` to do its job at all.
     ///
-    /// T6 correction: `slides` is real now too — moved to `office.docs.info`, the last remaining
-    /// stub kind, same reasoning as this file's other T6-corrected tests above.
+    /// T7 correction: every office verb is real now, so this moved again — to an UNROUTED
+    /// `office.`-prefixed action, the only thing the refusal path still answers.
     func testTheRefusalNeverGrowsWithArgs() {
         let consumer = makeConsumer()
         let hugePath = String(repeating: "x", count: 100_000)
-        consumer.handle(command("office.docs.info", args: ["path": hugePath, "sheet": "S"]))
+        consumer.handle(command("office.docs.frobnicate", args: ["path": hugePath, "sheet": "S"]))
         XCTAssertEqual(sent.count, 1)
         XCTAssertFalse(sent.first?.result?.contains(hugePath) == true)
         XCTAssertLessThan(sent.first?.result?.count ?? Int.max, 1_000,
@@ -313,6 +348,19 @@ final class OfficeCommandConsumerTests: XCTestCase {
         slidesManagePage: @escaping (String, OfficeSlidesManagePageOp, Int?, Int?, Int?, OfficeSlidesLayoutPreset?) async throws -> Int = { _, _, _, _, _, _ in
             throw OfficeHelperClientError.serverError(reason: "slidesManagePage not stubbed for this test")
         },
+        // office-agent-tools T7 — same "explicit stub per test, throw if unstubbed" shape.
+        docsInfo: @escaping (String) async throws -> (pages: Int, paragraphs: Int, characters: Int) = { _ in
+            throw OfficeHelperClientError.serverError(reason: "docsInfo not stubbed for this test")
+        },
+        docsRead: @escaping (String) async throws -> String = { _ in
+            throw OfficeHelperClientError.serverError(reason: "docsRead not stubbed for this test")
+        },
+        docsReplace: @escaping (String, String, String) async throws -> Int = { _, _, _ in
+            throw OfficeHelperClientError.serverError(reason: "docsReplace not stubbed for this test")
+        },
+        docsInsert: @escaping (String, String, Bool, Bool) async throws -> Int = { _, _, _, _ in
+            throw OfficeHelperClientError.serverError(reason: "docsInsert not stubbed for this test")
+        },
         // Fix-round review (item 4) — every EXISTING caller of this helper only ever exercises
         // sheetsInfo/sheetsRead (read-only, no save-through) or a refusal path (never reaches save
         // either), so the original hardcoded `"/tmp/unused-save"` — a path that does not exist —
@@ -328,19 +376,6 @@ final class OfficeCommandConsumerTests: XCTestCase {
         // one, which is exactly what a real already-open human tab looks like to it — the caller
         // still has to `open` the document on the returned runtime for the broker's rule-1 lookup
         // (`stateSnapshot.documents[path]`) to find it.
-        // office-agent-tools T7 — same "explicit stub per test, throw if unstubbed" shape.
-        docsInfo: @escaping (String) async throws -> (pages: Int, paragraphs: Int, characters: Int) = { _ in
-            throw OfficeHelperClientError.serverError(reason: "docsInfo not stubbed for this test")
-        },
-        docsRead: @escaping (String) async throws -> String = { _ in
-            throw OfficeHelperClientError.serverError(reason: "docsRead not stubbed for this test")
-        },
-        docsReplace: @escaping (String, String, String) async throws -> Int = { _, _, _ in
-            throw OfficeHelperClientError.serverError(reason: "docsReplace not stubbed for this test")
-        },
-        docsInsert: @escaping (String, String, Bool, Bool) async throws -> Int = { _, _, _, _ in
-            throw OfficeHelperClientError.serverError(reason: "docsInsert not stubbed for this test")
-        },
         adoptExistingRuntime: Bool = false
     ) -> (consumer: OfficeCommandConsumer, runtime: OfficeRuntime) {
         let driver = OfficeRuntime.Driver(
@@ -1357,5 +1392,266 @@ final class OfficeCommandConsumerTests: XCTestCase {
         world.consumer.handle(command("office.slides.reorder", args: ["path": path, "slide": 3, "to": 1]))
         await waitUntil { !self.sent.isEmpty }
         XCTAssertEqual(sent.first?.ok, true, "\(sent)")
+    }
+
+    // MARK: - office-agent-tools T7: docs' own operand guards (the app-side half of the sweep)
+
+    /// **The class this arc has now paid for three times, closed on arrival for `docs`.**
+    /// `paragraphIndex`'s `Int(Double)` TRAPS outside `Int`'s range — a SIGTRAP that aborts
+    /// Norma.app and every open document's unsaved edits. The daemon's zod bounds these too, but
+    /// `panel_command.args` is `z.record(z.string(), z.unknown())` with only a byte cap, so nothing
+    /// between a tool's schema and this file types or bounds a value at all — and `docs.ts` did not
+    /// exist during the sweep that closed the same door for `sheets` and `slides`.
+    ///
+    /// **Forced red, before the guard existed**: with the ceiling removed from `paragraphIndex`,
+    /// `office.docs.read fromParagraph:1e30` takes the XCTest runner down outright
+    /// ("Restarting after unexpected exit, crash, or test timeout"), which is what an aborting
+    /// `Int(Double)` looks like from outside a test process — there is no XCTFail to catch.
+    func testDocsReadRefusesAnAppAbortingParagraphIndexOnBothOperands() async {
+        let vectors: [(key: String, value: Any, label: String)] = [
+            ("fromParagraph", 1e30, "1e30"),
+            ("toParagraph", 1e30, "1e30"),
+            ("fromParagraph", 9.223372036854775e18, "Int64.max as Double"),
+            ("toParagraph", -1, "negative"),
+            ("fromParagraph", 0, "zero"),
+            ("toParagraph", 1.5, "fractional"),
+            ("fromParagraph", 1_000_001, "past the ceiling"),
+        ]
+        var driverCalled = false
+        for v in vectors {
+            let path = makeScratchFile(named: "notes.odt")
+            let world = makeSheetsWorld(
+                workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+                docsRead: { _ in driverCalled = true; return "one\ntwo" })
+            sent.removeAll()
+            world.consumer.handle(command("office.docs.read", args: ["path": path, v.key: v.value],
+                                          commandId: "pcmd-\(v.key)-\(v.label)"))
+            await waitUntil { !self.sent.isEmpty }
+            XCTAssertEqual(sent.first?.ok, false, "\(v.key) = \(v.label) must refuse: \(sent)")
+            XCTAssertTrue(sent.first?.result?.contains(v.key) == true,
+                          "the refusal must name the operand at fault: \(sent)")
+        }
+        XCTAssertFalse(driverCalled, "an out-of-range index must refuse before the broker is reached")
+    }
+
+    /// **The type-arm hole, closed on every arm — T5 round 3's own `isPresent` shape.**
+    /// A guard gated on `if case .number?` alone would let `fromParagraph: "3"` walk past into
+    /// "absent" and return the WHOLE document while reporting success: the model asked for a slice,
+    /// got everything, and was told it worked. That regression shipped once already in this arc and
+    /// was caught only by the fix's own test.
+    func testDocsReadRefusesAWrongTypedParagraphIndexOnEveryTypeArm() async {
+        let vectors: [(key: String, value: Any, label: String)] = [
+            ("fromParagraph", "3", "string"),
+            ("fromParagraph", true, "bool"),
+            ("fromParagraph", [1, 2], "array"),
+            ("fromParagraph", ["n": 3], "object"),
+            ("toParagraph", "9", "string"),
+            ("toParagraph", false, "bool"),
+        ]
+        var driverCalled = false
+        for v in vectors {
+            let path = makeScratchFile(named: "notes.odt")
+            let world = makeSheetsWorld(
+                workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+                docsRead: { _ in driverCalled = true; return "one\ntwo" })
+            sent.removeAll()
+            world.consumer.handle(command("office.docs.read", args: ["path": path, v.key: v.value],
+                                          commandId: "pcmd-type-\(v.key)-\(v.label)"))
+            await waitUntil { !self.sent.isEmpty }
+            XCTAssertEqual(sent.first?.ok, false,
+                           "\(v.key) as \(v.label) must REFUSE, never collapse to \"absent\" and "
+                               + "silently return the whole document: \(sent)")
+        }
+        XCTAssertFalse(driverCalled, "a wrong-typed index must refuse before the broker is reached")
+    }
+
+    /// The counterpart that stops the guard from over-refusing — the right type still works, and an
+    /// explicit `null` still means ABSENT (so `{"fromParagraph": null}` reads the whole document
+    /// rather than refusing, exactly as omitting it does).
+    func testDocsReadStillAcceptsRealParagraphBoundsAndTreatsNullAsAbsent() async {
+        let path = makeScratchFile(named: "notes.odt")
+        let world = makeSheetsWorld(
+            workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+            docsRead: { _ in "one\ntwo\nthree" })
+
+        world.consumer.handle(command("office.docs.read",
+                                      args: ["path": path, "fromParagraph": 2, "toParagraph": 3]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, true, "\(sent)")
+        XCTAssertTrue(sent.first?.result?.contains("paragraphs 2-3 of 3") == true, "\(sent)")
+        XCTAssertFalse(sent.first?.result?.contains("one") == true, "paragraph 1 is outside the range: \(sent)")
+
+        sent.removeAll()
+        world.consumer.handle(command("office.docs.read",
+                                      args: ["path": path, "fromParagraph": NSNull()],
+                                      commandId: "pcmd-null-from"))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, true, "an explicit null must mean absent, not undecodable: \(sent)")
+        XCTAssertTrue(sent.first?.result?.contains("all 3 paragraphs") == true, "\(sent)")
+    }
+
+    /// `all: false` is refused APP-SIDE too, not merely at the daemon. The daemon is not the only
+    /// possible producer of a `panel_command`, and the failure this prevents — replacing every
+    /// occurrence when the caller asked for one — lands in the user's saved file.
+    func testDocsReplaceRefusesAllFalseAndAWrongTypedAllAppSide() async {
+        var driverCalled = false
+        for (value, label) in [(false, "false"), ("yes" as Any, "string"), (0 as Any, "number")] as [(Any, String)] {
+            let path = makeScratchFile(named: "notes.odt")
+            let world = makeSheetsWorld(
+                workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+                docsReplace: { _, _, _ in driverCalled = true; return 1 },
+                save: { [self] _, _ in self.makeScratchFile(named: "saved.odt") })
+            sent.removeAll()
+            world.consumer.handle(command("office.docs.replace",
+                                          args: ["path": path, "find": "a", "replaceWith": "b", "all": value],
+                                          commandId: "pcmd-all-\(label)"))
+            await waitUntil { !self.sent.isEmpty }
+            XCTAssertEqual(sent.first?.ok, false, "all as \(label) must refuse: \(sent)")
+        }
+        XCTAssertFalse(driverCalled, "a refused `all` must never reach the driver")
+    }
+
+    /// `find`/`replaceWith`'s own app-side guards, each closing a distinct hole: a missing or empty
+    /// `find` (no count is meaningful), an ABSENT `replaceWith` (a forgotten operand must never
+    /// become a deletion), and a line break in either (the engine's matcher never crosses a paragraph
+    /// node, so our count and the engine's would be guaranteed to disagree).
+    func testDocsReplaceGuardsFindAndReplaceWithAppSide() async {
+        let vectors: [([String: Any], String)] = [
+            (["find": "", "replaceWith": "b"], "empty find"),
+            (["replaceWith": "b"], "missing find"),
+            (["find": 3], "wrong-typed find"),
+            (["find": "a"], "missing replaceWith"),
+            (["find": "a", "replaceWith": 3], "wrong-typed replaceWith"),
+            (["find": "a\nb", "replaceWith": "c"], "multiline find"),
+            (["find": "a", "replaceWith": "b\nc"], "multiline replaceWith"),
+        ]
+        var driverCalled = false
+        for (extra, label) in vectors {
+            let path = makeScratchFile(named: "notes.odt")
+            let world = makeSheetsWorld(
+                workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+                docsReplace: { _, _, _ in driverCalled = true; return 1 },
+                save: { [self] _, _ in self.makeScratchFile(named: "saved.odt") })
+            var args: [String: Any] = ["path": path]
+            for (k, v) in extra { args[k] = v }
+            sent.removeAll()
+            world.consumer.handle(command("office.docs.replace", args: args, commandId: "pcmd-fr-\(label)"))
+            await waitUntil { !self.sent.isEmpty }
+            XCTAssertEqual(sent.first?.ok, false, "\(label) must refuse: \(sent)")
+        }
+        XCTAssertFalse(driverCalled, "none of these may reach the driver")
+
+        // The counterpart: an EMPTY replaceWith is legal and DOES reach the driver — that is how a
+        // caller deletes every occurrence, and a guard that refused it would be over-refusing.
+        let path = makeScratchFile(named: "notes.odt")
+        var seen: (String, String)?
+        let world = makeSheetsWorld(
+            workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+            docsReplace: { _, find, replaceWith in seen = (find, replaceWith); return 2 },
+            save: { [self] _, _ in self.makeScratchFile(named: "saved.odt") })
+        sent.removeAll()
+        world.consumer.handle(command("office.docs.replace",
+                                      args: ["path": path, "find": "TODO ", "replaceWith": ""],
+                                      commandId: "pcmd-empty-replacewith"))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, true, "\(sent)")
+        XCTAssertEqual(seen?.0, "TODO ")
+        XCTAssertEqual(seen?.1, "")
+    }
+
+    /// `insert`'s `at` — the closed enum, and the same present-but-undecodable close. Without it,
+    /// `at: "beginning"` would fall through to the "end" default and the text would land at the
+    /// OPPOSITE end of the document from the one asked for, with `ok: true`.
+    func testDocsInsertRefusesAnUnknownOrWrongTypedAtAndHonoursTheRealOnes() async {
+        var driverCalled = false
+        for (value, label) in [("beginning" as Any, "unknown"), ("END" as Any, "wrong case"),
+                               (0 as Any, "number"), (true as Any, "bool")] as [(Any, String)] {
+            let path = makeScratchFile(named: "notes.odt")
+            let world = makeSheetsWorld(
+                workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+                docsInsert: { _, _, _, _ in driverCalled = true; return 3 },
+                save: { [self] _, _ in self.makeScratchFile(named: "saved.odt") })
+            sent.removeAll()
+            world.consumer.handle(command("office.docs.insert",
+                                          args: ["path": path, "text": "x", "at": value],
+                                          commandId: "pcmd-at-\(label)"))
+            await waitUntil { !self.sent.isEmpty }
+            XCTAssertEqual(sent.first?.ok, false, "at as \(label) must refuse: \(sent)")
+        }
+        XCTAssertFalse(driverCalled, "a bad `at` must refuse before the driver")
+
+        // And the real ones reach the driver with the right flags. `insert` never starts a new
+        // paragraph; `append` always does, and always at the end — the distinction the tool
+        // description promises.
+        for (at, expectedAtStart) in [("start", true), ("end", false)] {
+            let path = makeScratchFile(named: "notes.odt")
+            var seen: (Bool, Bool)?
+            let world = makeSheetsWorld(
+                workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+                docsInsert: { _, _, atStart, asNewParagraph in seen = (atStart, asNewParagraph); return 3 },
+                save: { [self] _, _ in self.makeScratchFile(named: "saved.odt") })
+            sent.removeAll()
+            world.consumer.handle(command("office.docs.insert", args: ["path": path, "text": "x", "at": at],
+                                          commandId: "pcmd-at-ok-\(at)"))
+            await waitUntil { !self.sent.isEmpty }
+            XCTAssertEqual(sent.first?.ok, true, "\(sent)")
+            XCTAssertEqual(seen?.0, expectedAtStart)
+            XCTAssertEqual(seen?.1, false, "insert must never start a new paragraph")
+        }
+
+        let path = makeScratchFile(named: "notes.odt")
+        var appendSeen: (Bool, Bool)?
+        let world = makeSheetsWorld(
+            workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+            docsInsert: { _, _, atStart, asNewParagraph in appendSeen = (atStart, asNewParagraph); return 4 },
+            save: { [self] _, _ in self.makeScratchFile(named: "saved.odt") })
+        sent.removeAll()
+        world.consumer.handle(command("office.docs.append", args: ["path": path, "text": "x"],
+                                      commandId: "pcmd-append-ok"))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, true, "\(sent)")
+        XCTAssertEqual(appendSeen?.0, false, "append is always at the end")
+        XCTAssertEqual(appendSeen?.1, true, "append always starts a new paragraph")
+    }
+
+    /// The `docs read` character cap — refused with the operands that fix it NAMED, never truncated.
+    /// A silently clipped document body is indistinguishable from a complete one to whatever reads
+    /// it, and a model that summarises a clipped document reports a conclusion about text it never
+    /// saw (T3's I4 lesson).
+    func testDocsReadRefusesAnOverCapResultAndNamesTheOperandsThatFixIt() async {
+        let path = makeScratchFile(named: "notes.odt")
+        let huge = (0..<2000).map { "paragraph \($0) with enough text to matter here" }.joined(separator: "\n")
+        XCTAssertGreaterThan(huge.count, OfficeCommandConsumer.officeDocsReadMaxCharacters,
+                             "setup: the fixture must actually exceed the cap")
+        let world = makeSheetsWorld(
+            workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+            docsRead: { _ in huge })
+        world.consumer.handle(command("office.docs.read", args: ["path": path]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, false, "\(sent)")
+        let refusal = sent.first?.result ?? ""
+        XCTAssertTrue(refusal.contains("\(OfficeCommandConsumer.officeDocsReadMaxCharacters)"),
+                      "the cap must be named in the refusal, not only in a comment: \(refusal)")
+        XCTAssertTrue(refusal.contains("fromParagraph"), "and so must the way around it: \(refusal)")
+        XCTAssertFalse(refusal.contains("paragraph 1999"), "refused, never truncated-and-returned")
+    }
+
+    /// `docs info`'s own three counts, formatted from the driver's answer — and the honesty clause
+    /// about the page count, which is a real property of the mechanism (`getParts()` reads a cached
+    /// counter of page frames CURRENTLY CONSTRUCTED, and Writer paginates lazily) rather than a
+    /// hedge.
+    func testDocsInfoReportsAllThreeCountsAndDisclosesThePageCountCaveat() async {
+        let path = makeScratchFile(named: "notes.odt")
+        let world = makeSheetsWorld(
+            workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+            docsInfo: { _ in (pages: 2, paragraphs: 3, characters: 41) })
+        world.consumer.handle(command("office.docs.info", args: ["path": path]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, true, "\(sent)")
+        let text = sent.first?.result ?? ""
+        XCTAssertTrue(text.contains("2 pages"), "\(text)")
+        XCTAssertTrue(text.contains("3 paragraphs"), "\(text)")
+        XCTAssertTrue(text.contains("41 characters"), "\(text)")
+        XCTAssertTrue(text.contains("under-report"), "the page count's own caveat must reach the model: \(text)")
     }
 }
