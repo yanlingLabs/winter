@@ -331,6 +331,120 @@ final class OfficeSlidesCommandTests: XCTestCase {
         XCTAssertFalse(contentXML.contains("Norma T6 Slide Two"), "slide 2's OLD title must be gone from the saved bytes, not just superseded in a read")
     }
 
+    // MARK: - `add_slide` live drill — this IS the probe for InsertPage's relative-insert semantics
+
+    /// **`InsertPage`'s own landing position was UNRESOLVED from source** (`slides-lok-research.md`'s
+    /// own "flagged for live-testing rather than guessed"). This test is that live test, run against
+    /// `slidesAddOnDedicatedThread`'s own first-attempt implementation (`setPart`-then-bare-
+    /// `InsertPage`, `MovePageFirst` as a position-0 correction) — three independent scenarios, each
+    /// on its own fresh copy so a failure in one is never entangled with another: append (`at`
+    /// omitted), insert in the middle (`at` = 2), insert at the very front (`at` = 1). Each asserts
+    /// every ORIGINAL slide's own title is exactly where the shift predicts — never the new slide's
+    /// own content, which is expected to be empty and proves nothing about WHERE it landed. The
+    /// middle-insert scenario additionally goes through the full save+reopen two-part-discriminator
+    /// treatment (independent reopen + raw `content.xml` filesystem seal), matching the standard
+    /// `set_text`/`delete_slide` already met — the other two scenarios check via the same adopted
+    /// session's own `info` call, which is sufficient to confirm POSITION (this test's actual subject)
+    /// without re-paying the full save+reopen cost three times over.
+    func testLiveAddSlideInsertsAtEveryRequestedPosition() async throws {
+        try requireLiveEngine()
+
+        // --- Scenario 1: `at` omitted -> append at the end. ---
+        do {
+            let path = try makeWritableCopy(of: "three-slide.odp")
+            let stateDir = makeScratchDirectory()
+            let host = makeLiveHost(stateDir: stateDir, dirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)])
+            await host.directory.refresh()
+            let runtime = host.officeRuntime(for: "S1")
+            runtime.open(path)
+            let opened = await waitUntilLive { runtime.stateSnapshot.documents[path] != nil || runtime.stateSnapshot.phase == .failed }
+            XCTAssertTrue(opened, "setup: three-slide.odp must open cleanly")
+
+            let addResult = await send(command("office.slides.add_slide", args: ["path": path],
+                                               sessionId: "S1", commandId: "pcmd_add_append"), through: host)
+            XCTAssertTrue(addResult.ok, "\(addResult)")
+
+            let infoResult = await send(command("office.slides.info", args: ["path": path],
+                                                sessionId: "S1", commandId: "pcmd_info_append"), through: host)
+            XCTAssertTrue(infoResult.ok, "\(infoResult)")
+            let infoText = infoResult.result ?? ""
+            XCTAssertTrue(infoText.contains("4 slides"), infoText)
+            XCTAssertTrue(infoText.hasPrefix("4 slides") || infoText.contains("4 slides"), infoText)
+            // Original three, in order, at positions 1/2/3 — the new (empty) slide at position 4.
+            let lines = infoText.split(separator: "\n")
+            XCTAssertTrue(lines.contains(where: { $0.hasPrefix("1. ") && $0.contains("Norma T6 Slide One") }), infoText)
+            XCTAssertTrue(lines.contains(where: { $0.hasPrefix("2. ") && $0.contains("Norma T6 Slide Two") }), infoText)
+            XCTAssertTrue(lines.contains(where: { $0.hasPrefix("3. ") && $0.contains("Norma T6 Slide Three") }), infoText)
+            XCTAssertTrue(lines.contains(where: { $0.hasPrefix("4. ") }), "there must be a 4th slide line: \(infoText)")
+        }
+
+        // --- Scenario 2: `at` = 2 -> insert in the middle, full save+reopen discriminator. ---
+        let middlePath = try makeWritableCopy(of: "three-slide.odp")
+        let middleStateDir = makeScratchDirectory()
+        let middleHost = makeLiveHost(stateDir: middleStateDir, dirs: [SessionDirEntry(path: (middlePath as NSString).deletingLastPathComponent, locked: true)])
+        await middleHost.directory.refresh()
+        let middleRuntime = middleHost.officeRuntime(for: "S1")
+        middleRuntime.open(middlePath)
+        let middleOpened = await waitUntilLive { middleRuntime.stateSnapshot.documents[middlePath] != nil || middleRuntime.stateSnapshot.phase == .failed }
+        XCTAssertTrue(middleOpened, "setup: three-slide.odp must open cleanly (middle scenario)")
+
+        let addMiddleResult = await send(command("office.slides.add_slide", args: ["path": middlePath, "at": 2],
+                                                  sessionId: "S1", commandId: "pcmd_add_middle"), through: middleHost)
+        XCTAssertTrue(addMiddleResult.ok, "\(addMiddleResult)")
+
+        guard let independentClient = middleHost.officeHelperSupervisor?.client else {
+            return XCTFail("no live client for the independent reopen")
+        }
+        let independentDocId = "slides-add-middle-two-part-reopen"
+        _ = try await independentClient.open(docId: independentDocId, path: middlePath)
+        let infoAfter = try await independentClient.slidesInfo(docId: independentDocId)
+        XCTAssertEqual(infoAfter.count, 4, "add_slide must produce exactly 4 slides")
+
+        // Index 0 — untouched (was slide 1, still slide 1).
+        let savedSlide1 = try await independentClient.slidesRead(docId: independentDocId, slide: 0)
+        XCTAssertEqual(savedSlide1.title, "Norma T6 Slide One", "slide 1 must be untouched by an insert at position 2")
+        // Index 1 — the new, empty slide (this is where `at: 2` landed it).
+        // Index 2 — what WAS slide 2, shifted down one.
+        let savedSlide3 = try await independentClient.slidesRead(docId: independentDocId, slide: 2)
+        XCTAssertEqual(savedSlide3.title, "Norma T6 Slide Two", "the original slide 2 must have shifted to position 3")
+        // Index 3 — what WAS slide 3, shifted down one.
+        let savedSlide4 = try await independentClient.slidesRead(docId: independentDocId, slide: 3)
+        XCTAssertEqual(savedSlide4.title, "Norma T6 Slide Three", "the original slide 3 must have shifted to position 4")
+
+        try await independentClient.close(docId: independentDocId)
+
+        let contentXML = try readODFEntry(atPath: middlePath, entry: "content.xml")
+        XCTAssertTrue(contentXML.contains("Norma T6 Slide One"), "saved content.xml must still contain slide 1's untouched title")
+        XCTAssertTrue(contentXML.contains("Norma T6 Slide Two"), "saved content.xml must still contain the shifted slide 2's title")
+        XCTAssertTrue(contentXML.contains("Norma T6 Slide Three"), "saved content.xml must still contain the shifted slide 3's title")
+
+        // --- Scenario 3: `at` = 1 -> insert at the very front. ---
+        do {
+            let path = try makeWritableCopy(of: "three-slide.odp")
+            let stateDir = makeScratchDirectory()
+            let host = makeLiveHost(stateDir: stateDir, dirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)])
+            await host.directory.refresh()
+            let runtime = host.officeRuntime(for: "S1")
+            runtime.open(path)
+            let opened = await waitUntilLive { runtime.stateSnapshot.documents[path] != nil || runtime.stateSnapshot.phase == .failed }
+            XCTAssertTrue(opened, "setup: three-slide.odp must open cleanly (front scenario)")
+
+            let addResult = await send(command("office.slides.add_slide", args: ["path": path, "at": 1],
+                                               sessionId: "S1", commandId: "pcmd_add_front"), through: host)
+            XCTAssertTrue(addResult.ok, "\(addResult)")
+
+            let infoResult = await send(command("office.slides.info", args: ["path": path],
+                                                sessionId: "S1", commandId: "pcmd_info_front"), through: host)
+            XCTAssertTrue(infoResult.ok, "\(infoResult)")
+            let infoText = infoResult.result ?? ""
+            let lines = infoText.split(separator: "\n")
+            // The new (empty) slide at position 1 — original three shifted to positions 2/3/4.
+            XCTAssertTrue(lines.contains(where: { $0.hasPrefix("2. ") && $0.contains("Norma T6 Slide One") }), infoText)
+            XCTAssertTrue(lines.contains(where: { $0.hasPrefix("3. ") && $0.contains("Norma T6 Slide Two") }), infoText)
+            XCTAssertTrue(lines.contains(where: { $0.hasPrefix("4. ") && $0.contains("Norma T6 Slide Three") }), infoText)
+        }
+    }
+
     // MARK: - `delete_slide` live drill — the two-part discriminator, through save+reopen
 
     /// Mirrors `set_text`'s own two-part-discriminator test exactly in spirit: `delete_slide` on

@@ -3778,6 +3778,18 @@ final class LOKBridge: OfficeDocumentBridge {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
         guard doc.kind == .presentation else { throw SaveError.notPresentation(docId: docId, kind: doc.kind) }
         let partCount = Int(doc.handle.pointee.pClass.pointee.getParts?(doc.handle) ?? 0)
+        if op == .add {
+            // `at` is allowed to equal `partCount` itself (append past the last existing index) —
+            // unlike `slide`/`to` elsewhere in this function, which must be a real EXISTING slide.
+            // Only a genuinely out-of-range `at` (negative, impossible from the wire's own 1-based
+            // `.positive()` validation; or greater than `partCount`) refuses. Reuses `.slideNotFound`
+            // — its own message text is neutral enough to describe either "no such existing slide" or
+            // "no such insertion point" honestly.
+            if let at, at < 0 || at > partCount {
+                throw SaveError.slideNotFound(docId: docId, slide: at, slideCount: partCount)
+            }
+            return try slidesAddOnDedicatedThread(docId: docId, doc: doc, at: at, layout: layout, partCount: partCount)
+        }
         if op == .delete, let slide {
             guard slide >= 0, slide < partCount else {
                 throw SaveError.slideNotFound(docId: docId, slide: slide, slideCount: partCount)
@@ -3797,9 +3809,13 @@ final class LOKBridge: OfficeDocumentBridge {
             }
             return try slidesReorderOnDedicatedThread(docId: docId, doc: doc, from: slide, to: to, partCount: partCount)
         }
-        throw OfficeHelperServerError.posix(
-            "slides \(op.rawValue) mechanism not yet implemented (office-agent-tools T6, pending live "
-            + "research into InsertPage/DeletePage command names)")
+        // Unreachable — every op (`.add`/`.delete`/`.reorder`) now has a real case above, and the
+        // wire's own decode guard (`OfficeWireFrame.slidesManagePage`'s per-op paired-field contract,
+        // `OfficeWireCodecTests.testSlidesManagePagePerOpFieldShapeIsRejectedAsMalformed`) guarantees
+        // `.delete`'s `slide` and `.reorder`'s `slide`+`to` are never nil by the time a frame decodes
+        // successfully — mirroring `sheetsManageSheetOnDedicatedThread`'s own `.rename`/`newName`
+        // precondition for the identical class of already-guaranteed invariant.
+        preconditionFailure("slidesManagePageOnDedicatedThread(\(op.rawValue)) reached with a nil required field — the wire decode's own invariant was violated")
     }
 
     /// office-agent-tools T6, Probe B — reachability was UNDETERMINED FROM SOURCE going in:
@@ -3959,6 +3975,115 @@ final class LOKBridge: OfficeDocumentBridge {
             throw SaveError.writeVerificationFailed(docId: docId, address: "delete_slide(\(slide + 1))")
         }
         return partCount - 1
+    }
+
+    /// office-agent-tools T6 — `add_slide`'s real mechanism. Coordinator instruction: `setPart`-then-
+    /// relative `InsertPage`, NEVER `InsertPos` (`SfxUInt16Item`, research's own semantics — 0-based?
+    /// 1-based? relative-to-current? — left explicitly UNRESOLVED, "flagged for live-testing rather
+    /// than guessed" and then never guessed). This dispatches `.uno:InsertPage` completely BARE
+    /// (`[:]`, no args at all — `PageName`/`WhatLayout`/`IsPageBack`/`IsPageObj`/`InsertPos` are ALL
+    /// optional per the slot table) after `setPart`ing the PREDECESSOR position, relying on research's
+    /// own citation that insert acts "relative to `DrawViewShell::GetActualPage()`" — **live-confirmed
+    /// by this function's own test to land immediately AFTER the current part**, not before, not
+    /// always-at-the-end (`OfficeSlidesCommandTests.testLiveAddSlideInsertsAtEveryRequestedPosition`).
+    /// Position 0 (new slide becomes the very first) has no real predecessor to `setPart` onto, so
+    /// this inserts after position 0 as usual and then dispatches `.uno:MovePageFirst` as a correction
+    /// step — relying on a SECOND live-confirmed fact, that a freshly inserted page becomes the
+    /// current/selected part automatically, so `MovePageFirst`'s own selection-based targeting needs
+    /// no extra `setPart` to reach it.
+    ///
+    /// Same primary-view dispatch as `reorder`/`delete_slide` (`destroyAgentViewIfAnyOnDedicatedThread`
+    /// first — see `slidesReorderOnDedicatedThread`'s own header for the full sheets precedent this
+    /// still rides), same `notifyWhenFinished: true`, same disclosed residual.
+    ///
+    /// **Layout assignment is best-effort and UNVERIFIABLE, by construction, not by gap in this
+    /// function.** Ruling 1 (`slides-lok-research.md` §3): LOK exposes NO layout read-back at all, for
+    /// any slide, ever — so unlike position (verified below by content), there is no re-read this
+    /// function could perform even in principle to confirm `.uno:AssignLayout` took effect. Dispatched
+    /// with `notifyWhenFinished: true` and a pump like every other write here, but its own success is
+    /// asserted nowhere — the tool description says so plainly (`slides.ts`'s own `add_slide` entry).
+    /// `WhatPage`/`WhatLayout` (`SfxUInt32Item` per the slot table, `sd/sdi/sdraw.sdi:2137-2138`) use
+    /// JSON type `"long"` — an educated guess consistent with this bridge's own established UNO-args
+    /// JSON convention (`sheets`' own `Index`, a `SfxUInt16Item`, resolved live to `"unsigned short"`;
+    /// no failure mode was observed live using `"long"` here, but unlike position this was NOT
+    /// independently proven correct by a read-back, only by the absence of an error/dialog/crash and
+    /// research's own note that `AssignLayout` "internally rewrites itself... which is exactly why it
+    /// sidesteps L2" — i.e. even a malformed arg here is expected to be safe, not silently wrong in a
+    /// way this bridge could fail to notice).
+    private func slidesAddOnDedicatedThread(docId: String, doc: OpenDocument, at: Int?,
+                                             layout: OfficeSlidesLayoutPreset?, partCount: Int) throws -> Int {
+        func titleAt(_ part: Int) throws -> String? {
+            guard try selectSlidePlaceholderOnDedicatedThread(docId: docId, slide: part, tabCount: 1) != nil else {
+                return nil
+            }
+            guard let agentViewId = documents[docId]?.agentViewId else { throw SaveError.noAgentView(docId) }
+            return readSelectedShapeTextOnDedicatedThread(doc, agentViewId: agentViewId, part: part)
+        }
+        var beforeTitles: [String?] = []
+        beforeTitles.reserveCapacity(partCount)
+        for part in 0..<partCount {
+            beforeTitles.append(try titleAt(part))
+        }
+
+        // Omitted `at` -> append at the end (one past the last valid index, `partCount`). Clamped
+        // defensively (`OfficeCommandConsumer`'s own `at` decode is the real range guard; this is
+        // belt-and-braces against calling this function directly with something out of range).
+        let targetIndex = max(0, min(at ?? partCount, partCount))
+        let predecessorIndex = max(0, targetIndex == 0 ? 0 : targetIndex - 1)
+
+        destroyAgentViewIfAnyOnDedicatedThread(doc, docId: docId)
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(predecessorIndex))
+        pumpDedicatedThreadForPendingDispatch(doc, viewId: doc.viewId, part: predecessorIndex)
+        postUnoCommandOnDedicatedThread(doc, ".uno:InsertPage", [:], notifyWhenFinished: true)
+        pumpDedicatedThreadForPendingDispatch(doc, viewId: doc.viewId, part: targetIndex)
+
+        if targetIndex == 0 {
+            postUnoCommandOnDedicatedThread(doc, ".uno:MovePageFirst", [:], notifyWhenFinished: true)
+            pumpDedicatedThreadForPendingDispatch(doc, viewId: doc.viewId, part: 0)
+        }
+
+        if let layout {
+            let args: [String: Any] = [
+                "WhatPage": ["type": "long", "value": targetIndex],
+                "WhatLayout": ["type": "long", "value": layout.autoLayoutValue],
+            ]
+            postUnoCommandOnDedicatedThread(doc, ".uno:AssignLayout", args, notifyWhenFinished: true)
+            pumpDedicatedThreadForPendingDispatch(doc, viewId: doc.viewId, part: targetIndex)
+        }
+
+        // Verification is content-based and position-only (layout, per the header above, cannot be
+        // verified at all): skip exactly the NEW slide's own expected resting position and assert
+        // every remaining title, in order, reconstructs `beforeTitles` exactly — the mirror image of
+        // `slidesDeleteOnDedicatedThread`'s own "skip the deleted index" check.
+        func survivorsNow() throws -> [String?] {
+            let newPartCount = Int(doc.handle.pointee.pClass.pointee.getParts?(doc.handle) ?? 0)
+            guard newPartCount == partCount + 1 else { return [] }
+            var titles: [String?] = []
+            titles.reserveCapacity(partCount)
+            for part in 0..<newPartCount where part != targetIndex {
+                titles.append(try titleAt(part))
+            }
+            return titles
+        }
+        func verified() throws -> Bool { try survivorsNow() == beforeTitles }
+
+        var ok = try verified()
+        var attempts = 1
+        while !ok, attempts < Self.slidesManageVerificationAttempts {
+            pumpDedicatedThreadForPendingDispatch(doc, viewId: doc.viewId, part: targetIndex)
+            ok = try verified()
+            attempts += 1
+        }
+        if attempts > 1 {
+            FileHandle.standardError.write(Data(
+                "[LOKBridge slides] add needed \(attempts) attempt(s) before verification succeeded (or the budget was exhausted)\n".utf8))
+        }
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        guard ok else {
+            throw SaveError.writeVerificationFailed(docId: docId, address: "add_slide(at \(targetIndex + 1))")
+        }
+        return partCount + 1
     }
 
     /// office-agent-tools T4 — the shared JSON-args UNO dispatch this task's own three new sheet-
