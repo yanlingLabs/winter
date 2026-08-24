@@ -2349,6 +2349,34 @@ final class LOKBridge: OfficeDocumentBridge {
     /// analogue (a structural, non-per-cell document mutation) since this call site has not yet
     /// earned its own independently-measured number across repeated live runs.
     private static let slidesManageVerificationAttempts = 20
+    /// office-agent-tools T6 fix round 1 (review F-6) — `selectSlidePlaceholderOnDedicatedThread`'s
+    /// OWN budget, and the first number in this block that is MEASURED rather than borrowed or
+    /// reasoned. F-6 recommended raising it (it borrowed `goToCellVerificationAttempts = 4`, sized
+    /// for a different call site, and its own comment conceded as much). Half of that is right — the
+    /// call site should own its budget, so raising one can never silently loosen another — but the
+    /// *raise* is empirically wrong, and the measurement that says so is worth more than the
+    /// reasoning that suggested it.
+    ///
+    /// **Method**: set to 40 temporarily, added the permanent evidence line in
+    /// `selectSlidePlaceholderOnDedicatedThread`, ran the full 11-test live suite twice under
+    /// saturating CPU load (one spin loop per core) to provoke the deferred-dispatch class on
+    /// purpose. Result, and it is bimodal with nothing in between:
+    ///
+    ///     313  needed 2 attempt(s), landed=true      <- every logged success
+    ///      15  needed 40 attempt(s), landed=false    <- every non-landing
+    ///
+    /// **Zero occurrences at attempts 3 through 39.** No success has ever needed more than 2 (and
+    /// attempt-1 successes go unlogged, so the real consumption is lower still); no non-landing was
+    /// ever rescued by attempts 5..40. All 15 non-landings trace, via the evidence line's own
+    /// slide/tab fields, to the three genuinely placeholder-less slides the F-0 and F-4 drills exist
+    /// to exercise — legitimate structural absences, correctly reported, on tests that passed.
+    ///
+    /// So 4 already carries 2x headroom over every success ever observed, and a larger number would
+    /// only make every LEGITIMATE refusal ~10x slower. The residual flake this was hoped to cure is
+    /// therefore NOT "the callback needed more time" — a discrete loss, not a slow arrival. What can
+    /// help is re-posting the key events, never pumping harder: see `slidesSetTextOnDedicatedThread`'s
+    /// pass-2 retry, which is the fix that measurement actually pointed at.
+    private static let slidePlaceholderPositionAttempts = 4
 
     /// Splits `getTextSelection`'s own TSV shape (rows joined by `"\n"`, cells within a row joined by
     /// `"\t"`) into a grid — the ONE place both `sheetsInfo` and `sheetsRead` turn that raw string into
@@ -3600,10 +3628,19 @@ final class LOKBridge: OfficeDocumentBridge {
             // earned its own independently-derived budget yet).
             var rect = documents[docId]?.lastGraphicSelectionRectTwips
             var attempts = 1
-            while rect == nil, attempts < Self.goToCellVerificationAttempts {
+            while rect == nil, attempts < Self.slidePlaceholderPositionAttempts {
                 pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: slide)
                 rect = documents[docId]?.lastGraphicSelectionRectTwips
                 attempts += 1
+            }
+            if attempts > 1 {
+                // Evidence line, permanent — the same shape (and the same purpose) as the
+                // `[LOKBridge sheets] GoToCell` line this file already carries: how often the race
+                // actually fires, and which attempt it resolved on, never silent. This is what makes
+                // `slidePlaceholderPositionAttempts` a MEASURED budget rather than a guessed one, and
+                // what will show the next reader whether it is still adequate.
+                FileHandle.standardError.write(Data(
+                    "[LOKBridge slides] placeholder positioning (slide \(slide), tab \(tabCount)) needed \(attempts) attempt(s), landed=\(rect != nil)\n".utf8))
             }
             guard let rect else {
                 return nil
@@ -3768,7 +3805,13 @@ final class LOKBridge: OfficeDocumentBridge {
     /// reach it in pass 2 — selection is not carried between the two passes), and Tab-cycling is this
     /// file's own established flake class (`goToCellVerificationAttempts`, T3's own finding). So a
     /// transient positioning flake in pass 2 — AFTER pass 1 proved existence and AFTER an earlier
-    /// field in this SAME call already wrote — remains structurally possible. `applied` is still
+    /// field in this SAME call already wrote — remains structurally possible.
+    /// **Narrowed, not closed, by the RED-full-suite follow-up**: that flake was caught in the act
+    /// (the full suite's own `.partialSetFailure` on slide 2's body — task-6-report.md §9.1), the
+    /// budget hypothesis for it was measured and FALSIFIED (§9.4), and `writeField` now re-posts the
+    /// whole positioning once, which absorbs a single discrete loss (forced red/green, §9.5). Two
+    /// consecutive losses still reach the caller — deliberately, since that is a different diagnosis.
+    /// `applied` is still
     /// tracked through pass 2 for exactly this reason: the moment a pass-2 positioning failure lands
     /// with `applied` non-empty, it is wrapped in `.partialSetFailure`, mirroring
     /// `sheetsSetOnDedicatedThread`'s own identical `index > 0` wrapping for the SAME root cause (a
@@ -3799,7 +3842,40 @@ final class LOKBridge: OfficeDocumentBridge {
 
         // Pass 2 — both named placeholders are now KNOWN to exist; write to them.
         func writeField(tabCount: Int, text: String, fieldName: String) throws {
-            guard try selectSlidePlaceholderOnDedicatedThread(docId: docId, slide: slide, tabCount: tabCount) != nil else {
+            // **Retry the WHOLE positioning here, and ONLY here** (office-agent-tools T6 fix round 1,
+            // the RED-full-suite follow-up — see task-6-report.md §9.4/§9.5). Three things justify a
+            // retry on this one call site and on no other:
+            //
+            // 1. **A `nil` here cannot be structural.** Pass 1 proved this exact placeholder exists,
+            //    on this same dedicated thread, within this same call — nothing can have mutated the
+            //    deck in between. So the retry can only ever absorb a transient loss; it is
+            //    structurally incapable of masking a genuine absence, which is what makes it safe
+            //    here and NOT safe in `read`/`info`/pass 1, where `nil` is genuinely ambiguous and a
+            //    retry would tax every legitimate refusal for no information gain.
+            // 2. **Re-posting is the only action the measurement leaves on the table.** The attempt
+            //    distribution (`slidePlaceholderPositionAttempts`' own header) is bimodal: successes
+            //    land at attempt 2, always; non-landings are never rescued by more pumping. The
+            //    residual flake is a DISCRETE LOSS of an Escape/Tab key event or its selection
+            //    callback, not a slow arrival — so a fresh Escape + fresh Tab posts is the fix shape,
+            //    and a bigger pump budget provably is not.
+            // 3. **It also cures the likeliest concrete mechanism.** A write leaves the shape in
+            //    text-edit mode; one Escape exits edit mode but leaves the object SELECTED, and
+            //    Tab-cycling from "an object is already selected" lands off-by-one and can run off
+            //    the end of the slide's shape list into `nil`. The retry's own fresh Escape starts
+            //    from the deselected state the mechanism assumes.
+            //
+            // Bounded deliberately small (2 whole positionings, not a loop) — a second consecutive
+            // discrete loss is a different diagnosis (suspect the callback delivery path, not the
+            // keys) and must surface as a failure rather than be absorbed silently. The evidence
+            // line inside `selectSlidePlaceholderOnDedicatedThread` logs every retried attempt, so a
+            // recurrence stays observable instead of becoming invisible the moment it stops failing.
+            var positioned = try selectSlidePlaceholderOnDedicatedThread(docId: docId, slide: slide, tabCount: tabCount)
+            if positioned == nil {
+                FileHandle.standardError.write(Data(
+                    "[LOKBridge slides] pass-2 positioning for \(fieldName) on slide \(slide) returned nil although pass 1 proved it exists — re-posting Escape+Tab once\n".utf8))
+                positioned = try selectSlidePlaceholderOnDedicatedThread(docId: docId, slide: slide, tabCount: tabCount)
+            }
+            guard positioned != nil else {
                 throw SaveError.slidePlaceholderNotFound(docId: docId, slide: slide, field: fieldName)
             }
             guard let agentViewId = documents[docId]?.agentViewId else { throw SaveError.noAgentView(docId) }
