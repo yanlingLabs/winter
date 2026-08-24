@@ -177,10 +177,16 @@ const SheetsArgs = z.object({
    *  task-5-report.md). "general" clears back to the plain default format; "number" is a decimal
    *  number (2 places); "percent"/"currency"/"date" apply that preset. Every preset changes how a
    *  cell's value DISPLAYS — NEVER the value itself: a cell holding the number 0.5, formatted
-   *  "percent", reads back as the text "50.00%" from a `read` in VALUES mode, while the same `read`
-   *  in FORMULAS mode (or any formula elsewhere that references the cell) still sees/computes with
-   *  the plain number 0.5 — that split is the entire point of a number format, and it is what this
-   *  tool's own live proof checks. Reapplying the SAME preset is a no-op, not a toggle back to
+   *  "percent", reads back as the text "50.00%" from a `read` (both the exact string and the
+   *  survival of a real close-and-reopen through the engine are asserted live), while any FORMULA
+   *  elsewhere that references the cell still computes with the plain number 0.5 (`=D7*2` gives 1,
+   *  not 100 — also asserted live). That split is the entire point of a number format.
+   *
+   *  **`read formulas:true` does NOT recover the raw value** — an earlier draft of this text told
+   *  the model it did, and the T5 fix round's own drill measured otherwise: formulas mode on a
+   *  formatted CONSTANT cell returns the same display string ("50.00%"), because there is no formula
+   *  to show and the engine falls back to the formatted text. To get the underlying number, compute
+   *  with it in a formula. Reapplying the SAME preset is a no-op, not a toggle back to
    *  general — this operand always sets an absolute state. Same absent-means-untouched contract as
    *  `bold` above. */
   numberFormat: z.enum(["general", "number", "percent", "currency", "date"]).optional(),
@@ -432,11 +438,19 @@ export function registerSheetsTool(r: ToolRegistry, deps: SheetsToolDeps): void 
       + "and the bold from the first call survives. Every attribute sets an ABSOLUTE state, never a "
       + "toggle — true always makes bold/italic so, false always clears it, the same preset applied "
       + "twice is a no-op, not a flip-back. numberFormat changes how a cell's value DISPLAYS, never "
-      + "the value itself — a cell holding 0.5 formatted \"percent\" reads back as \"50.00%\" from a "
-      + "read in values mode, while formulas mode (or any formula elsewhere referencing it) still "
-      + "sees the plain number 0.5. width is a COLUMN property, not a cell one: it widens every "
-      + "column range touches, in full, even if range is only a few rows tall. align is horizontal "
-      + "only in v1.\n"
+      + "the value itself — a cell holding 0.5 formatted \"percent\" reads back as \"50.00%\", while "
+      + "any formula elsewhere referencing it still computes with the plain 0.5 (=D7*2 gives 1, not "
+      + "100). formulas:true does NOT recover the raw value of a formatted constant cell — it "
+      + "returns the same display string; compute with the cell in a formula instead. width is a "
+      + "COLUMN property, not a cell one: it widens every "
+      + "column range touches, in full, even if range is only a few rows tall — and because that is "
+      + "a much larger operation than the range's cell count suggests, a call naming width is capped "
+      + "at 64 columns (the cell attributes keep the full range). align is horizontal only in v1.\n"
+      + "One honest limit on format's own answer: unlike set and the resize verbs, which re-read "
+      + "what they changed, format reports the attributes it DISPATCHED and then saved. That is "
+      + "strong evidence (a failed save is reported as a failure, and every attribute is proven live "
+      + "against the saved bytes) but it is not a per-call read-back — if a specific cell's "
+      + "formatting is load-bearing for what you do next, read it back yourself.\n"
       + "Every path must be inside this session's own working directories — an office read/write "
       + "COPIES the file and parses it with LibreOffice, so it is not an ordinary file read/write and "
       + "the usual unrestricted-reads rule does not cover it.\n"

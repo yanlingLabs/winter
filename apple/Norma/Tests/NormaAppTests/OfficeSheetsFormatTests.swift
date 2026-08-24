@@ -431,6 +431,18 @@ final class OfficeSheetsFormatTests: XCTestCase {
                                         sessionId: "S1", commandId: "pcmd-read-before"), through: host)
         XCTAssertFalse(before.result?.contains("%") == true, "the baseline must not already look like a percent: \(before)")
 
+        // Minor-2 (fix-round review) — D7's PRE-format numFmtId, captured rather than assumed. The
+        // original asserted `numFmtId != 0` against "the pristine General default", which is a false
+        // statement about THIS fixture: `gate.xlsx`'s styles.xml declares
+        // `<numFmt numFmtId="164" formatCode="General"/>` and both `cellXfs` entries carry
+        // numFmtId="164", so a cell seeded by `sheets set` inherits 164 and the assertion could not
+        // fail — for any input, including a numberFormat dispatch that did nothing at all. The
+        // sibling preset drill had already hit this live and fixed it per-cell; this is that fix,
+        // applied here too.
+        let pristineStylesXml = try readOOXMLEntry(atPath: path, entry: "xl/styles.xml")
+        let pristineSheetXml = try readOOXMLEntry(atPath: path, entry: "xl/worksheets/sheet1.xml")
+        let pristineNumFmtId = xfNumFmtId(pristineStylesXml, xfIndex: cellStyleIndex(pristineSheetXml, cellRef: "D7") ?? 0) ?? 0
+
         try await format(["path": path, "sheet": "Sheet1", "range": "D7", "numberFormat": "percent"],
                          through: host, commandId: "pcmd-format")
 
@@ -457,12 +469,48 @@ final class OfficeSheetsFormatTests: XCTestCase {
         let cellD7 = try XCTUnwrap(cellElement(sheetXml, cellRef: "D7"), sheetXml.prefix(3000).description)
         XCTAssertTrue(cellD7.contains("<v>0.5</v>"), "the saved <v> element itself must still be the raw 0.5: \(cellD7)")
 
-        // Supporting signal (not load-bearing on its own): the cell's own numFmtId changed from the
-        // pristine General default.
+        // Supporting signal (not load-bearing on its own — the `%` in `sheets read` above is the
+        // discriminator): the cell's own numFmtId CHANGED from whatever it actually started at.
         let stylesXml = try readOOXMLEntry(atPath: path, entry: "xl/styles.xml")
         let xf = try XCTUnwrap(cellStyleIndex(sheetXml, cellRef: "D7"))
         let numFmtId = xfNumFmtId(stylesXml, xfIndex: xf) ?? 0
-        XCTAssertNotEqual(numFmtId, 0, "numFmtId must have moved off General (0) after formatting")
+        XCTAssertNotEqual(numFmtId, pristineNumFmtId,
+                          "D7's numFmtId must have CHANGED from its real pristine value "
+                              + "(\(pristineNumFmtId)) — this fixture's default is a CUSTOM id whose "
+                              + "format code is literally \"General\", so comparing against 0 could not "
+                              + "fail even for a no-op dispatch: \(stylesXml.prefix(3000))")
+
+        // === Important-2 / V-3 — the brief's own unfulfilled clause: re-open and read it back
+        // THROUGH LOK. Every assertion above this line is against the saved zip bytes, which proves
+        // the format SERIALISED but not that LibreOffice RE-IMPORTS what it exported. A format that
+        // round-tripped to something else, or to nothing, would pass every other drill in this file.
+        // The reopen is a fresh docId through the helper client directly, bypassing the adopted
+        // runtime entirely.
+        guard let client = host.officeHelperSupervisor?.client else { return XCTFail("no live client to reopen through") }
+        let reopenDocId = "sheets-format-numfmt-reopen"
+        _ = try await client.open(docId: reopenDocId, path: path)
+        let reopenedValues = try await client.sheetsRead(docId: reopenDocId, sheet: "Sheet1", range: "D7:D7", formulas: false)
+        XCTAssertTrue(reopenedValues.first?.first?.contains("%") == true,
+                      "the percent format must survive a REAL close-and-reopen through the engine "
+                          + "itself, not merely serialise into the file: \(reopenedValues)")
+
+        // Minor-5 — the tool description told the model, as fact, that `read formulas:true` on a
+        // number-formatted cell "still sees the plain number 0.5". **It does not, and this drill is
+        // what found that out**: formulas mode on a formatted CONSTANT cell returns the same display
+        // string, because there is no formula to show and the engine falls back to the formatted
+        // text. The description now says so; this assertion is the pin on the REAL behaviour, so the
+        // claim and the code cannot drift apart again in either direction.
+        let reopenedFormulas = try await client.sheetsRead(docId: reopenDocId, sheet: "Sheet1", range: "D7:D7", formulas: true)
+        let formulaCell = reopenedFormulas.first?.first ?? ""
+        XCTAssertEqual(formulaCell, "50.00%",
+                       "formulas mode on a formatted CONSTANT cell returns the display string, not "
+                           + "the raw value — if this ever changes, `sheets.ts`'s numberFormat doc "
+                           + "and the tool description must change with it: \(reopenedFormulas)")
+        // ...which also pins the exact display string the description quotes to the model (Minor-5's
+        // other half: `"50.00%"` was asserted to the model and checked by nothing but `contains("%")`).
+        XCTAssertEqual(reopenedValues.first?.first, "50.00%",
+                       "the exact string the tool description promises: \(reopenedValues)")
+        try await client.close(docId: reopenDocId)
     }
 
     /// **Reapplying the SAME numberFormat preset is a no-op, not a toggle back to General** — the
@@ -597,17 +645,18 @@ final class OfficeSheetsFormatTests: XCTestCase {
                                 + "the parameter is load-bearing, not a fixed constant: \(widthD1.width) -> \(widthD2.width)")
     }
 
-    /// **Position verification is mandatory (task-5-brief.md), and the same sentinel-then-anchor
-    /// two-check pattern `sheetsResizeOnDedicatedThread` uses — this drill proves the check is
-    /// REACHED and REAL for `format` specifically, by forcing the ordinary GoToCell mechanism to
-    /// land somewhere unexpected: a range naming a sheet position past any content, on a document
-    /// whose fence/adoption path is otherwise identical to every passing drill above.** The
-    /// DELETION-red proof (temporarily removing the real span-select dispatch to simulate a silent
-    /// no-op, confirming the check's own red message names the SPAN, not the anchor) was performed
-    /// manually against `sheetsFormatOnDedicatedThread`, exactly mirroring task-4-report.md §8's own
-    /// method, and is recorded in task-5-report.md rather than committed as a permanently-broken
-    /// test (this branch's own house standard — task-4-report.md's own "reverted; green again"
-    /// pattern for every one of its own deletion-red proofs).
+    /// **A bad SHEET NAME is refused before anything is dispatched** — the sheet-resolve guard at the
+    /// very top of `sheetsFormatOnDedicatedThread`, which runs before `ensureAgentView`, before any
+    /// `GoToCell`, and before position verification is entered at all.
+    ///
+    /// **T5 fix-round review, Important-3 — this drill's doc comment used to claim it proved
+    /// `format`'s POSITION VERIFICATION was "REACHED and REAL ... by forcing the ordinary GoToCell
+    /// mechanism to land somewhere unexpected." It does no such thing.** The body passes
+    /// `sheet:"NoSuchSheet"`, which is refused three guards earlier than any positioning. The test's
+    /// own NAME was accurate the whole time; only the comment lied — the arc's
+    /// description-contradicting-the-code class, sitting in exactly the artifact a later reader
+    /// would cite as evidence that the question had been answered. The real position-verification
+    /// drill is the one directly below this; this one is left as what it always was.
     func testLiveSheetsFormatRefusesAnUnwritableSheetNameBeforeDispatchingAnything() async throws {
         try requireLiveEngine()
         let path = try makeWritableCopy(of: "gate.xlsx")
@@ -633,4 +682,105 @@ final class OfficeSheetsFormatTests: XCTestCase {
         XCTAssertEqual(cellStyleIndex(sheetXml, cellRef: "A1"), pristineStyle,
                        "a refused format must not touch anything: \(sheetXml.prefix(2000))")
     }
+    /// **The real position-verification drill — T5 fix-round review, Important-3.** `format`'s
+    /// span positioning (`positionAndVerifySpanOnDedicatedThread`) parks at a sentinel cell first,
+    /// verifies THAT landed, selects the real span, and re-verifies against the span's own anchor.
+    /// Until this drill, nothing in the tree exercised any of it: the only evidence the check was
+    /// real was a deletion-red recorded in prose, and the one committed test that CLAIMED to prove
+    /// it was refused three guards earlier (see the drill above).
+    ///
+    /// **The vector is a real, non-mutant, permanently-committable one**, and it exists only because
+    /// `officeColumnIndex`'s new bound is deliberately LEXICAL rather than Calc's grid (see that
+    /// function's own header): `XFE` is three letters, so the app parses it, but it is one column
+    /// PAST Calc's real last column XFD — so the engine's own `.uno:GoToCell` cannot put the cursor
+    /// there, the anchor re-verify fails, and `format` refuses. A grid bound in the parser would
+    /// have made this test impossible to write without mutating production code.
+    ///
+    /// What it would do if the code were wrong, three ways:
+    /// - position verification deleted wholesale -> the dispatch lands on whatever was selected,
+    ///   which is the SENTINEL (B1, a real cell in this fixture's used range) -> `sent.ok` is true
+    ///   AND B1 goes bold -> both the ok assertion and the B1 byte-compare go red;
+    /// - the span re-verify deleted but the sentinel park kept -> same as above;
+    /// - the check kept but its message rebuilt from the sentinel instead of the span -> the
+    ///   `XFE1` substring assertion goes red, which is the exact discrimination T4's third fix
+    ///   round had to add for `set`.
+    func testLiveSheetsFormatRefusesWhenTheCursorCannotReachTheSpanAndTouchesNothing() async throws {
+        try requireLiveEngine()
+        let path = try makeWritableCopy(of: "gate.xlsx")
+        let stateDir = makeScratchDirectory()
+        let host = makeLiveHost(stateDir: stateDir, dirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)])
+        await host.directory.refresh()
+        _ = try await adopt(path, through: host)
+
+        // Captured, never assumed: B1 is the SENTINEL this anchor produces (`sentinelColumn` is
+        // column B unless the anchor already is column B), and it is a real, non-empty cell in
+        // `gate.xlsx`'s own A1:B2 used range — so a formatting dispatch that fired against the
+        // sentinel selection instead of the span is visible in the saved bytes.
+        let pristineSheetXml = try readOOXMLEntry(atPath: path, entry: "xl/worksheets/sheet1.xml")
+        let pristineB1 = cellStyleIndex(pristineSheetXml, cellRef: "B1")
+        let pristineA1 = cellStyleIndex(pristineSheetXml, cellRef: "A1")
+
+        let sent = await send(command("office.sheets.format",
+                                      args: ["path": path, "sheet": "Sheet1", "range": "XFE1", "bold": true],
+                                      sessionId: "S1", commandId: "pcmd-unreachable"), through: host)
+        XCTAssertFalse(sent.ok, "a span the cursor cannot reach must refuse, never report `applied bold`: \(sent)")
+        XCTAssertTrue(sent.result?.contains("positioning check before formatting") == true,
+                      "the refusal must be the POSITION check's own, not some other guard's: \(sent)")
+        XCTAssertTrue(sent.result?.contains("XFE1") == true,
+                      "the message must name the SPAN it could not reach — naming the sentinel or the "
+                          + "anchor instead is the exact ambiguity T4's third fix round had to remove: \(sent)")
+
+        // And nothing was formatted — the sentinel cell above all, since that is where a deleted
+        // span-select would have left the selection.
+        let afterSheetXml = try readOOXMLEntry(atPath: path, entry: "xl/worksheets/sheet1.xml")
+        XCTAssertEqual(cellStyleIndex(afterSheetXml, cellRef: "B1"), pristineB1,
+                       "the SENTINEL cell must be untouched — if it went bold, the dispatch fired "
+                           + "against the sentinel park because the span never took: \(afterSheetXml.prefix(2000))")
+        XCTAssertEqual(cellStyleIndex(afterSheetXml, cellRef: "A1"), pristineA1,
+                       "nothing else may have moved either: \(afterSheetXml.prefix(2000))")
+    }
+
+    /// **A cell attribute and `width` in ONE call — the only code path on which a partial
+    /// application is structurally possible, and the one the ten original drills never combined**
+    /// (the implementer's own disclosed concern (e), confirmed by the fix-round review). Both phases
+    /// must land, on their own separate selections: the cell attribute on `range` exactly as given,
+    /// the width on the FULL columns `range` spans.
+    func testLiveSheetsFormatAppliesACellAttributeAndWidthInTheSameCall() async throws {
+        try requireLiveEngine()
+        let path = try makeWritableCopy(of: "gate.xlsx")
+        let stateDir = makeScratchDirectory()
+        let host = makeLiveHost(stateDir: stateDir, dirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)])
+        await host.directory.refresh()
+        _ = try await adopt(path, through: host)
+
+        let pristineSheetXml = try readOOXMLEntry(atPath: path, entry: "xl/worksheets/sheet1.xml")
+        XCTAssertNil(columnWidth(pristineSheetXml, columnOneBasedIndex: 6), "column F must start with no explicit width")
+
+        let sent = try await format(["path": path, "sheet": "Sheet1", "range": "F3:F4",
+                                     "bold": true, "align": "right", "width": 96], through: host)
+        XCTAssertTrue(sent.result?.contains("bold") == true, "\(sent)")
+        XCTAssertTrue(sent.result?.contains("width") == true, "\(sent)")
+
+        let sheetXml = try readOOXMLEntry(atPath: path, entry: "xl/worksheets/sheet1.xml")
+        let stylesXml = try readOOXMLEntry(atPath: path, entry: "xl/styles.xml")
+        // Phase 1 landed, on `range`'s own cells.
+        let xf3 = try XCTUnwrap(cellStyleIndex(sheetXml, cellRef: "F3"), sheetXml.prefix(2000).description)
+        let font3 = try XCTUnwrap(xfFontId(stylesXml, xfIndex: xf3))
+        XCTAssertTrue(fontIsBold(stylesXml, fontId: font3), "phase 1's bold must have landed on F3: \(stylesXml.prefix(3000))")
+        XCTAssertEqual(xfHorizontalAlignment(stylesXml, xfIndex: xf3), "right", stylesXml.prefix(3000).description)
+        // Phase 2 landed, on the WHOLE column — including a row `range` never named.
+        let widthF = try XCTUnwrap(columnWidth(sheetXml, columnOneBasedIndex: 6),
+                                   "phase 2's width must have landed on column F: \(sheetXml.prefix(3000))")
+        XCTAssertTrue(widthF.customWidth)
+        // ...and phase 1 did NOT bleed into a row outside `range`: F1 is above the range and must
+        // carry no bold, which is what proves the two phases used two different selections rather
+        // than one shared whole-column one.
+        if let xf1 = cellStyleIndex(sheetXml, cellRef: "F1"), xf1 != 0,
+           let font1 = xfFontId(stylesXml, xfIndex: xf1) {
+            XCTAssertFalse(fontIsBold(stylesXml, fontId: font1),
+                           "the CELL attribute must be confined to `range` (F3:F4) even though the "
+                               + "WIDTH covered the whole column: \(stylesXml.prefix(3000))")
+        }
+    }
+
 }
