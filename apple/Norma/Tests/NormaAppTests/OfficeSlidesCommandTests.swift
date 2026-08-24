@@ -238,5 +238,35 @@ final class OfficeSlidesCommandTests: XCTestCase {
         XCTAssertEqual(savedSlide3.body, "third bullet", "slide 3's body must also be untouched")
 
         try await independentClient.close(docId: independentDocId)
+
+        // Filesystem-level seal, independent of every LOK abstraction above. The reads via
+        // `independentClient` prove the WIRE/BROKER/HELPER path reports the right content, but they
+        // still go through the same LOK process as the write — whether `documentLoad` on a
+        // still-open path dedups to the SAME in-memory model rather than genuinely re-parsing disk is
+        // not something this bridge's own API surface can distinguish. `content.xml` inside the saved
+        // `.odp` zip is ground truth no LOK abstraction sits between: if the write only ever reached
+        // memory and never reached `.uno:Save`'s own bytes, this is where that would show.
+        let contentXML = try readODFEntry(atPath: path, entry: "content.xml")
+        XCTAssertTrue(contentXML.contains("CHANGED TITLE"), "saved content.xml must contain the new title text")
+        XCTAssertTrue(contentXML.contains("CHANGED BODY"), "saved content.xml must contain the new body text")
+        XCTAssertTrue(contentXML.contains("Norma T6 Slide Three"), "saved content.xml must still contain slide 3's untouched title")
+        XCTAssertTrue(contentXML.contains("third bullet"), "saved content.xml must still contain slide 3's untouched body")
+        XCTAssertFalse(contentXML.contains("Norma T6 Slide Two"), "slide 2's OLD title must be gone from the saved bytes, not just superseded in a read")
+    }
+
+    /// `unzip -p` for a single entry inside a saved ODF (zip-based, same container format as OOXML)
+    /// document — mirrors `OfficeSheetsCommandTests.readOOXMLEntry`'s own shape exactly (shell out to
+    /// a well-understood system tool rather than reimplement zip reading), kept as a local copy per
+    /// that suite's own established per-file-helper convention.
+    private func readODFEntry(atPath path: String, entry: String) throws -> String {
+        let unzip = Process()
+        unzip.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+        unzip.arguments = ["-p", path, entry]
+        let pipe = Pipe()
+        unzip.standardOutput = pipe
+        try unzip.run()
+        unzip.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        return try XCTUnwrap(String(data: data, encoding: .utf8), "\(entry) was not valid UTF-8")
     }
 }
