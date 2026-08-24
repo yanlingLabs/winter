@@ -487,6 +487,77 @@ final class OfficeSheetsFormatTests: XCTestCase {
                           + "to General in between: \(after)")
     }
 
+    /// **The other three presets (`number`/`currency`/`date`) are proven to actually land, not just
+    /// assumed from their command names.** `percent`/`general` are proven end-to-end by the two drills
+    /// above; the remaining three UNO command names (`.uno:NumberFormatDecimal`/`Currency`/`Date`)
+    /// were this task's own best-confidence reading of LibreOffice's C++ source (never independently
+    /// confirmed against the running engine before this drill was added) — a wrong command name is
+    /// the SAME failure shape as the comma-tuple trap this task's own report documents for
+    /// `.uno:NumberFormat`: the dispatch itself would report success while silently formatting
+    /// nothing, because `postUnoCommand` on an unrecognized slot is not an error, it is a no-op.
+    /// Locale-safe by construction — asserts only that `numFmtId` moved off General (0) in the saved
+    /// XML, never a currency symbol or a date string's exact text, which would vary by the running
+    /// system's own locale.
+    func testLiveSheetsFormatNumberDecimalCurrencyAndDatePresetsActuallyChangeTheSavedStyleNotJustPercentAndGeneral() async throws {
+        try requireLiveEngine()
+        let path = try makeWritableCopy(of: "gate.xlsx")
+        let stateDir = makeScratchDirectory()
+        let host = makeLiveHost(stateDir: stateDir, dirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)])
+        await host.directory.refresh()
+        _ = try await adopt(path, through: host)
+
+        let cases: [(cell: String, preset: String)] = [("D14", "number"), ("D15", "currency"), ("D16", "date")]
+        for (cell, _) in cases {
+            try await send(command("office.sheets.set", args: ["path": path, "sheet": "Sheet1", "range": cell, "values": [["0.5"]]],
+                                   sessionId: "S1", commandId: "pcmd-seed-\(cell)"), through: host)
+        }
+        // Pristine numFmtId captured PER CELL, whatever it actually is — `gate.xlsx` turns out to
+        // already carry a non-General style (164) this far down the sheet (the same "don't assume the
+        // fixture's own pristine state" lesson the sibling drill's A1 comment already names, hit again
+        // live rather than assumed away). The discriminating comparison below is "did applying the
+        // preset CHANGE this cell's own numFmtId from whatever it started at" — correct regardless of
+        // what that starting value is, and still fully red on a silent no-op (a no-op leaves numFmtId
+        // exactly at its pristine value, unchanged).
+        let pristineSheetXml = try readOOXMLEntry(atPath: path, entry: "xl/worksheets/sheet1.xml")
+        let pristineStylesXml = try readOOXMLEntry(atPath: path, entry: "xl/styles.xml")
+        var pristineNumFmtIds: [String: Int] = [:]
+        for (cell, _) in cases {
+            let xf = cellStyleIndex(pristineSheetXml, cellRef: cell) ?? 0
+            pristineNumFmtIds[cell] = xfNumFmtId(pristineStylesXml, xfIndex: xf) ?? 0
+        }
+
+        for (cell, preset) in cases {
+            try await format(["path": path, "sheet": "Sheet1", "range": cell, "numberFormat": preset],
+                             through: host, commandId: "pcmd-format-\(cell)")
+        }
+
+        let sheetXml = try readOOXMLEntry(atPath: path, entry: "xl/worksheets/sheet1.xml")
+        let stylesXml = try readOOXMLEntry(atPath: path, entry: "xl/styles.xml")
+        for (cell, preset) in cases {
+            let xf = try XCTUnwrap(cellStyleIndex(sheetXml, cellRef: cell),
+                                   "\(cell) must carry an explicit style after \(preset): \(sheetXml.prefix(2000))")
+            let numFmtId = xfNumFmtId(stylesXml, xfIndex: xf) ?? 0
+            XCTAssertNotEqual(numFmtId, pristineNumFmtIds[cell],
+                              "\(cell)'s numFmtId must have CHANGED from its pristine value "
+                                  + "(\(pristineNumFmtIds[cell] ?? -1)) after applying \(preset) — if this "
+                                  + "fails, \(preset)'s .uno: command name is wrong and the dispatch silently "
+                                  + "no-op'd while sheetsFormat still reported success: \(stylesXml.prefix(3000))")
+        }
+
+        // The formula-vs-display triangle already proven for percent must ALSO hold for `number` — the
+        // preset most likely to be confused with "no formatting at all" if the command name silently
+        // no-op'd (a no-op General cell and a genuinely-applied `number` preset can look identical in
+        // sheetsRead's OWN string for a value like 0.5, so the discriminating proof is numFmtId above,
+        // not sheetsRead's display string, for this specific preset).
+        try await send(command("office.sheets.set", args: ["path": path, "sheet": "Sheet1", "range": "D17", "values": [["=D14*2"]]],
+                               sessionId: "S1", commandId: "pcmd-formula"), through: host)
+        let formulaResult = await send(command("office.sheets.read", args: ["path": path, "sheet": "Sheet1", "range": "D17"],
+                                               sessionId: "S1", commandId: "pcmd-read-formula"), through: host)
+        XCTAssertTrue(formulaResult.result?.contains("1") == true,
+                      "a formula referencing D14 must still compute against the raw 0.5 (=1) after the "
+                          + "`number` preset: \(formulaResult)")
+    }
+
     /// **`width` is a COLUMN property, not a cell one — it widens every column the range touches, in
     /// full, even when the range is only a few rows tall.** Two columns (D and E), a range covering
     /// only rows 10-11 of both — BOTH full columns must widen, never just the touched rows (there is
