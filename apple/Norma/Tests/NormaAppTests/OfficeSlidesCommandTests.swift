@@ -573,10 +573,24 @@ final class OfficeSlidesCommandTests: XCTestCase {
 
         try await independentClient.close(docId: independentDocId)
 
+        // fix round 1 (review F-1): the three `contains` checks this seal originally had were
+        // VACUOUS — the pristine, never-written fixture already contains all three titles
+        // (`unzip -p three-slide.odp content.xml | grep -o "Norma T6 Slide [A-Za-z]*"` on the
+        // committed fixture returns all three), and `String.contains` is order-blind, so this
+        // seal's entire subject — ORDER — was unobservable by the check that claimed to prove it.
+        // Fixed to compare byte OFFSETS directly: the saved bytes must show "Two" before "Three"
+        // before "One", the exact permutation this move produces, not merely that all three
+        // strings exist somewhere in the file (which pristine bytes already satisfy).
         let contentXML = try readODFEntry(atPath: path, entry: "content.xml")
-        XCTAssertTrue(contentXML.contains("Norma T6 Slide One"), "saved content.xml must still contain the moved slide's title")
-        XCTAssertTrue(contentXML.contains("Norma T6 Slide Two"), "saved content.xml must still contain the shifted slide 2's title")
-        XCTAssertTrue(contentXML.contains("Norma T6 Slide Three"), "saved content.xml must still contain the shifted slide 3's title")
+        guard let twoRange = contentXML.range(of: "Norma T6 Slide Two"),
+              let threeRange = contentXML.range(of: "Norma T6 Slide Three"),
+              let oneRange = contentXML.range(of: "Norma T6 Slide One") else {
+            return XCTFail("all three titles must be present in the saved bytes at all: \(contentXML.prefix(200))")
+        }
+        XCTAssertTrue(twoRange.lowerBound < threeRange.lowerBound,
+                      "saved content.xml must show slide 2's title BEFORE slide 3's — order, not mere presence")
+        XCTAssertTrue(threeRange.lowerBound < oneRange.lowerBound,
+                      "saved content.xml must show slide 3's title BEFORE the moved slide's — order, not mere presence")
     }
 
     // MARK: - `add_slide` live drill — this IS the probe for InsertPage's relative-insert semantics
@@ -616,14 +630,27 @@ final class OfficeSlidesCommandTests: XCTestCase {
                                                 sessionId: "S1", commandId: "pcmd_info_append"), through: host)
             XCTAssertTrue(infoResult.ok, "\(infoResult)")
             let infoText = infoResult.result ?? ""
-            XCTAssertTrue(infoText.contains("4 slides"), infoText)
-            XCTAssertTrue(infoText.hasPrefix("4 slides") || infoText.contains("4 slides"), infoText)
+            // fix round 1 (review F-2): this used to be two assertions, the second one
+            // (`hasPrefix(...) || contains(...)`) tautological because its own right disjunct was
+            // already proven true by the line above — it could never fail regardless of what
+            // `infoText` actually started with. A single real `hasPrefix` check replaces both,
+            // pinning `formatSlidesInfo`'s own documented "N slides in <name>..." format for real.
+            XCTAssertTrue(infoText.hasPrefix("4 slides"), infoText)
             // Original three, in order, at positions 1/2/3 — the new (empty) slide at position 4.
             let lines = infoText.split(separator: "\n")
             XCTAssertTrue(lines.contains(where: { $0.hasPrefix("1. ") && $0.contains("Norma T6 Slide One") }), infoText)
             XCTAssertTrue(lines.contains(where: { $0.hasPrefix("2. ") && $0.contains("Norma T6 Slide Two") }), infoText)
             XCTAssertTrue(lines.contains(where: { $0.hasPrefix("3. ") && $0.contains("Norma T6 Slide Three") }), infoText)
             XCTAssertTrue(lines.contains(where: { $0.hasPrefix("4. ") }), "there must be a 4th slide line: \(infoText)")
+
+            // fix round 1 (review F-1's own evidence line, "scenarios 1 and 3 never reopen at all")
+            // — this scenario's own claim was entirely in-memory (the adopted session's own `info`)
+            // until now. A raw page-count seal against the SAVED bytes closes that gap cheaply: no
+            // independent client needed, just the same `readODFEntry` helper every other seal in
+            // this file already uses.
+            let contentXML = try readODFEntry(atPath: path, entry: "content.xml")
+            let pageCount = contentXML.components(separatedBy: "<draw:page ").count - 1
+            XCTAssertEqual(pageCount, 4, "saved content.xml must show exactly 4 <draw:page> elements after an append")
         }
 
         // --- Scenario 2: `at` = 2 -> insert in the middle, full save+reopen discriminator. ---
@@ -661,7 +688,13 @@ final class OfficeSlidesCommandTests: XCTestCase {
 
         try await independentClient.close(docId: independentDocId)
 
+        // fix round 1 (review F-1): the three `contains` checks below were VACUOUS on their own —
+        // the pristine fixture already contains all three titles, so they passed on a file that
+        // was never written at all. `add_slide`'s own seal's real subject is "a new page exists,"
+        // which `contains` on existing titles cannot observe — a `<draw:page>` COUNT can.
         let contentXML = try readODFEntry(atPath: middlePath, entry: "content.xml")
+        let pageCount = contentXML.components(separatedBy: "<draw:page ").count - 1
+        XCTAssertEqual(pageCount, 4, "saved content.xml must show exactly 4 <draw:page> elements after a middle insert")
         XCTAssertTrue(contentXML.contains("Norma T6 Slide One"), "saved content.xml must still contain slide 1's untouched title")
         XCTAssertTrue(contentXML.contains("Norma T6 Slide Two"), "saved content.xml must still contain the shifted slide 2's title")
         XCTAssertTrue(contentXML.contains("Norma T6 Slide Three"), "saved content.xml must still contain the shifted slide 3's title")
@@ -685,11 +718,22 @@ final class OfficeSlidesCommandTests: XCTestCase {
                                                 sessionId: "S1", commandId: "pcmd_info_front"), through: host)
             XCTAssertTrue(infoResult.ok, "\(infoResult)")
             let infoText = infoResult.result ?? ""
+            // fix round 1 (review F-3): this scenario asserted the three original titles landed at
+            // positions 2/3/4 but never asserted the resulting COUNT — a double-insert leaving five
+            // slides with the originals still at 2/3/4 would have passed. Scenario 1 already pins
+            // "4 slides"; scenario 2 pins `infoAfter.count == 4`; this closes the same gap here.
+            XCTAssertTrue(infoText.contains("4 slides"), infoText)
             let lines = infoText.split(separator: "\n")
             // The new (empty) slide at position 1 — original three shifted to positions 2/3/4.
             XCTAssertTrue(lines.contains(where: { $0.hasPrefix("2. ") && $0.contains("Norma T6 Slide One") }), infoText)
             XCTAssertTrue(lines.contains(where: { $0.hasPrefix("3. ") && $0.contains("Norma T6 Slide Two") }), infoText)
             XCTAssertTrue(lines.contains(where: { $0.hasPrefix("4. ") && $0.contains("Norma T6 Slide Three") }), infoText)
+
+            // fix round 1 (review F-1's own evidence line, "scenarios 1 and 3 never reopen at all")
+            // — a raw page-count seal against the SAVED bytes, matching scenario 1's own fix.
+            let contentXML = try readODFEntry(atPath: path, entry: "content.xml")
+            let pageCount = contentXML.components(separatedBy: "<draw:page ").count - 1
+            XCTAssertEqual(pageCount, 4, "saved content.xml must show exactly 4 <draw:page> elements after a front insert")
         }
     }
 
