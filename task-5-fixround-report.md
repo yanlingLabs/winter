@@ -271,4 +271,56 @@ distinguishable until somebody runs it.
 
 ## 5. Suite numbers
 
-(filled in at the end)
+All run at `55b7583e` (the last code commit), after `pkill -9 -f NormaOfficeHelper`, one suite at a
+time (the sentinel flake below is load-sensitive; running both concurrently would have tainted the
+numbers this report cites).
+
+- **`packages/core`, full `bun test`**: **4114 pass / 1 skip / 1 fail** (14594 expectations, 266
+  files, 122s). The one failure is `tools-bash.test.ts` -> "git runs through the sandbox with clean
+  output (no spurious permission errors)" — **byte-identical to the baseline `task-5-report.md` §8
+  names**, the pre-existing environmental sandbox/mktemp flake every task on this branch has
+  documented. Not `pnpm test`, deliberately: the CLI TUI suite is red on `main` and would have made
+  these numbers meaningless.
+- **`packages/core` `tsc --noEmit`**: the same 6 pre-existing `TS18048` errors in
+  `test/agent/approvals.test.ts`, unchanged. Nothing new.
+- **`test/agent/tools/sheets.test.ts`** (targeted, during iteration): **63 pass / 0 fail**, up from
+  59 — four new tests, each forced red first against the pre-fix schema (`3 fail`, the correct three).
+- **Swift, full unscoped `xcodebuild test`**: **2999 tests, 18 assertion failures across 7 methods,
+  428s.** Every one dispositioned:
+
+  | Method | Class |
+  |---|---|
+  | `OfficeSheetsCommandTests.testLiveAgentReadNeverTouchesThePrimaryViewsOwnSelection` (T3) | GoToCell straggler |
+  | `OfficeSheetsCommandTests.testLiveSheetsSetWritesValuesAndAFormula…` (T4) | GoToCell straggler |
+  | `OfficeSheetsFormatTests.testLiveSheetsFormatAppliesACellAttributeAndWidthInTheSameCall` (new here) | sentinel park, "landed at B3 instead" |
+  | `OfficeSheetsFormatTests.testLiveSheetsFormatBoldFalseExplicitlyClearsExistingBoldness` (T5) | sentinel park, "landed at A1 instead" |
+  | `OfficeSlidesCommandTests.testLiveAddSlideInsertsAtEveryRequestedPosition` (T6) | slides positioning |
+  | `SurfaceWindowTests` x2 | the named known-unrelated `pollUntil` flake (`task-5-report.md` §8) |
+
+  The five office methods were re-run in isolation **three times each after `pkill`: 15/15 green.**
+  All five are the documented `goToCellVerificationAttempts` discrete-loss class under full-suite
+  contention, which `task-4-report.md`, `task-5-report.md` and this task's own brief all name as
+  known-unrelated. No mechanism was touched (see §3's note on why).
+- **`OfficeSheetsFormatTests`** (this task's file), targeted: **14/14**, run four separate times
+  clean; 10 original drills + 4 new (position verification, cell+width combined, forced partial on
+  an adopted document, all-alignments + italic-clear).
+- **`OfficeCommandConsumerTests`**: **56/56** (was 49) — 7 new.
+- **`PanelDocumentTabTests`**: **69/69** (was 65) — 4 new.
+
+## 6. Residuals, disclosed not fixed
+
+1. **The partial-application sentence is still broader than "actually possible."** It is now exactly
+   "structurally possible for THIS OPERAND COMBINATION" (a cell attribute + `width`), which is the
+   fix Important-4 asked for. It is not "possible for THIS FAILURE": the full-suite run above caught
+   a case where **phase 1 itself** failed its position check — nothing was dispatched at all — and
+   the sentence still appeared. Narrowing that further needs the bridge to tell the consumer WHICH
+   phase threw, i.e. a signature change on `sheetsFormat`, not a fix-round patch. The sentence is
+   conditional, so it remains true; it is noise, and the noise is now bounded to one shape instead
+   of ten.
+2. **`format` still has no post-write read-back** (Minor-3). Description made honest; mechanism
+   unchanged.
+3. **Minor-4's two wire-codec guards still have no negative decode test.** Consistent with the
+   file's own precedent, which the review itself notes.
+4. **The sentinel-park flake** — observed, characterised, deliberately not chased (§3).
+5. **The V-1 fixtures are not committed** (2 MB and 20 MB). Regenerating them is ~15 lines of zip
+   surgery on `gate.xlsx`, described in §1 Important-1.
