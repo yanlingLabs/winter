@@ -1598,6 +1598,12 @@ final class OfficeRuntime: ObservableObject {
                            _ op: OfficeSheetsResizeOp, _ selectionRange: String) async throws -> (usedEndColumn: Int, usedEndRow: Int)
         var sheetsManageSheet: (_ docId: String, _ op: OfficeSheetsManageSheetOp, _ name: String,
                                 _ newName: String?) async throws -> [String]
+        /// office-agent-tools T5 — same no-reducer, throws-through posture as every sibling above.
+        /// See `OfficeRuntime.sheetsFormat`'s own header (below) for the full contract this closure
+        /// carries — this field only threads it through, one more layer of the same shape.
+        var sheetsFormat: (_ docId: String, _ sheet: String, _ range: String, _ columnSpan: String?,
+                           _ bold: Bool?, _ italic: Bool?, _ numberFormat: OfficeSheetsNumberFormatPreset?,
+                           _ align: OfficeSheetsAlign?, _ width: Double?) async throws -> [String]
         /// **Office Stage B Task 2b — the shared helper's own `--state-path`.** A plain stored
         /// value, unlike every sibling above: it is a FACT about the shared supervisor's
         /// configuration (`OfficeHelperSupervisor.statePath`, exposing `Configuration
@@ -1829,6 +1835,40 @@ final class OfficeRuntime: ObservableObject {
     }
     func sheetsManageSheet(docId: String, op: OfficeSheetsManageSheetOp, name: String, newName: String?) async throws -> [String] {
         try await driver.sheetsManageSheet(docId, op, name, newName)
+    }
+
+    /// office-agent-tools T5 — **the shared function this task's own sharing obligation names**:
+    /// applies `bold`/`italic`/`numberFormat`/`align`/`width` over an A1 `range` on a named sheet,
+    /// every operand optional and independent (`nil` means "leave this attribute alone," never
+    /// "reset it to default"). `columnSpan` is `width`'s own separate column-span selection (`nil`
+    /// unless `width` is non-nil — see `OfficeWireFrame.sheetsFormat`'s own header for why `width`,
+    /// alone among these five, needs one). Returns the attribute NAMES actually applied, a subset of
+    /// `["bold","italic","numberFormat","align","width"]` in that order.
+    ///
+    /// **This is the ONE function a future human-facing formatting UI calls too — not a second path
+    /// to LOK.** The agent's own route is `OfficeCommandConsumer.handleSheetsFormat` →
+    /// `OfficeAgentBroker.perform(access: .write, ...)` → THIS function; a SwiftUI toolbar button
+    /// bound to an already-open tab (which already has its own `docId`/`sheet`/selection in hand, and
+    /// needs neither the broker's adopt-or-open dance — the document is already open by construction
+    /// — nor its fence/dirty checks, which exist for an AGENT that might be reaching an unattended
+    /// document, not a human already looking at their own) can call this SAME function directly:
+    ///
+    /// ```swift
+    /// let applied = try await officeRuntime.sheetsFormat(
+    ///     docId: openTab.docId, sheet: openTab.activeSheetName, range: selection.a1Range,
+    ///     columnSpan: nil, bold: true, italic: nil, numberFormat: nil, align: nil, width: nil)
+    /// ```
+    ///
+    /// No agent-specific prose leaks into this layer — `formatSheetsFormat`'s "applied bold, width to
+    /// Sheet1!A1:C10 in budget.xlsx" sentence is composed one layer up, in `OfficeCommandConsumer`,
+    /// the same separation `sheetsSet`/`sheetsResize`/`sheetsManageSheet` already hold to (this file's
+    /// own no-reducer posture doc, above): a toolbar caller gets the plain, structured truth (which
+    /// attributes landed) and composes whatever UI feedback it wants from that, never a sentence
+    /// baked for a model to read.
+    func sheetsFormat(docId: String, sheet: String, range: String, columnSpan: String?,
+                      bold: Bool?, italic: Bool?, numberFormat: OfficeSheetsNumberFormatPreset?,
+                      align: OfficeSheetsAlign?, width: Double?) async throws -> [String] {
+        try await driver.sheetsFormat(docId, sheet, range, columnSpan, bold, italic, numberFormat, align, width)
     }
 
     /// One `saveAndAwaitOutcome` caller, still waiting. Kept per PATH (a table, not a single slot) —

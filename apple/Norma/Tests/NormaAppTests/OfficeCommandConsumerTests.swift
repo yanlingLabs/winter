@@ -108,12 +108,12 @@ final class OfficeCommandConsumerTests: XCTestCase {
         "office.docs.insert", "office.docs.append",
     ]
 
-    /// T3 gave `sheets.info`/`.read` real (async) behaviour; T4 gives `sheets.set`/`.insert_rows`/
+    /// T3 gave `sheets.info`/`.read` real (async) behaviour; T4 gave `sheets.set`/`.insert_rows`/
     /// `.insert_cols`/`.delete_rows`/`.delete_cols`/`.add_sheet`/`.delete_sheet`/`.rename_sheet` the
-    /// same — 10 of the 22 verbs are real now, leaving 12 STILL on T1's own synchronous refusal
-    /// shell (every `slides`/`docs` verb, plus `sheets.format`, T5+'s own job). Every pre-existing
-    /// test below that needs "an office verb that still answers synchronously with the
-    /// not-implemented refusal, for ANY verb" picks from this list rather than hand-naming a real
+    /// same; T5 adds `sheets.format` — 11 of the 22 verbs are real now, leaving 11 STILL on T1's own
+    /// synchronous refusal shell (every `slides`/`docs` verb — Stage C's remaining stages' own job).
+    /// Every pre-existing test below that needs "an office verb that still answers synchronously with
+    /// the not-implemented refusal, for ANY verb" picks from this list rather than hand-naming a real
     /// one, which would otherwise silently start asserting on ASYNC behaviour these tests were never
     /// built to await.
     static let stillStubOfficeVerbs = allOfficeVerbsAsOfT1.filter {
@@ -122,6 +122,7 @@ final class OfficeCommandConsumerTests: XCTestCase {
             "office.sheets.insert_rows", "office.sheets.insert_cols",
             "office.sheets.delete_rows", "office.sheets.delete_cols",
             "office.sheets.add_sheet", "office.sheets.delete_sheet", "office.sheets.rename_sheet",
+            "office.sheets.format",
         ].contains($0)
     }
 
@@ -156,13 +157,14 @@ final class OfficeCommandConsumerTests: XCTestCase {
 
     func testTheRefusalNamesTheToolAndVerbSeparately() {
         let consumer = makeConsumer()
-        // T4 correction: `office.sheets.set` is real now (`handleSheetsSet`) — `format` is the one
-        // sheets verb still on T1's own refusal shell (T5+'s own job).
-        consumer.handle(command("office.sheets.format"))
+        // T5 correction: `office.sheets.format` is real now (`handleSheetsFormat`) — every `sheets`
+        // verb is real as of T5, so this moves to `office.slides.info`, the first still-stub verb of
+        // Stage C's next kind (`slides`'s own job, not yet reached).
+        consumer.handle(command("office.slides.info"))
         XCTAssertEqual(sent.count, 1)
         XCTAssertEqual(sent.first?.ok, false)
-        XCTAssertTrue(sent.first?.result?.contains("sheets") == true, "\(sent)")
-        XCTAssertTrue(sent.first?.result?.contains("format") == true, "\(sent)")
+        XCTAssertTrue(sent.first?.result?.contains("slides") == true, "\(sent)")
+        XCTAssertTrue(sent.first?.result?.contains("info") == true, "\(sent)")
         let lower = sent.first?.result?.lowercased() ?? ""
         XCTAssertTrue(lower.contains("not implemented") || lower.contains("not yet implement"), "\(sent)")
     }
@@ -215,19 +217,21 @@ final class OfficeCommandConsumerTests: XCTestCase {
     /// `args` is never read by this consumer's STUB verbs at all (`OfficeCommandConsumer.handle`'s
     /// synchronous `default:` branch only ever touches `command.sessionId`/`command.commandId`/
     /// `command.action`) — so a huge `args.path` cannot reach a STUB verb's message, structurally, not
-    /// merely by discipline. **T3 correction, T4 re-correction**: this test originally used
-    /// `office.sheets.read` as its example, which read as "args is never read AT ALL" — no longer
-    /// true once `sheets.read` went real; T3 switched to `office.sheets.set`, which T4 then made
-    /// real too. Switched again, to `office.sheets.format` (the one sheets verb still a stub), to
-    /// keep this test's own claim honest. The EQUIVALENT guarantee for every REAL verb — a
-    /// huge/malicious operand still cannot grow the ANSWER past a bound, even though it genuinely
-    /// gets read — is `testASheetsReadResultIsCappedNotAllowedToGrowUnbounded` below, a different
-    /// mechanism (`sheetsResultMaxLength`, checked on the BUILT result) proving the equivalent
-    /// property for a verb that must read `args` to do its job at all.
+    /// merely by discipline. **T3 correction, T4 re-correction, T5 re-correction**: this test
+    /// originally used `office.sheets.read` as its example, which read as "args is never read AT
+    /// ALL" — no longer true once `sheets.read` went real; T3 switched to `office.sheets.set`, T4
+    /// switched again to `office.sheets.format` once `set` went real too, and T5 makes `format` real
+    /// — every `sheets` verb now is. Switched a third time, to `office.slides.info` (the first
+    /// still-stub verb of Stage C's next kind), to keep this test's own claim honest. The EQUIVALENT
+    /// guarantee for every REAL verb — a huge/malicious operand still cannot grow the ANSWER past a
+    /// bound, even though it genuinely gets read — is
+    /// `testASheetsReadResultIsCappedNotAllowedToGrowUnbounded` below, a different mechanism
+    /// (`sheetsResultMaxLength`, checked on the BUILT result) proving the equivalent property for a
+    /// verb that must read `args` to do its job at all.
     func testTheRefusalNeverGrowsWithArgs() {
         let consumer = makeConsumer()
         let hugePath = String(repeating: "x", count: 100_000)
-        consumer.handle(command("office.sheets.format", args: ["path": hugePath, "sheet": "S"]))
+        consumer.handle(command("office.slides.info", args: ["path": hugePath, "sheet": "S"]))
         XCTAssertEqual(sent.count, 1)
         XCTAssertFalse(sent.first?.result?.contains(hugePath) == true)
         XCTAssertLessThan(sent.first?.result?.count ?? Int.max, 1_000,
@@ -276,6 +280,12 @@ final class OfficeCommandConsumerTests: XCTestCase {
         sheetsManageSheet: @escaping (String, OfficeSheetsManageSheetOp, String, String?) async throws -> [String] = { _, _, _, _ in
             throw OfficeHelperClientError.serverError(reason: "sheetsManageSheet not stubbed for this test")
         },
+        // office-agent-tools T5 — same "explicit stub per test, throw if unstubbed" shape as every
+        // sibling above.
+        sheetsFormat: @escaping (String, String, String, String?, Bool?, Bool?, OfficeSheetsNumberFormatPreset?,
+                                 OfficeSheetsAlign?, Double?) async throws -> [String] = { _, _, _, _, _, _, _, _, _ in
+            throw OfficeHelperClientError.serverError(reason: "sheetsFormat not stubbed for this test")
+        },
         // Fix-round review (item 4) — every EXISTING caller of this helper only ever exercises
         // sheetsInfo/sheetsRead (read-only, no save-through) or a refusal path (never reaches save
         // either), so the original hardcoded `"/tmp/unused-save"` — a path that does not exist —
@@ -298,6 +308,7 @@ final class OfficeCommandConsumerTests: XCTestCase {
             undo: { _ in }, redo: { _ in },
             sheetsInfo: sheetsInfo, sheetsRead: sheetsRead,
             sheetsSet: sheetsSet, sheetsResize: sheetsResize, sheetsManageSheet: sheetsManageSheet,
+            sheetsFormat: sheetsFormat,
             stateDirectory: FileManager.default.temporaryDirectory)
         let runtime = OfficeRuntime(sessionId: "s1", driver: driver)
         let broker = OfficeAgentBroker(host: .init(
@@ -549,5 +560,155 @@ final class OfficeCommandConsumerTests: XCTestCase {
         let result = sent.first?.result ?? ""
         XCTAssertLessThan(result.utf16.count, PanelCommandConsumer.resultMaxLength)
         XCTAssertFalse(result.contains("cell-0-"), "a capped refusal must not still carry the oversized content")
+    }
+
+    // ============================================================================================
+    // office-agent-tools T5: sheets format — pre-broker refusals (fast, no live engine needed) and
+    // the happy path through a fake driver. The saved-bytes proof obligations (position verification,
+    // toggle-vs-absolute, the numberFormat display/value triangle, width-as-a-column-property) are
+    // OfficeSheetsFormatTests.swift's own live drills — this file only proves the operand plumbing.
+    // ============================================================================================
+
+    func testSheetsFormatRefusesAMissingSheet() async {
+        let world = makeSheetsWorld()
+        world.consumer.handle(command("office.sheets.format", args: ["path": "/tmp/a.xlsx", "range": "A1", "bold": true]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, false)
+        XCTAssertTrue(sent.first?.result?.contains("sheet") == true, "\(sent)")
+    }
+
+    func testSheetsFormatRefusesAMissingRange() async {
+        let world = makeSheetsWorld()
+        world.consumer.handle(command("office.sheets.format", args: ["path": "/tmp/a.xlsx", "sheet": "Sheet1", "bold": true]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, false)
+        XCTAssertTrue(sent.first?.result?.contains("range") == true, "\(sent)")
+    }
+
+    func testSheetsFormatRefusesAMalformedRangeWithoutTouchingTheBroker() async {
+        var driverCalled = false
+        let world = makeSheetsWorld(sheetsFormat: { _, _, _, _, _, _, _, _, _ in driverCalled = true; return [] })
+        world.consumer.handle(command("office.sheets.format",
+                                       args: ["path": "/tmp/a.xlsx", "sheet": "Sheet1", "range": "not-a-range", "bold": true]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, false)
+        XCTAssertFalse(driverCalled, "a malformed range must refuse before the broker/driver is ever reached")
+    }
+
+    /// Mirrors `testSheetsReadRefusesAnOversizedRangeWithoutTouchingTheBroker` — `format` reuses
+    /// `officeReadRangeMaxCells` rather than a verb-specific number (`handleSheetsFormat`'s own doc:
+    /// single-dispatch cost shape, same as `read`, unlike `set`'s per-cell one).
+    func testSheetsFormatRefusesAnOversizedRangeWithoutTouchingTheBroker() async {
+        var driverCalled = false
+        let world = makeSheetsWorld(sheetsFormat: { _, _, _, _, _, _, _, _, _ in driverCalled = true; return [] })
+        let tooManyRows = officeReadRangeMaxCells + 1
+        world.consumer.handle(command("office.sheets.format",
+                                       args: ["path": "/tmp/a.xlsx", "sheet": "Sheet1", "range": "A1:A\(tooManyRows)", "bold": true]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, false)
+        XCTAssertTrue(sent.first?.result?.contains("cells") == true, "\(sent)")
+        XCTAssertFalse(driverCalled, "an oversized range must refuse before the broker/driver is ever reached")
+    }
+
+    /// The verb's own central contract, checked at the wire-decode boundary this file owns: naming
+    /// NONE of the five attributes is refused before the broker is ever reached — never silently
+    /// "succeeds" having done nothing.
+    func testSheetsFormatRefusesWhenNoAttributeIsNamedWithoutTouchingTheBroker() async {
+        var driverCalled = false
+        let world = makeSheetsWorld(sheetsFormat: { _, _, _, _, _, _, _, _, _ in driverCalled = true; return [] })
+        world.consumer.handle(command("office.sheets.format", args: ["path": "/tmp/a.xlsx", "sheet": "Sheet1", "range": "A1"]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, false)
+        XCTAssertTrue(sent.first?.result?.contains("at least one") == true, "\(sent)")
+        XCTAssertFalse(driverCalled, "a call naming no attribute must refuse before the broker/driver is ever reached")
+    }
+
+    /// The happy path, and the absent-vs-present distinction at the Swift decode boundary
+    /// specifically (the daemon's own zod schema already enforces "absent means omitted from args" —
+    /// this proves THIS layer decodes that shape correctly too, never defaulting a missing key to
+    /// `false`/some other value the way `optionalFormulas` deliberately does for a DIFFERENT field).
+    func testSheetsFormatHappyPathThreadsOnlyTheNamedAttributesAndBuildsTheColumnSpanForWidth() async {
+        let path = makeScratchFile()
+        let savedPath = makeScratchFile(named: "saved-output.xlsx")
+        let world = makeSheetsWorld(
+            workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+            sheetsFormat: { docId, sheet, range, columnSpan, bold, italic, numberFormat, align, width in
+                XCTAssertEqual(sheet, "Sheet1")
+                XCTAssertEqual(range, "A1:C2")
+                XCTAssertEqual(columnSpan, "A:C", "width's own column span must cover every column the range touches")
+                XCTAssertEqual(bold, true)
+                XCTAssertNil(italic, "italic was never named — must decode as nil, not false")
+                XCTAssertNil(numberFormat)
+                XCTAssertNil(align)
+                XCTAssertEqual(width, 72)
+                return ["bold", "width"]
+            },
+            save: { _, _ in savedPath })
+        world.consumer.handle(command("office.sheets.format",
+                                       args: ["path": path, "sheet": "Sheet1", "range": "A1:C2", "bold": true, "width": 72]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, true, "\(sent)")
+        let result = sent.first?.result ?? ""
+        XCTAssertTrue(result.contains("bold, width"), result)
+    }
+
+    /// `columnSpan` must be `nil` when `width` is never named — the wire's own paired-field
+    /// discipline (`OfficeWireFrame.sheetsFormat`'s decode guard) only matters if THIS side never
+    /// builds a mismatched pair to begin with.
+    func testSheetsFormatOmitsColumnSpanWhenWidthIsNotNamed() async {
+        let path = makeScratchFile()
+        let savedPath = makeScratchFile(named: "saved-output.xlsx")
+        let world = makeSheetsWorld(
+            workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+            sheetsFormat: { _, _, _, columnSpan, _, _, _, _, _ in
+                XCTAssertNil(columnSpan)
+                return ["italic"]
+            },
+            save: { _, _ in savedPath })
+        world.consumer.handle(command("office.sheets.format",
+                                       args: ["path": path, "sheet": "Sheet1", "range": "B2:D9", "italic": true]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, true, "\(sent)")
+    }
+
+    /// The partial-failure lifecycle sentence — `handleSheetsFormat`'s own catch block, mirroring
+    /// `handleSheetsSet`'s established shape: appended only when more than one attribute could
+    /// plausibly have been in flight, phrased conditionally ("if an earlier attribute already
+    /// applied"), never asserting a specific one landed (this function's own local `attributeCount`
+    /// check has no visibility into which attribute the driver actually reached before throwing).
+    func testSheetsFormatMultiAttributeFailureAppendsThePartialApplicationLifecycleSentence() async {
+        let path = makeScratchFile()
+        let world = makeSheetsWorld(
+            workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+            sheetsFormat: { _, _, _, _, _, _, _, _, _ in
+                throw OfficeHelperClientError.serverError(reason: "the width phase failed")
+            })
+        world.consumer.handle(command("office.sheets.format",
+                                       args: ["path": path, "sheet": "Sheet1", "range": "A1", "bold": true, "width": 72]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, false)
+        let result = sent.first?.result ?? ""
+        XCTAssertTrue(result.contains("the width phase failed"), result)
+        XCTAssertTrue(result.contains("already applied"), "a two-attribute call's failure must carry the "
+                      + "conditional partial-application sentence: \(result)")
+    }
+
+    /// The single-attribute counterpart — no lifecycle sentence, since only one attribute was ever
+    /// in flight and a failure on it cannot leave anything "earlier" behind.
+    func testSheetsFormatSingleAttributeFailureNeverAppendsTheLifecycleSentence() async {
+        let path = makeScratchFile()
+        let world = makeSheetsWorld(
+            workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+            sheetsFormat: { _, _, _, _, _, _, _, _, _ in
+                throw OfficeHelperClientError.serverError(reason: "bold failed")
+            })
+        world.consumer.handle(command("office.sheets.format",
+                                       args: ["path": path, "sheet": "Sheet1", "range": "A1", "bold": true]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, false)
+        let result = sent.first?.result ?? ""
+        XCTAssertTrue(result.contains("bold failed"), result)
+        XCTAssertFalse(result.contains("already applied"), "a single-attribute call has nothing earlier "
+                       + "in the same call to have already applied: \(result)")
     }
 }

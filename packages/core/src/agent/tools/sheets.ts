@@ -6,13 +6,16 @@ import type { SessionDirs } from "../../sessions/dirs";
 import { canHostPanel } from "./browser";
 
 /**
- * `sheets` (office-agent-tools T3/T4, task-3-brief.md/task-4-brief.md; design
+ * `sheets` (office-agent-tools T3/T4/T5, task-3-brief.md/task-4-brief.md/task-5-brief.md; design
  * `docs/superpowers/specs/2026-08-22-office-agent-tools-design.md` §1-§5) — T3 shipped `info`/`read`;
- * this task (T4) adds the write verbs: `set`, `insert_rows`, `insert_cols`, `delete_rows`,
- * `delete_cols`, `add_sheet`, `delete_sheet`, `rename_sheet`. `format` (T5+) is still not registered
- * — the model is never told about a verb this build cannot yet perform (contrast the app's own
- * `OfficeCommandConsumer`, which DOES answer all 22 for wire-completeness reasons that do not apply
- * to a tool schema no agent has reached yet).
+ * T4 added the write verbs: `set`, `insert_rows`, `insert_cols`, `delete_rows`, `delete_cols`,
+ * `add_sheet`, `delete_sheet`, `rename_sheet`. T5 adds the LAST verb this tool will ever register in
+ * Stage C: `format` — `bold`/`italic`/`numberFormat`/`align`/`width` over an A1 range, every one
+ * OPTIONAL and independent (an ABSENT key means "leave this attribute alone," never "reset it to a
+ * default" — see `format`'s own rung in `run()` and its own description bullet below for the exact
+ * contract). It drives the SAME `.uno:` commands a human formatting toolbar would send — see
+ * `OfficeRuntime.sheetsFormat` (`apple/Norma/Sources/AppShell/OfficeRuntime.swift`) for the shared
+ * app-side function a future human-facing formatting UI calls too, not a second path to LOK.
  *
  * ## T4's own operand design — one real, disclosed deviation from the spec's compressed table
  *
@@ -88,6 +91,7 @@ const SheetsArgs = z.object({
     "info", "read", "set",
     "insert_rows", "insert_cols", "delete_rows", "delete_cols",
     "add_sheet", "delete_sheet", "rename_sheet",
+    "format",
   ]),
   /** Absolute (or, mirroring `resolveWithinAny`, resolved against the session's primary working
    *  directory if relative) — spec §2's own table. Required for EVERY verb; a missing path is
@@ -152,6 +156,46 @@ const SheetsArgs = z.object({
   name: z.string().min(1).max(256).optional(),
   /** `rename_sheet` ONLY — the sheet's new name. */
   newName: z.string().min(1).max(256).optional(),
+  /** `format` ONLY — bold text on/off, an ABSOLUTE state (not a toggle): `true` makes the range
+   *  bold regardless of its current state, `false` makes it explicitly not-bold, and — the operand
+   *  this verb builds its whole contract on — LEAVING THIS KEY OUT of the call touches bold-ness not
+   *  at all, on any cell in the range. Verified live, not assumed: applying `bold:true` twice in a
+   *  row leaves the range bold both times (never flips back), and applying it to a range that starts
+   *  with a MIX of bold and non-bold cells leaves every cell in it bold — see task-5-report.md. */
+  bold: z.boolean().optional(),
+  /** `format` ONLY — italic text on/off. Same absolute-state, same absent-means-untouched contract
+   *  as `bold` above — see that field's own doc. */
+  italic: z.boolean().optional(),
+  /** `format` ONLY — a number-format PRESET, not an arbitrary format-code string (a disclosed,
+   *  deliberate v1 narrowing from an earlier draft of this operand — not pre-approved, see
+   *  task-5-report.md). "general" clears back to the plain default format; "number" is a decimal
+   *  number (2 places); "percent"/"currency"/"date" apply that preset. Every preset changes how a
+   *  cell's value DISPLAYS — NEVER the value itself: a cell holding the number 0.5, formatted
+   *  "percent", reads back as the text "50.00%" from a `read` in VALUES mode, while the same `read`
+   *  in FORMULAS mode (or any formula elsewhere that references the cell) still sees/computes with
+   *  the plain number 0.5 — that split is the entire point of a number format, and it is what this
+   *  tool's own live proof checks. Reapplying the SAME preset is a no-op, not a toggle back to
+   *  general — this operand always sets an absolute state. Same absent-means-untouched contract as
+   *  `bold` above. */
+  numberFormat: z.enum(["general", "number", "percent", "currency", "date"]).optional(),
+  /** `format` ONLY — horizontal text alignment. v1 has no vertical-alignment operand (not exposed,
+   *  not planned for this pass). Same absent-means-untouched contract as `bold` above. */
+  align: z.enum(["left", "center", "right"]).optional(),
+  /** `format` ONLY — column width in POINTS (1/72 inch: an absolute, locale-independent physical
+   *  unit, chosen because the underlying engine's own width dialog otherwise reports/accepts
+   *  whatever measurement unit the human's own Tools>Options happens to be set to, which this tool
+   *  has no way to know or rely on). **A COLUMN property, not a cell one, unlike every other operand
+   *  on this verb**: `width` widens every column `range` touches, in FULL — e.g. range:"B2:B5" widens
+   *  ALL of column B end to end, not just rows 2-5, because a spreadsheet has no notion of a
+   *  partial-column width. Combining `width` with `bold`/`italic`/`numberFormat`/`align` in the same
+   *  call is legal — the cell attributes apply to `range` exactly as given, `width` still applies to
+   *  the full columns `range` spans, independently. Same absent-means-untouched contract as `bold`
+   *  above (an absent `width` never resizes any column). Bounded to [1, 1000] points: the app-side
+   *  conversion to the engine's own native unit (1/100mm) rounds a value below 1 point down to an
+   *  unrepresentable zero — `.min(1)`, not `.positive()`, makes that impossible at the schema itself
+   *  rather than relying on the app to clamp it; 1000 points (~13.9in) is well above any realistic
+   *  column and keeps the converted value safely inside the engine's own uint16 argument. */
+  width: z.number().min(1).max(1000).optional(),
 });
 type SheetsArgs = z.infer<typeof SheetsArgs>;
 
@@ -360,6 +404,19 @@ export function registerSheetsTool(r: ToolRegistry, deps: SheetsToolDeps): void 
       + "• rename_sheet — path, name (the sheet to rename), newName. Can change which sheet is shown "
       + "as ACTIVE in a document a human already has open — a real, visible side effect on that tab "
       + "(a timing-dependent one, not guaranteed on every call).\n"
+      + "• format — path, sheet, range, and at least one of bold (boolean), italic (boolean), "
+      + "numberFormat (\"general\"/\"number\"/\"percent\"/\"currency\"/\"date\" — a closed preset "
+      + "set, not an arbitrary format code), align (\"left\"/\"center\"/\"right\"), width (column "
+      + "width in points). An ABSENT key means \"leave this attribute alone\" — never \"reset it to "
+      + "default\": format bold:true then, in a separate call, format italic:true on the same range, "
+      + "and the bold from the first call survives. Every attribute sets an ABSOLUTE state, never a "
+      + "toggle — true always makes bold/italic so, false always clears it, the same preset applied "
+      + "twice is a no-op, not a flip-back. numberFormat changes how a cell's value DISPLAYS, never "
+      + "the value itself — a cell holding 0.5 formatted \"percent\" reads back as \"50.00%\" from a "
+      + "read in values mode, while formulas mode (or any formula elsewhere referencing it) still "
+      + "sees the plain number 0.5. width is a COLUMN property, not a cell one: it widens every "
+      + "column range touches, in full, even if range is only a few rows tall. align is horizontal "
+      + "only in v1.\n"
       + "Every path must be inside this session's own working directories — an office read/write "
       + "COPIES the file and parses it with LibreOffice, so it is not an ordinary file read/write and "
       + "the usual unrestricted-reads rule does not cover it.\n"
@@ -381,15 +438,20 @@ export function registerSheetsTool(r: ToolRegistry, deps: SheetsToolDeps): void 
       + "**A timeout means the outcome is UNKNOWN, never that a write failed to happen** — the app "
       + "may have completed it and lost the race home. Re-read the document before ever retrying a "
       + "write verb; never blind-retry set/insert_rows/insert_cols/add_sheet/etc. on a timeout alone, "
-      + "since a retry can double the change if the first attempt actually landed.",
+      + "since a retry can double the change if the first attempt actually landed. format is the one "
+      + "exception worth naming: bold/italic/align/numberFormat/width all set an ABSOLUTE state, so "
+      + "re-sending the exact same format call after a timeout is safe — it converges to the same "
+      + "result, never doubles anything — but re-reading first is still the honest way to confirm "
+      + "what actually happened before deciding to resend.",
     modes: ["code", "dispatch"],
     args: SheetsArgs,
     async run(a: SheetsArgs, ctx) {
       const sessionId = ctx.sessionId;
       const action = `office.sheets.${a.verb}` as OfficeCommandAction;
-      const sheetVerbs = new Set(["read", "set", "insert_rows", "insert_cols", "delete_rows", "delete_cols"]);
+      const sheetVerbs = new Set(["read", "set", "insert_rows", "insert_cols", "delete_rows", "delete_cols", "format"]);
       const resizeVerbs = new Set(["insert_rows", "insert_cols", "delete_rows", "delete_cols"]);
       const rowVerbs = new Set(["insert_rows", "delete_rows"]);
+      const rangeVerbs = new Set(["read", "set", "format"]);
 
       // Rung 1 — operands, per verb. Missing → malformed, never defaulted (this file's own
       // wire-strictness rule).
@@ -397,7 +459,7 @@ export function registerSheetsTool(r: ToolRegistry, deps: SheetsToolDeps): void 
         throw new Error(`sheets ${a.verb} needs a \`sheet\` naming which sheet to act on — e.g. `
           + `verb:"${a.verb}", path:"...", sheet:"Sheet1", ...`);
       }
-      if ((a.verb === "read" || a.verb === "set")) {
+      if (rangeVerbs.has(a.verb)) {
         if (!a.range) {
           throw new Error(`sheets ${a.verb} needs a \`range\` in A1 notation — e.g. range:"A1:C10" `
             + 'or a single cell range:"B2".');
@@ -467,6 +529,14 @@ export function registerSheetsTool(r: ToolRegistry, deps: SheetsToolDeps): void 
           throw new Error('sheets rename_sheet needs `newName` — the sheet\'s new name.');
         }
       }
+      if (a.verb === "format") {
+        if (a.bold === undefined && a.italic === undefined && a.numberFormat === undefined
+            && a.align === undefined && a.width === undefined) {
+          throw new Error("sheets format needs at least one of `bold`, `italic`, `numberFormat`, "
+            + "`align`, `width` — an absent key means \"leave alone,\" so a call naming none of them "
+            + "would do nothing.");
+        }
+      }
 
       // Rung 2 — the fence. Runs BEFORE reach (this file's own header explains why the ordering is
       // load-bearing, not incidental): a path that could never be allowed must refuse the same way
@@ -499,6 +569,18 @@ export function registerSheetsTool(r: ToolRegistry, deps: SheetsToolDeps): void 
         args = officeCommandArgs(resolvedPath, { name: a.name! });
       } else if (a.verb === "rename_sheet") {
         args = officeCommandArgs(resolvedPath, { name: a.name!, newName: a.newName! });
+      } else if (a.verb === "format") {
+        // Built conditionally, one key at a time — never `{ ..., bold: a.bold }` with `a.bold`
+        // possibly `undefined` — so an omitted operand is OMITTED from the wire object entirely
+        // (JSON has no way to say "this key is present but means nothing"; the absent-key contract
+        // this verb's whole design rests on has to be enforced HERE, not hoped for downstream).
+        const fields: Record<string, string | number | boolean> = { sheet: a.sheet!, range: a.range! };
+        if (a.bold !== undefined) fields.bold = a.bold;
+        if (a.italic !== undefined) fields.italic = a.italic;
+        if (a.numberFormat !== undefined) fields.numberFormat = a.numberFormat;
+        if (a.align !== undefined) fields.align = a.align;
+        if (a.width !== undefined) fields.width = a.width;
+        args = officeCommandArgs(resolvedPath, fields);
       } else {
         args = officeCommandArgs(resolvedPath);
       }

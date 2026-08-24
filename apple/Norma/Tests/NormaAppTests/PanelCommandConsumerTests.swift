@@ -154,33 +154,36 @@ final class PanelCommandConsumerTests: XCTestCase {
     /// `OfficeCommandConsumer` directly; this is the one test in THIS file that proves
     /// `PanelCommandConsumer.handle` actually reaches it for an office action, rather than falling
     /// into the `default:` branch just above (which would answer "does not know the browser verb
-    /// `office.sheets.format`" — a true-sounding but WRONG message, since this build does know the
+    /// `office.slides.info`" — a true-sounding but WRONG message, since this build does know the
     /// verb by name, it simply hasn't implemented it yet). The two messages are asserted to differ so
     /// a future edit that accidentally deletes the routing guard reds here even if it still produces
     /// *some* refusal.
     ///
     /// **T3 — `office.sheets.set` chosen deliberately, not `office.sheets.read`; T4 — `office.sheets
-    /// .format` chosen in `set`'s place, for the identical reason one level later.** T1 picked `read`
-    /// arbitrarily, back when all 22 verbs answered identically; T3 made `sheets.info`/`sheets.read`
-    /// REAL (dispatched onto their own `Task`, answered asynchronously), so THIS test's own
-    /// synchronous "exactly one result, sent by the time `handle` returns" assertion would race a
-    /// verb that no longer answers synchronously — T3 moved this test to `sheets.set`, still T1's
-    /// own refusal shell at the time. T4 then made `sheets.set` (and seven siblings) real too, async
-    /// the identical way — `format` is the one sheets verb still on T1's own synchronous shell
-    /// (T5+'s own job), so this test moves to it now, same routing proof, same synchronous guarantee.
+    /// .format` chosen in `set`'s place; T5 — `office.slides.info` chosen in `format`'s place, for
+    /// the identical reason one level later, again.** T1 picked `read` arbitrarily, back when all 22
+    /// verbs answered identically; T3 made `sheets.info`/`sheets.read` REAL (dispatched onto their
+    /// own `Task`, answered asynchronously), so THIS test's own synchronous "exactly one result, sent
+    /// by the time `handle` returns" assertion would race a verb that no longer answers
+    /// synchronously — T3 moved this test to `sheets.set`, still T1's own refusal shell at the time.
+    /// T4 then made `sheets.set` (and seven siblings) real too, async the identical way — this test
+    /// moved to `sheets.format`, the one sheets verb still on T1's own synchronous shell at the time.
+    /// T5 makes `format` real too (every `sheets` verb now is) — `office.slides.info` is the first
+    /// still-stub verb of Stage C's next kind, so this test moves to it now, same routing proof, same
+    /// synchronous guarantee.
     ///
     /// Also proves the thing `OfficeCommandConsumerTests` cannot: that CEF is never touched and no
     /// deadline timer is armed for an office verb, because routing happens before this file's own
     /// `Call`/`arm` machinery ever sees the command.
     func testOfficeActionsRouteToTheOfficeConsumerRatherThanTheUnknownVerbBranch() {
         let world = makeWorld()
-        world.consumer.handle(command("office.sheets.format"))
+        world.consumer.handle(command("office.slides.info"))
         XCTAssertEqual(sent.count, 1)
         XCTAssertEqual(sent.first?.ok, false)
         let result = sent.first?.result ?? ""
         XCTAssertFalse(result.contains("does not know the browser verb"), "\(sent)")
-        XCTAssertTrue(result.contains("sheets"), "\(sent)")
-        XCTAssertTrue(result.contains("format"), "\(sent)")
+        XCTAssertTrue(result.contains("slides"), "\(sent)")
+        XCTAssertTrue(result.contains("info"), "\(sent)")
         XCTAssertEqual(cef.log, [], "an office verb must never reach CEF")
         XCTAssertEqual(clock.liveTimers.count, 0, "an office verb arms no browser-side deadline")
     }

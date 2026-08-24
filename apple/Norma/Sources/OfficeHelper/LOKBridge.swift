@@ -419,7 +419,7 @@ final class LOKBridge: OfficeDocumentBridge {
         /// `set`'s own per-cell check and both resize checks (`sheetsResizeOnDedicatedThread`'s
         /// sentinel-park and its post-span re-check) throw this SAME case now, distinguished only by
         /// this field — never a second, near-duplicate case.
-        enum PositionVerificationContext { case typing, resizePositioning, verifyingWrite }
+        enum PositionVerificationContext { case typing, resizePositioning, verifyingWrite, formatPositioning }
         case positionVerificationFailed(docId: String, address: String, landedAt: String?,
                                         context: PositionVerificationContext)
         /// Second fix-round review (Important #2 + Minor 3) — `sheetsSetOnDedicatedThread`'s own loop
@@ -495,6 +495,11 @@ final class LOKBridge: OfficeDocumentBridge {
                         + "still there to verify the content afterward (landed at \(landedDescription) "
                         + "instead) — the write itself may have succeeded; re-read the cell directly "
                         + "before trusting or retrying it"
+                case .formatPositioning:
+                    return "an internal positioning check before formatting could not confirm the "
+                        + "cursor reached \(address) in \(docId) (landed at \(landedDescription) "
+                        + "instead) — nothing was formatted; re-read before retrying, the outcome is "
+                        + "known (unchanged), not unknown"
                 }
             case .partialSetFailure(let reason): return reason
             case .lastSheet(let docId):
@@ -939,6 +944,18 @@ final class LOKBridge: OfficeDocumentBridge {
     }
     func sheetsManageSheet(docId: String, op: OfficeSheetsManageSheetOp, name: String, newName: String?) throws -> [String] {
         try thread.sync { try self.sheetsManageSheetOnDedicatedThread(docId: docId, op: op, name: name, newName: newName) }
+    }
+
+    // MARK: - office-agent-tools T5: sheets format
+
+    func sheetsFormat(docId: String, sheet: String, range: String, columnSpan: String?,
+                      bold: Bool?, italic: Bool?, numberFormat: OfficeSheetsNumberFormatPreset?,
+                      align: OfficeSheetsAlign?, width: Double?) throws -> [String] {
+        try thread.sync {
+            try self.sheetsFormatOnDedicatedThread(docId: docId, sheet: sheet, range: range, columnSpan: columnSpan,
+                                                    bold: bold, italic: italic, numberFormat: numberFormat,
+                                                    align: align, width: width)
+        }
     }
 
     // MARK: - Office Stage B Task 10 — the CFB release blocker
@@ -3165,6 +3182,218 @@ final class LOKBridge: OfficeDocumentBridge {
             throw SaveError.writeVerificationFailed(docId: docId, address: label)
         }
         return after
+    }
+
+    // MARK: - office-agent-tools T5: sheets format — the verb the human formatting toolbar will share
+
+    /// office-agent-tools T5 — points (`sheets.ts`'s own operand unit, chosen for locale-independence
+    /// — see that file's own doc) to the vendored engine's real native unit for `.uno:ColumnWidth`'s
+    /// own argument: 1/100 mm, confirmed against the pinned engine's own source
+    /// (`o3tl::toTwips(nWidth, o3tl::Length::mm100)`, `sc/source/ui/view/cellsh3.cxx`, this task's own
+    /// research — see `sheetsFormatOnDedicatedThread`'s own header for the full citation). 1 point =
+    /// 1/72 inch = 25.4/72 mm = 2540/72 hundredths-of-a-mm — an exact rational constant, not a
+    /// measured approximation. Rounded to the nearest whole 1/100mm (the item's own type,
+    /// `SfxUInt16Item`, is integral — a fractional value has nowhere to go anyway). `sheets.ts`'s own
+    /// `width` schema (`.min(1).max(1000)` points) keeps this comfortably inside `UInt16`'s range at
+    /// both ends: 1pt -> 35 (never rounds to the unrepresentable 0), 1000pt -> 35,278 (well under
+    /// 65,535).
+    private static func officeWidthMm100(fromPoints points: Double) -> Int {
+        Int((points * 2540.0 / 72.0).rounded())
+    }
+
+    /// office-agent-tools T5 — the SAME sentinel-then-anchor two-check position-verification pattern
+    /// `sheetsResizeOnDedicatedThread` established (task-5-brief.md's own mandate: "Position
+    /// verification is mandatory... Do the same"), generalized to any pre-formatted `span` a caller
+    /// wants to select — a full two-corner range ("A1:C10", `sheetsFormat`'s own cell-attribute
+    /// phase) or a column-only Name-Box span ("A:C", its own width phase) — given that span's own
+    /// ANCHOR as an already-resolved single-cell address (the caller's job, mirroring
+    /// `sheetsResizeOnDedicatedThread`'s own `anchorAddress` construction, never re-derived here).
+    ///
+    /// Parks at a sentinel cell DIFFERENT from the anchor first — same row, a column guaranteed to
+    /// differ from the anchor's own (column B unless the anchor's own column IS B, in which case
+    /// column A; always exists, always distinct, never an arithmetic offset that could overflow near
+    /// the sheet's own edge) — so a span-select that silently never happens is caught, not masked by
+    /// a check that only re-confirms wherever the sentinel-park already put the cursor (the exact
+    /// falsification task-4-report.md §8 documents against the FIRST version of this pattern, before
+    /// the sentinel fix). Then selects the real `span` and re-verifies against the SAME anchor.
+    private func positionAndVerifySpanOnDedicatedThread(_ doc: OpenDocument, docId: String, viewId: Int32, part: Int,
+                                                        anchorAddress: String, span: String) throws {
+        guard let anchorTarget = Self.parseSingleCellReference(anchorAddress) else {
+            throw SaveError.positionVerificationFailed(docId: docId, address: anchorAddress, landedAt: nil,
+                                                        context: .formatPositioning)
+        }
+        let sentinelColumn = anchorTarget.column == 1 ? 0 : 1
+        let sentinelAddress = Self.formatCellReference(column: sentinelColumn, row: anchorTarget.row)
+        try positionAndVerifyOnDedicatedThread(doc, docId: docId, viewId: viewId, part: part,
+                                               address: sentinelAddress, context: .formatPositioning)
+
+        _ = selectionTextOnDedicatedThread(doc, docId: docId, viewId: viewId, part: part, range: span, formulas: false)
+        try verifyCellCursorOnDedicatedThread(doc, docId: docId, expectedAddress: span, target: anchorTarget,
+                                              context: .formatPositioning)
+    }
+
+    /// office-agent-tools T5 — applies `bold`/`italic`/`numberFormat`/`align`/`width` over `range` on
+    /// `sheet`, every one optional and independent (`nil` means "leave this attribute alone" — the
+    /// whole contract `OfficeWireFrame.sheetsFormat`'s own header states in full). **The app-side
+    /// `OfficeRuntime.sheetsFormat` that calls down to this bridge is the SAME function a future
+    /// human-facing formatting UI will call — see that function's own header for the shared-code
+    /// signature.**
+    ///
+    /// **Two independent phases, on the agent view — the same isolation every OTHER cell-level write
+    /// verb in this file has (`set`, all four resize verbs), never the primary-view retreat
+    /// `sheetsManageSheetOnDedicatedThread` was live-forced into (that retreat was about WORKBOOK-
+    /// STRUCTURAL commands — Add/Remove/Name a whole sheet — not cell/column attribute commands,
+    /// which this task's own live drills confirm behave like every other agent-view-isolated
+    /// primitive; see task-5-report.md if that ever needs revisiting).**
+    ///
+    /// **Phase 1 — cell attributes (bold/italic/numberFormat/align), entered only when at least one
+    /// is named**, over `range`'s own cell-range selection:
+    ///
+    /// - **`bold`/`italic` dispatch a REAL absolute-state argument, confirmed by reading the vendored
+    ///   engine's own Execute handler (`ScFormatShell::ExecuteTextAttr`, `sc/source/ui/view/
+    ///   formatsh.cxx`, this task's own research, primary-source-cited in task-5-report.md): the slot
+    ///   TOGGLES only when its args are ABSENT — supplying `{"Bold":{"type":"boolean","value":
+    ///   "true"}}` (the value as a STRING, `"true"`/`"false"`, the shape the research found actually
+    ///   used — never a native JSON boolean, which this bridge has not verified the underlying parser
+    ///   accepts) sets that exact state regardless of the range's own current state, including a
+    ///   MIXED range. Verified live, not merely reasoned — see task-5-report.md's own idempotency and
+    ///   mixed-range drills.
+    /// - **`align` dispatches `.uno:HorizontalAlignment`** (`SID_H_ALIGNCELL`), value `1`/`2`/`3` for
+    ///   left/center/right (`com.sun.star.table.CellHoriJustify`) — deterministic by construction, no
+    ///   toggle risk at all (this task's own research: the Execute handler only ever fires when args
+    ///   are present, so an absent-args no-op is the ONLY alternate behavior, never a flip).
+    /// - **`numberFormat` is applied via a NORMALIZE-THEN-APPLY sequence, unconditionally, regardless
+    ///   of whether the underlying preset commands turn out to toggle or set absolutely.**
+    ///   `.uno:NumberFormatStandard` (General) dispatches FIRST, always; the target preset's own
+    ///   command dispatches second, only when the target itself is not `.general` (nothing to
+    ///   normalize INTO beyond the reset itself). This makes the whole operation deterministic BY
+    ///   CONSTRUCTION: starting from a KNOWN state and taking exactly one forward step always lands
+    ///   in the same place, whether that step happens to toggle or to set absolutely — a toggle's own
+    ///   ambiguity on a MIXED-state range never gets a chance to matter, because every cell in the
+    ///   selection is normalized to the identical starting state first. **Why this design exists at
+    ///   all, not a free-form format-code string** (spec §2's own generic `numberFormat` operand,
+    ///   deliberately narrowed — see `OfficeWireFrame.sheetsFormat`'s own header for the full,
+    ///   source-grounded reasoning): this task's own research read the vendored engine's real Execute
+    ///   handler and found `.uno:NumberFormat` is NOT a format code at all (a four-field comma tuple
+    ///   silently comma-split into garbage by a real code string) and the command that DOES take a
+    ///   format — `.uno:NumberFormatValue` — takes a pre-registered NUMERIC KEY whose registration
+    ///   (`XNumberFormats.queryKey`/`.addNew`) is a UNO Property-API call with no `.uno:` slot,
+    ///   confirmed UNREACHABLE by reading the vendored `LibreOfficeKit.h` this bridge actually links
+    ///   against (`Sources/OfficeKit/include/LibreOfficeKit.h`): the only command-shaped surface on
+    ///   `LibreOfficeKitDocumentClass` is `postUnoCommand`/`getCommandValues`/`setBlockedCommandList`.
+    ///
+    /// **Phase 2 — `width`, entered only when `width`/`columnSpan` are both non-nil**, over
+    /// `columnSpan`'s OWN, SEPARATE column-span selection (never `range`'s cell selection — `width`
+    /// is a COLUMN property, this function's own callers already establish that split):
+    ///
+    /// - **`.uno:ColumnWidth` dispatches with its OWN argument ALWAYS present** — omitting it opens a
+    ///   real, headless-undismissable modal dialog (`ScMetricInputDlg`, this task's own research,
+    ///   confirmed against `sc/source/ui/view/cellsh3.cxx`'s own `StartExecuteAsync` call) — the exact
+    ///   hang class `sheetsManageSheetOnDedicatedThread`'s own header already paid to learn to avoid,
+    ///   for a DIFFERENT command. `officeWidthMm100(fromPoints:)` (above) is the named, cited
+    ///   points-to-1/100mm conversion — never an inline formula.
+    ///
+    /// A best-effort pump (`pumpDedicatedThreadForPendingDispatch`, the SAME throwaway primitive every
+    /// other UNO-command verb in this file already trusts) follows each phase's own dispatches, before
+    /// the NEXT phase's own position-verification (or, for the last phase run, before this function
+    /// returns) — giving LOK's own dispatcher a turn to drain before anything downstream (a save, or
+    /// phase 2's own position check) depends on the phase having taken effect.
+    ///
+    /// Returns which attribute NAMES were reached — `["bold","italic","numberFormat","align","width"]`
+    /// filtered to what was actually named, in that fixed order — "posted," the same honest-not-a-
+    /// claim-of-effect posture `keyEventOk`/`undoOk` already hold to (this bridge's real proof is the
+    /// caller's own save-reopen-readback, per this task's own proof obligations, not a synchronous
+    /// confirmation this function has no cheap way to make for a formatting attribute the way
+    /// `sheetsResizeOnDedicatedThread`'s own `getDataArea` read can for a dimension change).
+    private func sheetsFormatOnDedicatedThread(docId: String, sheet: String, range: String, columnSpan: String?,
+                                               bold: Bool?, italic: Bool?, numberFormat: OfficeSheetsNumberFormatPreset?,
+                                               align: OfficeSheetsAlign?, width: Double?) throws -> [String] {
+        guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        guard doc.kind == .spreadsheet else { throw SaveError.notSpreadsheet(docId: docId, kind: doc.kind) }
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+
+        let names = sheetNamesOnDedicatedThread(doc)
+        guard let part = names.firstIndex(of: sheet) else {
+            throw SaveError.sheetNotFound(docId: docId, sheet: sheet, available: names)
+        }
+
+        let agentViewId = try ensureAgentViewOnDedicatedThread(docId: docId)
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
+        doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(part))
+
+        var applied: [String] = []
+
+        // Phase 1 — cell attributes, over `range`'s own selection.
+        if bold != nil || italic != nil || numberFormat != nil || align != nil {
+            guard let rangeAnchorToken = range.split(separator: ":", maxSplits: 1).first, !rangeAnchorToken.isEmpty else {
+                throw SaveError.positionVerificationFailed(docId: docId, address: range, landedAt: nil,
+                                                            context: .formatPositioning)
+            }
+            try positionAndVerifySpanOnDedicatedThread(doc, docId: docId, viewId: agentViewId, part: part,
+                                                        anchorAddress: String(rangeAnchorToken), span: range)
+
+            if let bold {
+                postUnoCommandOnDedicatedThread(doc, ".uno:Bold",
+                                                ["Bold": ["type": "boolean", "value": bold ? "true" : "false"]])
+                applied.append("bold")
+            }
+            if let italic {
+                postUnoCommandOnDedicatedThread(doc, ".uno:Italic",
+                                                ["Italic": ["type": "boolean", "value": italic ? "true" : "false"]])
+                applied.append("italic")
+            }
+            if let numberFormat {
+                // Normalize first, unconditionally — see this function's own header for why this
+                // makes the whole operation deterministic regardless of toggle-vs-absolute.
+                ".uno:NumberFormatStandard".withCString { commandPtr in
+                    doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, nil, false)
+                }
+                if numberFormat != .general {
+                    let presetCommand: String
+                    switch numberFormat {
+                    case .general: presetCommand = ".uno:NumberFormatStandard" // unreachable — guarded above
+                    case .number: presetCommand = ".uno:NumberFormatDecimal"
+                    case .percent: presetCommand = ".uno:NumberFormatPercent"
+                    case .currency: presetCommand = ".uno:NumberFormatCurrency"
+                    case .date: presetCommand = ".uno:NumberFormatDate"
+                    }
+                    presetCommand.withCString { commandPtr in
+                        doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, nil, false)
+                    }
+                }
+                applied.append("numberFormat")
+            }
+            if let align {
+                let value: Int
+                switch align {
+                case .left: value = 1
+                case .center: value = 2
+                case .right: value = 3
+                }
+                postUnoCommandOnDedicatedThread(doc, ".uno:HorizontalAlignment",
+                                                ["HorizontalAlignment": ["type": "long", "value": String(value)]])
+                applied.append("align")
+            }
+            pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: part)
+        }
+
+        // Phase 2 — `width`, over `columnSpan`'s OWN, separate selection.
+        if let width, let columnSpan {
+            guard let columnAnchorToken = columnSpan.split(separator: ":", maxSplits: 1).first, !columnAnchorToken.isEmpty else {
+                throw SaveError.positionVerificationFailed(docId: docId, address: columnSpan, landedAt: nil,
+                                                            context: .formatPositioning)
+            }
+            try positionAndVerifySpanOnDedicatedThread(doc, docId: docId, viewId: agentViewId, part: part,
+                                                        anchorAddress: "\(columnAnchorToken)1", span: columnSpan)
+
+            let mm100 = Self.officeWidthMm100(fromPoints: width)
+            postUnoCommandOnDedicatedThread(doc, ".uno:ColumnWidth",
+                                            ["ColumnWidth": ["type": "unsigned short", "value": String(mm100)]])
+            applied.append("width")
+            pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: part)
+        }
+
+        return applied
     }
 
     /// office-agent-tools T4 — the shared JSON-args UNO dispatch this task's own three new sheet-

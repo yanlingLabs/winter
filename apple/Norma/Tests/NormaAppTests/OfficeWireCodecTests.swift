@@ -144,6 +144,16 @@ final class OfficeWireCodecTests: XCTestCase {
                 ["1", "=SUM(A1:B1)", "3"],
             ]),
             .sheetsReadOk(seq: 73, docId: "doc-1", rows: []), // a range whose sheet turned out to have nothing there
+            // office-agent-tools T5 — sheets format. Every optional field gets a nil AND a non-nil
+            // sample somewhere in this list, including the columnSpan<->width pairing.
+            .sheetsFormat(seq: 74, docId: "doc-1", sheet: "Sheet1", range: "A1:C10", columnSpan: nil,
+                         bold: true, italic: nil, numberFormat: nil, align: nil, width: nil),
+            .sheetsFormat(seq: 75, docId: "doc-1", sheet: "Sheet1", range: "B2", columnSpan: nil,
+                         bold: nil, italic: false, numberFormat: .percent, align: .center, width: nil),
+            .sheetsFormat(seq: 76, docId: "doc-1", sheet: "Q1 Recap", range: "B2:B5", columnSpan: "B:B",
+                         bold: nil, italic: nil, numberFormat: nil, align: nil, width: 72.5),
+            .sheetsFormatOk(seq: 77, docId: "doc-1", applied: ["bold", "align"]),
+            .sheetsFormatOk(seq: 78, docId: "doc-1", applied: ["width"]),
         ]
         for frame in samples {
             let line = try XCTUnwrap(String(data: frame.encodedLine(), encoding: .utf8))
@@ -245,6 +255,9 @@ final class OfficeWireCodecTests: XCTestCase {
             "sheetsSetOk": #"{"type":"sheetsSetOk","seq":1,"docId":"d","cellsWritten":1}"#,
             "sheetsResizeOk": #"{"type":"sheetsResizeOk","seq":1,"docId":"d","usedEndColumn":1,"usedEndRow":1}"#,
             "sheetsManageSheetOk": #"{"type":"sheetsManageSheetOk","seq":1,"docId":"d","sheets":["Sheet1","Q3"]}"#,
+            // office-agent-tools T5 — sheets format.
+            "sheetsFormat": #"{"type":"sheetsFormat","seq":1,"docId":"d","sheet":"Sheet1","range":"A1:C10","bold":true}"#,
+            "sheetsFormatOk": #"{"type":"sheetsFormatOk","seq":1,"docId":"d","applied":["bold"]}"#,
         ]
         XCTAssertEqual(Set(fixtures.keys), Set(OfficeWireFrame.wireTypes),
                        "fixtures must cover exactly OfficeWireFrame.wireTypes, no more, no less")
@@ -320,6 +333,10 @@ final class OfficeWireCodecTests: XCTestCase {
         XCTAssertEqual(OfficeWireFrame.sheetsRead(seq: 147, docId: "d", sheet: "Sheet1", range: "A1", formulas: false).seq, 147)
         XCTAssertEqual(OfficeWireFrame.sheetsInfoOk(seq: 148, docId: "d", sheets: [], activeSheet: "Sheet1").seq, 148)
         XCTAssertEqual(OfficeWireFrame.sheetsReadOk(seq: 149, docId: "d", rows: []).seq, 149)
+        XCTAssertEqual(OfficeWireFrame.sheetsFormat(seq: 150, docId: "d", sheet: "Sheet1", range: "A1",
+                                                     columnSpan: nil, bold: true, italic: nil,
+                                                     numberFormat: nil, align: nil, width: nil).seq, 150)
+        XCTAssertEqual(OfficeWireFrame.sheetsFormatOk(seq: 151, docId: "d", applied: ["bold"]).seq, 151)
     }
 
     // MARK: - The brief's literal pin: unknown type -> error{seq,reason:"unknown"}

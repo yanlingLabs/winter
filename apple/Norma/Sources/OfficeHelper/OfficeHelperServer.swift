@@ -222,6 +222,16 @@ public protocol OfficeDocumentBridge: AnyObject {
     /// own slot handlers silently no-op or silently rename-with-a-suffix rather than erroring these
     /// cases, so this bridge would otherwise have no honest signal to report).
     func sheetsManageSheet(docId: String, op: OfficeSheetsManageSheetOp, name: String, newName: String?) throws -> [String]
+
+    /// office-agent-tools T5 — applies `bold`/`italic`/`numberFormat`/`align`/`width` over `range` on
+    /// `sheet`, every one optional (`nil` means untouched — see `OfficeWireFrame.sheetsFormat`'s own
+    /// header for the full contract). `columnSpan` is `width`'s own separate column-span selection,
+    /// non-nil only when `width` itself is. Returns which attribute names were actually applied, a
+    /// subset of `["bold","italic","numberFormat","align","width"]` in that order. Throws the same
+    /// existence/kind errors `sheetsRead` throws, plus `SaveError.sheetNotFound`.
+    func sheetsFormat(docId: String, sheet: String, range: String, columnSpan: String?,
+                      bold: Bool?, italic: Bool?, numberFormat: OfficeSheetsNumberFormatPreset?,
+                      align: OfficeSheetsAlign?, width: Double?) throws -> [String]
 }
 
 /// The result of a successful `OfficeDocumentBridge.paintTile` call — helper-internal (never
@@ -481,6 +491,27 @@ public final class FakeOfficeDocumentBridge: OfficeDocumentBridge {
             fakeSheetNames[index] = newName
         }
         return fakeSheetNames
+    }
+
+    /// office-agent-tools T5 — wire-level dispatch only, same reasoning as every other fake stub
+    /// above: existence/sheet-name checked (real UNO-command correctness is `LOKBridge`'s own
+    /// live-tested job), returns the attribute names actually named — a deterministic, real (if fake)
+    /// echo of the caller's own request, in the fixed order `sheetsFormatOk`'s own header promises.
+    public func sheetsFormat(docId: String, sheet: String, range: String, columnSpan: String?,
+                             bold: Bool?, italic: Bool?, numberFormat: OfficeSheetsNumberFormatPreset?,
+                             align: OfficeSheetsAlign?, width: Double?) throws -> [String] {
+        lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
+        guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
+        guard sheet == "Sheet1" else {
+            throw OfficeHelperServerError.posix("fake bridge: no sheet named \"\(sheet)\" in \(docId) — this workbook has: Sheet1")
+        }
+        var applied: [String] = []
+        if bold != nil { applied.append("bold") }
+        if italic != nil { applied.append("italic") }
+        if numberFormat != nil { applied.append("numberFormat") }
+        if align != nil { applied.append("align") }
+        if width != nil { applied.append("width") }
+        return applied
     }
 
     /// A small, deterministic, key-dependent pixel pattern (never blank, never identical across
@@ -1360,6 +1391,20 @@ public final class OfficeHelperServer {
             do {
                 let sheets = try documentBridge.sheetsManageSheet(docId: docId, op: op, name: name, newName: newName)
                 writeReply(.sheetsManageSheetOk(seq: seq, docId: docId, sheets: sheets), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.sheetsFormat(let seq, let docId, let sheet, let range, let columnSpan, let bold,
+                                  let italic, let numberFormat, let align, let width)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                let applied = try documentBridge.sheetsFormat(docId: docId, sheet: sheet, range: range,
+                                                               columnSpan: columnSpan, bold: bold, italic: italic,
+                                                               numberFormat: numberFormat, align: align, width: width)
+                writeReply(.sheetsFormatOk(seq: seq, docId: docId, applied: applied), writer: writer)
             } catch {
                 writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
             }

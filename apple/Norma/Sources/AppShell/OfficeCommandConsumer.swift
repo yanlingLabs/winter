@@ -115,6 +115,8 @@ struct OfficeCommandConsumer {
             Task { await handleSheetsResize(command) }
         case "office.sheets.add_sheet", "office.sheets.delete_sheet", "office.sheets.rename_sheet":
             Task { await handleSheetsManageSheet(command) }
+        case "office.sheets.format":
+            Task { await handleSheetsFormat(command) }
         default:
             sendResult(command.sessionId, command.commandId, false,
                        Self.refusal(for: command.action), nil)
@@ -450,6 +452,107 @@ struct OfficeCommandConsumer {
         }
     }
 
+    /// `office.sheets.format` — `bold`/`italic`/`numberFormat`/`align`/`width` over one A1 `range` on
+    /// one named sheet, every operand optional and independent (absent means "leave alone" — see
+    /// `sheets.ts`'s own description and `OfficeWireFrame.sheetsFormat`'s own header for the full
+    /// contract this rests on).
+    ///
+    /// **`width`'s own column-span selection is computed HERE, from the SAME already-parsed `range` —
+    /// never re-derived by the helper.** `width` is a COLUMN property (task-5-brief.md's own words):
+    /// it must widen every column `range` touches, in full, so its own selection is a Name-Box-style
+    /// column span ("A:C"), built with the identical `officeColumnLetters` conversion
+    /// `handleSheetsResize`'s own column verbs already use — never a second implementation.
+    /// `columnSpan` is `nil` whenever `width` itself is `nil` (the wire's own paired-field guard —
+    /// `OfficeWireFrame.sheetsFormat`'s decode refuses any OTHER combination).
+    private func handleSheetsFormat(_ command: SessionEvent.PanelCommand) async {
+        guard let path = Self.requiredPath(command.args) else {
+            return sendResult(command.sessionId, command.commandId, false, Self.requiredPathRefusal, nil)
+        }
+        guard let sheet = Self.requiredSheet(command.args) else {
+            return sendResult(command.sessionId, command.commandId, false, Self.requiredSheetRefusal, nil)
+        }
+        guard let rangeText = Self.requiredRangeText(command.args) else {
+            return sendResult(command.sessionId, command.commandId, false, Self.requiredRangeRefusal, nil)
+        }
+        guard let range = officeParseRange(rangeText) else {
+            return sendResult(command.sessionId, command.commandId, false,
+                               "\"\(Self.brief(rangeText))\" is not a valid A1 range — examples: "
+                                   + "\"A1\", \"A1:C10\".", nil)
+        }
+        // Mirrors `handleSheetsRead`'s own pre-broker cap check — `format` is single-dispatch over
+        // the WHOLE selection, never per-cell (unlike `set`), so its cost shape matches `read`'s, not
+        // `set`'s — this reuses `officeReadRangeMaxCells` rather than inventing a third number with
+        // subtly different reasoning attached.
+        guard range.cellCount <= officeReadRangeMaxCells else {
+            return sendResult(command.sessionId, command.commandId, false,
+                               "\"\(rangeText)\" spans \(range.cellCount) cells, past the "
+                                   + "\(officeReadRangeMaxCells)-cell limit on one format call — ask for "
+                                   + "a smaller range.", nil)
+        }
+        let bold = Self.optionalBool(command.args, "bold")
+        let italic = Self.optionalBool(command.args, "italic")
+        let numberFormat = Self.optionalNumberFormatPreset(command.args)
+        let align = Self.optionalAlign(command.args)
+        let width = Self.optionalWidth(command.args)
+        guard bold != nil || italic != nil || numberFormat != nil || align != nil || width != nil else {
+            return sendResult(command.sessionId, command.commandId, false, Self.requiredFormatAttributeRefusal, nil)
+        }
+
+        let rangeString = "\(officeCellReference(column: range.startColumn, row: range.startRow)):"
+            + officeCellReference(column: range.endColumn, row: range.endRow)
+        let columnSpan: String? = width != nil
+            ? "\(officeColumnLetters(range.startColumn)):\(officeColumnLetters(range.endColumn))"
+            : nil
+
+        // How many independent attributes THIS call named — mirrors `handleSheetsSet`'s own
+        // `cellAddresses.count > 1` test exactly, one layer up: a partial failure is only STRUCTURALLY
+        // possible when more than one attribute was in flight, regardless of which one a later error
+        // actually names. Known entirely from THIS call's own already-decoded operands — no error-
+        // parsing needed, the same simplification `handleSheetsSet`'s own catch block already makes
+        // (it never asks LOKBridge's thrown message "how many cells landed," it only asks itself
+        // "could more than one plausibly have").
+        let attributeCount = [bold != nil, italic != nil, numberFormat != nil, align != nil, width != nil]
+            .filter { $0 }.count
+
+        guard let broker = officeAgentBroker(command.sessionId) else {
+            return sendResult(command.sessionId, command.commandId, false, Self.hostGoneRefusal, nil)
+        }
+        do {
+            let resultText = try await broker.perform(
+                sessionId: command.sessionId, path: path, access: .write, requestId: command.commandId
+            ) { runtime, docId, adopted in
+                do {
+                    let applied = try await runtime.sheetsFormat(
+                        docId: docId, sheet: sheet, range: rangeString, columnSpan: columnSpan,
+                        bold: bold, italic: italic, numberFormat: numberFormat, align: align, width: width)
+                    return Self.formatSheetsFormat(path: path, sheet: sheet, range: rangeString, applied: applied)
+                } catch {
+                    // Same partial-application honesty `handleSheetsSet` already established (that
+                    // function's own header): `format` dispatches its named attributes in SEQUENCE
+                    // (cell attributes first, then — only if `width` was named — a SEPARATE
+                    // column-span selection for it), and `OfficeAgentBroker.perform`'s own control
+                    // flow throws BEFORE rule 4's save switch is ever reached — so a LATER attribute's
+                    // failure does not undo whatever an EARLIER one in this SAME call already
+                    // dispatched, and none of it is saved either way.
+                    guard attributeCount > 1 else { throw error }
+                    let lifecycle = adopted
+                        ? " If an earlier attribute in this call already applied before this failure, "
+                            + "it is sitting unsaved in your own open tab right now — the tab is dirty, "
+                            + "and Norma will refuse further writes to this document until you save or "
+                            + "discard those changes yourself."
+                        : " If an earlier attribute in this call already applied before this failure, "
+                            + "it was discarded when Norma closed the document afterward — nothing from "
+                            + "this call persisted, and the next call will start fresh."
+                    throw OfficeAgentBrokerError.writeFailed(path: path, reason: Self.message(for: error) + lifecycle)
+                }
+            }
+            let (ok, text) = Self.capped(resultText)
+            sendResult(command.sessionId, command.commandId, ok, text, nil)
+        } catch {
+            sendResult(command.sessionId, command.commandId, false, Self.message(for: error), nil)
+        }
+    }
+
     // MARK: - office-agent-tools T3: operands (wire strictness — missing required, never defaulted)
 
     private static let requiredPathRefusal = "this office verb needs a `path`."
@@ -526,6 +629,39 @@ struct OfficeCommandConsumer {
         guard case .bool(let value)? = args?["formulas"] else { return false }
         return value
     }
+    private static let requiredFormatAttributeRefusal =
+        "`sheets format` needs at least one of `bold`, `italic`, `numberFormat`, `align`, `width` — "
+        + "an absent key means \"leave alone,\" so a call naming none of them would do nothing."
+
+    // MARK: - office-agent-tools T5: format's own operands — every one OPTIONAL, absent-means-untouched
+
+    /// `bold`/`italic` — `Bool?`, genuinely three-valued (present-true / present-false / absent),
+    /// unlike `optionalFormulas` above (which collapses "absent" and "wrong type" into the SAME
+    /// default): a wrong-typed value here is a decode mismatch between the two languages' own
+    /// schemas (the daemon's zod already refused a non-boolean before dispatch), not real caller
+    /// intent — folding it into `nil` ("untouched") is safe for the SAME reason `sheetsManageSheet`'s
+    /// own `newName` decode already treats "absent or wrong type" as `nil` rather than refusing.
+    private static func optionalBool(_ args: [String: SessionEvent.JSONValue]?, _ key: String) -> Bool? {
+        guard case .bool(let value)? = args?[key] else { return nil }
+        return value
+    }
+    private static func optionalAlign(_ args: [String: SessionEvent.JSONValue]?) -> OfficeSheetsAlign? {
+        guard case .string(let raw)? = args?["align"] else { return nil }
+        return OfficeSheetsAlign(rawValue: raw)
+    }
+    /// `numberFormat` — see `OfficeWireFrame.sheetsFormat`'s own header for why this is a closed
+    /// PRESET enum, not an arbitrary format-code string (a disclosed, source-grounded v1 narrowing).
+    private static func optionalNumberFormatPreset(_ args: [String: SessionEvent.JSONValue]?) -> OfficeSheetsNumberFormatPreset? {
+        guard case .string(let raw)? = args?["numberFormat"] else { return nil }
+        return OfficeSheetsNumberFormatPreset(rawValue: raw)
+    }
+    /// `width` — points (see `sheets.ts`'s own doc for why points, not the engine's raw 1/100mm
+    /// storage unit). `.number` on the wire decodes as `Double` regardless of whether the daemon sent
+    /// a whole number or a fraction — no separate int/double handling needed here.
+    private static func optionalWidth(_ args: [String: SessionEvent.JSONValue]?) -> Double? {
+        guard case .number(let value)? = args?["width"] else { return nil }
+        return value
+    }
 
     // MARK: - office-agent-tools T3: result formatting (the "smallest useful truth", spec §3.5)
 
@@ -590,6 +726,11 @@ struct OfficeCommandConsumer {
     private static func formatSheetsManageSheet(path: String, sheets: [String]) -> String {
         let name = (path as NSString).lastPathComponent
         return "\(sheets.count) sheet\(sheets.count == 1 ? "" : "s") in \(name): \(sheets.joined(separator: ", "))"
+    }
+
+    private static func formatSheetsFormat(path: String, sheet: String, range: String, applied: [String]) -> String {
+        let name = (path as NSString).lastPathComponent
+        return "applied \(applied.joined(separator: ", ")) to \(sheet)!\(range) in \(name)"
     }
 
     /// The final belt — `sheetsResultMaxLength`, checked in the wire's own UTF-16-code-unit unit

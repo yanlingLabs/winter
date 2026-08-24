@@ -72,14 +72,15 @@ describe("registration", () => {
     expect(h.registry.namesForMode("chat").has("sheets")).toBe(false);
   });
 
-  // office-agent-tools T3 review (I6), T4 update — `sheets`' verb enum is pinned literally,
-  // rendered through the SAME z.toJSONSchema path a real model actually sees (ToolRegistry.specFor),
-  // not a raw zod import that could drift from what's really offered. T3 warned that gate.ts's
-  // READ_ONLY classification was name-keyed and would need revisiting the day a write verb landed —
-  // T4 did that (gate.ts now classifies `sheets` MUTATING; see gate.test.ts's own dedicated test).
-  // This test now guards the NEXT growth (`format`, T5+): the day the enum grows again, it fails
-  // here first, before a new verb ships without its own operand validation/gate audit.
-  test("the verb enum is exactly the 10 verbs T3+T4 shipped — format (T5+) is not registered yet", () => {
+  // office-agent-tools T3 review (I6), T4 update, T5 update — `sheets`' verb enum is pinned
+  // literally, rendered through the SAME z.toJSONSchema path a real model actually sees
+  // (ToolRegistry.specFor), not a raw zod import that could drift from what's really offered. T3
+  // warned that gate.ts's READ_ONLY classification was name-keyed and would need revisiting the day
+  // a write verb landed — T4 did that (gate.ts now classifies `sheets` MUTATING; see gate.test.ts's
+  // own dedicated test). T5 adds `format`, the LAST verb this tool will ever register in Stage C —
+  // the day the enum grows again (a future stage, not T5), it fails here first, before a new verb
+  // ships without its own operand validation/gate audit.
+  test("the verb enum is exactly the 11 verbs T3+T4+T5 shipped", () => {
     const h = makeHarness();
     const spec = h.registry.specFor("sheets", WORKDIR, "code");
     const parameters = spec?.parameters as { properties?: { verb?: { enum?: string[] } } } | undefined;
@@ -88,6 +89,7 @@ describe("registration", () => {
       "info", "read", "set",
       "insert_rows", "insert_cols", "delete_rows", "delete_cols",
       "add_sheet", "delete_sheet", "rename_sheet",
+      "format",
     ]);
   });
 
@@ -387,6 +389,119 @@ describe("sheet management verbs", () => {
     const result = await h.run({ verb: "rename_sheet", path: `${WORKDIR}/b.xlsx`, name: "Sheet1" });
     expect(result.isError).toBe(true);
     expect(result.output).toContain("newName");
+    expect(h.recorded).toEqual([]);
+  });
+});
+
+// ================================================================================================
+// format (T5) — the verb the human formatting UI will share
+// ================================================================================================
+
+describe("format", () => {
+  test("dispatches office.sheets.format with sheet/range and one attribute", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "format", path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", range: "A1:C10", bold: true });
+    expect(result.isError).toBe(false);
+    expect(h.recorded).toEqual([{
+      sessionId: SID, action: "office.sheets.format",
+      args: { path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", range: "A1:C10", bold: true },
+      deadlineMs: OFFICE_DEADLINES_MS["office.sheets.format"],
+    }]);
+  });
+
+  test("dispatches all five attributes together when all five are given", async () => {
+    const h = makeHarness();
+    const result = await h.run({
+      verb: "format", path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", range: "A1:C10",
+      bold: true, italic: false, numberFormat: "percent", align: "center", width: 72,
+    });
+    expect(result.isError).toBe(false);
+    expect(h.recorded[0]?.args).toEqual({
+      path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", range: "A1:C10",
+      bold: true, italic: false, numberFormat: "percent", align: "center", width: 72,
+    });
+  });
+
+  test("numberFormat must be one of the closed presets — an unrecognized value is malformed and refused by zod", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "format", path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", range: "A1", numberFormat: "0.00%" });
+    expect(result.isError).toBe(true);
+    expect(h.recorded).toEqual([]);
+  });
+
+  // The absent-key contract this verb's whole design rests on (spec: "an absent key means leave
+  // alone, never reset to default") — pinned here at the WIRE level: an operand the caller never
+  // named must not merely be `undefined` in some intermediate object, it must not be a KEY in the
+  // JSON `args` sent over the wire at all, since JSON has no way to distinguish "present but
+  // undefined" from "absent" once serialized. If this test ever failed, `format` would be sending
+  // `{"italic": null}`-shaped noise (or, worse, a stray `undefined` a naive JSON encoder might drop
+  // ANYWAY, hiding a real bug) instead of a clean, absent key.
+  test("an attribute never named by the caller is not a key in args at all — not even as undefined/null", async () => {
+    const h = makeHarness();
+    await h.run({ verb: "format", path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", range: "A1", italic: true });
+    const args = h.recorded[0]?.args ?? {};
+    expect(Object.keys(args).sort()).toEqual(["italic", "path", "range", "sheet"]);
+    expect("bold" in args).toBe(false);
+    expect("numberFormat" in args).toBe(false);
+    expect("align" in args).toBe(false);
+    expect("width" in args).toBe(false);
+  });
+
+  // The other half of the absolute-state contract: `false` is a REAL, present instruction (turn
+  // this OFF), never confused with "absent" — the two must produce different wire shapes.
+  test("bold:false is a real, present instruction — distinct from omitting bold entirely", async () => {
+    const h = makeHarness();
+    await h.run({ verb: "format", path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", range: "A1", bold: false });
+    expect(h.recorded[0]?.args).toEqual({ path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", range: "A1", bold: false });
+  });
+
+  test("a missing sheet is malformed and refused, before dispatch", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "format", path: `${WORKDIR}/b.xlsx`, range: "A1", bold: true });
+    expect(result.isError).toBe(true);
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("a missing range is malformed and refused, before dispatch", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "format", path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", bold: true });
+    expect(result.isError).toBe(true);
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("a range that does not look like A1 notation is refused before dispatch", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "format", path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", range: "not a range", bold: true });
+    expect(result.isError).toBe(true);
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("naming none of bold/italic/numberFormat/align/width is refused, before dispatch — it would do nothing", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "format", path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", range: "A1" });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("at least one");
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("align must be left/center/right — an unrecognized value is malformed and refused by zod", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "format", path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", range: "A1", align: "justify" });
+    expect(result.isError).toBe(true);
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("width past the schema's own ceiling is refused by zod, before dispatch", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "format", path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", range: "A1", width: 100_000 });
+    expect(result.isError).toBe(true);
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("width must be positive — zero and negative are refused by zod", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "format", path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", range: "A1", width: 0 });
+    expect(result.isError).toBe(true);
     expect(h.recorded).toEqual([]);
   });
 });

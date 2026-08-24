@@ -300,6 +300,49 @@ public enum OfficeWireFrame: Equatable, Sendable {
     /// decode refuses a `.rename` with no `newName`, and a non-`.rename` op that supplies one, rather
     /// than silently ignoring either mismatch).
     case sheetsManageSheet(seq: UInt64, docId: String, op: OfficeSheetsManageSheetOp, name: String, newName: String?)
+    /// office-agent-tools T5 — applies `bold`/`italic`/`numberFormat`/`align`/`width` over one A1
+    /// `range` on ONE named sheet, every field OPTIONAL and independent: a `nil` field means "leave
+    /// this attribute alone," never "reset it to default" (spec: the whole contract this verb is
+    /// built around). At least one of the five is guaranteed non-nil by the time this frame is built
+    /// — `OfficeCommandConsumer.handleSheetsFormat`'s own job, not re-checked here (this wire's own
+    /// established precedent: `sheetsSet`'s decode does not re-check `cellAddresses.count >= 1`
+    /// either — a business rule the daemon/consumer already enforced, not a structural shape this
+    /// layer re-derives).
+    ///
+    /// **`columnSpan` is a SEPARATE, already-formatted Name-Box-style span ("A:C"), present if and
+    /// only if `width` is present** — `width` is a COLUMN property, not a cell one (unlike the other
+    /// four), so it needs its OWN selection distinct from `range`'s own cell-range selection: a
+    /// range like "B2:B5" only spans rows 2-5 of column B, but widening column B widens the WHOLE
+    /// column. Built app-side (`officeColumnLetters`, the SAME conversion `sheetsResize`'s own
+    /// `selectionRange` uses), never re-derived helper-side — the identical cross-target constraint
+    /// every other real-A1-math field on this wire already carries (see `sheetsRead.range`'s own
+    /// header). Decode refuses a mismatch (`columnSpan` present without `width`, or vice versa)
+    /// rather than silently ignoring either — the same discipline `sheetsManageSheet`'s own
+    /// `newName`/`op` pairing already established on this file.
+    ///
+    /// **`numberFormat` is a closed PRESET enum, not a free-form format-code string — a disclosed,
+    /// deliberate narrowing from spec §2's generic operand name, not an oversight.** This task's own
+    /// research read the vendored engine's real Execute handlers (`sc/source/ui/view/formatsh.cxx`)
+    /// and confirmed two things primary-source, not guessed: (1) `.uno:NumberFormat` looks like the
+    /// obvious candidate but is NOT a format code at all — it is a four-field comma tuple
+    /// (`bThousand,bNegRed,precision,leadZeroes`) fed to `GenerateFormat()`; handing it a real code
+    /// like `"0.00%"` would silently comma-split into garbage, a real wrong-result trap, not a
+    /// refusal. (2) The command that DOES take a format — `.uno:NumberFormatValue` — takes a
+    /// pre-registered NUMERIC KEY (`SfxUInt32Item`), and registering an arbitrary code to get that
+    /// key is `XNumberFormats.queryKey`/`.addNew`, a UNO Property-API call with no `.uno:` slot of
+    /// its own — confirmed UNREACHABLE by reading the vendored `LibreOfficeKit.h` this bridge
+    /// actually links against (`Sources/OfficeKit/include/LibreOfficeKit.h`): the only command-shaped
+    /// surface on `LibreOfficeKitDocumentClass` is `postUnoCommand`/`getCommandValues`/
+    /// `setBlockedCommandList` — nothing reaches a UNO service's own methods. The closed preset set
+    /// below rides the SAME fixed, argument-less toolbar commands a human's own Number Format
+    /// toolbar section sends (`.uno:NumberFormatStandard`/`.../Number`/`.../Percent`/`.../Currency`/
+    /// `.../Date`) — arguably MORE faithful to this task's own "the same `.uno:` commands a human
+    /// toolbar would send" charge than an arbitrary string would have been, since an arbitrary code
+    /// has no toolbar button at all, only the Format Cells DIALOG (a headless-hang risk this bridge
+    /// already paid to learn to avoid — see `sheetsManageSheetOnDedicatedThread`'s own header).
+    case sheetsFormat(seq: UInt64, docId: String, sheet: String, range: String, columnSpan: String?,
+                      bold: Bool?, italic: Bool?, numberFormat: OfficeSheetsNumberFormatPreset?,
+                      align: OfficeSheetsAlign?, width: Double?)
 
     // MARK: Responses (helper -> client)
 
@@ -489,6 +532,12 @@ public enum OfficeWireFrame: Equatable, Sendable {
     /// returns, and the only way a caller learns whether `add`'s requested name survived Calc's own
     /// silent sanitization (`CreateValidTabName`) verbatim or was altered.
     case sheetsManageSheetOk(seq: UInt64, docId: String, sheets: [String])
+    /// office-agent-tools T5 — answers a successful `sheetsFormat`: which attribute NAMES were
+    /// actually applied (`"bold"`, `"italic"`, `"numberFormat"`, `"align"`, `"width"` — a subset of
+    /// those five, in that fixed order, never empty since the caller must have named at least one).
+    /// The smallest useful truth, same posture `sheetsManageSheetOk`'s sheet list already has — a
+    /// caller can see exactly what landed without re-deriving it from its own request.
+    case sheetsFormatOk(seq: UInt64, docId: String, applied: [String])
 
     /// The wire vocabulary, in frame-declaration order. A test walks this list the same way
     /// `EditorBridgeInbound.wireTypes`'s own test does — one fixture per name, decode, assert the
@@ -507,6 +556,8 @@ public enum OfficeWireFrame: Equatable, Sendable {
         "sheetsInfo", "sheetsRead",
         // office-agent-tools T4 — sheets write verbs.
         "sheetsSet", "sheetsResize", "sheetsManageSheet",
+        // office-agent-tools T5 — sheets format.
+        "sheetsFormat",
         "helloOk", "refused", "pong", "opened", "openFailed", "closed", "saved", "saveFailed",
         "keyEventOk", "mouseEventOk", "extTextInputEventOk",
         "clipboardCopyOk", "clipboardCutOk", "clipboardPasteOk", "undoOk", "redoOk",
@@ -515,6 +566,7 @@ public enum OfficeWireFrame: Equatable, Sendable {
         "subscribed", "unsubscribed", "tileRequestAccepted", "tile", "tileFailed", "invalidated",
         "sheetsInfoOk", "sheetsReadOk",
         "sheetsSetOk", "sheetsResizeOk", "sheetsManageSheetOk",
+        "sheetsFormatOk",
     ]
 
     public var wireType: String {
@@ -542,6 +594,7 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .sheetsSet: return "sheetsSet"
         case .sheetsResize: return "sheetsResize"
         case .sheetsManageSheet: return "sheetsManageSheet"
+        case .sheetsFormat: return "sheetsFormat"
         case .helloOk: return "helloOk"
         case .refused: return "refused"
         case .pong: return "pong"
@@ -573,6 +626,7 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .sheetsSetOk: return "sheetsSetOk"
         case .sheetsResizeOk: return "sheetsResizeOk"
         case .sheetsManageSheetOk: return "sheetsManageSheetOk"
+        case .sheetsFormatOk: return "sheetsFormatOk"
         }
     }
 
@@ -601,6 +655,7 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .sheetsSet(let seq, _, _, _, _, _): return seq
         case .sheetsResize(let seq, _, _, _, _, _): return seq
         case .sheetsManageSheet(let seq, _, _, _, _): return seq
+        case .sheetsFormat(let seq, _, _, _, _, _, _, _, _, _): return seq
         case .helloOk(let seq, _): return seq
         case .refused(let seq, _): return seq
         case .pong(let seq): return seq
@@ -632,6 +687,7 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .sheetsSetOk(let seq, _, _): return seq
         case .sheetsResizeOk(let seq, _, _, _): return seq
         case .sheetsManageSheetOk(let seq, _, _): return seq
+        case .sheetsFormatOk(let seq, _, _): return seq
         }
     }
 
@@ -763,6 +819,17 @@ public enum OfficeWireFrame: Equatable, Sendable {
             payload["op"] = op.rawValue
             payload["name"] = name
             if let newName { payload["newName"] = newName }
+        case .sheetsFormat(_, let docId, let sheet, let range, let columnSpan, let bold, let italic,
+                           let numberFormat, let align, let width):
+            payload["docId"] = docId
+            payload["sheet"] = sheet
+            payload["range"] = range
+            if let columnSpan { payload["columnSpan"] = columnSpan }
+            if let bold { payload["bold"] = bold }
+            if let italic { payload["italic"] = italic }
+            if let numberFormat { payload["numberFormat"] = numberFormat.rawValue }
+            if let align { payload["align"] = align.rawValue }
+            if let width { payload["width"] = width }
         case .sheetsSetOk(_, let docId, let cellsWritten):
             payload["docId"] = docId
             payload["cellsWritten"] = cellsWritten
@@ -773,6 +840,9 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .sheetsManageSheetOk(_, let docId, let sheets):
             payload["docId"] = docId
             payload["sheets"] = sheets
+        case .sheetsFormatOk(_, let docId, let applied):
+            payload["docId"] = docId
+            payload["applied"] = applied
         case .subscribed(_, let docId, let keys), .invalidated(_, let docId, let keys):
             payload["docId"] = docId
             payload["keys"] = keys.map { $0.jsonObject() }
@@ -930,6 +1000,29 @@ public enum OfficeSheetsManageSheetOp: String, Equatable, Sendable {
     case add
     case delete
     case rename
+}
+
+/// office-agent-tools T5 — `sheetsFormat`'s horizontal alignment. Same strict-enum, refuse-don't-
+/// default-on-unrecognized discipline as `OfficeSheetsResizeDimension`/`Op` above. v1 has no
+/// vertical-alignment case — not exposed, not planned for this pass (`sheets.ts`'s own doc says so).
+public enum OfficeSheetsAlign: String, Equatable, Sendable {
+    case left
+    case center
+    case right
+}
+
+/// office-agent-tools T5 — `sheetsFormat`'s number-format PRESET (a closed set, not an arbitrary
+/// format-code string — see `sheetsFormat`'s own case header for the full, source-grounded reasoning
+/// this narrowing rests on). `general` doubles as both the caller's own "clear back to the default
+/// format" request AND this bridge's own internal normalizer for every OTHER preset, if the preset
+/// commands turn out to TOGGLE rather than set an absolute state (see `LOKBridge
+/// .sheetsFormatOnDedicatedThread`'s own header for which one this engine build actually is).
+public enum OfficeSheetsNumberFormatPreset: String, Equatable, Sendable {
+    case general
+    case number
+    case percent
+    case currency
+    case date
 }
 
 /// `hello`'s role field. `agent` is the daemon (Stage C consumer; the handshake alone lands now).
@@ -1983,6 +2076,37 @@ public enum OfficeWireCodec {
                 return .rejected(seq: seq, reason: "malformed")
             }
             return .frame(.sheetsManageSheet(seq: seq, docId: docId, op: op, name: name, newName: newName))
+        case "sheetsFormat":
+            guard let docId = object["docId"] as? String, let sheet = object["sheet"] as? String,
+                  let range = object["range"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            let columnSpan = object["columnSpan"] as? String
+            let bold = object["bold"] as? Bool
+            let italic = object["italic"] as? Bool
+            let align = (object["align"] as? String).flatMap(OfficeSheetsAlign.init(rawValue:))
+            let width = doubleValue(object["width"])
+            // A `numberFormat` KEY present but unrecognized is malformed (the strict-enum discipline
+            // every other new-in-this-file string field already has) — distinct from the key being
+            // ABSENT, which is a legitimate `nil` (this attribute untouched).
+            let numberFormat: OfficeSheetsNumberFormatPreset?
+            if let raw = object["numberFormat"] as? String {
+                guard let parsed = OfficeSheetsNumberFormatPreset(rawValue: raw) else {
+                    return .rejected(seq: seq, reason: "malformed")
+                }
+                numberFormat = parsed
+            } else {
+                numberFormat = nil
+            }
+            // `columnSpan` present iff `width` present — same paired-field discipline
+            // `sheetsManageSheet`'s own `op == .rename` <-> `newName != nil` guard already established
+            // on this file (that case's own header).
+            guard (columnSpan != nil) == (width != nil) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.sheetsFormat(seq: seq, docId: docId, sheet: sheet, range: range,
+                                        columnSpan: columnSpan, bold: bold, italic: italic,
+                                        numberFormat: numberFormat, align: align, width: width))
         case "sheetsSetOk":
             guard let docId = object["docId"] as? String, let cellsWritten = intValue(object["cellsWritten"]) else {
                 return .rejected(seq: seq, reason: "malformed")
@@ -2000,6 +2124,11 @@ public enum OfficeWireCodec {
                 return .rejected(seq: seq, reason: "malformed")
             }
             return .frame(.sheetsManageSheetOk(seq: seq, docId: docId, sheets: sheets))
+        case "sheetsFormatOk":
+            guard let docId = object["docId"] as? String, let applied = object["applied"] as? [String] else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.sheetsFormatOk(seq: seq, docId: docId, applied: applied))
         default:
             // The type itself is unrecognized — the brief's exact case: error{seq,reason:"unknown"}.
             return .rejected(seq: seq, reason: "unknown")
@@ -2030,6 +2159,13 @@ func intValue(_ value: Any?) -> Int? {
 func int64Value(_ value: Any?) -> Int64? {
     guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
     return number as? Int64
+}
+/// office-agent-tools T5 — same NSNumber-boolean-trap discipline as `intValue`/`int64Value` above,
+/// for `sheetsFormat.width` (points — a fractional value, unlike every other numeric field this wire
+/// has carried so far, which is why this helper did not already exist).
+func doubleValue(_ value: Any?) -> Double? {
+    guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+    return number as? Double
 }
 
 /// Mints strictly increasing `seq` values for one connection's OUTBOUND frames, starting at 1

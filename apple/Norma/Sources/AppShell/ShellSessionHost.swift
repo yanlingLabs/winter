@@ -1151,6 +1151,16 @@ final class ShellSessionHost: ObservableObject {
                     return try await client.sheetsManageSheet(docId: docId, op: op, name: name, newName: newName)
                 }
             },
+            sheetsFormat: { [weak supervisor] docId, sheet, range, columnSpan, bold, italic, numberFormat, align, width in
+                try await queue.run {
+                    guard let client = supervisor?.client else {
+                        throw OfficeHelperClientError.serverError(reason: "helper not connected")
+                    }
+                    return try await client.sheetsFormat(docId: docId, sheet: sheet, range: range, columnSpan: columnSpan,
+                                                          bold: bold, italic: italic, numberFormat: numberFormat,
+                                                          align: align, width: width)
+                }
+            },
             // Office Stage B Task 2b — the LIVE supervisor's own configured directory, never
             // `OfficeHelperSupervisor.Configuration.defaultStateDirectory()` read fresh: every live
             // test overrides `socketDirectory` with a scratch dir precisely so its own helper's

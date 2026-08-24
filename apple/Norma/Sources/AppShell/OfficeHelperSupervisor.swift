@@ -387,6 +387,23 @@ final class OfficeHelperClient {
         }
     }
 
+    // MARK: - office-agent-tools T5: sheets format
+
+    func sheetsFormat(docId: String, sheet: String, range: String, columnSpan: String?,
+                      bold: Bool?, italic: Bool?, numberFormat: OfficeSheetsNumberFormatPreset?,
+                      align: OfficeSheetsAlign?, width: Double?) async throws -> [String] {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.sheetsFormat(seq: seq, docId: docId, sheet: sheet, range: range,
+                                                columnSpan: columnSpan, bold: bold, italic: italic,
+                                                numberFormat: numberFormat, align: align, width: width))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .sheetsFormatOk(_, _, let applied): return applied
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
     // MARK: - Task 4: tiles
 
     /// Registers this connection as a tile-push subscriber for `docId` (which must already be open
