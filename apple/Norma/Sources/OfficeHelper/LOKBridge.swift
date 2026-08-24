@@ -3571,6 +3571,14 @@ final class LOKBridge: OfficeDocumentBridge {
         postAgentKey(SlidesKeyCode.escape)
 
         var landedRect: OfficeTwipsRect?
+        // **Deletion-red proof (office-agent-tools T6, 2026-08-24)**: hardcoded this loop to always
+        // run exactly once regardless of `tabCount`, rebuilt, reran the live `read` drill (slide 2,
+        // tabCount 1 for title / 2 for body) — `body` came back reading the SAME text as `title`
+        // ("Norma T6 Slide Two" for both), the exact "wrong placeholder selected" signature, not
+        // "nothing found" (that's proof A/C's own signature, in `handleCallback`/
+        // `readSelectedShapeTextOnDedicatedThread`) — and `info` (title-only, tabCount always 1) was
+        // correctly UNAFFECTED, confirming the break was scoped to this loop bound specifically, not
+        // some broader breakage. Reverted, confirmed byte-identical, reran green.
         for _ in 0..<tabCount {
             clearObservedRect()
             postAgentKey(SlidesKeyCode.tab)
@@ -3618,6 +3626,13 @@ final class LOKBridge: OfficeDocumentBridge {
     /// not a poll-until-non-empty loop — an empty read here can be a GENUINELY empty placeholder,
     /// which this bridge has no way to distinguish from "SelectAll hasn't landed yet" by content
     /// alone, so this gives the queue one honest chance to drain rather than guessing from the result.
+    /// **Deletion-red proof (office-agent-tools T6, 2026-08-24)**: skipped the `.uno:SelectAll`
+    /// dispatch itself (not just its pump), rebuilt, reran the live `info`/`read` drill — every
+    /// title/body came back "(empty title placeholder)"/"(empty)": the PLACEHOLDER WAS FOUND
+    /// (position-verification, proof B's own mechanism, still intact) but its TEXT read empty — a
+    /// signature specifically distinct from proof A's "(no title placeholder)" (nothing found at
+    /// all). Confirms this dispatch is load-bearing on its own, not merely the pump around it.
+    /// Reverted, confirmed byte-identical, reran green.
     private func readSelectedShapeTextOnDedicatedThread(_ doc: OpenDocument, agentViewId: Int32, part: Int) -> String {
         doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyInput.rawValue), 0, Int32(SlidesKeyCode.f2))
         doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyUp.rawValue), 0, Int32(SlidesKeyCode.f2))
@@ -3647,6 +3662,16 @@ final class LOKBridge: OfficeDocumentBridge {
     /// `readSelectedShapeTextOnDedicatedThread`'s own header explains; a write that types into a
     /// selection SelectAll has not actually made yet would insert alongside existing content instead
     /// of replacing it, silently.
+    /// **Deletion-red proof (office-agent-tools T6, 2026-08-24)**: skipped both `postWindowExtTextInputEvent`
+    /// dispatches (the actual write), rebuilt, reran
+    /// `testLiveSetTextChangesOnlyTheTargetedSlideProvenBySaveAndIndependentReopen` live — slide 2's
+    /// title/body read back as the ORIGINAL, untouched text ("Norma T6 Slide Two"/"second bullet"),
+    /// not "CHANGED TITLE"/"CHANGED BODY", at BOTH verification layers: the independent-reopen LOK
+    /// read AND the raw `unzip -p content.xml` filesystem seal (which correctly asserted "must
+    /// contain the new title text" / "OLD title must be gone" and both correctly failed). Proves the
+    /// write dispatch itself is load-bearing, and proves the filesystem seal genuinely detects an
+    /// absence of change rather than passing by construction. Reverted, confirmed byte-identical,
+    /// reran green.
     private func writeSelectedShapeTextOnDedicatedThread(_ doc: OpenDocument, agentViewId: Int32, part: Int, text: String) {
         doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyInput.rawValue), 0, Int32(SlidesKeyCode.f2))
         doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyUp.rawValue), 0, Int32(SlidesKeyCode.f2))
@@ -3958,6 +3983,13 @@ final class LOKBridge: OfficeDocumentBridge {
             // before accepting the rect — a firing for the PRIMARY view (a human clicking around an
             // adopted tab while this mechanism runs) must never be mistaken for this bridge's own
             // agent-view selection landing; silently ignored, not merely unfiltered-and-hoped-safe.
+            // **Deletion-red proof (office-agent-tools T6, 2026-08-24)**: inverted to `viewId !=
+            // agentViewId` (accept only what this filter is supposed to reject), rebuilt, reran
+            // `testLiveSlidesInfoReadsRealTitlesFromThreeSlideFixture` live — every title/body came
+            // back "(no title placeholder)"/"(empty)", the exact "nothing was ever recorded"
+            // signature, not some unrelated symptom. Reverted, confirmed byte-identical
+            // (`git diff --stat`), reran green. This filter is load-bearing, not incidentally
+            // passing.
             if var doc = documents[docId], let agentViewId = doc.agentViewId,
                let (viewId, selection) = Self.parseGraphicViewSelectionEnvelope(payload),
                viewId == agentViewId {
