@@ -236,6 +236,39 @@ retry inside `positionAndVerifySpanOnDedicatedThread` — which is shared by `re
 `resize` and is mechanism surgery well outside a fix round's remit. Recorded with its exact message
 so the next person has the observation rather than having to rediscover it.
 
-## 4. Suite numbers
+## 4. Pushback on the review
+
+Four items, in descending order of consequence. The review was careful and mostly right; these are
+the places where following it exactly would have produced a worse result.
+
+1. **The Critical's prescription was half a fix.** "Bound the letter run" closes the column door and
+   leaves the row door — `range:"A1:B9223372036854775807"`, 23 characters, matching the daemon's own
+   shape regex — wide open, aborting the app one line later in `cellCount`. Two more doors of the
+   same class (`Int(1e30)` in the resize `at`/`count` decode; `at + count - 1`) are named nowhere in
+   the arc. All four measured. **The finding was right; its prescription was not sufficient.**
+
+2. **Important-1's severity does not reproduce.** The wedge premise — whole-column selections
+   serialising the full grid — is false: the selection is bounded by the used data area, and the
+   worst case measured is +2.4s on a 4M-cell workbook. I kept a cap, because bounding an operand is
+   right regardless, but I re-sized it from the measurement and rewrote both its header and the
+   model-facing text so nobody inherits the wedge story as fact. **A cap sold on a false premise is
+   the same defect class this arc keeps paying for, pointed at the fix instead of the code.**
+
+3. **The brief's own Critical vector is the wrong one.** `AAAAAAAAAAAAAA1` (14 A's) does not trap in
+   `officeColumnIndex` — 2.58e18 fits. `ZZZZZZZZZZZZZZ1` (the review's vector) does. Immaterial to
+   the conclusion, material to anyone re-running the proof: a tester using the brief's string would
+   have seen it return cleanly and concluded the finding was wrong.
+
+4. **Minor-1 is right about the shipped test and understates its own importance.** `center` was
+   fired, `left` was not, and the review is correct that this pins the enum FAMILY. Worth saying
+   plainly in the ledger, because the T5 report's version of this sentence is the one a later reader
+   would cite.
+
+One thing the review flagged as a Minor that turned out to be a genuine defect: **Minor-5.** It was
+filed as "asserted to the model but tested by nothing." Testing it showed the claim is **false**.
+That is the arc's own lesson landing on the review itself — "untested" and "wrong" are not
+distinguishable until somebody runs it.
+
+## 5. Suite numbers
 
 (filled in at the end)
