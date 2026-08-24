@@ -332,6 +332,21 @@ final class OfficeSlidesCommandTests: XCTestCase {
         // probe-specific workaround). Primes against `gate.odp`, a throwaway, UNRELATED single-slide
         // fixture — never `three-slide.odp` — so the probe's own document is never touched by the
         // broker/runtime at all, only by the raw client below, start to finish.
+        //
+        // ADOPTS `gate.odp` first, deliberately — the identical close-race fix
+        // `testLiveSetTextChangesOnlyTheTargetedSlideProvenBySaveAndIndependentReopen`'s own header
+        // explains in full (fix round 1: this exact race was live-observed here too, once, under a
+        // full-suite run's heavier load — reproducible in isolation zero times out of a retry, a
+        // genuine race, not a deterministic break). A priming call that MINTS its own open closes it
+        // again fire-and-forget (rule 2) over the SAME shared wire connection/seq stream the probe's
+        // own `client.open` below also uses — racing an `open()` for `three-slide.odp` against a
+        // still-in-flight `close()` for `gate.odp` produced "unexpected reply: closed(seq: ...)".
+        // Adopting sidesteps the race structurally: an ADOPTED document is never auto-closed, so
+        // there is nothing left in flight by the time the probe's own `client.open` runs.
+        let gateRuntime = host.officeRuntime(for: "S1")
+        gateRuntime.open(gatePath)
+        let gateOpened = await waitUntilLive { gateRuntime.stateSnapshot.documents[gatePath] != nil || gateRuntime.stateSnapshot.phase == .failed }
+        XCTAssertTrue(gateOpened, "setup: gate.odp must open cleanly for priming")
         let primed = await send(command("office.slides.info", args: ["path": gatePath], sessionId: "S1",
                                         commandId: "pcmd_prime"), through: host)
         XCTAssertTrue(primed.ok, "\(primed)")
@@ -734,6 +749,82 @@ final class OfficeSlidesCommandTests: XCTestCase {
             let contentXML = try readODFEntry(atPath: path, entry: "content.xml")
             let pageCount = contentXML.components(separatedBy: "<draw:page ").count - 1
             XCTAssertEqual(pageCount, 4, "saved content.xml must show exactly 4 <draw:page> elements after a front insert")
+        }
+    }
+
+    /// **`.uno:AssignLayout` had ZERO live executions before this fix round (review F-4) — this is
+    /// that drill.** `layout:"blank"` is the cheapest discriminator: `AUTOLAYOUT_BLANK` (research
+    /// §4) is the one preset that REMOVES a fresh slide's title/outline placeholder frames rather
+    /// than merely leaving them empty (`SdPage::SetAutoLayout`'s own documented behavior for empty
+    /// placeholders), so its effect is visible with no baseline comparison needed — the nil-vs-
+    /// empty distinction this bridge already documents elsewhere as load-bearing
+    /// (`slidesReadOnDedicatedThread`'s own contract) does double duty as the layout signal.
+    ///
+    /// **Both scenarios insert at position 2 (predecessor = slide 1), matching the reviewer's own
+    /// exact F-4 probe — deliberately, not incidentally.** A first attempt at this test inserted at
+    /// position 4 (predecessor = the LAST existing slide, appending) for both arms and found the
+    /// CONTROL (no `layout` named at all) came back with NO title placeholder either — the exact
+    /// same shape as `blank`, live-reproduced twice, not a flake. That directly contradicts the
+    /// reviewer's own live measurement at position 2, where the control had REAL title/outline
+    /// frames. The honest reading is that a layout-OMITTED `add_slide`'s own default shape is not
+    /// position-independent — which predecessor slide `InsertPage` inserts after appears to affect
+    /// what "no explicit layout" actually produces, in a way this fix round does not fully
+    /// characterize (out of F-4's own scope, which is proving `AssignLayout` itself dispatches
+    /// correctly, not characterizing every default-layout edge case). Using position 2 here matches
+    /// the ALREADY-LIVE-PROVEN setup rather than asserting a NEW, unverified generalization about
+    /// position 4's own control shape.
+    func testLiveAddSlideWithLayoutBlankStripsPlaceholdersProvenBySaveAndIndependentReopen() async throws {
+        try requireLiveEngine()
+
+        // --- WITH layout:"blank" — the new slide must have NO title placeholder at all. ---
+        do {
+            let path = try makeWritableCopy(of: "three-slide.odp")
+            let stateDir = makeScratchDirectory()
+            let host = makeLiveHost(stateDir: stateDir, dirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)])
+            await host.directory.refresh()
+            let runtime = host.officeRuntime(for: "S1")
+            runtime.open(path)
+            let opened = await waitUntilLive { runtime.stateSnapshot.documents[path] != nil || runtime.stateSnapshot.phase == .failed }
+            XCTAssertTrue(opened, "setup: three-slide.odp must open cleanly (blank layout)")
+
+            let addResult = await send(command("office.slides.add_slide", args: ["path": path, "at": 2, "layout": "blank"],
+                                               sessionId: "S1", commandId: "pcmd_layout_blank_add"), through: host)
+            XCTAssertTrue(addResult.ok, "\(addResult)")
+
+            let readResult = await send(command("office.slides.read", args: ["path": path, "slide": 2],
+                                                sessionId: "S1", commandId: "pcmd_layout_blank_read"), through: host)
+            XCTAssertTrue(readResult.ok, "\(readResult)")
+            XCTAssertTrue((readResult.result ?? "").contains("(no such placeholder"),
+                          "a blank-layout slide must have NO title placeholder at all, not merely an empty one: \(readResult)")
+
+            let contentXML = try readODFEntry(atPath: path, entry: "content.xml")
+            let pageCount = contentXML.components(separatedBy: "<draw:page ").count - 1
+            XCTAssertEqual(pageCount, 4, "saved content.xml must show exactly 4 <draw:page> elements")
+        }
+
+        // --- CONTROL, no layout named — the new slide's title placeholder must exist, empty. ---
+        do {
+            let path = try makeWritableCopy(of: "three-slide.odp")
+            let stateDir = makeScratchDirectory()
+            let host = makeLiveHost(stateDir: stateDir, dirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)])
+            await host.directory.refresh()
+            let runtime = host.officeRuntime(for: "S1")
+            runtime.open(path)
+            let opened = await waitUntilLive { runtime.stateSnapshot.documents[path] != nil || runtime.stateSnapshot.phase == .failed }
+            XCTAssertTrue(opened, "setup: three-slide.odp must open cleanly (control)")
+
+            let addResult = await send(command("office.slides.add_slide", args: ["path": path, "at": 2],
+                                               sessionId: "S1", commandId: "pcmd_layout_control_add"), through: host)
+            XCTAssertTrue(addResult.ok, "\(addResult)")
+
+            let readResult = await send(command("office.slides.read", args: ["path": path, "slide": 2],
+                                                sessionId: "S1", commandId: "pcmd_layout_control_read"), through: host)
+            XCTAssertTrue(readResult.ok, "\(readResult)")
+            let readText = readResult.result ?? ""
+            XCTAssertFalse(readText.contains("(no such placeholder"),
+                           "the control (no layout named) must have a REAL title placeholder, just an empty one: \(readText)")
+            XCTAssertTrue(readText.contains("title: (empty)"),
+                          "the control's title placeholder must be present but empty, not absent: \(readText)")
         }
     }
 
