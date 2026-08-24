@@ -30,11 +30,24 @@ import { officeTimeoutMessage } from "./sheets";
  *    `getPartName` is NOT a title — for a never-renamed slide it is recomputed POSITIONALLY
  *    ("Slide N") on every call, live, from the slide's current position. A model reading `name` and
  *    mistaking it for a stable title would misidentify a slide the instant a `reorder` lands.
- * 3. **`reorder` is PROBE-FIRST and may not exist.** No arbitrary-index move command exists in this
- *    engine at all — only selection-based `MovePageUp`/`Down`/`First`/`Last`, whose reachability from
- *    a headless LOK session (one that never shows a Slide Sorter panel) was undetermined from source
- *    alone. If the live probe finds it unreachable, `reorder` is excised — verb, deadline, wire case,
- *    fixtures — rather than shipped as a verb that silently no-ops.
+ * 3. **`reorder` — PROBED, then KEPT (controller-adjudicated, 2026-08-24).** No arbitrary-index move
+ *    command exists in this engine at all — only selection-based `MovePageUp`/`Down`/`First`/`Last` —
+ *    so reachability from a headless LOK session (one that never shows a Slide Sorter panel) was
+ *    undetermined from source alone and had to be probed live before any production dispatch code was
+ *    written for it (`OfficeSlidesCommandTests.testProbeInvestigatesWhetherReorderIsReachableHeadless`).
+ *    Verdict: reachable — `setPart` DOES drive `MovePage*`'s own selection-based targeting, confirmed
+ *    by a three-position content readout, not by `getPartName` (see ruling 2 above for why that would
+ *    have been a trap) and not by `getPartInfo`'s `hash` field either, despite that being the
+ *    controller's own original instruction — a disclosed substitution, approved: neither of LOK's two
+ *    in-session identity primitives survives save+reload, which the mandatory two-part-discriminator
+ *    proof (save+reopen) every write verb here needs regardless, so content-based verification serves
+ *    both the probe and the eventual proof with one mechanism. `reorder`'s own real mechanism
+ *    dispatches on the PRIMARY view (not the agent-view isolation every other write verb in this file
+ *    uses) — borrowed from `sheetsManageSheetOnDedicatedThread`'s own two-round live history of
+ *    agent-view structural dispatch hanging or failing to converge; see that function's own header and
+ *    `LOKBridge.slidesReorderOnDedicatedThread`'s. Carries the same disclosed residual sheets' own
+ *    `rename_sheet` has: can change which slide is shown ACTIVE in an already-open human tab (see this
+ *    verb's own tool-description line below).
  * 4. **Three commands are BANNED BY NAME**, never dispatched even to experiment:
  *    `.uno:RenamePage`/`RenameMasterPage` (opens a blocking modal dialog on this bridge's one
  *    dedicated LOK thread — wedges every open office document until the app restarts, since nothing
@@ -299,7 +312,10 @@ export function registerSlidesTool(r: ToolRegistry, deps: SlidesToolDeps): void 
       + "no way to ask). Returns the new slide count.\n"
       + "• delete_slide — path, slide. Refused if it would delete the presentation's LAST "
       + "slide.\n"
-      + "• reorder — path, slide (which slide), to (the 1-based position it moves to).\n"
+      + "• reorder — path, slide (which slide), to (the 1-based position it moves to). Can change "
+      + "which slide is shown as ACTIVE in a document a human already has open — a real, visible "
+      + "side effect on that tab (mirrors sheets' own rename_sheet residual; this verb's own "
+      + "mechanism moves the primary view's current slide to do the reorder).\n"
       + "Every path must be inside this session's own working directories — an office read/write "
       + "COPIES the file and parses it with LibreOffice, so it is not an ordinary file read/write and "
       + "the usual unrestricted-reads rule does not cover it.\n"
