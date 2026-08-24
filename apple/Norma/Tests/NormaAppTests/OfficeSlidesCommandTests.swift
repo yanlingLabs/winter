@@ -608,6 +608,62 @@ final class OfficeSlidesCommandTests: XCTestCase {
                       "saved content.xml must show slide 3's title BEFORE the moved slide's — order, not mere presence")
     }
 
+    /// **V-4 (review "verification owed") — `MovePageUp`, the BACKWARDS direction of `reorder`, had
+    /// NO live coverage at all before this fix round.** Every prior live drill (Probe B's own single
+    /// step, the forward multi-step test immediately above) moved `to > from`, dispatching only
+    /// `.uno:MovePageDown`. This moves slide 3 (index 2) to position 1 (index 0) — `to < from`,
+    /// `slidesReorderOnDedicatedThread`'s own `steps > 0 ? ".uno:MovePageDown" : ".uno:MovePageUp"`
+    /// branch exercising the ELSE arm for the first time in this suite. Adjacent-swap arithmetic
+    /// predicts `[One, Two, Three] -> [Three, One, Two]` (step 1 swaps 2<->1: `[One, Three, Two]`;
+    /// step 2 swaps 1<->0, where `Three` now sits: `[Three, One, Two]`) — the same three-position
+    /// readout, order-checked seal, and save+reopen discipline the forward drill established.
+    func testLiveReorderMultiStepMovesBackwardsProvenBySaveAndIndependentReopen() async throws {
+        try requireLiveEngine()
+        let path = try makeWritableCopy(of: "three-slide.odp")
+        let stateDir = makeScratchDirectory()
+        let host = makeLiveHost(stateDir: stateDir, dirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)])
+        await host.directory.refresh()
+
+        let runtime = host.officeRuntime(for: "S1")
+        runtime.open(path)
+        let opened = await waitUntilLive { runtime.stateSnapshot.documents[path] != nil || runtime.stateSnapshot.phase == .failed }
+        XCTAssertTrue(opened, "setup: three-slide.odp must open cleanly")
+
+        let reorderResult = await send(command("office.slides.reorder", args: ["path": path, "slide": 3, "to": 1],
+                                               sessionId: "S1", commandId: "pcmd_reorder_backwards"), through: host)
+        XCTAssertTrue(reorderResult.ok, "\(reorderResult)")
+
+        guard let independentClient = host.officeHelperSupervisor?.client else {
+            return XCTFail("no live client for the independent reopen")
+        }
+        let independentDocId = "slides-reorder-backwards-two-part-reopen"
+        _ = try await independentClient.open(docId: independentDocId, path: path)
+
+        let infoAfter = try await independentClient.slidesInfo(docId: independentDocId)
+        XCTAssertEqual(infoAfter.count, 3, "reorder must never change the slide count")
+
+        let savedSlide1 = try await independentClient.slidesRead(docId: independentDocId, slide: 0)
+        XCTAssertEqual(savedSlide1.title, "Norma T6 Slide Three", "index 0 must now hold the slide this call targeted — moved two full positions backwards")
+        XCTAssertEqual(savedSlide1.body, "third bullet", "the moved slide's own body must have traveled with it")
+        let savedSlide2 = try await independentClient.slidesRead(docId: independentDocId, slide: 1)
+        XCTAssertEqual(savedSlide2.title, "Norma T6 Slide One", "index 1 must now hold what was slide 1")
+        let savedSlide3 = try await independentClient.slidesRead(docId: independentDocId, slide: 2)
+        XCTAssertEqual(savedSlide3.title, "Norma T6 Slide Two", "index 2 must now hold what was slide 2")
+
+        try await independentClient.close(docId: independentDocId)
+
+        let contentXML = try readODFEntry(atPath: path, entry: "content.xml")
+        guard let threeRange = contentXML.range(of: "Norma T6 Slide Three"),
+              let oneRange = contentXML.range(of: "Norma T6 Slide One"),
+              let twoRange = contentXML.range(of: "Norma T6 Slide Two") else {
+            return XCTFail("all three titles must be present in the saved bytes at all: \(contentXML.prefix(200))")
+        }
+        XCTAssertTrue(threeRange.lowerBound < oneRange.lowerBound,
+                      "saved content.xml must show the moved slide's title BEFORE slide 1's — order, not mere presence")
+        XCTAssertTrue(oneRange.lowerBound < twoRange.lowerBound,
+                      "saved content.xml must show slide 1's title BEFORE slide 2's — order, not mere presence")
+    }
+
     // MARK: - `add_slide` live drill — this IS the probe for InsertPage's relative-insert semantics
 
     /// **`InsertPage`'s own landing position was UNRESOLVED from source** (`slides-lok-research.md`'s
