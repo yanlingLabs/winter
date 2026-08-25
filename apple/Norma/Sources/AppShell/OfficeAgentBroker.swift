@@ -366,9 +366,29 @@ final class OfficeAgentBroker {
             }
         }
 
+        // ── office-live-edit R3 — THE BRACKET. "One tool call = one undo step" is implemented by
+        // measuring the engine's undo-stack depth on either side of the WHOLE edit closure and
+        // remembering the difference, so a later ⌘Z can take back exactly that many actions in one
+        // press. Read BEFORE `action`, never derived from how many edits the closure intended to
+        // make: a verb's op count is not its undo-action count (four typed characters measured as
+        // ONE action; a `paste` is one; a structural `.uno:` dispatch is its own number), and
+        // counting ops would be the arc's own right-conclusion-wrong-supporting-fact shape.
+        //
+        // A `nil` depth (an engine that cannot answer) records NOTHING rather than guessing — which
+        // leaves ⌘Z at its pre-existing one-action-per-press granularity for that call. Degrading to
+        // less, never to a wrong number.
+        let depthBefore = access == .write ? await runtime.undoDepth(docId: docId) : nil
+
         let result = try await action(runtime, docId, adopted)
 
         guard access == .write else { return result }
+
+        if let before = depthBefore, let after = await runtime.undoDepth(docId: docId) {
+            // Only a RISE is a group. A fall (or no change) means the closure undid, cleared or
+            // otherwise did not add to the stack, and there is nothing for one ⌘Z to collapse.
+            runtime.noteAgentUndoGroup(path: resolvedPath, topDepth: after.undo,
+                                       count: max(0, after.undo - before.undo))
+        }
 
         // Rule 4 — save-through, and the outcome is AWAITED for real (`saveAndAwaitOutcome`, not the
         // fire-and-forget `save`) — Stage B's own C1 lesson, restated for an agent caller instead of

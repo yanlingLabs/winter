@@ -1485,6 +1485,104 @@ enum OfficeRuntimeReducer {
 /// The lifecycle itself is NOT here — it is `OfficeRuntimeReducer`, pure and tested without a
 /// helper process. This half performs effects and relays what the shared helper (via its Driver)
 /// says.
+/// **office-live-edit R3 — "one tool call = one undo step", implemented as bracket-and-count.**
+///
+/// The obvious implementation, an engine-side undo GROUP, is not reachable: no `.uno:` grouping
+/// command exists at all, and the only reachable grouping API (`XUndoManager.enterUndoContext`)
+/// stamps `ViewShellId(-1)`, which makes the resulting group repair-only for **every** view
+/// including the user's own. So the grouping is done HERE: the app remembers how many engine undo
+/// actions one agent tool call created, and one ⌘Z issues exactly that many repair-undos.
+///
+/// 🔑 **The invariant that makes this safe is that the ENGINE'S OWN STACK DEPTH is the arbiter, not
+/// a guess about what happened in between.** A remembered group is only ever used when the engine
+/// still reports the stack at exactly the depth that group's top action sat at. That single check
+/// subsumes every "has the user edited since?" question without needing to observe user edits at
+/// all:
+/// - the user types → depth RISES above the group's `topDepth` → no match → ⌘Z takes back one
+///   action, exactly as it always did;
+/// - the user then undoes their own edit → depth falls back TO `topDepth` → the agent's group IS
+///   the top again, and matches → correct, and correct for the right reason;
+/// - anything truncates or clears the stack → depths no longer match → the group is pruned.
+///
+/// This is why the ledger never tries to detect a user edit. The research's own framing ("N must be
+/// tracked by Norma itself and invalidated the moment the user edits") is satisfied by construction
+/// rather than by a watcher that could miss an edit.
+///
+/// **A group is never allowed to mean "undo nothing".** `stepSize` floors at one action whenever
+/// there is anything at all on the stack: a ⌘Z that does nothing is indistinguishable, to the user,
+/// from a broken ⌘Z.
+///
+/// Pure value semantics, no LOK, no actor — every rule above is unit-tested directly.
+struct OfficeUndoLedger: Equatable {
+    /// One logical step: `count` engine actions whose topmost sits at stack depth `topDepth`.
+    struct Group: Equatable {
+        var topDepth: Int
+        var count: Int
+    }
+
+    /// Newest last. Groups the agent created that have not yet been undone.
+    private(set) var pendingUndo: [Group] = []
+    /// Newest last. Groups a ⌘Z took back, keyed by their depth on the REDO stack, so ⌘⇧Z can put
+    /// the whole group back. Without this a repair-undone group would be redone one action at a
+    /// time — and worse, the FIRST plain redo would be refused outright, because a repair-undone
+    /// action keeps its original agent `ViewShellId` on the redo stack.
+    private(set) var pendingRedo: [Group] = []
+
+    /// The agent's call finished: it left the undo stack `topDepth` deep, having added `count`
+    /// actions. `count == 0` records nothing — a tool call that changed nothing must not create an
+    /// undo step for the user to press ⌘Z through.
+    mutating func recordAgentEdit(topDepth: Int, count: Int) {
+        guard count > 0, topDepth >= count else { return }
+        // Anything recorded at or above this edit's own base cannot still be on the stack.
+        pendingUndo.removeAll { $0.topDepth > topDepth - count }
+        pendingUndo.append(Group(topDepth: topDepth, count: count))
+        // Any new action clears the engine's redo stack, so nothing we remembered about it holds.
+        pendingRedo.removeAll()
+    }
+
+    /// How many engine undo actions ONE ⌘Z should take back, given the stack's real depth right now.
+    /// Prunes as it goes, so the ledger cannot accumulate groups that no longer exist.
+    mutating func undoStepSize(undoDepth: Int) -> Int {
+        pendingUndo.removeAll { $0.topDepth > undoDepth }
+        guard undoDepth > 0 else { return 0 }
+        guard let top = pendingUndo.last, top.topDepth == undoDepth else { return 1 }
+        return max(1, min(top.count, undoDepth))
+    }
+
+    /// A ⌘Z of `count` actions just completed, leaving the redo stack `redoDepth` deep.
+    mutating func didUndo(count: Int, redoDepth: Int) {
+        if let top = pendingUndo.last, top.count == count { pendingUndo.removeLast() }
+        guard count > 0, redoDepth >= count else { return }
+        pendingRedo.removeAll { $0.topDepth > redoDepth - count }
+        pendingRedo.append(Group(topDepth: redoDepth, count: count))
+    }
+
+    /// The ⌘⇧Z mirror of `undoStepSize`.
+    mutating func redoStepSize(redoDepth: Int) -> Int {
+        pendingRedo.removeAll { $0.topDepth > redoDepth }
+        guard redoDepth > 0 else { return 0 }
+        guard let top = pendingRedo.last, top.topDepth == redoDepth else { return 1 }
+        return max(1, min(top.count, redoDepth))
+    }
+
+    /// A ⌘⇧Z of `count` actions just completed, leaving the undo stack `undoDepth` deep — the group
+    /// goes back onto the undo side so a second ⌘Z takes it off whole again.
+    mutating func didRedo(count: Int, undoDepth: Int) {
+        if let top = pendingRedo.last, top.count == count { pendingRedo.removeLast() }
+        guard count > 0, undoDepth >= count else { return }
+        pendingUndo.removeAll { $0.topDepth > undoDepth - count }
+        pendingUndo.append(Group(topDepth: undoDepth, count: count))
+    }
+
+    /// The document went away (closed, reloaded from disk, replaced). Everything remembered about
+    /// its stack is meaningless — and a stale group is worse than none, because it would make one
+    /// ⌘Z take back MORE than the user asked for.
+    mutating func forgetEverything() {
+        pendingUndo.removeAll()
+        pendingRedo.removeAll()
+    }
+}
+
 @MainActor
 final class OfficeRuntime: ObservableObject {
 
@@ -1572,10 +1670,16 @@ final class OfficeRuntime: ObservableObject {
         var clipboardPaste: (_ docId: String, _ part: Int, _ text: String) async -> Void
         /// `.uno:Undo` against the document's own primary view. Fire-and-forget — see
         /// `OfficeWireFrame.undoOk`'s own header for why this never claims to have changed
-        /// anything, only that the command was dispatched.
-        var undo: (_ docId: String) async -> Void
+        /// anything, only that the command was dispatched. `repair` carries the slot's own
+        /// `Repair` argument, which is what lets this take back an AGENT-view edit.
+        var undo: (_ docId: String, _ repair: Bool) async -> Void
         /// `.uno:Redo`, same posture as `undo` above.
-        var redo: (_ docId: String) async -> Void
+        var redo: (_ docId: String, _ repair: Bool) async -> Void
+        /// office-live-edit R3 — the document's undo/redo stack depths
+        /// (`getCommandValues(".uno:UndoCount"/".uno:RedoCount")`). `nil` on ANY failure, and every
+        /// caller treats `nil` as "fall back to one action", never as "zero actions": a depth query
+        /// that degraded to 0 would produce a ⌘Z that does nothing while reporting success.
+        var undoDepth: (_ docId: String) async -> (undo: Int, redo: Int)?
         /// office-agent-tools T3 — read-only, no reducer/effect of its own (unlike `open`/`save`):
         /// there is nothing in `OfficeRuntimeState` for a sheet-info query to update, so
         /// `OfficeRuntime.sheetsInfo(docId:)` calls straight through to this closure and returns its
@@ -1700,6 +1804,11 @@ final class OfficeRuntime: ObservableObject {
     /// see that method's own header for the full reasoning. `@MainActor`-isolated (this whole class
     /// is), matching `OfficeHelperRequestQueue.tail`'s identical shape and identical reasoning.
     private var inputChainTail: Task<Void, Never> = Task {}
+
+    /// office-live-edit R3 — per-open-document undo grouping, keyed by the SAME path key
+    /// `documents` uses. Not `@Published` and deliberately not reducer state: nothing renders from
+    /// it, and it is written at ⌘Z frequency (constraint C7).
+    private var undoLedgers: [String: OfficeUndoLedger] = [:]
 
     /// Office Stage B Task 6 — where `postClipboardCopy`/`postClipboardCut` write their result.
     /// Injected, like `makeWatcher` above, rather than touching `NSPasteboard.general` directly in
@@ -1830,6 +1939,13 @@ final class OfficeRuntime: ObservableObject {
     /// to guard against one layer up).
     func sheetsInfo(docId: String) async throws -> (sheets: [OfficeSheetInfo], activeSheet: String) {
         try await driver.sheetsInfo(docId)
+    }
+
+    /// office-live-edit R3 — the document's undo/redo stack depths, by `docId` for the same reason
+    /// `sheetsInfo` above takes one. `nil` on any failure; callers fall back to one action, never to
+    /// zero.
+    func undoDepth(docId: String) async -> (undo: Int, redo: Int)? {
+        await driver.undoDepth(docId)
     }
 
     /// Same no-reducer posture as `sheetsInfo` above. `range` is already an A1 string, and `sheet` is
@@ -2323,26 +2439,121 @@ final class OfficeRuntime: ObservableObject {
     /// with typing/paste/cut all gated too, a read-only-format document's own LOK-side undo stack
     /// never has anything mutating pushed onto it in the first place — but kept for the same
     /// consistency and defense-in-depth every OTHER mutation verb here gets.
+    ///
+    /// **office-live-edit R3 — this door now dispatches with `Repair: true`, and one press can take
+    /// back more than one engine action.** Two changes, both user-visible:
+    ///
+    /// 1. **⌘Z reverts the last thing that happened, regardless of who did it.** Without `Repair`,
+    ///    LOK refuses any undo whose top action belongs to another view, so an agent edit made ⌘Z
+    ///    silently dead (pinned live before this change, and re-measured beside the repair arm in
+    ///    `OfficeRuntimeLiveTests.testRepairArgumentLetsAPrimaryViewUndoTakeBackAnAgentViewEdit`).
+    ///    In **Calc** specifically this does not merely unblock a refusal — Calc's range-based
+    ///    independence escape means a plain ⌘Z after a DISJOINT agent edit today silently steps
+    ///    over it and undoes the user's OWN earlier edit instead. That is a wrong answer delivered
+    ///    quietly, and the user ruled to change it; the new behaviour is pinned by its own live drill.
+    /// 2. **One agent tool call collapses to one ⌘Z**, via `OfficeUndoLedger` — see its header for
+    ///    why the engine's own stack depth, not a watcher on user edits, is what keeps that safe.
+    ///
+    /// **The degradation is deliberately toward doing LESS, never toward doing nothing.** If the
+    /// depth query fails, this issues exactly one repair-undo: the granularity the user had before
+    /// this change, not a silent no-op.
     func postUndo(path: String) {
         guard let doc = state.documents[path], !officeDocumentIsReadOnlyFormat(path: path) else { return }
         let docId = doc.docId
         let previous = inputChainTail
-        inputChainTail = Task { [driver] in
+        inputChainTail = Task { [driver, weak self] in
             _ = await previous.value
-            await driver.undo(docId)
+            guard let depths = await driver.undoDepth(docId) else {
+                NSLog("[OfficeRuntime] undo depth unavailable for \(docId) — falling back to a single repair-undo")
+                await driver.undo(docId, true)
+                return
+            }
+            let steps = await self?.planUndoStep(path: path, undoDepth: depths.undo) ?? min(1, depths.undo)
+            guard steps > 0 else { return }
+            for _ in 0..<steps { await driver.undo(docId, true) }
+            if let after = await driver.undoDepth(docId) {
+                await self?.noteUndoCompleted(path: path, count: steps, redoDepth: after.redo)
+            }
         }
     }
 
-    /// `.uno:Redo`, same posture as `postUndo` above.
+    /// `.uno:Redo`, same posture as `postUndo` above — **including `Repair`, which is not symmetry
+    /// for its own sake.** An action undone under repair keeps its ORIGINAL (agent) `ViewShellId`
+    /// when it moves to the redo stack, so a plain ⌘⇧Z of it is refused by every app's redo gate.
+    /// A repair undo that was not mirrored here would make redo silently stop working the moment an
+    /// agent edit was taken back.
     func postRedo(path: String) {
         guard let doc = state.documents[path], !officeDocumentIsReadOnlyFormat(path: path) else { return }
         let docId = doc.docId
         let previous = inputChainTail
-        inputChainTail = Task { [driver] in
+        inputChainTail = Task { [driver, weak self] in
             _ = await previous.value
-            await driver.redo(docId)
+            guard let depths = await driver.undoDepth(docId) else {
+                NSLog("[OfficeRuntime] undo depth unavailable for \(docId) — falling back to a single repair-redo")
+                await driver.redo(docId, true)
+                return
+            }
+            let steps = await self?.planRedoStep(path: path, redoDepth: depths.redo) ?? min(1, depths.redo)
+            guard steps > 0 else { return }
+            for _ in 0..<steps { await driver.redo(docId, true) }
+            if let after = await driver.undoDepth(docId) {
+                await self?.noteRedoCompleted(path: path, count: steps, undoDepth: after.undo)
+            }
         }
     }
+
+    // MARK: office-live-edit R3 — the undo ledger's actor-side doors
+    //
+    // Kept OFF the reducer deliberately (constraint C7): these run at ⌘Z frequency and, more to the
+    // point, carry no `OfficeRuntimeState` meaning at all — nothing renders from them. `dispatch`
+    // reassigns the whole `@Published` state on every call, which is the same reason caret/selection
+    // events bypass it into `cursorStore`.
+
+    /// How many engine actions this ⌘Z should take back. Consults and prunes the ledger.
+    func planUndoStep(path: String, undoDepth: Int) -> Int {
+        var ledger = undoLedgers[path] ?? OfficeUndoLedger()
+        let steps = ledger.undoStepSize(undoDepth: undoDepth)
+        undoLedgers[path] = ledger
+        return steps
+    }
+
+    func noteUndoCompleted(path: String, count: Int, redoDepth: Int) {
+        var ledger = undoLedgers[path] ?? OfficeUndoLedger()
+        ledger.didUndo(count: count, redoDepth: redoDepth)
+        undoLedgers[path] = ledger
+    }
+
+    func planRedoStep(path: String, redoDepth: Int) -> Int {
+        var ledger = undoLedgers[path] ?? OfficeUndoLedger()
+        let steps = ledger.redoStepSize(redoDepth: redoDepth)
+        undoLedgers[path] = ledger
+        return steps
+    }
+
+    func noteRedoCompleted(path: String, count: Int, undoDepth: Int) {
+        var ledger = undoLedgers[path] ?? OfficeUndoLedger()
+        ledger.didRedo(count: count, undoDepth: undoDepth)
+        undoLedgers[path] = ledger
+    }
+
+    /// **The broker calls this after an agent tool call**, having bracketed the stack depth around
+    /// the whole edit closure. `count == 0` records nothing, so a call that changed the document in
+    /// no way leaves no ⌘Z step behind it.
+    func noteAgentUndoGroup(path: String, topDepth: Int, count: Int) {
+        var ledger = undoLedgers[path] ?? OfficeUndoLedger()
+        ledger.recordAgentEdit(topDepth: topDepth, count: count)
+        undoLedgers[path] = ledger
+        NSLog("[OfficeRuntime] agent edit on \(path): \(count) undo action(s), stack now \(topDepth) deep")
+    }
+
+    /// The document's identity changed underneath the ledger (closed, reloaded from disk). A stale
+    /// group is strictly worse than none: it would make one ⌘Z take back MORE than the user asked.
+    func forgetUndoLedger(path: String) {
+        undoLedgers.removeValue(forKey: path)
+    }
+
+    /// Test-only reader.
+    func undoLedgerSnapshot(path: String) -> OfficeUndoLedger? { undoLedgers[path] }
 
     /// Test-only: awaits the current tail of the input-ordering chain, so a test can know a
     /// `postKeyEvent`/`postMouseEvent`/`postExtTextInput`/`postClipboardCopy`/`postClipboardCut`/

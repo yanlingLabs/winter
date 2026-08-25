@@ -360,6 +360,21 @@ final class OfficeTileCanvasViewTests: XCTestCase {
         var clipboardPasteCalls: [(docId: String, part: Int, text: String)] {
             lock.lock(); defer { lock.unlock() }; return _clipboardPasteCalls
         }
+        /// office-live-edit R3 — the REPAIR FLAG is recorded alongside the docId, because
+        /// "⌘Z dispatched an undo" and "⌘Z dispatched an undo that can cross views" are different
+        /// claims, and only the second one is what requirement 3 delivers. A recorder that kept
+        /// only the docId would go green against the pre-R3 behaviour it exists to distinguish.
+        private var _undoRepairFlags: [Bool] = []
+        var undoRepairFlags: [Bool] {
+            lock.lock(); defer { lock.unlock() }; return _undoRepairFlags
+        }
+        private var _redoRepairFlags: [Bool] = []
+        var redoRepairFlags: [Bool] {
+            lock.lock(); defer { lock.unlock() }; return _redoRepairFlags
+        }
+        /// What the fake depth query answers. `nil` (the default) means "cannot answer", which every
+        /// caller degrades to ONE action — the pre-R3 granularity these tests were written against.
+        var undoDepthAnswer: (undo: Int, redo: Int)?
         private var _undoCalls: [String] = []
         var undoCalls: [String] {
             lock.lock(); defer { lock.unlock() }; return _undoCalls
@@ -429,14 +444,19 @@ final class OfficeTileCanvasViewTests: XCTestCase {
                     guard let self else { return }
                     self.lock.lock(); self._clipboardPasteCalls.append((docId, part, text)); self.lock.unlock()
                 },
-                undo: { [weak self] docId in
+                undo: { [weak self] docId, repair in
                     guard let self else { return }
-                    self.lock.lock(); self._undoCalls.append(docId); self.lock.unlock()
+                    self.lock.lock()
+                    self._undoCalls.append(docId); self._undoRepairFlags.append(repair)
+                    self.lock.unlock()
                 },
-                redo: { [weak self] docId in
+                redo: { [weak self] docId, repair in
                     guard let self else { return }
-                    self.lock.lock(); self._redoCalls.append(docId); self.lock.unlock()
+                    self.lock.lock()
+                    self._redoCalls.append(docId); self._redoRepairFlags.append(repair)
+                    self.lock.unlock()
                 },
+                undoDepth: { [weak self] _ in self?.undoDepthAnswer },
                 sheetsInfo: { _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
                 sheetsRead: { _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
                 sheetsSet: { _, _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
@@ -941,8 +961,12 @@ final class OfficeTileCanvasViewTests: XCTestCase {
                 clipboardCopy: { _, _ in nil },
                 clipboardCut: { _, _ in nil },
                 clipboardPaste: { _, _, _ in },
-                undo: { _ in },
-                redo: { _ in },
+                undo: { _, _ in },
+                redo: { _, _ in },
+                // office-live-edit R3 — `nil` = "this stub cannot answer", which every caller reads as
+                // "fall back to ONE action", i.e. exactly the pre-R3 granularity these tests were written
+                // against. Never 0: a zero would mean "undo nothing".
+                undoDepth: { _ in nil },
                 sheetsInfo: { _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
                 sheetsRead: { _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
                 sheetsSet: { _, _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },

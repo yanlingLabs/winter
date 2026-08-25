@@ -4150,8 +4150,12 @@ final class ShellSessionHostTests: XCTestCase {
                 },
                 clipboardCut: { _, _ in nil },
                 clipboardPaste: { _, _, _ in },
-                undo: { _ in },
-                redo: { _ in },
+                undo: { _, _ in },
+                redo: { _, _ in },
+                // office-live-edit R3 — `nil` = "this stub cannot answer", which every caller reads as
+                // "fall back to ONE action", i.e. exactly the pre-R3 granularity these tests were written
+                // against. Never 0: a zero would mean "undo nothing".
+                undoDepth: { _ in nil },
                 sheetsInfo: { _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
                 sheetsRead: { _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
                 sheetsSet: { _, _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },

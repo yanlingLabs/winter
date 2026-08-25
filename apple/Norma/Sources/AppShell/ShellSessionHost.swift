@@ -1096,24 +1096,38 @@ final class ShellSessionHost: ObservableObject {
                     NSLog("[ShellSessionHost] office clipboardPaste(\(docId)) failed: \(error)")
                 }
             },
-            undo: { [weak supervisor] docId in
+            undo: { [weak supervisor] docId, repair in
                 do {
                     try await queue.run {
                         guard let client = supervisor?.client else { return }
-                        try await client.undo(docId: docId)
+                        try await client.undo(docId: docId, repair: repair)
                     }
                 } catch {
-                    NSLog("[ShellSessionHost] office undo(\(docId)) failed: \(error)")
+                    NSLog("[ShellSessionHost] office undo(\(docId), repair: \(repair)) failed: \(error)")
                 }
             },
-            redo: { [weak supervisor] docId in
+            redo: { [weak supervisor] docId, repair in
                 do {
                     try await queue.run {
                         guard let client = supervisor?.client else { return }
-                        try await client.redo(docId: docId)
+                        try await client.redo(docId: docId, repair: repair)
                     }
                 } catch {
-                    NSLog("[ShellSessionHost] office redo(\(docId)) failed: \(error)")
+                    NSLog("[ShellSessionHost] office redo(\(docId), repair: \(repair)) failed: \(error)")
+                }
+            },
+            // office-live-edit R3 — a READ, so it answers `nil` on failure rather than throwing:
+            // every caller's fallback is "one action", never "zero". Note the deliberate absence of
+            // any `nil`-means-zero collapse anywhere downstream.
+            undoDepth: { [weak supervisor] docId in
+                do {
+                    return try await queue.run {
+                        guard let client = supervisor?.client else { return nil }
+                        return try await client.undoDepth(docId: docId)
+                    }
+                } catch {
+                    NSLog("[ShellSessionHost] office undoDepth(\(docId)) failed: \(error)")
+                    return nil
                 }
             },
             // office-agent-tools T3 — same `queue.run` routing, and same throws-all-the-way-back
