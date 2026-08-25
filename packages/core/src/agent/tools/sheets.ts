@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { realpathSync } from "node:fs";
+import { resolveLeafSymlinks, canonicalizeForWrite } from "../paths";
 import { OFFICE_DEADLINES_MS, officeCommandArgs, officeSheetsSetArgs, type OfficeCommandAction } from "../../panel/office-commands";
 import type { ToolRegistry } from "./registry";
 import type { PanelCommandAction, PanelCommandOutcome } from "../../panel/commands";
@@ -254,13 +256,42 @@ const A1_RANGE_SHAPE = /^[A-Za-z]{1,3}[1-9][0-9]{0,6}(:[A-Za-z]{1,3}[1-9][0-9]{0
  * concept, or genuinely none configured) refuses every path — mirrors `resolveWithinAny`'s own
  * `roots.length === 0` guard.
  *
- * Returns the resolved absolute path on success, `null` on refusal. Deliberately NOT symlink-hardened
- * the way `resolveWithinAny` is (`resolveLeafSymlinks`/`canonAncestor`) — same disclosed limitation
- * the Swift fence carries, acceptable for a backstop-shaped check behind the app's own broker fence,
- * not acceptable as this tool's ONLY gate (it isn't: the broker's fence runs again, independently,
- * app-side).
+ * Returns the resolved absolute path on success, `null` on refusal.
+ *
+ * **SHARED by all three office tools** (`slides.ts` and `docs.ts` delegate to this one function).
+ * It used to be three byte-identical copies — and three copies of a security fence, each needing the
+ * identical hardening, is precisely how whole-branch review F4 would come back. One body now.
+ *
+ * **Symlink-hardened (whole-branch review F4, CRITICAL).** The prior text here called this
+ * "deliberately NOT symlink-hardened … acceptable for a backstop-shaped check behind the app's own
+ * broker fence", while the app's fence said the mirror image — acceptable behind *the daemon's* own
+ * hardened check, `resolveWithinAny`. **Neither was true: no office tool has ever called
+ * `resolveWithinAny`** (its only consumers are `engine.ts` and `fs-read.ts`), so each layer deferred
+ * to a check the other never ran, and the same non-hardened string compare simply happened twice.
+ * A working directory containing an ordinary `ln -s` pointing outside it let an agent `docs replace`
+ * overwrite a file outside every declared root and report success.
+ *
+ * **Which layer is the gate:** the app's (`officeAgentResolvedPathWithinFence`,
+ * `OfficeAgentBroker.swift`) — it runs in the process that performs the write, immediately before
+ * open/edit/save, and the daemon is not the only possible caller. This copy is a fast pre-dispatch
+ * refusal: better wording, no round trip, no app work started. It is hardened too, because a daemon
+ * that dispatches a path the app then refuses is a UX bug even when neither side is wrong.
+ *
+ * **How.** Containment is judged on where the path really lands — `resolveLeafSymlinks` (which also
+ * catches a DANGLING in-root link aimed outside, the task-24 hole) then `canonicalizeForWrite`
+ * (realpath of the deepest existing ancestor with the missing tail re-appended). Roots are realpathed
+ * where they exist and left verbatim where they do not. The RETURN value stays the caller's own
+ * unresolved spelling — the contract `resolveWithinAny` documents, and load-bearing rather than
+ * cosmetic: the app's broker matches `documents[resolvedPath]` to decide whether to ADOPT an already
+ * open tab, so handing back a link-resolved spelling would silently open a second copy of a document
+ * the user already has on screen.
+ *
+ * A path with nothing on disk resolves to itself, so a not-yet-created file is judged exactly as it
+ * was before this fix — which is why every fictional-root case in the three tools' suites stays
+ * meaningful. A symlink chain longer than `resolveLeafSymlinks`' own cap throws; that is caught here
+ * and refused, fail-closed.
  */
-function officeSheetsResolvedPathWithinFence(path: string, dirs: SessionDirs): string | null {
+export function officeResolvedPathWithinFence(path: string, dirs: SessionDirs): string | null {
   if (dirs.length === 0) return null;
   const roots = dirs.map((d) => normalizePath(d.path));
 
@@ -273,12 +304,25 @@ function officeSheetsResolvedPathWithinFence(path: string, dirs: SessionDirs): s
     target = normalizePath(`${primary}/${path}`);
   }
 
+  // F4. Fail-closed on a link cycle / over-long chain: resolveLeafSymlinks throws there, and a
+  // fence that cannot determine where a path lands must refuse, never fall back to the spelling.
+  let probe: string;
+  try { probe = canonicalizeForWrite(resolveLeafSymlinks(target)); } catch { return null; }
+
   for (const root of roots) {
     if (!root) continue;
-    if (target === root || target.startsWith(`${root}/`)) return target;
+    // realpath where it exists, verbatim where it does not — a root with nothing on disk has no
+    // symlink to resolve, and skipping it (resolveWithinAny's own behaviour) would turn a
+    // not-yet-created working directory into a total refusal.
+    let realRoot: string;
+    try { realRoot = realpathSync(root); } catch { realRoot = root; }
+    if (probe === realRoot || probe.startsWith(`${realRoot}/`)) return target;
   }
   return null;
 }
+
+/** Back-compat alias: this file's own call sites still read `officeSheetsResolvedPathWithinFence`. */
+const officeSheetsResolvedPathWithinFence = officeResolvedPathWithinFence;
 
 /** Collapses `.`/`..`/duplicate slashes and drops a trailing slash — the Node equivalent of
  *  `NSString.standardizingPath`'s own normalization half (never the symlink-resolving half, which

@@ -4,7 +4,7 @@ import type { ToolRegistry } from "./registry";
 import type { PanelCommandAction, PanelCommandOutcome } from "../../panel/commands";
 import type { SessionDirs } from "../../sessions/dirs";
 import { canHostPanel } from "./browser";
-import { officeTimeoutMessage } from "./sheets";
+import { officeTimeoutMessage, officeResolvedPathWithinFence } from "./sheets";
 
 /**
  * `slides` (office-agent-tools T6, task-6-brief.md; design
@@ -189,25 +189,13 @@ type SlidesArgs = z.infer<typeof SlidesArgs>;
  * relative-path-resolves-against-primary) — not repeated here verbatim to avoid two copies of the
  * same essay drifting apart in PROSE while the CODE itself already has to stay byte-identical logic.
  */
-function officeSlidesResolvedPathWithinFence(path: string, dirs: SessionDirs): string | null {
-  if (dirs.length === 0) return null;
-  const roots = dirs.map((d) => normalizePath(d.path));
-
-  let target: string;
-  if (path.startsWith("/")) {
-    target = normalizePath(path);
-  } else {
-    const primary = roots[0];
-    if (!primary) return null;
-    target = normalizePath(`${primary}/${path}`);
-  }
-
-  for (const root of roots) {
-    if (!root) continue;
-    if (target === root || target.startsWith(`${root}/`)) return target;
-  }
-  return null;
-}
+/** Delegates to the ONE shared, symlink-hardened office fence (`sheets.ts`'s
+ *  `officeResolvedPathWithinFence`). This used to be a byte-identical copy of it; whole-branch
+ *  review F4 found the copies were all symlink-blind and each disclosure pointed at a different
+ *  layer as the hardened one, so there is now a single body to harden and a single one to read.
+ *  `slides.ts` already imported `officeTimeoutMessage` from `sheets.ts`, so this adds no new
+ *  dependency edge. */
+const officeSlidesResolvedPathWithinFence = officeResolvedPathWithinFence;
 
 /** Collapses `.`/`..`/duplicate slashes and drops a trailing slash — byte-identical to `sheets.ts`'s
  *  own copy (see that file's header for why this is not shared as an import: a tiny pure function,

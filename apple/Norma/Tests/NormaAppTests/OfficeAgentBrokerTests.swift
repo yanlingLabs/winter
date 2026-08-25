@@ -46,6 +46,53 @@ final class OfficeAgentBrokerTests: XCTestCase {
         XCTAssertNil(officeAgentResolvedPathWithinFence("/x/proj-evil/a.xlsx", dirs: dirs))
     }
 
+    /// **Whole-branch review F4 (CRITICAL).** A REAL directory and a REAL `symlink`, never a
+    /// transcription of the fence body — this is the app-side half of the same pin
+    /// `sheets.test.ts`'s own "a path through an in-root symlink that LEAVES the root" carries.
+    ///
+    /// This side is the **load-bearing** one: it runs inside the process that performs the write,
+    /// immediately before `OfficeRuntime.open`/edit/save, and the daemon is not the only possible
+    /// caller. Pre-fix both fences did pure string work, so this path matched the root by prefix and
+    /// `placeAtomically`'s `rename()` landed the overwrite outside every working directory.
+    func testFenceRefusesAPathThroughAnInRootSymlinkThatLeavesTheRoot() throws {
+        let base = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("office-fence-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        let proj = base.appendingPathComponent("proj", isDirectory: true)
+        let outside = base.appendingPathComponent("outside", isDirectory: true)
+        try FileManager.default.createDirectory(at: proj, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        try Data("x".utf8).write(to: outside.appendingPathComponent("secret.xlsx"))
+        try FileManager.default.createSymbolicLink(at: proj.appendingPathComponent("link"),
+                                                   withDestinationURL: outside)
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        let dirs = [SessionDirEntry(path: proj.path, locked: true)]
+        let viaLink = proj.appendingPathComponent("link").appendingPathComponent("secret.xlsx").path
+        XCTAssertNil(officeAgentResolvedPathWithinFence(viaLink, dirs: dirs),
+                     "a path that string-matches the root but RESOLVES outside it must refuse")
+    }
+
+    /// The control arm, so the fix cannot be an over-refusal that simply bans symlinks: a link that
+    /// stays INSIDE the root still passes, and the RETURN value is the caller's own spelling — the
+    /// `resolveWithinAny` contract. That return contract is load-bearing beyond tidiness: the broker
+    /// matches `documents[resolvedPath]` to decide whether to ADOPT the user's already-open tab, so
+    /// returning the link-resolved spelling here would silently stop adopting and open a second copy.
+    func testFenceAllowsAnInRootSymlinkThatStaysInsideAndReturnsTheCallersSpelling() throws {
+        let base = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("office-fence-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        let proj = base.appendingPathComponent("proj", isDirectory: true)
+        let sub = proj.appendingPathComponent("sub", isDirectory: true)
+        try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+        try Data("x".utf8).write(to: sub.appendingPathComponent("budget.xlsx"))
+        try FileManager.default.createSymbolicLink(at: proj.appendingPathComponent("link"),
+                                                   withDestinationURL: sub)
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        let dirs = [SessionDirEntry(path: proj.path, locked: true)]
+        let viaLink = proj.appendingPathComponent("link").appendingPathComponent("budget.xlsx").path
+        XCTAssertEqual(officeAgentResolvedPathWithinFence(viaLink, dirs: dirs), viaLink)
+    }
+
     func testFenceResolvesWhenTheTargetIsARootItself() {
         let dirs = [SessionDirEntry(path: "/repo", locked: true)]
         XCTAssertEqual(officeAgentResolvedPathWithinFence("/repo", dirs: dirs), "/repo")

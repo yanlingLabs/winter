@@ -552,11 +552,37 @@ final class OfficeAgentBroker {
 /// `roots` is. Compared with a trailing separator (`root == target || target.hasPrefix(root + "/")`)
 /// so `/x/proj-evil` can never match root `/x/proj`.
 ///
-/// **Not symlink-hardened the way `resolveWithinAny` is** (`resolveLeafSymlinks`/`canonAncestor`) —
-/// `NSString.standardizingPath` collapses `.`/`..` and resolves the FIRST symlink component it
-/// contains, but does not walk a dangling-leaf symlink chain the way the TS original deliberately
-/// does to close task-24's F4 hole. Acceptable for a backstop behind the daemon's own hardened check,
-/// not for a lone gate — disclosed in `task-2-report.md`, not silently narrower than it looks.
+/// **THIS IS THE LOAD-BEARING FENCE, and it IS symlink-hardened (whole-branch review F4, CRITICAL).**
+///
+/// The prior text here said this was "not symlink-hardened … acceptable for a backstop behind the
+/// daemon's own hardened check (`resolveWithinAny`)", and the daemon's three copies
+/// (`sheets.ts`/`slides.ts`/`docs.ts`) said the mirror image — acceptable "behind the app's own
+/// broker fence". **Both were wrong, and wrong in a way that hid the hole for three tools, nine task
+/// reviews and two re-reviews: no office tool has ever called `resolveWithinAny`** (its only
+/// consumers are `engine.ts` and `fs-read.ts`), so each layer deferred to a check the other never
+/// performed. Running the same non-hardened check twice is not defence in depth against a symlink.
+/// The old text also asserted a FALSE fact — `standardizingPath` does NOT resolve "the FIRST symlink
+/// component"; it does no symlink resolution at all. Measured, not reasoned: with working directory
+/// `<tmp>/proj` containing `link -> <tmp>/outside`, the pre-fix body RETURNED
+/// `<tmp>/proj/link/secret.xlsx`, and `OfficeRuntime.placeAtomically`'s `rename()` then landed the
+/// overwrite in `<tmp>/outside` — outside every declared working directory, reported as success.
+///
+/// **Why this side is load-bearing rather than the daemon's.** It runs in the process that performs
+/// the write, immediately before `OfficeRuntime.open`/edit/save, so it is the narrowest gap between
+/// check and effect; and the daemon is not the only possible caller — the identical reasoning that
+/// made the app-side numeric ceilings load-bearing in T5's own sweep. The daemon's copies remain a
+/// fast pre-dispatch refusal (better wording, no round trip) and are hardened too, but this one is
+/// the gate.
+///
+/// **How.** Containment is judged on `resolvingSymlinksInPath` of BOTH the target and each root, so
+/// the comparison is between where the path really lands and where the root really is. The RETURN
+/// value is deliberately the UNRESOLVED, standardized `target` — the same contract
+/// `resolveWithinAny` documents ("the RETURN value stays the caller's literal `target`"). That is
+/// not tidiness: `runOnce` matches `documents[resolvedPath]` to decide whether to ADOPT the user's
+/// already-open tab, so returning a link-resolved spelling would silently stop adopting and open a
+/// second copy of a document the user already has on screen. A link that stays INSIDE the root still
+/// passes and still returns the caller's spelling — pinned by its own control test, so the fix can
+/// never degenerate into "symlinks are banned".
 ///
 /// `dirs == nil` (no working-directory concept for this session) and `dirs == []` (a genuinely
 /// workdir-less session) both mean "nothing to be within" — every path refuses, mirroring
@@ -581,8 +607,15 @@ func officeAgentResolvedPathWithinFence(_ path: String, dirs: [SessionDirEntry]?
         target = ((primary as NSString).appendingPathComponent(path) as NSString).standardizingPath
     }
 
-    for root in roots where !root.isEmpty && (target == root || target.hasPrefix(root + "/")) {
-        return target
+    // F4: judge containment on where this path REALLY lands, never on its spelling. Both sides of
+    // the comparison go through the same resolver so the platform's own normalizations (macOS maps
+    // /tmp and /var through /private) can never make one side disagree with the other by accident.
+    // A path with nothing on disk resolves to itself, so a not-yet-created file is judged exactly as
+    // before — which is what keeps every fictional-root case in this file's own suite meaningful.
+    let probe = (target as NSString).resolvingSymlinksInPath
+    for root in roots where !root.isEmpty {
+        let realRoot = (root as NSString).resolvingSymlinksInPath
+        if probe == realRoot || probe.hasPrefix(realRoot + "/") { return target }
     }
     return nil
 }

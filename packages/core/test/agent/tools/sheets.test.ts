@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { OFFICE_DEADLINES_MS } from "../../../src/panel/office-commands";
 import { ToolRegistry, type ToolContext } from "../../../src/agent/tools/registry";
 import { registerSheetsTool, officeTimeoutMessage, type SheetsToolDeps } from "../../../src/agent/tools/sheets";
@@ -589,6 +592,58 @@ describe("the fence", () => {
     const result = await h.run({ verb: "info", path: "/x/proj-evil/budget.xlsx" });
     expect(result.isError).toBe(true);
     expect(h.recorded).toEqual([]);
+  });
+
+  /**
+   * **Whole-branch review F4 (CRITICAL), the regression pin.** This runs against a REAL directory
+   * with a REAL `ln -s`, never a transcribed copy of the fence body — the arc's own lesson that "a
+   * standalone repro binary is only as good as the validation it transcribes" applies to a fence
+   * repro at least as much as to an overflow one.
+   *
+   * The hole: both fences did pure string work, so `<workdir>/link/secret.xlsx` string-matched the
+   * root and passed, while the kernel resolved `link` at write time and `placeAtomically`'s
+   * `rename()` landed the overwrite OUTSIDE every declared working directory — reported to the
+   * agent as success. Each side's comment named the OTHER as the hardened layer, and
+   * `resolveWithinAny` (the check both pointed at) is never called by any office tool.
+   */
+  test("a path through an in-root symlink that LEAVES the root is refused (F4)", async () => {
+    const base = mkdtempSync(join(tmpdir(), "office-fence-"));
+    const proj = join(base, "proj");
+    const outside = join(base, "outside");
+    mkdirSync(proj); mkdirSync(outside);
+    writeFileSync(join(outside, "secret.xlsx"), "x");
+    symlinkSync(outside, join(proj, "link"));
+
+    const h = makeHarness({ dirs: [{ path: proj, locked: true }] });
+    const result = await h.run({ verb: "info", path: join(proj, "link", "secret.xlsx") });
+
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("working directories");
+    // The load-bearing half: nothing was dispatched to the app at all.
+    expect(h.recorded).toEqual([]);
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  /** The other direction, so the fix cannot be an over-refusal that simply bans symlinks: a link
+   *  that stays INSIDE the root must still pass, and must dispatch the caller's own spelling (the
+   *  `resolveWithinAny` contract — containment is judged on the resolved destination, the RETURN
+   *  value stays the literal target, which is what keeps the broker's adopt-an-open-tab match on
+   *  the path the user actually opened). */
+  test("a path through an in-root symlink that STAYS inside the root still passes (F4 control)", async () => {
+    const base = mkdtempSync(join(tmpdir(), "office-fence-"));
+    const proj = join(base, "proj");
+    const sub = join(proj, "sub");
+    mkdirSync(proj); mkdirSync(sub);
+    writeFileSync(join(sub, "budget.xlsx"), "x");
+    symlinkSync(sub, join(proj, "link"));
+
+    const h = makeHarness({ dirs: [{ path: proj, locked: true }] });
+    const viaLink = join(proj, "link", "budget.xlsx");
+    const result = await h.run({ verb: "info", path: viaLink });
+
+    expect(result.isError).toBe(false);
+    expect(h.recorded[0]?.args?.path).toBe(viaLink);
+    rmSync(base, { recursive: true, force: true });
   });
 
   test("a secondary (non-primary) working directory is in-fence too", async () => {

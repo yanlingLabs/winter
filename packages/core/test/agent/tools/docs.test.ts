@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { OFFICE_DEADLINES_MS } from "../../../src/panel/office-commands";
 import { ToolRegistry, type ToolContext } from "../../../src/agent/tools/registry";
 import { registerDocsTool, type DocsToolDeps } from "../../../src/agent/tools/docs";
@@ -377,6 +380,28 @@ describe("insert / append", () => {
 // ================================================================================================
 
 describe("fence and reach", () => {
+  /** **Whole-branch review F4 (CRITICAL), this tool's own call site.** The fence body is now shared
+   *  (`sheets.ts`'s `officeResolvedPathWithinFence`), but a shared body proves nothing about whether
+   *  THIS tool actually calls it — that wiring is what F4's three byte-identical copies were hiding.
+   *  Real directory, real `ln -s`, real tool surface. */
+  test("a path through an in-root symlink that LEAVES the root is refused (F4)", async () => {
+    const base = mkdtempSync(join(tmpdir(), "office-fence-"));
+    const proj = join(base, "proj");
+    const outside = join(base, "outside");
+    mkdirSync(proj); mkdirSync(outside);
+    writeFileSync(join(outside, "deck.bin"), "x");
+    symlinkSync(outside, join(proj, "link"));
+    const symPath = join(proj, "link", "deck.bin");
+
+    const h = makeHarness({ dirs: [{ path: proj, locked: true }] });
+    const result = await h.run({ verb: "replace", path: symPath, find: "a", replaceWith: "b" });
+
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("working directories");
+    expect(h.recorded).toEqual([]);
+    rmSync(base, { recursive: true, force: true });
+  });
+
   test("a path outside the working directories is refused, for every verb, before dispatch", async () => {
     for (const args of [
       { verb: "info", path: "/etc/passwd" },
