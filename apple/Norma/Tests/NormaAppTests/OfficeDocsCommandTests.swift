@@ -526,6 +526,58 @@ final class OfficeDocsCommandTests: XCTestCase {
                         + "pre-R3 behaviour this test now exists to catch")
     }
 
+    // MARK: - office-live-edit R2 — how many paragraphs one paste actually makes
+
+    /// **PROBE, and the decision it settles.** Requirement 2 wants several edits in one tool call.
+    /// For `docs.append` the cheapest possible shape is for the DAEMON to join N paragraphs with
+    /// `\n` and send the existing single-`text` wire frame: that would be one wire request, one
+    /// `paste`, ONE undo action, and the existing exact-text verification — with no new wire field,
+    /// no new app decoder, and no change to the deadline budget.
+    ///
+    /// That shape is only legitimate if a `\n` inside a pasted payload becomes a REAL PARAGRAPH
+    /// BREAK. `docs.ts`'s own `replaceWith` note says the engine inserts `\n` "as literal
+    /// characters, not as a paragraph break" — **but that note is about `replace`, which goes
+    /// through `.uno:ExecuteSearch`, an entirely different mechanism from `insert`/`append`'s
+    /// `paste` of `text/plain`.** Carrying that claim across mechanisms is exactly the
+    /// right-conclusion-wrong-supporting-fact shape this arc keeps producing, so it is measured here
+    /// instead.
+    ///
+    /// The assertion is on the PARAGRAPH NUMBERING `read` returns, not on the characters: a literal
+    /// `\n` inside one paragraph and a real paragraph break are indistinguishable in a raw text
+    /// dump, and only the numbering tells them apart.
+    func testLiveOnePasteWithNewlinesBecomesSeveralRealParagraphs() async throws {
+        let (path, host, _) = try await openLive("two-page.odt", as: "paste-paragraphs.odt")
+
+        let before = await send(command("office.docs.info", args: ["path": path], sessionId: "S1",
+                                        commandId: "pcmd_pp_info_before"), through: host)
+        XCTAssertTrue(before.ok, "\(before)")
+        let beforeText = try XCTUnwrap(before.result)
+
+        let result = await send(command("office.docs.append",
+                                        args: ["path": path, "text": "ALPHAPARA\nBETAPARA\nGAMMAPARA"],
+                                        sessionId: "S1", commandId: "pcmd_pp_append"), through: host)
+        XCTAssertTrue(result.ok, "the append itself must succeed: \(result)")
+
+        let after = await send(command("office.docs.read", args: ["path": path], sessionId: "S1",
+                                       commandId: "pcmd_pp_read"), through: host)
+        XCTAssertTrue(after.ok, "\(after)")
+        let text = try XCTUnwrap(after.result)
+        print("[paste-paragraph probe] info before: \(beforeText)\n--- read after ---\n\(text)")
+
+        // Each marker must be numbered as its OWN paragraph. If `\n` pasted as a literal character,
+        // all three land inside ONE numbered paragraph and these three assertions cannot all hold.
+        let numbered = text.split(separator: "\n").filter { line in
+            ["ALPHAPARA", "BETAPARA", "GAMMAPARA"].contains { line.contains($0) }
+        }
+        XCTAssertEqual(numbered.count, 3,
+                       "three markers must occupy three separately numbered paragraphs — if they "
+                         + "share one, `\\n` pasted as a literal character and the daemon-side join "
+                         + "design for requirement 2 is INVALID: \(text)")
+        for marker in ["ALPHAPARA", "BETAPARA", "GAMMAPARA"] {
+            XCTAssertTrue(text.contains(marker), "\(marker) must survive the paste: \(text)")
+        }
+    }
+
     // MARK: - The Word carve-out: .docx is written exactly like .odt
 
     /// **The FIXED branch of the carve-out, live.** The `.docx` export defect (Writer's OOXML export

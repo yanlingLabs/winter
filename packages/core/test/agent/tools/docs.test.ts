@@ -518,3 +518,89 @@ describe("outcomes", () => {
     expect(h.recorded).toEqual([]);
   });
 });
+
+
+// ================================================================================================
+// office-live-edit R2 — append's `texts`: several paragraphs in one call
+// ================================================================================================
+
+describe("append texts[]", () => {
+  test("several paragraphs ride ONE dispatch, joined with newlines into the existing text field", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "append", path: DOC, texts: ["one", "two", "three"] });
+    expect(result.isError).toBe(false);
+    // ONE dispatch, not three. This is the whole point: one wire request keeps the write deadline's
+    // counted worst case intact, and it is one `paste`, so it is ONE engine undo action.
+    expect(h.recorded).toHaveLength(1);
+    expect(h.recorded[0]).toEqual({
+      sessionId: SID, action: "office.docs.append",
+      args: { path: DOC, text: "one\ntwo\nthree" },
+      deadlineMs: OFFICE_DEADLINES_MS["office.docs.append"],
+    });
+    // And `texts` itself must never reach the wire — the app decodes `text`, and an unknown key
+    // would be silently ignored there rather than refused.
+    expect(Object.keys(h.recorded[0].args)).toEqual(["path", "text"]);
+  });
+
+  test("one-paragraph `text` is completely unchanged by the new operand", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "append", path: DOC, text: "solo" });
+    expect(result.isError).toBe(false);
+    expect(h.recorded[0].args).toEqual({ path: DOC, text: "solo" });
+  });
+
+  test("text AND texts together REFUSES — it never picks one", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "append", path: DOC, text: "a", texts: ["b", "c"] });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("not both");
+    // Nothing dispatched: an ambiguous call must not reach the user's file at all.
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("neither text nor texts REFUSES", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "append", path: DOC });
+    expect(result.isError).toBe(true);
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("`texts` on a verb that does not take it REFUSES rather than being dropped", async () => {
+    // The load-bearing arm. Silently ignoring it would append nothing and report ok — or, on
+    // `insert`, add the FIRST paragraph and silently discard the rest. Both are the silent-wrong-
+    // answer class that `all: false` and append's own `at` are already kept in the schema to refuse.
+    for (const verb of ["insert", "replace", "read", "info"] as const) {
+      const h = makeHarness();
+      const result = await h.run({
+        verb, path: DOC, texts: ["a", "b"],
+        ...(verb === "replace" ? { find: "x", replaceWith: "y" } : {}),
+        ...(verb === "insert" ? { text: "t" } : {}),
+      } as never);
+      expect(result.isError, `${verb} must refuse a present texts`).toBe(true);
+      expect(result.output).toContain("only append");
+      expect(h.recorded, `${verb} must not dispatch`).toEqual([]);
+    }
+  });
+
+  test("the AGGREGATE length is bounded, and the refusal names the real numbers", async () => {
+    const h = makeHarness();
+    // 5 × 1500 = 7500 joined — each element is legal on its own, the total is not. This is exactly
+    // the composition the per-element and array-length caps do NOT bound between them.
+    const result = await h.run({ verb: "append", path: DOC, texts: Array(5).fill("x".repeat(1500)) });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("over the 4000");
+    expect(result.output).toContain("5 paragraphs");
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("an over-long array and a wrong-typed element are both refused by the schema", async () => {
+    const tooMany = await makeHarness().run({ verb: "append", path: DOC, texts: Array(51).fill("x") });
+    expect(tooMany.isError).toBe(true);
+    const wrongType = await makeHarness().run({ verb: "append", path: DOC, texts: [1, 2] } as never);
+    expect(wrongType.isError).toBe(true);
+    // An EMPTY array is refused too — it would otherwise join to "" and dispatch an empty append,
+    // which the app refuses with a less specific message after a full round trip.
+    const empty = await makeHarness().run({ verb: "append", path: DOC, texts: [] });
+    expect(empty.isError).toBe(true);
+  });
+});
