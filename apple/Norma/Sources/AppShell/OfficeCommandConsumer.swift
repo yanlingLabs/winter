@@ -1135,8 +1135,16 @@ struct OfficeCommandConsumer {
     private static func formatDocsReplace(path: String, find: String, replaced: Int) -> String {
         let name = (path as NSString).lastPathComponent
         guard replaced > 0 else {
+            // **"its text is unchanged", not "the document was not changed" — the second overclaims.**
+            // Every `docs` write verb saves through the broker unconditionally (`OfficeAgentBroker`
+            // rule 4 has no only-if-dirty branch), so even a zero-match replace re-serializes the
+            // whole ODF/OOXML package: the file's bytes and mtime DO change. What is true, and what
+            // a caller actually needs, is that the document's own text is identical — which is
+            // exactly what `testLiveDocsReplaceIsCaseSensitiveAndAWrongCaseSearchChangesNothing`
+            // asserts (it originally asserted byte-equality and failed for this reason).
             return "nothing to replace in \(name) — \"\(brief(find))\" does not appear in it "
-                + "(the search is literal and case-sensitive). The document was not changed."
+                + "(the search is literal and case-sensitive). The document's text is unchanged "
+                + "(the file itself was still re-saved, as every write verb does)."
         }
         return "replaced \(replaced) occurrence\(replaced == 1 ? "" : "s") of \"\(brief(find))\" in \(name)"
     }

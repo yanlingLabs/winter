@@ -22,8 +22,22 @@ import { officeTimeoutMessage } from "./sheets";
  *    `sw/source/uibase/uiview/viewsrch.cxx:395`, its only other sink is a localized findbar string
  *    that does not exist headless, and `unoAnyToJson` cannot serialize even that bool's VALUE. The
  *    single reachable bit is `success` in `LOK_CALLBACK_UNO_COMMAND_RESULT`. So the app counts the
- *    matches itself over the text it just read, **cross-checks against the engine's boolean, and
- *    throws on disagreement** rather than reporting a number nothing can stand behind. `find` is
+ *    matches itself over the text it just read, and **verifies by re-reading the document and
+ *    comparing it to the exact text the replacement should have produced** — throwing, with the
+ *    outcome reported as UNKNOWN, when it does not match.
+ *
+ *    ⚠️ **The ruling's own engine cross-check ("throw on disagreement with `success`") is WIRED BUT
+ *    UNREACHABLE on this bridge, measured, and must not be described as shipped.** The listener is
+ *    built against `mpCallbackFlushHandlers[getViewId(docId)]`, and `setView`'s own hop 4
+ *    (`SfxApplication::SetViewFrame_Impl` → `MoveShellToFirstShell`) moves the newly-current shell
+ *    to the head of the very list `getViewId` scans — so `getViewId` returns the AGENT view, which
+ *    has no `registerCallback`, and no `DispatchResultListener` is ever constructed. Measured:
+ *    `observed=none` on every replace, and no type-16 callback in a full raw trace. The consumer
+ *    stays wired (correct if one ever arrives, and it treats "no result" as *no cross-check
+ *    available*, never as agreement). What actually does the verifying is the re-read above, which
+ *    is strictly stronger — it knows what the text should BE, not merely that something changed —
+ *    and it is what caught the one real bug here (a case-insensitive engine match). See
+ *    `LOKBridge.docsReplaceOnDedicatedThread` and `task-7-report.md` §5.1. `find` is
  *    therefore literal — a regex or wildcard would let our count and the engine's matching diverge
  *    silently, and a wrong count lands in the user's saved file. Named follow-up: regex/wildcard
  *    search, widened deliberately.

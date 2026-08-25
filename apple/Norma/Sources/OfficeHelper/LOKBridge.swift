@@ -4497,8 +4497,20 @@ final class LOKBridge: OfficeDocumentBridge {
     //  2. **The caret and selection ARE per-view** (research §5.2, an 8-hop chain from
     //     `SfxLokHelper::setView` to `SwView::Activate` -> `SwDocShell::SetView`), so every verb runs
     //     on the AGENT view (`ensureAgentViewOnDedicatedThread`) and the user's own caret is never
-    //     moved. **The undo stack is NOT per-view** (`sw::UndoManager` hangs off `SwDoc`) — an agent
-    //     edit lands in the user's ⌘Z stack. Stated in `docs.ts`'s tool description; not implied away.
+    //     moved. That half is confirmed in practice — no drill has ever produced misplaced text.
+    //
+    //     ⚠️ **The undo half of the same ruling is FALSE, and this comment used to assert it.** The
+    //     STORAGE is shared (`sw::UndoManager` hangs off `SwDoc`, not `SwView`), but LOK gates undo
+    //     per-view on top of that: `sw::UndoManager::GetLastUndoInfo`
+    //     (`sw/source/core/undo/docundo.cxx:456-472`) REFUSES, in LOK mode outside repair mode, any
+    //     undo whose top action's `GetViewShellId()` differs from the asking view's, and its only
+    //     escape (`IsViewUndoActionIndependent`, `:367-430`) requires BOTH that action and the asking
+    //     view's own earlier action to be `SwUndoId::TYPING` — which `PASTE_CLIPBOARD` never is.
+    //     ⟹ **an agent edit does NOT land in the user's usable ⌘Z stack: their ⌘Z is refused and
+    //     silently does nothing.** Live-pinned by `OfficeDocsCommandTests
+    //     .testLiveAHumanUndoOnTheirOwnViewCannotTakeBackAnAgentEditAndSilentlyDoesNothing`, and
+    //     `docs.ts`'s tool description says exactly that ("there is NO WAY TO UNDO IT … their ⌘Z will
+    //     simply do nothing") — NOT what this comment previously claimed it said.
     //  3. **Every dispatch passes `notifyWhenFinished: true`** (research L4) — it is what makes the
     //     dispatch `SfxCallMode::SYNCHRON` and it is the only reason `replace`'s boolean exists at all.
     //     It is still not proof the write landed: every verb here VERIFIES BY RE-READ.
@@ -4544,48 +4556,82 @@ final class LOKBridge: OfficeDocumentBridge {
         // NO setPart — see this section's own header, fact 1.
         postUnoCommandOnDedicatedThread(doc, ".uno:SelectAll", [:], notifyWhenFinished: true)
 
-        // **Pump-and-poll, not one pump — added after a LOADED full-suite run caught the single-pump
-        // version returning "" for a document that demonstrably had content** (the saved
-        // `content.xml` assertions in the very same drill passed). `.uno:SelectAll` is dispatched
-        // through `postUnoCommand`, whose effect this bridge has been burned by three times for
-        // landing on a deferred internal queue rather than synchronously — the identical shape
+        // **Retry-on-empty, with a bounded pump budget.** `.uno:SelectAll` is dispatched through
+        // `postUnoCommand`, whose effect this bridge has been burned by three times for landing on a
+        // deferred internal queue rather than synchronously — the identical shape
         // `selectionTextOnDedicatedThread` (`.uno:GoToCell`) and
-        // `selectSlidePlaceholderOnDedicatedThread` (Tab-driven selection) both already pay for. One
-        // pump was enough in every scoped run and not enough under a full-suite load; a fixed budget
-        // is the same answer this bridge already gives everywhere else.
+        // `selectSlidePlaceholderOnDedicatedThread` (Tab-driven selection) both already pay for.
+        //
+        // **What prompted it, and what is and is NOT proven — corrected after review, because the
+        // first version of this comment told a mechanism story the instrument below cannot support.**
+        //  - PROMPT: one full unscoped suite run had the single-unconditional-pump version return
+        //    `""` for a document whose saved `content.xml` assertions, in that same drill, passed.
+        //    So the file was fine and the READ was empty. That observation is real.
+        //  - NOT PROVEN: that this loop fixes it. The `""` has never recurred, and — see the
+        //    evidence line's own note below — no run has ever needed more than ONE pump, so the
+        //    extra headroom this loop adds over the old code has never once been exercised. Whether
+        //    2-5 further pumps would have rescued that read is **unobserved**.
+        //  - WITHDRAWN: the original "load-dependent" story. The measured pattern is deterministic,
+        //    not load-shaped (again, see below).
+        //  - OPEN, and named as a residual rather than quietly closed by this loop: the original
+        //    `""` is still unexplained.
+        //
+        // Kept regardless, because it strictly dominates the old code — the old one pumped exactly
+        // once and read once; this reads first (which the measured pattern shows is often enough on
+        // its own) and then pumps up to five times — at the cost of one extra `getTextSelection` on
+        // the common path.
         //
         // **Not self-restoring, deliberately**: `""` remains reachable — a genuinely empty document
         // simply costs the whole budget in cheap 64x64 tile paints and still answers `""`. This
-        // stops early on the FIRST non-empty read rather than looping until some assertion passes.
+        // stops at the FIRST non-empty read rather than looping until some assertion passes.
         //
-        // Why the race is dangerous enough to be worth the budget: every write verb reads twice
-        // (before, to compute the expected result; after, to verify it). A spurious `""` on either
-        // read makes the two disagree, so the verb REFUSES with "the outcome is UNKNOWN" — loud, not
-        // silent, but a false alarm on a write that actually succeeded is its own harm.
+        // Why an empty read matters at all: every write verb reads twice (before, to compute the
+        // expected result; after, to verify it). A spurious `""` on either read makes the two
+        // disagree, so the verb REFUSES with "the outcome is UNKNOWN" — loud, not silent, but a
+        // false alarm on a write that actually succeeded is its own harm.
         var text = readSelectionTextOnDedicatedThread(doc)
-        var attempts = 1
-        while text.isEmpty, attempts < Self.docsSelectAllReadAttempts {
+        var pumps = 0
+        while text.isEmpty, pumps < Self.docsSelectAllReadMaxPumps {
             pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: 0)
             text = readSelectionTextOnDedicatedThread(doc)
-            attempts += 1
+            pumps += 1
         }
-        if attempts > 1 {
-            // Permanent evidence line, same shape and same purpose as this file's `GoToCell` and
-            // `slides placeholder positioning` lines: what makes the budget MEASURED rather than
-            // guessed, and what will show the next reader whether it is still adequate.
+        if pumps > 0 {
+            // Permanent evidence line — and it counts **PUMPS**, deliberately, not "attempts". The
+            // first version counted attempts, which made every observed line read `needed 2
+            // attempt(s)`; a reviewer correctly pointed out that this is ONE pump, i.e. exactly what
+            // the old unconditional-pump code did, so the line could not distinguish this loop from
+            // the code it replaced. Counting pumps makes the comparison direct: **`pumps=1` is
+            // old-code-equivalent; only `pumps >= 2` is this loop doing something the old code could
+            // not.**
+            //
+            // Measured, counted rather than inferred, on a clean 15-drill run (`pkill`ed first, 0
+            // leaked helpers): those drills perform **29** whole-document reads and produce **14**
+            // lines — so 15 reads needed no pump at all, 14 needed exactly one, and **none needed
+            // two or more**. ⟹ this loop has never once done anything the old unconditional-pump
+            // code could not, which is why its efficacy against the original `""` is unobserved.
+            //
+            // (An earlier version of this note claimed the pattern was "first read of a document
+            // needs 0, every later read needs exactly 1". That is ALMOST right and therefore worth
+            // striking: `testLiveDocsReplaceIsCaseSensitiveAndAWrongCaseSearchChangesNothing`
+            // performs 4 reads and logs only 2, so at least one non-first read also needed no pump.
+            // No mechanism is claimed here beyond the counts above.)
+            //
+            // `empty=` still distinguishes a real read from a retried-and-still-empty one.
             FileHandle.standardError.write(Data(
-                "[LOKBridge docs] SelectAll read needed \(attempts) attempt(s), empty=\(text.isEmpty)\n".utf8))
+                "[LOKBridge docs] SelectAll read needed \(pumps) pump(s), empty=\(text.isEmpty)\n".utf8))
         }
         doc.handle.pointee.pClass.pointee.resetSelection?(doc.handle)
         return text
     }
 
-    /// `docsReadTextOnDedicatedThread`'s own poll budget. Sized like
-    /// `slidePlaceholderPositionAttempts`/`docsUnoResultAttempts` rather than independently derived —
-    /// this mechanism has not earned its own number, and the evidence line above is what would show
-    /// it needs one. Each attempt is one cheap 64x64 tile paint, so a genuinely empty document pays
-    /// six of those and nothing else.
-    private static let docsSelectAllReadAttempts = 6
+    /// `docsReadTextOnDedicatedThread`'s own pump budget — the number of extra pumps AFTER the first
+    /// unpumped read, so the worst case is 5 pumps and 6 `getTextSelection` calls. Sized like
+    /// `slidePlaceholderPositionAttempts`/`docsUnoResultAttempts` rather than independently derived;
+    /// this mechanism has not earned its own number, and no observed run has ever needed more than
+    /// ONE pump, so the number is headroom rather than a measured requirement. Each pump is one cheap
+    /// 64x64 tile paint, so a genuinely empty document pays five of those and nothing else.
+    private static let docsSelectAllReadMaxPumps = 5
 
     /// Shared entry guard for every `docs` verb: the document must be open AND must be a Writer text
     /// document. `.notTextDocument` mirrors `.notSpreadsheet`/`.notPresentation` — composed from this

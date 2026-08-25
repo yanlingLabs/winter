@@ -482,6 +482,18 @@ final class OfficeDocsCommandTests: XCTestCase {
 
         // The USER-FACING undo door — literally what ⌘Z dispatches (`OfficeRuntime.postUndo`), on
         // the PRIMARY view, which is the whole point: the agent wrote on its own second view.
+        //
+        // ⚠️ **Disclosed weakness: this test has no positive control of its own.** Its assertions are
+        // that the text SURVIVES, so a `postUndo` that silently did nothing at all — a broken door,
+        // not a refused one — would pass it just the same. The positive control exists, but in
+        // another suite: the Office Harness's `18.undoLadderThenRedo`
+        // (`OfficeHarnessScript.swift:159`) drives this same `postUndo` door and proves it DOES
+        // remove a marker typed on the primary view, confirmed on disk, with redo restoring it; and
+        // `18.twoViewUndoCharacterization` (`:161`) independently pins the cross-view case as
+        // refused/no-op. Together those make "the door works, and it declines THIS action" the
+        // supported reading rather than "the door is dead". Recorded here rather than left for a
+        // reader to assume — adding a same-suite positive control would mean typing on the primary
+        // view through `postKey`, which is Stage B surface this task does not otherwise touch.
         runtime.postUndo(path: path)
 
         // A settle, deliberately NOT a poll on the assertion's own condition. Polling "has UNDOMARKER

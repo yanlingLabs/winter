@@ -101,7 +101,7 @@ describe("registration", () => {
   // The tool description is a shipped artifact this arc has already caught contradicting the code
   // once (T5's Minor-5: a description that was not merely untested but FALSE). These three claims
   // are the ones a model will act on and the ones the code below actually enforces.
-  test("the description states the three facts the code enforces — shared undo, literal find, no first-only replace", () => {
+  test("the description states the three facts the code enforces — undo is REFUSED, literal find, no first-only replace", () => {
     const h = makeHarness();
     const description = h.registry.specFor("docs", WORKDIR, "code")?.description ?? "";
     // Ruling 4's user-facing half, CORRECTED by T7's own live drill: LOK refuses a cross-view undo
