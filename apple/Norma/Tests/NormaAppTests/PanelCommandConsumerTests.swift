@@ -170,21 +170,23 @@ final class PanelCommandConsumerTests: XCTestCase {
     /// siblings) real too, async the identical way — this test moved to `sheets.format`, the one
     /// sheets verb still on T1's own synchronous shell at the time. T5 makes `format` real too
     /// (every `sheets` verb now is) — moved to `office.slides.info`. T6 makes every `slides` verb
-    /// real too — `office.docs.info` is the last remaining stub kind's own first verb, so this test
-    /// moves to it now, same routing proof, same synchronous guarantee.
+    /// real too. **T7 makes every `docs` verb real as well, so NO office verb answers synchronously
+    /// any more** — this test moves to an UNROUTED `office.`-prefixed action, which is what the
+    /// refusal path still answers and which proves the same routing fact: an `office.` action reaches
+    /// `OfficeCommandConsumer`, not this file's own unknown-browser-verb branch.
     ///
     /// Also proves the thing `OfficeCommandConsumerTests` cannot: that CEF is never touched and no
     /// deadline timer is armed for an office verb, because routing happens before this file's own
     /// `Call`/`arm` machinery ever sees the command.
     func testOfficeActionsRouteToTheOfficeConsumerRatherThanTheUnknownVerbBranch() {
         let world = makeWorld()
-        world.consumer.handle(command("office.docs.info"))
+        world.consumer.handle(command("office.docs.frobnicate"))
         XCTAssertEqual(sent.count, 1)
         XCTAssertEqual(sent.first?.ok, false)
         let result = sent.first?.result ?? ""
         XCTAssertFalse(result.contains("does not know the browser verb"), "\(sent)")
         XCTAssertTrue(result.contains("docs"), "\(sent)")
-        XCTAssertTrue(result.contains("info"), "\(sent)")
+        XCTAssertTrue(result.contains("frobnicate"), "\(sent)")
         XCTAssertEqual(cef.log, [], "an office verb must never reach CEF")
         XCTAssertEqual(clock.liveTimers.count, 0, "an office verb arms no browser-side deadline")
     }

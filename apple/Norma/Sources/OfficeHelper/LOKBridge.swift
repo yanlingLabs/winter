@@ -4543,11 +4543,49 @@ final class LOKBridge: OfficeDocumentBridge {
         doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
         // NO setPart — see this section's own header, fact 1.
         postUnoCommandOnDedicatedThread(doc, ".uno:SelectAll", [:], notifyWhenFinished: true)
-        pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: 0)
-        let text = readSelectionTextOnDedicatedThread(doc)
+
+        // **Pump-and-poll, not one pump — added after a LOADED full-suite run caught the single-pump
+        // version returning "" for a document that demonstrably had content** (the saved
+        // `content.xml` assertions in the very same drill passed). `.uno:SelectAll` is dispatched
+        // through `postUnoCommand`, whose effect this bridge has been burned by three times for
+        // landing on a deferred internal queue rather than synchronously — the identical shape
+        // `selectionTextOnDedicatedThread` (`.uno:GoToCell`) and
+        // `selectSlidePlaceholderOnDedicatedThread` (Tab-driven selection) both already pay for. One
+        // pump was enough in every scoped run and not enough under a full-suite load; a fixed budget
+        // is the same answer this bridge already gives everywhere else.
+        //
+        // **Not self-restoring, deliberately**: `""` remains reachable — a genuinely empty document
+        // simply costs the whole budget in cheap 64x64 tile paints and still answers `""`. This
+        // stops early on the FIRST non-empty read rather than looping until some assertion passes.
+        //
+        // Why the race is dangerous enough to be worth the budget: every write verb reads twice
+        // (before, to compute the expected result; after, to verify it). A spurious `""` on either
+        // read makes the two disagree, so the verb REFUSES with "the outcome is UNKNOWN" — loud, not
+        // silent, but a false alarm on a write that actually succeeded is its own harm.
+        var text = readSelectionTextOnDedicatedThread(doc)
+        var attempts = 1
+        while text.isEmpty, attempts < Self.docsSelectAllReadAttempts {
+            pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: 0)
+            text = readSelectionTextOnDedicatedThread(doc)
+            attempts += 1
+        }
+        if attempts > 1 {
+            // Permanent evidence line, same shape and same purpose as this file's `GoToCell` and
+            // `slides placeholder positioning` lines: what makes the budget MEASURED rather than
+            // guessed, and what will show the next reader whether it is still adequate.
+            FileHandle.standardError.write(Data(
+                "[LOKBridge docs] SelectAll read needed \(attempts) attempt(s), empty=\(text.isEmpty)\n".utf8))
+        }
         doc.handle.pointee.pClass.pointee.resetSelection?(doc.handle)
         return text
     }
+
+    /// `docsReadTextOnDedicatedThread`'s own poll budget. Sized like
+    /// `slidePlaceholderPositionAttempts`/`docsUnoResultAttempts` rather than independently derived —
+    /// this mechanism has not earned its own number, and the evidence line above is what would show
+    /// it needs one. Each attempt is one cheap 64x64 tile paint, so a genuinely empty document pays
+    /// six of those and nothing else.
+    private static let docsSelectAllReadAttempts = 6
 
     /// Shared entry guard for every `docs` verb: the document must be open AND must be a Writer text
     /// document. `.notTextDocument` mirrors `.notSpreadsheet`/`.notPresentation` — composed from this
