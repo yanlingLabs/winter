@@ -292,6 +292,19 @@ final class OfficeHelperClient {
         }
     }
 
+    /// office-live-edit R3 — the document's undo/redo stack depths. A real answer about state, not
+    /// an ack: an engine that cannot answer arrives here as `.error` and THROWS, never as a zero.
+    func undoDepth(docId: String) async throws -> (undo: Int, redo: Int) {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.undoDepth(seq: seq, docId: docId))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .undoDepthOk(_, _, let undoCount, let redoCount): return (undo: undoCount, redo: redoCount)
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
     /// The two-writer groundwork — mints a second ("agent") LOK view for `docId`, returning its
     /// view id. Deliberately NOT reachable from `OfficeRuntime`/`Driver` — the brief's own words
     /// are "unused by the app but drilled"; only the live characterization drill

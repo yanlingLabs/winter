@@ -205,6 +205,13 @@ public enum OfficeWireFrame: Equatable, Sendable {
     /// A repair undo MUST be paired with a repair redo or ⌘⇧Z silently stops working right after an
     /// agent edit is taken back.
     case redo(seq: UInt64, docId: String, repair: Bool = false)
+    /// **office-live-edit R3 — how deep this document's undo and redo stacks are.**
+    /// `getCommandValues(".uno:UndoCount"/".uno:RedoCount")`, a synchronous query, NOT a dispatch
+    /// and NOT a state notification. It exists so one ⌘Z can undo exactly the N actions ONE agent
+    /// tool call created — the count is bracketed around the call, helper-side, and rides home in
+    /// the reply. See `LOKBridge.undoDepthOnDedicatedThread` for why this is reachable at all when
+    /// the slot/state layer has no stack introspection.
+    case undoDepth(seq: UInt64, docId: String)
     /// The two-writer groundwork: mints a SECOND LOK view for `docId` on demand (`createView()`),
     /// for a future AI collaborator's own edits — never used by the app today (the brief's own
     /// words), only by the live characterization drill (`OfficeRuntimeLiveTests`). Refused
@@ -502,6 +509,10 @@ public enum OfficeWireFrame: Equatable, Sendable {
     case undoOk(seq: UInt64, docId: String)
     /// Office Stage B Task 6 — answers `redo`, same posture as `undoOk`.
     case redoOk(seq: UInt64, docId: String)
+    /// office-live-edit R3 — answers `undoDepth`. Unlike `undoOk` this IS a real answer about the
+    /// document's state, not an ack of a dispatch: a query that could not be answered comes back
+    /// as `.error`, never as a zero.
+    case undoDepthOk(seq: UInt64, docId: String, undoCount: Int, redoCount: Int)
     /// Office Stage B Task 6 — answers a successful `createView`: `viewId` is `createView()`'s OWN
     /// return value (never re-derived via `getView()`, which becomes ambiguous the instant a
     /// second view exists — see `LOKBridge.createAgentViewOnDedicatedThread`'s own header). The
@@ -672,7 +683,7 @@ public enum OfficeWireFrame: Equatable, Sendable {
     public static let wireTypes: [String] = [
         "hello", "ping", "open", "close", "save", "keyEvent", "mouseEvent", "extTextInputEvent",
         // Office Stage B Task 6 — clipboard, undo/redo, the second ("agent") view.
-        "clipboardCopy", "clipboardCut", "clipboardPaste", "undo", "redo", "createView", "agentKeyEvent",
+        "clipboardCopy", "clipboardCut", "clipboardPaste", "undo", "redo", "undoDepth", "createView", "agentKeyEvent",
         "subscribeTiles", "unsubscribe", "tileRequest",
         // office-agent-tools T3 — sheets info/read.
         "sheetsInfo", "sheetsRead",
@@ -686,7 +697,7 @@ public enum OfficeWireFrame: Equatable, Sendable {
         "docsInfo", "docsRead", "docsReplace", "docsInsert",
         "helloOk", "refused", "pong", "opened", "openFailed", "closed", "saved", "saveFailed",
         "keyEventOk", "mouseEventOk", "extTextInputEventOk",
-        "clipboardCopyOk", "clipboardCutOk", "clipboardPasteOk", "undoOk", "redoOk",
+        "clipboardCopyOk", "clipboardCutOk", "clipboardPasteOk", "undoOk", "redoOk", "undoDepthOk",
         "agentViewReady", "agentKeyEventOk",
         "error", "documentEvent",
         "subscribed", "unsubscribed", "tileRequestAccepted", "tile", "tileFailed", "invalidated",
@@ -712,6 +723,7 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .clipboardPaste: return "clipboardPaste"
         case .undo: return "undo"
         case .redo: return "redo"
+        case .undoDepth: return "undoDepth"
         case .createView: return "createView"
         case .agentKeyEvent: return "agentKeyEvent"
         case .subscribeTiles: return "subscribeTiles"
@@ -747,6 +759,7 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .clipboardPasteOk: return "clipboardPasteOk"
         case .undoOk: return "undoOk"
         case .redoOk: return "redoOk"
+        case .undoDepthOk: return "undoDepthOk"
         case .agentViewReady: return "agentViewReady"
         case .agentKeyEventOk: return "agentKeyEventOk"
         case .error: return "error"
@@ -789,6 +802,7 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .clipboardPaste(let seq, _, _, _): return seq
         case .undo(let seq, _, _): return seq
         case .redo(let seq, _, _): return seq
+        case .undoDepth(let seq, _): return seq
         case .createView(let seq, _): return seq
         case .agentKeyEvent(let seq, _, _, _, _, _): return seq
         case .subscribeTiles(let seq, _, _, _, _): return seq
@@ -824,6 +838,7 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .clipboardPasteOk(let seq, _): return seq
         case .undoOk(let seq, _): return seq
         case .redoOk(let seq, _): return seq
+        case .undoDepthOk(let seq, _, _, _): return seq
         case .agentViewReady(let seq, _, _): return seq
         case .agentKeyEventOk(let seq, _): return seq
         case .error(let seq, _): return seq
@@ -899,8 +914,12 @@ public enum OfficeWireFrame: Equatable, Sendable {
             payload["docId"] = docId
             payload["part"] = part
             payload["text"] = text
-        case .createView(_, let docId):
+        case .createView(_, let docId), .undoDepth(_, let docId):
             payload["docId"] = docId
+        case .undoDepthOk(_, let docId, let undoCount, let redoCount):
+            payload["docId"] = docId
+            payload["undoCount"] = undoCount
+            payload["redoCount"] = redoCount
         case .undo(_, let docId, let repair), .redo(_, let docId, let repair):
             payload["docId"] = docId
             // Emitted ONLY when true. An always-present `"repair":false` would change the bytes of
@@ -2212,6 +2231,11 @@ public enum OfficeWireCodec {
                 return .rejected(seq: seq, reason: "malformed")
             }
             return .frame(.createView(seq: seq, docId: docId))
+        case "undoDepth":
+            guard let docId = object["docId"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.undoDepth(seq: seq, docId: docId))
         case "agentKeyEvent":
             guard let docId = object["docId"] as? String, let part = intValue(object["part"]),
                   let typeRaw = intValue(object["eventType"]), let type = OfficeKeyEventType(rawValue: typeRaw),
@@ -2244,6 +2268,15 @@ public enum OfficeWireCodec {
                 return .rejected(seq: seq, reason: "malformed")
             }
             return .frame(.redoOk(seq: seq, docId: docId))
+        case "undoDepthOk":
+            // `intValue` (not `as? Int`) for the same NSNumber-boolean reason every other numeric
+            // field on this wire uses it: `true` satisfies a bare `as? Int`.
+            guard let docId = object["docId"] as? String,
+                  let undoCount = intValue(object["undoCount"]),
+                  let redoCount = intValue(object["redoCount"]), undoCount >= 0, redoCount >= 0 else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.undoDepthOk(seq: seq, docId: docId, undoCount: undoCount, redoCount: redoCount))
         case "agentViewReady":
             guard let docId = object["docId"] as? String, let viewId = intValue(object["viewId"]) else {
                 return .rejected(seq: seq, reason: "malformed")

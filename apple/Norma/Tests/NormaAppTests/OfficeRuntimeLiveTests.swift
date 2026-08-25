@@ -4217,6 +4217,90 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         _ = host.teardownAllOfficeRuntimesAndStopHelper()
     }
 
+    /// **office-live-edit R3 PROBE — is the undo stack's DEPTH readable at all?**
+    ///
+    /// Requirement 3's "one tool call = one undo step" cannot be delivered by undo GROUPING: no
+    /// `.uno:` grouping command exists, and the only reachable grouping API stamps
+    /// `ViewShellId(-1)`, which makes the group repair-only for EVERY view including the user's.
+    /// The alternative is bracket-and-count — measure the depth before and after the agent's call,
+    /// remember K, and have one ⌘Z issue K repair-undos. That design is worthless unless the depth
+    /// is actually readable, so this probe settles it BEFORE anything is built on it.
+    ///
+    /// It is a MEASUREMENT, not just an availability check: it reads the depth at four points and
+    /// asserts the DELTAS, because "the query answered" and "the query answered something true"
+    /// are different claims and only the second one is usable. A query that always returned the
+    /// same constant would satisfy the first and fail here.
+    func testUndoStackDepthIsReadableAndTracksRealEdits() async throws {
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
+                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                        + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
+        let vendorRoot = Self.vendorProductSetRoot
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
+                      "LibreOffice vendor tree not present at \(vendorRoot.path) — run "
+                        + "`bun run libreoffice:fetch` from the repo root.")
+        let fixturePath = Self.fixturesRoot.appendingPathComponent("gate.odt").path
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: fixturePath), "gate.odt fixture missing")
+
+        let stateDir = makeScratchDirectory()
+        let directory = SessionDirectory(lister: { [] })
+        let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        host.makeOfficeHelperSupervisor = {
+            OfficeHelperSupervisor(configuration: OfficeHelperSupervisor.Configuration(
+                helperExecutableURL: helperURL,
+                socketDirectory: stateDir,
+                extraArguments: ["--lok-root", vendorRoot.path, "--sandbox-profile", Self.sandboxProfilePath.path]))
+        }
+        let runtime = host.officeRuntime(for: "S1")
+        let scratchDir = makeScratchDirectory()
+        let docPath = scratchDir.appendingPathComponent("undo-depth-probe.odt").path
+        try Data(contentsOf: URL(fileURLWithPath: fixturePath)).write(to: URL(fileURLWithPath: docPath))
+
+        runtime.open(docPath)
+        let settled = await waitUntil(timeout: 90) {
+            runtime.stateSnapshot.documents[docPath] != nil || runtime.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(settled, "never settled — phase: \(runtime.stateSnapshot.phase)")
+        guard let doc = runtime.stateSnapshot.documents[docPath],
+              let client = host.officeHelperSupervisor?.client else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("did not open: \(runtime.stateSnapshot.openFailures[docPath] ?? "no reason recorded")")
+        }
+
+        // 1 — a freshly opened, never-edited document.
+        let pristine = try await client.undoDepth(docId: doc.docId)
+        NSLog("[undoDepth probe] pristine: undo=\(pristine.undo) redo=\(pristine.redo)")
+        XCTAssertEqual(pristine.undo, 0, "a freshly opened document has nothing to undo")
+        XCTAssertEqual(pristine.redo, 0, "a freshly opened document has nothing to redo")
+
+        // 2 — after a real edit through the primary view.
+        try await client.postMouse(docId: doc.docId, part: 0, type: .buttonDown, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await client.postMouse(docId: doc.docId, part: 0, type: .buttonUp, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await postRawUppercaseMarker(client: client, docId: doc.docId, marker: "AAAA")
+        let afterEdit = try await client.undoDepth(docId: doc.docId)
+        NSLog("[undoDepth probe] after a 4-char primary-view edit: undo=\(afterEdit.undo) redo=\(afterEdit.redo)")
+        XCTAssertGreaterThan(afterEdit.undo, pristine.undo,
+                             "the depth query must RISE after a real edit. If it does not, it is "
+                             + "answering a constant, and bracket-and-count cannot be built on it")
+
+        // 3 — after an undo: undo depth falls, redo depth rises. This is the arm that proves the
+        // query tracks the stacks rather than counting edits ever made.
+        try await client.undo(docId: doc.docId)
+        let afterUndo = try await client.undoDepth(docId: doc.docId)
+        NSLog("[undoDepth probe] after one undo: undo=\(afterUndo.undo) redo=\(afterUndo.redo)")
+        XCTAssertLessThan(afterUndo.undo, afterEdit.undo, "an undo must LOWER the undo depth")
+        XCTAssertGreaterThan(afterUndo.redo, afterEdit.redo, "an undo must RAISE the redo depth")
+
+        // 4 — and back again on redo, so neither direction is a one-way artefact.
+        try await client.redo(docId: doc.docId)
+        let afterRedo = try await client.undoDepth(docId: doc.docId)
+        NSLog("[undoDepth probe] after one redo: undo=\(afterRedo.undo) redo=\(afterRedo.redo)")
+        XCTAssertEqual(afterRedo.undo, afterEdit.undo, "redo must restore the undo depth")
+        XCTAssertEqual(afterRedo.redo, afterEdit.redo, "redo must restore the redo depth")
+
+        _ = host.teardownAllOfficeRuntimesAndStopHelper()
+    }
+
     /// Office Stage B Task 6, fix round 1 (I-2) — **the discriminator the coordinator's review
     /// demanded.** The two-view drill above observed `(aSurvived: true, bSurvived: true)` after
     /// "edit A, edit B, undo via A" and read it as REFUSED/NO-OP — LO declining to undo a foreign

@@ -172,6 +172,10 @@ public protocol OfficeDocumentBridge: AnyObject {
     func undo(docId: String, repair: Bool) throws
     /// `.uno:Redo`, same posture as `undo` above.
     func redo(docId: String, repair: Bool) throws
+    /// office-live-edit R3 — the document's current undo/redo stack depths
+    /// (`getCommandValues(".uno:UndoCount"/".uno:RedoCount")`). THROWS rather than answering a
+    /// zero when the engine cannot answer: see `LOKBridge.SaveError.undoDepthUnavailable`.
+    func undoDepth(docId: String) throws -> (undo: Int, redo: Int)
     /// Mints a second ("agent") LOK view for `docId`, returning its view id — `createView()`'s own
     /// return value, never re-derived. Throws `SaveError.agentViewAlreadyExists` if this docId
     /// already has one (a deliberate refusal, not a silent "return the existing id").
@@ -456,6 +460,15 @@ public final class FakeOfficeDocumentBridge: OfficeDocumentBridge {
         lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
         guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
         lock.lock(); redoRepairFlags.append(repair); lock.unlock()
+    }
+    /// Existence-checked, and answers a FIXED, non-zero pair. Non-zero on purpose: a fake that
+    /// answered `(0, 0)` would let a wire-level test pass against the same value a real
+    /// unanswerable query would be tempted to return, which is the distinction this door exists to
+    /// preserve.
+    public func undoDepth(docId: String) throws -> (undo: Int, redo: Int) {
+        lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
+        guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
+        return (undo: 7, redo: 3)
     }
     public func createAgentView(docId: String) throws -> Int32 {
         lock.lock()
@@ -1459,6 +1472,17 @@ public final class OfficeHelperServer {
             do {
                 try documentBridge.redo(docId: docId, repair: repair)
                 writeReply(.redoOk(seq: seq, docId: docId), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.undoDepth(let seq, let docId)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                let depth = try documentBridge.undoDepth(docId: docId)
+                writeReply(.undoDepthOk(seq: seq, docId: docId, undoCount: depth.undo, redoCount: depth.redo), writer: writer)
             } catch {
                 writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
             }
