@@ -520,10 +520,24 @@ final class OfficeDocsCommandTests: XCTestCase {
         XCTAssertTrue(text.contains("all 3 paragraphs") || !text.contains("all 4 paragraphs"),
                       "and the document must be back to its pre-agent shape, not merely missing the "
                         + "marker text: \(text)")
-        XCTAssertTrue(runtime.stateSnapshot.documents[path]?.dirty ?? false,
-                      "an undo that really changed the document must mark it modified — LOK's own "
-                        + "ModifiedStatus. A `false` here would mean nothing happened, which is the "
-                        + "pre-R3 behaviour this test now exists to catch")
+        // ⚠️ **This assertion used to read `dirty == true`, and requirement 1 falsified it — which
+        // is the two requirements meeting, not a conflict.** ⌘Z is an edit, so it re-arms the
+        // debounced save; ~900 ms later the document is saved and `dirty` is false again. Asserting
+        // "modified" would now be asserting that instant-save did NOT work.
+        //
+        // The replacement is strictly stronger than the flag ever was: wait for the document to go
+        // clean (which only happens if a save really landed) and then assert on **the saved bytes on
+        // disk**. That proves the undo happened AND that it was persisted — end to end, off disk,
+        // through both requirements at once. A `postUndo` that silently did nothing would leave
+        // UNDOMARKER in those bytes and fail here.
+        let settledClean = await waitUntilLive { runtime.stateSnapshot.documents[path]?.dirty == false }
+        XCTAssertTrue(settledClean, "the debounced save must land the undone state on disk — if the "
+                        + "document never goes clean, instant-save did not run for the undo")
+        let savedXML = try readODFEntry(atPath: path, entry: "content.xml")
+        XCTAssertFalse(savedXML.contains("UNDOMARKER"),
+                       "the SAVED bytes must no longer carry the agent's text: the human's ⌘Z took "
+                         + "it back and instant-save persisted that. Still present means either the "
+                         + "undo did nothing or the save did")
     }
 
     // MARK: - office-live-edit R2 — how many paragraphs one paste actually makes

@@ -2802,13 +2802,29 @@ final class OfficeRuntime: ObservableObject {
         switch event {
         case .modifiedChanged(let modified):
             perform(dispatch(.modifiedStatusChanged(docId: docId, modified: modified)))
-            // office-live-edit R1 — the BELT on the debounced save. The input doors are the primary
-            // trigger (see `noteEditActivity`); this catches a document that became dirty by a route
-            // the app did not post — and it is only a belt precisely BECAUSE this signal is a
-            // transition: it fires on clean→dirty and then stays silent however much more is typed.
-            if modified, let path = state.documents.first(where: { $0.value.docId == docId })?.key {
-                noteEditActivity(path: path)
-            }
+            // ⚠️ **office-live-edit R1 — there is deliberately NO auto-save belt on this transition,
+            // and the reason is a defect it actually caused rather than a preference.**
+            //
+            // An earlier revision armed the debounced save from here as well as from the app's own
+            // input doors, on the reasoning that it would catch "a document that became dirty by a
+            // route the app did not post". Enumerating those routes shows the reasoning was wrong:
+            //
+            //  1. **The AGENT is the main one, and it already saves.** `OfficeAgentBroker` rule 4
+            //     saves once per tool call, awaited, then drains. Arming from here schedules a
+            //     SECOND, redundant save for the same edit — and the `dirty` fast path does not
+            //     prevent it, because the debounce can fire while the broker's own save is still in
+            //     flight. That is an overlapping save on one path: precisely what `fireAutoSave`'s
+            //     never-overlap guard exists to prevent, reintroduced from outside where that guard
+            //     cannot see it. Measured, not theorised — it took six live tests red, several with
+            //     `office helper request timed out`, the signature of the post-save close window
+            //     killing the SHARED helper and taking every other open document with it.
+            //  2. **Raw wire clients** (this suite's own drills and the harness) are test surface,
+            //     not product.
+            //
+            // A human's edits — the whole point of instant save — all arrive through the app's own
+            // input doors, which is where `noteEditActivity` is called. Nothing a human does reaches
+            // LOK without passing one of them. So the belt covered no real case and cost real saves,
+            // and every extra save widens the window that measurably kills the helper ~4 times in 5.
         case .caretRect, .textSelection, .textSelectionStart, .textSelectionEnd, .cellCursor, .cellFormula:
             let activePart = state.documents.first(where: { $0.value.docId == docId })?.value.activePart ?? 0
             cursorStore.apply(docId: docId, event: event, activePart: activePart)
