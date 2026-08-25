@@ -846,8 +846,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // same `summonAppWindow(navigatingTo:)` primitive every "open in app" affordance uses, with
         // a destination the app already constructs elsewhere. Deferred one run-loop turn for the
         // same reason: `boot()`'s window-less state must be fully settled first.
+        //
+        // RETRIED, because a single deferred call is a RACE and losing it is silent.
+        // `summonAppWindow` bails with `guard let model = appModel else { … return }`, and one
+        // run-loop turn after `boot()` is not a guarantee that `appModel` exists yet. When the race
+        // is lost the summon simply does not happen: no window, no error, no log the gate can see —
+        // observed as a gate run where the app was alive and healthy, the daemon and helper were
+        // servicing documents correctly, and accessibility reported zero named elements because
+        // there was no shell window at all. Re-arming until `appWindow` actually exists turns that
+        // silent loss into an eventual success, and the retries are idempotent (`summonAppWindow`
+        // re-summons an existing window rather than making a second one).
         if let gateSession = ProcessInfo.processInfo.environment["NORMA_GATE_SESSION"], !gateSession.isEmpty {
-            DispatchQueue.main.async { [weak self] in self?.summonAppWindow(navigatingTo: .session(gateSession)) }
+            var attemptsLeft = 40   // 40 × 500ms = 20s, comfortably past a cold boot
+            func armSummon() {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                    guard let self else { return }
+                    self.summonAppWindow(navigatingTo: .session(gateSession))
+                    attemptsLeft -= 1
+                    if self.appWindow == nil && attemptsLeft > 0 { armSummon() }
+                }
+            }
+            armSummon()
         }
         #endif
     }

@@ -211,8 +211,13 @@ struct ShellRootView: View {
                     // still cannot re-enter the panel dismantle that re-navigating with a
                     // `.document` tab open causes (already at `.session(gateSession)` -> no call),
                     // and it DOES retry on every re-mount until the navigation actually sticks.
+                    // The panel is opened UNCONDITIONALLY, before the navigation guard — the two
+                    // are independent facts and folding them into one `return` was a real bug: the
+                    // window half above may already have navigated to this very session before the shell
+                    // mounted, in which case the guard below returns and the panel would never open,
+                    // so no `.document` tab could ever render for the UI leg.
+                    if presentation.mode != .side { presentation.mode = .side }
                     if case .session(let current) = nav.destination, current == gateSession { return }
-                    presentation.mode = .side
                     nav.navigate(to: .session(gateSession))
                 }
                 #endif

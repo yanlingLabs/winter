@@ -397,7 +397,10 @@ function xlsxCell(file: string, sheetEntry: string, ref: string): string | null 
     // An inline-string cell keeps its text in <is><t>…</t></is> rather than <v>.
     return inner.match(/<t[^>]*>([\s\S]*?)<\/t>/)?.[1] ?? null;
   }
-  if (/\bt="s"\b/.test(attrs)) {
+  // NOT /\bt="s"\b/ — the trailing \b can never match, because the character before it is a
+  // quote and the character after is also non-word, so there is no word boundary there. That bug
+  // made this reader return the raw shared-string INDEX ("2") instead of the string it points at.
+  if (/\st="s"/.test(attrs)) {
     const shared = zipEntry(file, "xl/sharedStrings.xml");
     const items = [...shared.matchAll(/<si>([\s\S]*?)<\/si>/g)].map((si) =>
       [...si[1].matchAll(/<t[^>]*>([\s\S]*?)<\/t>/g)].map((t) => t[1]).join(""));
