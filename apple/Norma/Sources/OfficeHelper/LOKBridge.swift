@@ -1072,11 +1072,11 @@ final class LOKBridge: OfficeDocumentBridge {
     func clipboardPaste(docId: String, part: Int, text: String) throws {
         try thread.sync { try self.clipboardPasteOnDedicatedThread(docId: docId, part: part, text: text) }
     }
-    func undo(docId: String) throws {
-        try thread.sync { try self.undoOnDedicatedThread(docId: docId) }
+    func undo(docId: String, repair: Bool) throws {
+        try thread.sync { try self.undoOnDedicatedThread(docId: docId, repair: repair) }
     }
-    func redo(docId: String) throws {
-        try thread.sync { try self.redoOnDedicatedThread(docId: docId) }
+    func redo(docId: String, repair: Bool) throws {
+        try thread.sync { try self.redoOnDedicatedThread(docId: docId, repair: repair) }
     }
     func createAgentView(docId: String) throws -> Int32 {
         try thread.sync { try self.createAgentViewOnDedicatedThread(docId: docId) }
@@ -1996,21 +1996,54 @@ final class LOKBridge: OfficeDocumentBridge {
     /// bigger surface than "wire Undo/Redo" asks for, and the drill's own save+reopen PLACEMENT
     /// assertions already answer the characterization question without it (they can distinguish
     /// isolated / shared-LIFO / no-op / multi-revert outcomes directly from what landed on disk).
-    private func undoOnDedicatedThread(docId: String) throws {
+    /// **`repair` (office-live-edit R3).** LOK gates undo PER VIEW: every app refuses, in LOK mode,
+    /// an undo whose top action belongs to a different view — Writer `sw/…/docundo.cxx:458-470`,
+    /// Impress `sd/…/viewshel.cxx:1385-1393`, Calc `sc/…/tabvwshb.cxx:778` (Calc additionally has a
+    /// range-based independence escape at `sc/…/undobase.cxx:649-715` that SKIPS the foreign action
+    /// and undoes an older own-view one instead — which is why turning repair ON changes Calc's
+    /// existing behaviour rather than merely unblocking it). The slot takes
+    /// `SfxBoolItem Repair SID_REPAIRPACKAGE` (`sfx2/sdi/sfx.sdi:4719-4720`) and every app's
+    /// Execute handler reads it and skips its own gate.
+    ///
+    /// The argument's JSON encoding is **not guessed** — it is the SAME `{"type":"boolean","value":
+    /// "<t/f>"}` shape `sheetsFormat` already dispatches `.uno:Bold` with through this very helper
+    /// (`postUnoCommandOnDedicatedThread`), i.e. a shape already proven against the SHIPPED engine
+    /// rather than only at the source pin. The `value` is a STRING because the receiving mapper
+    /// reads it as one (`comphelper/…/sequenceashashmap.cxx:312,319-320`,
+    /// `rtl_str_toBoolean(aValueStr)`).
+    ///
+    /// `repair: false` is byte-identical to this function's pre-repair body — the literal
+    /// `postUnoCommand(handle, cmd, nil, false)`, not "the args helper with an empty dict". That
+    /// matters: an empty `{}` argument string is a DIFFERENT call from a null one, and every pinned
+    /// characterization in this suite was measured against the null one.
+    private func undoOnDedicatedThread(docId: String, repair: Bool) throws {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
         doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
-        ".uno:Undo".withCString { commandPtr in
-            doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, nil, false)
+        guard repair else {
+            ".uno:Undo".withCString { commandPtr in
+                doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, nil, false)
+            }
+            return
         }
+        postUnoCommandOnDedicatedThread(doc, ".uno:Undo",
+                                        ["Repair": ["type": "boolean", "value": "true"]])
     }
 
-    /// `.uno:Redo`, same posture as `undoOnDedicatedThread` above.
-    private func redoOnDedicatedThread(docId: String) throws {
+    /// `.uno:Redo`, same posture as `undoOnDedicatedThread` above — `repair` included, and it is
+    /// load-bearing rather than symmetric-for-tidiness: an action undone under repair keeps its
+    /// ORIGINAL `ViewShellId` on the redo stack, so a plain redo of it is refused by the redo gates
+    /// (`sw/…/docundo.cxx:523`, `sc/…/tabvwshb.cxx:778` `bIsUndo == false`, `sd/…/viewshel.cxx:1455`).
+    private func redoOnDedicatedThread(docId: String, repair: Bool) throws {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
         doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
-        ".uno:Redo".withCString { commandPtr in
-            doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, nil, false)
+        guard repair else {
+            ".uno:Redo".withCString { commandPtr in
+                doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, nil, false)
+            }
+            return
         }
+        postUnoCommandOnDedicatedThread(doc, ".uno:Redo",
+                                        ["Repair": ["type": "boolean", "value": "true"]])
     }
 
     /// `createView()`, LOK's own C signature (`int (*)(LibreOfficeKitDocument*)`) — confirmed

@@ -117,6 +117,15 @@ final class OfficeWireCodecTests: XCTestCase {
             .undoOk(seq: 59, docId: "doc-1"),
             .redo(seq: 60, docId: "doc-1"),
             .redoOk(seq: 61, docId: "doc-1"),
+            // office-live-edit R3 — the `repair` arm of undo/redo. BOTH polarities ride this
+            // round-trip: `repair: false` must encode to the SAME bytes the pre-repair frame did
+            // (the encoder omits the key), and `repair: true` must survive encode→decode. A
+            // round-trip that only carried `true` would pass even if the encoder had started
+            // emitting `"repair":false` on every frame.
+            .undo(seq: 158, docId: "doc-1", repair: true),
+            .undo(seq: 159, docId: "doc-1", repair: false),
+            .redo(seq: 160, docId: "doc-1", repair: true),
+            .redo(seq: 161, docId: "doc-1", repair: false),
             .createView(seq: 62, docId: "doc-1"),
             .agentViewReady(seq: 63, docId: "doc-1", viewId: 2),
             .agentKeyEvent(seq: 64, docId: "doc-1", part: 0, type: .keyInput, charCode: 65, keyCode: 512),

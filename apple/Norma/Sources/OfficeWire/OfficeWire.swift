@@ -188,9 +188,23 @@ public enum OfficeWireFrame: Equatable, Sendable {
     /// process-global "active frame," never a part-scoped call — and the brief's own words for
     /// this door are "view-scoped (setView prefix)"; `setPart` was never asked for and is not
     /// added speculatively.
-    case undo(seq: UInt64, docId: String)
-    /// `.uno:Redo`, same posture as `undo` above.
-    case redo(seq: UInt64, docId: String)
+    ///
+    /// **`repair`** rides the slot's own `SfxBoolItem Repair SID_REPAIRPACKAGE` argument
+    /// (`sfx2/sdi/sfx.sdi:4719-4720`, Redo's twin at `:3590-3591`). Its ONLY job is to skip the
+    /// per-view refusal every app applies in LOK mode — Writer `basesh.cxx:649-664`, Impress
+    /// `viewshel.cxx:1376-1394`, Calc `tabvwshb.cxx:746,773-778` — so an undo dispatched from THIS
+    /// document's primary view can take back an edit made through the AGENT view. Defaults `false`,
+    /// which is byte-for-byte the pre-repair frame (the encoder omits the key entirely, and the
+    /// decoder reads an absent key as `false`), so every existing caller and every pinned wire
+    /// fixture is unchanged by its addition.
+    case undo(seq: UInt64, docId: String, repair: Bool = false)
+    /// `.uno:Redo`, same posture as `undo` above — **including `repair`, which is not optional in
+    /// practice**: a repair-undone action keeps its ORIGINAL `ViewShellId` when it moves to the redo
+    /// stack, so the redo gates (`sw/…/docundo.cxx:523`, `sc/…/tabvwshb.cxx:778` with
+    /// `bIsUndo == false`, `sd/…/viewshel.cxx:1455`) refuse a plain redo of it from any other view.
+    /// A repair undo MUST be paired with a repair redo or ⌘⇧Z silently stops working right after an
+    /// agent edit is taken back.
+    case redo(seq: UInt64, docId: String, repair: Bool = false)
     /// The two-writer groundwork: mints a SECOND LOK view for `docId` on demand (`createView()`),
     /// for a future AI collaborator's own edits — never used by the app today (the brief's own
     /// words), only by the live characterization drill (`OfficeRuntimeLiveTests`). Refused
@@ -773,8 +787,8 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .clipboardCopy(let seq, _, _): return seq
         case .clipboardCut(let seq, _, _): return seq
         case .clipboardPaste(let seq, _, _, _): return seq
-        case .undo(let seq, _): return seq
-        case .redo(let seq, _): return seq
+        case .undo(let seq, _, _): return seq
+        case .redo(let seq, _, _): return seq
         case .createView(let seq, _): return seq
         case .agentKeyEvent(let seq, _, _, _, _, _): return seq
         case .subscribeTiles(let seq, _, _, _, _): return seq
@@ -885,8 +899,14 @@ public enum OfficeWireFrame: Equatable, Sendable {
             payload["docId"] = docId
             payload["part"] = part
             payload["text"] = text
-        case .undo(_, let docId), .redo(_, let docId), .createView(_, let docId):
+        case .createView(_, let docId):
             payload["docId"] = docId
+        case .undo(_, let docId, let repair), .redo(_, let docId, let repair):
+            payload["docId"] = docId
+            // Emitted ONLY when true. An always-present `"repair":false` would change the bytes of
+            // every undo frame this bridge has ever sent and red the pinned wire fixtures for no
+            // behavioural gain — the decoder already reads an absent key as `false`.
+            if repair { payload["repair"] = true }
         case .agentKeyEvent(_, let docId, let part, let type, let charCode, let keyCode):
             payload["docId"] = docId
             payload["part"] = part
@@ -2169,12 +2189,24 @@ public enum OfficeWireCodec {
             guard let docId = object["docId"] as? String else {
                 return .rejected(seq: seq, reason: "malformed")
             }
-            return .frame(.undo(seq: seq, docId: docId))
+            // ABSENT means `false` — the pre-repair frame shape, which every pinned fixture and
+            // every shipped caller still emits. A PRESENT-but-wrong-typed `repair` is NOT silently
+            // read as absent: it is malformed, and refused. Reading `"true"` (a string) as `false`
+            // would be this arc's own silent-wrong-answer class on the one operand that decides
+            // whether an undo may cross views — and a repair undo that quietly declines to cross is
+            // indistinguishable, at every layer above, from an undo that had nothing to do.
+            guard let undoRepair = decodedRepairFlag(object) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.undo(seq: seq, docId: docId, repair: undoRepair))
         case "redo":
             guard let docId = object["docId"] as? String else {
                 return .rejected(seq: seq, reason: "malformed")
             }
-            return .frame(.redo(seq: seq, docId: docId))
+            guard let redoRepair = decodedRepairFlag(object) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.redo(seq: seq, docId: docId, repair: redoRepair))
         case "createView":
             guard let docId = object["docId"] as? String else {
                 return .rejected(seq: seq, reason: "malformed")
@@ -2609,6 +2641,27 @@ func int64Value(_ value: Any?) -> Int64? {
 func doubleValue(_ value: Any?) -> Double? {
     guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
     return number as? Double
+}
+
+/// The `repair` flag on `undo`/`redo`, decoded with the SAME NSNumber discipline `intValue` uses,
+/// pointed the other way: a real JSON boolean is exactly an `NSNumber` whose CoreFoundation type id
+/// IS `CFBooleanGetTypeID()`. Without that check `"repair": 1` — a NUMBER — would satisfy a plain
+/// `as? Bool` and silently arm cross-view undo, which is the same trap `intValue` exists to close
+/// from the other side (`true` satisfying `as? Int`).
+///
+/// Three-way on purpose, and the three are NOT interchangeable:
+/// - key ABSENT → `false`. The pre-repair frame shape; every shipped caller and every pinned wire
+///   fixture still emits it, and they must keep decoding to the identical frame.
+/// - key present and a real boolean → that value.
+/// - key present and ANYTHING else → `nil`, which the caller turns into `.rejected(reason:
+///   "malformed")`. Deliberately NOT folded into the absent case: a caller that meant `"true"` and
+///   got a plain non-repair undo would see the wire's own success reply and a document that did not
+///   change — this bridge cannot tell those apart afterwards (`undoOk` acks the DISPATCH, never the
+///   effect), so the only place the mistake is still visible is here.
+func decodedRepairFlag(_ object: [String: Any]) -> Bool? {
+    guard let raw = object["repair"] else { return false }
+    guard let number = raw as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
+    return number.boolValue
 }
 
 /// Mints strictly increasing `seq` values for one connection's OUTBOUND frames, starting at 1
