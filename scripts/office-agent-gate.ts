@@ -375,6 +375,37 @@ function xlsxAllText(file: string): string {
   return zipEntry(file, "xl/sharedStrings.xml") + "\n" + zipEntry(file, "xl/worksheets/sheet1.xml");
 }
 
+/**
+ * Resolve ONE named cell of a worksheet to its value, following the shared-string table when the
+ * cell is `t="s"`.
+ *
+ * Deliberately cell-addressed rather than "does this string appear anywhere in the file". The
+ * loose version is a genuinely weaker assertion — it passes when the right value lands in the
+ * WRONG cell, which is exactly the bystander-clobber failure mode this arc spent a whole round
+ * closing — and it also produced a false red on this gate's first run: stripping tags glued
+ * `<v>2</v><v>1234</v>` into "21234", so a digit-boundary match for 1234 failed while the file was
+ * perfectly correct. Right conclusion, wrong supporting fact; the fix is to read the cell.
+ */
+function xlsxCell(file: string, sheetEntry: string, ref: string): string | null {
+  const sheet = zipEntry(file, sheetEntry);
+  const m = sheet.match(new RegExp(`<c r="${ref}"([^>]*)>([\\s\\S]*?)</c>`));
+  if (!m) return null;
+  const attrs = m[1];
+  const inner = m[2];
+  const v = inner.match(/<v>([\s\S]*?)<\/v>/)?.[1];
+  if (v === undefined) {
+    // An inline-string cell keeps its text in <is><t>…</t></is> rather than <v>.
+    return inner.match(/<t[^>]*>([\s\S]*?)<\/t>/)?.[1] ?? null;
+  }
+  if (/\bt="s"\b/.test(attrs)) {
+    const shared = zipEntry(file, "xl/sharedStrings.xml");
+    const items = [...shared.matchAll(/<si>([\s\S]*?)<\/si>/g)].map((si) =>
+      [...si[1].matchAll(/<t[^>]*>([\s\S]*?)<\/t>/g)].map((t) => t[1]).join(""));
+    return items[Number(v)] ?? null;
+  }
+  return v;
+}
+
 function odpAllText(file: string): string { return zipEntry(file, "content.xml"); }
 function docxAllText(file: string): string { return zipEntry(file, "word/document.xml"); }
 
@@ -479,10 +510,11 @@ function buildVerbSteps(): VerbStep[] {
       prompt: 'In budget.xlsx, put the text "QUARTERLY REVIEW" in cell A4 of Sheet1, and put the number 1234 in cell B4.',
       assert() {
         if (!differsFromPristine("budget.xlsx")) return [false, "the file is byte-identical to the pristine fixture — nothing was written"];
-        const text = xmlText(xlsxAllText(xlsx));
-        const hasText = text.includes("QUARTERLY REVIEW");
-        const hasNum = /(^|\D)1234(\D|$)/.test(text);
-        return [hasText && hasNum, `saved xlsx XML ${hasText ? "contains" : "MISSING"} "QUARTERLY REVIEW"; ${hasNum ? "contains" : "MISSING"} 1234`];
+        // Cell-addressed on purpose: the right value in the WRONG cell must not pass.
+        const a4 = xlsxCell(xlsx, "xl/worksheets/sheet1.xml", "A4");
+        const b4 = xlsxCell(xlsx, "xl/worksheets/sheet1.xml", "B4");
+        const ok = a4 === "QUARTERLY REVIEW" && b4 === "1234";
+        return [ok, `saved bytes: A4=${JSON.stringify(a4)} (want "QUARTERLY REVIEW"), B4=${JSON.stringify(b4)} (want "1234")`];
       },
     },
     {
@@ -543,11 +575,15 @@ function buildVerbSteps(): VerbStep[] {
       file: "deck.odp",
       prompt: "Add one more slide to the end of deck.odp.",
       assert() {
-        const content = odpAllText(odp);
-        const count = (content.match(/<draw:page\b/g) ?? []).length;
-        const pristineCount = (odpAllText(join(PRISTINE_DIR, "deck.odp")).match(/<draw:page\b/g) ?? []).length;
-        // Counted from BOTH files at runtime — never a literal. The pristine fixture is 3 slides,
-        // but this asserts the delta rather than trusting that number.
+        // `<draw:page[\s>]`, NOT `<draw:page\b` — `\b` matches before the hyphen of
+        // `<draw:page-thumbnail>`, an element LibreOffice writes once per slide on save but which
+        // the hand-built pristine fixture has none of. The loose pattern therefore counted 4 real
+        // slides as 8 and produced a false red on this gate's first run while the file was exactly
+        // right. Verified against the saved bytes: 4 `<draw:page`, 4 `<draw:page-thumbnail`.
+        const countPages = (xml: string) => (xml.match(/<draw:page[\s>]/g) ?? []).length;
+        const count = countPages(odpAllText(odp));
+        const pristineCount = countPages(odpAllText(join(PRISTINE_DIR, "deck.odp")));
+        // Counted from BOTH files at runtime — never a literal, and asserted as a DELTA.
         return [count === pristineCount + 1, `slide count ${pristineCount} (pristine) -> ${count} (saved); expected ${pristineCount + 1}`];
       },
     },
@@ -580,7 +616,9 @@ function buildVerbSteps(): VerbStep[] {
 // ── the run ──────────────────────────────────────────────────────────────────────────────────
 
 function seedFixtures(): void {
-  rmSync(GATE_ROOT, { recursive: true, force: true });
+  // Wipe the STATE dirs only — never DERIVED_DATA, so `--no-build` can reuse a build and a normal
+  // run still gets a completely fresh home, workdir and pristine set.
+  for (const d of [HOME_DIR, WORK_DIR, PRISTINE_DIR]) rmSync(d, { recursive: true, force: true });
   mkdirSync(WORK_DIR, { recursive: true });
   mkdirSync(PRISTINE_DIR, { recursive: true });
   mkdirSync(HOME_DIR, { recursive: true });
@@ -846,8 +884,10 @@ async function withTeardown(): Promise<void> {
     killHelpers();
     log("   app stopped, daemon stopped, helpers killed");
     if (!process.argv.includes("--keep")) {
-      rmSync(GATE_ROOT, { recursive: true, force: true });
-      log(`   removed ${GATE_ROOT}`);
+      // The temp home, the workdir and the pristine set go; the build stays (it is expensive and
+      // carries no state). `--keep` leaves everything for post-mortem.
+      for (const d of [HOME_DIR, WORK_DIR, PRISTINE_DIR]) rmSync(d, { recursive: true, force: true });
+      log(`   removed the temp NORMA_HOME, workdir and pristine set under ${GATE_ROOT}`);
     } else {
       log(`   --keep: left ${GATE_ROOT} in place`);
     }

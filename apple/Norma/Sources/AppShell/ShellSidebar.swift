@@ -1,12 +1,6 @@
 import AppKit
 import SwiftUI
 
-#if DEBUG
-/// office-agent Task 8: the `NORMA_GATE_SESSION` door's one-shot latch — see its `.onAppear` below
-/// for why re-firing tears the window down. Main-actor-confined by construction (the only reader and
-/// writer is a SwiftUI `.onAppear` body), never read in a shipped build.
-@MainActor private var officeGateDoorHasFired = false
-#endif
 
 /// The shell's root content: the nav sidebar and the selected destination's surface.
 ///
@@ -205,8 +199,19 @@ struct ShellRootView: View {
                 .onAppear {
                     let env = ProcessInfo.processInfo.environment
                     guard let gateSession = env["NORMA_GATE_SESSION"], !gateSession.isEmpty else { return }
-                    guard !officeGateDoorHasFired else { return }
-                    officeGateDoorHasFired = true
+                    // IDEMPOTENT, not a one-shot latch — and the difference was measured, twice.
+                    //
+                    // A plain `fired` boolean deadlocks the door: the FIRST `.onAppear` can land
+                    // before navigation can take, the flag is spent on that no-op, and no later
+                    // re-mount ever retries — observed as a shell window that never appears at all
+                    // (the app alive, the daemon and helper healthy, LibreOffice servicing the
+                    // document, and AX reporting zero named elements).
+                    //
+                    // Testing the CURRENT destination instead gets both properties at once: it
+                    // still cannot re-enter the panel dismantle that re-navigating with a
+                    // `.document` tab open causes (already at `.session(gateSession)` -> no call),
+                    // and it DOES retry on every re-mount until the navigation actually sticks.
+                    if case .session(let current) = nav.destination, current == gateSession { return }
                     presentation.mode = .side
                     nav.navigate(to: .session(gateSession))
                 }
