@@ -318,6 +318,7 @@ function gateEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
     // DELETION-RED"), rebuilding, and then passing this flag. Stated plainly because a flag that
     // silently does nothing while claiming to break a verb would be its own kind of lie.
     ...(process.argv.includes("--break-sheets-set") ? { NORMA_GATE_BREAK_SHEETS_SET: "1" } : {}),
+    ...(process.argv.includes("--break-sheets-read") ? { NORMA_GATE_BREAK_SHEETS_READ: "1" } : {}),
     NORMA_HOME: HOME_DIR,
     NORMA_PROFILE: "dev",
     // Belt and braces: nothing in this gate may ever reach `open -g -b com.norma.app` and launch
@@ -1027,7 +1028,9 @@ async function main(): Promise<number> {
   // expected to go red. Previously these were separate (`--break-sheets-set` + `--break=<id>`) and
   // passing only the latter produced a green run plus the line "STILL PASSING (the gate is BLIND to
   // this break)" — which reads as a damning finding when in fact nothing had been broken.
-  const breakVerb = argv.includes("--break-sheets-set") ? "sheets.set" : undefined;
+  const breakVerb = argv.includes("--break-sheets-set") ? "sheets.set"
+    : argv.includes("--break-sheets-read") ? "sheets.read (fresh open through the helper)"
+    : undefined;
 
   log("═══ Office Stage C — the headless agent gate ═══");
   log(`repo root : ${REPO_ROOT}`);
