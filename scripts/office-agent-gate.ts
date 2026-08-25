@@ -52,11 +52,21 @@
  * ─────────────────────────────────────────────────────────────────────────────────────────────
  * FIVE THINGS THIS GATE LEARNED THE HARD WAY (none of them in the ledger before Task 8)
  *
- * 1. **`sockaddr_un.sun_path` is 103 bytes.** A `NORMA_HOME` under a deep temp root makes the app
- *    die ~2s after launch with exit 133 (SIGTRAP), NO crash report and NO log line — while `bun`'s
- *    daemon happily reports "listening on" the same over-long path. The failure presents at the far
- *    end from its cause. `assertSocketPathFits` is the preflight that turns that into one clear
- *    sentence, and the gate roots itself at a SHORT `/tmp` path.
+ * 1. **`sockaddr_un.sun_path` is 103 bytes** (measured by bind probe: 103 OK, 104 "path too long").
+ *    A `NORMA_HOME` under a deep temp root makes the app die ~2s after launch with exit 133
+ *    (SIGTRAP), NO crash report and NO log line.
+ *
+ *    **And the daemon actively lies about it — reproduced deliberately, not inferred.** Started on
+ *    a 138-byte socket path, `norma-core` printed
+ *
+ *        norma-core 0.2.013 listening on /tmp/nog-sunpath-probe/ddd…/eee…/run/core.sock
+ *
+ *    and `<home>/run/` then contained **`core.lock` and NO `core.sock` at all**. The daemon reports
+ *    listening on a socket it never created, exits 0, and stays up — so the failure presents at the
+ *    far end from its cause (the app, silently trapping, minutes later). `assertSocketPathFits` is
+ *    the preflight that turns that into one clear sentence, and the gate roots itself at a SHORT
+ *    `/tmp` path. **This is a real product-level silent failure, worth a look independently of this
+ *    gate** — `packages/core/src/daemon.ts` prints that line unconditionally after `listen`.
  * 2. **The office tools need the app ATTACHED TO THIS SESSION**, and the app attaches to whatever
  *    session its window shows. Norma is `LSUIElement` — no window at launch — so this gate drives
  *    the `NORMA_GATE_SESSION` DEBUG door (added in Task 8) rather than AX-clicking an unnamed
@@ -403,9 +413,28 @@ function stopApp(): void {
   killHelpers();
 }
 
+/**
+ * Stop the daemon and WAIT for it to actually be gone, escalating to SIGKILL.
+ *
+ * Fire-and-forget SIGTERM was not enough: the gate's own residual-process check found the daemon
+ * still resident immediately after teardown printed "daemon stopped", because SIGTERM shutdown is
+ * asynchronous. "Zero residual processes at exit" has to be observed, not requested — a leaked
+ * daemon holds the temp home's socket and poisons the next run.
+ */
 function stopDaemon(): void {
-  if (daemon && daemon.exitCode === null) { try { daemon.kill("SIGTERM"); } catch { /* gone */ } }
+  const child = daemon;
   daemon = undefined;
+  if (!child || child.exitCode !== null || child.pid === undefined) return;
+  try { child.kill("SIGTERM"); } catch { /* already gone */ }
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    if (child.exitCode !== null) return;
+    try { process.kill(child.pid, 0); } catch { return; }   // ESRCH -> it is gone
+    spawnSync("sleep", ["0.2"]);
+  }
+  // Still alive after 10s of asking politely.
+  try { child.kill("SIGKILL"); } catch { /* gone */ }
+  spawnSync("sleep", ["0.5"]);
 }
 
 // ── driving the REAL agent ───────────────────────────────────────────────────────────────────
@@ -1167,7 +1196,15 @@ async function withTeardown(): Promise<void> {
     stopApp();
     stopDaemon();
     killHelpers();
-    log("   app stopped, daemon stopped, helpers killed");
+    // Reported from `pgrep`, not assumed from having called the kills — the previous version
+    // printed "daemon stopped" while the daemon was still resident.
+    const residual = (pattern: string) =>
+      (spawnSync("pgrep", ["-f", pattern], { encoding: "utf8" }).stdout || "").trim().split("\n").filter(Boolean).length;
+    const leftApp = residual(`${DERIVED_DATA}.*MacOS/Norma`);
+    const leftHelpers = residual(`${DERIVED_DATA}.*NormaOfficeHelper`);
+    const leftDaemons = residual(`daemon run.*${HOME_DIR}`) + residual(`${HOME_DIR}.*daemon run`);
+    const clean = leftApp === 0 && leftHelpers === 0 && leftDaemons === 0;
+    log(`   app stopped, daemon stopped, helpers killed — residual: app=${leftApp} helpers=${leftHelpers} daemons=${leftDaemons}${clean ? " (clean)" : " ⚠ LEAKED"}`);
     if (!process.argv.includes("--keep")) {
       // The temp home, the workdir and the pristine set go; the build stays (it is expensive and
       // carries no state). `--keep` leaves everything for post-mortem.
