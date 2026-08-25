@@ -473,7 +473,7 @@ final class OfficeDocsCommandTests: XCTestCase {
     /// ⟹ **A human's ⌘Z cannot take back a `docs` edit, and does nothing at all when they try.** The
     /// tool description says exactly that, in those words, instead of ruling 4's "shared" framing.
     /// This test pins the real behaviour so a later reader does not "fix" the description back.
-    func testLiveAHumanUndoOnTheirOwnViewCannotTakeBackAnAgentEditAndSilentlyDoesNothing() async throws {
+    func testLiveAHumanUndoTakesBackAWholeAgentEditInOnePress() async throws {
         let (path, host, runtime) = try await openLive("two-page.odt")
         let appended = "UNDOMARKER one two three four"
         let result = await send(command("office.docs.append", args: ["path": path, "text": appended],
@@ -483,17 +483,22 @@ final class OfficeDocsCommandTests: XCTestCase {
         // The USER-FACING undo door — literally what ⌘Z dispatches (`OfficeRuntime.postUndo`), on
         // the PRIMARY view, which is the whole point: the agent wrote on its own second view.
         //
-        // ⚠️ **Disclosed weakness: this test has no positive control of its own.** Its assertions are
-        // that the text SURVIVES, so a `postUndo` that silently did nothing at all — a broken door,
-        // not a refused one — would pass it just the same. The positive control exists, but in
-        // another suite: the Office Harness's `18.undoLadderThenRedo`
-        // (`OfficeHarnessScript.swift:159`) drives this same `postUndo` door and proves it DOES
-        // remove a marker typed on the primary view, confirmed on disk, with redo restoring it; and
-        // `18.twoViewUndoCharacterization` (`:161`) independently pins the cross-view case as
-        // refused/no-op. Together those make "the door works, and it declines THIS action" the
-        // supported reading rather than "the door is dead". Recorded here rather than left for a
-        // reader to assume — adding a same-suite positive control would mean typing on the primary
-        // view through `postKey`, which is Stage B surface this task does not otherwise touch.
+        // ⚠️ **THIS TEST WAS INVERTED BY office-live-edit R3, and the inversion is the deliverable.**
+        // It used to be called `…CannotTakeBackAnAgentEditAndSilentlyDoesNothing` and asserted that
+        // `UNDOMARKER` SURVIVED — a true and pinned characterization of the engine's per-view undo
+        // gate, and a genuinely bad experience: the human's ⌘Z did nothing, silently. `postUndo` now
+        // dispatches with `Repair: true`, so the user's ruling holds — **⌘Z reverts the last thing
+        // that happened, regardless of who did it.**
+        //
+        // Its old disclosed weakness is gone too, and by construction rather than by assertion: this
+        // test's claim is now that the text DISAPPEARS, so a `postUndo` that silently did nothing —
+        // the exact failure the old shape could not distinguish from success — fails it. It is
+        // therefore its own positive control, and it is the end-to-end proof that the repair flag
+        // survives every hop from ⌘Z's door to LOK: `postUndo` → the input chain → the driver → the
+        // app-wide FIFO → the wire → the helper → `postUnoCommand`.
+        //
+        // It also exercises the LEDGER end to end: `docs.append` is one `paste`, so one press must
+        // take the whole appended paragraph back, not one character of it.
         runtime.postUndo(path: path)
 
         // A settle, deliberately NOT a poll on the assertion's own condition. Polling "has UNDOMARKER
@@ -507,13 +512,18 @@ final class OfficeDocsCommandTests: XCTestCase {
                                        commandId: "pcmd_undo_read"), through: host)
         XCTAssertTrue(after.ok, "\(after)")
         let text = after.result ?? ""
-        XCTAssertTrue(text.contains("UNDOMARKER"),
-                      "LOK refuses a cross-view undo outside repair mode — the agent's edit must still "
-                        + "be there after the human's own ⌘Z (docundo.cxx:456-472): \(text)")
-        XCTAssertTrue(text.contains("all 4 paragraphs"),
-                      "and the paragraph the agent added must still be there too: \(text)")
-        XCTAssertFalse(runtime.stateSnapshot.documents[path]?.dirty ?? true,
-                       "a refused undo must not even mark the document modified — nothing happened at all")
+        XCTAssertFalse(text.contains("UNDOMARKER"),
+                       "the human's own ⌘Z must take back the agent's edit — `postUndo` dispatches "
+                         + "`Repair: true`, which skips LOK's per-view undo gate "
+                         + "(sw/…/docundo.cxx:458-470). Still present means the repair flag was "
+                         + "dropped somewhere between this door and `postUnoCommand`: \(text)")
+        XCTAssertTrue(text.contains("all 3 paragraphs") || !text.contains("all 4 paragraphs"),
+                      "and the document must be back to its pre-agent shape, not merely missing the "
+                        + "marker text: \(text)")
+        XCTAssertTrue(runtime.stateSnapshot.documents[path]?.dirty ?? false,
+                      "an undo that really changed the document must mark it modified — LOK's own "
+                        + "ModifiedStatus. A `false` here would mean nothing happened, which is the "
+                        + "pre-R3 behaviour this test now exists to catch")
     }
 
     // MARK: - The Word carve-out: .docx is written exactly like .odt

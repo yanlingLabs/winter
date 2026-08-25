@@ -117,9 +117,14 @@ describe("office-commands: the read/write partition and the deadline tripwire", 
     // exist; the read query and the edit request are not yet built but ride the same R-bounded
     // client once they are).
     const readMinimumMs = H_MS + 2 * REQUEST_TIMEOUT_MS;   // 150 500
-    const writeMinimumMs = H_MS + 3 * REQUEST_TIMEOUT_MS;  // 180 500
+    // office-live-edit R3 — FOUR, not three. A write on an ADOPTED document brackets the engine's
+    // undo-stack depth around its edit (`OfficeAgentBroker.runOnce`), which is two more R-bounded
+    // requests, so the counted worst case is open/adopt + depth + edit + depth + save. See
+    // `office-commands.ts` §A item 4 for the full argument, including why the NOT-adopted path is
+    // still three and why requirement 2's batch does not move this again.
+    const writeMinimumMs = H_MS + 4 * REQUEST_TIMEOUT_MS;  // 210 500
     expect(readMinimumMs).toBe(150_500);
-    expect(writeMinimumMs).toBe(180_500);
+    expect(writeMinimumMs).toBe(210_500);
 
     // The shipped constants must never fall below the real worst case (unsafe — see the failure
     // mode above) and must not drift absurdly far above it either (a margin band, not an unbounded

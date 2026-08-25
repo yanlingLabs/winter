@@ -2097,6 +2097,88 @@ final class OfficeTileCanvasViewTests: XCTestCase {
         await runtime.drainInputChainForTesting()
         XCTAssertEqual(recorder.undoCalls.count, 1)
         XCTAssertEqual(recorder.redoCalls.count, 1)
+        // office-live-edit R3 — the depth query answers `nil` here (the recorder's default), which
+        // is the "engine cannot tell me" path. It must degrade to exactly ONE action, never zero:
+        // the counts above are the assertion that it does.
+        view.unmount()
+    }
+
+    /// **office-live-edit R3 — ⌘Z must dispatch with `Repair: true`.** Without it LOK refuses any
+    /// undo whose top action belongs to another view, which is what made a human's ⌘Z silently dead
+    /// after an agent edit. The recorder captures the FLAG, not just the call, because "an undo was
+    /// dispatched" and "an undo that can cross views was dispatched" are different claims and only
+    /// the second is what requirement 3 delivers — a test asserting only the call count would pass
+    /// against the pre-R3 behaviour it exists to distinguish.
+    func testUndoAndRedoDispatchWithRepairSoTheyCanCrossViews() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.undo(nil)
+        view.redo(nil)
+        await runtime.drainInputChainForTesting()
+        XCTAssertEqual(recorder.undoRepairFlags, [true],
+                       "⌘Z must carry Repair — otherwise an agent edit makes it silently do nothing")
+        XCTAssertEqual(recorder.redoRepairFlags, [true],
+                       "and ⌘⇧Z must mirror it: a repair-undone action keeps its agent ViewShellId "
+                         + "on the redo stack, so a plain redo of it is refused")
+        view.unmount()
+    }
+
+    /// **The ledger, driven through the REAL ⌘Z door rather than as arithmetic.** With a depth query
+    /// that answers, and a recorded agent group of 3 actions sitting on top, ONE ⌘Z must issue
+    /// exactly THREE repair-undos — not one, and not four.
+    func testOneUndoPressIssuesOneDispatchPerActionInTheAgentsGroup() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        recorder.undoDepthAnswer = (undo: 4, redo: 0)
+        await runtime.noteAgentUndoGroup(path: gatePath, topDepth: 4, count: 3)
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.undo(nil)
+        await runtime.drainInputChainForTesting()
+        XCTAssertEqual(recorder.undoCalls.count, 3,
+                       "one press, one undo STEP, three engine actions")
+        XCTAssertEqual(recorder.undoRepairFlags, [true, true, true],
+                       "every one of them repaired — a group is only reachable at all under repair")
+        view.unmount()
+    }
+
+    /// The control arm for the test above: same door, same recorder, no recorded group — one press
+    /// must be ONE action. Without this, a `postUndo` that simply looped forever, or that always
+    /// used the last group it ever saw, would pass the test above and look correct.
+    func testOneUndoPressWithNoAgentGroupIssuesExactlyOneDispatch() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        recorder.undoDepthAnswer = (undo: 4, redo: 0)
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.undo(nil)
+        await runtime.drainInputChainForTesting()
+        XCTAssertEqual(recorder.undoCalls.count, 1,
+                       "a document the agent never wrote to keeps ⌘Z at one action per press")
+        view.unmount()
+    }
+
+    /// And the arm that pins the invariant end to end through the real door: the human has typed
+    /// since the agent's call, so the stack is deeper than the group's own depth and the group is
+    /// NOT on top. One press must take back the human's ONE action, never reach past it into the
+    /// agent's group.
+    func testOneUndoPressAfterAUserEditDoesNotReachIntoTheAgentsGroup() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        await runtime.noteAgentUndoGroup(path: gatePath, topDepth: 4, count: 3)
+        recorder.undoDepthAnswer = (undo: 5, redo: 0)   // the human typed one more action on top
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.undo(nil)
+        await runtime.drainInputChainForTesting()
+        XCTAssertEqual(recorder.undoCalls.count, 1,
+                       "the agent's group is no longer the top of the stack, so ⌘Z is one action")
         view.unmount()
     }
 

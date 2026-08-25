@@ -2709,8 +2709,28 @@ final class OfficeRuntime: ObservableObject {
     // MARK: The reducer, driven
 
     private func dispatch(_ event: OfficeRuntimeEvent) -> [OfficeRuntimeEffect] {
+        // office-live-edit R3 — **structural undo-ledger invalidation, at the ONE funnel every state
+        // transition goes through.** A remembered undo group describes ONE engine undo stack; the
+        // moment a path's document identity changes — closed, reloaded from disk, replaced after an
+        // external write — that stack is gone and the group describes nothing.
+        //
+        // The depth-arbiter check protects against almost everything, but NOT against this: a reload
+        // resets the stack to 0, the human then types back up to the same depth the old group was
+        // recorded at, the depths match, and one ⌘Z eats several of the human's OWN actions. That is
+        // the one way this design can take back MORE than the user asked for, so it is closed
+        // structurally here rather than by remembering to call `forgetUndoLedger` at each of the
+        // three-plus doors that can change a document's identity — three call sites each needing the
+        // identical guard is how the guard comes back missing from the fourth.
+        //
+        // Costs O(number of ledgers), not O(open documents): only paths that actually have a group
+        // are looked at, and that is zero for every document the agent has never written to.
+        let watchedDocIds: [String: String?] = undoLedgers.isEmpty ? [:]
+            : undoLedgers.keys.reduce(into: [:]) { $0[$1] = state.documents[$1]?.docId }
         let (next, effects) = OfficeRuntimeReducer.reduce(state, event)
         state = next
+        for (path, previousDocId) in watchedDocIds where next.documents[path]?.docId != previousDocId {
+            undoLedgers.removeValue(forKey: path)
+        }
         return effects
     }
 
