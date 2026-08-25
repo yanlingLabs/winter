@@ -2555,35 +2555,53 @@ final class OfficeRuntime: ObservableObject {
     /// Injectable so tests can drive the machine without sleeping for real. Production never sets it.
     var autoSaveDebounceInterval: TimeInterval = OfficeRuntime.autoSaveDebounceIntervalDefault
 
-    /// **ARMED. The kill switch for instant save, and the record of what it took to earn it.**
+    /// ⛔ **DEFAULT OFF. Two blockers were found; the first is FIXED, the second is why this is
+    /// still off. Both mechanisms below are MEASURED — the first round's were not, and that is the
+    /// most important thing on this page.**
     ///
-    /// This shipped `false` for one commit, because arming it **lost the user's typed content** in
-    /// two live multi-sheet Calc drills — reproducibly, A/B'd. That parking commit named two
-    /// candidate mechanisms and **a review measured both and falsified both**:
+    /// ### Round 1 — my stated mechanisms were wrong, and the decision was still right
+    /// Arming this lost the user's typed content in two live Calc drills. I named two candidates and
+    /// a review measured both and **falsified both**:
+    ///  - *"a save landing mid-cell-edit"* — **FALSE.** A save taken while a Calc cell is in edit
+    ///    mode CONTAINS the in-progress text; LOK serializes it.
+    ///  - *"two saves racing"* — **FALSE, twice.** Two back-to-back saves keep the text, and the
+    ///    debounced save lost it with **nothing racing it at all**.
     ///
-    ///  - *"a save landing mid-cell-edit"* — **FALSE.** A save taken while a Calc cell is still in
-    ///    edit mode CONTAINS the in-progress text; LOK serializes it.
-    ///  - *"two saves on one path racing"* — **FALSE, twice.** Two back-to-back saves keep the text,
-    ///    and decisively: the debounced save loses it with **nothing racing it at all**. The
-    ///    cross-door single-flight that comment sent the next implementer to build would have fixed
-    ///    nothing, on a live save path.
+    /// The real mechanism was **ordering**: `performSave` did not join `inputChainTail`, so a save
+    /// issued while key events were still queued serialized the PRE-EDIT document. Pre-existing on
+    /// `main`, reproduced at the base commit; instant-save only made it the ordinary path, because a
+    /// debounce arms at key ENQUEUE time, not delivery. **That is fixed** (see `performSave`), and
+    /// with it fixed the content loss is gone: both Calc drills pass with this armed.
     ///
-    /// **The real mechanism was ORDERING, and it was never this feature's.** `performSave` did not
-    /// join `inputChainTail`, so a save issued while key events were still queued serialized the
-    /// PRE-EDIT document — see its own header. Pre-existing Stage B behaviour, reproduced at the
-    /// base commit; instant-save only made it the ordinary path, because a debounce arms when a key
-    /// event is ENQUEUED, not when it is delivered. With `performSave` joining the input chain, both
-    /// Calc drills pass with this armed, and so does the whole suite.
+    /// ### Round 2 — the blocker that is still standing: THE POST-SAVE CLOSE WINDOW (constraint C3)
+    /// With the ordering bug fixed and this armed, `testTypingOnSheetTwoLandsOnSheetTwoNotSheetOne
+    /// ThroughSaveAndReopen` fails **2 of 3 runs in isolation**, at the REOPEN, with the helper's own
+    /// `Unspecified Application Error` in the log — the documented signature of LOK calling libc
+    /// `exit()` from inside C++. **Disarmed, the same drill passes 3 of 3.** That is the whole A/B.
     ///
-    /// 🔑 **The lesson worth keeping, because it is the one this arc keeps re-learning:** the
-    /// parking decision was right and the stated reason was wrong. Stopping on a reproducible loss
-    /// cost nothing; the two confident mechanisms — neither measured, both plausible — would have
-    /// cost the next implementer a wrong fix. A stated mechanism is a claim, and a claim needs a
-    /// measurement, even when the decision it supports is correct.
+    /// This is not new behaviour, it is a known hazard made ordinary: closing a document too soon
+    /// after a save kills the SHARED helper, measured at ~4 times in 5, and because
+    /// `OfficeHelperRequestQueue` is one app-wide FIFO **it takes every other open document down with
+    /// it**. Two drains exist for exactly this, but neither covers a plain `runtime.close` — they sit
+    /// on the dirty-close sheet and on the broker's save-through. Saving on every idle keeps that
+    /// window open essentially all the time, which is precisely the risk the office research flagged
+    /// against instant save.
     ///
-    /// Kept as a property rather than inlined so a live problem can be switched off in one edit, and
-    /// so tests can arm it explicitly rather than depending on this default.
-    var autoSaveEnabled: Bool = true
+    /// ### What arming this needs, stated so nobody re-derives it
+    /// A close must not race a save this scheduler started: cancel a pending debounce **and await an
+    /// in-flight auto-save (or drain) before the close proceeds**. `close` is deliberately
+    /// synchronous and fire-and-forget today, so that is a real change to a live lifecycle path —
+    /// not a patch to make a test green, and not something to land after a review has reported.
+    ///
+    /// 🔑 **The lesson, and it is mine:** stopping on a reproducible loss cost nothing. Stating two
+    /// confident, unmeasured mechanisms nearly cost the next implementer a wrong fix on a live save
+    /// path — my own parking comment pointed at it. *A stated mechanism is a claim, and a claim needs
+    /// a measurement, even when the decision it supports is correct.* Round 2's mechanism above is
+    /// stated only because it was A/B'd, with the helper's own error text as the witness.
+    ///
+    /// Everything else stays and is recoverable: the machine, its unit tests (which arm it
+    /// explicitly), the forced-red evidence, and the measured 72-97 ms save cost.
+    var autoSaveEnabled: Bool = false
 
     private var autoSaveTasks: [String: Task<Void, Never>] = [:]
     private var autoSaveInFlight: Set<String> = []

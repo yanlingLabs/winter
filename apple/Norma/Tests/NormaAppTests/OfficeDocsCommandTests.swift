@@ -529,9 +529,13 @@ final class OfficeDocsCommandTests: XCTestCase {
         // and it is what makes this test its own positive control: a `postUndo` that silently did
         // nothing — the pre-R3 behaviour this test was INVERTED from — leaves UNDOMARKER in those
         // bytes and fails here.
+        // The save is issued EXPLICITLY rather than waited for, because `autoSaveEnabled` ships
+        // OFF (see its own header for the post-save close-window blocker). This works either way:
+        // armed, the debounce would have saved already and this is harmless; disarmed, this is the
+        // save. What is asserted is the same either way — the SAVED BYTES.
+        runtime.save(path)
         let settledClean = await waitUntilLive { runtime.stateSnapshot.documents[path]?.dirty == false }
-        XCTAssertTrue(settledClean, "the debounced save must land the undone state on disk — if the "
-                        + "document never goes clean, instant-save did not run for the undo")
+        XCTAssertTrue(settledClean, "the post-undo save must land the undone state on disk")
         let savedXML = try readODFEntry(atPath: path, entry: "content.xml")
         XCTAssertFalse(savedXML.contains("UNDOMARKER"),
                        "the SAVED bytes must no longer carry the agent's text: the human's ⌘Z took "
