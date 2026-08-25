@@ -421,20 +421,23 @@ function stopApp(): void {
  * asynchronous. "Zero residual processes at exit" has to be observed, not requested — a leaked
  * daemon holds the temp home's socket and poisons the next run.
  */
-function stopDaemon(): void {
+function stopDaemon(): number | undefined {
   const child = daemon;
   daemon = undefined;
-  if (!child || child.exitCode !== null || child.pid === undefined) return;
+  if (!child || child.pid === undefined) return undefined;
+  const pid = child.pid;
+  if (child.exitCode !== null) return pid;
   try { child.kill("SIGTERM"); } catch { /* already gone */ }
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
-    if (child.exitCode !== null) return;
-    try { process.kill(child.pid, 0); } catch { return; }   // ESRCH -> it is gone
+    if (child.exitCode !== null) return pid;
+    try { process.kill(pid, 0); } catch { return pid; }   // ESRCH -> it is gone
     spawnSync("sleep", ["0.2"]);
   }
   // Still alive after 10s of asking politely.
   try { child.kill("SIGKILL"); } catch { /* gone */ }
   spawnSync("sleep", ["0.5"]);
+  return pid;
 }
 
 // ── driving the REAL agent ───────────────────────────────────────────────────────────────────
@@ -1103,6 +1106,9 @@ async function main(): Promise<number> {
   // is read out of the file the agent was asked to write, at runtime, so this leg cannot be
   // satisfied by a model repeating a value it saw in an earlier prompt.
   const readResult = toolResultFor(readBack.stdout, "read");
+  // Keyed by the RECORD name, not a VERB_STEPS id — otherwise this step's failure prints an empty
+  // transcript tail (its verdict name is not in VERB_STEPS).
+  turnLog["sheets.read (fresh open through the helper)"] = readBack.stdout.slice(-1200);
   const expectedA4 = xlsxCell(join(WORK_DIR, "budget.xlsx"), "xl/worksheets/sheet1.xml", "A4") ?? "";
   const dispatched = readResult.length > 0;
   const sawIt = dispatched && expectedA4.length > 0 && readResult.includes(expectedA4);
@@ -1194,17 +1200,33 @@ async function withTeardown(): Promise<void> {
   } finally {
     step("Teardown");
     stopApp();
-    stopDaemon();
+    const daemonPid = stopDaemon();
     killHelpers();
-    // Reported from `pgrep`, not assumed from having called the kills — the previous version
+
+    // Residuals REPORTED, not assumed from having called the kills — the first honest teardown
     // printed "daemon stopped" while the daemon was still resident.
+    //
+    // The app and helper legs match on `DERIVED_DATA`, which really is in their argv (it is part of
+    // the binary path). **The daemon deliberately does NOT use `pgrep`**: its argv is
+    // `bun <worktree>/packages/cli/src/main.ts daemon run` and the temp `NORMA_HOME` lives in its
+    // ENVIRONMENT, not its arguments — so any `pgrep -f` pattern mentioning the home can never
+    // match it, and would report `daemons=0` whether or not one survived. A check blind to its own
+    // failure mode, in the very verification added to answer "teardown never runs". (A pattern
+    // loose enough to match, like `daemon run`, has the opposite defect: it self-matches the shell
+    // running the check — which produced two phantom "1 surviving daemon" readings during this
+    // work.) The held child pid is exact, needs no argv, and cannot self-match.
     const residual = (pattern: string) =>
       (spawnSync("pgrep", ["-f", pattern], { encoding: "utf8" }).stdout || "").trim().split("\n").filter(Boolean).length;
     const leftApp = residual(`${DERIVED_DATA}.*MacOS/Norma`);
     const leftHelpers = residual(`${DERIVED_DATA}.*NormaOfficeHelper`);
-    const leftDaemons = residual(`daemon run.*${HOME_DIR}`) + residual(`${HOME_DIR}.*daemon run`);
-    const clean = leftApp === 0 && leftHelpers === 0 && leftDaemons === 0;
-    log(`   app stopped, daemon stopped, helpers killed — residual: app=${leftApp} helpers=${leftHelpers} daemons=${leftDaemons}${clean ? " (clean)" : " ⚠ LEAKED"}`);
+    let daemonState = "none-started";
+    if (daemonPid !== undefined) {
+      let alive = false;
+      try { process.kill(daemonPid, 0); alive = true; } catch { alive = false; }
+      daemonState = alive ? `pid ${daemonPid} RESIDENT` : `pid ${daemonPid} gone`;
+    }
+    const clean = leftApp === 0 && leftHelpers === 0 && !daemonState.includes("RESIDENT");
+    log(`   residual: app=${leftApp} helpers=${leftHelpers} daemon=${daemonState}${clean ? " (clean)" : " ⚠ LEAKED"}`);
     if (!process.argv.includes("--keep")) {
       // The temp home, the workdir and the pristine set go; the build stays (it is expensive and
       // carries no state). `--keep` leaves everything for post-mortem.
