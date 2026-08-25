@@ -131,6 +131,50 @@ final class OfficeWireCodecTests: XCTestCase {
                 TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0),
                 TileKey(part: 1, zoomPPT: 2000, tileX: -3, tileY: 7), // negative index + a second part/zoom
             ]),
+            // office-agent-tools T3 — sheets info/read.
+            .sheetsInfo(seq: 68, docId: "doc-1"),
+            .sheetsRead(seq: 69, docId: "doc-1", sheet: "Sheet1", range: "A1:C10", formulas: false),
+            .sheetsRead(seq: 70, docId: "doc-1", sheet: "Q1 Recap", range: "B6", formulas: true), // one-cell range, formulas:true, a name with a space
+            .sheetsInfoOk(seq: 71, docId: "doc-1", sheets: [
+                OfficeSheetInfo(name: "Sheet1", usedEndColumn: 2, usedEndRow: 9),
+                OfficeSheetInfo(name: "Empty Sheet", usedEndColumn: -1, usedEndRow: -1), // the wholly-empty sentinel
+            ], activeSheet: "Sheet1"),
+            .sheetsReadOk(seq: 72, docId: "doc-1", rows: [
+                ["42", "Hello", ""],       // "" — a genuinely empty cell, never an absent element
+                ["1", "=SUM(A1:B1)", "3"],
+            ]),
+            .sheetsReadOk(seq: 73, docId: "doc-1", rows: []), // a range whose sheet turned out to have nothing there
+            // office-agent-tools T5 — sheets format. Every optional field gets a nil AND a non-nil
+            // sample somewhere in this list, including the columnSpan<->width pairing.
+            .sheetsFormat(seq: 74, docId: "doc-1", sheet: "Sheet1", range: "A1:C10", columnSpan: nil,
+                         bold: true, italic: nil, numberFormat: nil, align: nil, width: nil),
+            .sheetsFormat(seq: 75, docId: "doc-1", sheet: "Sheet1", range: "B2", columnSpan: nil,
+                         bold: nil, italic: false, numberFormat: .percent, align: .center, width: nil),
+            .sheetsFormat(seq: 76, docId: "doc-1", sheet: "Q1 Recap", range: "B2:B5", columnSpan: "B:B",
+                         bold: nil, italic: nil, numberFormat: nil, align: nil, width: 72.5),
+            .sheetsFormatOk(seq: 77, docId: "doc-1", applied: ["bold", "align"]),
+            .sheetsFormatOk(seq: 78, docId: "doc-1", applied: ["width"]),
+            // office-agent-tools T6 — slides. Every optional field gets a nil AND a non-nil sample,
+            // including slidesManagePage's three per-op field shapes (add/delete/reorder) and
+            // slidesReadOk's load-bearing nil ("no such placeholder") vs "" ("empty placeholder")
+            // distinction.
+            .slidesInfo(seq: 79, docId: "doc-1"),
+            .slidesRead(seq: 80, docId: "doc-1", slide: 0),
+            .slidesRead(seq: 81, docId: "doc-1", slide: 2),
+            .slidesInfoOk(seq: 82, docId: "doc-1", slides: [
+                OfficeSlideInfo(name: "Slide1", title: "Q3 Revenue"),
+                OfficeSlideInfo(name: "Slide2", title: nil), // no title placeholder on this slide at all
+            ]),
+            .slidesReadOk(seq: 83, docId: "doc-1", title: "Q3 Revenue", body: "bullet one"),
+            .slidesReadOk(seq: 84, docId: "doc-1", title: nil, body: ""), // no title placeholder at all vs an empty body placeholder
+            .slidesSetText(seq: 85, docId: "doc-1", slide: 1, title: "New Title", body: nil),
+            .slidesSetText(seq: 86, docId: "doc-1", slide: 1, title: nil, body: "New body"),
+            .slidesSetTextOk(seq: 87, docId: "doc-1", applied: ["title", "body"]),
+            .slidesManagePage(seq: 88, docId: "doc-1", op: .add, slide: nil, at: nil, to: nil, layout: nil),
+            .slidesManagePage(seq: 89, docId: "doc-1", op: .add, slide: nil, at: 1, to: nil, layout: .titleContent),
+            .slidesManagePage(seq: 90, docId: "doc-1", op: .delete, slide: 2, at: nil, to: nil, layout: nil),
+            .slidesManagePage(seq: 91, docId: "doc-1", op: .reorder, slide: 0, at: nil, to: 2, layout: nil),
+            .slidesManagePageOk(seq: 92, docId: "doc-1", slideCount: 3),
         ]
         for frame in samples {
             let line = try XCTUnwrap(String(data: frame.encodedLine(), encoding: .utf8))
@@ -220,6 +264,44 @@ final class OfficeWireCodecTests: XCTestCase {
             "tile": #"{"type":"tile","seq":1,"docId":"d","key":{"part":0,"zoomPPT":1000,"tileX":0,"tileY":0},"generation":0,"width":512,"height":512,"byteCount":0}"#,
             "tileFailed": #"{"type":"tileFailed","seq":1,"docId":"d","key":{"part":0,"zoomPPT":1000,"tileX":0,"tileY":0},"reason":"r"}"#,
             "invalidated": #"{"type":"invalidated","seq":1,"docId":"d","keys":[]}"#,
+            // office-agent-tools T3 — sheets info/read.
+            "sheetsInfo": #"{"type":"sheetsInfo","seq":1,"docId":"d"}"#,
+            "sheetsRead": #"{"type":"sheetsRead","seq":1,"docId":"d","sheet":"Sheet1","range":"A1","formulas":false}"#,
+            "sheetsInfoOk": #"{"type":"sheetsInfoOk","seq":1,"docId":"d","sheets":[],"activeSheet":"Sheet1"}"#,
+            "sheetsReadOk": #"{"type":"sheetsReadOk","seq":1,"docId":"d","rows":[]}"#,
+            // office-agent-tools T4 — sheets write verbs.
+            "sheetsSet": #"{"type":"sheetsSet","seq":1,"docId":"d","sheet":"Sheet1","range":"A1","cellAddresses":["A1"],"cellValues":["x"]}"#,
+            "sheetsResize": #"{"type":"sheetsResize","seq":1,"docId":"d","sheet":"Sheet1","dimension":"row","op":"insert","selectionRange":"1:1"}"#,
+            "sheetsManageSheet": #"{"type":"sheetsManageSheet","seq":1,"docId":"d","op":"add","name":"Q3"}"#,
+            "sheetsSetOk": #"{"type":"sheetsSetOk","seq":1,"docId":"d","cellsWritten":1}"#,
+            "sheetsResizeOk": #"{"type":"sheetsResizeOk","seq":1,"docId":"d","usedEndColumn":1,"usedEndRow":1}"#,
+            "sheetsManageSheetOk": #"{"type":"sheetsManageSheetOk","seq":1,"docId":"d","sheets":["Sheet1","Q3"]}"#,
+            // office-agent-tools T5 — sheets format.
+            "sheetsFormat": #"{"type":"sheetsFormat","seq":1,"docId":"d","sheet":"Sheet1","range":"A1:C10","bold":true}"#,
+            "sheetsFormatOk": #"{"type":"sheetsFormatOk","seq":1,"docId":"d","applied":["bold"]}"#,
+            // office-agent-tools T6 — slides.
+            "slidesInfo": #"{"type":"slidesInfo","seq":1,"docId":"d"}"#,
+            "slidesRead": #"{"type":"slidesRead","seq":1,"docId":"d","slide":0}"#,
+            "slidesSetText": #"{"type":"slidesSetText","seq":1,"docId":"d","slide":0,"title":"T"}"#,
+            // `.add`'s own legal minimal shape (slide/to absent) — see `slidesManagePage`'s own
+            // header for the per-op field contract this fixture satisfies.
+            "slidesManagePage": #"{"type":"slidesManagePage","seq":1,"docId":"d","op":"add"}"#,
+            "slidesInfoOk": #"{"type":"slidesInfoOk","seq":1,"docId":"d","slides":[]}"#,
+            "slidesReadOk": #"{"type":"slidesReadOk","seq":1,"docId":"d"}"#,
+            "slidesSetTextOk": #"{"type":"slidesSetTextOk","seq":1,"docId":"d","applied":["title"]}"#,
+            "slidesManagePageOk": #"{"type":"slidesManagePageOk","seq":1,"docId":"d","slideCount":1}"#,
+            // office-agent-tools T7 — docs. `docsReplace`'s `find` is non-empty and newline-free and
+            // `docsInsert`'s `text` is non-empty because the decoder REFUSES otherwise (see those
+            // cases' own decode guards) — a fixture that skipped those fields would decode as
+            // `.rejected` and this test would fail on the case name, which is the intended shape.
+            "docsInfo": #"{"type":"docsInfo","seq":1,"docId":"d"}"#,
+            "docsRead": #"{"type":"docsRead","seq":1,"docId":"d"}"#,
+            "docsReplace": #"{"type":"docsReplace","seq":1,"docId":"d","find":"a","replaceWith":"b"}"#,
+            "docsInsert": #"{"type":"docsInsert","seq":1,"docId":"d","text":"x","atStart":false,"asNewParagraph":true}"#,
+            "docsInfoOk": #"{"type":"docsInfoOk","seq":1,"docId":"d","pages":1,"paragraphs":2,"characters":9}"#,
+            "docsReadOk": #"{"type":"docsReadOk","seq":1,"docId":"d","text":"one\ntwo"}"#,
+            "docsReplaceOk": #"{"type":"docsReplaceOk","seq":1,"docId":"d","replaced":2}"#,
+            "docsInsertOk": #"{"type":"docsInsertOk","seq":1,"docId":"d","paragraphs":4}"#,
         ]
         XCTAssertEqual(Set(fixtures.keys), Set(OfficeWireFrame.wireTypes),
                        "fixtures must cover exactly OfficeWireFrame.wireTypes, no more, no less")
@@ -291,6 +373,23 @@ final class OfficeWireCodecTests: XCTestCase {
         XCTAssertEqual(OfficeWireFrame.tile(seq: 118, docId: "d", key: tileKey, generation: 0, width: 512, height: 512, pixels: Data()).seq, 118)
         XCTAssertEqual(OfficeWireFrame.tileFailed(seq: 119, docId: "d", key: tileKey, reason: "r").seq, 119)
         XCTAssertEqual(OfficeWireFrame.invalidated(seq: 120, docId: "d", keys: []).seq, 120)
+        XCTAssertEqual(OfficeWireFrame.sheetsInfo(seq: 146, docId: "d").seq, 146)
+        XCTAssertEqual(OfficeWireFrame.sheetsRead(seq: 147, docId: "d", sheet: "Sheet1", range: "A1", formulas: false).seq, 147)
+        XCTAssertEqual(OfficeWireFrame.sheetsInfoOk(seq: 148, docId: "d", sheets: [], activeSheet: "Sheet1").seq, 148)
+        XCTAssertEqual(OfficeWireFrame.sheetsReadOk(seq: 149, docId: "d", rows: []).seq, 149)
+        XCTAssertEqual(OfficeWireFrame.sheetsFormat(seq: 150, docId: "d", sheet: "Sheet1", range: "A1",
+                                                     columnSpan: nil, bold: true, italic: nil,
+                                                     numberFormat: nil, align: nil, width: nil).seq, 150)
+        XCTAssertEqual(OfficeWireFrame.sheetsFormatOk(seq: 151, docId: "d", applied: ["bold"]).seq, 151)
+        XCTAssertEqual(OfficeWireFrame.slidesInfo(seq: 152, docId: "d").seq, 152)
+        XCTAssertEqual(OfficeWireFrame.slidesRead(seq: 153, docId: "d", slide: 0).seq, 153)
+        XCTAssertEqual(OfficeWireFrame.slidesSetText(seq: 154, docId: "d", slide: 0, title: "T", body: nil).seq, 154)
+        XCTAssertEqual(OfficeWireFrame.slidesManagePage(seq: 155, docId: "d", op: .add, slide: nil, at: nil,
+                                                         to: nil, layout: nil).seq, 155)
+        XCTAssertEqual(OfficeWireFrame.slidesInfoOk(seq: 156, docId: "d", slides: []).seq, 156)
+        XCTAssertEqual(OfficeWireFrame.slidesReadOk(seq: 157, docId: "d", title: nil, body: nil).seq, 157)
+        XCTAssertEqual(OfficeWireFrame.slidesSetTextOk(seq: 158, docId: "d", applied: ["title"]).seq, 158)
+        XCTAssertEqual(OfficeWireFrame.slidesManagePageOk(seq: 159, docId: "d", slideCount: 1).seq, 159)
     }
 
     // MARK: - The brief's literal pin: unknown type -> error{seq,reason:"unknown"}
@@ -332,6 +431,44 @@ final class OfficeWireCodecTests: XCTestCase {
                 XCTAssertEqual(reason, "malformed", "expected malformed for: \(line)")
             case .frame, .tilePending, .tileHeaderMalformed, .unreadable:
                 XCTFail("expected .rejected(seq: 1, reason: \"malformed\") for: \(line)")
+            }
+        }
+    }
+
+    /// office-agent-tools T6 — `slidesManagePage`'s own per-op paired-field guard (its own case
+    /// header states the contract this pins): each row is a shape that is malformed for the op it
+    /// claims, and each is malformed for a DIFFERENT reason (an extra field the op forbids, or a
+    /// missing field the op requires) — not just one representative case, since the guard is a
+    /// three-way conditional, not a single boolean pairing like `sheetsManageSheet`'s `op == .rename
+    /// <-> newName != nil`.
+    func testSlidesManagePagePerOpFieldShapeIsRejectedAsMalformed() {
+        let addWithSlide = #"{"type":"slidesManagePage","seq":1,"docId":"d","op":"add","slide":0}"#
+        let addWithTo = #"{"type":"slidesManagePage","seq":1,"docId":"d","op":"add","to":1}"#
+        let deleteMissingSlide = #"{"type":"slidesManagePage","seq":1,"docId":"d","op":"delete"}"#
+        let deleteWithAt = #"{"type":"slidesManagePage","seq":1,"docId":"d","op":"delete","slide":0,"at":1}"#
+        let deleteWithLayout = #"{"type":"slidesManagePage","seq":1,"docId":"d","op":"delete","slide":0,"layout":"blank"}"#
+        let reorderMissingTo = #"{"type":"slidesManagePage","seq":1,"docId":"d","op":"reorder","slide":0}"#
+        let reorderMissingSlide = #"{"type":"slidesManagePage","seq":1,"docId":"d","op":"reorder","to":1}"#
+        let reorderWithAt = #"{"type":"slidesManagePage","seq":1,"docId":"d","op":"reorder","slide":0,"to":1,"at":2}"#
+        let unrecognizedOp = #"{"type":"slidesManagePage","seq":1,"docId":"d","op":"duplicate","slide":0}"#
+        for line in [addWithSlide, addWithTo, deleteMissingSlide, deleteWithAt, deleteWithLayout,
+                     reorderMissingTo, reorderMissingSlide, reorderWithAt, unrecognizedOp] {
+            switch OfficeWireCodec.decodeInbound(line) {
+            case .rejected(let seq, let reason):
+                XCTAssertEqual(seq, 1, "for: \(line)")
+                XCTAssertEqual(reason, "malformed", "for: \(line)")
+            case .frame, .tilePending, .tileHeaderMalformed, .unreadable:
+                XCTFail("expected .rejected(seq: 1, reason: \"malformed\") for: \(line)")
+            }
+        }
+        // The legal shape for every op, confirmed to decode — the deletion-red half of this pin:
+        // without it, a guard that rejects EVERYTHING would also pass every case above vacuously.
+        let legalAdd = #"{"type":"slidesManagePage","seq":2,"docId":"d","op":"add","at":1,"layout":"blank"}"#
+        let legalDelete = #"{"type":"slidesManagePage","seq":3,"docId":"d","op":"delete","slide":0}"#
+        let legalReorder = #"{"type":"slidesManagePage","seq":4,"docId":"d","op":"reorder","slide":0,"to":1}"#
+        for line in [legalAdd, legalDelete, legalReorder] {
+            guard case .frame(.slidesManagePage) = OfficeWireCodec.decodeInbound(line) else {
+                return XCTFail("expected a legal .slidesManagePage frame for: \(line)")
             }
         }
     }

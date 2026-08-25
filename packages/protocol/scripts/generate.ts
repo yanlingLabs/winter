@@ -186,6 +186,16 @@ const fixtures: Record<string, unknown> = {
   // to do with what these fixtures are pinning.
   "panel_command_back": { ...base, type: "panel_command", commandId: "cmd_2", tabId: "tab_1", action: "back", deadlineMs: 15000 },
   "panel_command_type": { ...base, type: "panel_command", commandId: "cmd_3", tabId: "tab_1", action: "type", args: { selector: "#search", text: "norma" }, deadlineMs: 15000 },
+  // office-agent-tools T1 — the FIRST office verb on the wire, and deliberately a DIFFERENT shape
+  // from every fixture above rather than a fourth `panel_command_*` clone of the browser ones. Two
+  // things this fixture alone proves the Swift mirror tolerates, because nothing above exercises
+  // either: (1) `action` carries a NAMESPACED value it has never decoded before — `PanelCommand.action`
+  // is a plain `String` precisely so this needs no Swift change (see `SessionEvent.swift`'s own
+  // comment on that field, and `testUnknownPanelCommandVerbStillDecodes`, which already proves an
+  // action this build has NEVER heard of decodes fine); (2) NO `tabId` — every browser fixture above
+  // carries one, but an office command addresses a document by `path` (in `args`), not an existing
+  // panel tab (design doc §3), so `tabId` staying optional on the wire is what this fixture pins.
+  "panel_command_office": { ...base, type: "panel_command", commandId: "cmd_4", action: "office.sheets.read", args: { path: "/tmp/fixture.ods", sheet: "Sheet1", range: "A1:B2" }, deadlineMs: 35000 },
 };
 for (const [name, value] of Object.entries(fixtures)) {
   SessionEvent.parse(value); // fixtures must be valid by construction

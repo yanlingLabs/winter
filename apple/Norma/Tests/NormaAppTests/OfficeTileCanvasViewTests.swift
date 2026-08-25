@@ -393,36 +393,64 @@ final class OfficeTileCanvasViewTests: XCTestCase {
                     sizeTwips: OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)) },
                 close: { _ in },
                 save: { _, _ in "/tmp/officetilecanvasviewtests-unused-save" },
-                subscribeTiles: { [unowned self] docId, part, zoomPPT, viewportTwips in
+                // crash-fix round 1 (Family B): same fire-and-forget-outlives-the-test mechanism as
+                // `BrokerOfficeDriverRecorder` (broker-crash-investigation.md §2) — this recorder is
+                // one of the "sibling recorders" the investigation names, reached by the same
+                // `OfficeRuntime.perform` straggler-task shape. `[weak self]` + a straggler-safe
+                // fallback (never observed by these tests, since the recorder is already gone)
+                // replaces the host-killing `unowned` abort.
+                subscribeTiles: { [weak self] docId, part, zoomPPT, viewportTwips in
+                    guard let self else { return [] }
                     self.lock.lock(); self._subscribeCalls.append((docId, part, zoomPPT, viewportTwips)); self.lock.unlock()
                     return []
                 },
                 unsubscribeTiles: { _ in },
                 requestTiles: { _, _ in },
-                postKey: { [unowned self] docId, part, type, charCode, keyCode in
+                postKey: { [weak self] docId, part, type, charCode, keyCode in
+                    guard let self else { return }
                     self.lock.lock(); self._postKeyCalls.append((docId, part, type, charCode, keyCode)); self.lock.unlock()
                 },
                 postMouse: { _, _, _, _, _, _, _, _ in },
-                postExtTextInput: { [unowned self] docId, part, type, text in
+                postExtTextInput: { [weak self] docId, part, type, text in
+                    guard let self else { return }
                     self.lock.lock(); self._postExtTextInputCalls.append((docId, part, type, text)); self.lock.unlock()
                 },
-                clipboardCopy: { [unowned self] docId, part in
+                clipboardCopy: { [weak self] docId, part in
+                    guard let self else { return nil }
                     self.lock.lock(); self._clipboardCopyCalls.append((docId, part)); self.lock.unlock()
                     return self.copyAndCutAnswer
                 },
-                clipboardCut: { [unowned self] docId, part in
+                clipboardCut: { [weak self] docId, part in
+                    guard let self else { return nil }
                     self.lock.lock(); self._clipboardCutCalls.append((docId, part)); self.lock.unlock()
                     return self.copyAndCutAnswer
                 },
-                clipboardPaste: { [unowned self] docId, part, text in
+                clipboardPaste: { [weak self] docId, part, text in
+                    guard let self else { return }
                     self.lock.lock(); self._clipboardPasteCalls.append((docId, part, text)); self.lock.unlock()
                 },
-                undo: { [unowned self] docId in
+                undo: { [weak self] docId in
+                    guard let self else { return }
                     self.lock.lock(); self._undoCalls.append(docId); self.lock.unlock()
                 },
-                redo: { [unowned self] docId in
+                redo: { [weak self] docId in
+                    guard let self else { return }
                     self.lock.lock(); self._redoCalls.append(docId); self.lock.unlock()
                 },
+                sheetsInfo: { _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
+                sheetsRead: { _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
+                sheetsSet: { _, _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
+                sheetsResize: { _, _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
+                sheetsManageSheet: { _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
+                sheetsFormat: { _, _, _, _, _, _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
+                slidesInfo: { _ in throw OfficeHelperClientError.serverError(reason: "fake driver: slides not implemented") },
+                slidesRead: { _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: slides not implemented") },
+                slidesSetText: { _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: slides not implemented") },
+                slidesManagePage: { _, _, _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: slides not implemented") },
+                docsInfo: { _ in throw OfficeHelperClientError.serverError(reason: "fake driver: docs not implemented") },
+                docsRead: { _ in throw OfficeHelperClientError.serverError(reason: "fake driver: docs not implemented") },
+                docsReplace: { _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: docs not implemented") },
+                docsInsert: { _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: docs not implemented") },
                 stateDirectory: stateDirectory)
         }
     }
@@ -490,7 +518,7 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// `masksToBounds` to `false` — see `init`'s own comment for why this view, unlike
     /// `PanelCEFContainerView`/`EditorViewportHostView`, actually needs it set explicitly.
     func testHostingLayerMasksSublayersToBounds() async {
-        // Never mounts, so `recorder`'s `[unowned self]` driver closures are never actually called
+        // Never mounts, so `recorder`'s `[weak self]` driver closures are never actually called
         // (`init` touches neither the driver nor the runtime) — no retention hazard here the way the
         // NEXT test has (see that one's own comment). `_` would be fine; bound anyway for symmetry.
         let (runtime, _) = await makeOpenedRuntime()
@@ -527,13 +555,15 @@ final class OfficeTileCanvasViewTests: XCTestCase {
         // a `.subscribe` effect that reaches `driver.subscribeTiles` from inside a detached `Task`
         // (`OfficeRuntime.perform`'s own `.subscribe` case) — fire-and-forget from `mount()`'s own
         // perspective. `SubscribeCapturingDriverRecorder`'s closures capture the recorder
-        // `[unowned self]` (mirroring every production Driver's own assumption that ITS owner
-        // outlives it), so if this function returned (and `recorder` fell out of scope) before that
-        // Task actually ran, the Task would later read a DANGLING `unowned self` and crash the whole
-        // test host — measured directly, mid fix-round: a dummy `_ = recorder` placed right after the
-        // `let` above does NOT fix this (it is itself `recorder`'s last syntactic use at that point,
-        // so ARC is free to deallocate immediately, no later than end of scope — and the Task can
-        // easily still be pending past that). Awaiting the subscribe here, the same way
+        // `[weak self]` (crash-fix round 1: was `[unowned self]` — see broker-crash-investigation.md
+        // §2 — so this raced a host-killing abort instead of the silent drop described below), so if
+        // this function returned (and `recorder` fell out of scope) before that Task actually ran,
+        // the Task would later find `self` already `nil` and silently no-op — measured directly, mid
+        // fix-round: a dummy `_ = recorder` placed right after the `let` above does NOT fix this (it
+        // is itself `recorder`'s last syntactic use at that point, so ARC is free to deallocate
+        // immediately, no later than end of scope — and the Task can easily still be pending past
+        // that), and the assertion below would then hang until `waitUntil`'s own timeout instead of
+        // observing the call. Awaiting the subscribe here, the same way
         // `testSettingActivePartOnAMountedCanvasResubscribesImmediatelyWithTheNewPart` (above) already
         // does, is what actually closes the race: `recorder` stays alive for as long as this polling
         // closure keeps reading it, which is until the async call has genuinely landed.
@@ -672,7 +702,8 @@ final class OfficeTileCanvasViewTests: XCTestCase {
         // Hygiene, not an assertion (task-6-report's own recipe note, repeated by every sibling test
         // in this file): `syncDocumentIdentity`'s own docId change fires a SECOND resubscribe —
         // settle it before `unmount()`/return lets `recorder` deallocate, or the still-in-flight
-        // Task's `[unowned self]` closure crashes the whole process the moment it resumes.
+        // Task's `[weak self]` closure (crash-fix round 1: was `[unowned self]`) silently no-ops
+        // and the resubscribe this test is asserting on never gets recorded.
         _ = await waitUntil { recorder.subscribeCalls.count == 2 }
 
         view.unmount()
@@ -834,7 +865,7 @@ final class OfficeTileCanvasViewTests: XCTestCase {
         view.unmount()
         // Hygiene, not an assertion (this file's own recipe note, repeated by every sibling test):
         // settle any still-in-flight subscribe Task before `recorder` deallocates at return, or its
-        // `[unowned self]` driver closure crashes the whole test host the moment it resumes.
+        // `[weak self]` driver closure (crash-fix round 1: was `[unowned self]`) silently no-ops.
         try? await Task.sleep(nanoseconds: 30_000_000)
     }
 
@@ -888,13 +919,21 @@ final class OfficeTileCanvasViewTests: XCTestCase {
                                                             sizeTwips: OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)) },
                 close: { _ in },
                 save: { _, _ in "/tmp/officetilecanvasviewtests-unused-save" },
-                subscribeTiles: { [unowned self] docId, part, zoomPPT, viewportTwips in
+                // crash-fix round 1 (Family B): NOT one of the investigation's named recorder
+                // types, but found sharing the identical mechanism — this recorder's `driver` is
+                // also assigned straight into a live `OfficeRuntime` (see
+                // `makeOpenedResidencyRuntime` below), so it is equally reachable by
+                // `OfficeRuntime.perform`'s fire-and-forget straggler `Task`s. Same `[weak self]`
+                // fix, same reasoning as `SubscribeCapturingDriverRecorder` above.
+                subscribeTiles: { [weak self] docId, part, zoomPPT, viewportTwips in
+                    guard let self else { return [] }
                     self.lock.lock(); self._subscribeCalls.append((docId, part, zoomPPT, viewportTwips)); self.lock.unlock()
                     return [] // never relied on here — the canvas computes its own prefetch keys
                               // directly via TileMath, the same shared authority the server uses
                 },
                 unsubscribeTiles: { _ in },
-                requestTiles: { [unowned self] docId, keys in
+                requestTiles: { [weak self] docId, keys in
+                    guard let self else { return }
                     self.lock.lock(); self._requestCalls.append((docId, keys)); self.lock.unlock()
                 },
                 postKey: { _, _, _, _, _ in }, postMouse: { _, _, _, _, _, _, _, _ in },
@@ -904,6 +943,20 @@ final class OfficeTileCanvasViewTests: XCTestCase {
                 clipboardPaste: { _, _, _ in },
                 undo: { _ in },
                 redo: { _ in },
+                sheetsInfo: { _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
+                sheetsRead: { _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
+                sheetsSet: { _, _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
+                sheetsResize: { _, _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
+                sheetsManageSheet: { _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
+                sheetsFormat: { _, _, _, _, _, _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
+                slidesInfo: { _ in throw OfficeHelperClientError.serverError(reason: "fake driver: slides not implemented") },
+                slidesRead: { _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: slides not implemented") },
+                slidesSetText: { _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: slides not implemented") },
+                slidesManagePage: { _, _, _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: slides not implemented") },
+                docsInfo: { _ in throw OfficeHelperClientError.serverError(reason: "fake driver: docs not implemented") },
+                docsRead: { _ in throw OfficeHelperClientError.serverError(reason: "fake driver: docs not implemented") },
+                docsReplace: { _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: docs not implemented") },
+                docsInsert: { _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: docs not implemented") },
                 stateDirectory: stateDirectory)
         }
     }
@@ -1266,7 +1319,7 @@ final class OfficeTileCanvasViewTests: XCTestCase {
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
         view.mount() // relayoutVisibleTiles runs synchronously inside mount() — the layer itself needs no wait
         // `mount()` also fires `performSubscribe()`'s detached Task into `driver.subscribeTiles` —
-        // `recorder`'s closures capture it `[unowned self]`, so this MUST stay alive until that Task
+        // `recorder`'s closures capture it `[weak self]`, so this MUST stay alive until that Task
         // has genuinely landed (`testRelayoutRoutinelyPositionsATileLayerPastTheViewsOwnEdge`'s own
         // header, above, documents this exact race and why a bare `_ = recorder` does not close it).
         let subscribed = await waitUntil { recorder.subscribeCalls.count >= 1 }
@@ -1321,9 +1374,10 @@ final class OfficeTileCanvasViewTests: XCTestCase {
         defer { window.close() }
 
         view.mount()
-        // `recorder`'s closures capture it `[unowned self]` — MUST stay alive until `mount()`'s own
-        // detached subscribe Task has genuinely landed, or that Task later dereferences a deallocated
-        // object and crashes the whole test host (see `testTileLayerNeverResolvesAnAnimatableAction
+        // `recorder`'s closures capture it `[weak self]` (crash-fix round 1: was `[unowned self]`)
+        // — MUST stay alive until `mount()`'s own detached subscribe Task has genuinely landed, or
+        // that Task later finds `self` already `nil` and silently no-ops instead of recording the
+        // call (see `testTileLayerNeverResolvesAnAnimatableAction
         // ForAnyKeyThisFileTouches`'s identical guard, immediately above, and
         // `testRelayoutRoutinelyPositionsATileLayerPastTheViewsOwnEdge`'s own header for the full
         // mechanism) — genuinely awaiting it here is also what gives the run-loop the turn it needs
@@ -1520,10 +1574,11 @@ final class OfficeTileCanvasViewTests: XCTestCase {
                                         sizeTwips: sizeTwips, initialPart: 0, model: model)
         view.frame = NSRect(x: 0, y: 0, width: 300, height: 300)
         view.mount()
-        // `recorder`'s driver closures capture it `[unowned self]` — this MUST stay alive until
-        // `performSubscribe()`'s own detached Task has landed, or the Task deref's a freed object
-        // the moment this test discards `recorder` early (see `makeOpenedRuntime`'s own callers,
-        // several lines up, for the identical precedent and its own header comment on this hazard).
+        // `recorder`'s driver closures capture it `[weak self]` (crash-fix round 1: was
+        // `[unowned self]`) — this MUST stay alive until `performSubscribe()`'s own detached Task
+        // has landed, or the Task finds `self` already `nil` and silently no-ops the moment this
+        // test discards `recorder` early (see `makeOpenedRuntime`'s own callers, several lines up,
+        // for the identical precedent and its own header comment on this hazard).
         _ = await waitUntil { recorder.subscribeCalls.count >= 1 }
 
         XCTAssertEqual(view.caretLayerForTesting?.isHidden, true)
@@ -1827,10 +1882,11 @@ final class OfficeTileCanvasViewTests: XCTestCase {
 
     func testFirstRectIsZeroWithNoWindow() async {
         // `recorder` kept alive (never `let (runtime, _)`) — `mount()` fires `performSubscribe()`'s
-        // detached `Task` into `SubscribeCapturingDriverRecorder`'s own `[unowned self]`-capturing
-        // driver closures; discarding the recorder lets it deallocate before that `Task` runs,
-        // crashing on the unowned read — this file's own documented hazard (see this class's own
-        // header on `driver`), hit and fixed here the same way every other mounting test already is.
+        // detached `Task` into `SubscribeCapturingDriverRecorder`'s own `[weak self]`-capturing
+        // driver closures (crash-fix round 1: was `[unowned self]`); discarding the recorder lets
+        // it deallocate before that `Task` runs, silently dropping the subscribe call — this file's
+        // own documented hazard (see this class's own header on `driver`), hit and fixed here the
+        // same way every other mounting test already is.
         let (runtime, recorder) = await makeOpenedRuntime()
         let view = makeMountedView(runtime: runtime)
         _ = await waitUntil { recorder.subscribeCalls.count >= 1 }

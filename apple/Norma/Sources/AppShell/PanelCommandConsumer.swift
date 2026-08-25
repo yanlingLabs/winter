@@ -165,12 +165,24 @@ final class PanelCommandConsumer {
     /// it already models exactly "a one-shot timer at an absolute date, and its canceller", and one
     /// clock per subsystem is what lets a test drive a deadline without waiting for it.
     private let scheduler: BrowserRuntime.Scheduler
+    /// office-agent-tools T1/T3 — the office half of this bridge (`OfficeCommandConsumer.swift`'s own
+    /// header). Constructed HERE, reusing the SAME `sendResult` this type already received (T1's own
+    /// reasoning, unchanged: both consumers answer through the identical `panel.commandResult`
+    /// mechanism, and this file has nothing else `OfficeCommandConsumer` needs — no `runtime`, no
+    /// `scheduler`). **T3 correction**: T1's own comment here claimed this kept `AppDelegate`'s
+    /// `PanelCommandConsumer(runtime:sendResult:)` call site untouched "by this task" — true for T1,
+    /// no longer true once a verb needs the office runtime. T3 adds ONE more init parameter,
+    /// `officeAgentBroker`, forwarded straight through to `OfficeCommandConsumer`'s own — the single
+    /// thing `info`/`read` need that `sendResult` alone cannot supply.
+    private let officeCommands: OfficeCommandConsumer
 
     init(runtime: BrowserRuntime, sendResult: @escaping ResultSender,
-         scheduler: BrowserRuntime.Scheduler = .production) {
+         scheduler: BrowserRuntime.Scheduler = .production,
+         officeAgentBroker: @escaping (_ sessionId: String) -> OfficeAgentBroker? = { _ in nil }) {
         self.runtime = runtime
         self.sendResult = sendResult
         self.scheduler = scheduler
+        self.officeCommands = OfficeCommandConsumer(sendResult: sendResult, officeAgentBroker: officeAgentBroker)
     }
 
     // MARK: - One command's life
@@ -239,6 +251,20 @@ final class PanelCommandConsumer {
             NSLog("[PanelCommandConsumer] quiesced — dropping \(command.action) "
                   + "(\(Self.brief(command.commandId))); the daemon will time it out")
             return
+        }
+
+        // office-agent-tools T1 — route OFFICE verbs to the office consumer, AFTER the quiescent
+        // guard above rather than before it. `isQuiescent` reads as CEF-specific at a glance (it is
+        // `BrowserRuntime`'s own flag), but its MEANING is not: it is the app's terminal beat, and its
+        // own comment gives two reasons that are subsystem-agnostic — a refusal now and a timeout
+        // describe the SAME fact when the app stops existing next tick, and the beat must stay empty
+        // of *socket writes*, which an office refusal is one of. One teardown discipline for every
+        // verb this file routes, browser or office, rather than a second one office would otherwise
+        // need to invent for itself. (What "never a throw, never silence" governs is this file's
+        // handling of a verb IN OPERATION — the browser verbs below accept silence in the quit beat
+        // by the same design, for the same reason.)
+        guard !OfficeCommandConsumer.isOfficeAction(command.action) else {
+            return officeCommands.handle(command)
         }
 
         // **WHO OWNS "does this tabId belong to this sessionId?" — the daemon's browser tool, not

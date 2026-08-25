@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { SessionEvent, SYSTEM_SESSION_ID, TaskSchema, PANEL_COMMAND_ACTIONS, PANEL_COMMAND_ARGS_MAX_JSON_BYTES } from "../src/events";
+import {
+  SessionEvent, SYSTEM_SESSION_ID, TaskSchema, PANEL_COMMAND_ACTIONS,
+  BROWSER_COMMAND_ACTIONS, OFFICE_COMMAND_ACTIONS, PANEL_COMMAND_ARGS_MAX_JSON_BYTES,
+} from "../src/events";
 import {
   HelloParams, HelloResult, PROTOCOL_VERSION,
   PanelCommandResultParams, PANEL_COMMAND_RESULT_MAX_LENGTH, PANEL_COMMAND_IMAGE_B64_MAX_LENGTH,
@@ -512,6 +515,11 @@ describe("hello method schemas", () => {
 // B2 Task 2 — the command wire. `panel_command` grew from one verb to nine and gained a per-verb
 // `args` bag; `panel.commandResult` is the answer channel. These pin the two things a schema change
 // here can silently break: the verb set itself, and the two caps that keep a frame deliverable.
+//
+// office-agent-tools T1 repartitioned `PANEL_COMMAND_ACTIONS` into `BROWSER_COMMAND_ACTIONS` (the
+// original nine, unchanged) plus `OFFICE_COMMAND_ACTIONS` (22 new office verbs) — this describe
+// block's own name still says "B2 T2" because everything else in it (args, the two caps) is still
+// exactly B2's mechanism; only the verb COUNT below needed updating for the wire to have grown.
 // ================================================================================================
 describe("panel_command (B2 T2)", () => {
   const base = { seq: 7, sessionId: "s_abc", ts: 1781270000000 };
@@ -519,11 +527,16 @@ describe("panel_command (B2 T2)", () => {
     ...base, type: "panel_command", commandId: "cmd_1", deadlineMs: 15000, ...over,
   });
 
-  test("every one of the nine verbs parses", () => {
+  test("every verb of both families parses, and the union is exactly their sum", () => {
     for (const action of PANEL_COMMAND_ACTIONS) {
       expect(SessionEvent.parse(cmd({ action })).type).toBe("panel_command");
     }
-    expect(PANEL_COMMAND_ACTIONS).toHaveLength(9);
+    // Not a hand-typed number: computed from the two family constants this test also imports, so a
+    // verb added to either family without being composed into the union fails here rather than
+    // silently changing what "every verb parses" means. 9 browser + 22 office today.
+    expect(PANEL_COMMAND_ACTIONS).toHaveLength(BROWSER_COMMAND_ACTIONS.length + OFFICE_COMMAND_ACTIONS.length);
+    expect(BROWSER_COMMAND_ACTIONS).toHaveLength(9);
+    expect(OFFICE_COMMAND_ACTIONS).toHaveLength(22);
   });
 
   test("an unknown verb is refused", () => {

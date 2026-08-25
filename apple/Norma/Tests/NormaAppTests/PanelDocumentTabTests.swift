@@ -72,20 +72,20 @@ final class PanelDocumentTabTests: XCTestCase {
     // MARK: - Pure: officeDocumentViewportPlan
 
     func testNoPathRendersNoFile() {
-        XCTAssertEqual(officeDocumentViewportPlan(path: nil, state: OfficeRuntimeState(), hasRequestedOpen: false),
+        XCTAssertEqual(officeDocumentViewportPlan(path: nil, state: OfficeRuntimeState(), hasRequestedOpen: false, documentVanished: false),
                        .renderState(.noFile))
-        XCTAssertEqual(officeDocumentViewportPlan(path: "", state: OfficeRuntimeState(), hasRequestedOpen: false),
+        XCTAssertEqual(officeDocumentViewportPlan(path: "", state: OfficeRuntimeState(), hasRequestedOpen: false, documentVanished: false),
                        .renderState(.noFile))
     }
 
     func testNoRuntimeStateRendersBooting() {
-        XCTAssertEqual(officeDocumentViewportPlan(path: "/a.xlsx", state: nil, hasRequestedOpen: false),
+        XCTAssertEqual(officeDocumentViewportPlan(path: "/a.xlsx", state: nil, hasRequestedOpen: false, documentVanished: false),
                        .renderState(.booting))
     }
 
     func testAnOpenDocumentShowsTheCanvasWithEveryFieldCarriedThrough() {
         let state = documentState(path: "/a.xlsx", docId: "d1", type: .spreadsheet, parts: 3, activePart: 2)
-        XCTAssertEqual(officeDocumentViewportPlan(path: "/a.xlsx", state: state, hasRequestedOpen: true),
+        XCTAssertEqual(officeDocumentViewportPlan(path: "/a.xlsx", state: state, hasRequestedOpen: true, documentVanished: false),
                        .showCanvas(path: "/a.xlsx", docId: "d1", type: .spreadsheet, parts: 3,
                                   sizeTwips: sizeTwips, activePart: 2))
     }
@@ -97,7 +97,7 @@ final class PanelDocumentTabTests: XCTestCase {
         var state = documentState(path: "/a.xlsx")
         state.phase = .failed
         state.failureReason = "irrelevant"
-        XCTAssertNotEqual(officeDocumentViewportPlan(path: "/a.xlsx", state: state, hasRequestedOpen: true),
+        XCTAssertNotEqual(officeDocumentViewportPlan(path: "/a.xlsx", state: state, hasRequestedOpen: true, documentVanished: false),
                           .renderState(.failed(reason: "irrelevant")))
     }
 
@@ -106,14 +106,14 @@ final class PanelDocumentTabTests: XCTestCase {
     /// at anything (it never tried).
     func testFailedPhaseWithNoRequestedOpenYetRendersBootingNotFailed() {
         let state = failedState()
-        XCTAssertEqual(officeDocumentViewportPlan(path: "/a.xlsx", state: state, hasRequestedOpen: false),
+        XCTAssertEqual(officeDocumentViewportPlan(path: "/a.xlsx", state: state, hasRequestedOpen: false, documentVanished: false),
                        .renderState(.booting))
     }
 
     /// The genuine case: this tab DID ask, and the runtime is `.failed` — the Reopen affordance.
     func testFailedPhaseAfterThisTabAskedRendersFailedWithTheReason() {
         let state = failedState(reason: "the office helper stopped unexpectedly.")
-        XCTAssertEqual(officeDocumentViewportPlan(path: "/a.xlsx", state: state, hasRequestedOpen: true),
+        XCTAssertEqual(officeDocumentViewportPlan(path: "/a.xlsx", state: state, hasRequestedOpen: true, documentVanished: false),
                        .renderState(.failed(reason: "the office helper stopped unexpectedly.")))
     }
 
@@ -121,7 +121,7 @@ final class PanelDocumentTabTests: XCTestCase {
     /// empty one.
     func testFailedPhaseWithNoReasonUsesTheFallbackSentence() {
         let state = failedState(reason: nil)
-        XCTAssertEqual(officeDocumentViewportPlan(path: "/a.xlsx", state: state, hasRequestedOpen: true),
+        XCTAssertEqual(officeDocumentViewportPlan(path: "/a.xlsx", state: state, hasRequestedOpen: true, documentVanished: false),
                        .renderState(.failed(reason: officeDocumentUnknownFailureReason)))
     }
 
@@ -129,14 +129,14 @@ final class PanelDocumentTabTests: XCTestCase {
         var state = OfficeRuntimeState()
         state.phase = .ready
         state.openFailures["/bad.docx"] = "garbage file"
-        XCTAssertEqual(officeDocumentViewportPlan(path: "/bad.docx", state: state, hasRequestedOpen: true),
+        XCTAssertEqual(officeDocumentViewportPlan(path: "/bad.docx", state: state, hasRequestedOpen: true, documentVanished: false),
                        .renderState(.openFailed(path: "/bad.docx", reason: "garbage file")))
     }
 
     func testReadyWithNoDocumentAndNoFailureRendersBooting() {
         var state = OfficeRuntimeState()
         state.phase = .ready
-        XCTAssertEqual(officeDocumentViewportPlan(path: "/a.xlsx", state: state, hasRequestedOpen: false),
+        XCTAssertEqual(officeDocumentViewportPlan(path: "/a.xlsx", state: state, hasRequestedOpen: false, documentVanished: false),
                        .renderState(.booting))
     }
 
@@ -144,8 +144,80 @@ final class PanelDocumentTabTests: XCTestCase {
         var state = OfficeRuntimeState()
         state.phase = .starting
         state.pendingOpens = ["/a.xlsx"]
-        XCTAssertEqual(officeDocumentViewportPlan(path: "/a.xlsx", state: state, hasRequestedOpen: true),
+        XCTAssertEqual(officeDocumentViewportPlan(path: "/a.xlsx", state: state, hasRequestedOpen: true, documentVanished: false),
                        .renderState(.booting))
+    }
+
+    // MARK: - Office Stage C: a document closed out from under a live tab
+
+    /// **The defect's own plan-level pin.** `documents[path] == nil` on a `.ready` runtime with no
+    /// recorded open failure is byte-for-byte the state of a path nobody has opened yet — which is
+    /// exactly why the pre-fix code rendered it `.booting` and why only the model's own
+    /// `documentVanished` bookkeeping can tell the two apart.
+    ///
+    /// **The control arm is the second half of this test, not a separate one**: the SAME state with
+    /// `documentVanished: false` must still render `.booting`. Without it this would pass just as
+    /// happily if the new arm ignored its parameter and fired for every document-less state — which
+    /// would paint a failure sentence over every tab that is merely still booting.
+    func testAVanishedDocumentRendersClosedUnderTabAndOnlyWhenItActuallyVanished() {
+        var state = OfficeRuntimeState()
+        state.phase = .ready
+        XCTAssertEqual(officeDocumentViewportPlan(path: "/a.xlsx", state: state, hasRequestedOpen: true,
+                                                  documentVanished: true),
+                       .renderState(.closedUnderTab(reason: officeDocumentClosedUnderTabReason)))
+        XCTAssertEqual(officeDocumentViewportPlan(path: "/a.xlsx", state: state, hasRequestedOpen: true,
+                                                  documentVanished: false),
+                       .renderState(.booting),
+                       "the control arm: an identical state that did NOT vanish is still a quiet wait")
+    }
+
+    /// A document back at the path outranks the memory of one going away — the same precedence the
+    /// canvas already has over every other case.
+    func testADocumentBackAtThePathWinsOverAVanish() {
+        let state = documentState(path: "/a.xlsx", docId: "d1", type: .spreadsheet, parts: 1, activePart: 0)
+        XCTAssertEqual(officeDocumentViewportPlan(path: "/a.xlsx", state: state, hasRequestedOpen: true,
+                                                  documentVanished: true),
+                       .showCanvas(path: "/a.xlsx", docId: "d1", type: .spreadsheet, parts: 1,
+                                   sizeTwips: sizeTwips, activePart: 0))
+    }
+
+    /// **A dead helper wipes every document, so a vanish is ALSO true then** — and "the office
+    /// helper stopped" is the more specific, more useful sentence, so it must win. This pins the
+    /// ordering, not a coincidence: the `.failed` arm sits above the vanish arm in the plan.
+    func testAFailedHelperPhaseWinsOverAVanish() {
+        let state = failedState(reason: "the office helper stopped unexpectedly.")
+        XCTAssertEqual(officeDocumentViewportPlan(path: "/a.xlsx", state: state, hasRequestedOpen: true,
+                                                  documentVanished: true),
+                       .renderState(.failed(reason: "the office helper stopped unexpectedly.")))
+    }
+
+    /// **The `.reloadFailed` case, at the plan level.** That reducer arm (`OfficeRuntime.swift`) is
+    /// the ONE other transition that removes a live `documents[path]` entry — and it records a
+    /// per-path reason in the same transition. That specific reason must beat the generic vanish
+    /// sentence, or a failed reload would be described as somebody having closed the document.
+    func testAPerPathOpenFailureWinsOverAVanish() {
+        var state = OfficeRuntimeState()
+        state.phase = .ready
+        state.openFailures["/a.xlsx"] = "couldn't re-stage the file"
+        XCTAssertEqual(officeDocumentViewportPlan(path: "/a.xlsx", state: state, hasRequestedOpen: true,
+                                                  documentVanished: true),
+                       .renderState(.openFailed(path: "/a.xlsx", reason: "couldn't re-stage the file")))
+    }
+
+    /// **Why `.closedUnderTab` is its own case and not a second spelling of `.failed`.**
+    /// `OfficeDocumentViewportStateView`'s `.failed` arm hardcodes the title "The office helper
+    /// stopped"; the helper is running in this state and still serving every other document. This
+    /// pins the plan against a future simplification that routes a vanish through `.failed` and so
+    /// puts a sentence on screen contradicting the state that produced it.
+    func testAVanishIsNeverDescribedAsAHelperFailure() {
+        var ready = OfficeRuntimeState()
+        ready.phase = .ready
+        XCTAssertNotEqual(officeDocumentViewportPlan(path: "/a.xlsx", state: ready, hasRequestedOpen: true,
+                                                     documentVanished: true),
+                          .renderState(.failed(reason: officeDocumentClosedUnderTabReason)),
+                          "`.failed` renders 'The office helper stopped' — untrue here")
+        XCTAssertFalse(officeDocumentClosedUnderTabReason.contains("helper"),
+                       "the helper is RUNNING in this state — the sentence must not blame it")
     }
 
     // MARK: - Pure: officeColumnLetters / officeCellReference (Task 8: the formula bar's own A1-style ref)
@@ -173,6 +245,202 @@ final class PanelDocumentTabTests: XCTestCase {
         XCTAssertEqual(officeCellReference(column: 1, row: 0), "B1")
         XCTAssertEqual(officeCellReference(column: 0, row: 9), "A10")
         XCTAssertEqual(officeCellReference(column: 26, row: 99), "AA100")
+    }
+
+    // MARK: - Pure: officeColumnIndex(fromLetters:) / officeParseCellReference / officeParseRange
+    // (office-agent-tools T3 — the INVERSE of officeColumnLetters/officeCellReference above, needed
+    // to turn `sheets read`'s own A1-string `range` operand into 0-based indices LOK can use.
+    // "Reuse the A1 conversion Stage B T8 already built, do not write a second one" — this is that
+    // reuse: every boundary pinned here is the identical bijective-base-26 boundary the forward
+    // conversion already pins, walked backwards.)
+
+    func testOfficeColumnIndexInvertsOfficeColumnLettersAtEveryBoundary() {
+        XCTAssertEqual(officeColumnIndex(fromLetters: "A"), 0)
+        XCTAssertEqual(officeColumnIndex(fromLetters: "B"), 1)
+        XCTAssertEqual(officeColumnIndex(fromLetters: "Z"), 25)
+        XCTAssertEqual(officeColumnIndex(fromLetters: "AA"), 26)
+        XCTAssertEqual(officeColumnIndex(fromLetters: "AB"), 27)
+        XCTAssertEqual(officeColumnIndex(fromLetters: "AZ"), 51)
+        XCTAssertEqual(officeColumnIndex(fromLetters: "BA"), 52)
+        XCTAssertEqual(officeColumnIndex(fromLetters: "ZZ"), 701)
+        XCTAssertEqual(officeColumnIndex(fromLetters: "AAA"), 702)
+    }
+
+    /// Round-trips a wide sample through BOTH directions — the strongest single proof that the
+    /// inverse actually inverts, not just that the two happen to agree at the hand-picked boundaries
+    /// above.
+    func testOfficeColumnIndexRoundTripsWithOfficeColumnLettersAcrossAWideRange() {
+        for column in 0..<1500 {
+            let letters = officeColumnLetters(column)
+            XCTAssertEqual(officeColumnIndex(fromLetters: letters), column,
+                           "officeColumnLetters(\(column)) = \"\(letters)\" must invert back to \(column)")
+        }
+    }
+
+    func testOfficeColumnIndexIsCaseInsensitive() {
+        XCTAssertEqual(officeColumnIndex(fromLetters: "aa"), 26)
+        XCTAssertEqual(officeColumnIndex(fromLetters: "Az"), 51)
+    }
+
+    // MARK: - T5 fix round, review Critical-1 — the app-abort regression tests
+    //
+    // Every string below used to abort NORMA.APP ITSELF: Swift traps on `Int` overflow (only `&*`
+    // wraps), in `-O` as well as debug, and `officeColumnIndex`'s `value * 26` was unchecked with
+    // nothing upstream bounding the letter run. Measured before the fix against a verbatim copy of
+    // the original — SIGTRAP (exit 133) on each — in `task-5-fixround-report.md` §2. An agent typo
+    // in `range` was sufficient; no user action, no malice.
+    //
+    // These are XCTAssertNil, not XCTAssertEqual: the point is that the function REFUSES rather
+    // than traps, and a trap is not something XCTest can catch — if the guard is ever removed,
+    // this test does not fail, it takes the whole test runner down with it. That is the loudest
+    // possible red, and it is why the assertion's own name says "abort".
+
+    func testOfficeColumnIndexRefusesRatherThanTrappingOnAnAppAbortingLetterRun() {
+        // The exact review vector: 14 letters, 15 characters, inside `sheets.ts`'s own `.max(64)`.
+        XCTAssertNil(officeColumnIndex(fromLetters: String(repeating: "Z", count: 14)))
+        XCTAssertNil(officeColumnIndex(fromLetters: String(repeating: "A", count: 14)))
+        // The measured trap boundary is letter-dependent (Z x14 traps, A x14 returns a finite
+        // 2.58e18 that overflows `cellCount` one line later instead) — so the bound is on LENGTH,
+        // and both sides of that boundary are pinned here.
+        XCTAssertNil(officeColumnIndex(fromLetters: String(repeating: "A", count: 13)))
+        XCTAssertNil(officeColumnIndex(fromLetters: "XFDA"))   // 4 letters — always invalid, Calc's max is XFD
+        XCTAssertNil(officeColumnIndex(fromLetters: "AAAA"))
+    }
+
+    /// The bound is LEXICAL (<= 3 letters), never Calc's real 16,384-column grid — so "XFE", one
+    /// column PAST XFD, still resolves here and is refused downstream by LOK's own position
+    /// verification. `OfficeSheetsFormatTests`' position-verification drill rides exactly that
+    /// vector; a grid bound here would silently delete the only non-mutant way to prove that check
+    /// is real. Pinned so a later "tidy-up" cannot quietly tighten it.
+    func testOfficeColumnIndexStaysLexicalAndStillResolvesTheOutOfGridThreeLetterColumns() {
+        XCTAssertEqual(officeColumnIndex(fromLetters: "XFD"), 16383)  // Calc's real last column
+        XCTAssertEqual(officeColumnIndex(fromLetters: "XFE"), 16384)  // one past it — still resolves
+        XCTAssertEqual(officeColumnIndex(fromLetters: "ZZZ"), 18277)  // the widest 3-letter column
+    }
+
+    /// The ROW half of the same class — the door the review's own prescription did not name.
+    /// `Int("9223372036854775807")` succeeds, so `range:"A1:B9223372036854775807"` (23 characters)
+    /// parsed cleanly and then aborted the app on the consumer's VERY NEXT LINE, in
+    /// `OfficeCellRange.cellCount`'s `columnCount * rowCount` = `2 * Int.max`.
+    func testOfficeParseCellReferenceRefusesRatherThanTrappingOnAnAppAbortingRowNumber() {
+        XCTAssertNil(officeParseCellReference("B9223372036854775807"))
+        XCTAssertNil(officeParseCellReference("A12345678"))       // 8 digits
+        XCTAssertNil(officeParseRange("A1:B9223372036854775807"))
+        XCTAssertNil(officeParseRange("A1:AAAAAAAAAAAAAA4"))      // the 14-A + 4-rows cellCount vector
+        // Symmetric to the column bound: lexical, and still past Calc's own 1,048,576-row maximum,
+        // so an out-of-grid ROW stays expressible as a position-verification vector too.
+        XCTAssertEqual(officeParseCellReference("D9999999")?.row, 9_999_998)
+        XCTAssertEqual(officeParseCellReference("A1048576")?.row, 1_048_575)
+    }
+
+    /// The whole point of both bounds, stated as one property: **every range this parser accepts has
+    /// a `cellCount` that cannot overflow.** 18,278 columns x 10^7 rows ~= 1.8e11, eleven orders of
+    /// magnitude below `Int.max` — so the consumer's own `range.cellCount`, and everything
+    /// downstream of it, is total by construction rather than by inspection.
+    func testEveryAcceptedRangeHasACellCountThatCannotOverflow() throws {
+        let widest = try XCTUnwrap(officeParseRange("A1:ZZZ9999999"))
+        XCTAssertEqual(widest.columnCount, 18278)
+        XCTAssertEqual(widest.rowCount, 9_999_999)
+        XCTAssertEqual(widest.cellCount, 18278 * 9_999_999)
+        XCTAssertLessThan(widest.cellCount, Int.max / 1_000_000)
+    }
+
+    func testOfficeColumnIndexRejectsNonLetters() {
+        XCTAssertNil(officeColumnIndex(fromLetters: ""))
+        XCTAssertNil(officeColumnIndex(fromLetters: "1"))
+        XCTAssertNil(officeColumnIndex(fromLetters: "A1"))
+        XCTAssertNil(officeColumnIndex(fromLetters: "A-B"))
+        XCTAssertNil(officeColumnIndex(fromLetters: "A "))
+    }
+
+    func testOfficeParseCellReferenceInvertsOfficeCellReference() {
+        XCTAssertEqual(officeParseCellReference("A1")?.column, 0)
+        XCTAssertEqual(officeParseCellReference("A1")?.row, 0)
+        XCTAssertEqual(officeParseCellReference("B1")?.column, 1)
+        XCTAssertEqual(officeParseCellReference("A10")?.row, 9)
+        XCTAssertEqual(officeParseCellReference("AA100")?.column, 26)
+        XCTAssertEqual(officeParseCellReference("AA100")?.row, 99)
+    }
+
+    func testOfficeParseCellReferenceIsCaseInsensitiveOnTheLetters() {
+        let lower = officeParseCellReference("aa100")
+        XCTAssertEqual(lower?.column, 26)
+        XCTAssertEqual(lower?.row, 99)
+    }
+
+    /// Malformed shapes: wire strictness applied to the ONE place this file owns real A1 semantics
+    /// (the daemon only validates the wire SHAPE of `range`, never defaults a bad one) — every one
+    /// of these must refuse, never guess.
+    func testOfficeParseCellReferenceRejectsMalformedInput() {
+        XCTAssertNil(officeParseCellReference(""))
+        XCTAssertNil(officeParseCellReference("1A"))          // digits before letters
+        XCTAssertNil(officeParseCellReference("A"))            // no row at all
+        XCTAssertNil(officeParseCellReference("1"))            // no column at all
+        XCTAssertNil(officeParseCellReference("A0"))           // row 0 does not exist (rows are 1-based)
+        XCTAssertNil(officeParseCellReference("A-1"))          // signed row
+        XCTAssertNil(officeParseCellReference("A1B2"))         // letters resume after digits
+        XCTAssertNil(officeParseCellReference(" A1"))          // leading whitespace
+        XCTAssertNil(officeParseCellReference("A1 "))          // trailing whitespace
+    }
+
+    func testOfficeParseRangeAcceptsASingleCellAsAOneCellRange() {
+        let range = officeParseRange("B2")
+        XCTAssertEqual(range?.startColumn, 1)
+        XCTAssertEqual(range?.startRow, 1)
+        XCTAssertEqual(range?.endColumn, 1)
+        XCTAssertEqual(range?.endRow, 1)
+        XCTAssertEqual(range?.cellCount, 1)
+    }
+
+    func testOfficeParseRangeParsesATwoCornerSpan() {
+        let range = officeParseRange("A1:C10")
+        XCTAssertEqual(range?.startColumn, 0)
+        XCTAssertEqual(range?.startRow, 0)
+        XCTAssertEqual(range?.endColumn, 2)
+        XCTAssertEqual(range?.endRow, 9)
+        XCTAssertEqual(range?.columnCount, 3)
+        XCTAssertEqual(range?.rowCount, 10)
+        XCTAssertEqual(range?.cellCount, 30)
+    }
+
+    /// A range given "backwards" (bottom-right : top-left) normalizes identically to the same span
+    /// given the ordinary way — a caller (model-authored, not UI-driven) has no reason to always get
+    /// reading order right, and LOK's own Name Box accepts either order.
+    func testOfficeParseRangeNormalizesAReversedCornerOrder() {
+        XCTAssertEqual(officeParseRange("C10:A1"), officeParseRange("A1:C10"))
+    }
+
+    func testOfficeParseRangeRejectsMalformedShapes() {
+        XCTAssertNil(officeParseRange(""))
+        XCTAssertNil(officeParseRange("A1:B2:C3"))     // more than one colon
+        XCTAssertNil(officeParseRange("A1:"))           // empty second half
+        XCTAssertNil(officeParseRange(":A1"))           // empty first half
+        XCTAssertNil(officeParseRange("A1:B0"))         // a malformed corner poisons the whole range
+        XCTAssertNil(officeParseRange("Sheet1!A1"))     // sheet-qualification is the `sheet` operand's job, not range's
+    }
+
+    /// office-agent-tools T3 — the cell-count ceiling `sheets read` enforces BEFORE any LOK work.
+    /// Sized so a worst-realistic-case grid of moderately long text cells still lands comfortably
+    /// under `PanelCommandConsumer.resultMaxLength` (64 KiB, mirroring the wire's own
+    /// `PANEL_COMMAND_RESULT_MAX_LENGTH`) — measured here directly, not merely asserted, so a future
+    /// change to either number is caught by arithmetic rather than trusted by comment.
+    func testOfficeReadRangeMaxCellsKeepsAWorstRealisticGridUnderTheResultCap() {
+        let cellsAtCap = officeReadRangeMaxCells
+        let longestOrdinaryCellText = String(repeating: "x", count: 20) // a realistic "long-ish" text cell
+        let syntheticGridBytes = (longestOrdinaryCellText.utf8.count + 1) * cellsAtCap // +1 per cell for its separator
+        XCTAssertLessThan(syntheticGridBytes, PanelCommandConsumer.resultMaxLength,
+                          "officeReadRangeMaxCells (\(cellsAtCap)) is too large: a grid of "
+                          + "\(cellsAtCap) 20-character cells would already be \(syntheticGridBytes) "
+                          + "bytes, at or past PanelCommandConsumer.resultMaxLength "
+                          + "(\(PanelCommandConsumer.resultMaxLength))")
+    }
+
+    func testOfficeParseRangeRefusesARangeLargerThanTheCap() {
+        let tooManyRows = officeReadRangeMaxCells + 1
+        let range = officeParseRange("A1:A\(tooManyRows)")
+        XCTAssertEqual(range?.cellCount, tooManyRows, "setup: this range's cell count must actually "
+                       + "exceed the cap for this test to mean anything")
+        XCTAssertGreaterThan(range!.cellCount, officeReadRangeMaxCells)
     }
 
     // MARK: - Pure: officeFormulaBarReference / officeFormulaBarContent (advisor review, Task 8:
@@ -354,6 +622,20 @@ final class PanelDocumentTabTests: XCTestCase {
                 clipboardPaste: { _, _, _ in },
                 undo: { _ in },
                 redo: { _ in },
+                sheetsInfo: { _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
+                sheetsRead: { _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
+                sheetsSet: { _, _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
+                sheetsResize: { _, _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
+                sheetsManageSheet: { _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
+                sheetsFormat: { _, _, _, _, _, _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
+                slidesInfo: { _ in throw OfficeHelperClientError.serverError(reason: "fake driver: slides not implemented") },
+                slidesRead: { _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: slides not implemented") },
+                slidesSetText: { _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: slides not implemented") },
+                slidesManagePage: { _, _, _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: slides not implemented") },
+                docsInfo: { _ in throw OfficeHelperClientError.serverError(reason: "fake driver: docs not implemented") },
+                docsRead: { _ in throw OfficeHelperClientError.serverError(reason: "fake driver: docs not implemented") },
+                docsReplace: { _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: docs not implemented") },
+                docsInsert: { _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: docs not implemented") },
                 stateDirectory: stateDirectory)
         }
     }
@@ -632,6 +914,152 @@ final class PanelDocumentTabTests: XCTestCase {
         XCTAssertTrue(office.openCalls.allSatisfy { $0.path != realAPath })
         XCTAssertNotEqual(office.openCalls[0].path, office.openCalls[1].path,
                           "a retry is a fresh open under a fresh docId, staged fresh")
+    }
+
+    // MARK: - Office Stage C: the vanish, end to end through the model
+
+    /// **The defect, reproduced at the door that produces it, and then the fix.**
+    /// `OfficeRuntime.close(_:)` is the exact call `OfficeAgentBroker`'s rule-2 `defer` makes — the
+    /// mirror interleaving's own last step — so this drives the real mechanism, not a transcription
+    /// of it. (`OfficeAgentBrokerTests` carries the whole interleaving, broker included.)
+    ///
+    /// **The `.closedUnderTab` assertion is synchronous and deterministic, not a race.**
+    /// `OfficeRuntime.state` is `@Published`, so `close` publishes inside the call and this model's
+    /// sink has already run by the time it returns; the automatic re-open is a deferred `Task` and
+    /// cannot have fired yet. Pre-fix, that same line read `.renderState(.booting)` — an indefinite
+    /// spinner with no text and no Reopen — and `openCalls` stayed at 1 forever.
+    func testACloseUnderALiveTabLandsInClosedUnderTabAndReopensAutomaticallyOnce() async {
+        let office = DocumentOfficeDriverRecorder(stateDirectory: stateDir)
+        doubles.append(office)
+        let host = makeHost(office: office)
+        let model = PanelDocumentTabModel(tabId: "t1", path: realAPath)
+        model.bind(host: host, sessionId: "S1")
+        model.activate()
+        _ = await waitUntil { office.openCalls.count == 1 }
+        let landed = await waitUntil { model.runtime?.stateSnapshot.documents[realAPath] != nil }
+        XCTAssertTrue(landed, "setup: the document never opened")
+        guard case .showCanvas = model.plan else {
+            return XCTFail("setup: a tab holding its document must be showing the canvas")
+        }
+
+        model.runtime?.close(realAPath)
+
+        XCTAssertEqual(model.plan,
+                       .renderState(.closedUnderTab(reason: officeDocumentClosedUnderTabReason)),
+                       "pre-fix this was .renderState(.booting): no text, no Reopen, forever")
+        XCTAssertEqual(office.openCalls.count, 1,
+                       "the automatic re-open is deferred — it cannot have fired synchronously")
+
+        let reopened = await waitUntil { office.openCalls.count == 2 }
+        XCTAssertTrue(reopened, "the gate must re-arm — pre-fix `openRequestedPaths` was spent for "
+                      + "this model's whole lifetime and nothing self-healed")
+        let back = await waitUntil { model.runtime?.stateSnapshot.documents[realAPath] != nil }
+        XCTAssertTrue(back, "the automatic re-open must actually land, not merely dispatch")
+        guard case .showCanvas = model.plan else {
+            return XCTFail("the canvas must come back once the re-open lands")
+        }
+        XCTAssertNotEqual(office.openCalls[0].path, office.openCalls[1].path,
+                          "a re-open is a fresh open under a fresh docId, staged fresh")
+    }
+
+    /// **The bound, and that it is structural rather than a hope.** A second vanish gets no second
+    /// automatic re-open — but it does still get a real state with the Reopen affordance standing,
+    /// and the user's own door (which consults no gate at all) still works. That pairing is the
+    /// whole design: automatic recovery is bounded, user recovery is not.
+    func testASecondVanishExhaustsTheAutomaticBoundButLeavesTheTabRecoverable() async {
+        let office = DocumentOfficeDriverRecorder(stateDirectory: stateDir)
+        doubles.append(office)
+        let host = makeHost(office: office)
+        let model = PanelDocumentTabModel(tabId: "t1", path: realAPath)
+        model.bind(host: host, sessionId: "S1")
+        model.activate()
+        _ = await waitUntil { office.openCalls.count == 1 }
+        _ = await waitUntil { model.runtime?.stateSnapshot.documents[realAPath] != nil }
+
+        model.runtime?.close(realAPath)
+        let reopened = await waitUntil { office.openCalls.count == 2 }
+        XCTAssertTrue(reopened, "setup: the FIRST vanish must self-heal — see the test above")
+        let back = await waitUntil { model.runtime?.stateSnapshot.documents[realAPath] != nil }
+        XCTAssertTrue(back, "setup: the re-open never landed, so this cannot be a second vanish")
+
+        model.runtime?.close(realAPath)
+
+        XCTAssertEqual(model.plan,
+                       .renderState(.closedUnderTab(reason: officeDocumentClosedUnderTabReason)),
+                       "a spent bound still owes the user a real state, not a spinner")
+        let third = await waitUntil(timeout: 0.5) { office.openCalls.count > 2 }
+        XCTAssertFalse(third, "at most ONE automatic re-open per (runtime, path) for that pairing's "
+                       + "whole lifetime — the counter is never reset by a successful re-open, "
+                       + "which is exactly what would re-enable an open/close loop")
+
+        model.retryOpen()
+        let manual = await waitUntil { office.openCalls.count == 3 }
+        XCTAssertTrue(manual, "the Reopen affordance consults no gate — the user can always recover")
+    }
+
+    /// **THE CONTROL ARM: the one thing this fix could newly break.** The user's own `×` closes a
+    /// document tab, and the automatic re-open must not undo it — that would leave a document open
+    /// on the helper with no tab watching it.
+    ///
+    /// **Drives the REAL ordering, which is the only version of this test worth running.**
+    /// `ShellSessionHost.closePanelTab` calls `officeRuntime.close(path)` FIRST and
+    /// `PanelDocumentTabModels.discard(tabId:)` SECOND, with `OfficeRuntime.state` publishing
+    /// synchronously in between — so the model is still live and still subscribed when the close
+    /// lands. Retiring the model BEFORE the close would make this test vacuous: the sink would
+    /// already be gone and nothing could have fired either way. The mid-test `.closedUnderTab`
+    /// assertion is what proves it is not vacuous — the vanish IS detected and the gate IS
+    /// re-armed here; it is the deferred `Task`'s own `isRetired` guard that has to stop it.
+    func testTheUsersOwnTabCloseIsNeverUndoneByTheAutomaticReopen() async {
+        let office = DocumentOfficeDriverRecorder(stateDirectory: stateDir)
+        doubles.append(office)
+        let host = makeHost(office: office)
+        let tab = PanelTab(tabId: "t1", kind: .document, url: realAPath, title: nil)
+        let model = PanelDocumentTabModels.model(for: tab, host: host, sessionId: "S1")
+        model.activate()
+        _ = await waitUntil { office.openCalls.count == 1 }
+        let runtime = model.runtime
+        let landed = await waitUntil { runtime?.stateSnapshot.documents[realAPath] != nil }
+        XCTAssertTrue(landed, "setup: the document never opened")
+
+        runtime?.close(realAPath)                       // closePanelTab's own line, first
+        XCTAssertEqual(model.plan,
+                       .renderState(.closedUnderTab(reason: officeDocumentClosedUnderTabReason)),
+                       "not vacuous: the vanish was detected and the gate re-armed, exactly as it "
+                       + "would be for the broker's own close — the two are indistinguishable here")
+        PanelDocumentTabModels.discard(tabId: "t1")     // and its own next line, second
+
+        let reopened = await waitUntil(timeout: 0.5) { office.openCalls.count > 1 }
+        XCTAssertFalse(reopened, "closing the tab must never reopen the document — that would leave "
+                       + "it open on the helper with no tab watching it")
+        XCTAssertNil(runtime?.stateSnapshot.documents[realAPath], "and it must stay closed")
+    }
+
+    /// **The other thing this fix could newly break: a session hop is not a vanish.** A departure
+    /// and return mints a FRESH `OfficeRuntime`, so a returning tab sees no document at its path —
+    /// and must read that as "booting again", never as "somebody closed my document". This is what
+    /// the runtime-identity reset (moved above the `openFailures` guard) buys.
+    func testAFreshRuntimeAfterASessionHopIsBootingNotAVanish() async {
+        let (office1, office2) = (DocumentOfficeDriverRecorder(stateDirectory: stateDir),
+                                  DocumentOfficeDriverRecorder(stateDirectory: stateDir))
+        doubles.append(contentsOf: [office1, office2])
+        let host = makeHost(office: office1, perSession: ["S1": office1, "S2": office2])
+        let model = PanelDocumentTabModel(tabId: "t1", path: realAPath)
+        model.bind(host: host, sessionId: "S1")
+        model.activate()
+        _ = await waitUntil { office1.openCalls.count == 1 }
+        let landed = await waitUntil { model.runtime?.stateSnapshot.documents[realAPath] != nil }
+        XCTAssertTrue(landed, "setup: the document never opened on S1's runtime")
+
+        // The same MODEL re-pointed at a different session, i.e. a different runtime instance —
+        // the shape `bind` is built for, and the one that would look like a vanish if the identity
+        // reset did not clear this tab's memory of S1's document.
+        model.bind(host: host, sessionId: "S2")
+        model.activate()
+        _ = await waitUntil { office2.openCalls.count == 1 }
+
+        XCTAssertNotEqual(model.plan,
+                          .renderState(.closedUnderTab(reason: officeDocumentClosedUnderTabReason)),
+                          "a fresh runtime has shown this tab nothing — that is booting, not a loss")
     }
 
     // MARK: - The part-strip door

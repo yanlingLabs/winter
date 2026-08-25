@@ -607,9 +607,9 @@ export const PanelTabNavigatedEvent = Base.extend({
   title: z.string().max(PANEL_TITLE_MAX_LENGTH),
 });
 
-/** B2 Task 2: the agent's nine browser verbs, in one place so the TS producer, the app's consumer
- *  and the tool schema all name the same set. Plan A shipped this enum one-valued (`navigate`) with
- *  no producer at all; B2 gives the agent hands.
+/** B2 Task 2: the agent's browser verbs, in one place so the TS producer, the app's consumer and the
+ *  tool schema all name the same set. Plan A shipped this enum one-valued (`navigate`) with no
+ *  producer at all; B2 gives the agent hands.
  *
  *  Split by capability, because the per-mode tool registry depends on the split (spec §1): the READ
  *  set — `navigate`, `back`, `read`, `screenshot` (plus the tab verbs, which are RPCs and never
@@ -632,9 +632,61 @@ export const PanelTabNavigatedEvent = Base.extend({
  *  which resolves through ONE predicate that both `specs()`/`specFor()` (what the model is shown) and
  *  `execute()` (what is accepted) call. A chat session that named an INTERACT verb anyway — a
  *  provider ignoring the advertised schema — is rejected at argument validation, before the tool's
- *  own code runs and long before anything is emitted onto this channel. */
-export const PANEL_COMMAND_ACTIONS = [
+ *  own code runs and long before anything is emitted onto this channel.
+ *
+ *  **office-agent-tools T1 renamed this array from `PANEL_COMMAND_ACTIONS` to
+ *  `BROWSER_COMMAND_ACTIONS`** — its membership is UNCHANGED, only its name and what composes it
+ *  into the wire enum did. See `OFFICE_COMMAND_ACTIONS` and `PANEL_COMMAND_ACTIONS` below: the wire
+ *  field now carries two tool families' verbs, and this is the browser family's half. */
+export const BROWSER_COMMAND_ACTIONS = [
   "navigate", "back", "read", "screenshot", "click", "type", "scroll", "submit", "wait",
+] as const;
+
+/** office-agent-tools T1 (design `docs/superpowers/specs/2026-08-22-office-agent-tools-design.md`
+ *  §1, §2, §6) — the `sheets`/`slides`/`docs` tools' verbs, riding the SAME `panel_command` bridge B2
+ *  built for the browser (§1: "Stage C does not move either [the daemon/app split]: it reuses the
+ *  bridge the browser tool already established"). **T1 builds only the wire and a routing shell that
+ *  refuses every one of them** — no `sheets`/`slides`/`docs` tool exists yet to dispatch them, and no
+ *  verb below does anything on the app side beyond a structured "not implemented yet"
+ *  (`OfficeCommandConsumer.swift`). Later tasks give each verb real behaviour without touching this
+ *  list's membership — the point of shipping the full list now is that later tasks add BEHAVIOUR,
+ *  never a new wire value.
+ *
+ *  **Namespaced, flat strings** — `office.<kind>.<verb>`. Flat because this field is (and stays) a
+ *  string enum; namespaced so the app's routing switch and `OFFICE_DEADLINES_MS`
+ *  (`packages/core/src/panel/office-commands.ts`) read obviously and so a future non-office command
+ *  can never collide with one of these. Three kinds, mirroring spec §2's tables exactly:
+ *
+ *   - `sheets` (11): info, read, set, insert_rows, insert_cols, delete_rows, delete_cols, add_sheet,
+ *     delete_sheet, rename_sheet, format
+ *   - `slides` (6): info, read, set_text, add_slide, delete_slide, reorder
+ *   - `docs` (5): info, read, replace, insert, append
+ *
+ *  Every kind's `info`/`read` are the read half — `info` doubles as the drivability probe, spec §1 —
+ *  everything else writes and saves immediately (spec §3 step 4). `OFFICE_DEADLINES_MS` sizes the
+ *  two halves differently and says why. */
+export const OFFICE_COMMAND_ACTIONS = [
+  "office.sheets.info", "office.sheets.read", "office.sheets.set",
+  "office.sheets.insert_rows", "office.sheets.insert_cols",
+  "office.sheets.delete_rows", "office.sheets.delete_cols",
+  "office.sheets.add_sheet", "office.sheets.delete_sheet", "office.sheets.rename_sheet",
+  "office.sheets.format",
+  "office.slides.info", "office.slides.read", "office.slides.set_text",
+  "office.slides.add_slide", "office.slides.delete_slide", "office.slides.reorder",
+  "office.docs.info", "office.docs.read", "office.docs.replace",
+  "office.docs.insert", "office.docs.append",
+] as const;
+
+/** The WIRE's whole verb enum for `panel_command.action` — every verb of every tool family that
+ *  rides this bridge, browser and office alike. Deliberately a SPREAD of the two family lists above
+ *  rather than a third hand-typed array: `packages/core/test/agent/tools/browser.test.ts` asserts
+ *  `BROWSER_DEADLINES_MS` covers `BROWSER_COMMAND_ACTIONS` exactly, and
+ *  `packages/core/test/panel/office-commands.test.ts` asserts the identical exact-equality tripwire
+ *  for `OFFICE_DEADLINES_MS` / `OFFICE_COMMAND_ACTIONS`. Both tripwires only stay meaningful if this
+ *  union is COMPOSED from the same two named constants they check against rather than re-typed —
+ *  re-typing it would let the three lists drift apart while every existing assertion stayed green. */
+export const PANEL_COMMAND_ACTIONS = [
+  ...BROWSER_COMMAND_ACTIONS, ...OFFICE_COMMAND_ACTIONS,
 ] as const;
 
 /** Cap on `panel_command.args`, measured as `Buffer.byteLength(JSON.stringify(args), "utf8")` —

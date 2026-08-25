@@ -115,11 +115,21 @@ struct _LibreOfficeKitClass
                      LibreOfficeKitWakeCallback pWakeCallback,
                      void* pData);
 
-    /// @see lok::Office::sendDialogEvent
-    void (*sendDialogEvent) (LibreOfficeKit* pThis,
-                            unsigned long long int nLOKWindowId,
-                            const char* pArguments);
-
+    // office-agent-tools T3 review (C1-split) — `sendDialogEvent` REMOVED from the OFFICE class,
+    // same evidence and mechanism as the document-class fix above: the compiled engine has no such
+    // member here either. dladdr-resolving the raw pointer this slot's old declared position read,
+    // on a REAL BOOTED kit (not a document — this struct's own instance, `LOKBridge.kit`), returned
+    // `lo_setOption` — the NEXT function this class declares — not any `lo_sendDialogEvent` symbol.
+    //
+    // **This one is NOT caught by a size-only tripwire, unlike the document class.** The document
+    // class had three NET phantom members (79 declared vs 78 real); this class had exactly ONE
+    // phantom (`sendDialogEvent`, here) AND was separately missing exactly one REAL tail member
+    // (`registerFileSaveDialogCallback`, added below) — the two cancel in COUNT (26 declared either
+    // way), so `MemoryLayout<LibreOfficeKitClass>.size` matched `pClass->nSize` (216 == 216) even
+    // WHILE genuinely misaligned. Confirmed live before fixing, not assumed: the boot-time size
+    // probe passed on the UNFIXED header. See `LOKBridge.init`'s own named-symbol tripwire, right
+    // after `self.kit` is set, for the guard that actually catches this class of drift — a size
+    // check structurally cannot.
     /// @see lok::Office::setOption
     void (*setOption) (LibreOfficeKit* pThis, const char* pOption, const char* pValue);
 
@@ -165,6 +175,15 @@ struct _LibreOfficeKitClass
 
     /// @see lok::Office::getDocsCount().
     int (*getDocsCount) (LibreOfficeKit* pThis);
+
+    // office-agent-tools T3 review (C1-split) — ADDED. The real compiled engine's tail member this
+    // vendored copy was missing (confirmed live: dladdr on the raw pointer at this class's own LAST
+    // declared position, before this fix, resolved to `lo_registerFileSaveDialogCallback`, not
+    // `lo_getDocsCount` — the header's own prior last member). See `sendDialogEvent`'s own removal
+    // above, in this same struct, for why the two together did not move `nSize`.
+    /// @see lok::Office::registerFileSaveDialogCallback()
+    void (*registerFileSaveDialogCallback)(LibreOfficeKit* pThis,
+            LibreOfficeKitFileSaveDialogCallback pCallback);
 };
 
 #define LIBREOFFICEKIT_DOCUMENT_HAS(pDoc,member) LIBREOFFICEKIT_HAS_MEMBER(LibreOfficeKitDocumentClass,member,(pDoc)->pClass->nSize)
@@ -458,11 +477,16 @@ struct _LibreOfficeKitDocumentClass
                                int nBefore,
                                int nAfter);
 
-    /// @see lok::Document::sendDialogEvent
-    void (*sendDialogEvent) (LibreOfficeKitDocument* pThis,
-                            unsigned long long int nLOKWindowId,
-                            const char* pArguments);
-
+    // office-agent-tools T3 review (C1) — `sendDialogEvent` REMOVED. This build's actual compiled
+    // engine (`libmergedlo.dylib`/`libsclo.dylib`) has no such member: dladdr-resolving the RAW
+    // function pointer this bridge read through this slot's old declared position, on a real open
+    // document, returned `doc_renderFontOrientation` — the NEXT function this header declares —
+    // not any `doc_sendDialogEvent` symbol (which does not exist anywhere in this dylib). Declaring
+    // a phantom member here shifted every subsequent field's computed offset one pointer-width past
+    // where the real engine actually put it, for as long as this header has existed uncorrected
+    // (Stage A, `807a8b78`) — see `LOKBridge.swift`'s `nSize` tripwire, right after `documentLoad`
+    // in `openOnDedicatedThread`, for the boot-time assertion that now catches this class of drift
+    // instead of a silent, wrong-function call.
     /// @see lok::Document::renderFontOrientation().
     unsigned char* (*renderFontOrientation) (LibreOfficeKitDocument* pThis,
                        const char* pFontName,
@@ -539,8 +563,10 @@ struct _LibreOfficeKitDocumentClass
     /// @see lok::Document::setViewReadOnly().
     void (*setViewReadOnly) (LibreOfficeKitDocument* pThis, int nId, const bool readOnly);
 
-    /// @see lok::Document::setAllowChangeComments().
-    void (*setAllowChangeComments) (LibreOfficeKitDocument* pThis, int nId, const bool allow);
+    // office-agent-tools T3 review (C1) — `setAllowChangeComments` REMOVED, same evidence and
+    // mechanism as `sendDialogEvent`'s removal above: dladdr on the raw pointer this slot's old
+    // position read resolved to `doc_getPresentationInfo` (the NEXT declared field), and no
+    // `doc_setAllowChangeComments` symbol exists anywhere in this dylib's resolved trace.
 
     /// @see lok::Document::getPresentationInfo
     char* (*getPresentationInfo) (LibreOfficeKitDocument* pThis);
@@ -565,8 +591,21 @@ struct _LibreOfficeKitDocumentClass
     /// @see lok::Document::setColorPreviewState().
     void (*setColorPreviewState) (LibreOfficeKitDocument* pThis, int nId, bool nEnabled);
 
-    /// @see lok::Document::setAllowManageRedlines().
-    void (*setAllowManageRedlines)(LibreOfficeKitDocument* pThis, int nId, bool allow);
+    // office-agent-tools T3 review (C1) — `setAllowManageRedlines` REMOVED, same evidence and
+    // mechanism as the two removals above: this was the LAST declared member, and dladdr on the raw
+    // pointer its old position read resolved to nil (past the real struct's populated region,
+    // `nSize` bytes from the start) — no `doc_setAllowManageRedlines` symbol exists in this dylib.
+    //
+    // **Verified end to end, not just at this one edit.** After all three removals
+    // (`sendDialogEvent`, `setAllowChangeComments`, this one), every one of this struct's 78
+    // remaining members — read individually, live, via `pClass->pointee.<name>` on a real open
+    // document, and resolved through `dladdr` back to a symbol name — names EXACTLY the function the
+    // compiled engine actually put there: `doc_<sameName>`, with zero exceptions and zero omissions.
+    // `MemoryLayout<LibreOfficeKitDocumentClass>.size` (648 bytes with two of the three phantoms
+    // still present, 656 with all three) now equals the engine's own self-reported `pClass->nSize`
+    // (632 bytes)
+    // exactly — the tripwire right after `documentLoad` in `LOKBridge.openOnDedicatedThread` asserts
+    // this on every document open, not just this one investigation.
 
 #endif // defined LOK_USE_UNSTABLE_API || defined LIBO_INTERNAL_ONLY
 };

@@ -69,6 +69,36 @@ describe("PermissionGate v1", () => {
   // READ_ONLY, same class as bash/write/edit: ask under `ask`, allow under `auto`, denied outright
   // under `plan` (plan mode's whole point is "nothing mutates until the plan is approved" — that
   // must include "nothing gets SCHEDULED to mutate later" too).
+  // office-agent-tools T4: `sheets` moves from READ_ONLY (T3, info/read only) to MUTATING now that
+  // it also has write verbs (set/insert_rows/…) — gate.ts classifies by TOOL NAME, not by verb, so
+  // there is no way to keep info/read free while gating the write verbs on the SAME name. Same
+  // precedent as `notebook_edit` (a structured-document editor riding plain MUTATING, not its own
+  // carve-out) — not `schedule`'s "one tool, one gate decision" framing, which is about a
+  // deliberately-uniform op set, not a read/write MIX. The disclosed cost: `info`/`read` now ask
+  // under `ask`/`dont-ask` and deny under `plan` too, even though neither one mutates anything — a
+  // deliberate, name-keyed consequence, not an oversight (task-4-report.md states this plainly).
+  test("sheets is mutating (T4): ask under ask-policy, allow under auto-policy, denied under plan — including its own read verbs, by name-keyed design", () => {
+    expect(gate.evaluate("sheets", "ask")).toBe("ask");
+    expect(gate.evaluate("sheets", "auto")).toBe("allow");
+    expect(gate.evaluate("sheets", "plan")).toBe("deny");
+  });
+
+  // office-agent-tools T6: `slides` joins `sheets` in MUTATING — identical reasoning (a mixed
+  // read/write verb set on one name, gate.ts still name-keyed not verb-keyed), not re-derived here.
+  test("slides is mutating (T6): ask under ask-policy, allow under auto-policy, denied under plan — including its own read verbs, by name-keyed design", () => {
+    expect(gate.evaluate("slides", "ask")).toBe("ask");
+    expect(gate.evaluate("slides", "auto")).toBe("allow");
+    expect(gate.evaluate("slides", "plan")).toBe("deny");
+  });
+
+  // office-agent-tools T7: `docs` joins them — identical reasoning again.
+  test("docs is mutating (T7): ask under ask-policy, allow under auto-policy, denied under plan", () => {
+    expect(gate.evaluate("docs", "ask")).toBe("ask");
+    expect(gate.evaluate("docs", "auto")).toBe("allow");
+    expect(gate.evaluate("docs", "plan")).toBe("deny");
+    expect(gate.evaluate("docs", "bypass")).toBe("allow");
+  });
+
   test("schedule is mutating: ask under ask-policy, allow under auto-policy, denied under plan", () => {
     expect(gate.evaluate("schedule", "ask")).toBe("ask");
     expect(gate.evaluate("schedule", "auto")).toBe("allow");
@@ -281,8 +311,9 @@ describe("PermissionGate v1", () => {
       "read", "glob", "grep", "ls", "bash_output", "Skill", "ToolSearch", "ask_user", "AskQuestion", "task_create", "task_update", "task_list", "task_get", "exit_plan_mode", "enter_plan_mode", "spawn_agent", "send_message", "task_stop", "agent_list", "agent_output", "lsp", "push_notification",
       // MUTATING ("Workflow" excluded — see this test's own doc comment above). B2-T7 adds
       // "session_spawn" (see gate.ts's own entry for why MUTATING and not READ_ONLY beside
-      // spawn_agent).
-      "write", "edit", "bash", "notebook_edit", "enter_worktree", "exit_worktree", "computer", "schedule", "session_spawn",
+      // spawn_agent). office-agent-tools T4 adds "sheets" (moved from READ_ONLY — see the dedicated
+      // test above). office-agent-tools T6 adds "slides" (same reasoning as sheets).
+      "write", "edit", "bash", "notebook_edit", "enter_worktree", "exit_worktree", "computer", "schedule", "session_spawn", "sheets", "slides", "docs",
       // NETWORK + externals (B1-T5 adds "Search"; B2-T2 "ReadPage"; B2-T6 "browser"; B2-T7 the two
       // MCP resource tools — this list's claim to enumerate every member had gone stale by four
       // names, which is the same drift the new COMPLETENESS pin in mode-toolset-census.test.ts

@@ -21,10 +21,13 @@ final class EditorTabTests: XCTestCase {
 
     // MARK: - Fixtures
 
-    /// Every double a live `EditorRuntime` reaches through an `[unowned self]` closure, held for the
-    /// whole test — `ShellSessionHostTests` measured this as a real crash, not a hypothetical: the
-    /// recorders hand out closure structs that capture themselves unowned, and one a test never
-    /// mentions again is released at its local's last use.
+    /// Every double a live `EditorRuntime` reaches through a closure, held for the whole test.
+    /// crash-fix round 1 (broker-crash-investigation.md §2): these recorders' closures now capture
+    /// `[weak self]`, not `[unowned self]` — `ShellSessionHostTests` measured the old shape as a
+    /// real crash, not a hypothetical, so a recorder a test never mentions again used to abort the
+    /// process the moment a straggler `Task` read it after release. Now it would only silently
+    /// no-op instead, but holding every double here for the whole test still matters: a dropped
+    /// call is a wrong/flaky assertion, not a crash, and just as worth avoiding.
     private var doubles: [AnyObject] = []
     private var runtimes: [EditorRuntime] = []
 

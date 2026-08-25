@@ -1,0 +1,762 @@
+import { describe, expect, test } from "bun:test";
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { OFFICE_DEADLINES_MS } from "../../../src/panel/office-commands";
+import { ToolRegistry, type ToolContext } from "../../../src/agent/tools/registry";
+import { registerSheetsTool, officeTimeoutMessage, type SheetsToolDeps } from "../../../src/agent/tools/sheets";
+import type { PanelCommandOutcome } from "../../../src/panel/commands";
+import type { SessionDirs } from "../../../src/sessions/dirs";
+import { PermissionGate } from "../../../src/agent/gate";
+
+/**
+ * office-agent-tools T3 — the `sheets` daemon tool, through a FAKE registry recorder rather than a
+ * live daemon (same posture `browser.test.ts` takes, spec §9: "the daemon tool [is tested] through
+ * the fake transport, end-to-end only at the live gate" — the live gate here is the Swift-side live
+ * drills task-3-report.md documents against real fixtures).
+ */
+
+const SID = "s-sheets";
+const WORKDIR = "/repo";
+
+interface Recorded {
+  sessionId: string;
+  action: string;
+  args?: Record<string, unknown>;
+  deadlineMs: number;
+}
+
+interface Harness {
+  deps: SheetsToolDeps;
+  recorded: Recorded[];
+  registry: ToolRegistry;
+  outcome: (cmd: Recorded) => Promise<PanelCommandOutcome>;
+  run(args: unknown, ctx?: Partial<ToolContext>): Promise<{ output: string; isError: boolean }>;
+}
+
+function makeHarness(opts?: {
+  dirs?: SessionDirs;
+  harnesses?: Array<{ clientName: string; role?: string | null }>;
+}): Harness {
+  const recorded: Recorded[] = [];
+  const h: Harness = {
+    recorded,
+    outcome: async () => ({ kind: "result", ok: true, result: "did it" }),
+    registry: new ToolRegistry(),
+    deps: {
+      dispatch(cmd) {
+        const rec: Recorded = { sessionId: cmd.sessionId, action: cmd.action, args: cmd.args, deadlineMs: cmd.deadlineMs };
+        recorded.push(rec);
+        return { commandId: `pcmd_${recorded.length}`, settled: h.outcome(rec) };
+      },
+      harnesses: () => opts?.harnesses ?? [{ clientName: "orb", role: "harness" }],
+      dirsOf: () => opts?.dirs ?? [{ path: WORKDIR, locked: true }],
+    },
+    async run(args, ctx) {
+      return h.registry.execute("sheets", args, {
+        cwd: WORKDIR, roots: [WORKDIR], sessionId: SID, mode: "code",
+        ...ctx,
+      } as ToolContext);
+    },
+  };
+  registerSheetsTool(h.registry, h.deps);
+  return h;
+}
+
+// ================================================================================================
+// Registration — the brief's own explicit pin
+// ================================================================================================
+
+describe("registration", () => {
+  test("modes is exactly [\"code\", \"dispatch\"] — never chat", () => {
+    const h = makeHarness();
+    expect(h.registry.namesForMode("code").has("sheets")).toBe(true);
+    expect(h.registry.namesForMode("dispatch").has("sheets")).toBe(true);
+    expect(h.registry.namesForMode("chat").has("sheets")).toBe(false);
+  });
+
+  // office-agent-tools T3 review (I6), T4 update, T5 update — `sheets`' verb enum is pinned
+  // literally, rendered through the SAME z.toJSONSchema path a real model actually sees
+  // (ToolRegistry.specFor), not a raw zod import that could drift from what's really offered. T3
+  // warned that gate.ts's READ_ONLY classification was name-keyed and would need revisiting the day
+  // a write verb landed — T4 did that (gate.ts now classifies `sheets` MUTATING; see gate.test.ts's
+  // own dedicated test). T5 adds `format`, the LAST verb this tool will ever register in Stage C —
+  // the day the enum grows again (a future stage, not T5), it fails here first, before a new verb
+  // ships without its own operand validation/gate audit.
+  test("the verb enum is exactly the 11 verbs T3+T4+T5 shipped", () => {
+    const h = makeHarness();
+    const spec = h.registry.specFor("sheets", WORKDIR, "code");
+    const parameters = spec?.parameters as { properties?: { verb?: { enum?: string[] } } } | undefined;
+    const verbEnum = parameters?.properties?.verb?.enum;
+    expect(verbEnum).toEqual([
+      "info", "read", "set",
+      "insert_rows", "insert_cols", "delete_rows", "delete_cols",
+      "add_sheet", "delete_sheet", "rename_sheet",
+      "format",
+    ]);
+  });
+
+  // office-agent-tools T4 — the companion half of the guard above: the day a verb lands here, it
+  // must ALSO be reflected in gate.ts's classification. Since gate.ts classifies by TOOL NAME (not
+  // verb), this is a single assertion rather than one per verb — but it is what actually closes the
+  // loop the I6 comment above promises, rather than merely restating the enum.
+  test("sheets is classified MUTATING in gate.ts, not READ_ONLY — every verb, including info/read, pays this now", () => {
+    const gate = new PermissionGate();
+    expect(gate.evaluate("sheets", "ask")).toBe("ask");
+    expect(gate.evaluate("sheets", "plan")).toBe("deny");
+  });
+});
+
+// ================================================================================================
+// info
+// ================================================================================================
+
+describe("info", () => {
+  test("dispatches office.sheets.info with just path, at its own deadline", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "info", path: `${WORKDIR}/budget.xlsx` });
+    expect(result.isError).toBe(false);
+    expect(h.recorded).toEqual([{
+      sessionId: SID, action: "office.sheets.info",
+      args: { path: `${WORKDIR}/budget.xlsx` },
+      deadlineMs: OFFICE_DEADLINES_MS["office.sheets.info"],
+    }]);
+  });
+
+  test("a missing path is malformed and refused by zod, before dispatch", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "info" });
+    expect(result.isError).toBe(true);
+    expect(h.recorded).toEqual([]);
+  });
+});
+
+// ================================================================================================
+// read
+// ================================================================================================
+
+describe("read", () => {
+  test("dispatches office.sheets.read with path/sheet/range/formulas, at its own deadline", async () => {
+    const h = makeHarness();
+    const result = await h.run({
+      verb: "read", path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1", range: "A1:C10", formulas: true,
+    });
+    expect(result.isError).toBe(false);
+    expect(h.recorded).toEqual([{
+      sessionId: SID, action: "office.sheets.read",
+      args: { path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1", range: "A1:C10", formulas: true },
+      deadlineMs: OFFICE_DEADLINES_MS["office.sheets.read"],
+    }]);
+  });
+
+  test("formulas defaults to false when absent — the one genuinely optional operand", async () => {
+    const h = makeHarness();
+    await h.run({ verb: "read", path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1", range: "A1" });
+    expect(h.recorded[0]?.args).toEqual({ path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1", range: "A1", formulas: false });
+  });
+
+  test("a missing sheet is malformed and refused, before dispatch", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "read", path: `${WORKDIR}/budget.xlsx`, range: "A1" });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("sheet");
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("a missing range is malformed and refused, before dispatch", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "read", path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1" });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("range");
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("a range that does not even LOOK like A1 notation is refused before dispatch — no round trip for an obviously bad string", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "read", path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1", range: "not a range" });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("not a range");
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("a single cell is a legal range shape", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "read", path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1", range: "B2" });
+    expect(result.isError).toBe(false);
+    expect(h.recorded).toHaveLength(1);
+  });
+
+  // T5 fix round, review Critical-1 — these four are a CRASH regression test, not a tidiness one.
+  // Every one of these strings used to reach the Mac app and ABORT it (measured SIGTRAPs, see
+  // task-5-fixround-report.md §2): 14 letters overflowed `officeColumnIndex`'s `value * 26`, and an
+  // Int.max row overflowed `OfficeCellRange.cellCount` one line later. The app-side guards are the
+  // real fix; this daemon-side shape bound turns a 155-second silent timeout into an immediate,
+  // specific refusal.
+  test("a column reference longer than three letters is refused before dispatch — the app-abort vector", async () => {
+    const h = makeHarness();
+    for (const range of ["ZZZZZZZZZZZZZZ1", "AAAAAAAAAAAAAA1", "XFDA1", "A1:AAAAAAAAAAAAAA4"]) {
+      const result = await h.run({ verb: "read", path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1", range });
+      expect(result.isError).toBe(true);
+      expect(h.recorded).toEqual([]);
+    }
+  });
+
+  test("a row number longer than seven digits is refused before dispatch — the OTHER app-abort vector", async () => {
+    const h = makeHarness();
+    for (const range of ["A1:B9223372036854775807", "A12345678", "A1:B99999999"]) {
+      const result = await h.run({ verb: "read", path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1", range });
+      expect(result.isError).toBe(true);
+      expect(h.recorded).toEqual([]);
+    }
+  });
+
+  // The bounds are LEXICAL, never Calc's real grid — deliberately. An out-of-grid reference must
+  // still be expressible so the engine's own position verification is the thing that refuses it;
+  // OfficeSheetsFormatTests' position-verification drill rides exactly this vector, and a grid
+  // bound here would silently delete the only non-mutant way to prove that check is real.
+  test("three letters and seven digits still pass even PAST Calc's real grid — XFE1 and D9999999 stay expressible", async () => {
+    for (const range of ["XFE1", "D9999999", "XFD1048576"]) {
+      const h = makeHarness();
+      const result = await h.run({ verb: "read", path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1", range });
+      expect(result.isError).toBe(false);
+      expect(h.recorded).toHaveLength(1);
+    }
+  });
+});
+
+// ================================================================================================
+// set (T4) — a single `values` grid, content-driven formula detection (this file's own header)
+// ================================================================================================
+
+describe("set", () => {
+  test("dispatches office.sheets.set via the dedicated typed builder, at its own deadline", async () => {
+    const h = makeHarness();
+    const result = await h.run({
+      verb: "set", path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1", range: "A1:B1",
+      values: [["hello", 42]],
+    });
+    expect(result.isError).toBe(false);
+    expect(h.recorded).toEqual([{
+      sessionId: SID, action: "office.sheets.set",
+      args: { path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1", range: "A1:B1", values: [["hello", 42]] },
+      deadlineMs: OFFICE_DEADLINES_MS["office.sheets.set"],
+    }]);
+  });
+
+  test("a missing sheet is malformed and refused, before dispatch", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "set", path: `${WORKDIR}/budget.xlsx`, range: "A1", values: [["x"]] });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("sheet");
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("a missing range is malformed and refused, before dispatch", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "set", path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1", values: [["x"]] });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("range");
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("a missing values is malformed and refused, before dispatch", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "set", path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1", range: "A1" });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("values");
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("a ragged (non-rectangular) grid is refused, before dispatch", async () => {
+    const h = makeHarness();
+    const result = await h.run({
+      verb: "set", path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1", range: "A1:B2",
+      values: [["a", "b"], ["c"]],
+    });
+    expect(result.isError).toBe(true);
+    expect(result.output.toLowerCase()).toContain("rectangular");
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("an embedded tab in a cell is refused, before dispatch — write to one cell at a time instead", async () => {
+    const h = makeHarness();
+    const result = await h.run({
+      verb: "set", path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1", range: "A1", values: [["a\tb"]],
+    });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("tab");
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("an embedded newline in a cell is refused, before dispatch", async () => {
+    const h = makeHarness();
+    const result = await h.run({
+      verb: "set", path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1", range: "A1", values: [["a\nb"]],
+    });
+    expect(result.isError).toBe(true);
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("a grid past sheetsSetMaxCells is refused outright, before dispatch", async () => {
+    const h = makeHarness();
+    const row = Array.from({ length: 201 }, (_, i) => i);
+    const result = await h.run({
+      verb: "set", path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1", range: "A1:GS1", values: [row],
+    });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("201 cells");
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("values may carry a formula string — the tool never distinguishes it from a plain value at this layer", async () => {
+    const h = makeHarness();
+    const result = await h.run({
+      verb: "set", path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1", range: "A1", values: [["=1+1"]],
+    });
+    expect(result.isError).toBe(false);
+    expect(h.recorded[0]?.args).toEqual({
+      path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1", range: "A1", values: [["=1+1"]],
+    });
+  });
+});
+
+// ================================================================================================
+// insert_rows / insert_cols / delete_rows / delete_cols (T4)
+// ================================================================================================
+
+describe("resize verbs", () => {
+  test("insert_rows dispatches office.sheets.insert_rows with sheet/at/count", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "insert_rows", path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", at: 3, count: 2 });
+    expect(result.isError).toBe(false);
+    expect(h.recorded).toEqual([{
+      sessionId: SID, action: "office.sheets.insert_rows",
+      args: { path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", at: 3, count: 2 },
+      deadlineMs: OFFICE_DEADLINES_MS["office.sheets.insert_rows"],
+    }]);
+  });
+
+  // Fix-round review (item 4) — `at` for a row verb is documented-legal as EITHER a JSON number OR
+  // a digit-only JSON string (the validation below coerces via `String(a.at)` against a regex, never
+  // requiring `typeof a.at === "number"`) — and passes the ORIGINAL value through UNCHANGED, never
+  // normalized to a number, so the app-side consumer must accept a string "3" too (a real gap this
+  // review round found and fixed on the Swift side — see OfficeCommandConsumerTests.swift).
+  test("a row verb's `at` may be a digit-only STRING, not just a number — documented-legal, passed through unchanged", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "insert_rows", path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", at: "3", count: 2 });
+    expect(result.isError).toBe(false);
+    expect(h.recorded[0]?.args).toEqual({ path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", at: "3", count: 2 });
+  });
+
+  test("delete_cols dispatches office.sheets.delete_cols with sheet/at/count, at as letters", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "delete_cols", path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", at: "C", count: 2 });
+    expect(result.isError).toBe(false);
+    expect(h.recorded[0]?.args).toEqual({ path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", at: "C", count: 2 });
+  });
+
+  test("a row verb's `at` must be a positive integer row number, not letters", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "insert_rows", path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", at: "C", count: 1 });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("row number");
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("a column verb's `at` must be letters, not a number", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "insert_cols", path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", at: 3, count: 1 });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("column letters");
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("a missing count is malformed and refused, before dispatch", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "delete_rows", path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", at: 1 });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("count");
+    expect(h.recorded).toEqual([]);
+  });
+
+  // T5 fix round, review Critical-1's sweep — `at: 1e30` and `count: Int.max` each ABORTED the Mac
+  // app (measured SIGTRAPs, task-5-fixround-report.md §2): the first inside `Int(Double)`, which
+  // traps outside Int's range, the second inside `at + count - 1`. `z.number().int().positive()`
+  // was never a bound — `Number.isInteger(1e30)` is `true`.
+  test("an absurd `at` or `count` is refused before dispatch — the resize app-abort vectors", async () => {
+    for (const args of [{ at: 1e30, count: 1 }, { at: 1, count: 9223372036854775807 },
+                        { at: 1, count: 1e30 }, { at: 10_000_000, count: 1 }]) {
+      const h = makeHarness();
+      const result = await h.run({ verb: "insert_rows", path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", ...args });
+      expect(result.isError).toBe(true);
+      expect(h.recorded).toEqual([]);
+    }
+  });
+
+  test("a missing sheet is malformed and refused, before dispatch", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "insert_rows", path: `${WORKDIR}/b.xlsx`, at: 1, count: 1 });
+    expect(result.isError).toBe(true);
+    expect(h.recorded).toEqual([]);
+  });
+});
+
+// ================================================================================================
+// add_sheet / delete_sheet / rename_sheet (T4) — `name`/`newName`, no `sheet` operand
+// ================================================================================================
+
+describe("sheet management verbs", () => {
+  test("add_sheet dispatches office.sheets.add_sheet with just name (no `sheet`, no position)", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "add_sheet", path: `${WORKDIR}/b.xlsx`, name: "Q3" });
+    expect(result.isError).toBe(false);
+    expect(h.recorded).toEqual([{
+      sessionId: SID, action: "office.sheets.add_sheet",
+      args: { path: `${WORKDIR}/b.xlsx`, name: "Q3" },
+      deadlineMs: OFFICE_DEADLINES_MS["office.sheets.add_sheet"],
+    }]);
+  });
+
+  test("add_sheet without a name is malformed and refused, before dispatch", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "add_sheet", path: `${WORKDIR}/b.xlsx` });
+    expect(result.isError).toBe(true);
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("delete_sheet dispatches office.sheets.delete_sheet with name", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "delete_sheet", path: `${WORKDIR}/b.xlsx`, name: "Sheet2" });
+    expect(result.isError).toBe(false);
+    expect(h.recorded[0]?.args).toEqual({ path: `${WORKDIR}/b.xlsx`, name: "Sheet2" });
+  });
+
+  test("rename_sheet dispatches office.sheets.rename_sheet with name+newName", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "rename_sheet", path: `${WORKDIR}/b.xlsx`, name: "Sheet1", newName: "Revenue" });
+    expect(result.isError).toBe(false);
+    expect(h.recorded[0]?.args).toEqual({ path: `${WORKDIR}/b.xlsx`, name: "Sheet1", newName: "Revenue" });
+  });
+
+  test("rename_sheet without newName is malformed and refused, before dispatch", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "rename_sheet", path: `${WORKDIR}/b.xlsx`, name: "Sheet1" });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("newName");
+    expect(h.recorded).toEqual([]);
+  });
+});
+
+// ================================================================================================
+// format (T5) — the verb the human formatting UI will share
+// ================================================================================================
+
+describe("format", () => {
+  test("dispatches office.sheets.format with sheet/range and one attribute", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "format", path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", range: "A1:C10", bold: true });
+    expect(result.isError).toBe(false);
+    expect(h.recorded).toEqual([{
+      sessionId: SID, action: "office.sheets.format",
+      args: { path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", range: "A1:C10", bold: true },
+      deadlineMs: OFFICE_DEADLINES_MS["office.sheets.format"],
+    }]);
+  });
+
+  test("dispatches all five attributes together when all five are given", async () => {
+    const h = makeHarness();
+    const result = await h.run({
+      verb: "format", path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", range: "A1:C10",
+      bold: true, italic: false, numberFormat: "percent", align: "center", width: 72,
+    });
+    expect(result.isError).toBe(false);
+    expect(h.recorded[0]?.args).toEqual({
+      path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", range: "A1:C10",
+      bold: true, italic: false, numberFormat: "percent", align: "center", width: 72,
+    });
+  });
+
+  test("numberFormat must be one of the closed presets — an unrecognized value is malformed and refused by zod", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "format", path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", range: "A1", numberFormat: "0.00%" });
+    expect(result.isError).toBe(true);
+    expect(h.recorded).toEqual([]);
+  });
+
+  // The absent-key contract this verb's whole design rests on (spec: "an absent key means leave
+  // alone, never reset to default") — pinned here at the WIRE level: an operand the caller never
+  // named must not merely be `undefined` in some intermediate object, it must not be a KEY in the
+  // JSON `args` sent over the wire at all, since JSON has no way to distinguish "present but
+  // undefined" from "absent" once serialized. If this test ever failed, `format` would be sending
+  // `{"italic": null}`-shaped noise (or, worse, a stray `undefined` a naive JSON encoder might drop
+  // ANYWAY, hiding a real bug) instead of a clean, absent key.
+  test("an attribute never named by the caller is not a key in args at all — not even as undefined/null", async () => {
+    const h = makeHarness();
+    await h.run({ verb: "format", path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", range: "A1", italic: true });
+    const args = h.recorded[0]?.args ?? {};
+    expect(Object.keys(args).sort()).toEqual(["italic", "path", "range", "sheet"]);
+    expect("bold" in args).toBe(false);
+    expect("numberFormat" in args).toBe(false);
+    expect("align" in args).toBe(false);
+    expect("width" in args).toBe(false);
+  });
+
+  // The other half of the absolute-state contract: `false` is a REAL, present instruction (turn
+  // this OFF), never confused with "absent" — the two must produce different wire shapes.
+  test("bold:false is a real, present instruction — distinct from omitting bold entirely", async () => {
+    const h = makeHarness();
+    await h.run({ verb: "format", path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", range: "A1", bold: false });
+    expect(h.recorded[0]?.args).toEqual({ path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", range: "A1", bold: false });
+  });
+
+  test("a missing sheet is malformed and refused, before dispatch", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "format", path: `${WORKDIR}/b.xlsx`, range: "A1", bold: true });
+    expect(result.isError).toBe(true);
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("a missing range is malformed and refused, before dispatch", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "format", path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", bold: true });
+    expect(result.isError).toBe(true);
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("a range that does not look like A1 notation is refused before dispatch", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "format", path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", range: "not a range", bold: true });
+    expect(result.isError).toBe(true);
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("naming none of bold/italic/numberFormat/align/width is refused, before dispatch — it would do nothing", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "format", path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", range: "A1" });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("at least one");
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("align must be left/center/right — an unrecognized value is malformed and refused by zod", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "format", path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", range: "A1", align: "justify" });
+    expect(result.isError).toBe(true);
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("width past the schema's own ceiling is refused by zod, before dispatch", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "format", path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", range: "A1", width: 100_000 });
+    expect(result.isError).toBe(true);
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("width must be positive — zero and negative are refused by zod", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "format", path: `${WORKDIR}/b.xlsx`, sheet: "Sheet1", range: "A1", width: 0 });
+    expect(result.isError).toBe(true);
+    expect(h.recorded).toEqual([]);
+  });
+});
+
+// ================================================================================================
+// The fence (spec §5) — and its precedence over reach
+// ================================================================================================
+
+describe("the fence", () => {
+  test("a path outside every working directory is refused, before dispatch", async () => {
+    const h = makeHarness({ dirs: [{ path: WORKDIR, locked: true }] });
+    const result = await h.run({ verb: "info", path: "/etc/passwd" });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("working directories");
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("no working directories at all refuses every path", async () => {
+    const h = makeHarness({ dirs: [] });
+    const result = await h.run({ verb: "info", path: `${WORKDIR}/budget.xlsx` });
+    expect(result.isError).toBe(true);
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("a relative path resolves against the primary working directory", async () => {
+    const h = makeHarness({ dirs: [{ path: WORKDIR, locked: true }] });
+    const result = await h.run({ verb: "info", path: "budget.xlsx" });
+    expect(result.isError).toBe(false);
+    expect(h.recorded[0]?.args?.path).toBe(`${WORKDIR}/budget.xlsx`);
+  });
+
+  test("a sibling directory that merely shares a string prefix is not inside the root", async () => {
+    const h = makeHarness({ dirs: [{ path: "/x/proj", locked: true }] });
+    const result = await h.run({ verb: "info", path: "/x/proj-evil/budget.xlsx" });
+    expect(result.isError).toBe(true);
+    expect(h.recorded).toEqual([]);
+  });
+
+  /**
+   * **Whole-branch review F4 (CRITICAL), the regression pin.** This runs against a REAL directory
+   * with a REAL `ln -s`, never a transcribed copy of the fence body — the arc's own lesson that "a
+   * standalone repro binary is only as good as the validation it transcribes" applies to a fence
+   * repro at least as much as to an overflow one.
+   *
+   * The hole: both fences did pure string work, so `<workdir>/link/secret.xlsx` string-matched the
+   * root and passed, while the kernel resolved `link` at write time and `placeAtomically`'s
+   * `rename()` landed the overwrite OUTSIDE every declared working directory — reported to the
+   * agent as success. Each side's comment named the OTHER as the hardened layer, and
+   * `resolveWithinAny` (the check both pointed at) is never called by any office tool.
+   */
+  test("a path through an in-root symlink that LEAVES the root is refused (F4)", async () => {
+    const base = mkdtempSync(join(tmpdir(), "office-fence-"));
+    const proj = join(base, "proj");
+    const outside = join(base, "outside");
+    mkdirSync(proj); mkdirSync(outside);
+    writeFileSync(join(outside, "secret.xlsx"), "x");
+    symlinkSync(outside, join(proj, "link"));
+
+    const h = makeHarness({ dirs: [{ path: proj, locked: true }] });
+    const result = await h.run({ verb: "info", path: join(proj, "link", "secret.xlsx") });
+
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("working directories");
+    // The load-bearing half: nothing was dispatched to the app at all.
+    expect(h.recorded).toEqual([]);
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  /** The other direction, so the fix cannot be an over-refusal that simply bans symlinks: a link
+   *  that stays INSIDE the root must still pass, and must dispatch the caller's own spelling (the
+   *  `resolveWithinAny` contract — containment is judged on the resolved destination, the RETURN
+   *  value stays the literal target, which is what keeps the broker's adopt-an-open-tab match on
+   *  the path the user actually opened). */
+  test("a path through an in-root symlink that STAYS inside the root still passes (F4 control)", async () => {
+    const base = mkdtempSync(join(tmpdir(), "office-fence-"));
+    const proj = join(base, "proj");
+    const sub = join(proj, "sub");
+    mkdirSync(proj); mkdirSync(sub);
+    writeFileSync(join(sub, "budget.xlsx"), "x");
+    symlinkSync(sub, join(proj, "link"));
+
+    const h = makeHarness({ dirs: [{ path: proj, locked: true }] });
+    const viaLink = join(proj, "link", "budget.xlsx");
+    const result = await h.run({ verb: "info", path: viaLink });
+
+    expect(result.isError).toBe(false);
+    expect(h.recorded[0]?.args?.path).toBe(viaLink);
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  test("a secondary (non-primary) working directory is in-fence too", async () => {
+    const h = makeHarness({ dirs: [{ path: WORKDIR, locked: true }, { path: "/granted", locked: false }] });
+    const result = await h.run({ verb: "info", path: "/granted/budget.xlsx" });
+    expect(result.isError).toBe(false);
+    expect(h.recorded[0]?.args?.path).toBe("/granted/budget.xlsx");
+  });
+
+  /** spec §5's own words, tested literally: "a probe outside the working dirs answers with the
+   *  fence refusal, not the app-not-running one." With NO harnesses attached AND an out-of-fence
+   *  path, the fence must win — reach is never even consulted. */
+  test("an out-of-fence path with the app not even running still gets the FENCE refusal, not \"app not running\"", async () => {
+    const h = makeHarness({ dirs: [{ path: WORKDIR, locked: true }], harnesses: [] });
+    const result = await h.run({ verb: "info", path: "/etc/passwd" });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("working directories");
+    expect(result.output).not.toContain("isn't showing this session");
+    expect(h.recorded).toEqual([]);
+  });
+
+  // office-agent-tools T4 — the fence applies identically to a WRITE verb (this file's own header:
+  // "v1 office tools, read or write, are working-directories-only"). Cheap defense-in-depth here;
+  // the live, Swift-side proof (both the app's own fence and the daemon's, agreeing) is the real
+  // one — see task-4-report.md.
+  test("a write verb is refused by the fence exactly like a read, before dispatch", async () => {
+    const h = makeHarness({ dirs: [{ path: WORKDIR, locked: true }] });
+    const result = await h.run({ verb: "set", path: "/etc/passwd", sheet: "Sheet1", range: "A1", values: [["x"]] });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("working directories");
+    expect(h.recorded).toEqual([]);
+  });
+});
+
+// ================================================================================================
+// Reach (spec §3 — info doubles as the drivability probe)
+// ================================================================================================
+
+describe("reach", () => {
+  test("no attached client at all refuses with a clear reason, before dispatch", async () => {
+    const h = makeHarness({ harnesses: [] });
+    const result = await h.run({ verb: "info", path: `${WORKDIR}/budget.xlsx` });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("isn't showing this session");
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("only a phone/terminal attached (no panel-hosting client) refuses, before dispatch", async () => {
+    const h = makeHarness({ harnesses: [{ clientName: "cli-abc", role: "harness" }] });
+    const result = await h.run({ verb: "read", path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1", range: "A1" });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("cli-abc");
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("a remote (phone) role does not count as a panel host", async () => {
+    const h = makeHarness({ harnesses: [{ clientName: "orb", role: "remote" }] });
+    const result = await h.run({ verb: "info", path: `${WORKDIR}/budget.xlsx` });
+    expect(result.isError).toBe(true);
+    expect(h.recorded).toEqual([]);
+  });
+});
+
+// ================================================================================================
+// Outcomes — timeout (OUTCOME UNKNOWN, never "failed"), ok:false, ok:true
+// ================================================================================================
+
+describe("outcomes", () => {
+  test("a timeout says OUTCOME UNKNOWN, never that the read failed — and Task 4 inherits this exact wording", async () => {
+    const h = makeHarness();
+    h.outcome = async () => ({ kind: "timeout", deadlineMs: OFFICE_DEADLINES_MS["office.sheets.info"] });
+    const result = await h.run({ verb: "info", path: `${WORKDIR}/budget.xlsx` });
+    expect(result.isError).toBe(true);
+    expect(result.output.toLowerCase()).toContain("unknown");
+    // The word "failed" legitimately appears in a NEGATING clause ("don't act as if it failed") —
+    // the claim this pins is "never asserts failure as fact," not "never uses the word."
+    expect(result.output.toLowerCase()).toContain("not a failure");
+    expect(result.output.toLowerCase()).not.toContain("this failed");
+    expect(result.output.toLowerCase()).not.toContain("did not happen");
+    expect(result.output).toBe(officeTimeoutMessage("sheets info", OFFICE_DEADLINES_MS["office.sheets.info"]));
+  });
+
+  test("officeTimeoutMessage never claims the outcome is known — pinned literally so Task 4's write verbs inherit the same guarantee, not just the same function name", () => {
+    const message = officeTimeoutMessage("sheets set", 12_345);
+    expect(message).toContain("UNKNOWN");
+    expect(message.toLowerCase()).not.toContain("did not happen");
+    expect(message.toLowerCase()).not.toContain("this failed");
+    expect(message.toLowerCase()).toContain("never retry blindly");
+  });
+
+  test("an app-reported failure (ok:false) surfaces the app's own reason, unedited", async () => {
+    const h = makeHarness();
+    h.outcome = async () => ({ kind: "result", ok: false, result: "no sheet named \"Nope\" — this workbook has: Sheet1" });
+    const result = await h.run({ verb: "read", path: `${WORKDIR}/budget.xlsx`, sheet: "Nope", range: "A1" });
+    expect(result.isError).toBe(true);
+    expect(result.output).toBe("no sheet named \"Nope\" — this workbook has: Sheet1");
+  });
+
+  test("a successful read returns the app's own result text verbatim", async () => {
+    const h = makeHarness();
+    h.outcome = async () => ({ kind: "result", ok: true, result: "Sheet1!A1:B2 (values):\n42\tHello" });
+    const result = await h.run({ verb: "read", path: `${WORKDIR}/budget.xlsx`, sheet: "Sheet1", range: "A1:B2" });
+    expect(result.isError).toBe(false);
+    expect(result.output).toBe("Sheet1!A1:B2 (values):\n42\tHello");
+  });
+
+  test("an aborted turn returns an interrupted note rather than dispatching or throwing", async () => {
+    const h = makeHarness();
+    const controller = new AbortController();
+    controller.abort();
+    const result = await h.run({ verb: "info", path: `${WORKDIR}/budget.xlsx` }, { signal: controller.signal });
+    expect(result.isError).toBe(false);
+    expect(result.output).toContain("interrupted");
+    expect(h.recorded).toEqual([]);
+  });
+});

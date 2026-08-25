@@ -229,6 +229,190 @@ public enum OfficeWireFrame: Equatable, Sendable {
     /// every Stage-A caller subscribes first to learn which keys exist.
     case tileRequest(seq: UInt64, docId: String, keys: [TileKey])
 
+    // MARK: office-agent-tools T3 — sheets info/read, the agent's first real verbs
+
+    /// Asks for `docId`'s sheet names, each one's used range, and which part is currently active.
+    /// Read-only — never mutates the document, never touches `dirty`. `setView` prefix (unconditional,
+    /// same discipline `save`/`clipboardCopy` already carry) because `getPart()` (the active-part
+    /// query) is genuinely view-dependent the same way `getTextSelection` is; no `setPart` at all —
+    /// `sheetsInfo` reads EVERY part regardless of which one is current (`getPartName`/`getDataArea`
+    /// are both `nPart`-addressed, not current-view-addressed), the same "no setPart needed" shape
+    /// `undo`/`redo` already have for the identical reason (a call with nothing view-current-scoped
+    /// to assert).
+    case sheetsInfo(seq: UInt64, docId: String)
+    /// Asks for a value or formula grid over one rectangular range on ONE named sheet. `sheet` is a
+    /// NAME, resolved to a part index on the helper side (never the app side — sheet-name lookup
+    /// needs `getPartName`, a LOK call this wire's client half has no other reason to make) so an
+    /// unknown name can be refused with the workbook's own real sheet list rather than a bare index
+    /// out of range.
+    ///
+    /// **`range` is an ALREADY-FORMATTED A1 string ("A1:C10"), not column/row integers — a deliberate
+    /// cross-target constraint, not a style choice.** `NormaOfficeHelper` (this frame's receiving
+    /// target) compiles `Sources/OfficeWire` + `Sources/OfficeHelper` only (`project.yml`) — it never
+    /// sees `Sources/AppShell/PanelDocumentTab.swift`, where Stage B T8's
+    /// `officeColumnLetters`/`officeCellReference` (and this task's own inverse,
+    /// `officeParseRange`/`officeReadRangeMaxCells`) live. The APP resolves and cell-count-caps the
+    /// operand into an `OfficeCellRange` (`OfficeCommandConsumer`, before this frame is ever built)
+    /// and formats its two corners back into the A1 string LOK's own `.uno:GoToCell` `ToPoint`
+    /// argument wants — the helper never re-derives column math from integers, it passes this string
+    /// straight through. This is "reuse T8's conversion, don't write a second one" applied literally:
+    /// writing a column-letters function inside `Sources/OfficeHelper` to satisfy this frame would BE
+    /// the second implementation the brief forbids, even in a different language boundary.
+    case sheetsRead(seq: UInt64, docId: String, sheet: String, range: String, formulas: Bool)
+
+    // MARK: office-agent-tools T4 — sheets write verbs
+
+    /// Writes each `(cellAddresses[i], cellValues[i])` pair, in order, on ONE named sheet.
+    /// **`cellAddresses` is a flat, already-formatted list of A1 cell references ("B2"), computed
+    /// APP-side — never column integers, and never a single range string this frame would have to
+    /// walk itself.** Same cross-target constraint `sheetsRead`'s own `range` field carries (see
+    /// that case's own header): `NormaOfficeHelper` never compiles `Sources/AppShell`, where the A1
+    /// column math (`officeCellReference`) lives, so per-cell addressing has to arrive pre-computed
+    /// rather than be re-derived helper-side from `range` + a grid position. `cellValues[i]` is
+    /// exactly what gets TYPED into `cellAddresses[i]` — a leading `=` becomes a formula, exactly
+    /// like a human typing it (this bridge's own write mechanism is real synthetic text entry, not a
+    /// paste — see `LOKBridge.sheetsSetOnDedicatedThread`'s own header for why, and for the
+    /// apostrophe-escape convention the app applies before this frame is ever built). `cellAddresses`
+    /// and `cellValues` MUST be the same length — the helper refuses (`malformed`) rather than
+    /// guess if they are not. `range` is carried too, ALREADY FORMATTED (mirroring `sheetsRead`),
+    /// purely so the post-write verification read (this bridge's own defense-in-depth, not the
+    /// caller's job to ask for separately) can re-select the exact block it just wrote.
+    case sheetsSet(seq: UInt64, docId: String, sheet: String, range: String, cellAddresses: [String], cellValues: [String])
+    /// office-agent-tools T4 — insert/delete N whole rows or columns, starting at `selectionRange`'s
+    /// own row/column span. **One wire pair covers all four daemon-visible verbs**
+    /// (`insert_rows`/`insert_cols`/`delete_rows`/`delete_cols`) — `office.sheets.*`'s own four
+    /// `panel_command.action` strings are unaffected (Task 1's already-shipped, frozen enum); this is
+    /// an APP-INTERNAL wire, free to consolidate what the daemon-visible surface does not. `dimension`/
+    /// `op` are real Swift enums, not raw strings — an unrecognized value refuses to decode
+    /// (`malformed`) rather than silently falling through to a default case helper-side.
+    ///
+    /// **`selectionRange` is a PRE-FORMATTED row-only ("3:5") or column-only ("C:E") span** — the
+    /// research this task's own report cites (`sc/source/core/tool/address.cxx`'s range parser)
+    /// confirms `.uno:GoToCell`'s own `ToPoint` argument accepts exactly this Name-Box-style
+    /// addressing, expanding the OTHER axis to the sheet's full width/height itself — this bridge
+    /// never has to compute that expansion. Built app-side (`officeCellReference`'s own row/column
+    /// letter math), same cross-target reasoning as `sheetsSet.cellAddresses` above.
+    case sheetsResize(seq: UInt64, docId: String, sheet: String, dimension: OfficeSheetsResizeDimension,
+                      op: OfficeSheetsResizeOp, selectionRange: String)
+    /// office-agent-tools T4 — add/delete/rename a sheet. One wire pair for three daemon-visible
+    /// verbs, same reasoning as `sheetsResize` above. `name` is the NEW sheet's name for `.add`, the
+    /// EXISTING sheet's name for `.delete`/`.rename`; `newName` is `.rename`-only (`nil` otherwise —
+    /// decode refuses a `.rename` with no `newName`, and a non-`.rename` op that supplies one, rather
+    /// than silently ignoring either mismatch).
+    case sheetsManageSheet(seq: UInt64, docId: String, op: OfficeSheetsManageSheetOp, name: String, newName: String?)
+    /// office-agent-tools T5 — applies `bold`/`italic`/`numberFormat`/`align`/`width` over one A1
+    /// `range` on ONE named sheet, every field OPTIONAL and independent: a `nil` field means "leave
+    /// this attribute alone," never "reset it to default" (spec: the whole contract this verb is
+    /// built around). At least one of the five is guaranteed non-nil by the time this frame is built
+    /// — `OfficeCommandConsumer.handleSheetsFormat`'s own job, not re-checked here (this wire's own
+    /// established precedent: `sheetsSet`'s decode does not re-check `cellAddresses.count >= 1`
+    /// either — a business rule the daemon/consumer already enforced, not a structural shape this
+    /// layer re-derives).
+    ///
+    /// **`columnSpan` is a SEPARATE, already-formatted Name-Box-style span ("A:C"), present if and
+    /// only if `width` is present** — `width` is a COLUMN property, not a cell one (unlike the other
+    /// four), so it needs its OWN selection distinct from `range`'s own cell-range selection: a
+    /// range like "B2:B5" only spans rows 2-5 of column B, but widening column B widens the WHOLE
+    /// column. Built app-side (`officeColumnLetters`, the SAME conversion `sheetsResize`'s own
+    /// `selectionRange` uses), never re-derived helper-side — the identical cross-target constraint
+    /// every other real-A1-math field on this wire already carries (see `sheetsRead.range`'s own
+    /// header). Decode refuses a mismatch (`columnSpan` present without `width`, or vice versa)
+    /// rather than silently ignoring either — the same discipline `sheetsManageSheet`'s own
+    /// `newName`/`op` pairing already established on this file.
+    ///
+    /// **`numberFormat` is a closed PRESET enum, not a free-form format-code string — a disclosed,
+    /// deliberate narrowing from spec §2's generic operand name, not an oversight.** This task's own
+    /// research read the vendored engine's real Execute handlers (`sc/source/ui/view/formatsh.cxx`)
+    /// and confirmed two things primary-source, not guessed: (1) `.uno:NumberFormat` looks like the
+    /// obvious candidate but is NOT a format code at all — it is a four-field comma tuple
+    /// (`bThousand,bNegRed,precision,leadZeroes`) fed to `GenerateFormat()`; handing it a real code
+    /// like `"0.00%"` would silently comma-split into garbage, a real wrong-result trap, not a
+    /// refusal. (2) The command that DOES take a format — `.uno:NumberFormatValue` — takes a
+    /// pre-registered NUMERIC KEY (`SfxUInt32Item`), and registering an arbitrary code to get that
+    /// key is `XNumberFormats.queryKey`/`.addNew`, a UNO Property-API call with no `.uno:` slot of
+    /// its own — confirmed UNREACHABLE by reading the vendored `LibreOfficeKit.h` this bridge
+    /// actually links against (`Sources/OfficeKit/include/LibreOfficeKit.h`): the only command-shaped
+    /// surface on `LibreOfficeKitDocumentClass` is `postUnoCommand`/`getCommandValues`/
+    /// `setBlockedCommandList` — nothing reaches a UNO service's own methods. The closed preset set
+    /// below rides the SAME fixed, argument-less toolbar commands a human's own Number Format
+    /// toolbar section sends (`.uno:NumberFormatStandard`/`.../Number`/`.../Percent`/`.../Currency`/
+    /// `.../Date`) — arguably MORE faithful to this task's own "the same `.uno:` commands a human
+    /// toolbar would send" charge than an arbitrary string would have been, since an arbitrary code
+    /// has no toolbar button at all, only the Format Cells DIALOG (a headless-hang risk this bridge
+    /// already paid to learn to avoid — see `sheetsManageSheetOnDedicatedThread`'s own header).
+    case sheetsFormat(seq: UInt64, docId: String, sheet: String, range: String, columnSpan: String?,
+                      bold: Bool?, italic: Bool?, numberFormat: OfficeSheetsNumberFormatPreset?,
+                      align: OfficeSheetsAlign?, width: Double?)
+
+    // MARK: office-agent-tools T6 — slides
+
+    /// Asks for `docId`'s slide count and, per slide, its own PART NAME (`getPartName` — never a
+    /// placeholder-text extraction; `slidesRead` is the dedicated placeholder-text verb) and its
+    /// layout, WHEN this bridge can determine one (see `OfficeSlideInfo`'s own header for the
+    /// disclosed fail-closed posture on layout — this task found no live-confirmed way to query it
+    /// for every LOK build, so a slide with an unknown layout reports `nil`, never a guess).
+    /// Read-only. `setView` prefix (unconditional, matching `sheetsInfo`'s own discipline) because
+    /// `getParts`/`getPartName`/`getPartInfo` read process-global-current-view-adjacent state the
+    /// same way `sheetsInfo`'s own `getPart()` probe does.
+    case slidesInfo(seq: UInt64, docId: String)
+    /// Asks for ONE slide's title and body placeholder text. `slide` is 0-based (the app resolves the
+    /// daemon's own 1-based `slide` operand before this frame is ever built — the identical
+    /// resolve-at-the-app-boundary discipline `sheetsRead`'s own `sheet` name resolves to a part
+    /// index at, see that case's own header).
+    case slidesRead(seq: UInt64, docId: String, slide: Int)
+    /// Writes `title` and/or `body` onto ONE slide's own placeholder(s) — each field independent,
+    /// `nil` meaning "leave this placeholder alone," the identical absent-means-untouched contract
+    /// `sheetsFormat`'s five attribute fields already established (that case's own header). At least
+    /// one of the two is guaranteed non-nil by the time this frame is built (`slides.ts`'s own job,
+    /// mirroring `sheetsFormat`'s identical "not re-checked here" precedent — a business rule the
+    /// daemon/consumer already enforced, not a structural shape this wire layer re-derives).
+    case slidesSetText(seq: UInt64, docId: String, slide: Int, title: String?, body: String?)
+    /// office-agent-tools T6 — one wire pair covers all three structural verbs (`add_slide`/
+    /// `delete_slide`/`reorder`), mirroring `sheetsManageSheet`'s own consolidation of `add_sheet`/
+    /// `delete_sheet`/`rename_sheet` (that case's own header: "APP-INTERNAL wire, free to consolidate
+    /// what the daemon-visible surface does not" — `office.slides.*`'s own three frozen
+    /// `panel_command.action` strings are unaffected). `op` decides which of `slide`/`at`/`to`/
+    /// `layout` are meaningful; decode refuses any OTHER combination rather than silently ignoring a
+    /// mismatched field, the identical discipline `sheetsManageSheet`'s own `op == .rename <->
+    /// newName != nil` guard and `sheetsFormat`'s own `columnSpan != nil <-> width != nil` guard
+    /// already established on this file:
+    ///  - `.add`: `slide` and `to` MUST be nil. `at` (0-based insert position; nil appends at the
+    ///    end) and `layout` are each independently optional.
+    ///  - `.delete`: `slide` MUST be non-nil (0-based, the slide to remove). `at`/`to`/`layout` MUST
+    ///    all be nil.
+    ///  - `.reorder`: `slide` and `to` MUST both be non-nil (0-based source and target). `at`/
+    ///    `layout` MUST both be nil.
+    case slidesManagePage(seq: UInt64, docId: String, op: OfficeSlidesManagePageOp, slide: Int?,
+                          at: Int?, to: Int?, layout: OfficeSlidesLayoutPreset?)
+
+    // MARK: office-agent-tools T7 — docs
+
+    /// Asks for `docId`'s page count and, derived from its own text, paragraph and character counts.
+    /// Read-only. **The page count is `getParts()`** — for Writer, LOK's parts ARE pages
+    /// (`SwXTextDocument::getParts` is `pWrtShell->GetPageCnt()`); there is no paragraph query in LOK
+    /// at all, so `paragraphs` is derived from the SAME text `docsRead` returns rather than measured
+    /// independently (`LOKBridge.docsParagraphCount`'s own header). That makes `docs info` cost a
+    /// whole-document read, unlike `sheetsInfo` — see that function for why the cost is accepted.
+    case docsInfo(seq: UInt64, docId: String)
+    /// Asks for `docId`'s whole body text — UTF-8, paragraphs separated by `\n`. **No range**: LOK
+    /// exposes no character- or paragraph-indexed addressing for Writer at all (research §3.5), so
+    /// the daemon's own `fromParagraph`/`toParagraph` operands are a slice the APP takes over this
+    /// text, never a range this frame could ask the engine for. Read-only.
+    case docsRead(seq: UInt64, docId: String)
+    /// Replaces EVERY literal, case-sensitive occurrence of `find` with `replaceWith`. `find` is
+    /// guaranteed non-empty and free of `\n`/`\r` by the time this frame is built (the daemon's own
+    /// job — see `docs.ts`; the same "a business rule the daemon already enforced" precedent
+    /// `slidesSetText`'s own header names). There is no `all` field: v1 is REPLACE_ALL only, because
+    /// `SvxSearchCmd::REPLACE` is not "replace the first occurrence" — see
+    /// `LOKBridge.docsReplaceOnDedicatedThread`'s own header.
+    case docsReplace(seq: UInt64, docId: String, find: String, replaceWith: String)
+    /// Inserts `text` at the start or the end of the body. `atStart` picks the end;
+    /// `asNewParagraph` prepends a paragraph break (suffixes one, for `atStart`) so that `append`
+    /// starts a real new paragraph while `insert` puts exactly the text at the position and nothing
+    /// else. Both flags are decided by the app from the daemon's `verb`/`at` operands, never guessed
+    /// here.
+    case docsInsert(seq: UInt64, docId: String, text: String, atStart: Bool, asNewParagraph: Bool)
+
     // MARK: Responses (helper -> client)
 
     /// `hello` succeeded: `token` matched. `lokVersion` is now (Task 3) the REAL
@@ -389,6 +573,80 @@ public enum OfficeWireFrame: Equatable, Sendable {
     /// tile coordinates those rects touched. Both are sent — see `OfficeHelperServer.routeDocumentEvent`.
     case invalidated(seq: UInt64, docId: String, keys: [TileKey])
 
+    // MARK: office-agent-tools T3 — sheets info/read replies
+
+    /// Answers a successful `sheetsInfo`. `activeSheet` is the NAME of the part `getPart()` reports
+    /// current at the moment this ran (never an index — the caller already has names via `sheets`,
+    /// and a bare index would make it re-derive the mapping this frame already computed once).
+    case sheetsInfoOk(seq: UInt64, docId: String, sheets: [OfficeSheetInfo], activeSheet: String)
+    /// Answers a successful `sheetsRead`: one string per cell, laid out `rows[row][column]`, ALWAYS
+    /// `(endRow-startRow+1)` rows of `(endColumn-startColumn+1)` strings each — a wholly empty cell is
+    /// `""`, never an absent element, so a caller can index this by the SAME 0-based offsets it sent
+    /// without re-deriving the range's own shape from the reply.
+    case sheetsReadOk(seq: UInt64, docId: String, rows: [[String]])
+
+    // MARK: office-agent-tools T4 — sheets write replies
+
+    /// Answers a successful `sheetsSet`: how many cells were written — `cellAddresses.count`, echoed
+    /// back rather than re-derived by the caller, so a caller who counts differently (an off-by-one
+    /// in its own grid math) sees a mismatch rather than trusting its own count silently.
+    case sheetsSetOk(seq: UInt64, docId: String, cellsWritten: Int)
+    /// Answers a successful `sheetsResize`: the sheet's own dimensions AFTER the operation —
+    /// `getDataArea`'s own used-range answer (`sheetsInfo`'s identical mechanism), not merely "ok."
+    /// A model that just inserted 2 rows can see the sheet actually grew, without a second `info`
+    /// call.
+    case sheetsResizeOk(seq: UInt64, docId: String, usedEndColumn: Int, usedEndRow: Int)
+    /// Answers a successful `sheetsManageSheet`: the workbook's full sheet-name list AFTER the
+    /// operation, in part order — the same "smallest useful truth" shape `sheetsInfo` already
+    /// returns, and the only way a caller learns whether `add`'s requested name survived Calc's own
+    /// silent sanitization (`CreateValidTabName`) verbatim or was altered.
+    case sheetsManageSheetOk(seq: UInt64, docId: String, sheets: [String])
+    /// office-agent-tools T5 — answers a successful `sheetsFormat`: which attribute NAMES were
+    /// actually applied (`"bold"`, `"italic"`, `"numberFormat"`, `"align"`, `"width"` — a subset of
+    /// those five, in that fixed order, never empty since the caller must have named at least one).
+    /// The smallest useful truth, same posture `sheetsManageSheetOk`'s sheet list already has — a
+    /// caller can see exactly what landed without re-deriving it from its own request.
+    case sheetsFormatOk(seq: UInt64, docId: String, applied: [String])
+
+    // MARK: office-agent-tools T6 — slides replies
+
+    /// Answers a successful `slidesInfo`.
+    case slidesInfoOk(seq: UInt64, docId: String, slides: [OfficeSlideInfo])
+    /// Answers a successful `slidesRead`. `nil` means "this slide has no such placeholder at all" —
+    /// distinct from `""` ("the placeholder exists and is empty") — the identical distinction
+    /// `sheetsInfo`'s own `(usedEndColumn: -1, usedEndRow: -1)` sentinel exists to make for an empty
+    /// SHEET, applied here per-placeholder instead: a caller (and `slides.ts`'s own `set_text`
+    /// refusal, spec's own "refuses naming the reason" contract) needs to tell "nothing to read" from
+    /// "read an empty string" apart.
+    case slidesReadOk(seq: UInt64, docId: String, title: String?, body: String?)
+    /// Answers a successful `slidesSetText`: which of `title`/`body` actually applied — a subset of
+    /// `["title","body"]`, in that fixed order — the identical "smallest useful truth" shape
+    /// `sheetsFormatOk.applied` already returns for its own multi-optional-field write.
+    case slidesSetTextOk(seq: UInt64, docId: String, applied: [String])
+    /// Answers a successful `slidesManagePage`: the presentation's slide count AFTER the operation —
+    /// the same "smallest useful truth, not merely ok" posture `sheetsResizeOk`/`sheetsManageSheetOk`
+    /// already have for their own structural ops.
+    case slidesManagePageOk(seq: UInt64, docId: String, slideCount: Int)
+
+    // MARK: office-agent-tools T7 — docs replies
+
+    /// Answers a successful `docsInfo`. `pages` may UNDER-report on a document nothing has laid out
+    /// yet (`SwRootFrame::GetPageNum()` returns the cached count of page frames currently
+    /// constructed, and Writer paginates lazily) — disclosed in `docs.ts`'s own description rather
+    /// than presented as exact.
+    case docsInfoOk(seq: UInt64, docId: String, pages: Int, paragraphs: Int, characters: Int)
+    /// Answers a successful `docsRead`: the whole body text. `""` is a legitimate answer (an empty
+    /// document), never an error — `SwXTextDocument::getSelection()` always constructs a transferable
+    /// for a live shell, so "nothing selected" surfaces as an empty string.
+    case docsReadOk(seq: UInt64, docId: String, text: String)
+    /// Answers a successful `docsReplace`: how many occurrences were replaced — **counted by us**,
+    /// cross-checked against the engine's own boolean, never reported when the two disagree
+    /// (`LOKBridge.docsReplaceOnDedicatedThread`).
+    case docsReplaceOk(seq: UInt64, docId: String, replaced: Int)
+    /// Answers a successful `docsInsert`: the document's paragraph count AFTER the insert — the same
+    /// "smallest useful truth, not merely ok" posture `slidesManagePageOk` has.
+    case docsInsertOk(seq: UInt64, docId: String, paragraphs: Int)
+
     /// The wire vocabulary, in frame-declaration order. A test walks this list the same way
     /// `EditorBridgeInbound.wireTypes`'s own test does — one fixture per name, decode, assert the
     /// case names itself the same way — so this array and `decode`/`wireType` cannot drift apart
@@ -402,12 +660,27 @@ public enum OfficeWireFrame: Equatable, Sendable {
         // Office Stage B Task 6 — clipboard, undo/redo, the second ("agent") view.
         "clipboardCopy", "clipboardCut", "clipboardPaste", "undo", "redo", "createView", "agentKeyEvent",
         "subscribeTiles", "unsubscribe", "tileRequest",
+        // office-agent-tools T3 — sheets info/read.
+        "sheetsInfo", "sheetsRead",
+        // office-agent-tools T4 — sheets write verbs.
+        "sheetsSet", "sheetsResize", "sheetsManageSheet",
+        // office-agent-tools T5 — sheets format.
+        "sheetsFormat",
+        // office-agent-tools T6 — slides.
+        "slidesInfo", "slidesRead", "slidesSetText", "slidesManagePage",
+        // office-agent-tools T7 — docs.
+        "docsInfo", "docsRead", "docsReplace", "docsInsert",
         "helloOk", "refused", "pong", "opened", "openFailed", "closed", "saved", "saveFailed",
         "keyEventOk", "mouseEventOk", "extTextInputEventOk",
         "clipboardCopyOk", "clipboardCutOk", "clipboardPasteOk", "undoOk", "redoOk",
         "agentViewReady", "agentKeyEventOk",
         "error", "documentEvent",
         "subscribed", "unsubscribed", "tileRequestAccepted", "tile", "tileFailed", "invalidated",
+        "sheetsInfoOk", "sheetsReadOk",
+        "sheetsSetOk", "sheetsResizeOk", "sheetsManageSheetOk",
+        "sheetsFormatOk",
+        "slidesInfoOk", "slidesReadOk", "slidesSetTextOk", "slidesManagePageOk",
+        "docsInfoOk", "docsReadOk", "docsReplaceOk", "docsInsertOk",
     ]
 
     public var wireType: String {
@@ -430,6 +703,20 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .subscribeTiles: return "subscribeTiles"
         case .unsubscribe: return "unsubscribe"
         case .tileRequest: return "tileRequest"
+        case .sheetsInfo: return "sheetsInfo"
+        case .sheetsRead: return "sheetsRead"
+        case .sheetsSet: return "sheetsSet"
+        case .sheetsResize: return "sheetsResize"
+        case .sheetsManageSheet: return "sheetsManageSheet"
+        case .sheetsFormat: return "sheetsFormat"
+        case .slidesInfo: return "slidesInfo"
+        case .slidesRead: return "slidesRead"
+        case .slidesSetText: return "slidesSetText"
+        case .slidesManagePage: return "slidesManagePage"
+        case .docsInfo: return "docsInfo"
+        case .docsRead: return "docsRead"
+        case .docsReplace: return "docsReplace"
+        case .docsInsert: return "docsInsert"
         case .helloOk: return "helloOk"
         case .refused: return "refused"
         case .pong: return "pong"
@@ -456,6 +743,20 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .tile: return "tile"
         case .tileFailed: return "tileFailed"
         case .invalidated: return "invalidated"
+        case .sheetsInfoOk: return "sheetsInfoOk"
+        case .sheetsReadOk: return "sheetsReadOk"
+        case .sheetsSetOk: return "sheetsSetOk"
+        case .sheetsResizeOk: return "sheetsResizeOk"
+        case .sheetsManageSheetOk: return "sheetsManageSheetOk"
+        case .sheetsFormatOk: return "sheetsFormatOk"
+        case .slidesInfoOk: return "slidesInfoOk"
+        case .slidesReadOk: return "slidesReadOk"
+        case .slidesSetTextOk: return "slidesSetTextOk"
+        case .slidesManagePageOk: return "slidesManagePageOk"
+        case .docsInfoOk: return "docsInfoOk"
+        case .docsReadOk: return "docsReadOk"
+        case .docsReplaceOk: return "docsReplaceOk"
+        case .docsInsertOk: return "docsInsertOk"
         }
     }
 
@@ -479,6 +780,20 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .subscribeTiles(let seq, _, _, _, _): return seq
         case .unsubscribe(let seq, _): return seq
         case .tileRequest(let seq, _, _): return seq
+        case .sheetsInfo(let seq, _): return seq
+        case .sheetsRead(let seq, _, _, _, _): return seq
+        case .sheetsSet(let seq, _, _, _, _, _): return seq
+        case .sheetsResize(let seq, _, _, _, _, _): return seq
+        case .sheetsManageSheet(let seq, _, _, _, _): return seq
+        case .sheetsFormat(let seq, _, _, _, _, _, _, _, _, _): return seq
+        case .slidesInfo(let seq, _): return seq
+        case .slidesRead(let seq, _, _): return seq
+        case .slidesSetText(let seq, _, _, _, _): return seq
+        case .slidesManagePage(let seq, _, _, _, _, _, _): return seq
+        case .docsInfo(let seq, _): return seq
+        case .docsRead(let seq, _): return seq
+        case .docsReplace(let seq, _, _, _): return seq
+        case .docsInsert(let seq, _, _, _, _): return seq
         case .helloOk(let seq, _): return seq
         case .refused(let seq, _): return seq
         case .pong(let seq): return seq
@@ -505,6 +820,20 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .tile(let seq, _, _, _, _, _, _): return seq
         case .tileFailed(let seq, _, _, _): return seq
         case .invalidated(let seq, _, _): return seq
+        case .sheetsInfoOk(let seq, _, _, _): return seq
+        case .sheetsReadOk(let seq, _, _): return seq
+        case .sheetsSetOk(let seq, _, _): return seq
+        case .sheetsResizeOk(let seq, _, _, _): return seq
+        case .sheetsManageSheetOk(let seq, _, _): return seq
+        case .sheetsFormatOk(let seq, _, _): return seq
+        case .slidesInfoOk(let seq, _, _): return seq
+        case .slidesReadOk(let seq, _, _, _): return seq
+        case .slidesSetTextOk(let seq, _, _): return seq
+        case .slidesManagePageOk(let seq, _, _): return seq
+        case .docsInfoOk(let seq, _, _, _, _): return seq
+        case .docsReadOk(let seq, _, _): return seq
+        case .docsReplaceOk(let seq, _, _): return seq
+        case .docsInsertOk(let seq, _, _): return seq
         }
     }
 
@@ -605,6 +934,116 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .tileRequest(_, let docId, let keys):
             payload["docId"] = docId
             payload["keys"] = keys.map { $0.jsonObject() }
+        case .sheetsInfo(_, let docId):
+            payload["docId"] = docId
+        case .sheetsRead(_, let docId, let sheet, let range, let formulas):
+            payload["docId"] = docId
+            payload["sheet"] = sheet
+            payload["range"] = range
+            payload["formulas"] = formulas
+        case .sheetsInfoOk(_, let docId, let sheets, let activeSheet):
+            payload["docId"] = docId
+            payload["sheets"] = sheets.map { $0.jsonObject() }
+            payload["activeSheet"] = activeSheet
+        case .sheetsReadOk(_, let docId, let rows):
+            payload["docId"] = docId
+            payload["rows"] = rows
+        case .sheetsSet(_, let docId, let sheet, let range, let cellAddresses, let cellValues):
+            payload["docId"] = docId
+            payload["sheet"] = sheet
+            payload["range"] = range
+            payload["cellAddresses"] = cellAddresses
+            payload["cellValues"] = cellValues
+        case .sheetsResize(_, let docId, let sheet, let dimension, let op, let selectionRange):
+            payload["docId"] = docId
+            payload["sheet"] = sheet
+            payload["dimension"] = dimension.rawValue
+            payload["op"] = op.rawValue
+            payload["selectionRange"] = selectionRange
+        case .sheetsManageSheet(_, let docId, let op, let name, let newName):
+            payload["docId"] = docId
+            payload["op"] = op.rawValue
+            payload["name"] = name
+            if let newName { payload["newName"] = newName }
+        case .sheetsFormat(_, let docId, let sheet, let range, let columnSpan, let bold, let italic,
+                           let numberFormat, let align, let width):
+            payload["docId"] = docId
+            payload["sheet"] = sheet
+            payload["range"] = range
+            if let columnSpan { payload["columnSpan"] = columnSpan }
+            if let bold { payload["bold"] = bold }
+            if let italic { payload["italic"] = italic }
+            if let numberFormat { payload["numberFormat"] = numberFormat.rawValue }
+            if let align { payload["align"] = align.rawValue }
+            if let width { payload["width"] = width }
+        case .sheetsSetOk(_, let docId, let cellsWritten):
+            payload["docId"] = docId
+            payload["cellsWritten"] = cellsWritten
+        case .sheetsResizeOk(_, let docId, let usedEndColumn, let usedEndRow):
+            payload["docId"] = docId
+            payload["usedEndColumn"] = usedEndColumn
+            payload["usedEndRow"] = usedEndRow
+        case .sheetsManageSheetOk(_, let docId, let sheets):
+            payload["docId"] = docId
+            payload["sheets"] = sheets
+        case .sheetsFormatOk(_, let docId, let applied):
+            payload["docId"] = docId
+            payload["applied"] = applied
+        case .slidesInfo(_, let docId):
+            payload["docId"] = docId
+        case .slidesRead(_, let docId, let slide):
+            payload["docId"] = docId
+            payload["slide"] = slide
+        case .slidesSetText(_, let docId, let slide, let title, let body):
+            payload["docId"] = docId
+            payload["slide"] = slide
+            if let title { payload["title"] = title }
+            if let body { payload["body"] = body }
+        case .slidesManagePage(_, let docId, let op, let slide, let at, let to, let layout):
+            payload["docId"] = docId
+            payload["op"] = op.rawValue
+            if let slide { payload["slide"] = slide }
+            if let at { payload["at"] = at }
+            if let to { payload["to"] = to }
+            if let layout { payload["layout"] = layout.rawValue }
+        case .slidesInfoOk(_, let docId, let slides):
+            payload["docId"] = docId
+            payload["slides"] = slides.map { $0.jsonObject() }
+        case .slidesReadOk(_, let docId, let title, let body):
+            payload["docId"] = docId
+            if let title { payload["title"] = title }
+            if let body { payload["body"] = body }
+        case .slidesSetTextOk(_, let docId, let applied):
+            payload["docId"] = docId
+            payload["applied"] = applied
+        case .slidesManagePageOk(_, let docId, let slideCount):
+            payload["docId"] = docId
+            payload["slideCount"] = slideCount
+        case .docsInfo(_, let docId), .docsRead(_, let docId):
+            payload["docId"] = docId
+        case .docsReplace(_, let docId, let find, let replaceWith):
+            payload["docId"] = docId
+            payload["find"] = find
+            payload["replaceWith"] = replaceWith
+        case .docsInsert(_, let docId, let text, let atStart, let asNewParagraph):
+            payload["docId"] = docId
+            payload["text"] = text
+            payload["atStart"] = atStart
+            payload["asNewParagraph"] = asNewParagraph
+        case .docsInfoOk(_, let docId, let pages, let paragraphs, let characters):
+            payload["docId"] = docId
+            payload["pages"] = pages
+            payload["paragraphs"] = paragraphs
+            payload["characters"] = characters
+        case .docsReadOk(_, let docId, let text):
+            payload["docId"] = docId
+            payload["text"] = text
+        case .docsReplaceOk(_, let docId, let replaced):
+            payload["docId"] = docId
+            payload["replaced"] = replaced
+        case .docsInsertOk(_, let docId, let paragraphs):
+            payload["docId"] = docId
+            payload["paragraphs"] = paragraphs
         case .subscribed(_, let docId, let keys), .invalidated(_, let docId, let keys):
             payload["docId"] = docId
             payload["keys"] = keys.map { $0.jsonObject() }
@@ -678,6 +1117,234 @@ public enum OfficeWireFrame: Equatable, Sendable {
             keys.append(key)
         }
         return keys
+    }
+
+    /// office-agent-tools T3 — `sheetsInfoOk.sheets`.
+    static func decodeSheetInfos(_ object: Any?) -> [OfficeSheetInfo]? {
+        guard let array = object as? [[String: Any]] else { return nil }
+        var sheets: [OfficeSheetInfo] = []
+        sheets.reserveCapacity(array.count)
+        for item in array {
+            guard let sheet = OfficeSheetInfo.decode(item) else { return nil }
+            sheets.append(sheet)
+        }
+        return sheets
+    }
+
+    /// office-agent-tools T3 — `sheetsReadOk.rows`, a plain `[[String]]`: every element of the
+    /// outer array must itself be an array of strings, never mixed types — `as? [[String]]` alone
+    /// would accept `[[String: Any]]`'s sibling shapes too loosely under `JSONSerialization`'s own
+    /// bridging, so this walks and re-validates one level deep rather than trusting a single cast.
+    static func decodeRows(_ object: Any?) -> [[String]]? {
+        guard let array = object as? [[Any]] else { return nil }
+        var rows: [[String]] = []
+        rows.reserveCapacity(array.count)
+        for row in array {
+            guard let strings = row as? [String] else { return nil }
+            rows.append(strings)
+        }
+        return rows
+    }
+
+    /// office-agent-tools T6 — `slidesInfoOk.slides`, mirroring `decodeSheetInfos` exactly.
+    static func decodeSlideInfos(_ object: Any?) -> [OfficeSlideInfo]? {
+        guard let array = object as? [[String: Any]] else { return nil }
+        var slides: [OfficeSlideInfo] = []
+        slides.reserveCapacity(array.count)
+        for item in array {
+            guard let slide = OfficeSlideInfo.decode(item) else { return nil }
+            slides.append(slide)
+        }
+        return slides
+    }
+}
+
+/// office-agent-tools T3 — one sheet's own facts, as `sheetsInfoOk` reports them: its name, and its
+/// used range's bottom-right corner (0-based, INCLUSIVE — `(usedEndColumn: -1, usedEndRow: -1)` is
+/// the wholly-empty-sheet sentinel: `getDataArea`'s own raw output cannot distinguish "nothing used"
+/// from "only A1 used" any other way, and `-1` composes correctly with `OfficeCellRange`-style
+/// inclusive-end arithmetic — a caller who blindly adds 1 to get a count sees `0`, the right answer,
+/// rather than special-casing `(0,0)` twice for two different meanings).
+public struct OfficeSheetInfo: Equatable, Sendable {
+    public let name: String
+    public let usedEndColumn: Int
+    public let usedEndRow: Int
+    public init(name: String, usedEndColumn: Int, usedEndRow: Int) {
+        self.name = name
+        self.usedEndColumn = usedEndColumn
+        self.usedEndRow = usedEndRow
+    }
+
+    /// Manual JSON encode/decode, matching this file's own established discipline (`TileKey`'s own
+    /// header) rather than introducing `Codable` for just this one type.
+    func jsonObject() -> [String: Any] {
+        ["name": name, "usedEndColumn": usedEndColumn, "usedEndRow": usedEndRow]
+    }
+
+    static func decode(_ object: [String: Any]) -> OfficeSheetInfo? {
+        guard let name = object["name"] as? String,
+              let usedEndColumn = intValue(object["usedEndColumn"]),
+              let usedEndRow = intValue(object["usedEndRow"]) else {
+            return nil
+        }
+        return OfficeSheetInfo(name: name, usedEndColumn: usedEndColumn, usedEndRow: usedEndRow)
+    }
+}
+
+/// office-agent-tools T6 — one slide's own facts, as `slidesInfoOk` reports them: its own PART NAME
+/// (`getPartName`) and its title placeholder text, when one exists.
+///
+/// **`name` is NOT a title — controller ruling 2, slides-lok-research.md §7.** `SdPage::GetName()`
+/// (`sd/source/core/sdpage.cxx:2648-2695`) returns a user-set real name UNCONDITIONALLY when one was
+/// ever set, but for a NEVER-RENAMED page it computes a positional default LIVE, on every call:
+/// `"Slide " + currentPageNumber`. For an untitled deck, `name` is just a restatement of the index,
+/// recomputed fresh after every reorder — never a title, never stable identity for a renamed-vs-not
+/// slide the caller can't otherwise distinguish. `slides.ts`'s own tool description says this
+/// plainly, not just this doc comment: every verb targets a slide BY INDEX ONLY, never by `name`.
+///
+/// **`title` is genuinely `nil`-able, and NOT the same "unknown, might exist" fail-closed posture
+/// `layout` used to have here.** The mechanism `LOKBridge.slidesInfoOnDedicatedThread` uses to read it
+/// is the SAME one `slidesRead` uses (see that case's own header) — `nil` means this slide's title
+/// placeholder genuinely does not exist, `""` means it exists and is empty, exactly the distinction
+/// `slidesReadOk` already draws for the identical reason.
+///
+/// **`layout` was REMOVED from this struct — controller ruling 1, research §3.** `getPartInfo` (the
+/// only LOK-side per-part JSON) carries no layout field at either of its two emission sites, and no
+/// `getCommandValues` query exposes one either: LOK gives NO layout read-back at all, ever, for any
+/// slide. `add_slide`'s own `layout` operand is write-only by necessity, not by this bridge's own
+/// choice to narrow it — there was never a wire shape to design here that could have reported one.
+public struct OfficeSlideInfo: Equatable, Sendable {
+    public let name: String
+    public let title: String?
+    public init(name: String, title: String?) {
+        self.name = name
+        self.title = title
+    }
+
+    func jsonObject() -> [String: Any] {
+        var object: [String: Any] = ["name": name]
+        if let title { object["title"] = title }
+        return object
+    }
+
+    static func decode(_ object: [String: Any]) -> OfficeSlideInfo? {
+        guard let name = object["name"] as? String else { return nil }
+        return OfficeSlideInfo(name: name, title: object["title"] as? String)
+    }
+}
+
+// MARK: - office-agent-tools T4 — the resize/manage-sheet wire's own strict enums
+
+/// `sheetsResize`'s axis. A raw `String` field this bridge cannot recognize refuses to decode
+/// (`malformed`) rather than falling through to a default case helper-side — advisor guidance for
+/// this task's own wire consolidation (see `sheetsResize`'s own header for why one wire pair covers
+/// four daemon-visible verbs).
+public enum OfficeSheetsResizeDimension: String, Equatable, Sendable {
+    case row
+    case col
+}
+
+/// `sheetsResize`'s operation.
+public enum OfficeSheetsResizeOp: String, Equatable, Sendable {
+    case insert
+    case delete
+}
+
+/// `sheetsManageSheet`'s operation.
+public enum OfficeSheetsManageSheetOp: String, Equatable, Sendable {
+    case add
+    case delete
+    case rename
+}
+
+/// office-agent-tools T5 — `sheetsFormat`'s horizontal alignment. Same strict-enum, refuse-don't-
+/// default-on-unrecognized discipline as `OfficeSheetsResizeDimension`/`Op` above. v1 has no
+/// vertical-alignment case — not exposed, not planned for this pass (`sheets.ts`'s own doc says so).
+// F3: `CaseIterable` so the consumer's refusal can NAME the legal set instead of hand-listing
+// it — a hand-listed set is a second source of truth that drifts the moment a case is added.
+public enum OfficeSheetsAlign: String, Equatable, Sendable, CaseIterable {
+    case left
+    case center
+    case right
+}
+
+/// office-agent-tools T5 — `sheetsFormat`'s number-format PRESET (a closed set, not an arbitrary
+/// format-code string — see `sheetsFormat`'s own case header for the full, source-grounded reasoning
+/// this narrowing rests on). `general` doubles as both the caller's own "clear back to the default
+/// format" request AND this bridge's own internal normalizer for every OTHER preset, if the preset
+/// commands turn out to TOGGLE rather than set an absolute state (see `LOKBridge
+/// .sheetsFormatOnDedicatedThread`'s own header for which one this engine build actually is).
+// F3: `CaseIterable` so the consumer's refusal can NAME the legal set instead of hand-listing
+// it — a hand-listed set is a second source of truth that drifts the moment a case is added.
+public enum OfficeSheetsNumberFormatPreset: String, Equatable, Sendable, CaseIterable {
+    case general
+    case number
+    case percent
+    case currency
+    case date
+}
+
+// MARK: - office-agent-tools T6 — the slides wire's own strict enums
+
+/// `slidesManagePage`'s operation. Same refuse-don't-default-on-unrecognized discipline as
+/// `OfficeSheetsResizeOp`/`OfficeSheetsManageSheetOp` above.
+public enum OfficeSlidesManagePageOp: String, Equatable, Sendable {
+    case add
+    case delete
+    case reorder
+}
+
+/// `add_slide`'s own `layout` preset — WRITE-ONLY (slides-lok-research.md §3/ruling 1: `getPartInfo`
+/// carries no layout field at either JSON-emission site, and no `getCommandValues` query exposes one
+/// either — LOK gives no layout READ-BACK at all, so this preset only ever flows INTO a document via
+/// `.uno:AssignLayout`, never back out through `slidesInfo`). A CLOSED enum, not LOK's raw numeric
+/// `AutoLayout` id (35 values, `include/xmloff/autolayout.hxx`) or a free-form name — mirroring
+/// `OfficeSheetsNumberFormatPreset`'s own precedent. These 16 are the exact UI-EXPOSED subset the
+/// vendored product's own `simpress/popupmenu/page.xml` `SlideLayoutMenu` offers a human (research
+/// §4) — not the full internal enum, and not guessed: every raw integer below is cited to that XML's
+/// own `WhatLayout:long=` values. Raw string values are snake_case to match `slides.ts`'s own zod
+/// enum verbatim — this is a WIRE string, decoded on both ends independently, so the two must agree
+/// byte-for-byte.
+public enum OfficeSlidesLayoutPreset: String, Equatable, Sendable {
+    case titleSlide = "title_slide"                     // AutoLayout 0
+    case titleContent = "title_content"                 // AutoLayout 1
+    case titleTwoContent = "title_two_content"           // AutoLayout 3
+    case titleContentTwoContent = "title_content_two_content"           // AutoLayout 12
+    case titleContentOverContent = "title_content_over_content"         // AutoLayout 14
+    case titleTwoContentContent = "title_two_content_content"           // AutoLayout 15
+    case titleTwoContentOverContent = "title_two_content_over_content"  // AutoLayout 16
+    case titleFourContent = "title_four_content"         // AutoLayout 18
+    case titleOnly = "title_only"                        // AutoLayout 19
+    case blank = "blank"                                 // AutoLayout 20
+    case verticalTitleVerticalContentOverVerticalContent = "vertical_title_vertical_content_over_vertical_content" // AutoLayout 27
+    case verticalTitleVerticalContent = "vertical_title_vertical_content"   // AutoLayout 28
+    case titleVerticalContent = "title_vertical_content"                   // AutoLayout 29
+    case titleTwoVerticalContent = "title_two_vertical_content"            // AutoLayout 30
+    case centeredText = "centered_text"                  // AutoLayout 32
+    case titleSixContent = "title_six_content"           // AutoLayout 34
+
+    /// The real LOK `AutoLayout` integer this preset maps to — `.uno:AssignLayout`'s own `WhatLayout`
+    /// argument (`SfxUInt32Item`, `sd/sdi/sdraw.sdi:2137-2138`). Never invented, never the full
+    /// 35-value internal enum — see this type's own header for the citation.
+    public var autoLayoutValue: Int {
+        switch self {
+        case .titleSlide: return 0
+        case .titleContent: return 1
+        case .titleTwoContent: return 3
+        case .titleContentTwoContent: return 12
+        case .titleContentOverContent: return 14
+        case .titleTwoContentContent: return 15
+        case .titleTwoContentOverContent: return 16
+        case .titleFourContent: return 18
+        case .titleOnly: return 19
+        case .blank: return 20
+        case .verticalTitleVerticalContentOverVerticalContent: return 27
+        case .verticalTitleVerticalContent: return 28
+        case .titleVerticalContent: return 29
+        case .titleTwoVerticalContent: return 30
+        case .centeredText: return 32
+        case .titleSixContent: return 34
+        }
     }
 }
 
@@ -1674,6 +2341,237 @@ public enum OfficeWireCodec {
                 return .rejected(seq: seq, reason: "malformed")
             }
             return .frame(.invalidated(seq: seq, docId: docId, keys: keys))
+        case "sheetsInfo":
+            guard let docId = object["docId"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.sheetsInfo(seq: seq, docId: docId))
+        case "sheetsRead":
+            guard let docId = object["docId"] as? String, let sheet = object["sheet"] as? String,
+                  let range = object["range"] as? String, let formulas = object["formulas"] as? Bool else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.sheetsRead(seq: seq, docId: docId, sheet: sheet, range: range, formulas: formulas))
+        case "sheetsInfoOk":
+            guard let docId = object["docId"] as? String,
+                  let sheets = OfficeWireFrame.decodeSheetInfos(object["sheets"]),
+                  let activeSheet = object["activeSheet"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.sheetsInfoOk(seq: seq, docId: docId, sheets: sheets, activeSheet: activeSheet))
+        case "sheetsReadOk":
+            guard let docId = object["docId"] as? String,
+                  let rows = OfficeWireFrame.decodeRows(object["rows"]) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.sheetsReadOk(seq: seq, docId: docId, rows: rows))
+        case "sheetsSet":
+            guard let docId = object["docId"] as? String, let sheet = object["sheet"] as? String,
+                  let range = object["range"] as? String,
+                  let cellAddresses = object["cellAddresses"] as? [String],
+                  let cellValues = object["cellValues"] as? [String],
+                  cellAddresses.count == cellValues.count else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.sheetsSet(seq: seq, docId: docId, sheet: sheet, range: range,
+                                     cellAddresses: cellAddresses, cellValues: cellValues))
+        case "sheetsResize":
+            guard let docId = object["docId"] as? String, let sheet = object["sheet"] as? String,
+                  let dimensionRaw = object["dimension"] as? String,
+                  let dimension = OfficeSheetsResizeDimension(rawValue: dimensionRaw),
+                  let opRaw = object["op"] as? String, let op = OfficeSheetsResizeOp(rawValue: opRaw),
+                  let selectionRange = object["selectionRange"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.sheetsResize(seq: seq, docId: docId, sheet: sheet, dimension: dimension,
+                                        op: op, selectionRange: selectionRange))
+        case "sheetsManageSheet":
+            guard let docId = object["docId"] as? String,
+                  let opRaw = object["op"] as? String, let op = OfficeSheetsManageSheetOp(rawValue: opRaw),
+                  let name = object["name"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            let newName = object["newName"] as? String
+            // `.rename` MUST carry a `newName`; every other op must NOT — a mismatch either
+            // direction refuses rather than silently ignoring/inventing one (this frame's own
+            // header: "refuses... rather than silently ignoring either mismatch").
+            guard (op == .rename) == (newName != nil) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.sheetsManageSheet(seq: seq, docId: docId, op: op, name: name, newName: newName))
+        case "sheetsFormat":
+            guard let docId = object["docId"] as? String, let sheet = object["sheet"] as? String,
+                  let range = object["range"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            let columnSpan = object["columnSpan"] as? String
+            let bold = object["bold"] as? Bool
+            let italic = object["italic"] as? Bool
+            let align = (object["align"] as? String).flatMap(OfficeSheetsAlign.init(rawValue:))
+            let width = doubleValue(object["width"])
+            // A `numberFormat` KEY present but unrecognized is malformed (the strict-enum discipline
+            // every other new-in-this-file string field already has) — distinct from the key being
+            // ABSENT, which is a legitimate `nil` (this attribute untouched).
+            let numberFormat: OfficeSheetsNumberFormatPreset?
+            if let raw = object["numberFormat"] as? String {
+                guard let parsed = OfficeSheetsNumberFormatPreset(rawValue: raw) else {
+                    return .rejected(seq: seq, reason: "malformed")
+                }
+                numberFormat = parsed
+            } else {
+                numberFormat = nil
+            }
+            // `columnSpan` present iff `width` present — same paired-field discipline
+            // `sheetsManageSheet`'s own `op == .rename` <-> `newName != nil` guard already established
+            // on this file (that case's own header).
+            guard (columnSpan != nil) == (width != nil) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.sheetsFormat(seq: seq, docId: docId, sheet: sheet, range: range,
+                                        columnSpan: columnSpan, bold: bold, italic: italic,
+                                        numberFormat: numberFormat, align: align, width: width))
+        case "sheetsSetOk":
+            guard let docId = object["docId"] as? String, let cellsWritten = intValue(object["cellsWritten"]) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.sheetsSetOk(seq: seq, docId: docId, cellsWritten: cellsWritten))
+        case "sheetsResizeOk":
+            guard let docId = object["docId"] as? String,
+                  let usedEndColumn = intValue(object["usedEndColumn"]),
+                  let usedEndRow = intValue(object["usedEndRow"]) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.sheetsResizeOk(seq: seq, docId: docId, usedEndColumn: usedEndColumn, usedEndRow: usedEndRow))
+        case "sheetsManageSheetOk":
+            guard let docId = object["docId"] as? String, let sheets = object["sheets"] as? [String] else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.sheetsManageSheetOk(seq: seq, docId: docId, sheets: sheets))
+        case "sheetsFormatOk":
+            guard let docId = object["docId"] as? String, let applied = object["applied"] as? [String] else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.sheetsFormatOk(seq: seq, docId: docId, applied: applied))
+        case "slidesInfo":
+            guard let docId = object["docId"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.slidesInfo(seq: seq, docId: docId))
+        case "slidesRead":
+            guard let docId = object["docId"] as? String, let slide = intValue(object["slide"]) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.slidesRead(seq: seq, docId: docId, slide: slide))
+        case "slidesSetText":
+            guard let docId = object["docId"] as? String, let slide = intValue(object["slide"]) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.slidesSetText(seq: seq, docId: docId, slide: slide,
+                                         title: object["title"] as? String, body: object["body"] as? String))
+        case "slidesManagePage":
+            guard let docId = object["docId"] as? String,
+                  let opRaw = object["op"] as? String, let op = OfficeSlidesManagePageOp(rawValue: opRaw) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            let slide = intValue(object["slide"])
+            let at = intValue(object["at"])
+            let to = intValue(object["to"])
+            let layout: OfficeSlidesLayoutPreset?
+            if let raw = object["layout"] as? String {
+                guard let parsed = OfficeSlidesLayoutPreset(rawValue: raw) else {
+                    return .rejected(seq: seq, reason: "malformed")
+                }
+                layout = parsed
+            } else {
+                layout = nil
+            }
+            // Per-op paired-field guard — this case's own header states the contract; a mismatch
+            // refuses rather than silently ignoring an inapplicable field, the same discipline
+            // `sheetsManageSheet`/`sheetsFormat`'s own paired-field guards already established.
+            let shapeIsValid: Bool
+            switch op {
+            case .add: shapeIsValid = slide == nil && to == nil
+            case .delete: shapeIsValid = slide != nil && at == nil && to == nil && layout == nil
+            case .reorder: shapeIsValid = slide != nil && to != nil && at == nil && layout == nil
+            }
+            guard shapeIsValid else { return .rejected(seq: seq, reason: "malformed") }
+            return .frame(.slidesManagePage(seq: seq, docId: docId, op: op, slide: slide, at: at, to: to, layout: layout))
+        case "slidesInfoOk":
+            guard let docId = object["docId"] as? String,
+                  let slides = OfficeWireFrame.decodeSlideInfos(object["slides"]) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.slidesInfoOk(seq: seq, docId: docId, slides: slides))
+        case "slidesReadOk":
+            guard let docId = object["docId"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.slidesReadOk(seq: seq, docId: docId,
+                                        title: object["title"] as? String, body: object["body"] as? String))
+        case "slidesSetTextOk":
+            guard let docId = object["docId"] as? String, let applied = object["applied"] as? [String] else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.slidesSetTextOk(seq: seq, docId: docId, applied: applied))
+        case "slidesManagePageOk":
+            guard let docId = object["docId"] as? String, let slideCount = intValue(object["slideCount"]) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.slidesManagePageOk(seq: seq, docId: docId, slideCount: slideCount))
+        case "docsInfo":
+            guard let docId = object["docId"] as? String else { return .rejected(seq: seq, reason: "malformed") }
+            return .frame(.docsInfo(seq: seq, docId: docId))
+        case "docsRead":
+            guard let docId = object["docId"] as? String else { return .rejected(seq: seq, reason: "malformed") }
+            return .frame(.docsRead(seq: seq, docId: docId))
+        case "docsReplace":
+            // `find` non-empty and newline-free is re-checked HERE, not merely trusted from the
+            // daemon: an empty `find` would make our own occurrence count 0 while the engine's
+            // behaviour on an empty search string is unspecified from source, and a `find` spanning a
+            // paragraph break can never match (the engine's matcher does not cross a paragraph node)
+            // while OUR literal count over `\n`-joined text happily would — a guaranteed
+            // count/engine divergence, i.e. a guaranteed trip of the ruling-1 tripwire, on input a
+            // model can produce by accident. Refused at the wire rather than discovered mid-verb.
+            guard let docId = object["docId"] as? String,
+                  let find = object["find"] as? String, !find.isEmpty,
+                  !find.contains("\n"), !find.contains("\r"),
+                  let replaceWith = object["replaceWith"] as? String,
+                  !replaceWith.contains("\n"), !replaceWith.contains("\r") else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.docsReplace(seq: seq, docId: docId, find: find, replaceWith: replaceWith))
+        case "docsInsert":
+            guard let docId = object["docId"] as? String,
+                  let text = object["text"] as? String, !text.isEmpty,
+                  let atStart = object["atStart"] as? Bool,
+                  let asNewParagraph = object["asNewParagraph"] as? Bool else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.docsInsert(seq: seq, docId: docId, text: text, atStart: atStart,
+                                      asNewParagraph: asNewParagraph))
+        case "docsInfoOk":
+            guard let docId = object["docId"] as? String, let pages = intValue(object["pages"]),
+                  let paragraphs = intValue(object["paragraphs"]),
+                  let characters = intValue(object["characters"]) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.docsInfoOk(seq: seq, docId: docId, pages: pages, paragraphs: paragraphs,
+                                      characters: characters))
+        case "docsReadOk":
+            guard let docId = object["docId"] as? String, let text = object["text"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.docsReadOk(seq: seq, docId: docId, text: text))
+        case "docsReplaceOk":
+            guard let docId = object["docId"] as? String, let replaced = intValue(object["replaced"]) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.docsReplaceOk(seq: seq, docId: docId, replaced: replaced))
+        case "docsInsertOk":
+            guard let docId = object["docId"] as? String, let paragraphs = intValue(object["paragraphs"]) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.docsInsertOk(seq: seq, docId: docId, paragraphs: paragraphs))
         default:
             // The type itself is unrecognized — the brief's exact case: error{seq,reason:"unknown"}.
             return .rejected(seq: seq, reason: "unknown")
@@ -1704,6 +2602,13 @@ func intValue(_ value: Any?) -> Int? {
 func int64Value(_ value: Any?) -> Int64? {
     guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
     return number as? Int64
+}
+/// office-agent-tools T5 — same NSNumber-boolean-trap discipline as `intValue`/`int64Value` above,
+/// for `sheetsFormat.width` (points — a fractional value, unlike every other numeric field this wire
+/// has carried so far, which is why this helper did not already exist).
+func doubleValue(_ value: Any?) -> Double? {
+    guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+    return number as? Double
 }
 
 /// Mints strictly increasing `seq` values for one connection's OUTBOUND frames, starting at 1

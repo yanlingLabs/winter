@@ -831,6 +831,24 @@ final class ShellSessionHost: ObservableObject {
     /// The session's office runtime **if it already has one** — mirrors `existingEditorRuntime`.
     func existingOfficeRuntime(for sessionId: String) -> OfficeRuntime? { officeRuntimes[sessionId] }
 
+    /// office-agent-tools T2 — the agent's own document broker, reached through this host's existing
+    /// `existingOfficeRuntime`/`officeRuntime(for:)` doors, never a new path to a runtime. One per
+    /// host, lazily minted on first use (mirrors `officeHelperSupervisor`'s own "never in `init`"
+    /// reasoning — most hosts across the test suite never touch office at all, and this costs nothing
+    /// until the first verb does).
+    ///
+    /// `[weak self]` throughout: a broker call outliving this host (a session torn down mid-call) is
+    /// the one case `OfficeAgentBroker.Host`'s optional-returning doors exist for — see that type's
+    /// own doc. `workingDirectories` reads `directory.rows` fresh on every call, never cached, the
+    /// same "read fresh from the directory" convention `resolvedFilePath`/`editorTabSessionRoots`
+    /// already follow for this exact field.
+    private(set) lazy var officeAgentBroker: OfficeAgentBroker = OfficeAgentBroker(host: .init(
+        existingRuntime: { [weak self] sessionId in self?.existingOfficeRuntime(for: sessionId) },
+        runtime: { [weak self] sessionId in self?.officeRuntime(for: sessionId) },
+        workingDirectories: { [weak self] sessionId in
+            self?.directory.rows.first(where: { $0.sessionId == sessionId })?.dirs
+        }))
+
     private func ensureOfficeHelperSupervisor() -> OfficeHelperSupervisor {
         if let existing = officeHelperSupervisor { return existing }
         let supervisor = makeOfficeHelperSupervisor()
@@ -1096,6 +1114,132 @@ final class ShellSessionHost: ObservableObject {
                     }
                 } catch {
                     NSLog("[ShellSessionHost] office redo(\(docId)) failed: \(error)")
+                }
+            },
+            // office-agent-tools T3 — same `queue.run` routing, and same throws-all-the-way-back
+            // posture `open`/`save` have (unlike `close`/`undo`/`redo`'s fire-and-forget swallow):
+            // a read caller needs to know WHY it failed, not just that it did.
+            sheetsInfo: { [weak supervisor] docId in
+                try await queue.run {
+                    guard let client = supervisor?.client else {
+                        throw OfficeHelperClientError.serverError(reason: "helper not connected")
+                    }
+                    return try await client.sheetsInfo(docId: docId)
+                }
+            },
+            sheetsRead: { [weak supervisor] docId, sheet, range, formulas in
+                try await queue.run {
+                    guard let client = supervisor?.client else {
+                        throw OfficeHelperClientError.serverError(reason: "helper not connected")
+                    }
+                    return try await client.sheetsRead(docId: docId, sheet: sheet, range: range, formulas: formulas)
+                }
+            },
+            // office-agent-tools T4 — same `queue.run` routing and same throws-all-the-way-back
+            // posture `sheetsInfo`/`sheetsRead`/`save`/`open` already have: a write caller needs to
+            // know WHY it failed, never a silent swallow the way `postKey`/`close` fire-and-forget.
+            sheetsSet: { [weak supervisor] docId, sheet, range, cellAddresses, cellValues in
+                try await queue.run {
+                    guard let client = supervisor?.client else {
+                        throw OfficeHelperClientError.serverError(reason: "helper not connected")
+                    }
+                    return try await client.sheetsSet(docId: docId, sheet: sheet, range: range,
+                                                       cellAddresses: cellAddresses, cellValues: cellValues)
+                }
+            },
+            sheetsResize: { [weak supervisor] docId, sheet, dimension, op, selectionRange in
+                try await queue.run {
+                    guard let client = supervisor?.client else {
+                        throw OfficeHelperClientError.serverError(reason: "helper not connected")
+                    }
+                    return try await client.sheetsResize(docId: docId, sheet: sheet, dimension: dimension,
+                                                          op: op, selectionRange: selectionRange)
+                }
+            },
+            sheetsManageSheet: { [weak supervisor] docId, op, name, newName in
+                try await queue.run {
+                    guard let client = supervisor?.client else {
+                        throw OfficeHelperClientError.serverError(reason: "helper not connected")
+                    }
+                    return try await client.sheetsManageSheet(docId: docId, op: op, name: name, newName: newName)
+                }
+            },
+            sheetsFormat: { [weak supervisor] docId, sheet, range, columnSpan, bold, italic, numberFormat, align, width in
+                try await queue.run {
+                    guard let client = supervisor?.client else {
+                        throw OfficeHelperClientError.serverError(reason: "helper not connected")
+                    }
+                    return try await client.sheetsFormat(docId: docId, sheet: sheet, range: range, columnSpan: columnSpan,
+                                                          bold: bold, italic: italic, numberFormat: numberFormat,
+                                                          align: align, width: width)
+                }
+            },
+            // office-agent-tools T6 — slides, same `queue.run` routing and same throws-all-the-way-
+            // back posture every sheets sibling above already has.
+            slidesInfo: { [weak supervisor] docId in
+                try await queue.run {
+                    guard let client = supervisor?.client else {
+                        throw OfficeHelperClientError.serverError(reason: "helper not connected")
+                    }
+                    return try await client.slidesInfo(docId: docId)
+                }
+            },
+            slidesRead: { [weak supervisor] docId, slide in
+                try await queue.run {
+                    guard let client = supervisor?.client else {
+                        throw OfficeHelperClientError.serverError(reason: "helper not connected")
+                    }
+                    return try await client.slidesRead(docId: docId, slide: slide)
+                }
+            },
+            slidesSetText: { [weak supervisor] docId, slide, title, body in
+                try await queue.run {
+                    guard let client = supervisor?.client else {
+                        throw OfficeHelperClientError.serverError(reason: "helper not connected")
+                    }
+                    return try await client.slidesSetText(docId: docId, slide: slide, title: title, body: body)
+                }
+            },
+            slidesManagePage: { [weak supervisor] docId, op, slide, at, to, layout in
+                try await queue.run {
+                    guard let client = supervisor?.client else {
+                        throw OfficeHelperClientError.serverError(reason: "helper not connected")
+                    }
+                    return try await client.slidesManagePage(docId: docId, op: op, slide: slide, at: at,
+                                                              to: to, layout: layout)
+                }
+            },
+            docsInfo: { [weak supervisor] docId in
+                try await queue.run {
+                    guard let client = supervisor?.client else {
+                        throw OfficeHelperClientError.serverError(reason: "helper not connected")
+                    }
+                    return try await client.docsInfo(docId: docId)
+                }
+            },
+            docsRead: { [weak supervisor] docId in
+                try await queue.run {
+                    guard let client = supervisor?.client else {
+                        throw OfficeHelperClientError.serverError(reason: "helper not connected")
+                    }
+                    return try await client.docsRead(docId: docId)
+                }
+            },
+            docsReplace: { [weak supervisor] docId, find, replaceWith in
+                try await queue.run {
+                    guard let client = supervisor?.client else {
+                        throw OfficeHelperClientError.serverError(reason: "helper not connected")
+                    }
+                    return try await client.docsReplace(docId: docId, find: find, replaceWith: replaceWith)
+                }
+            },
+            docsInsert: { [weak supervisor] docId, text, atStart, asNewParagraph in
+                try await queue.run {
+                    guard let client = supervisor?.client else {
+                        throw OfficeHelperClientError.serverError(reason: "helper not connected")
+                    }
+                    return try await client.docsInsert(docId: docId, text: text, atStart: atStart,
+                                                        asNewParagraph: asNewParagraph)
                 }
             },
             // Office Stage B Task 2b — the LIVE supervisor's own configured directory, never

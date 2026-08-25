@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 
+
 /// The shell's root content: the nav sidebar and the selected destination's surface.
 ///
 /// custom-sidebar rework (2026-08-07, the [[custom-chrome-not-native]] correction): a plain
@@ -168,6 +169,56 @@ struct ShellRootView: View {
                             nav.navigate(to: .mode(.cowork))
                         }
                     }
+                }
+                // office-agent Task 8 — the SHELL half of the headless gate's door (the window half
+                // lives in `AppDelegate.applicationDidFinishLaunching`, exactly as
+                // `NORMA_PANEL_SMOKE`'s two halves are split, and for the same reason).
+                //
+                // Why both halves are needed, measured rather than assumed: the window half alone
+                // DOES attach the host to the named session — enough for `officeReach`, so every
+                // `sheets`/`slides`/`docs` verb starts working — but it fires one run-loop turn
+                // after `boot()`, long before the shell has mounted, so the visible route was still
+                // the `.newChat` landing (AX read back `AXStaticText "How can I help you today?"`
+                // with a document tab already open in the daemon's own `panel.list`). Attachment and
+                // rendering are separate facts, and the gate's UI assertions need the second one.
+                //
+                // `.onAppear` is the right moment for the same reason the door above it uses it:
+                // the shell is mounted, so `nav.navigate` lands. `presentation.mode = .side` opens
+                // the panel so a `.document` tab actually renders its canvas and part strip — the
+                // surfaces the gate reads back through accessibility.
+                //
+                // ONE-SHOT, and that is load-bearing rather than tidiness. `.onAppear` fires again
+                // on every SwiftUI re-mount of this view, and re-navigating to a destination while
+                // a `.document` tab is open re-enters the same panel dismantle the door above
+                // documents ("switching destination with one open — the same dismantle"). Measured:
+                // without this guard the window renders the document correctly (AX read back
+                // `nog-w/budget.xlsx` and the formula bar's `A1: NORMA GATE`) and then DISAPPEARS a
+                // few seconds later, while the app itself stays alive and LibreOffice keeps
+                // servicing the document — a live window that evaporates mid-gate, which would read
+                // as a UI assertion failure with nothing wrong at the surface under test.
+                .onAppear {
+                    let env = ProcessInfo.processInfo.environment
+                    guard let gateSession = env["NORMA_GATE_SESSION"], !gateSession.isEmpty else { return }
+                    // IDEMPOTENT, not a one-shot latch — and the difference was measured, twice.
+                    //
+                    // A plain `fired` boolean deadlocks the door: the FIRST `.onAppear` can land
+                    // before navigation can take, the flag is spent on that no-op, and no later
+                    // re-mount ever retries — observed as a shell window that never appears at all
+                    // (the app alive, the daemon and helper healthy, LibreOffice servicing the
+                    // document, and AX reporting zero named elements).
+                    //
+                    // Testing the CURRENT destination instead gets both properties at once: it
+                    // still cannot re-enter the panel dismantle that re-navigating with a
+                    // `.document` tab open causes (already at `.session(gateSession)` -> no call),
+                    // and it DOES retry on every re-mount until the navigation actually sticks.
+                    // The panel is opened UNCONDITIONALLY, before the navigation guard — the two
+                    // are independent facts and folding them into one `return` was a real bug: the
+                    // window half above may already have navigated to this very session before the shell
+                    // mounted, in which case the guard below returns and the panel would never open,
+                    // so no `.document` tab could ever render for the UI leg.
+                    if presentation.mode != .side { presentation.mode = .side }
+                    if case .session(let current) = nav.destination, current == gateSession { return }
+                    nav.navigate(to: .session(gateSession))
                 }
                 #endif
         }

@@ -178,6 +178,108 @@ public protocol OfficeDocumentBridge: AnyObject {
     /// Posts a key event through the agent view specifically. Throws `SaveError.noAgentView` if
     /// `createAgentView` was never called for this docId.
     func agentKeyEvent(docId: String, part: Int, type: OfficeKeyEventType, charCode: Int, keyCode: Int) throws
+
+    // MARK: - office-agent-tools T3: sheets info/read
+
+    /// Sheet names, each one's used range, and the active sheet's name. Read-only. Throws only on a
+    /// `docId` this bridge has no handle for, or one that is not a spreadsheet — both composed
+    /// entirely from this bridge's own words (never LOK-thrown text), matching `saveAsFailed`'s own
+    /// posture where the reason genuinely does come from LOK versus the ones that don't.
+    func sheetsInfo(docId: String) throws -> (sheets: [OfficeSheetInfo], activeSheet: String)
+    /// A value or formula grid over one already-validated, already-formatted A1 `range` on ONE named
+    /// sheet — see `OfficeWireFrame.sheetsRead`'s own header for why `range` arrives pre-formatted
+    /// rather than as column/row integers. `sheet` is resolved to a part index HERE. Throws
+    /// `SaveError.sheetNotFound` (carrying the real sheet list) for an unknown name, or the same
+    /// existence/kind errors `sheetsInfo` throws.
+    func sheetsRead(docId: String, sheet: String, range: String, formulas: Bool) throws -> [[String]]
+
+    // MARK: - office-agent-tools T4: sheets write verbs
+
+    /// Writes `cellValues[i]` into `cellAddresses[i]` for every `i`, in order, on `sheet` — real
+    /// synthetic text entry, not a paste (`LOKBridge.sheetsSetOnDedicatedThread`'s own header has the
+    /// full mechanism and why). `range` is used only for this bridge's own post-write verification
+    /// read (defense in depth — see that function's own header), never re-validated against
+    /// `cellAddresses`' own shape (the caller already did that). Returns the number of cells written
+    /// (`cellAddresses.count`, echoed back rather than silently trusted). Throws the same
+    /// existence/kind errors `sheetsRead` throws, plus `SaveError.sheetNotFound`, plus a write-
+    /// specific verification failure if the post-write read does not confirm the intended content
+    /// landed.
+    func sheetsSet(docId: String, sheet: String, range: String, cellAddresses: [String], cellValues: [String]) throws -> Int
+    /// Inserts or deletes `count` whole rows/columns starting at `selectionRange`'s own row/column
+    /// span (a pre-formatted "R1:R2" or "C1:C2" string — see `OfficeWireFrame.sheetsResize`'s own
+    /// header for why the app, not this bridge, computes it). Returns the sheet's own used-range
+    /// dimensions AFTER the operation (the same shape `sheetsInfo` reports per sheet). Throws the
+    /// same existence/kind errors `sheetsRead` throws, plus `SaveError.sheetNotFound`.
+    func sheetsResize(docId: String, sheet: String, dimension: OfficeSheetsResizeDimension,
+                      op: OfficeSheetsResizeOp, selectionRange: String) throws -> (usedEndColumn: Int, usedEndRow: Int)
+    /// Adds/deletes/renames a sheet. `name` is the NEW sheet's name for `.add`, the EXISTING sheet's
+    /// name for `.delete`/`.rename`; `newName` is `.rename`-only. Returns the workbook's full
+    /// sheet-name list AFTER the operation, in part order. Throws `SaveError.sheetNotFound` for
+    /// `.delete`/`.rename` naming a sheet that does not exist, `SaveError.lastSheet` for a `.delete`
+    /// that would leave the workbook with zero sheets, and `SaveError.duplicateSheetName` for an
+    /// `.add`/`.rename` whose target name already exists — all three checked BEFORE dispatching any
+    /// UNO command (see `LOKBridge.sheetsManageSheetOnDedicatedThread`'s own header for why: Calc's
+    /// own slot handlers silently no-op or silently rename-with-a-suffix rather than erroring these
+    /// cases, so this bridge would otherwise have no honest signal to report).
+    func sheetsManageSheet(docId: String, op: OfficeSheetsManageSheetOp, name: String, newName: String?) throws -> [String]
+
+    /// office-agent-tools T5 — applies `bold`/`italic`/`numberFormat`/`align`/`width` over `range` on
+    /// `sheet`, every one optional (`nil` means untouched — see `OfficeWireFrame.sheetsFormat`'s own
+    /// header for the full contract). `columnSpan` is `width`'s own separate column-span selection,
+    /// non-nil only when `width` itself is. Returns which attribute names were actually applied, a
+    /// subset of `["bold","italic","numberFormat","align","width"]` in that order. Throws the same
+    /// existence/kind errors `sheetsRead` throws, plus `SaveError.sheetNotFound`.
+    func sheetsFormat(docId: String, sheet: String, range: String, columnSpan: String?,
+                      bold: Bool?, italic: Bool?, numberFormat: OfficeSheetsNumberFormatPreset?,
+                      align: OfficeSheetsAlign?, width: Double?) throws -> [String]
+
+    // MARK: - office-agent-tools T6: slides
+
+    /// Every slide's own PART NAME and, when determinable, its layout name — see `OfficeWireFrame
+    /// .slidesInfo`/`OfficeSlideInfo`'s own headers for why this is not a placeholder-text read and
+    /// why `layout` is genuinely `nil`-able. Throws only on a `docId` this bridge has no handle for,
+    /// or one that is not a presentation.
+    func slidesInfo(docId: String) throws -> [OfficeSlideInfo]
+    /// ONE slide's title/body placeholder text — `nil` per field when that slide has no such
+    /// placeholder at all, `""` when it exists and is empty (see `OfficeWireFrame.slidesReadOk`'s own
+    /// header for why the distinction is load-bearing). `slide` is 0-based. Throws the same
+    /// existence/kind errors `slidesInfo` throws, plus a slide-index-out-of-range error.
+    func slidesRead(docId: String, slide: Int) throws -> (title: String?, body: String?)
+    /// Writes `title` and/or `body` onto ONE slide's own placeholder(s), each independently optional
+    /// (`nil` means untouched). Returns which of `["title","body"]` actually applied. Throws the same
+    /// existence/kind errors `slidesRead` throws, plus a refusal naming which placeholder is missing
+    /// when the caller named an attribute this slide has no placeholder for (spec's own "refuses
+    /// naming the reason, rather than inventing one" contract).
+    func slidesSetText(docId: String, slide: Int, title: String?, body: String?) throws -> [String]
+    /// Adds/deletes/reorders a slide (`op`) — `slide`/`at`/`to` are all 0-based, exactly matching
+    /// `OfficeWireFrame.slidesManagePage`'s own paired-field contract (that case's own header states
+    /// which fields apply to which op; this bridge trusts the wire's own decode guard rather than
+    /// re-validating the pairing a second time — the identical "a business rule already enforced
+    /// upstream" posture `sheetsManageSheet`'s own conformance already has for ITS op enum). Returns
+    /// the presentation's slide count AFTER the operation. Throws `SaveError.lastSlide` for a
+    /// `.delete` that would leave zero slides, plus the same existence/kind errors `slidesInfo`
+    /// throws.
+    func slidesManagePage(docId: String, op: OfficeSlidesManagePageOp, slide: Int?, at: Int?, to: Int?,
+                          layout: OfficeSlidesLayoutPreset?) throws -> Int
+
+    // MARK: - office-agent-tools T7: docs
+
+    /// `docId`'s page count (`getParts()` — for Writer, parts ARE pages) plus paragraph and character
+    /// counts derived from its own text. Throws only on a `docId` this bridge has no handle for, or
+    /// one that is not a TEXT document.
+    func docsInfo(docId: String) throws -> (pages: Int, paragraphs: Int, characters: Int)
+    /// `docId`'s whole body text, UTF-8, paragraphs separated by `\n`. `""` is a legitimate answer
+    /// (an empty document), never an error. Same existence/kind errors as `docsInfo`.
+    func docsRead(docId: String) throws -> String
+    /// Replaces every literal, case-sensitive occurrence of `find` with `replaceWith`, returning how
+    /// many — a count computed by the bridge itself and cross-checked against the engine's own
+    /// boolean, because the engine's real count is unreachable. Throws when the two disagree, and
+    /// when the document read back afterwards is not the text the replacement should have produced.
+    func docsReplace(docId: String, find: String, replaceWith: String) throws -> Int
+    /// Inserts `text` at the start (`atStart`) or the end of the body, optionally starting a new
+    /// paragraph first. Returns the paragraph count AFTER the insert. Throws when the document read
+    /// back afterwards is not the text the insert should have produced.
+    func docsInsert(docId: String, text: String, atStart: Bool, asNewParagraph: Bool) throws -> Int
 }
 
 /// The result of a successful `OfficeDocumentBridge.paintTile` call — helper-internal (never
@@ -363,6 +465,200 @@ public final class FakeOfficeDocumentBridge: OfficeDocumentBridge {
         guard hasAgentView else {
             throw OfficeHelperServerError.posix("fake bridge: docId has no agent view: \(docId)")
         }
+    }
+
+    /// office-agent-tools T3 — wire-level dispatch is what the fixture-backed tests exercise here,
+    /// never real sheet content (same reasoning as every other stub above): one synthetic sheet named
+    /// "Sheet1", reporting a fixed, non-empty used range so a wire-level test can assert on a REAL
+    /// (if fake) value rather than the wholly-empty sentinel by accident.
+    public func sheetsInfo(docId: String) throws -> (sheets: [OfficeSheetInfo], activeSheet: String) {
+        lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
+        guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
+        return ([OfficeSheetInfo(name: "Sheet1", usedEndColumn: 2, usedEndRow: 9)], "Sheet1")
+    }
+    /// office-agent-tools T3 — same existence-only posture as `sheetsInfo` above. Refuses any sheet
+    /// name other than "Sheet1" (mirroring the ONE sheet `sheetsInfo` reports) so a wire-level test
+    /// can exercise the `sheetNotFound` refusal path without real LOK. A deterministic, small grid —
+    /// never real content — with `formulas` folded into the one cell that differs, so a wire-level
+    /// test CAN tell the two request shapes apart without needing real LOK to compute anything.
+    public func sheetsRead(docId: String, sheet: String, range: String, formulas: Bool) throws -> [[String]] {
+        lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
+        guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
+        guard sheet == "Sheet1" else {
+            throw OfficeHelperServerError.posix("fake bridge: no sheet named \"\(sheet)\" in \(docId) — this workbook has: Sheet1")
+        }
+        return [["fake", formulas ? "=FAKE()" : "42"]]
+    }
+
+    /// office-agent-tools T4 — wire-level dispatch only, same reasoning as every other fake stub
+    /// above: existence/sheet-name checked (real CONTENT correctness is `LOKBridge`'s own live-tested
+    /// job), returns `cellAddresses.count` as a deterministic, real (if fake) answer.
+    private var fakeSheetNames: [String] = ["Sheet1"]
+
+    public func sheetsSet(docId: String, sheet: String, range: String, cellAddresses: [String], cellValues: [String]) throws -> Int {
+        lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
+        guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
+        guard sheet == "Sheet1" else {
+            throw OfficeHelperServerError.posix("fake bridge: no sheet named \"\(sheet)\" in \(docId) — this workbook has: Sheet1")
+        }
+        return cellAddresses.count
+    }
+    public func sheetsResize(docId: String, sheet: String, dimension: OfficeSheetsResizeDimension,
+                             op: OfficeSheetsResizeOp, selectionRange: String) throws -> (usedEndColumn: Int, usedEndRow: Int) {
+        lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
+        guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
+        guard sheet == "Sheet1" else {
+            throw OfficeHelperServerError.posix("fake bridge: no sheet named \"\(sheet)\" in \(docId) — this workbook has: Sheet1")
+        }
+        return (usedEndColumn: 2, usedEndRow: 9)
+    }
+    public func sheetsManageSheet(docId: String, op: OfficeSheetsManageSheetOp, name: String, newName: String?) throws -> [String] {
+        lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
+        guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
+        switch op {
+        case .add:
+            guard !fakeSheetNames.contains(name) else {
+                throw OfficeHelperServerError.posix("fake bridge: a sheet named \"\(name)\" already exists in \(docId)")
+            }
+            fakeSheetNames.append(name)
+        case .delete:
+            guard fakeSheetNames.contains(name) else {
+                throw OfficeHelperServerError.posix("fake bridge: no sheet named \"\(name)\" in \(docId)")
+            }
+            guard fakeSheetNames.count > 1 else {
+                throw OfficeHelperServerError.posix("fake bridge: cannot delete the only sheet in \(docId)")
+            }
+            fakeSheetNames.removeAll { $0 == name }
+        case .rename:
+            guard let index = fakeSheetNames.firstIndex(of: name) else {
+                throw OfficeHelperServerError.posix("fake bridge: no sheet named \"\(name)\" in \(docId)")
+            }
+            guard let newName, !fakeSheetNames.contains(newName) else {
+                throw OfficeHelperServerError.posix("fake bridge: a sheet named \"\(newName ?? "")\" already exists in \(docId)")
+            }
+            fakeSheetNames[index] = newName
+        }
+        return fakeSheetNames
+    }
+
+    /// office-agent-tools T5 — wire-level dispatch only, same reasoning as every other fake stub
+    /// above: existence/sheet-name checked (real UNO-command correctness is `LOKBridge`'s own
+    /// live-tested job), returns the attribute names actually named — a deterministic, real (if fake)
+    /// echo of the caller's own request, in the fixed order `sheetsFormatOk`'s own header promises.
+    public func sheetsFormat(docId: String, sheet: String, range: String, columnSpan: String?,
+                             bold: Bool?, italic: Bool?, numberFormat: OfficeSheetsNumberFormatPreset?,
+                             align: OfficeSheetsAlign?, width: Double?) throws -> [String] {
+        lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
+        guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
+        guard sheet == "Sheet1" else {
+            throw OfficeHelperServerError.posix("fake bridge: no sheet named \"\(sheet)\" in \(docId) — this workbook has: Sheet1")
+        }
+        var applied: [String] = []
+        if bold != nil { applied.append("bold") }
+        if italic != nil { applied.append("italic") }
+        if numberFormat != nil { applied.append("numberFormat") }
+        if align != nil { applied.append("align") }
+        if width != nil { applied.append("width") }
+        return applied
+    }
+
+    /// office-agent-tools T6 — wire-level dispatch only, same reasoning as every sheets stub above:
+    /// two synthetic slides ("Slide1"/"Slide2"), `title` reflecting whatever `slidesSetText` has set
+    /// for that slide so far in the SAME test (`nil` until then — a fresh presentation's slides have
+    /// no title placeholder text set, the ordinary case `slidesInfo`'s real conformance also reports).
+    /// `fakeSlideCount`/`fakeSlideText` back `slidesRead`/`slidesSetText`/`slidesManagePage`
+    /// with real (if fake) per-slide state, deterministic and mutable across calls in one test.
+    private var fakeSlideCount = 2
+    private var fakeSlideTitles: [Int: String] = [:]
+    private var fakeSlideBodies: [Int: String] = [:]
+
+    public func slidesInfo(docId: String) throws -> [OfficeSlideInfo] {
+        lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
+        guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
+        return (0..<fakeSlideCount).map { OfficeSlideInfo(name: "Slide\($0 + 1)", title: fakeSlideTitles[$0]) }
+    }
+    public func slidesRead(docId: String, slide: Int) throws -> (title: String?, body: String?) {
+        lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
+        guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
+        guard slide >= 0, slide < fakeSlideCount else {
+            throw OfficeHelperServerError.posix("fake bridge: no slide \(slide) in \(docId) — this presentation has \(fakeSlideCount) slides")
+        }
+        return (title: fakeSlideTitles[slide] ?? "fake title \(slide)", body: fakeSlideBodies[slide])
+    }
+    public func slidesSetText(docId: String, slide: Int, title: String?, body: String?) throws -> [String] {
+        lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
+        guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
+        guard slide >= 0, slide < fakeSlideCount else {
+            throw OfficeHelperServerError.posix("fake bridge: no slide \(slide) in \(docId) — this presentation has \(fakeSlideCount) slides")
+        }
+        var applied: [String] = []
+        if let title { fakeSlideTitles[slide] = title; applied.append("title") }
+        if let body { fakeSlideBodies[slide] = body; applied.append("body") }
+        return applied
+    }
+    public func slidesManagePage(docId: String, op: OfficeSlidesManagePageOp, slide: Int?, at: Int?, to: Int?,
+                                 layout: OfficeSlidesLayoutPreset?) throws -> Int {
+        lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
+        guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
+        switch op {
+        case .add:
+            fakeSlideCount += 1
+        case .delete:
+            guard fakeSlideCount > 1 else {
+                throw OfficeHelperServerError.posix("fake bridge: cannot delete the only slide in \(docId)")
+            }
+            guard let slide, slide >= 0, slide < fakeSlideCount else {
+                throw OfficeHelperServerError.posix("fake bridge: no slide \(slide ?? -1) in \(docId) — this presentation has \(fakeSlideCount) slides")
+            }
+            fakeSlideCount -= 1
+            fakeSlideTitles.removeValue(forKey: slide)
+            fakeSlideBodies.removeValue(forKey: slide)
+        case .reorder:
+            guard let slide, slide >= 0, slide < fakeSlideCount, let to, to >= 0, to < fakeSlideCount else {
+                throw OfficeHelperServerError.posix("fake bridge: reorder out of range in \(docId)")
+            }
+        }
+        return fakeSlideCount
+    }
+
+    /// office-agent-tools T7 — wire-level dispatch only, same reasoning as every stub above: one
+    /// synthetic body of text per docId, mutated by `docsReplace`/`docsInsert` so a test can drive a
+    /// real sequence of verbs through the real wire without a real LOK. `fakeDocsText` starts as two
+    /// paragraphs; `pages` is a constant, since page count is a layout fact no fake can honestly
+    /// produce.
+    private var fakeDocsText = "NORMA GATE\nsecond paragraph"
+
+    public func docsInfo(docId: String) throws -> (pages: Int, paragraphs: Int, characters: Int) {
+        lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
+        guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
+        return (pages: 1,
+                paragraphs: fakeDocsText.split(separator: "\n", omittingEmptySubsequences: false).count,
+                characters: fakeDocsText.count)
+    }
+    public func docsRead(docId: String) throws -> String {
+        lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
+        guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
+        return fakeDocsText
+    }
+    public func docsReplace(docId: String, find: String, replaceWith: String) throws -> Int {
+        lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
+        guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
+        var count = 0
+        var searchStart = fakeDocsText.startIndex
+        while searchStart < fakeDocsText.endIndex,
+              let found = fakeDocsText.range(of: find, options: [.literal], range: searchStart..<fakeDocsText.endIndex) {
+            count += 1
+            searchStart = found.upperBound
+        }
+        fakeDocsText = fakeDocsText.replacingOccurrences(of: find, with: replaceWith, options: [.literal])
+        return count
+    }
+    public func docsInsert(docId: String, text: String, atStart: Bool, asNewParagraph: Bool) throws -> Int {
+        lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
+        guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
+        let separator = (asNewParagraph && !fakeDocsText.isEmpty) ? "\n" : ""
+        fakeDocsText = atStart ? text + separator + fakeDocsText : fakeDocsText + separator + text
+        return fakeDocsText.split(separator: "\n", omittingEmptySubsequences: false).count
     }
 
     /// A small, deterministic, key-dependent pixel pattern (never blank, never identical across
@@ -1173,6 +1469,180 @@ public final class OfficeHelperServer {
             do {
                 try documentBridge.agentKeyEvent(docId: docId, part: part, type: type, charCode: charCode, keyCode: keyCode)
                 writeReply(.agentKeyEventOk(seq: seq, docId: docId), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.sheetsInfo(let seq, let docId)):
+            // office-agent-tools T3 — same existence-check posture as `clipboardCopy`/`undo` above
+            // (any connection touching an already-open doc may read it; this is a read, not a
+            // destructive operation the way `close` is).
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                let result = try documentBridge.sheetsInfo(docId: docId)
+                writeReply(.sheetsInfoOk(seq: seq, docId: docId, sheets: result.sheets, activeSheet: result.activeSheet),
+                           writer: writer)
+            } catch {
+                // `SaveError.notSpreadsheet`/`.docNotOpen` are already house-voice, composed entirely
+                // from this bridge's own words (see that enum's own doc) — `"\(error)"` carries them
+                // through unchanged, the same posture every other verb on this switch already takes.
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.sheetsRead(let seq, let docId, let sheet, let range, let formulas)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                let rows = try documentBridge.sheetsRead(docId: docId, sheet: sheet, range: range, formulas: formulas)
+                writeReply(.sheetsReadOk(seq: seq, docId: docId, rows: rows), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.sheetsSet(let seq, let docId, let sheet, let range, let cellAddresses, let cellValues)):
+            // office-agent-tools T4 — a WRITE, unlike sheetsInfo/sheetsRead above, but the same
+            // existence-check posture: any connection touching an already-open doc may write it
+            // (the broker's own dirty/fence checks already ran before this frame was ever built —
+            // see `OfficeAgentBroker`'s own rules; this bridge has no further consent to withhold).
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                let cellsWritten = try documentBridge.sheetsSet(docId: docId, sheet: sheet, range: range,
+                                                                 cellAddresses: cellAddresses, cellValues: cellValues)
+                writeReply(.sheetsSetOk(seq: seq, docId: docId, cellsWritten: cellsWritten), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.sheetsResize(let seq, let docId, let sheet, let dimension, let op, let selectionRange)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                let dims = try documentBridge.sheetsResize(docId: docId, sheet: sheet, dimension: dimension,
+                                                            op: op, selectionRange: selectionRange)
+                writeReply(.sheetsResizeOk(seq: seq, docId: docId, usedEndColumn: dims.usedEndColumn,
+                                           usedEndRow: dims.usedEndRow), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.sheetsManageSheet(let seq, let docId, let op, let name, let newName)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                let sheets = try documentBridge.sheetsManageSheet(docId: docId, op: op, name: name, newName: newName)
+                writeReply(.sheetsManageSheetOk(seq: seq, docId: docId, sheets: sheets), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.sheetsFormat(let seq, let docId, let sheet, let range, let columnSpan, let bold,
+                                  let italic, let numberFormat, let align, let width)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                let applied = try documentBridge.sheetsFormat(docId: docId, sheet: sheet, range: range,
+                                                               columnSpan: columnSpan, bold: bold, italic: italic,
+                                                               numberFormat: numberFormat, align: align, width: width)
+                writeReply(.sheetsFormatOk(seq: seq, docId: docId, applied: applied), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.slidesInfo(let seq, let docId)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                let slides = try documentBridge.slidesInfo(docId: docId)
+                writeReply(.slidesInfoOk(seq: seq, docId: docId, slides: slides), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.slidesRead(let seq, let docId, let slide)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                let result = try documentBridge.slidesRead(docId: docId, slide: slide)
+                writeReply(.slidesReadOk(seq: seq, docId: docId, title: result.title, body: result.body), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.slidesSetText(let seq, let docId, let slide, let title, let body)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                let applied = try documentBridge.slidesSetText(docId: docId, slide: slide, title: title, body: body)
+                writeReply(.slidesSetTextOk(seq: seq, docId: docId, applied: applied), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.slidesManagePage(let seq, let docId, let op, let slide, let at, let to, let layout)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                let slideCount = try documentBridge.slidesManagePage(docId: docId, op: op, slide: slide, at: at,
+                                                                      to: to, layout: layout)
+                writeReply(.slidesManagePageOk(seq: seq, docId: docId, slideCount: slideCount), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.docsInfo(let seq, let docId)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                let info = try documentBridge.docsInfo(docId: docId)
+                writeReply(.docsInfoOk(seq: seq, docId: docId, pages: info.pages,
+                                       paragraphs: info.paragraphs, characters: info.characters), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.docsRead(let seq, let docId)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                let text = try documentBridge.docsRead(docId: docId)
+                writeReply(.docsReadOk(seq: seq, docId: docId, text: text), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.docsReplace(let seq, let docId, let find, let replaceWith)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                let replaced = try documentBridge.docsReplace(docId: docId, find: find, replaceWith: replaceWith)
+                writeReply(.docsReplaceOk(seq: seq, docId: docId, replaced: replaced), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.docsInsert(let seq, let docId, let text, let atStart, let asNewParagraph)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                let paragraphs = try documentBridge.docsInsert(docId: docId, text: text, atStart: atStart,
+                                                               asNewParagraph: asNewParagraph)
+                writeReply(.docsInsertOk(seq: seq, docId: docId, paragraphs: paragraphs), writer: writer)
             } catch {
                 writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
             }

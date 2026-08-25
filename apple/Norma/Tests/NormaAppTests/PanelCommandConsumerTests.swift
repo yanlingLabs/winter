@@ -150,6 +150,60 @@ final class PanelCommandConsumerTests: XCTestCase {
         XCTAssertEqual(cef.log, [])
     }
 
+    /// office-agent-tools T1 — **the routing proof.** `OfficeCommandConsumerTests` exercises
+    /// `OfficeCommandConsumer` directly; this is the one test in THIS file that proves
+    /// `PanelCommandConsumer.handle` actually reaches it for an office action, rather than falling
+    /// into the `default:` branch just above (which would answer "does not know the browser verb
+    /// `office.docs.info`" — a true-sounding but WRONG message, since this build does know the
+    /// verb by name, it simply hasn't implemented it yet). The two messages are asserted to differ so
+    /// a future edit that accidentally deletes the routing guard reds here even if it still produces
+    /// *some* refusal.
+    ///
+    /// **T3 — `office.sheets.set` chosen deliberately, not `office.sheets.read`; T4 — `office.sheets
+    /// .format` chosen in `set`'s place; T5 — `office.slides.info` chosen in `format`'s place; T6 —
+    /// `office.docs.info` chosen in `slides.info`'s place, for the identical reason one level later,
+    /// again.** T1 picked `read` arbitrarily, back when all 22 verbs answered identically; T3 made
+    /// `sheets.info`/`sheets.read` REAL (dispatched onto their own `Task`, answered asynchronously),
+    /// so THIS test's own synchronous "exactly one result, sent by the time `handle` returns"
+    /// assertion would race a verb that no longer answers synchronously — T3 moved this test to
+    /// `sheets.set`, still T1's own refusal shell at the time. T4 then made `sheets.set` (and seven
+    /// siblings) real too, async the identical way — this test moved to `sheets.format`, the one
+    /// sheets verb still on T1's own synchronous shell at the time. T5 makes `format` real too
+    /// (every `sheets` verb now is) — moved to `office.slides.info`. T6 makes every `slides` verb
+    /// real too. **T7 makes every `docs` verb real as well, so NO office verb answers synchronously
+    /// any more** — this test moves to an UNROUTED `office.`-prefixed action, which is what the
+    /// refusal path still answers and which proves the same routing fact: an `office.` action reaches
+    /// `OfficeCommandConsumer`, not this file's own unknown-browser-verb branch.
+    ///
+    /// Also proves the thing `OfficeCommandConsumerTests` cannot: that CEF is never touched and no
+    /// deadline timer is armed for an office verb, because routing happens before this file's own
+    /// `Call`/`arm` machinery ever sees the command.
+    func testOfficeActionsRouteToTheOfficeConsumerRatherThanTheUnknownVerbBranch() {
+        let world = makeWorld()
+        world.consumer.handle(command("office.docs.frobnicate"))
+        XCTAssertEqual(sent.count, 1)
+        XCTAssertEqual(sent.first?.ok, false)
+        let result = sent.first?.result ?? ""
+        XCTAssertFalse(result.contains("does not know the browser verb"), "\(sent)")
+        XCTAssertTrue(result.contains("docs"), "\(sent)")
+        XCTAssertTrue(result.contains("frobnicate"), "\(sent)")
+        XCTAssertEqual(cef.log, [], "an office verb must never reach CEF")
+        XCTAssertEqual(clock.liveTimers.count, 0, "an office verb arms no browser-side deadline")
+    }
+
+    /// The quiescent guard is checked BEFORE routing (this file's `handle`), so an office command
+    /// arriving during the app's terminal beat is silent, exactly like a browser command — see
+    /// `PanelCommandConsumer.swift`'s routing comment for why office does not get its own carve-out
+    /// here. `testCommandsArrivingDuringTheQuitBeatDoNothingAtAll` below pins this for browser verbs;
+    /// this is the identical pin for an office one, since the two share one guard and this is the
+    /// only file positioned to prove they share it.
+    func testOfficeCommandsArrivingDuringTheQuitBeatAreSilentTooSameAsBrowserOnes() {
+        let world = makeWorld()
+        world.runtime.quiesce()
+        world.consumer.handle(command("office.sheets.read"))
+        XCTAssertEqual(sent.count, 0, "a quiesced app must send nothing, office or browser")
+    }
+
     // MARK: - The fifth door
 
     /// **THE FIFTH DOOR.** `panel_command.url` is capped on the wire but deliberately not

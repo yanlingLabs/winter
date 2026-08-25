@@ -1100,31 +1100,32 @@ final class OfficeHelperLiveTests: XCTestCase {
         // open view-only — nothing to race on, today); T4 makes this load-bearing the moment a real
         // push can actually land WHILE this test's own task is mid-read. One NSLock around both
         // sides closes the race now rather than leaving it as a trap for T4 to trip over.
-        let observedPushesLock = NSLock()
-        var observedPushes: [(String, OfficeDocumentEvent)] = []
-        // Plain (non-`async`) local functions, deliberately — `NSLock.lock()`/`.unlock()` called
-        // DIRECTLY from an `async` function's own body triggers "unavailable from asynchronous
-        // contexts" under strict concurrency checking (harmless here — neither call ever spans a
-        // suspension point — but still worth not shipping a new warning). Wrapping each critical
-        // section in its own synchronous function, called FROM the async test body, keeps the
-        // `.lock()`/`.unlock()` call sites themselves inside a synchronous context.
-        func recordPush(_ docId: String, _ event: OfficeDocumentEvent) {
-            observedPushesLock.lock()
-            observedPushes.append((docId, event))
-            observedPushesLock.unlock()
+        // crash-fix round 1 (finding 3, broker-crash-investigation.md §4): `OfficeHelperClient`'s
+        // push callbacks are now `@Sendable` (the fix that closes the `@MainActor`-inference gap
+        // the investigation found), so a closure assigned to `onDocumentEvent` below must
+        // independently prove itself Sendable — a bare `var` mutated through a local function (the
+        // previous shape here) no longer qualifies: Swift 6 makes that an error, 5.9 only warns,
+        // but the underlying capture was exactly as real either way. Boxed in a locked
+        // `@unchecked Sendable` class instead, matching this file's own established convention
+        // (see `Box`/`PushCollector`/`Outcomes` elsewhere in this file).
+        final class PushRecorder: @unchecked Sendable {
+            private let lock = NSLock()
+            private var pushes: [(String, OfficeDocumentEvent)] = []
+            func record(_ docId: String, _ event: OfficeDocumentEvent) {
+                lock.lock(); pushes.append((docId, event)); lock.unlock()
+            }
+            func snapshot() -> [(String, OfficeDocumentEvent)] {
+                lock.lock(); defer { lock.unlock() }; return pushes
+            }
         }
-        func snapshotPushes() -> [(String, OfficeDocumentEvent)] {
-            observedPushesLock.lock()
-            defer { observedPushesLock.unlock() }
-            return observedPushes
-        }
-        helper.client.onDocumentEvent = { docId, event in recordPush(docId, event) }
+        let pushRecorder = PushRecorder()
+        helper.client.onDocumentEvent = { docId, event in pushRecorder.record(docId, event) }
 
         let docId = UUID().uuidString
         _ = try await helper.client.open(docId: docId, path: Self.fixturesRoot.appendingPathComponent("gate.xlsx").path)
         try await helper.client.ping() // the regression assertion: this must not time out / mis-deliver
         try await helper.client.close(docId: docId)
-        let pushesSnapshot = snapshotPushes()
+        let pushesSnapshot = pushRecorder.snapshot()
         print("[push interleaving] observed \(pushesSnapshot.count) push(es) around open+ping+close; "
                 + "events=\(pushesSnapshot.map { $0.1 })")
     }
@@ -1306,11 +1307,21 @@ final class OfficeHelperLiveTests: XCTestCase {
         try skipUnlessVendorPresent()
         let helper = try await spawnLiveHelper(captureStderr: true)
 
-        var observedPushes: [(String, OfficeDocumentEvent)] = []
-        let observedLock = NSLock()
-        helper.client.onDocumentEvent = { docId, event in
-            observedLock.lock(); observedPushes.append((docId, event)); observedLock.unlock()
+        // crash-fix round 1 (finding 3): `onDocumentEvent` is now `@Sendable`-typed (see the
+        // sibling boxing a few tests up, this file's own `recordPush`/`PushRecorder` comment, for
+        // the full reasoning) — same locked-box shape, needed here too.
+        final class PushRecorder: @unchecked Sendable {
+            private let lock = NSLock()
+            private var pushes: [(String, OfficeDocumentEvent)] = []
+            func record(_ docId: String, _ event: OfficeDocumentEvent) {
+                lock.lock(); pushes.append((docId, event)); lock.unlock()
+            }
+            func snapshot() -> [(String, OfficeDocumentEvent)] {
+                lock.lock(); defer { lock.unlock() }; return pushes
+            }
         }
+        let observedPushes = PushRecorder()
+        helper.client.onDocumentEvent = { docId, event in observedPushes.record(docId, event) }
 
         let docId = UUID().uuidString
         let opened = try await helper.client.open(docId: docId, path: Self.fixturesRoot.appendingPathComponent("gate.xlsx").path)
@@ -1343,8 +1354,9 @@ final class OfficeHelperLiveTests: XCTestCase {
         let rawLines = (helper.stderrCapture?.linesSnapshot() ?? []).filter { $0.contains("[LOKBridge raw callback]") }
         print("[callback probe] \(rawLines.count) raw LOK callback(s) observed across open + 2x paintTile + close:")
         for line in rawLines { print("  " + line) }
-        print("[callback probe] \(observedPushes.count) OfficeDocumentEvent push(es) decoded from those on the wire:")
-        for (pushDocId, event) in observedPushes { print("  docId=\(pushDocId) event=\(event)") }
+        let observedPushesSnapshot = observedPushes.snapshot()
+        print("[callback probe] \(observedPushesSnapshot.count) OfficeDocumentEvent push(es) decoded from those on the wire:")
+        for (pushDocId, event) in observedPushesSnapshot { print("  docId=\(pushDocId) event=\(event)") }
 
         // The empirical finding stands regardless of count — this is not pass/fail on "did LOK
         // fire" (an honesty clause, not a target): it is pass/fail on "did whatever DID fire parse
@@ -1398,15 +1410,36 @@ final class OfficeHelperLiveTests: XCTestCase {
         try skipUnlessVendorPresent()
         let helper = try await spawnLiveHelper(captureStderr: true)
 
-        var invalidatedEventPushes: [(rects: [OfficeTwipsRect], part: Int)] = []
-        var invalidatedKeyPushes: [[TileKey]] = []
-        let pushLock = NSLock()
+        // crash-fix round 1 (finding 3): both push callbacks are now `@Sendable`-typed — same
+        // locked-box shape as `PushRecorder` above, this time covering the two arrays the ONE
+        // `pushLock` used to guard together.
+        final class InvalidationRecorder: @unchecked Sendable {
+            private let lock = NSLock()
+            private var eventPushes: [(rects: [OfficeTwipsRect], part: Int)] = []
+            private var keyPushes: [[TileKey]] = []
+            func recordEvent(rects: [OfficeTwipsRect], part: Int) {
+                lock.lock(); eventPushes.append((rects, part)); lock.unlock()
+            }
+            func recordKeys(_ keys: [TileKey]) {
+                lock.lock(); keyPushes.append(keys); lock.unlock()
+            }
+            var hasBoth: Bool {
+                lock.lock(); defer { lock.unlock() }; return !eventPushes.isEmpty && !keyPushes.isEmpty
+            }
+            func firstEvent() -> (rects: [OfficeTwipsRect], part: Int)? {
+                lock.lock(); defer { lock.unlock() }; return eventPushes.first
+            }
+            func firstKeys() -> [TileKey]? {
+                lock.lock(); defer { lock.unlock() }; return keyPushes.first
+            }
+        }
+        let invalidationRecorder = InvalidationRecorder()
         helper.client.onDocumentEvent = { _, event in
             guard case .invalidated(let rects, let part) = event else { return }
-            pushLock.lock(); invalidatedEventPushes.append((rects, part)); pushLock.unlock()
+            invalidationRecorder.recordEvent(rects: rects, part: part)
         }
         helper.client.onInvalidated = { _, _, keys in
-            pushLock.lock(); invalidatedKeyPushes.append(keys); pushLock.unlock()
+            invalidationRecorder.recordKeys(keys)
         }
 
         // T2's own root-caused finding — see this test's own header. The copy must land INSIDE this
@@ -1456,7 +1489,7 @@ final class OfficeHelperLiveTests: XCTestCase {
         try await helper.client.postKey(docId: docId, part: 0, type: .keyInput, charCode: 0, keyCode: 1280) // Return commits the cell edit
         try await helper.client.postKey(docId: docId, part: 0, type: .keyUp, charCode: 0, keyCode: 1280)
 
-        let invalidationArrived = await waitUntil(timeout: 10) { !invalidatedEventPushes.isEmpty && !invalidatedKeyPushes.isEmpty }
+        let invalidationArrived = await waitUntil(timeout: 10) { invalidationRecorder.hasBoth }
         XCTAssertTrue(invalidationArrived, "the edit must produce both the raw documentEvent push (to the "
                       + "opener) and the translated .invalidated key push (to the subscriber)")
 
@@ -1491,13 +1524,13 @@ final class OfficeHelperLiveTests: XCTestCase {
         // proving the server's real rect->key translation (TileCache.invalidate ->
         // OfficeHelperServer's multicast) agrees with TileMath's own authority, against genuine LOK
         // numbers, not hand-built test fixtures.
-        let firstEventPush = try XCTUnwrap(invalidatedEventPushes.first)
+        let firstEventPush = try XCTUnwrap(invalidationRecorder.firstEvent())
         let expectedKeys = Set(firstEventPush.rects.flatMap { rect in
             TileMath.tileCoordinates(rectTwips: rect, zoomPPT: zoomPPT).map {
                 TileKey(part: firstEventPush.part, zoomPPT: zoomPPT, tileX: $0.tileX, tileY: $0.tileY)
             }
         })
-        let actualKeys = Set(invalidatedKeyPushes.first ?? [])
+        let actualKeys = Set(invalidationRecorder.firstKeys() ?? [])
         XCTAssertFalse(expectedKeys.isEmpty, "criterion 2 setup: the real edit's own rect must touch at least one tile")
         XCTAssertEqual(actualKeys, expectedKeys, "criterion 2: the server's real rect->key translation must "
                        + "match TileMath's own independently-computed key set for the SAME real rect")
@@ -2732,6 +2765,18 @@ final class OfficeHelperLiveTests: XCTestCase {
         XCTAssertTrue(firings.contains { $0.type == 17 }, "CELL_CURSOR must fire at all from three "
                       + "real cell clicks — this probe's own baseline")
     }
+
+    // Second fix-round review, Minor 5 — the live probe that used to live here
+    // (`testProbeInvestigatesWhetherCellAddressCallbacksCanAttributeAgentViewPositioningSafely`) has
+    // been DELETED: its own job was diagnostic (does LOK_CALLBACK_CELL_ADDRESS/CELL_CURSOR let a
+    // write verify cursor position?), the answer was NO (zero firings for any UNO-command-driven
+    // move — real primary-view input only), and by the time of this review it asserted only that a
+    // baseline callback fired at all, spinning up a real live helper for a weak, no-longer-load-
+    // bearing check. The finding itself is durable in `cellCursorOnDedicatedThread`'s own header
+    // (`LOKBridge.swift`) and task-4-report.md §6 (the verbatim captured payloads) — the SHIPPED
+    // mechanism (`getCommandValues(".uno:CellCursor")`) is exercised live, continuously, by every
+    // `set`/resize write-verb drill in `OfficeSheetsCommandTests.swift`, which is the regression
+    // coverage that actually matters going forward.
 }
 
 /// `Process.TerminationReason.uncaughtSignal`'s raw value, for the SIGTERM measurement's log line

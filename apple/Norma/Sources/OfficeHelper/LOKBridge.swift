@@ -31,6 +31,39 @@ private enum LOKCallbackType {
     /// was added (`OfficeHelperLiveTests
     /// .testProbeInvestigatesWhetherCellFormulaCallbacksExistForTheFormulaBarsContent`).
     static let cellFormula: Int32 = 19
+    /// office-agent-tools T6 — LibreOfficeKitEnums.h:216 (LOK_CALLBACK_GRAPHIC_SELECTION). Payload
+    /// `"x, y, width, height, angle, { optional JSON properties }"` (twips, angle in 100ths of a
+    /// degree) — this bridge only ever needs the first four fields. Confirmed by
+    /// `slides-lok-research.md` §5.4 to fire, unconditionally, from `SdrMarkView
+    /// ::SetMarkHandlesForLOKit` on ANY mark-list change, Tab-driven `MarkNextObj` included — never a
+    /// mouse-only signal. **Live-verified NOT to be the one that actually fires** once a document has
+    /// more than one view (this bridge always has one by the time this matters — see
+    /// `.graphicViewSelection`'s own header immediately below) — kept for documentation completeness
+    /// and as a defensive fallback, never observed live.
+    static let graphicSelection: Int32 = 6
+    /// office-agent-tools T6 — LibreOfficeKitEnums.h:448-462 (LOK_CALLBACK_GRAPHIC_VIEW_SELECTION) —
+    /// **the ACTUAL callback a real live drill observed**, not `.graphicSelection` above: LOK's own
+    /// doc comment says plainly "the size/position of a graphic selection in ONE OF THE OTHER VIEWS
+    /// has changed" — a MULTI-VIEW-AWARE sibling this bridge's own two-view design (primary + agent)
+    /// makes the operative one the instant an agent view exists, which is always, by the time any
+    /// slides mechanism runs. Payload is a JSON envelope, `{"viewId": "<id>", "selection": "<the SAME
+    /// x,y,width,height,angle,{...} string .graphicSelection would have carried bare>"}` — this
+    /// bridge parses the envelope, checks `viewId` against the AGENT view specifically (never trusts
+    /// a firing for some OTHER view, e.g. the primary, as if it were this bridge's own), and parses
+    /// `selection` with the identical comma-split logic either raw type would need.
+    static let graphicViewSelection: Int32 = 27
+    /// office-agent-tools T7 — LibreOfficeKitEnums.h:323 (LOK_CALLBACK_UNO_COMMAND_RESULT). The ONE
+    /// completion signal a `postUnoCommand(..., bNotifyWhenFinished: true)` dispatch produces, and
+    /// the ONLY reachable evidence of whether `.uno:ExecuteSearch` replaced anything at all
+    /// (`docs-lok-research.md` L3: the real replacement COUNT is collapsed to a bool at
+    /// `sw/source/uibase/uiview/viewsrch.cxx:395` and never leaves C++). Payload is a JSON object
+    /// composed by `DispatchResultListener::dispatchFinished`
+    /// (`desktop/source/lib/init.cxx:5086-5107`, read at the pinned SHA):
+    /// `{"commandName": ".uno:...", "success": <bool>, "result": {...}, "wasModified": <bool>, ...}`
+    /// — with **`success` ABSENT entirely** when the dispatch result state is `DONTKNOW` (`:5091-5095`),
+    /// which is why `parseUnoCommandResult` below returns an OPTIONAL success rather than defaulting
+    /// one.
+    static let unoCommandResult: Int32 = 16
 }
 
 // LOKTileMode (LOK_TILEMODE_RGBA/BGRA, LibreOfficeKitEnums.h:40-41) lived here for
@@ -290,12 +323,27 @@ final class LOKBridge: OfficeDocumentBridge {
         case installPathMissing(String)
         case initFailed(String)
         case versionInfoUnavailable
+        /// office-agent-tools T3 third re-review — the office-class ABI tripwires (`nSize` size
+        /// check, tail-symbol identity check) throw this rather than `precondition`-crash. A
+        /// PRECONDITION failure here would kill the whole helper process outright — every document
+        /// it might already be serving (on a respawn after some UNRELATED crash) lost with it — for
+        /// a check whose own failure mode includes at least one FALSE positive this bridge cannot
+        /// rule out: `lo_registerFileSaveDialogCallback` is a non-external symbol in today's shipped
+        /// dylib, and nothing strips it today, but if a future, otherwise-VALID engine rebuild
+        /// strips local symbols, `dladdr` resolves the NEAREST PRECEDING EXPORTED symbol instead of
+        /// failing outright — a legitimate configuration producing what looks like an ABI mismatch
+        /// to this specific technique. Throwing here, in `init` (itself already a throwing
+        /// initializer), lets the caller refuse to boot gracefully — the existing "helper
+        /// unavailable" path this codebase already has for every OTHER boot failure — rather than a
+        /// raw process death.
+        case abiMismatch(String)
 
         var description: String {
             switch self {
             case .installPathMissing(let path): return "LibreOffice install root not found at \(path)"
             case .initFailed(let installPath): return "lok_init_2 returned NULL for installPath \(installPath)"
             case .versionInfoUnavailable: return "getVersionInfo() did not return a usable BuildId"
+            case .abiMismatch(let reason): return reason
             }
         }
     }
@@ -349,6 +397,151 @@ final class LOKBridge: OfficeDocumentBridge {
         /// Office Stage B Task 6 — `agentKeyEvent` requested for a docId `createAgentView` was
         /// never called for.
         case noAgentView(String)
+        /// office-agent-tools T3 re-review (Minor #4) — `createView()` returned LOK's own "no view"
+        /// sentinel (`-1`, or the optional closure itself never fired) inside
+        /// `ensureAgentViewOnDedicatedThread`. Thrown, never cached: the ORIGINAL code stored `-1`
+        /// into `OpenDocument.agentViewId` via `?? -1` and returned it as if it were a real view —
+        /// `agentViewId` being non-nil short-circuits every FUTURE call into returning that same
+        /// `-1` without ever retrying `createView`, and `SfxLokHelper::setView` (`sfx2/source/view/
+        /// lokhelper.cxx`, its own `getViewOfId` lookup) returns SILENTLY for an unknown id rather
+        /// than erroring — meaning every subsequent "agent view" read would have silently run on
+        /// whatever view was ALREADY current (in practice, the primary one), defeating I1's entire
+        /// isolation guarantee with no error anywhere in the chain.
+        case agentViewCreationFailed(String)
+        /// office-agent-tools T3 — `sheetsInfo`/`sheetsRead` requested for a document that is not a
+        /// spreadsheet. Distinct from every OTHER refusal on this enum: it is composed ENTIRELY from
+        /// this bridge's own words, never a LOK-thrown string, so it is already house-voice by
+        /// construction — the "mapped, never raw LibreOffice text" requirement the brief's own proof
+        /// obligations name is satisfied at the point of composition, not by a later translation
+        /// layer (unlike `.saveAsFailed`, whose `reason` — see `saveAsOnDedicatedThread` — DOES carry
+        /// LOK-adjacent text and relies on the app-side T9 mapping table).
+        case notSpreadsheet(docId: String, kind: OfficeDocumentKind)
+        /// office-agent-tools T3 — `sheetsRead`'s `sheet` named no part this document actually has.
+        /// `available` is the real, current sheet-name list (in part order) — carried so the caller
+        /// can build "no sheet named X — this workbook has: A, B, C" without a second round trip.
+        case sheetNotFound(docId: String, sheet: String, available: [String])
+        /// office-agent-tools T4 — `sheetsSet` wrote a non-empty value into a cell, and the
+        /// post-write verification read of that SAME cell came back empty. `LOKBridge.writeOneCell
+        /// OnDedicatedThread`'s own header explains the mechanism this catches (a GoToCell that never
+        /// landed within budget, or a commit that never took) — a real, if rare, failure this bridge
+        /// can actually detect rather than silently report success on.
+        case writeVerificationFailed(docId: String, address: String)
+        /// office-agent-tools T4 fix-round review (Important #2) — a formula's character REQUIRES a
+        /// `postKeyEvent` this bridge does not know how to synthesize. Deliberately DISTINCT from
+        /// `.writeVerificationFailed` (the reviewer's own finding: that case name was a mislabel for
+        /// this failure — the OLD code threw it mid-keystroke-loop, AFTER already posting every
+        /// character before the unmapped one, leaving a real, uncommitted, PARTIAL formula in Calc's
+        /// own edit mode on a document a human may have open). `formulaKeyEvent(for:)` is now called
+        /// entirely in a pre-validation PASS, before the first `postKeyEvent` of the real attempt —
+        /// this case can only be thrown BEFORE anything is typed, never mid-edit.
+        case unsupportedFormulaCharacter(docId: String, address: String, character: Character)
+        /// office-agent-tools T4 fix-round review (Important #3) — after positioning (the SAME
+        /// `.uno:GoToCell`-via-`selectionTextOnDedicatedThread` mechanism every write verb already
+        /// uses, including its own disclosed straggler residual), the agent view's OWN cursor —
+        /// queried fresh via `getCommandValues(".uno:CellCursor")`, confirmed live to report the
+        /// CURRENT view's real position, not a stale or cross-view-contaminated one (this task's own
+        /// fix-round report has the probe) — does not match `address`. Thrown BEFORE any keystroke is
+        /// posted: the reviewer's own finding was that the OLD lenient content-only check could not
+        /// tell "positioned on the WRONG cell that happens to already hold text" from "positioned
+        /// correctly" — reading a bystander cell's OWN old content back as "non-empty, so this must
+        /// have worked" and letting the broker save a clobber. This closes that gap by verifying
+        /// WHERE the cursor is, not merely THAT the target has content, before typing anything.
+        /// Second fix-round review (Important #1's own trap, caught reviewing the FIRST fix's own
+        /// message) — WHICH operation this check was guarding, so the description does not claim
+        /// "before typing"/"nothing was written" about a RESIZE that never typed anything at all.
+        /// `set`'s own per-cell check and both resize checks (`sheetsResizeOnDedicatedThread`'s
+        /// sentinel-park and its post-span re-check) throw this SAME case now, distinguished only by
+        /// this field — never a second, near-duplicate case.
+        enum PositionVerificationContext { case typing, resizePositioning, verifyingWrite, formatPositioning }
+        case positionVerificationFailed(docId: String, address: String, landedAt: String?,
+                                        context: PositionVerificationContext)
+        /// Second fix-round review (Important #2 + Minor 3) — `sheetsSetOnDedicatedThread`'s own loop
+        /// wraps ANY per-cell failure in this case once at least one EARLIER cell already landed in
+        /// THIS call, so a per-cell description's own "nothing was written"/"outcome unchanged"
+        /// (still true of THAT cell alone) cannot misread as the CALL's own truth when it is not one
+        /// — the reviewer's own finding: `sheets.ts`'s tool description claimed earlier cells "have
+        /// already been written and saved," but `OfficeAgentBroker.perform`'s `action` (the entire
+        /// per-cell loop) throws BEFORE rule 4's save switch is ever reached, so nothing from ANY
+        /// `set` call is ever saved once one cell in it fails — only the per-cell IN-MEMORY write is
+        /// real. The message is composed entirely at the throw site
+        /// (`sheetsSetOnDedicatedThread`), never reconstructed here: `SaveError` crosses the
+        /// helper->app socket flattened to a plain reason string
+        /// (`OfficeHelperClient.sheetsSet`'s own `.error(_, let reason)` arm), so a second, structured
+        /// field on THIS case would not survive that trip — this case exists so a fully pre-composed
+        /// sentence has somewhere honest to live, rather than being force-fit into a case whose own
+        /// description only ever names a bare docId/address.
+        case partialSetFailure(reason: String)
+        /// office-agent-tools T4 — `delete_sheet` named the workbook's ONLY remaining sheet. Checked
+        /// BEFORE dispatching `.uno:Remove` (`LOKBridge.sheetsManageSheetOnDedicatedThread`'s own
+        /// header explains why: Calc's own slot handler has no documented, verified error signal for
+        /// this case, so a pre-check is the only honest way to refuse it rather than risk a silent
+        /// no-op or an unverified worse outcome).
+        case lastSheet(docId: String)
+        /// T5 fix-round re-review (Minor) — `officeWidthMm100`'s own refusal; see its header. Never
+        /// reached from `sheets format`, whose app-side `optionalWidth` already bounds [1, 1000];
+        /// this exists so the helper's own conversion is total rather than dependent on that.
+        case widthOutOfRange(docId: String, points: Double)
+        /// office-agent-tools T4 — `add_sheet`/`rename_sheet` named a sheet name that already exists
+        /// in the workbook. Checked BEFORE dispatching, for the same reason as `.lastSheet` above:
+        /// `ScDocFunc::RenameTable`/`CreateValidTabName`'s own behavior on a collision is a silent
+        /// no-op or a silently ALTERED name, neither of which is an honest way to refuse.
+        case duplicateSheetName(docId: String, name: String)
+        /// office-agent-tools T6 — `slidesInfo`/`slidesRead`/`slidesSetText`/`slidesManagePage`
+        /// requested for a document that is not a presentation. Mirrors `.notSpreadsheet` exactly —
+        /// composed entirely from this bridge's own words, never LOK-thrown text.
+        case notPresentation(docId: String, kind: OfficeDocumentKind)
+        /// office-agent-tools T6 — `slidesRead`/`slidesSetText`/`slidesManagePage`'s `slide` named an
+        /// index this presentation does not have. `slideCount` is the real, current count — carried
+        /// so the caller can build "no slide N — this presentation has M slides" without a second
+        /// round trip, mirroring `.sheetNotFound`'s identical purpose.
+        case slideNotFound(docId: String, slide: Int, slideCount: Int)
+        /// office-agent-tools T6 — `delete_slide` named the presentation's ONLY remaining slide.
+        /// Mirrors `.lastSheet` exactly — checked BEFORE dispatching any UNO command.
+        case lastSlide(docId: String)
+        /// office-agent-tools T6 — `slidesRead`/`slidesSetText` positioned onto slide `slide`
+        /// successfully (it exists — `.slideNotFound` above already ruled that out), but Tab-cycling
+        /// (`selectSlidePlaceholderOnDedicatedThread`) never produced a NEW selection for the
+        /// requested `field` ("title" or "body") — a real, structural fact about this slide (e.g. a
+        /// Blank layout with fewer than 1-2 selectable shapes), never conflated with `.slideNotFound`
+        /// (a different slide identity question entirely). Spec's own "refuses naming the reason,
+        /// rather than inventing one" contract for `set_text`.
+        case slidePlaceholderNotFound(docId: String, slide: Int, field: String)
+        /// office-agent-tools T6 fix round 2 (re-review New-1) — a structural slides verb could not
+        /// establish per-slide IDENTITY (`getPartInfo`'s `hash`) for every slide BEFORE dispatching.
+        /// Deliberately NOT `.writeVerificationFailed`: that case's own text says "wrote to … but
+        /// could not confirm", which would be a lie here — this refuses before `destroyAgentView`,
+        /// before `setPart`, before any `.uno:` dispatch, so nothing was written and the outcome is
+        /// KNOWN (unchanged), not unknown. The distinction is the same one T4's fix round drew when
+        /// it split `.unsupportedFormulaCharacter` out of `.writeVerificationFailed` for exactly this
+        /// reason (see that case's own header).
+        case slideIdentityUnavailable(docId: String, verb: String)
+        /// **Whole-branch review Q6 fold-in.** `slides set_text`'s only proof used to be a verified
+        /// placeholder SELECTION followed by a `void` write call — a selection landing says the
+        /// keystrokes were aimed correctly, never that the text arrived. Deliberately NOT
+        /// `.writeVerificationFailed`, whose text tells the caller to "re-read the CELL": that case
+        /// is Calc-shaped and is already a ledgered wording residual (whole-branch F7) for the paths
+        /// that use it; adding a NEW use of a known-wrong sentence on a slides path would be making
+        /// that residual worse rather than leaving it alone. `field` names WHICH placeholder
+        /// disagreed, so the caller does not have to re-read both to find out.
+        case slideTextVerificationFailed(docId: String, slide: Int, field: String)
+        /// office-agent-tools T7 — a `docs` verb was asked for a document that is not a Writer text
+        /// document. Mirrors `.notSpreadsheet`/`.notPresentation` exactly, composed entirely from
+        /// this bridge's own words.
+        case notTextDocument(docId: String, kind: OfficeDocumentKind)
+        /// office-agent-tools T7 — ruling 1's cross-check FIRED: this bridge counted `counted`
+        /// literal occurrences of `find` in the text it had just read, and the engine's own
+        /// `UNO_COMMAND_RESULT` boolean disagreed about whether ANYTHING was replaced. The count is
+        /// unobtainable from the engine (`docs-lok-research.md` L3), so the tool computes it — and a
+        /// disagreement means the two matchers do not agree about what `find` MEANS, which would put
+        /// a wrong number in front of the model and a wrong edit in the user's saved file. Refused
+        /// loudly rather than reported. **The outcome is genuinely UNKNOWN here** — the dispatch
+        /// already ran — which is why the description says so instead of claiming nothing happened.
+        case replaceCountDisagreement(docId: String, counted: Int, engineSucceeded: Bool)
+        /// office-agent-tools T7 — a `docs` write verb re-read the document afterward and the text
+        /// it got back is not the text the verb intended to produce. Carries both lengths (never the
+        /// texts themselves — a document body has no business in an error string, and the wire caps
+        /// would refuse it) plus a short, already-composed description of what was attempted.
+        case docsVerificationFailed(docId: String, what: String, expectedLength: Int, actualLength: Int)
         var description: String {
             switch self {
             case .docNotOpen(let docId): return "save requested for a docId that is not open: \(docId)"
@@ -357,6 +550,110 @@ final class LOKBridge: OfficeDocumentBridge {
             case .pasteFailed(let docId): return "paste() failed for docId: \(docId)"
             case .agentViewAlreadyExists(let docId): return "docId already has an agent view: \(docId)"
             case .noAgentView(let docId): return "docId has no agent view: \(docId)"
+            case .agentViewCreationFailed(let docId): return "createView() failed to mint an agent view for docId: \(docId)"
+            case .notSpreadsheet(let docId, let kind):
+                let noun: String
+                switch kind {
+                case .text: noun = "a text document"
+                case .spreadsheet: noun = "a spreadsheet" // unreachable — this case IS the accepted kind
+                case .presentation: noun = "a presentation"
+                case .drawing: noun = "a drawing"
+                case .other: noun = "not a recognized office document"
+                }
+                return "the `sheets` tool only works on spreadsheets, but \(docId) is \(noun)"
+            case .sheetNotFound(let docId, let sheet, let available):
+                let list = available.isEmpty ? "(no sheets)" : available.joined(separator: ", ")
+                return "no sheet named \"\(sheet)\" in \(docId) — this workbook has: \(list)"
+            case .writeVerificationFailed(let docId, let address):
+                return "wrote to \(address) in \(docId) but could not confirm the content landed — "
+                    + "the outcome is unknown; re-read the cell before trusting or retrying this write"
+            case .unsupportedFormulaCharacter(let docId, let address, let character):
+                return "the formula for \(address) in \(docId) contains a character this tool cannot "
+                    + "type (\"\(character)\") — nothing was written; re-read the cell before "
+                    + "retrying, the outcome is known (unchanged), not unknown"
+            case .positionVerificationFailed(let docId, let address, let landedAt, let context):
+                let landedDescription = landedAt ?? "an unrecognized position"
+                switch context {
+                case .typing:
+                    return "could not confirm the cursor reached \(address) in \(docId) before typing "
+                        + "(landed at \(landedDescription) instead) — nothing was written; re-read the "
+                        + "cell before retrying, the outcome is known (unchanged), not unknown"
+                case .resizePositioning:
+                    return "an internal positioning check before the resize could not confirm the "
+                        + "cursor reached \(address) in \(docId) (landed at \(landedDescription) "
+                        + "instead) — nothing was resized; re-read before retrying, the outcome is "
+                        + "known (unchanged), not unknown"
+                case .verifyingWrite:
+                    return "wrote to \(address) in \(docId) but could not re-confirm the cursor was "
+                        + "still there to verify the content afterward (landed at \(landedDescription) "
+                        + "instead) — the write itself may have succeeded; re-read the cell directly "
+                        + "before trusting or retrying it"
+                case .formatPositioning:
+                    return "an internal positioning check before formatting could not confirm the "
+                        + "cursor reached \(address) in \(docId) (landed at \(landedDescription) "
+                        + "instead) — nothing was formatted; re-read before retrying, the outcome is "
+                        + "known (unchanged), not unknown"
+                }
+            case .partialSetFailure(let reason): return reason
+            case .widthOutOfRange(let docId, let points):
+                return "a column width of \(points) points is outside the supported range (1 to 1000) "
+                    + "in \(docId) — nothing was resized"
+            case .lastSheet(let docId):
+                return "\(docId) has only one sheet left — a workbook needs at least one; refusing to delete it"
+            case .duplicateSheetName(let docId, let name):
+                return "a sheet named \"\(name)\" already exists in \(docId)"
+            case .notPresentation(let docId, let kind):
+                let noun: String
+                switch kind {
+                case .text: noun = "a text document"
+                case .spreadsheet: noun = "a spreadsheet"
+                case .presentation: noun = "a presentation" // unreachable — this case IS the accepted kind
+                case .drawing: noun = "a drawing"
+                case .other: noun = "not a recognized office document"
+                }
+                return "the `slides` tool only works on presentations, but \(docId) is \(noun)"
+            case .slideNotFound(let docId, let slide, let slideCount):
+                return "no slide \(slide + 1) in \(docId) — this presentation has \(slideCount) slide\(slideCount == 1 ? "" : "s")"
+            case .lastSlide(let docId):
+                return "\(docId) has only one slide left — a presentation needs at least one; refusing to delete it"
+            case .slidePlaceholderNotFound(let docId, let slide, let field):
+                // Trailing period deliberate, unlike this file's other descriptions (fix round 1,
+                // review F-0): `handleSlidesSetText` concatenates this directly with a lifecycle
+                // sentence starting " If an earlier attribute…" when more than one field was named —
+                // without terminal punctuation here the composed string read "nothing was written If
+                // an earlier attribute…", a run-on the reviewer's own live reproduction quoted
+                // verbatim as evidence nobody had read the composed string end-to-end.
+                return "slide \(slide + 1) in \(docId) has no \(field) placeholder — nothing was written."
+            case .slideTextVerificationFailed(let docId, let slide, let field):
+                return "wrote the \(field) of slide \(slide + 1) in \(docId), but reading it back "
+                    + "returned something else — the outcome is UNKNOWN. Re-read the slide before "
+                    + "trusting or retrying this write."
+            case .slideIdentityUnavailable(let docId, let verb):
+                return "could not read per-slide identity from \(docId), so \(verb) could not be "
+                    + "verified — nothing was changed. The outcome is known (unchanged), not unknown; "
+                    + "retrying is safe."
+            case .notTextDocument(let docId, let kind):
+                let noun: String
+                switch kind {
+                case .text: noun = "a text document" // unreachable — this case IS the accepted kind
+                case .spreadsheet: noun = "a spreadsheet"
+                case .presentation: noun = "a presentation"
+                case .drawing: noun = "a drawing"
+                case .other: noun = "not a recognized office document"
+                }
+                return "the `docs` tool only works on text documents, but \(docId) is \(noun)"
+            case .replaceCountDisagreement(let docId, let counted, let engineSucceeded):
+                return "refusing to report a replacement count for \(docId) that Norma cannot stand "
+                    + "behind: Norma counted \(counted) literal match\(counted == 1 ? "" : "es") of the "
+                    + "search text, but the engine reported it "
+                    + (engineSucceeded ? "DID" : "did NOT")
+                    + " replace anything. The two disagree about what the search text matches, so the "
+                    + "outcome of this call is UNKNOWN — re-read the document before doing anything else."
+            case .docsVerificationFailed(let docId, let what, let expectedLength, let actualLength):
+                return "\(what) in \(docId) did not produce the text Norma expected when it read the "
+                    + "document back (expected \(expectedLength) characters, found \(actualLength)) — "
+                    + "the outcome is UNKNOWN and the document may have been changed. Re-read it before "
+                    + "retrying."
             }
         }
     }
@@ -485,6 +782,23 @@ final class LOKBridge: OfficeDocumentBridge {
         /// affects which view/cursor position the recovered file remembers as "current," a cosmetic
         /// detail next to the actual data-loss autosave exists to prevent.
         var lastKnownPart: Int = 0
+        /// office-agent-tools T6 — the most recent `LOK_CALLBACK_GRAPHIC_SELECTION` rect observed for
+        /// THIS docId, parsed by `handleCallback`. Consumed and CLEARED by
+        /// `selectSlidePlaceholderOnDedicatedThread`'s own Tab-cycling mechanism immediately before
+        /// every `KEY_TAB` it posts — so a non-nil value read back afterward can only be a fresh
+        /// firing from THAT specific keypress, never a stale rect left over from an earlier,
+        /// unrelated job on this same docId. `nil` means "no selection-changed callback observed
+        /// since this was last cleared."
+        var lastGraphicSelectionRectTwips: OfficeTwipsRect? = nil
+        /// office-agent-tools T7 — the most recent `LOK_CALLBACK_UNO_COMMAND_RESULT` observed for
+        /// THIS docId, parsed by `handleCallback`. Same consume-and-clear discipline
+        /// `lastGraphicSelectionRectTwips` above uses: `docsReplaceOnDedicatedThread` clears it
+        /// immediately before dispatching `.uno:ExecuteSearch`, so a non-nil value read back
+        /// afterward can only be a fresh firing from THAT dispatch, never a stale one left over from
+        /// an earlier command on this same docId. `commandName` is retained and CHECKED by the
+        /// consumer — every `notifyWhenFinished: true` dispatch in this file produces one of these,
+        /// so "a result arrived" is not the same as "MY result arrived."
+        var lastUnoCommandResult: (commandName: String, success: Bool?)? = nil
     }
 
     private let thread: LOKDedicatedThread
@@ -609,6 +923,63 @@ final class LOKBridge: OfficeDocumentBridge {
         }
         self.kit = rawKit
         self.lokVersionString = buildId
+
+        // office-agent-tools T3 review (C1-split) — the permanent office-class ABI guard.
+        //
+        // **A size check alone cannot guard `LibreOfficeKitClass` the way it guards
+        // `LibreOfficeKitDocumentClass` above.** This class's own real drift (found by this same
+        // review, live-verified before fixing — see `LibreOfficeKit.h`'s `sendDialogEvent`-removal
+        // and `registerFileSaveDialogCallback`-addition comments in this same struct) was a NET-ZERO
+        // swap: one phantom member the header declared but the engine never had, exactly cancelling
+        // one real tail member the header never declared but the engine did have. Declared-member
+        // COUNT stayed the same on both sides throughout (26), so `nSize == MemoryLayout.size` held
+        // true (216 == 216) on the UNFIXED header, even while every member from the phantom's
+        // position onward silently called the wrong function. Confirmed empirically: the boot-time
+        // size probe below passed before this fix, not just after.
+        guard rawKit.pointee.pClass.pointee.nSize == MemoryLayout<LibreOfficeKitClass>.size else {
+            throw BootError.abiMismatch(
+                "LibreOfficeKit office-class ABI mismatch: engine reports nSize=\(rawKit.pointee.pClass.pointee.nSize) "
+                    + "but this build's LibreOfficeKit.h describes a \(MemoryLayout<LibreOfficeKitClass>.size)-byte "
+                    + "struct.")
+        }
+
+        // The guard the size check cannot provide: resolve this struct's own LAST declared member
+        // and assert its REAL symbol name still contains what the header calls it.
+        //
+        // **Says what this actually covers, corrected after an overclaim in an earlier draft of
+        // this comment (second re-review) — this is TAIL-IDENTITY drift, not every net-zero
+        // drift.** It catches: this exact tail member being silently renamed or removed upstream
+        // with nothing replacing it, and (redundantly with the size check, but for free) anything
+        // that shifts the tail's own declared offset at all. It does NOT catch an INTERIOR
+        // add-one/remove-one pair entirely ABOVE this tail member: if a phantom is added and a real
+        // member removed somewhere between the struct's start and this tail, the NET shift to
+        // everything AT OR AFTER this position is zero — this member still lands on its own correct
+        // offset and resolves correctly, while every interior member between the swap silently
+        // misaligns, undetected by either guard. Closing that would need the same exhaustive
+        // per-member `dladdr` sweep this task's own investigation already did by hand for both
+        // structs, run as a permanent check — not attempted here, disclosed instead.
+        let lastOfficeMemberSymbol = Self.resolvedSymbolName(
+            unsafeBitCast(rawKit.pointee.pClass.pointee.registerFileSaveDialogCallback, to: UnsafeRawPointer?.self))
+        guard lastOfficeMemberSymbol.contains("registerFileSaveDialogCallback") else {
+            throw BootError.abiMismatch(
+                "LibreOfficeKit office-class ABI mismatch: this struct's own last declared member "
+                    + "(registerFileSaveDialogCallback) resolved to \"\(lastOfficeMemberSymbol)\" instead — the header "
+                    + "no longer matches the compiled engine's real member order.")
+        }
+    }
+
+    /// office-agent-tools T3 review (C1-split) — `dladdr`-resolves a raw function pointer back to
+    /// its real, compiled symbol name. The one general-purpose version of the ad hoc `symbolName`
+    /// helper this task's own investigation used repeatedly (document-class sweep, office-class
+    /// sweep) — kept as a real method, not deleted with the diagnostics that used it, because
+    /// `init`'s own permanent office-class tripwire (above) needs the identical resolution.
+    private static func resolvedSymbolName(_ raw: UnsafeRawPointer?) -> String {
+        guard let raw else { return "<nil>" }
+        var info = Dl_info()
+        guard dladdr(raw, &info) != 0, let sname = info.dli_sname else {
+            return "<unresolved @ \(raw)>"
+        }
+        return String(cString: sname)
     }
 
     // MARK: - OfficeDocumentBridge
@@ -714,6 +1085,83 @@ final class LOKBridge: OfficeDocumentBridge {
         try thread.sync {
             try self.agentKeyEventOnDedicatedThread(docId: docId, part: part, type: type, charCode: charCode, keyCode: keyCode)
         }
+    }
+
+    // MARK: - office-agent-tools T3: sheets info/read
+
+    func sheetsInfo(docId: String) throws -> (sheets: [OfficeSheetInfo], activeSheet: String) {
+        try thread.sync { try self.sheetsInfoOnDedicatedThread(docId: docId) }
+    }
+    func sheetsRead(docId: String, sheet: String, range: String, formulas: Bool) throws -> [[String]] {
+        try thread.sync { try self.sheetsReadOnDedicatedThread(docId: docId, sheet: sheet, range: range, formulas: formulas) }
+    }
+
+    // MARK: - office-agent-tools T4: sheets write verbs
+
+    func sheetsSet(docId: String, sheet: String, range: String, cellAddresses: [String], cellValues: [String]) throws -> Int {
+        try thread.sync { try self.sheetsSetOnDedicatedThread(docId: docId, sheet: sheet, range: range,
+                                                               cellAddresses: cellAddresses, cellValues: cellValues) }
+    }
+    func sheetsResize(docId: String, sheet: String, dimension: OfficeSheetsResizeDimension,
+                      op: OfficeSheetsResizeOp, selectionRange: String) throws -> (usedEndColumn: Int, usedEndRow: Int) {
+        try thread.sync { try self.sheetsResizeOnDedicatedThread(docId: docId, sheet: sheet, dimension: dimension,
+                                                                  op: op, selectionRange: selectionRange) }
+    }
+    func sheetsManageSheet(docId: String, op: OfficeSheetsManageSheetOp, name: String, newName: String?) throws -> [String] {
+        try thread.sync { try self.sheetsManageSheetOnDedicatedThread(docId: docId, op: op, name: name, newName: newName) }
+    }
+
+    // MARK: - office-agent-tools T5: sheets format
+
+    func sheetsFormat(docId: String, sheet: String, range: String, columnSpan: String?,
+                      bold: Bool?, italic: Bool?, numberFormat: OfficeSheetsNumberFormatPreset?,
+                      align: OfficeSheetsAlign?, width: Double?) throws -> [String] {
+        try thread.sync {
+            try self.sheetsFormatOnDedicatedThread(docId: docId, sheet: sheet, range: range, columnSpan: columnSpan,
+                                                    bold: bold, italic: italic, numberFormat: numberFormat,
+                                                    align: align, width: width)
+        }
+    }
+
+    // MARK: - office-agent-tools T6: slides
+    //
+    // CHECKPOINT STUB, not the real mechanism — mirrors Task 1's own precedent for this exact
+    // situation ("T1 builds only the wire and a routing shell that refuses every verb... T3 gives
+    // sheets' two READ verbs real behaviour"). The wire/protocol/dispatch/consumer plumbing above
+    // this file is real and complete; ONLY the LOK mechanism itself is pending live-research-informed
+    // implementation (the two hazard classes this bridge has already been burned by once each:
+    // a missing/malformed UNO arg opening a headless modal, and a guessed-wrong command name silently
+    // no-op'ing — neither is worth risking on an UN-researched command name). Every call below throws
+    // honestly rather than guessing.
+    func slidesInfo(docId: String) throws -> [OfficeSlideInfo] {
+        try thread.sync { try self.slidesInfoOnDedicatedThread(docId: docId) }
+    }
+    func slidesRead(docId: String, slide: Int) throws -> (title: String?, body: String?) {
+        try thread.sync { try self.slidesReadOnDedicatedThread(docId: docId, slide: slide) }
+    }
+    func slidesSetText(docId: String, slide: Int, title: String?, body: String?) throws -> [String] {
+        try thread.sync { try self.slidesSetTextOnDedicatedThread(docId: docId, slide: slide, title: title, body: body) }
+    }
+    func slidesManagePage(docId: String, op: OfficeSlidesManagePageOp, slide: Int?, at: Int?, to: Int?,
+                          layout: OfficeSlidesLayoutPreset?) throws -> Int {
+        try thread.sync { try self.slidesManagePageOnDedicatedThread(docId: docId, op: op, slide: slide, at: at,
+                                                                      to: to, layout: layout) }
+    }
+
+    // MARK: - office-agent-tools T7: docs
+
+    func docsInfo(docId: String) throws -> (pages: Int, paragraphs: Int, characters: Int) {
+        try thread.sync { try self.docsInfoOnDedicatedThread(docId: docId) }
+    }
+    func docsRead(docId: String) throws -> String {
+        try thread.sync { try self.docsReadOnDedicatedThread(docId: docId) }
+    }
+    func docsReplace(docId: String, find: String, replaceWith: String) throws -> Int {
+        try thread.sync { try self.docsReplaceOnDedicatedThread(docId: docId, find: find, replaceWith: replaceWith) }
+    }
+    func docsInsert(docId: String, text: String, atStart: Bool, asNewParagraph: Bool) throws -> Int {
+        try thread.sync { try self.docsInsertOnDedicatedThread(docId: docId, text: text, atStart: atStart,
+                                                               asNewParagraph: asNewParagraph) }
     }
 
     // MARK: - Office Stage B Task 10 — the CFB release blocker
@@ -871,6 +1319,66 @@ final class LOKBridge: OfficeDocumentBridge {
             throw LoadError.documentLoadFailed(reason)
         }
 
+        // office-agent-tools T3 review (C1) — the permanent ABI tripwire. `nSize` is the ENGINE's
+        // own report of how many bytes of `LibreOfficeKitDocumentClass` it actually populated
+        // (`LIBREOFFICEKIT_DOCUMENT_HAS`'s own `offsetof(...) < nSize` feature-detection macro
+        // relies on this same field for the identical purpose). Comparing it against what THIS
+        // BUILD's Swift compilation believes the struct's size to be, from the vendored header
+        // alone, is a single cheap integer check that would have caught the real bug this task's
+        // own investigation found: three phantom members (`sendDialogEvent`,
+        // `setAllowChangeComments`, `setAllowManageRedlines`) the vendored header declared that
+        // this compiled engine's struct does not actually have, silently shifting every
+        // subsequent field's computed offset — proven root cause of `getDataArea` (before this
+        // fix) actually invoking `doc_getEditMode`, discovered by dladdr-resolving the raw
+        // function pointer at that field's position on a real open document, not by inference.
+        //
+        // Verified empirically, exhaustively, not just at this boot-time size check: after
+        // removing all three phantoms, EVERY ONE of the struct's 78 remaining members — read
+        // individually via `pClass->pointee.<name>` on a real open document and resolved through
+        // `dladdr` back to a symbol — names exactly the function the engine actually put there,
+        // with zero exceptions (the investigation's own full sweep; not repeated here as
+        // production code, since this one size check already re-derives the same fact on every
+        // boot going forward).
+        //
+        // **NOW mirrored for `LibreOfficeKitClass` too (the office-level boot struct, `self.kit`,
+        // guarded in `init`)** — correcting an earlier version of this comment that called the
+        // absence deliberate: a THIRD re-review found the office class genuinely drifted the same
+        // way (a phantom `sendDialogEvent` cancelling a missing real tail member in COUNT, so a
+        // size check alone passed even while misaligned) and added both a size check and a
+        // tail-identity check there. See `init`'s own tripwire for the full account.
+        //
+        // Third re-review, also — **throws rather than `precondition`-crashes, corrected from an
+        // earlier version of this check.** A precondition failure kills the WHOLE HELPER PROCESS
+        // outright, taking every other document it might be serving down with it (a respawn after
+        // some unrelated crash could hold several); this function is already `throws`, called from
+        // a connection thread that already handles a failed `open` as an ordinary per-document
+        // error. Reuses `LoadError`, the identical throw type this same function already uses a few
+        // lines up for `documentLoad` itself failing — the SAME "this bridge always survives, one
+        // failed open is not a crash" posture that error already has.
+        guard rawDoc.pointee.pClass.pointee.nSize == MemoryLayout<LibreOfficeKitDocumentClass>.size else {
+            throw LoadError.documentLoadFailed(
+                "LibreOfficeKit ABI mismatch: engine reports nSize=\(rawDoc.pointee.pClass.pointee.nSize) but "
+                    + "this build's LibreOfficeKit.h describes a \(MemoryLayout<LibreOfficeKitDocumentClass>.size)-byte "
+                    + "struct — the vendored header no longer matches the compiled engine and every LOK call in this "
+                    + "file needs re-verifying against the real ABI before this assertion is loosened.")
+        }
+
+        // The tail-identity check the size check alone cannot provide (same reasoning as `init`'s
+        // own office-class pair, and the SAME disclosed limitation: this catches the struct's own
+        // LAST declared member being renamed/removed/shifted, not an interior add-one/remove-one
+        // pair that cancels in count above this position — see `init`'s own tripwire for the full
+        // account of what tail-identity drift does and does not cover). `setColorPreviewState` is
+        // this struct's own current last declared member (confirmed by this task's own exhaustive
+        // 78-member sweep, `task-3-report.md`'s own account).
+        let lastDocumentMemberSymbol = Self.resolvedSymbolName(
+            unsafeBitCast(rawDoc.pointee.pClass.pointee.setColorPreviewState, to: UnsafeRawPointer?.self))
+        guard lastDocumentMemberSymbol.contains("setColorPreviewState") else {
+            throw LoadError.documentLoadFailed(
+                "LibreOfficeKit ABI mismatch: this struct's own last declared member (setColorPreviewState) "
+                    + "resolved to \"\(lastDocumentMemberSymbol)\" instead — the header no longer matches the "
+                    + "compiled engine's real member order.")
+        }
+
         // Register BEFORE initializeForRendering so any invalidation LOK fires synchronously
         // during that call is captured, not missed.
         let context = DocumentCallbackContext(bridge: self, docId: docId)
@@ -929,7 +1437,11 @@ final class LOKBridge: OfficeDocumentBridge {
         // document itself owns via its `mxComponent` teardown cascade — this is ONLY about the
         // clipboard factory's OWN separate, view-id-keyed bookkeeping for a view minted OUTSIDE
         // `documentLoad`'s own view.
-        if let agentViewId = doc.agentViewId {
+        // `>= 0` (re-review MISS 1's own "every consumer" instruction) — both writers of
+        // `agentViewId` now throw rather than cache a failed mint, so this should never actually
+        // observe a negative id, but `destroyView`'s own behavior on an unresolved id was never
+        // verified by this bridge, and guarding here costs nothing.
+        if let agentViewId = doc.agentViewId, agentViewId >= 0 {
             doc.handle.pointee.pClass.pointee.destroyView?(doc.handle, agentViewId)
         }
         doc.handle.pointee.pClass.pointee.destroy?(doc.handle)
@@ -1520,7 +2032,62 @@ final class LOKBridge: OfficeDocumentBridge {
     private func createAgentViewOnDedicatedThread(docId: String) throws -> Int32 {
         guard var doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
         guard doc.agentViewId == nil else { throw SaveError.agentViewAlreadyExists(docId) }
-        let viewId = doc.handle.pointee.pClass.pointee.createView?(doc.handle) ?? -1
+        // Re-review fix (MISS 1) — the IDENTICAL `?? -1` hazard `ensureAgentViewOnDedicatedThread`
+        // already fixed survived HERE, writing into the SAME `doc.agentViewId` cache, reachable
+        // from the WIRE (this is `OfficeWireFrame.createView`'s own handler, compiled into Release
+        // — not a debug/test-only path). A cached `-1` here would have been returned by
+        // `ensureAgentViewOnDedicatedThread`'s own `if let existing` branch WITHOUT ever reaching
+        // that function's guard, and `agentKeyEventOnDedicatedThread`'s own `!= nil` check (below)
+        // would have let it straight through too — `setView(doc.handle, -1)` silently no-ops
+        // (engine-verified: `SfxLokHelper::setView`, `sfx2/source/view/lokhelper.cxx:201-203`,
+        // returns for an unresolved view id with no error), leaving whatever view was ALREADY
+        // current — meaning a keystroke meant for the agent view would land on the PRIMARY view
+        // instead: a silent EDIT, not merely a silent read, the moment this door's own caller
+        // (the two-writer characterization path) posted one after a failed mint.
+        guard let viewId = doc.handle.pointee.pClass.pointee.createView?(doc.handle), viewId >= 0 else {
+            throw SaveError.agentViewCreationFailed(docId)
+        }
+        doc.agentViewId = viewId
+        documents[docId] = doc
+        return viewId
+    }
+
+    /// office-agent-tools T3 review (I1) — get-or-mint variant of `createAgentViewOnDedicatedThread`
+    /// above, for `sheetsRead`'s own need: a read must never fail merely because SOMETHING ELSE (the
+    /// two-writer `createAgentView` wire door, or an earlier read in this same document's lifetime)
+    /// already minted the agent view — reusing the SAME view is exactly what a read wants (no reason
+    /// to mint a THIRD view per document). The wire-level `createAgentView`'s own strict
+    /// refusal-on-second-call (`SaveError.agentViewAlreadyExists`) is untouched by this — this is a
+    /// separate, internal-only entry point `sheetsReadOnDedicatedThread` alone calls, never reachable
+    /// from the wire.
+    ///
+    /// **Why reads need a second view at all**: Calc's selection, cursor, and part are PER-VIEW
+    /// state (confirmed by this whole mechanism's own precedent — `agentKeyEventOnDedicatedThread`,
+    /// right below, exists for the identical reason on the write side). `sheetsRead`'s own
+    /// `.uno:GoToCell` + `getTextSelection` mechanism moves and reads a SELECTION — on the PRIMARY
+    /// view, that is the user's own live selection on an adopted tab. Reading on the agent view
+    /// instead makes that side effect moot by construction: nothing this bridge does to the agent
+    /// view's own selection/part is ever visible to the user, so there is no residual to disclose
+    /// and no restore to get right, unlike the two-round `setPart` restore dance this task's own
+    /// earlier fix round needed before this change (see `sheetsReadOnDedicatedThread`'s own git
+    /// history for that superseded design).
+    private func ensureAgentViewOnDedicatedThread(docId: String) throws -> Int32 {
+        guard var doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        // `>= 0`, not merely non-nil (re-review MISS 1) — defense in depth alongside the fix at
+        // `createAgentViewOnDedicatedThread`'s own mint, below: with BOTH writers of `agentViewId`
+        // now throwing rather than caching `-1`, this branch should never actually observe a
+        // negative `existing` — but a consumer here that only checked `!= nil` is exactly the shape
+        // that let a cached `-1` reach `setView` silently in the first place, so this read site
+        // guards the same way rather than trusting its two writers to be its only protection.
+        if let existing = doc.agentViewId, existing >= 0 { return existing }
+        // Re-review fix (Minor #4) — a failed/absent `createView()` throws here, on THIS call,
+        // rather than caching `-1` into `agentViewId` (which would silently short-circuit every
+        // future call into returning that same unusable id — see `SaveError.agentViewCreationFailed`'s
+        // own header for the full failure chain this closes). `doc.agentViewId` is left `nil` on
+        // this path, so a LATER call for the same docId gets a fresh chance to mint a real view.
+        guard let viewId = doc.handle.pointee.pClass.pointee.createView?(doc.handle), viewId >= 0 else {
+            throw SaveError.agentViewCreationFailed(docId)
+        }
         doc.agentViewId = viewId
         documents[docId] = doc
         return viewId
@@ -1533,13 +2100,2908 @@ final class LOKBridge: OfficeDocumentBridge {
     /// called for this docId — never silently falls back to the primary view.
     private func agentKeyEventOnDedicatedThread(docId: String, part: Int, type: OfficeKeyEventType, charCode: Int, keyCode: Int) throws {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
-        guard let agentViewId = doc.agentViewId else { throw SaveError.noAgentView(docId) }
+        // `>= 0`, not merely non-nil (re-review MISS 1) — the SEVERE half of that finding: a cached
+        // `-1` here used to pass this guard (non-nil), then `setView(doc.handle, -1)` would
+        // silently no-op (stay on whatever view is ALREADY current), and the keystroke below would
+        // land THERE — on the user's own primary view, an actual silent EDIT, not merely a silent
+        // read the way the sibling read-path hazards were.
+        guard let agentViewId = doc.agentViewId, agentViewId >= 0 else { throw SaveError.noAgentView(docId) }
         doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
         if doc.kind != .text {
             doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(truncatingIfNeeded: part))
         }
         doc.handle.pointee.pClass.pointee.postKeyEvent?(
             doc.handle, Int32(type.rawValue), Int32(truncatingIfNeeded: charCode), Int32(truncatingIfNeeded: keyCode))
+    }
+
+    // MARK: - office-agent-tools T3: sheets info/read
+
+    /// All sheet-name lookups this bridge does (`sheetsInfo`'s own list, `sheetsRead`'s name-to-part
+    /// resolution) go through this one helper, `setView` already asserted by the caller — `getParts`/
+    /// `getPartName` are cheap, and duplicating the loop at each call site risked the two drifting
+    /// (a name found here but not there, or vice versa, on the exact same document). Returns names in
+    /// PART ORDER (index i's name is sheet i), never re-sorted — order is itself information (spec
+    /// §2: "sheet names" is a list, and `sheetsInfoOk.sheets` promises the same order `info` reports
+    /// as `sheets[i]`'s own part-scoped facts).
+    private func sheetNamesOnDedicatedThread(_ doc: OpenDocument) -> [String] {
+        let partCount = Int(doc.handle.pointee.pClass.pointee.getParts?(doc.handle) ?? 0)
+        var names: [String] = []
+        names.reserveCapacity(partCount)
+        for part in 0..<partCount {
+            if let cName = doc.handle.pointee.pClass.pointee.getPartName?(doc.handle, Int32(part)) {
+                defer { free(cName) }
+                names.append(String(cString: cName))
+            } else {
+                names.append("Sheet\(part + 1)") // defensive fallback — getPartName should not fail for a real part index
+            }
+        }
+        return names
+    }
+
+    /// Selects `range` on `part` (`.uno:GoToCell`'s own `ToPoint` argument — proven, live-tested
+    /// single-cell targeting since Office Stage B Task 4's now-retired `debugEdit` door; this task's
+    /// own live drills are what confirm it also accepts a two-corner span) and reads the selection
+    /// back via `getTextSelection`, the SAME mechanism `clipboardCopyOnDedicatedThread` already uses
+    /// and this codebase's own live tests already trust. `setPart` is the CALLER's job (both
+    /// `sheetsInfoOnDedicatedThread`'s used-range probe and `sheetsReadOnDedicatedThread` itself need
+    /// a specific part asserted first, and asserting it here a second time would be redundant, not
+    /// wrong, but this keeps the "one assertion per dedicated-thread job" shape the rest of this file
+    /// already has).
+    ///
+    /// **`formulas` selects Calc's own View > Show Formulas mode around the SAME read, toggled on
+    /// immediately before and off immediately after.** **The command is `.uno:ToggleFormula`, NOT the
+    /// more guessable `.uno:ShowFormula`** — this task's own first live drill against real content
+    /// (`two-sheet.ods`, known cells) proved `.uno:ShowFormula` a silent no-op: no
+    /// `LOK_CALLBACK_STATE_CHANGED` ever fired for it (every OTHER real toggle command in this LOK
+    /// build's own callback trace does), and a formula read came back as the COMPUTED value ("2"),
+    /// never the formula text ("=1+1"). The real name was found in the vendored product's own
+    /// `Resources/registry/calc.xcd` (`grep -o 'uno:[A-Za-z]*Formula[A-Za-z]*'`), whose
+    /// `.uno:ToggleFormula` entry carries the label "Show Formulas" — confirmed correct by the SAME
+    /// live drill afterward, which then read back the seeded `=1+1` verbatim.
+    ///
+    /// A display-mode toggle, not a document mutation (the same category as zoom or a split-pane
+    /// position), so it is not expected to touch `ModifiedStatus`; this task's own live drills assert
+    /// that directly rather than trusting the category alone. Toggled unconditionally both ways
+    /// (never queried first): a UNO toggle command flips whatever the CURRENT state is, so
+    /// flip-read-flip returns to the original state regardless of what it was, without this bridge
+    /// needing to ask what it started as.
+    ///
+    /// **Fix round 2 (live-drill-caught, ~25% of isolated reruns) — `.uno:GoToCell` is verified,
+    /// not trusted blind.** `postUnoCommand` is fire-and-forget: it returns before LOK's own
+    /// internal dispatcher has necessarily processed the command, and this task's own live drill
+    /// (`testLiveSheetsReadValuesMatchesTwoSheetOdsKnownContent`) measured `getTextSelection`,
+    /// called immediately after, sometimes still answering with whatever was selected BEFORE this
+    /// call (a fresh document's default cursor at A1) rather than `range`'s real content.
+    ///
+    /// **Fix round 2a, FALSIFIED by its own follow-up drill — re-dispatching `.uno:GoToCell` in a
+    /// tight loop does not help, and made the failure rate WORSE (5/5 isolated reruns, not the
+    /// original ~25%).** The first attempt at this fix re-issued `.uno:GoToCell` on every retry
+    /// iteration, reasoning that "each iteration re-enters LOK on the dedicated thread, giving its
+    /// internal dispatcher the turns it needs to drain the deferred slot." The very next live drill
+    /// falsified that reasoning directly: the stderr instrumentation showed the retry loop
+    /// exhausting its full budget, THEN — after `selectionTextOnDedicatedThread` had already
+    /// returned its (stale) answer — a burst of callbacks including the real "selection is now
+    /// A1:B2" firing, triggered by an entirely different LOK call later in the same request
+    /// (`sheetsReadOnDedicatedThread`'s own `setPart` restore, below). Repeated `getTextSelection`
+    /// reads do not pump whatever internal queue `.uno:GoToCell` sits in; only some OTHER LOK call
+    /// does, and re-dispatching `GoToCell` itself on every iteration is, if anything,
+    /// counterproductive — each repeat is one more queued selection-move that can still land later,
+    /// on the user's own sheet, after this function has moved on.
+    ///
+    /// **Fix round 2b (current) — dispatch `.uno:GoToCell` exactly ONCE, then poll
+    /// `getTextSelection` with a cheap, throwaway `paintPartTile` call as the pump between reads.**
+    /// `paintPartTile` was chosen over a second candidate (a `setPart` round-trip) on this task's
+    /// own repo precedent — Office Stage B's live drills already establish "paint before other
+    /// operations" as what settles LOK's view state — and because a real part switch would flicker
+    /// an adopted tab's own visible sheet, which a read-only probe must not do. See
+    /// `pumpDedicatedThreadForPendingDispatch` for the call itself and why it is not
+    /// `paintTileOnDedicatedThread`.
+    private func selectionTextOnDedicatedThread(_ doc: OpenDocument, docId: String, viewId: Int32, part: Int, range: String, formulas: Bool) -> String {
+        // **Order is load-bearing: the formula toggle MUST run BEFORE `.uno:GoToCell`, not after —
+        // live-drill-caught, not reasoned in advance.** The first working version of this function
+        // toggled AFTER selecting (select the range, then flip Show Formulas, then read) and got the
+        // COMPUTED VALUE back every time ("2" for a seeded "=1+1"), even once `.uno:ToggleFormula`
+        // was confirmed the right command name (below) — `getTextSelection`'s own per-cell display
+        // string is evidently computed AT SELECTION TIME, from whatever display mode was active
+        // then, not recomputed at copy/read time from the mode active at that later moment. Toggling
+        // first, so the selection itself is built under formula mode, is what actually works — this
+        // task's own live drill (`OfficeSheetsCommandTests.testLiveSheetsReadFormulasReturnsFormula
+        // TextNotTheComputedValue`) is the regression tripwire for this exact ordering.
+        //
+        // **Fix round 4 (review I5) — the restore is now GUARANTEED (`defer`, not a second plain
+        // statement at the tail), matching the SAME "fire-and-forget is not trustworthy" lesson fix
+        // round 2 already learned for `.uno:GoToCell` — this command rides the identical
+        // `postUnoCommand` contract, so the same distrust applies to whether it DISPATCHES at all on
+        // every exit path. `defer` is registered unconditionally on entry (Swift's own rule: a
+        // `defer` inside `if formulas` would only run if that branch executed, but this one must
+        // ALWAYS pair with the ON-toggle above, so the condition is checked again inside the
+        // deferred block, not by conditioning the registration itself).
+        //
+        // **NOT independently VERIFIED that the restore has landed before this function returns —
+        // but it IS pumped, which is a different and real property, not conflated with the first
+        // any more.** A first attempt at this fix tried to verify landing the same way
+        // `.uno:GoToCell` is verified (poll a flag set from a `LOK_CALLBACK_STATE_CHANGED` handler)
+        // on the claim this command fires one synchronously. Falsified by this task's own
+        // follow-up drill: a complete, unconditional raw-callback trace for a full
+        // seed-then-read-formulas cycle never mentions `ToggleFormula` in ANY callback of ANY type
+        // — see `toggleFormulaOnDedicatedThread`'s own header for the full account. No signal
+        // exists to poll, so none is polled — VERIFICATION is genuinely unavailable. But a
+        // re-review caught that the OFF-toggle, as first shipped after that finding, had NO PUMP
+        // at all — meaning `postUnoCommand`'s own queued restore could sit unprocessed for an
+        // UNBOUNDED interval, not the "brief flash" this comment used to claim, until some
+        // unrelated LOK call happened to pump it (a save landing in that window would persist the
+        // formula-display state into `settings.xml` — the exact harm this whole mechanism exists
+        // to avoid). The `defer` below now passes `pump:` to `toggleFormulaOnDedicatedThread` for
+        // the OFF-toggle specifically, reusing the SAME proven pump `.uno:GoToCell`'s own poll
+        // trusts — real help for LANDING, still no way to PROVE it landed, and this comment no
+        // longer says otherwise in either direction.
+        //
+        // **Disclosed, not fixed: this toggle is `rDoc`-scoped (document-wide View > Show Formulas),
+        // not per-view — the agent view does NOT isolate it.** Unlike the selection/part isolation
+        // `sheetsReadOnDedicatedThread`'s own agent-view switch provides, an adopted tab's user CAN
+        // see a brief, real flash to formula display and back for the duration of one `formulas:
+        // true` read — genuinely unavoidable with this mechanism (confirmed: `getCommandValues`'s
+        // full dispatch table, read directly from the pinned source, has no read-only formula-text
+        // query this bridge could use instead).
+        if formulas {
+            toggleFormulaOnDedicatedThread(doc)
+        }
+        defer {
+            if formulas {
+                toggleFormulaOnDedicatedThread(doc, pump: (viewId: viewId, part: part))
+            }
+        }
+
+        // Baseline: whatever `getTextSelection` answers BEFORE this call ever asks LOK to move the
+        // selection. This is the exact value a not-yet-processed `.uno:GoToCell` reads back as —
+        // see the poll loop below, which exists to tell "GoToCell hasn't landed yet" apart from
+        // "GoToCell landed, and the requested range's content happens to equal what was already
+        // selected" (read under `formulas`' own display mode, matching every read below, so a
+        // stale-vs-fresh comparison is never comparing across two different display modes).
+        let baseline = readSelectionTextOnDedicatedThread(doc)
+
+        let gotoPayload: [String: Any] = ["ToPoint": ["type": "string", "value": range]]
+        if let gotoData = try? JSONSerialization.data(withJSONObject: gotoPayload),
+           let gotoString = String(data: gotoData, encoding: .utf8) {
+            ".uno:GoToCell".withCString { commandPtr in
+                gotoString.withCString { argsPtr in
+                    doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, argsPtr, false)
+                }
+            }
+        }
+
+        // **Poll-with-pump, never a sleep** — house norm (`CLAUDE.md`: "no arbitrary sleeps...
+        // condition-poll instead"). `.uno:GoToCell` is dispatched exactly ONCE, above; every
+        // iteration below only READS plus, on a still-stale read, PUMPS
+        // (`pumpDedicatedThreadForPendingDispatch`) — never re-dispatches GoToCell itself, per fix
+        // round 2a's own falsification. Bounded by ITERATION COUNT, never a clock. A callback-based
+        // wait (blocking this job until `LOK_CALLBACK_STATE_CHANGED`/similar fires) is not available
+        // here without risking the exact same-thread reentrant deadlock `LOKDedicatedThread`'s own
+        // header warns against — `lokBridgeDocumentCallback` fires ON this thread, as part of
+        // whatever job is already running.
+        //
+        // **Exhaustion returns the last read rather than throwing.** When `range`'s real content
+        // genuinely EQUALS `baseline` — a freshly-opened document's default A1 selection, probed
+        // for a sheet whose only content IS at A1 (`sparse-sheets.ods`'s own Sheet1 fixture, added
+        // for `sheetsInfo`'s `(0, 0)` disambiguation fallback, is exactly this case for `read` too;
+        // so is every genuinely EMPTY sheet, which legitimately reads `""` both before and after) —
+        // "stale" and "correct" are indistinguishable by this detector's own construction, and
+        // throwing here would wrongly fail a read that in fact succeeded. The undetectable residual
+        // (GoToCell never actually lands within the attempt budget AND the requested range's real
+        // content differs from `baseline`) is a disclosed tail — task-3-report.md's concerns, not a
+        // claimed-solved case.
+        //
+        // **Round 4 — one unconditional pump added AFTER the loop, on the exhaustion path only.**
+        // Stale prose corrected: the paragraph this replaces used to justify the pump-before-retry
+        // pattern by "flushing a genuinely-still-pending GoToCell before the caller's own `setPart`
+        // restore runs" — that restore no longer exists (`sheetsReadOnDedicatedThread` reads on the
+        // agent view now, fix round 3/I1, and never restores anything on the primary), so that
+        // justification was already stale before this round, independent of what follows. The REAL
+        // reason to pump once more here, confirmed live: a round-3 full-app-suite run observed the
+        // PRIMARY view's own selection move to this read's target range after this loop, on
+        // UNMUTATED code, hit its full 4-attempt ceiling. The diagnostic two lines below cannot by
+        // itself distinguish "landed on the final read" from genuine exhaustion in that round-3 run
+        // — but genuine exhaustion of this exact loop WAS directly observed since: a round-4 mutant
+        // drill (deliberately reading on `doc.viewId` instead of the agent view, to re-prove this
+        // test discriminates) caught this loop returning the pre-dispatch baseline unchanged after
+        // all 4 attempts, in 3 of its 4 total runs, via the read's own now-added content assertion — see
+        // `OfficeSheetsCommandTests.testLiveAgentReadNeverTouchesThePrimaryViewsOwnSelection`'s own
+        // header for the full evidence chain. `postUnoCommand`'s `SynchronMode=false` (confirmed
+        // active in this build — unipoll is never enabled anywhere in this file) means a
+        // still-queued `GoToCell` can drain at ANY later point, against whatever view a SUBSEQUENT,
+        // unrelated LOK call on this thread makes current next — giving the dispatcher one more turn
+        // here, before this function returns control to whatever runs next, shrinks that window. It
+        // does NOT close it: this is the same fix-round-2a lesson (repeated `getTextSelection` reads
+        // do not themselves pump LOK's internal queue; only some OTHER LOK call does) applied once
+        // more, not a new mechanism — and it stays bounded and cheap, one more throwaway 64x64 tile
+        // paint, spent only on the path that already burned its full read budget.
+        var text = readSelectionTextOnDedicatedThread(doc)
+        var attempts = 1
+        while text == baseline && attempts < Self.goToCellVerificationAttempts {
+            pumpDedicatedThreadForPendingDispatch(doc, viewId: viewId, part: part)
+            text = readSelectionTextOnDedicatedThread(doc)
+            attempts += 1
+        }
+        if attempts > 1 {
+            // Evidence line for task-3-report.md's before/after — how often the race actually
+            // fires in practice, and which attempt it resolved on, never silent.
+            FileHandle.standardError.write(Data(
+                "[LOKBridge sheets] GoToCell(\(range)) needed \(attempts) attempt(s) before the selection changed (or the budget was exhausted)\n".utf8))
+        }
+        if text == baseline {
+            // Best-effort straggler flush (round 4) — see the comment above the loop. Only spent on
+            // the exhaustion path itself; a read that already succeeded needs no further pumping.
+            pumpDedicatedThreadForPendingDispatch(doc, viewId: viewId, part: part)
+        }
+
+        // The formula-toggle restore (fix round 4, review I5) is registered as a `defer` above,
+        // right after the ON-toggle — it runs here, guaranteed, on every exit from this function,
+        // not repeated as a plain statement at this tail.
+        return text
+    }
+
+    /// office-agent-tools T3 review (I5) — dispatches `.uno:ToggleFormula`. The name deliberately
+    /// does NOT say "AndVerify" — an earlier version of this fix attempted exactly that
+    /// (`OpenDocument.formulaToggleStateChangedSeen`, set from a `LOK_CALLBACK_STATE_CHANGED`
+    /// handler, polled the same way `.uno:GoToCell`'s own race is verified), on the reviewer's own
+    /// claim that this command fires `STATE_CHANGED` synchronously. **Falsified by this task's own
+    /// follow-up drill, not merely unconfirmed**: the COMPLETE, unconditional raw-callback trace for
+    /// a full seed-then-read-formulas cycle (every callback of every type this bridge receives,
+    /// already logged unconditionally by `handleCallback` — 64 lines for one real test run) never
+    /// once mentions `ToggleFormula`, in a `STATE_CHANGED` payload or any other callback type. This
+    /// build's engine gives NO observable signal for this command's own completion — full stop, not
+    /// "sometimes fires, sometimes doesn't" the way `.uno:GoToCell` does.
+    ///
+    /// Given no signal exists to poll, this does not poll. What it DOES still fix, correctly and
+    /// independently of any signal: the caller wraps this in `defer` (`selectionTextOnDedicatedThread`
+    /// above), so the OFF-toggle is GUARANTEED to dispatch on every exit from that function — a real,
+    /// structural improvement over the original plain-statement-at-the-tail shape, which a future
+    /// throwing call added between the ON-toggle and the tail could have skipped. "Guaranteed to
+    /// dispatch" and "guaranteed to have landed by the time this returns" are different properties;
+    /// only the first is achievable here, and this comment does not claim the second.
+    ///
+    /// **Re-review fix — pumped, not left in the async queue unpumped.** "Guarantees dispatch, not
+    /// landing" (this function's own header, above) was correct about VERIFICATION being
+    /// unavailable but, as originally shipped, conflated that with LANDING: with no pump at all
+    /// after the OFF-toggle, `postUnoCommand`'s own queued command could sit unprocessed for an
+    /// UNBOUNDED interval — not the "brief flash" this file's own caller-side comment
+    /// (`selectionTextOnDedicatedThread`) claimed — until some UNRELATED LOK call happened to pump
+    /// it. A save landing inside that window would persist `SetViewOptions`' formula-display state
+    /// into `settings.xml`, the exact harm this whole fix exists to prevent. `pump`, when true,
+    /// calls the SAME throwaway `paintPartTile` `.uno:GoToCell`'s own poll already trusts to give
+    /// LOK's internal dispatcher a turn — proven to help LANDING (this file's own measured
+    /// evidence), even though (unchanged from above) nothing here can PROVE it landed before
+    /// returning. The ON-toggle does not need its own explicit pump: the poll loop immediately
+    /// following it in `selectionTextOnDedicatedThread` already pumps multiple times as part of
+    /// verifying `.uno:GoToCell`, which pumps this command's own landing for free; only the
+    /// OFF-toggle, in that function's `defer`, has nothing after it to pump on its behalf.
+    private func toggleFormulaOnDedicatedThread(_ doc: OpenDocument, pump: (viewId: Int32, part: Int)? = nil) {
+        ".uno:ToggleFormula".withCString { commandPtr in
+            doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, nil, false)
+        }
+        if let pump {
+            pumpDedicatedThreadForPendingDispatch(doc, viewId: pump.viewId, part: pump.part)
+        }
+    }
+
+    /// The one place this bridge calls `getTextSelection` — `selectionTextOnDedicatedThread`'s
+    /// baseline read and every poll-loop read share this so the two can never disagree about the
+    /// MIME type or the empty-string fallback.
+    private func readSelectionTextOnDedicatedThread(_ doc: OpenDocument) -> String {
+        guard let cString = "text/plain;charset=utf-8".withCString({ mimePtr in
+            doc.handle.pointee.pClass.pointee.getTextSelection?(doc.handle, mimePtr, nil)
+        }) else {
+            return ""
+        }
+        defer { free(cString) }
+        return String(cString: cString)
+    }
+
+    /// A cheap, throwaway `paintPartTile` call whose ONLY purpose is to give LOK's own internal
+    /// idle/dispatch queue a chance to drain a still-pending `.uno:GoToCell` — see
+    /// `selectionTextOnDedicatedThread`'s own fix-round-2 history for the live evidence this exists
+    /// to answer. Pixels are discarded immediately; nothing here is cached or returned to any
+    /// caller — only the SIDE EFFECT of making the call matters.
+    ///
+    /// **Deliberately NOT `paintTileOnDedicatedThread`** — that method updates
+    /// `OpenDocument.lastKnownPart` (autosave's own "what part is the user looking at" signal, see
+    /// that field's own header) and this is a read probe, which must never perturb it. `part` is
+    /// always the SAME part the caller already asserted via `setPart` before calling into
+    /// `selectionTextOnDedicatedThread` in the first place — passed straight through rather than
+    /// re-derived, so this call's own `nPart` argument always matches `doc_getPart(pThis)` already.
+    /// That equality is what keeps this call out of `paintTileOnDedicatedThread`'s own documented
+    /// `getAlternativeViewForPaint` hazard (fix round 3 there): that unfiltered bystander-view
+    /// search only triggers on a part/mode MISMATCH, which passing the already-current part
+    /// structurally avoids without needing that method's own type-gated `setPart` prefix here.
+    ///
+    /// **`viewId` fix (review I1) — no longer hardcodes `doc.viewId` (the primary view).**
+    /// `sheetsReadOnDedicatedThread` now polls on the AGENT view, not the primary one (see
+    /// `ensureAgentViewOnDedicatedThread`'s own header for why); a pump that unconditionally
+    /// asserted the primary view would silently switch the process-global current view AWAY from
+    /// the agent view mid-poll, on every retry — clobbering the very isolation the agent-view
+    /// switch exists to provide, and reading the USER's own selection instead of the agent's from
+    /// that point on. The caller always passes the SAME view it already asserted before dispatching
+    /// `.uno:GoToCell` in the first place, so this is never a new assertion, only a repeated one.
+    private func pumpDedicatedThreadForPendingDispatch(_ doc: OpenDocument, viewId: Int32, part: Int) {
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, viewId)
+        var buffer = [UInt8](repeating: 0, count: Self.pumpTileByteCount)
+        buffer.withUnsafeMutableBufferPointer { rawBuffer in
+            doc.handle.pointee.pClass.pointee.paintPartTile?(
+                doc.handle, rawBuffer.baseAddress, Int32(part), 0 /* LOK_PARTMODE_SLIDES */,
+                Int32(Self.pumpTilePixelSize), Int32(Self.pumpTilePixelSize),
+                0, 0, 3000, 3000)
+        }
+    }
+    private static let pumpTilePixelSize = 64
+    private static let pumpTileByteCount = 64 * 64 * 4
+
+    /// `selectionTextOnDedicatedThread`'s own `.uno:GoToCell` poll budget — the ONE
+    /// `postUnoCommand` this file still verifies via a poll loop (`.uno:ToggleFormula`'s own attempt
+    /// at the identical pattern was tried and abandoned — see `toggleFormulaOnDedicatedThread`'s own
+    /// header for why no signal exists for it to poll). Small deliberately, not generous:
+    /// `sheetsInfoOnDedicatedThread`'s `(0, 0)` disambiguation fallback pays this cost for a
+    /// genuinely empty sheet (`""` read equals `""` baseline, so the loop never sees a difference to
+    /// stop early on and burns the full budget every time) — a large budget would make that fallback
+    /// slow for no correctness benefit on exactly the sheets most likely to trigger it. Each attempt
+    /// is a real, if cheap, LOK call (a 64x64 tile paint), not a clock tick, so this is a real cost
+    /// per attempt, unlike a bounded wall-clock retry would be.
+    private static let goToCellVerificationAttempts = 4
+    /// office-agent-tools T4 — `sheetsManageSheetOnDedicatedThread`'s own verification budget. See
+    /// that function's own header for why this is separate from, and larger than,
+    /// `goToCellVerificationAttempts`: a structural sheet insert/delete/rename is a heavier
+    /// operation than a cell selection move, live-measured to need more than 4 attempts at least
+    /// once across this task's own repeated runs.
+    private static let sheetsManageVerificationAttempts = 20
+    /// office-agent-tools T6 — `slidesReorderOnDedicatedThread`'s own verification budget. A
+    /// dedicated constant, not a reuse of `sheetsManageVerificationAttempts`, per that constant's
+    /// own header: each structural-mutation call site earns its own independently-sized budget so
+    /// raising one can never silently loosen another. Started at the same value (20) as its closest
+    /// analogue (a structural, non-per-cell document mutation) since this call site has not yet
+    /// earned its own independently-measured number across repeated live runs.
+    private static let slidesManageVerificationAttempts = 20
+    /// office-agent-tools T6 fix round 1 (review F-6) — `selectSlidePlaceholderOnDedicatedThread`'s
+    /// OWN budget, and the first number in this block that is MEASURED rather than borrowed or
+    /// reasoned. F-6 recommended raising it (it borrowed `goToCellVerificationAttempts = 4`, sized
+    /// for a different call site, and its own comment conceded as much). Half of that is right — the
+    /// call site should own its budget, so raising one can never silently loosen another — but the
+    /// *raise* is empirically wrong, and the measurement that says so is worth more than the
+    /// reasoning that suggested it.
+    ///
+    /// **Method**: set to 40 temporarily, added the permanent evidence line in
+    /// `selectSlidePlaceholderOnDedicatedThread`, ran the full 11-test live suite twice under
+    /// saturating CPU load (one spin loop per core) to provoke the deferred-dispatch class on
+    /// purpose. Result, and it is bimodal with nothing in between:
+    ///
+    ///     313  needed 2 attempt(s), landed=true      <- every logged success
+    ///      15  needed 40 attempt(s), landed=false    <- every non-landing
+    ///
+    /// **Zero occurrences at attempts 3 through 39.** No success has ever needed more than 2 (and
+    /// attempt-1 successes go unlogged, so the real consumption is lower still); no non-landing was
+    /// ever rescued by attempts 5..40. All 15 non-landings trace, via the evidence line's own
+    /// slide/tab fields, to the three genuinely placeholder-less slides the F-0 and F-4 drills exist
+    /// to exercise — legitimate structural absences, correctly reported, on tests that passed.
+    ///
+    /// So 4 already carries 2x headroom over every success ever observed, and a larger number would
+    /// only make every LEGITIMATE refusal ~10x slower. The residual flake this was hoped to cure is
+    /// therefore NOT "the callback needed more time" — a discrete loss, not a slow arrival. What can
+    /// help is re-posting the key events, never pumping harder: see `slidesSetTextOnDedicatedThread`'s
+    /// pass-2 retry, which is the fix that measurement actually pointed at.
+    private static let slidePlaceholderPositionAttempts = 4
+
+    /// Splits `getTextSelection`'s own TSV shape (rows joined by `"\n"`, cells within a row joined by
+    /// `"\t"`) into a grid — the ONE place both `sheetsInfo` and `sheetsRead` turn that raw string into
+    /// `[[String]]`, so the two can never disagree about the shape. A wholly-empty selection answers
+    /// `""`, which `.split` on an empty string with `omittingEmptySubsequences: false` would otherwise
+    /// turn into ONE spurious empty row — guarded explicitly rather than trusted to fall out of the
+    /// split, since a genuinely single BLANK cell ("\t"-free, content-free) must still come back as
+    /// `[[""]]`, not `[]`. A trailing `"\n"` (there almost always is one — LOK's own convention for a
+    /// Calc selection copy) would otherwise produce one spurious wholly-empty trailing row; every
+    /// OTHER embedded newline is a real row boundary and must survive.
+    ///
+    /// **office-agent-tools T3 review (I3) — characterized live before touching this function, not
+    /// assumed.** A purpose-built fixture (`embedded-delimiters.ods`, a cell with a real
+    /// `<text:tab/>` and a second `<text:p>` paragraph — ODF's own in-cell tab and line-break
+    /// shapes) dumped through the real `getTextSelection` mechanism read back as
+    /// `"lineone\u{01}tabbed linetwo\tNEXTCELL"` for a two-cell selection. Two findings, neither
+    /// the one the review's own framing assumed:
+    ///
+    /// 1. **The splitting above was never actually corrupted.** Calc's own plain-text clipboard
+    ///    export substitutes an EMBEDDED tab with U+0001 (Start of Heading) — never the real
+    ///    U+0009 this function splits on — specifically so an in-cell tab can never be confused
+    ///    with the real cell-boundary delimiter. Splitting on literal `"\t"`/`"\n"` above is safe
+    ///    exactly because Calc itself keeps those bytes reserved for real boundaries.
+    /// 2. **An embedded line break (`<text:p>` count > 1) is LOSSY, not corrupting**: it copies
+    ///    through as a plain SPACE, not U+000A and not any other distinguishable marker — genuinely
+    ///    indistinguishable, after the fact, from a space the user actually typed. Nothing this
+    ///    function does can recover that distinction; disclosed in `task-3-report.md`'s concerns,
+    ///    not silently accepted as "handled."
+    ///
+    /// U+0001 is substituted back to a real tab HERE, in each cell's own value — not left as an
+    /// opaque control character an agent would have no way to interpret. Safe to do AFTER
+    /// splitting, never before: by finding (1) above, only a genuine cell boundary is ever a real
+    /// U+0009 at the point this function's own `.components(separatedBy: "\t")` runs, so this later
+    /// substitution can never retroactively misinterpret a real delimiter as this fix's own target.
+    /// The wire-level RE-ambiguity this reintroduces (a cell's OWN value now containing a real tab,
+    /// same as `formatSheetsRead`'s own join separator) is closed one layer up, at the point that
+    /// join actually happens — see `OfficeCommandConsumer.formatSheetsRead`'s own quoting.
+    ///
+    /// **A separate, confirmed-live limitation this function inherits rather than causes: LEADING
+    /// empty rows/columns trim away exactly like trailing ones do** (`offset-content.ods`'s own
+    /// live drill — real content only at B2, `A1:C3` returns bare content with no leading blank row
+    /// or column at all). Disclosed in the tool's own description (`sheets.ts`) rather than padded
+    /// back to the requested rectangle's shape: correct padding would require knowing exactly how
+    /// many leading rows/columns were trimmed, and `getDataArea` (`sheetsInfoOnDedicatedThread`'s
+    /// own mechanism) only ever answers the LAST used row/column — `ScTable::GetCellArea` has no
+    /// `nMinX`/`nMinY` counterpart (checked directly against the pinned source) — so there is no
+    /// cheap way to recover the trimmed leading extent from information this bridge already has.
+    private func parseTSVGrid(_ text: String) -> [[String]] {
+        guard !text.isEmpty else { return [] }
+        let trimmed = text.hasSuffix("\n") ? String(text.dropLast()) : text
+        return trimmed.components(separatedBy: "\n").map { row in
+            row.components(separatedBy: "\t").map { cell in
+                cell.replacingOccurrences(of: "\u{01}", with: "\t")
+            }
+        }
+    }
+
+    /// office-agent-tools T3 — sheet names, each one's used range, and the active sheet's name.
+    /// Genuinely read-only, not just read-only in intent: no view but the PRIMARY one is touched
+    /// (`getDataArea` needs a current view resolved — see below — but never a selection move or a
+    /// part switch), so there is nothing here to restore.
+    ///
+    /// **Fix round 3 (review C1/C2) — `getDataArea` IS the used-range probe after all, now that the
+    /// header ABI bug is fixed.** This function's own PREVIOUS design replaced `getDataArea` with a
+    /// large-bound-range `getTextSelection` probe, reasoning that live drills had "measured
+    /// `getDataArea` wrong" (`(0,0)`/"A1:A1" for a sheet proven to have real content through B2).
+    /// The true root cause, found by this review: `getDataArea`'s header slot was silently reading
+    /// `getEditMode` instead (see `LOKBridge.swift`'s own `nSize` tripwire, and
+    /// `LibreOfficeKit.h`'s three phantom-member removals) — the function was never actually called
+    /// at all. With the ABI fixed, `getDataArea` is the CORRECT probe: it reads `ScTable::
+    /// GetCellArea` off the document MODEL directly (`sc/source/ui/unoobj/docuno.cxx`'s
+    /// `ScModelObj::getDataArea`, confirmed by reading the pinned source), taking `nPart` as a
+    /// direct argument — no `setPart`, no selection, no `.uno:GoToCell`, no poll-and-pump, and (per
+    /// this fix) no per-sheet part-restore dance either.
+    ///
+    /// **One view call IS still required, and this review's own first-pass guidance
+    /// ("no view at all") undersold it** — checked against the pinned source, not assumed:
+    /// `ScModelObj::getDataArea` resolves via `ScDocShell::GetViewData()`, the SAME static,
+    /// process-global-current-view accessor `setPart`/`getPart` use (`OpenDocument.viewId`'s own
+    /// header has the full citation chain) — this codebase already independently confirmed the
+    /// identical hazard for `getDocumentSize` (`openOnDedicatedThread`'s own fix-round-3 comment).
+    /// A wrong or absent current view does not throw here — `ScModelObj::getDataArea` silently
+    /// returns its own default `Size(1, 1)` — so `setView(doc.viewId)` once at the top, before the
+    /// per-sheet loop, is required for correctness, just not per-sheet the way `setPart` used to be.
+    ///
+    /// **The `(0, 0)` ambiguity is real, confirmed by reading `ScTable::GetCellArea`
+    /// (`sc/source/core/data/table1.cxx`) directly — not resolved by the ABI fix, and not
+    /// resolvable from the C API alone.** `GetCellArea` computes a real `bool bFound` (true content
+    /// existed) alongside `rEndCol`/`rEndRow`, but `ScModelObj::getDataArea` calls it and DISCARDS
+    /// the returned bool entirely — `(0, 0)` is what BOTH a genuinely empty sheet AND a sheet with
+    /// content confined to cell A1 alone report, indistinguishably, at the LOK C API layer. Resolved
+    /// here with a narrow, disclosed exception: ONLY when `getDataArea` answers `(0, 0)` does this
+    /// function fall back to a single-cell content check on A1 (`sheetHasA1ContentOnDedicatedThread`,
+    /// below) to decide between the empty-sheet sentinel (`-1, -1`) and "content confined to A1"
+    /// (`0, 0`, i.e. `A1:A1`) — on the AGENT view, never the primary one, so even this narrow
+    /// fallback never touches the user's own selection. Every OTHER sheet (the overwhelming common
+    /// case) never pays this cost at all.
+    private func sheetsInfoOnDedicatedThread(docId: String) throws -> (sheets: [OfficeSheetInfo], activeSheet: String) {
+        guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        guard doc.kind == .spreadsheet else { throw SaveError.notSpreadsheet(docId: docId, kind: doc.kind) }
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+
+        let names = sheetNamesOnDedicatedThread(doc)
+        let activeIndex = Int(doc.handle.pointee.pClass.pointee.getPart?(doc.handle) ?? 0)
+        let activeSheet = (activeIndex >= 0 && activeIndex < names.count) ? names[activeIndex] : (names.first ?? "")
+
+        var sheets: [OfficeSheetInfo] = []
+        sheets.reserveCapacity(names.count)
+        for (part, name) in names.enumerated() {
+            var lastCol: Int = 0
+            var lastRow: Int = 0
+            doc.handle.pointee.pClass.pointee.getDataArea?(doc.handle, part, &lastCol, &lastRow)
+            if lastCol == 0 && lastRow == 0 {
+                let hasA1Content = try sheetHasA1ContentOnDedicatedThread(docId: docId, part: part)
+                sheets.append(OfficeSheetInfo(name: name,
+                                               usedEndColumn: hasA1Content ? 0 : -1,
+                                               usedEndRow: hasA1Content ? 0 : -1))
+            } else {
+                sheets.append(OfficeSheetInfo(name: name, usedEndColumn: lastCol, usedEndRow: lastRow))
+            }
+        }
+        return (sheets, activeSheet)
+    }
+
+    /// The narrow `(0, 0)` disambiguation `sheetsInfoOnDedicatedThread` falls back to — see that
+    /// function's own header for why it is needed and why it is rare. Reuses
+    /// `selectionTextOnDedicatedThread` (the SAME proven, pump-and-poll-verified mechanism `read`
+    /// uses) on the AGENT view, so this never touches the primary view's own selection even in this
+    /// fallback path.
+    private func sheetHasA1ContentOnDedicatedThread(docId: String, part: Int) throws -> Bool {
+        guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        let agentViewId = try ensureAgentViewOnDedicatedThread(docId: docId)
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
+        doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(part))
+        let text = selectionTextOnDedicatedThread(doc, docId: docId, viewId: agentViewId, part: part, range: "A1", formulas: false)
+        return !text.isEmpty
+    }
+
+    /// office-agent-tools T3 — a value or formula grid over one already-validated, already-formatted
+    /// A1 `range` on ONE named sheet. `sheet` is resolved to a part index HERE (never by the caller —
+    /// see `OfficeWireFrame.sheetsRead`'s own header for why this MUST live helper-side), refusing
+    /// with the workbook's real sheet list on no match.
+    ///
+    /// **Fix round 3 (review I1) — reads on the AGENT view, not the primary one.** The previous
+    /// design read on `doc.viewId` (the user's own primary view) and restored `setPart` afterward
+    /// to undo the sheet switch — necessary because Calc's part is per-view state, but leaving a
+    /// residual this review named directly: `.uno:GoToCell`'s own SELECTION move on the primary
+    /// view was never restorable (no mechanism existed to recall the prior selection), disclosed
+    /// as an open concern in `task-3-report.md`. Reading on the agent view instead — minted or
+    /// reused via `ensureAgentViewOnDedicatedThread` — removes the DELIBERATE version of this
+    /// residual: this function itself never asserts the primary view or moves its selection.
+    ///
+    /// **NOT fully moot — narrowed, not eliminated (round 4, live-observed).** An earlier version of
+    /// this comment claimed reading on the agent view made "the whole class of residual moot." A
+    /// round-3 full-app-suite run falsified that directly:
+    /// `OfficeSheetsCommandTests.testLiveAgentReadNeverTouchesThePrimaryViewsOwnSelection` observed
+    /// the PRIMARY view's own selection move to this read's target range, following a read where
+    /// the actual cell move (the `.uno:GoToCell` dispatch onward, inside
+    /// `selectionTextOnDedicatedThread`) ran entirely through the agent view. This function's own
+    /// sole `doc.viewId` reference is the `setView` at the top of this function's body, asserting
+    /// the PRIMARY view before sheet-name resolution — legitimate, unrelated to the read itself,
+    /// and overwritten by the agent-view `setView` just below it, before anything that could move a
+    /// selection runs. See that test's own header for the full evidence chain,
+    /// including a raw LOK callback trace, a round-4 mutant drill that directly observed this same
+    /// loop exhaust on a DIFFERENT view (see `selectionTextOnDedicatedThread`'s own header), and a
+    /// reading of the pinned engine
+    /// source (`desktop/source/lib/init.cxx`'s `doc_postUnoCommand`): `SynchronMode=false` is
+    /// confirmed active in this build (unipoll is never enabled anywhere in this file), so
+    /// `.uno:GoToCell` genuinely executes asynchronously relative to `postUnoCommand`'s own return;
+    /// the generic dispatch fallback that handles `GoToCell` (`comphelper::dispatchCommand`) does
+    /// not thread the specific `pViewShell` that function resolves through an explicit parameter —
+    /// its own view/frame targeting is resolved by separate machinery not directly verified here.
+    /// `selectionTextOnDedicatedThread`'s own poll loop mitigates by giving LOK's internal
+    /// dispatcher repeated turns before returning, and now pumps once more on exhaustion
+    /// specifically (see that function's own header) — but this remains a best-effort mitigation of
+    /// an async race, not a closed one: a genuinely still-queued `GoToCell` can still land later,
+    /// against whatever view a SUBSEQUENT, unrelated LOK call on this thread makes current next.
+    /// Disclosed, not solved — see task-3-report.md.
+    private func sheetsReadOnDedicatedThread(docId: String, sheet: String, range: String, formulas: Bool) throws -> [[String]] {
+        guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        guard doc.kind == .spreadsheet else { throw SaveError.notSpreadsheet(docId: docId, kind: doc.kind) }
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+
+        let names = sheetNamesOnDedicatedThread(doc)
+        guard let part = names.firstIndex(of: sheet) else {
+            throw SaveError.sheetNotFound(docId: docId, sheet: sheet, available: names)
+        }
+
+        let agentViewId = try ensureAgentViewOnDedicatedThread(docId: docId)
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
+        doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(part))
+
+        let text = selectionTextOnDedicatedThread(doc, docId: docId, viewId: agentViewId, part: part, range: range, formulas: formulas)
+        return parseTSVGrid(text)
+    }
+
+    // MARK: - office-agent-tools T4: sheets write verbs
+
+    /// office-agent-tools T4 fix-round review (Important #3) — `getCommandValues(".uno:CellCursor")`,
+    /// a synchronous QUERY against the document's own current model state, not a callback. Confirmed
+    /// live (`OfficeHelperLiveTests.testProbeInvestigatesWhetherCellAddressCallbacksCanAttribute
+    /// AgentViewPositioningSafely`) to report the CURRENT view's real `(column, row)` on demand —
+    /// this is the mechanism that closes the reviewer's own "GoToCell straggler on writes" finding,
+    /// after the SAME probe first ruled out the more obvious candidate: `LOK_CALLBACK_CELL_ADDRESS`
+    /// (raw type 34) and `LOK_CALLBACK_CELL_CURSOR` (raw type 17) NEVER fire for a
+    /// `.uno:GoToCell`-driven move at all, on the agent view or (by the same probe's own primary-view
+    /// UNO-command evidence) plausibly any view — only REAL `postMouse`/`postKey` input events
+    /// produce them. A callback-cache design was therefore never viable here regardless of its own
+    /// staleness/attribution properties, which the probe also characterized for the record (see the
+    /// probe's own header and task-4-fix-round-report.md).
+    ///
+    /// **Why a query is the STRONGER guarantee, not merely a working substitute**: called from
+    /// WITHIN the same dedicated-thread closure that just dispatched the position (this file's own
+    /// job model — one Swift closure runs to completion before the next one starts; nothing else can
+    /// interleave mid-closure), this read is immune to the "a stale, still-draining async callback
+    /// surfaces during a LATER, unrelated job's own pump calls" hazard class `.uno:GoToCell`'s own
+    /// straggler documentation already covers at length — a cached PUSHED value could never make
+    /// that same guarantee.
+    ///
+    /// Reuses `OfficeDocumentEvent.parseCellCursor` VERBATIM (`OfficeWire`, already imported by this
+    /// file for the real `LOK_CALLBACK_CELL_CURSOR` callback path below) — `getCommandValues`'s own
+    /// `commandValues` field is the IDENTICAL comma-separated six-field shape
+    /// (`"x, y, width, height, col, row"`) the raw callback payload already has, one JSON envelope
+    /// deeper (`{"commandName": ".uno:CellCursor", "commandValues": "…"}`, confirmed live).
+    private func cellCursorOnDedicatedThread(_ doc: OpenDocument) -> OfficeCellCursor? {
+        guard let cString = ".uno:CellCursor".withCString({ commandPtr in
+            doc.handle.pointee.pClass.pointee.getCommandValues?(doc.handle, commandPtr)
+        }) else { return nil }
+        defer { free(cString) }
+        guard let data = String(cString: cString).data(using: .utf8),
+              let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let commandValues = object["commandValues"] as? String,
+              case .cellCursor(let cursor)? = OfficeDocumentEvent.parseCellCursor(commandValues) else {
+            return nil
+        }
+        return cursor
+    }
+
+    /// Fix-round review item 1 (resize-verb positioning) — factored out of
+    /// `writeOneCellOnDedicatedThread`'s own original inline block so both that function and
+    /// `sheetsResizeOnDedicatedThread`'s anchor check below share ONE verification path rather than
+    /// two independently-written copies of the same column/row comparison (a maintenance/drift risk
+    /// a shared helper removes by construction). Positions via the proven single-cell
+    /// `.uno:GoToCell` mechanism every write verb in this file already uses — `cellCursorOnDedicatedThread`'s
+    /// own header has the full "why a synchronous query, not a callback" story and the live probe
+    /// that ruled out the callback alternative — then confirms the agent view's cursor actually
+    /// reached `address` BEFORE the caller does anything that depends on that position. Throws
+    /// `positionVerificationFailed` on any mismatch, including an unparseable `address` itself
+    /// (`landedAt: nil` — the cursor was never even queried, since there is nothing to compare
+    /// against); never returns a partial or best-guess result.
+    private func positionAndVerifyOnDedicatedThread(_ doc: OpenDocument, docId: String, viewId: Int32, part: Int,
+                                                     address: String,
+                                                     context: SaveError.PositionVerificationContext) throws {
+        guard let target = Self.parseSingleCellReference(address) else {
+            throw SaveError.positionVerificationFailed(docId: docId, address: address, landedAt: nil, context: context)
+        }
+        _ = selectionTextOnDedicatedThread(doc, docId: docId, viewId: viewId, part: part, range: address, formulas: false)
+        try verifyCellCursorOnDedicatedThread(doc, docId: docId, expectedAddress: address, target: target, context: context)
+    }
+
+    /// The comparison half of `positionAndVerifyOnDedicatedThread`, split out so
+    /// `sheetsResizeOnDedicatedThread` can re-check a position established by an EARLIER `GoToCell`
+    /// (its own span selection) against an already-computed `target`, without issuing a second,
+    /// redundant `GoToCell` to the same effective anchor. Throws `positionVerificationFailed` on any
+    /// mismatch, `landedAt` carrying the best available description of where the cursor actually was
+    /// (`nil` only when the query itself returned nothing usable).
+    private func verifyCellCursorOnDedicatedThread(_ doc: OpenDocument, docId: String, expectedAddress: String,
+                                                    target: (column: Int, row: Int),
+                                                    context: SaveError.PositionVerificationContext) throws {
+        let landed = cellCursorOnDedicatedThread(doc)
+        let landedColumnRow: (column: Int, row: Int)?
+        if case .at(_, let column, let row)? = landed { landedColumnRow = (column, row) } else { landedColumnRow = nil }
+        guard let landedColumnRow, landedColumnRow.column == target.column, landedColumnRow.row == target.row else {
+            let landedDescription = landedColumnRow.map { Self.formatCellReference(column: $0.column, row: $0.row) }
+            throw SaveError.positionVerificationFailed(docId: docId, address: expectedAddress,
+                                                        landedAt: landedDescription, context: context)
+        }
+    }
+
+    /// office-agent-tools T4 — writes each `(cellAddresses[i], cellValues[i])` pair, in order, on the
+    /// AGENT view (same isolation reasoning `sheetsReadOnDedicatedThread`'s own I1 fix established:
+    /// nothing this does is ever visible to a human's own primary-view selection).
+    ///
+    /// **The mechanism is real synthetic TEXT ENTRY, not a paste — a deliberate choice, not the
+    /// first one tried.** `clipboardPasteOnDedicatedThread`'s own `paste()` door was the obvious
+    /// first candidate (`set`'s own name mirrors `read`'s single-range shape) but was set aside
+    /// BEFORE being built, on evidence already on hand rather than a fresh live drill: this task's
+    /// own advisor review named three concrete, unverified paste risks (does a TSV blob reliably
+    /// FILL a multi-cell block on the agent view specifically; does a pasted `=1+1` reliably become
+    /// a FORMULA rather than literal text, since clipboard import and cell-edit-mode text entry are
+    /// documented as different Calc code paths; does pasting OVER a non-empty cell raise a headless
+    /// overwrite-confirmation dialog — a modal on the dedicated thread is a HANG, not a failure, the
+    /// one risk this bridge cannot afford to discover live). Character-by-character, per-cell
+    /// GoToCell-then-type sidesteps all three by construction: (1) each cell is targeted
+    /// individually, so there is no multi-cell fill behavior to depend on; (2) typing IS the
+    /// mechanism `typeFormulaOnePlusOne`'s own live-tested precedent already proves produces a real
+    /// formula from a leading `=` — no second, unverified code path; (3) typing into a cell and
+    /// pressing Return never raises Calc's paste-specific overwrite dialog (confirmed by this
+    /// mechanism's own live drills — see task-4-report.md). The cost is real (`sheetsSetMaxCells`,
+    /// `sheets.ts`'s own cap, is far smaller than `read`'s 2,000-cell ceiling BECAUSE each cell here
+    /// pays for a real per-cell LOK round trip, not a bulk probe) — accepted deliberately, in
+    /// exchange for composing entirely out of ALREADY-PROVEN primitives rather than a fourth,
+    /// untested LOK code path.
+    private func sheetsSetOnDedicatedThread(docId: String, sheet: String, range: String,
+                                            cellAddresses: [String], cellValues: [String]) throws -> Int {
+        guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        guard doc.kind == .spreadsheet else { throw SaveError.notSpreadsheet(docId: docId, kind: doc.kind) }
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+
+        let names = sheetNamesOnDedicatedThread(doc)
+        guard let part = names.firstIndex(of: sheet) else {
+            throw SaveError.sheetNotFound(docId: docId, sheet: sheet, available: names)
+        }
+
+        let agentViewId = try ensureAgentViewOnDedicatedThread(docId: docId)
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
+        doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(part))
+
+        // Second fix-round review (Important #2 + Minor 3) — every per-cell failure
+        // (`unsupportedFormulaCharacter`/`positionVerificationFailed`/`writeVerificationFailed`, not
+        // only the formula one Minor 3 named specifically) is per-cell TRUE when it says "nothing was
+        // written"/"outcome unchanged" — that is still about the ONE cell it names. It is CALL-level
+        // FALSE the moment an earlier cell in this SAME `set` call already landed: something WAS
+        // written, just not to this cell. Wrapped here, once `index > 0`, into `.partialSetFailure` —
+        // a fully composed sentence naming the failing cell's position in the call, how many earlier
+        // cells already applied, and an explicit note disambiguating what the wrapped per-cell
+        // description's own "nothing"/"unchanged" wording actually scopes to. `index == 0` (the very
+        // first cell) needs no wrapping — per-cell and call-level truth coincide when there is no
+        // earlier cell to misdescribe.
+        for (index, (address, value)) in zip(cellAddresses, cellValues).enumerated() {
+            do {
+                try writeOneCellOnDedicatedThread(doc, docId: docId, viewId: agentViewId, part: part,
+                                                  address: address, text: value)
+            } catch let error as SaveError where index > 0 {
+                throw SaveError.partialSetFailure(reason:
+                    "cell \(address) (\(index + 1) of \(cellAddresses.count) in this set call) failed: "
+                    + "\(error.description) Note: \(index) earlier cell\(index == 1 ? "" : "s") in "
+                    + "this SAME call already applied before this failure — this call is not atomic, "
+                    + "and \"nothing was written\"/\"unchanged\" above describes \(address) alone, not "
+                    + "the whole call.")
+            }
+        }
+        return cellAddresses.count
+    }
+
+    /// **Positions on `address`, VERIFIES the cursor actually landed there, types `text`, commits,
+    /// then re-verifies content — all on the agent view, all within ONE call.** Positioning reuses
+    /// `selectionTextOnDedicatedThread` VERBATIM (called twice: once to position before typing, once
+    /// again after, to verify content) — this is "read Task 3's agent-view work and use the SAME
+    /// mechanism" applied literally, including its own disclosed residual: a `.uno:GoToCell` that
+    /// never lands within `goToCellVerificationAttempts` is not re-derived or newly solved here, it
+    /// is INHERITED (see that function's own header, and task-3-report.md §6/§9/§10).
+    ///
+    /// **Fix-round review (Important #3) — positioning is now VERIFIED, not merely attempted, before
+    /// any keystroke is posted.** The ORIGINAL version of this function trusted
+    /// `selectionTextOnDedicatedThread`'s own best-effort GoToCell dance and moved straight to
+    /// typing; the reviewer's own finding was that on a NON-EMPTY bystander cell, a GoToCell that
+    /// never actually landed would leave the cursor on the WRONG cell, which already has content —
+    /// this function would then type INTO that bystander cell, and the post-write content check
+    /// below (still present, still lenient) reads NON-EMPTY and passes, because it only ever asks
+    /// "does the target have content now," never "IS this actually the target." The broker then
+    /// SAVES a real, silent clobber. Closed via `cellCursorOnDedicatedThread` (`getCommandValues
+    /// (".uno:CellCursor")`, that function's own header has the full mechanism and the live probe
+    /// that ruled out the callback-based alternative first): a `(column, row)` mismatch against
+    /// `address` throws `SaveError.positionVerificationFailed` BEFORE typing, converting the
+    /// straggler from a silent-clobber risk into an honest refusal.
+    ///
+    /// **Two typing mechanisms, not one — a real, live falsification, not a design preference.**
+    /// The first version of this function used `postWindowExtTextInputEvent` (`.input` then `.end`)
+    /// UNCONDITIONALLY, on the reasoning that it already delivers a whole string in one call and is
+    /// already live-tested for committing arbitrary text
+    /// (`OfficeRuntimeLiveTests.testExtTextInputMarksCommitsAndCancelsAgainstRealLOKThroughSave
+    /// AndReopen`, a text-document test). Live-tested against Calc specifically, that reasoning
+    /// FALSIFIED itself in one direction and CONFIRMED itself in another: a plain value (`"42"`,
+    /// `"hello world"`) and an apostrophe-forced literal (`"'=NOT A REAL FORMULA"` — the apostrophe
+    /// is honored, stripped, and the rest stored as text) both land correctly via ext-text-input; a
+    /// genuine formula (`"=SUM(D1:D1)"`, no apostrophe) does NOT — it lands as the LITERAL STRING
+    /// `"=SUM(D1:D1)"` in a text cell, never entering Calc's formula-edit mode at all (confirmed
+    /// directly against the saved OOXML: `t="s"`, a shared-string reference, never a real `<f>`
+    /// element). Evidently Calc's ext-text-input path honors a leading apostrophe's "force text"
+    /// meaning but does not run the SAME leading-`=`-triggers-formula-mode transition a real KEY
+    /// PRESS does — the two "first character is special" rules live in different code, and only one
+    /// of them is wired to this input door.
+    ///
+    /// **The fix: a text starting with an UNESCAPED `=` is typed CHARACTER BY CHARACTER via real
+    /// `postKeyEvent` calls instead** — the exact mechanism `typeFormulaOnePlusOne`
+    /// (`OfficeSheetsCommandTests.swift`) and `OfficeRuntimeLiveTests.postRealEdit` already prove
+    /// produces a genuine formula, extended from their own small, closed test-marker alphabets to
+    /// `formulaKeyEvent(for:)`'s wider table (below) — every character a realistic formula needs:
+    /// digits, letters (case-preserving), and the operator/reference punctuation Calc formulas use.
+    /// Every OTHER cell — plain values, and the apostrophe-escaped case specifically — keeps using
+    /// ext-text-input, proven correct for both by this same live drill.
+    ///
+    /// **Typed characters commit with a trailing Return either way** — `com.sun.star.awt.Key.RETURN`
+    /// (1280), the SAME raw keyCode both proven precedents already use to commit a pending Calc cell
+    /// edit. For the ext-text-input path this is kept EXPLICIT rather than trusted to `.end` alone —
+    /// Calc's own cell-edit-mode commit semantics for ext-text-input specifically were unverified
+    /// going in; a redundant Return after an already-committed edit is harmless (it only moves the
+    /// cursor, which this function re-positions past anyway).
+    ///
+    /// **Post-write content verification is deliberately LENIENT — "landed something," not "landed
+    /// byte-identical."** A written NUMBER can read back reformatted (`"3.0"` typed, `"3"` read), and
+    /// a written FORMULA reads back as its COMPUTED value in values mode, never the formula text —
+    /// neither is a bug, so an exact-match check would false-fail both. What this DOES catch,
+    /// honestly: the dangerous silent-failure shape — a non-empty `text` whose target cell reads
+    /// back EMPTY, meaning the commit never landed. (Positioning itself is no longer this check's
+    /// job — see the position-verification fix above, which runs BEFORE typing and is strict, not
+    /// lenient, on purpose: content-leniency and position-strictness answer different questions.) A
+    /// genuinely empty `text` (the caller explicitly asked to write nothing there) is never content-
+    /// verified — there is nothing to distinguish "the write of nothing worked" from "the write of
+    /// nothing didn't happen," the identical baseline-ambiguity `selectionTextOnDedicatedThread`'s
+    /// own header already names for reads.
+    private func writeOneCellOnDedicatedThread(_ doc: OpenDocument, docId: String, viewId: Int32, part: Int,
+                                               address: String, text: String) throws {
+        // Fix-round review (Important #2) — pre-validate EVERY formula character in a pure pass,
+        // BEFORE the first keystroke of the real attempt. The ORIGINAL code called
+        // `formulaKeyEvent(for:)` INSIDE the typing loop itself, so an unmapped character partway
+        // through a formula threw `.writeVerificationFailed` AFTER already posting every character
+        // before it — a mislabel (nothing was "verified," something was left HALF-TYPED) for a real,
+        // uncommitted, PARTIAL formula stranded in Calc's own edit mode on a document a human may
+        // have open. Once this loop starts below, it cannot throw — every character is known before
+        // ANY keystroke is posted, or none are (`.unsupportedFormulaCharacter`, thrown here, before
+        // touching the document at all).
+        var formulaKeyEvents: [(charCode: Int, keyCode: Int)] = []
+        if text.hasPrefix("=") {
+            formulaKeyEvents = try text.map { try Self.formulaKeyEvent(for: $0, docId: docId, address: address) }
+        }
+
+        // Fix-round review (Important #3) — position, then VERIFY the agent view's cursor actually
+        // reached `address` before typing anything. See this function's own header above for the
+        // full "why," and `cellCursorOnDedicatedThread`'s own header for the mechanism and the live
+        // probe that ruled out the callback-based alternative first. `positionAndVerifyOnDedicatedThread`
+        // is this exact check, factored out so `sheetsResizeOnDedicatedThread`'s own anchor
+        // verification (fix-round review item 1) shares it rather than re-deriving it.
+        try positionAndVerifyOnDedicatedThread(doc, docId: docId, viewId: viewId, part: part, address: address,
+                                               context: .typing)
+
+        if text.hasPrefix("=") {
+            for (charCode, keyCode) in formulaKeyEvents {
+                doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyInput.rawValue), Int32(charCode), Int32(keyCode))
+                doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyUp.rawValue), Int32(charCode), Int32(keyCode))
+            }
+        } else {
+            text.withCString { textPtr in
+                doc.handle.pointee.pClass.pointee.postWindowExtTextInputEvent?(
+                    doc.handle, 0, Int32(OfficeExtTextInputType.input.rawValue), textPtr)
+            }
+            "".withCString { emptyPtr in
+                doc.handle.pointee.pClass.pointee.postWindowExtTextInputEvent?(
+                    doc.handle, 0, Int32(OfficeExtTextInputType.end.rawValue), emptyPtr)
+            }
+        }
+        doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyInput.rawValue), 0, 1280)
+        doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyUp.rawValue), 0, 1280)
+
+        guard !text.isEmpty else { return }
+        // Second fix-round review, Minor 4 — this re-read used to call `selectionTextOnDedicatedThread`
+        // directly, which does its OWN internal `GoToCell` back to `address` before reading — an
+        // UNVERIFIED one. If typing/Return had moved the cursor away and THIS re-positioning GoToCell
+        // itself straggled, the read could land on a bystander cell that happens to already hold SOME
+        // content, and the lenient `!after.isEmpty` check below would false-PASS: reporting success
+        // for a write this function never actually confirmed at its real target. Narrowed, not left
+        // as a hedge: position-verify FIRST (the same proven mechanism every other check in this file
+        // uses, `.verifyingWrite`'s own description makes clear this is a POST-write confirmation
+        // failure, not a claim nothing was written), then take a RAW read (`readSelectionTextOnDedicatedThread`,
+        // no GoToCell of its own) of whatever is now confirmed to be `address` — never a second,
+        // independently-unverified re-position. One residual, stated rather than implied closed: both
+        // calls run synchronously in this same dedicated-thread closure with nothing yielding between
+        // them, so there is no window for an unrelated queued command to drain in between BY this
+        // file's own established job model — but this is not independently proven the way the
+        // position check itself is.
+        try positionAndVerifyOnDedicatedThread(doc, docId: docId, viewId: viewId, part: part, address: address,
+                                               context: .verifyingWrite)
+        let after = readSelectionTextOnDedicatedThread(doc)
+        guard !after.isEmpty else {
+            throw SaveError.writeVerificationFailed(docId: docId, address: address)
+        }
+    }
+
+    /// office-agent-tools T4 — `(charCode, keyCode)` for one formula character, real
+    /// `com.sun.star.awt.Key` base codes (`offapi/com/sun/star/awt/Key.idl`) copied verbatim from
+    /// this codebase's OWN authoritative, independently-cross-checked table
+    /// (`apple/Norma/Sources/AppShell/OfficeInputCodes.swift`'s own header has the full source
+    /// citation and cross-check story) — this is a re-ENCODING of already-established values, not a
+    /// re-DERIVATION: `NormaOfficeHelper` cannot import `Sources/AppShell` (Task 3's own established
+    /// compile-boundary constraint), and there is no AppKit `NSEvent` here to run that file's own
+    /// `baseCode(appKitKeyCode:)` against in the first place — a synthetic formula character has no
+    /// physical key position to look up, only the CHARACTER itself, so this table is keyed directly
+    /// by `Character`, not by AppKit keyCode. Deliberately bounded to what a realistic formula
+    /// needs (digits, letters, common operators/reference punctuation, quotes for string literals,
+    /// space) rather than the full printable-ASCII range `OfficeInputCodes` covers for real keyboard
+    /// input — an unmapped character THROWS rather than silently drops or guesses, since a dropped
+    /// formula character is a corrupted formula, not a degraded-but-safe result.
+    private static func formulaKeyEvent(for character: Character, docId: String, address: String) throws -> (charCode: Int, keyCode: Int) {
+        guard let ascii = character.asciiValue else {
+            throw SaveError.unsupportedFormulaCharacter(docId: docId, address: address, character: character)
+        }
+        let charCode = Int(ascii)
+        let shift = 0x1000
+        let base: Int
+        switch character {
+        case "0": base = 256
+        case "1": base = 257
+        case "2": base = 258
+        case "3": base = 259
+        case "4": base = 260
+        case "5": base = 261
+        case "6": base = 262
+        case "7": base = 263
+        case "8": base = 264
+        case "9": base = 265
+        case "a", "A": base = character == "A" ? 512 | shift : 512
+        case "b", "B": base = character == "B" ? 513 | shift : 513
+        case "c", "C": base = character == "C" ? 514 | shift : 514
+        case "d", "D": base = character == "D" ? 515 | shift : 515
+        case "e", "E": base = character == "E" ? 516 | shift : 516
+        case "f", "F": base = character == "F" ? 517 | shift : 517
+        case "g", "G": base = character == "G" ? 518 | shift : 518
+        case "h", "H": base = character == "H" ? 519 | shift : 519
+        case "i", "I": base = character == "I" ? 520 | shift : 520
+        case "j", "J": base = character == "J" ? 521 | shift : 521
+        case "k", "K": base = character == "K" ? 522 | shift : 522
+        case "l", "L": base = character == "L" ? 523 | shift : 523
+        case "m", "M": base = character == "M" ? 524 | shift : 524
+        case "n", "N": base = character == "N" ? 525 | shift : 525
+        case "o", "O": base = character == "O" ? 526 | shift : 526
+        case "p", "P": base = character == "P" ? 527 | shift : 527
+        case "q", "Q": base = character == "Q" ? 528 | shift : 528
+        case "r", "R": base = character == "R" ? 529 | shift : 529
+        case "s", "S": base = character == "S" ? 530 | shift : 530
+        case "t", "T": base = character == "T" ? 531 | shift : 531
+        case "u", "U": base = character == "U" ? 532 | shift : 532
+        case "v", "V": base = character == "V" ? 533 | shift : 533
+        case "w", "W": base = character == "W" ? 534 | shift : 534
+        case "x", "X": base = character == "X" ? 535 | shift : 535
+        case "y", "Y": base = character == "Y" ? 536 | shift : 536
+        case "z", "Z": base = character == "Z" ? 537 | shift : 537
+        case " ": base = 1284 // SPACE
+        case "=": base = 1295 // EQUAL
+        case "+": base = 1287 // ADD
+        case "-": base = 1288 // SUBTRACT
+        case "*": base = 1289 // MULTIPLY
+        case "/": base = 1290 // DIVIDE
+        case ".": base = 1291 // POINT
+        case ",": base = 1292 // COMMA
+        case "(": base = 265 | shift // shift+0 -> "("; NUM9(265) is the physical "9" key — shift+9 IS "(" on US layout
+        case ")": base = 256 | shift // shift+NUM0 -> ")"
+        case "$": base = 260 | shift // shift+NUM4 -> "$"
+        case "%": base = 261 | shift // shift+NUM5 -> "%"
+        case "\"": base = 1318 | shift // shift+QUOTERIGHT -> '"'
+        case "'": base = 1318 // QUOTERIGHT, unshifted
+        case ":": base = 1317 | shift // shift+SEMICOLON -> ":"
+        case ";": base = 1317 // SEMICOLON
+        case "_": base = 1288 | shift // shift+SUBTRACT -> "_"
+        case "!": base = 257 | shift // shift+NUM1 -> "!"
+        case "^": base = 262 | shift // shift+NUM6 -> "^"
+        case "<": base = 1293 // LESS
+        case ">": base = 1294 // GREATER
+        case "&": base = 263 | shift // shift+NUM7 -> "&"
+        default:
+            throw SaveError.unsupportedFormulaCharacter(docId: docId, address: address, character: character)
+        }
+        return (charCode, base)
+    }
+
+    /// office-agent-tools T4 fix-round review (Important #3) — a LOCAL re-encoding of
+    /// `officeParseCellReference`'s exact algorithm (`Sources/AppShell/PanelDocumentTab.swift`),
+    /// unreachable from `NormaOfficeHelper` (Task 3's own established compile-boundary constraint,
+    /// the SAME one `formulaKeyEvent(for:)`'s own header already cites for a value copied from that
+    /// module) — re-ENCODED, not re-DERIVED. Every real caller's `address` is produced by
+    /// `officeCellReference` on the app side (uppercase letters, 1-based row, no colon, no
+    /// whitespace) — this parser is strict, not lenient, matching `officeParseCellReference`'s own
+    /// "wire strictness applies here" posture: `nil` for anything else, never guessed or clamped.
+    ///
+    /// **T5 fix round, Critical-1 — the same two bounds the app-side original now carries** (letters
+    /// <= 3, row digits <= 7; see `officeColumnMaxLetters`/`officeRowMaxDigits`' own headers for the
+    /// measured app-abort those close). A re-ENCODING that drifted from its original on the one
+    /// property that makes the original total would be worse than no re-encoding at all — and while
+    /// every real caller's `address` is app-produced and already bounded, "the caller happens to
+    /// bound it" is precisely the reasoning that left three doors open on the app side. An overflow
+    /// here would abort `NormaOfficeHelper`, not the app: a smaller blast radius, still a crash.
+    private static func parseSingleCellReference(_ address: String) -> (column: Int, row: Int)? {
+        let letters = address.prefix(while: { $0.isASCII && $0.isLetter })
+        let rest = address[letters.endIndex...]
+        guard !letters.isEmpty, letters.count <= 3, !rest.isEmpty, rest.count <= 7,
+              rest.allSatisfy({ $0.isASCII && $0.isNumber }) else { return nil }
+        var column = 0
+        for scalar in letters.uppercased().unicodeScalars {
+            guard scalar.value >= 65, scalar.value <= 90 else { return nil }
+            column = column * 26 + Int(scalar.value - 65 + 1)
+        }
+        column -= 1
+        guard let oneBasedRow = Int(rest), oneBasedRow >= 1 else { return nil }
+        return (column: column, row: oneBasedRow - 1)
+    }
+
+    /// The inverse of `parseSingleCellReference` above, for an honest error message only (never fed
+    /// back into LOK) — a local re-encoding of `officeCellReference`/`officeColumnLetters`'s combined
+    /// algorithm, the same compile-boundary reason as its own counterpart just above.
+    private static func formatCellReference(column: Int, row: Int) -> String {
+        var remaining = column + 1
+        var letters = ""
+        while remaining > 0 {
+            let digit = (remaining - 1) % 26
+            letters = String(UnicodeScalar(UInt8(65 + digit))) + letters
+            remaining = (remaining - 1) / 26
+        }
+        return "\(letters)\(row + 1)"
+    }
+
+    /// office-agent-tools T4 — insert/delete `count` whole rows/columns, selected via
+    /// `selectionRange`'s own row-only ("3:5") or column-only ("C:E") span (this task's own report
+    /// cites the pinned engine source — `sc/source/core/tool/address.cxx`'s range parser — confirming
+    /// `.uno:GoToCell`'s `ToPoint` accepts this Name-Box addressing and expands the OTHER axis to the
+    /// sheet's full width/height itself). None of the four commands
+    /// (`InsertRowsBefore`/`DeleteRows`/`InsertColumnsBefore`/`DeleteColumns`) takes an argument —
+    /// they act entirely on the CURRENT SELECTION, which is why positioning has to happen first, on
+    /// the SAME proven GoToCell mechanism every other verb in this file uses. `getDataArea` needs no
+    /// `setPart`/selection of its own (T3 review C2's own finding: it takes `nPart` directly) —
+    /// reused here exactly as `sheetsInfoOnDedicatedThread` already does, including its `(0,0)`
+    /// empty-vs-A1-only disambiguation.
+    ///
+    /// **Fix-round review item 1 — the GoToCell straggler's own residual, CLOSED here too, not left
+    /// at "same as `set`."** This function originally carried the identical unverified-position risk
+    /// `writeOneCellOnDedicatedThread` had before Important #3's fix — worse here, per the
+    /// coordinator's own review: "clobbering one cell damages one value the user can see and undo;
+    /// inserting or deleting rows at the wrong offset shifts every row below the mistake" (formulas
+    /// keep computing, references keep resolving — silent, hard-to-notice, harder-to-undo
+    /// misalignment of an entire sheet).
+    ///
+    /// **Second review — the FIRST version of this fix (anchor-check, then span-select, then
+    /// re-verify against the SAME anchor) was itself falsified, not merely incomplete.** Verbatim,
+    /// the finding: `selectionTextOnDedicatedThread`'s own straggler-exhaustion path (its header,
+    /// above) does not throw — it silently returns the CURRENT selection unchanged. Parking the
+    /// cursor AT the anchor first, then re-checking the span-select against that SAME anchor, meant a
+    /// span-select that silently never moved at all left the cursor exactly where the FIRST check
+    /// already put it — indistinguishable from a genuine success, since a real span-select's own
+    /// `CellCursor` ALSO reports the anchor (the measured finding below, still true and still the
+    /// reason a post-span check is possible at all). The old deletion-red "proof" never caught this:
+    /// breaking the ONE shared comparison function broke the FIRST (anchor) check first, so the red
+    /// message it produced named the anchor address, never the span — the second check's own
+    /// discriminating power was never actually exercised.
+    ///
+    /// **The fix: park at a cell DELIBERATELY DIFFERENT from the anchor before the span-select, so
+    /// the post-span check must observe a real move.** For a row resize anchored at `A<r>`, the
+    /// sentinel is `B<r>` — same row, column B; for a column resize anchored at `<c>1`, the sentinel
+    /// is `<c>2` — same column, row 2. Always distinct from the anchor by construction (column A vs
+    /// B, or row 1 vs 2), and never exceeds sheet bounds for any legal anchor (unlike an arbitrary
+    /// +1/+1 offset, which could overflow near the sheet's own max row/column). Two checks, not
+    /// three — an anchor-only pre-check adds no safety a wrong `anchorTarget` would not ALSO catch at
+    /// the post-span check (fail-closed either way), so it is not carried forward:
+    /// 1. GoToCell to the sentinel, verified via `verifyCellCursorOnDedicatedThread`. If THIS
+    ///    straggles, the mismatch is caught here, before the span is ever touched.
+    /// 2. GoToCell to `selectionRange` (the real span), then re-verified against `anchorTarget` — now
+    ///    genuinely discriminating: a real success moves the cursor from the sentinel to the anchor's
+    ///    own position (measured below); a silent no-op leaves it at the sentinel, which the check
+    ///    catches.
+    ///
+    /// **What `getCommandValues(".uno:CellCursor")` reports for a row/column-only span was measured
+    /// live, not assumed** — 6 observations across 2 anchors, including 2 away from the sheet origin
+    /// (row 3 / column C, not just row 1 / column A, which alone could not distinguish "reports the
+    /// span's own anchor" from "always reports (0,0)") — task-4-report.md has the full captured
+    /// values. Every observation, no outliers: `.uno:CellCursor` after a row/column-only span
+    /// selection reports the EXACT SAME `(column, row)` as the span's own anchor cell (LOK treats the
+    /// range's active cell as its top-left corner).
+    ///
+    /// **Deletion-red, this time proven against the SECOND check specifically**: the span-select
+    /// `GoToCell` dispatch itself was temporarily deleted (simulating the exact silent-no-op failure
+    /// this check exists to catch, not an artificial wrong-expectation), and the resize round-trip
+    /// test rerun — the red message named the SPAN's own address (`1:2`/`A:A`), not the sentinel,
+    /// confirming the second check is genuinely reached and genuinely discriminating. Reverted;
+    /// task-4-report.md quotes the exact message.
+    ///
+    /// **Residual, stated precisely, not implied away**: `CellCursor` exposes only the active cell,
+    /// so what is verified is the span's ANCHOR — twice, from two different starting points — never
+    /// its far EXTENT independently. "Right anchor, wrong extent" (a resize that started at the
+    /// correct row/column but somehow covered the wrong COUNT) remains formally unmeasured; `count`
+    /// itself is never sent to the helper as a number LOK could misinterpret; it is consumed entirely
+    /// on the app side to build `selectionRange`'s own two endpoints, and the documented GoToCell
+    /// straggler stales the WHOLE selection, anchor included — which these checks do catch.
+    private func sheetsResizeOnDedicatedThread(docId: String, sheet: String, dimension: OfficeSheetsResizeDimension,
+                                               op: OfficeSheetsResizeOp, selectionRange: String) throws -> (usedEndColumn: Int, usedEndRow: Int) {
+        guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        guard doc.kind == .spreadsheet else { throw SaveError.notSpreadsheet(docId: docId, kind: doc.kind) }
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+
+        let names = sheetNamesOnDedicatedThread(doc)
+        guard let part = names.firstIndex(of: sheet) else {
+            throw SaveError.sheetNotFound(docId: docId, sheet: sheet, available: names)
+        }
+
+        let agentViewId = try ensureAgentViewOnDedicatedThread(docId: docId)
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
+        doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(part))
+
+        // `selectionRange` is always `"<first>:<last>"` (`OfficeCommandConsumer.handleSheetsResize`'s
+        // own construction: `"\(startRow):\(startRow + count - 1)"` for rows, digits; or
+        // `"\(officeColumnLetters(startColumn)):..."` for columns, letters) — `<first>` is the exact
+        // row/column the resize is anchored on.
+        guard let firstToken = selectionRange.split(separator: ":", maxSplits: 1).first, !firstToken.isEmpty else {
+            throw SaveError.positionVerificationFailed(docId: docId, address: selectionRange, landedAt: nil,
+                                                        context: .resizePositioning)
+        }
+        let anchorAddress = dimension == .row ? "A\(firstToken)" : "\(firstToken)1"
+        guard let anchorTarget = Self.parseSingleCellReference(anchorAddress) else {
+            throw SaveError.positionVerificationFailed(docId: docId, address: anchorAddress, landedAt: nil,
+                                                        context: .resizePositioning)
+        }
+        // The sentinel: deliberately NOT the anchor (same row/column, other axis offset by one letter
+        // or one row — see this function's own header for why this specific offset, not +1/+1, and
+        // why a sentinel exists at all). `positionAndVerifyOnDedicatedThread` both positions AND
+        // verifies in one call, since — unlike the anchor — nothing else needs the sentinel's own
+        // parsed target afterward.
+        let sentinelAddress = dimension == .row ? "B\(firstToken)" : "\(firstToken)2"
+        try positionAndVerifyOnDedicatedThread(doc, docId: docId, viewId: agentViewId, part: part,
+                                               address: sentinelAddress, context: .resizePositioning)
+
+        _ = selectionTextOnDedicatedThread(doc, docId: docId, viewId: agentViewId, part: part,
+                                           range: selectionRange, formulas: false)
+        try verifyCellCursorOnDedicatedThread(doc, docId: docId, expectedAddress: selectionRange,
+                                              target: anchorTarget, context: .resizePositioning)
+
+        let command: String
+        switch (dimension, op) {
+        case (.row, .insert): command = ".uno:InsertRowsBefore"
+        case (.row, .delete): command = ".uno:DeleteRows"
+        case (.col, .insert): command = ".uno:InsertColumnsBefore"
+        case (.col, .delete): command = ".uno:DeleteColumns"
+        }
+        command.withCString { commandPtr in
+            doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, nil, false)
+        }
+        // Best-effort pump — the SAME throwaway `paintPartTile` primitive `.uno:GoToCell`'s own poll
+        // already trusts, giving LOK's dispatcher one more turn before the used-range read below,
+        // which would otherwise race the structural edit exactly the way an unpumped read could race
+        // a still-queued GoToCell.
+        pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: part)
+
+        var lastCol: Int = 0
+        var lastRow: Int = 0
+        doc.handle.pointee.pClass.pointee.getDataArea?(doc.handle, part, &lastCol, &lastRow)
+        if lastCol == 0 && lastRow == 0 {
+            let hasA1Content = try sheetHasA1ContentOnDedicatedThread(docId: docId, part: part)
+            return (usedEndColumn: hasA1Content ? 0 : -1, usedEndRow: hasA1Content ? 0 : -1)
+        }
+        return (usedEndColumn: lastCol, usedEndRow: lastRow)
+    }
+
+    /// office-agent-tools T4 — add/delete/rename a sheet, dispatched entirely through UNO commands
+    /// this task's own research confirmed dispatchable WITHOUT a modal dialog, PROVIDED every
+    /// required argument is present (a missing one opens a real, headless-undismissable dialog —
+    /// `AbstractScInsertTableDlg`/a `xQueryBox` confirmation — a HANG this function must never risk):
+    ///
+    /// - `.add` → `.uno:Add {Name}` — always appends at the end (this tool's own v1 scope: no
+    ///   position operand), never `.uno:Insert` (which additionally needs a numeric `Index` — see
+    ///   below for why this bridge avoids a numeric UNO arg wherever a real alternative exists).
+    /// - `.rename` → `.uno:Name {Name}`, `Index` OMITTED — the research's own finding: omitting
+    ///   `Index` targets the CURRENT sheet, and the dialog only fires when the WHOLE args object is
+    ///   null, not merely missing one optional key — so this function makes the TARGET sheet current
+    ///   first (`setPart`, the identical mechanism every read/write verb already uses to target a
+    ///   sheet) rather than compute a 1-based `Index` it would otherwise have to guess a JSON type
+    ///   string for.
+    /// - `.delete` → `.uno:Remove {Index}` — the ONE case with no name-based alternative; `Index` is
+    ///   REQUIRED (1-based, no "0 means current" convention — passing 0 targets sheet 1). The JSON
+    ///   "type" string for this NUMERIC arg (`SfxUInt16Item`) could not be confirmed from source
+    ///   alone (this task's own research: "an honest gap, not a guess dressed up as fact") — resolved
+    ///   live against the real engine, not assumed; see task-4-report.md for what actually worked.
+    ///
+    /// **Two refusals happen BEFORE any UNO command is dispatched, not after** —
+    /// `SaveError.lastSheet`/`.duplicateSheetName`: this task's own research found Calc's real
+    /// handlers give NO honest error signal for either case (`RenameTable` returns `false` with
+    /// nothing surfacing through the UNO dispatch; `CreateValidTabName` silently ALTERS a colliding
+    /// name rather than refusing it) — a pre-check against this bridge's own already-known sheet list
+    /// is the only way to refuse cleanly rather than risk a silent no-op or a silently different name
+    /// than the one the caller asked for.
+    ///
+    /// **The op's own success is confirmed by RE-READING the sheet list afterward, not trusted from
+    /// dispatch alone** — the identical "a UNO command was posted, not a claim it took effect" caveat
+    /// every fire-and-forget verb in this file already carries, made concrete here because this
+    /// task's own research specifically flagged both `.add`/`.rename`'s silent-failure/silent-
+    /// alteration risk. A count/membership mismatch after the pump throws honestly rather than report
+    /// success on an operation this bridge cannot otherwise confirm landed.
+    ///
+    /// **Dispatched on the PRIMARY view, all three ops — NOT the agent-view isolation every other
+    /// write verb in this file has, a deliberate, disclosed, LIVE-FORCED retreat, not the original
+    /// design.** Two rounds of live evidence, in order, are why:
+    ///
+    /// 1. Moving `.delete` (`.uno:Remove`) to the agent view made this bridge's own live drill TIME
+    ///    OUT — `OfficeHelperClient`'s bounded 30s `requestTimeout` rescuing it, not a crash, but a
+    ///    genuine hang on the dedicated thread — reproduced whether `.delete` itself dispatched from
+    ///    the agent view OR the primary, as long as an agent view EXISTED at all for that docId (left
+    ///    over from an earlier `sheets set`/`read`/`resize`/`rename_sheet` call, or this function's
+    ///    own prior `.add`/`.rename`). Destroying any pre-existing agent view immediately before
+    ///    `.uno:Remove` (kept below) is what actually closed that hang.
+    /// 2. Moving `.add`/`.rename` to the agent view (to stop `.rename`'s own `setPart` call from
+    ///    moving an ADOPTED tab's visible sheet — a real problem, proven live in isolation once) then
+    ///    made THEIR OWN post-dispatch verification stop converging AT ALL across repeated isolated
+    ///    reruns — not "needs a few more pump attempts" the way `.uno:GoToCell`'s own race does, but
+    ///    exhausting a 20-attempt budget outright, run after run. No root cause is claimed for either
+    ///    finding (plausible: this LOK build's multi-view support is proven, heavily, for the
+    ///    CELL-level primitives — GoToCell, paste, ext-text-input, postKeyEvent — every OTHER write
+    ///    verb in this file rides, and far less exercised for WORKBOOK-STRUCTURAL edits dispatched
+    ///    from a genuinely headless second view) — only that the boundary is real, found empirically,
+    ///    across two independent live-evidence rounds, not reasoned about in advance.
+    ///
+    /// **The disclosed residual this leaves**: unlike `sheets set`/`insert_rows`/`insert_cols`/
+    /// `delete_rows`/`delete_cols` (all genuinely isolated to the agent view, proven live), the THREE
+    /// verbs this function serves can move an ADOPTED document's own primary-view state —
+    /// `rename_sheet`'s `setPart` most concretely, `add_sheet`'s standard "new sheet becomes active"
+    /// UX plausibly. Not closed in this task; see task-4-report.md's own concerns for the full
+    /// accounting rather than a claim this is fixed.
+    ///
+    /// - `.add` → `.uno:Add {Name}` — always appends at the end (this tool's own v1 scope: no
+    ///   position operand), never `.uno:Insert` (which additionally needs a numeric `Index` — see
+    ///   `.delete`'s own case below for why this bridge avoids a numeric UNO arg wherever a real
+    ///   alternative exists).
+    /// - `.rename` → `.uno:Name {Name}`, `Index` OMITTED — the research's own finding: omitting
+    ///   `Index` targets the CURRENT sheet, and the dialog only fires when the WHOLE args object is
+    ///   null, not merely missing one optional key — so this function makes the TARGET sheet current
+    ///   first (`setPart`) rather than compute a 1-based `Index` it would otherwise have to guess a
+    ///   JSON type string for.
+    /// - `.delete` → `.uno:Remove {Index}` — the ONE case with no name-based alternative; `Index` is
+    ///   REQUIRED (1-based, no "0 means current" convention — passing 0 targets sheet 1). The JSON
+    ///   "type" string for this NUMERIC arg (`SfxUInt16Item`) could not be confirmed from source
+    ///   alone (this task's own research: "an honest gap, not a guess dressed up as fact") — resolved
+    ///   live against the real engine: `"unsigned short"`, first attempt, no dialog hang.
+    ///
+    /// **Two refusals happen BEFORE any UNO command is dispatched, not after** —
+    /// `SaveError.lastSheet`/`.duplicateSheetName`: this task's own research found Calc's real
+    /// handlers give NO honest error signal for either case (`RenameTable` returns `false` with
+    /// nothing surfacing through the UNO dispatch; `CreateValidTabName` silently ALTERS a colliding
+    /// name rather than refusing it) — a pre-check against this bridge's own already-known sheet list
+    /// is the only way to refuse cleanly rather than risk a silent no-op or a silently different name
+    /// than the one the caller asked for.
+    ///
+    /// **The op's own success is confirmed by RE-READING the sheet list afterward, poll-with-pump —
+    /// never a single read trusted from dispatch alone.** Same fix-round-2b lesson `.uno:GoToCell`'s
+    /// own verification already learned, with its OWN, independently-sized budget
+    /// (`sheetsManageVerificationAttempts`, larger than `goToCellVerificationAttempts` — a structural
+    /// sheet mutation is a heavier operation than a cell selection move, live-measured to need more
+    /// attempts even once it converges reliably again after the primary-view revert).
+    /// office-agent-tools T4 fix-round review (item 5) — extracted so each of `sheetsManageSheet
+    /// OnDedicatedThread`'s three cases can call it AFTER its own refusal guards, immediately before
+    /// its own UNO dispatch, rather than unconditionally before the whole `switch`. See that
+    /// function's own header for the full reasoning; unchanged in mechanism from the original
+    /// inline form (get-or-mint on the next `sheets set`/`read`/`resize` call already handles
+    /// re-creating whatever this destroys, so calling it zero times on a refused call loses nothing).
+    private func destroyAgentViewIfAnyOnDedicatedThread(_ doc: OpenDocument, docId: String) {
+        if var mutableDoc = documents[docId], let agentViewId = mutableDoc.agentViewId, agentViewId >= 0 {
+            doc.handle.pointee.pClass.pointee.destroyView?(doc.handle, agentViewId)
+            mutableDoc.agentViewId = nil
+            documents[docId] = mutableDoc
+        }
+    }
+
+    private func sheetsManageSheetOnDedicatedThread(docId: String, op: OfficeSheetsManageSheetOp,
+                                                     name: String, newName: String?) throws -> [String] {
+        guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        guard doc.kind == .spreadsheet else { throw SaveError.notSpreadsheet(docId: docId, kind: doc.kind) }
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        let before = sheetNamesOnDedicatedThread(doc)
+
+        // Fix-round review (item 5, "provably safe on the task's own evidence, since refusals never
+        // dispatch") — moved from UNCONDITIONALLY before the switch to immediately before EACH case's
+        // own UNO dispatch, AFTER that case's own guards. The ORIGINAL placement destroyed the agent
+        // view even on a call that was about to REFUSE (name not found, last sheet, duplicate name) —
+        // a real side effect on a path that mutates nothing else, contradicting this file's own
+        // "refuse before mutating anything" posture every OTHER refusal (dirty, fence) already holds
+        // to. Safe to move: every guard below THROWS before reaching its own case's dispatch line, so
+        // a refusal can never reach `destroyAgentViewIfAnyOnDedicatedThread` at all now — the hang
+        // this destroy exists to prevent (this function's own header, point 1) is a property of
+        // DISPATCHING `.uno:Remove` with a stale agent view present, never of a call that refuses
+        // and never dispatches anything.
+        switch op {
+        case .add:
+            guard !before.contains(name) else { throw SaveError.duplicateSheetName(docId: docId, name: name) }
+            destroyAgentViewIfAnyOnDedicatedThread(doc, docId: docId)
+            postUnoCommandOnDedicatedThread(doc, ".uno:Add", ["Name": ["type": "string", "value": name]])
+        case .delete:
+            guard before.contains(name) else {
+                throw SaveError.sheetNotFound(docId: docId, sheet: name, available: before)
+            }
+            guard before.count > 1 else { throw SaveError.lastSheet(docId: docId) }
+            destroyAgentViewIfAnyOnDedicatedThread(doc, docId: docId)
+            let oneBasedIndex = before.firstIndex(of: name)! + 1
+            postUnoCommandOnDedicatedThread(doc, ".uno:Remove",
+                                            ["Index": ["type": "unsigned short", "value": oneBasedIndex]])
+        case .rename:
+            guard let zeroBasedIndex = before.firstIndex(of: name) else {
+                throw SaveError.sheetNotFound(docId: docId, sheet: name, available: before)
+            }
+            // `newName` is guaranteed non-nil for `.rename` by the wire's own decode
+            // (`OfficeWireFrame`'s `sheetsManageSheet` case — `(op == .rename) == (newName != nil)`)
+            // — a genuinely nil `newName` here would be a decode bug elsewhere, not a data error
+            // this function should describe with a SaveError.
+            guard let newName else {
+                preconditionFailure("sheetsManageSheet(.rename) reached with no newName — the wire decode's own invariant was violated")
+            }
+            guard !before.contains(newName) else { throw SaveError.duplicateSheetName(docId: docId, name: newName) }
+            destroyAgentViewIfAnyOnDedicatedThread(doc, docId: docId)
+            doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(zeroBasedIndex))
+            postUnoCommandOnDedicatedThread(doc, ".uno:Name", ["Name": ["type": "string", "value": newName]])
+        }
+
+        // **Poll-with-pump, not a single read — live-measured, the same fix-round-2b lesson
+        // `.uno:GoToCell`'s own verification already learned (`selectionTextOnDedicatedThread`'s own
+        // header).** The first version of this check read `sheetNamesOnDedicatedThread` exactly
+        // once, immediately after the pump each op's own dispatch already does — and `add_sheet`
+        // failed verification live, on the very first drill after the `.delete`-hang fix above: the
+        // UNO dispatch itself needs more than one pump's worth of turns before the sheet COUNT
+        // reflects it, the identical "fire-and-forget, not synchronous" property `postUnoCommand`
+        // has everywhere else in this file. Bounded (4 attempts, mirroring `goToCellVerification
+        // Attempts`), pumped on the PRIMARY view uniformly — always valid regardless of which op ran
+        // (`.delete` may have just destroyed the agent view entirely; `.add`/`.rename`'s agent view
+        // may or may not still exist depending on future changes to this function) — never re-
+        // dispatching the op itself, only giving LOK's own dispatcher more turns to catch up.
+        func verified(_ names: [String]) -> Bool {
+            switch op {
+            case .add: return names.count == before.count + 1
+            case .delete: return names.count == before.count - 1 && !names.contains(name)
+            case .rename: return names.contains(newName ?? "") && !names.contains(name)
+            }
+        }
+        // **Round 2, live-measured again**: `goToCellVerificationAttempts` (4) — sized for a CELL
+        // SELECTION move — was not enough here even once out of six total live runs at that budget.
+        // Inserting/removing/renaming a SHEET is a heavier, structural document mutation than a
+        // selection change, not merely the same race at the same speed; `sheetsManageVerification
+        // Attempts` is this function's own, independently-sized budget, not a shared one, so raising
+        // it cannot silently loosen `.uno:GoToCell`'s own proven-tight bound elsewhere in this file.
+        var after = sheetNamesOnDedicatedThread(doc)
+        var attempts = 1
+        while !verified(after) && attempts < Self.sheetsManageVerificationAttempts {
+            pumpDedicatedThreadForPendingDispatch(doc, viewId: doc.viewId, part: 0)
+            after = sheetNamesOnDedicatedThread(doc)
+            attempts += 1
+        }
+        if attempts > 1 {
+            FileHandle.standardError.write(Data(
+                "[LOKBridge sheets] manageSheet(\(op)) needed \(attempts) attempt(s) before verification succeeded (or the budget was exhausted)\n".utf8))
+        }
+        guard verified(after) else {
+            let label = "(\(op)_sheet \"\(op == .rename ? (newName ?? "") : name)\")"
+            throw SaveError.writeVerificationFailed(docId: docId, address: label)
+        }
+        return after
+    }
+
+    // MARK: - office-agent-tools T5: sheets format — the verb the human formatting toolbar will share
+
+    /// office-agent-tools T5 — points (`sheets.ts`'s own operand unit, chosen for locale-independence
+    /// — see that file's own doc) to the vendored engine's real native unit for `.uno:ColumnWidth`'s
+    /// own argument: 1/100 mm, confirmed against the pinned engine's own source
+    /// (`o3tl::toTwips(nWidth, o3tl::Length::mm100)`, `sc/source/ui/view/cellsh3.cxx`, this task's own
+    /// research — see `sheetsFormatOnDedicatedThread`'s own header for the full citation). 1 point =
+    /// 1/72 inch = 25.4/72 mm = 2540/72 hundredths-of-a-mm — an exact rational constant, not a
+    /// measured approximation. Rounded to the nearest whole 1/100mm (the item's own type,
+    /// `SfxUInt16Item`, is integral — a fractional value has nowhere to go anyway). `sheets.ts`'s own
+    /// `width` schema (`.min(1).max(1000)` points) keeps this comfortably inside `UInt16`'s range at
+    /// both ends: 1pt -> 35 (never rounds to the unrepresentable 0), 1000pt -> 35,278 (well under
+    /// 65,535).
+    ///
+    /// **T5 fix-round RE-REVIEW (Minor) — bounded here too, against this round's own stated rule.**
+    /// The round bounded `parseSingleCellReference` helper-side on the explicit principle that "the
+    /// caller happens to bound it" is the reasoning that left three doors open, then did not apply
+    /// that principle to the sibling conversion in this same file: `Int(Double)` traps outside
+    /// `Int`'s range, and an unbounded `points` reaches it. Blast radius is `NormaOfficeHelper`, not
+    /// the app — a smaller crash, still a crash, and still a rule this file was already following
+    /// twelve hundred lines up. `nil` for anything outside the app's own documented [1, 1000]-point
+    /// operand range (`OfficeCommandConsumer.officeWidthMinPoints`/`MaxPoints`, mirrored here for
+    /// the same compile-boundary reason `parseSingleCellReference`'s own header cites); NaN and
+    /// infinity fall out for free, since neither comparison holds.
+    private static func officeWidthMm100(fromPoints points: Double) -> Int? {
+        guard points >= 1.0, points <= 1000.0 else { return nil }
+        return Int((points * 2540.0 / 72.0).rounded())
+    }
+
+    /// office-agent-tools T5 — the SAME sentinel-then-anchor two-check position-verification pattern
+    /// `sheetsResizeOnDedicatedThread` established (task-5-brief.md's own mandate: "Position
+    /// verification is mandatory... Do the same"), generalized to any pre-formatted `span` a caller
+    /// wants to select — a full two-corner range ("A1:C10", `sheetsFormat`'s own cell-attribute
+    /// phase) or a column-only Name-Box span ("A:C", its own width phase) — given that span's own
+    /// ANCHOR as an already-resolved single-cell address (the caller's job, mirroring
+    /// `sheetsResizeOnDedicatedThread`'s own `anchorAddress` construction, never re-derived here).
+    ///
+    /// Parks at a sentinel cell DIFFERENT from the anchor first — same row, a column guaranteed to
+    /// differ from the anchor's own (column B unless the anchor's own column IS B, in which case
+    /// column A; always exists, always distinct, never an arithmetic offset that could overflow near
+    /// the sheet's own edge) — so a span-select that silently never happens is caught, not masked by
+    /// a check that only re-confirms wherever the sentinel-park already put the cursor (the exact
+    /// falsification task-4-report.md §8 documents against the FIRST version of this pattern, before
+    /// the sentinel fix). Then selects the real `span` and re-verifies against the SAME anchor.
+    private func positionAndVerifySpanOnDedicatedThread(_ doc: OpenDocument, docId: String, viewId: Int32, part: Int,
+                                                        anchorAddress: String, span: String) throws {
+        guard let anchorTarget = Self.parseSingleCellReference(anchorAddress) else {
+            throw SaveError.positionVerificationFailed(docId: docId, address: anchorAddress, landedAt: nil,
+                                                        context: .formatPositioning)
+        }
+        let sentinelColumn = anchorTarget.column == 1 ? 0 : 1
+        let sentinelAddress = Self.formatCellReference(column: sentinelColumn, row: anchorTarget.row)
+        try positionAndVerifyOnDedicatedThread(doc, docId: docId, viewId: viewId, part: part,
+                                               address: sentinelAddress, context: .formatPositioning)
+
+        _ = selectionTextOnDedicatedThread(doc, docId: docId, viewId: viewId, part: part, range: span, formulas: false)
+        try verifyCellCursorOnDedicatedThread(doc, docId: docId, expectedAddress: span, target: anchorTarget,
+                                              context: .formatPositioning)
+    }
+
+    /// office-agent-tools T5 — applies `bold`/`italic`/`numberFormat`/`align`/`width` over `range` on
+    /// `sheet`, every one optional and independent (`nil` means "leave this attribute alone" — the
+    /// whole contract `OfficeWireFrame.sheetsFormat`'s own header states in full). **The app-side
+    /// `OfficeRuntime.sheetsFormat` that calls down to this bridge is the SAME function a future
+    /// human-facing formatting UI will call — see that function's own header for the shared-code
+    /// signature.**
+    ///
+    /// **Two independent phases, on the agent view — the same isolation every OTHER cell-level write
+    /// verb in this file has (`set`, all four resize verbs), never the primary-view retreat
+    /// `sheetsManageSheetOnDedicatedThread` was live-forced into (that retreat was about WORKBOOK-
+    /// STRUCTURAL commands — Add/Remove/Name a whole sheet — not cell/column attribute commands,
+    /// which this task's own live drills confirm behave like every other agent-view-isolated
+    /// primitive; see task-5-report.md if that ever needs revisiting).**
+    ///
+    /// **Phase 1 — cell attributes (bold/italic/numberFormat/align), entered only when at least one
+    /// is named**, over `range`'s own cell-range selection:
+    ///
+    /// - **`bold`/`italic` dispatch a REAL absolute-state argument, confirmed by reading the vendored
+    ///   engine's own Execute handler (`ScFormatShell::ExecuteTextAttr`, `sc/source/ui/view/
+    ///   formatsh.cxx`, this task's own research, primary-source-cited in task-5-report.md): the slot
+    ///   TOGGLES only when its args are ABSENT — supplying `{"Bold":{"type":"boolean","value":
+    ///   "true"}}` (the value as a STRING, `"true"`/`"false"`, the shape the research found actually
+    ///   used — never a native JSON boolean, which this bridge has not verified the underlying parser
+    ///   accepts) sets that exact state regardless of the range's own current state, including a
+    ///   MIXED range. Verified live, not merely reasoned — see task-5-report.md's own idempotency and
+    ///   mixed-range drills.
+    /// - **`align` dispatches `.uno:HorizontalAlignment`** (`SID_H_ALIGNCELL`), value `1`/`2`/`3` for
+    ///   left/center/right (`com.sun.star.table.CellHoriJustify`) — deterministic by construction, no
+    ///   toggle risk at all (this task's own research: the Execute handler only ever fires when args
+    ///   are present, so an absent-args no-op is the ONLY alternate behavior, never a flip).
+    /// - **`numberFormat` is applied via a NORMALIZE-THEN-APPLY sequence, unconditionally, regardless
+    ///   of whether the underlying preset commands turn out to toggle or set absolutely.**
+    ///   `.uno:NumberFormatStandard` (General) dispatches FIRST, always; the target preset's own
+    ///   command dispatches second, only when the target itself is not `.general` (nothing to
+    ///   normalize INTO beyond the reset itself). This makes the whole operation deterministic BY
+    ///   CONSTRUCTION: starting from a KNOWN state and taking exactly one forward step always lands
+    ///   in the same place, whether that step happens to toggle or to set absolutely — a toggle's own
+    ///   ambiguity on a MIXED-state range never gets a chance to matter, because every cell in the
+    ///   selection is normalized to the identical starting state first. **Why this design exists at
+    ///   all, not a free-form format-code string** (spec §2's own generic `numberFormat` operand,
+    ///   deliberately narrowed — see `OfficeWireFrame.sheetsFormat`'s own header for the full,
+    ///   source-grounded reasoning): this task's own research read the vendored engine's real Execute
+    ///   handler and found `.uno:NumberFormat` is NOT a format code at all (a four-field comma tuple
+    ///   silently comma-split into garbage by a real code string) and the command that DOES take a
+    ///   format — `.uno:NumberFormatValue` — takes a pre-registered NUMERIC KEY whose registration
+    ///   (`XNumberFormats.queryKey`/`.addNew`) is a UNO Property-API call with no `.uno:` slot,
+    ///   confirmed UNREACHABLE by reading the vendored `LibreOfficeKit.h` this bridge actually links
+    ///   against (`Sources/OfficeKit/include/LibreOfficeKit.h`): the only command-shaped surface on
+    ///   `LibreOfficeKitDocumentClass` is `postUnoCommand`/`getCommandValues`/`setBlockedCommandList`.
+    ///
+    /// **Phase 2 — `width`, entered only when `width`/`columnSpan` are both non-nil**, over
+    /// `columnSpan`'s OWN, SEPARATE column-span selection (never `range`'s cell selection — `width`
+    /// is a COLUMN property, this function's own callers already establish that split):
+    ///
+    /// - **`.uno:ColumnWidth` dispatches with its OWN argument ALWAYS present** — omitting it opens a
+    ///   real, headless-undismissable modal dialog (`ScMetricInputDlg`, this task's own research,
+    ///   confirmed against `sc/source/ui/view/cellsh3.cxx`'s own `StartExecuteAsync` call) — the exact
+    ///   hang class `sheetsManageSheetOnDedicatedThread`'s own header already paid to learn to avoid,
+    ///   for a DIFFERENT command. `officeWidthMm100(fromPoints:)` (above) is the named, cited
+    ///   points-to-1/100mm conversion — never an inline formula.
+    ///
+    /// A best-effort pump (`pumpDedicatedThreadForPendingDispatch`, the SAME throwaway primitive every
+    /// other UNO-command verb in this file already trusts) follows each phase's own dispatches, before
+    /// the NEXT phase's own position-verification (or, for the last phase run, before this function
+    /// returns) — giving LOK's own dispatcher a turn to drain before anything downstream (a save, or
+    /// phase 2's own position check) depends on the phase having taken effect.
+    ///
+    /// Returns which attribute NAMES were reached — `["bold","italic","numberFormat","align","width"]`
+    /// filtered to what was actually named, in that fixed order — "posted," the same honest-not-a-
+    /// claim-of-effect posture `keyEventOk`/`undoOk` already hold to. This bridge's real proof is the
+    /// caller's own save-reopen-readback, per this task's own proof obligations; there is no
+    /// synchronous confirmation here.
+    ///
+    /// **Correction (whole-branch review F1 addendum).** The sentence that used to end this paragraph
+    /// drew a contrast that does not exist: it said format cannot make the kind of confirmation
+    /// "`sheetsResizeOnDedicatedThread`'s own `getDataArea` read can for a dimension change."
+    /// `sheetsResizeOnDedicatedThread` reads `getDataArea` exactly ONCE, AFTER its dispatch, and
+    /// RETURNS the values (`usedEndColumn`/`usedEndRow`) — it never compares them to anything. **It
+    /// is a report, not a confirmation**, so it verifies no more than this function does. Both verbs
+    /// are unverified-by-re-read today; that is a named residual for both, not a property one of them
+    /// has and the other lacks.
+    ///
+    /// For whoever makes resize's verification real: a before/after `getDataArea` delta only
+    /// discriminates when the inserted/deleted rows intersect the USED area — an insert below the
+    /// data area legitimately changes nothing, so a naive delta assertion produces false failures on
+    /// correct work.
+    private func sheetsFormatOnDedicatedThread(docId: String, sheet: String, range: String, columnSpan: String?,
+                                               bold: Bool?, italic: Bool?, numberFormat: OfficeSheetsNumberFormatPreset?,
+                                               align: OfficeSheetsAlign?, width: Double?) throws -> [String] {
+        guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        guard doc.kind == .spreadsheet else { throw SaveError.notSpreadsheet(docId: docId, kind: doc.kind) }
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+
+        let names = sheetNamesOnDedicatedThread(doc)
+        guard let part = names.firstIndex(of: sheet) else {
+            throw SaveError.sheetNotFound(docId: docId, sheet: sheet, available: names)
+        }
+
+        let agentViewId = try ensureAgentViewOnDedicatedThread(docId: docId)
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
+        doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(part))
+
+        var applied: [String] = []
+
+        // Phase 1 — cell attributes, over `range`'s own selection.
+        if bold != nil || italic != nil || numberFormat != nil || align != nil {
+            guard let rangeAnchorToken = range.split(separator: ":", maxSplits: 1).first, !rangeAnchorToken.isEmpty else {
+                throw SaveError.positionVerificationFailed(docId: docId, address: range, landedAt: nil,
+                                                            context: .formatPositioning)
+            }
+            try positionAndVerifySpanOnDedicatedThread(doc, docId: docId, viewId: agentViewId, part: part,
+                                                        anchorAddress: String(rangeAnchorToken), span: range)
+
+            if let bold {
+                postUnoCommandOnDedicatedThread(doc, ".uno:Bold",
+                                                ["Bold": ["type": "boolean", "value": bold ? "true" : "false"]])
+                applied.append("bold")
+            }
+            if let italic {
+                postUnoCommandOnDedicatedThread(doc, ".uno:Italic",
+                                                ["Italic": ["type": "boolean", "value": italic ? "true" : "false"]])
+                applied.append("italic")
+            }
+            if let numberFormat {
+                // Normalize first, unconditionally — see this function's own header for why this
+                // makes the whole operation deterministic regardless of toggle-vs-absolute.
+                ".uno:NumberFormatStandard".withCString { commandPtr in
+                    doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, nil, false)
+                }
+                if numberFormat != .general {
+                    let presetCommand: String
+                    switch numberFormat {
+                    case .general: presetCommand = ".uno:NumberFormatStandard" // unreachable — guarded above
+                    case .number: presetCommand = ".uno:NumberFormatDecimal"
+                    case .percent: presetCommand = ".uno:NumberFormatPercent"
+                    case .currency: presetCommand = ".uno:NumberFormatCurrency"
+                    case .date: presetCommand = ".uno:NumberFormatDate"
+                    }
+                    presetCommand.withCString { commandPtr in
+                        doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, nil, false)
+                    }
+                }
+                applied.append("numberFormat")
+            }
+            if let align {
+                let value: Int
+                switch align {
+                case .left: value = 1
+                case .center: value = 2
+                case .right: value = 3
+                }
+                postUnoCommandOnDedicatedThread(doc, ".uno:HorizontalAlignment",
+                                                ["HorizontalAlignment": ["type": "long", "value": String(value)]])
+                applied.append("align")
+            }
+            pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: part)
+        }
+
+        // Phase 2 — `width`, over `columnSpan`'s OWN, separate selection.
+        if let width, let columnSpan {
+            guard let columnAnchorToken = columnSpan.split(separator: ":", maxSplits: 1).first, !columnAnchorToken.isEmpty else {
+                throw SaveError.positionVerificationFailed(docId: docId, address: columnSpan, landedAt: nil,
+                                                            context: .formatPositioning)
+            }
+            try positionAndVerifySpanOnDedicatedThread(doc, docId: docId, viewId: agentViewId, part: part,
+                                                        anchorAddress: "\(columnAnchorToken)1", span: columnSpan)
+
+            guard let mm100 = Self.officeWidthMm100(fromPoints: width) else {
+                throw SaveError.widthOutOfRange(docId: docId, points: width)
+            }
+            postUnoCommandOnDedicatedThread(doc, ".uno:ColumnWidth",
+                                            ["ColumnWidth": ["type": "unsigned short", "value": String(mm100)]])
+            applied.append("width")
+            pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: part)
+        }
+
+        return applied
+    }
+
+    // MARK: - office-agent-tools T6: slides
+    //
+    // `slidesInfoOnDedicatedThread`'s NAME half is REAL — `getParts`/`getPartName` are the identical,
+    // already-proven primitives `sheetNamesOnDedicatedThread` rides (LOK's part model is shared
+    // machinery across Calc/Impress; nothing here is Impress-specific or newly risky). `layout` was
+    // removed from this bridge's own vocabulary entirely (see `OfficeSlideInfo`'s own header): LOK
+    // gives no layout read-back at all, for any slide, ever.
+    //
+    // ## The placeholder-text mechanism — Tab-cycling, per `slides-lok-research.md` §5
+    //
+    // Went straight to the CONFIRMED path (§5.2), not the speculative one (§5.1, `.uno:OutlineMode`):
+    // that research found `SdXImpressDocument` — the class implementing every LOK callback for
+    // Impress — has ZERO references to `ST_OUTLINE`/`OutlineViewShell` anywhere, a strong signal it
+    // does not integrate with LOK's own tiled-rendering/callback model at all, versus Tab-cycling's
+    // fully-traced call chain (`FuDraw`'s raw key handler -> `SdrMarkView::MarkNextObj`) and its own
+    // confirmed verification instrument (`LOK_CALLBACK_GRAPHIC_SELECTION`, §5.4). A live-tested,
+    // real mechanism now beats a lower-confidence one nobody has spent a cycle probing.
+    //
+    // **Real key events only (`postKeyEvent`/`agentKeyEvent`), never `postUnoCommand`-driven
+    // selection** — Tab is confirmed to reach `MarkNextObj` ONLY via the raw key path (research
+    // §5.2). **Verified before typing, every time** (`selectSlidePlaceholderOnDedicatedThread`,
+    // below) — the same "confirm the selection actually moved before acting on it" discipline this
+    // bridge already applies for Calc's own `CellCursor` check, adapted to a push-only signal.
+    //
+    // **Disclosed, not closed — the residual `slides-lok-research.md` §5.2 itself names**: Tab order
+    // is semantic (title, then body) ONLY on a slide whose shapes were never manually reordered by
+    // the user — `SetAutoLayout`'s own placeholder-creation loop happens to create Title before
+    // Outline for every content-bearing layout, which is what makes "first Tab = title" true for an
+    // untouched, freshly-laid-out slide. There is no LOK-exposed way to ask "which `PresObjKind` is
+    // this" directly (research §5.3) — this bridge verifies ONLY that a real, NEW selection landed,
+    // never that it landed on the semantically-intended shape. Stated here, in the tool's own
+    // description (`slides.ts`), and left as a named residual, not silently assumed away.
+
+    /// office-agent-tools T6 — the raw `com.sun.star.awt.Key` base codes this mechanism needs,
+    /// transcribed from the SAME `offapi/com/sun/star/awt/Key.idl` source `OfficeInputCodes.swift`'s
+    /// own table cites (this bridge cannot import `Sources/AppShell` — see this file's own header,
+    /// and `formulaKeyEvent(for:)`'s identical precedent for why a second, independently-transcribed
+    /// copy lives here). No modifier bits — every use is a bare keypress, `charCode: 0`.
+    private enum SlidesKeyCode {
+        static let escape = 1281
+        static let tab = 1282
+        static let f2 = 769
+    }
+
+    /// Escapes any current selection/edit mode, then posts `KEY_TAB` `tabCount` times on the AGENT
+    /// view, verifying EACH press against a fresh `LOK_CALLBACK_GRAPHIC_SELECTION` firing before
+    /// posting the next one. Returns the FINAL press's own selection rect, or `nil` the instant any
+    /// press produces no new firing — read as "this slide has fewer than `tabCount` selectable
+    /// shapes" (a structural fact about the slide, e.g. a Blank layout), never a straggler worth
+    /// retrying: unlike `.uno:GoToCell`'s own fire-and-forget dispatch, a REAL key event through the
+    /// normal input path is what T4's own investigation found DOES fire callbacks reliably — no
+    /// pump-and-poll is built here unless live evidence demands one.
+    ///
+    /// `tabCount: 1` reaches the title placeholder (on a freshly-laid-out, undisturbed slide);
+    /// `tabCount: 2` reaches the body. Always starts from a fresh `Escape`, never continues from
+    /// wherever a PRIOR call on this same long-lived agent view happened to leave the mark list —
+    /// so `read`ing title then body (two independent calls) cannot accidentally land on the SAME
+    /// shape twice because the second call forgot where the first one left off.
+    private func selectSlidePlaceholderOnDedicatedThread(docId: String, slide: Int, tabCount: Int) throws -> OfficeTwipsRect? {
+        guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        let agentViewId = try ensureAgentViewOnDedicatedThread(docId: docId)
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
+        doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(slide))
+
+        func clearObservedRect() {
+            guard var cleared = documents[docId] else { return }
+            cleared.lastGraphicSelectionRectTwips = nil
+            documents[docId] = cleared
+        }
+        func postAgentKey(_ keyCode: Int) {
+            doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyInput.rawValue), 0, Int32(keyCode))
+            doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyUp.rawValue), 0, Int32(keyCode))
+        }
+
+        clearObservedRect()
+        postAgentKey(SlidesKeyCode.escape)
+
+        var landedRect: OfficeTwipsRect?
+        // **Deletion-red proof (office-agent-tools T6, 2026-08-24)**: hardcoded this loop to always
+        // run exactly once regardless of `tabCount`, rebuilt, reran the live `read` drill (slide 2,
+        // tabCount 1 for title / 2 for body) — `body` came back reading the SAME text as `title`
+        // ("Norma T6 Slide Two" for both), the exact "wrong placeholder selected" signature, not
+        // "nothing found" (that's proof A/C's own signature, in `handleCallback`/
+        // `readSelectedShapeTextOnDedicatedThread`) — and `info` (title-only, tabCount always 1) was
+        // correctly UNAFFECTED, confirming the break was scoped to this loop bound specifically, not
+        // some broader breakage. Reverted, confirmed byte-identical, reran green.
+        for _ in 0..<tabCount {
+            clearObservedRect()
+            postAgentKey(SlidesKeyCode.tab)
+            // **Live-falsified without this**: a first attempt with NO pump reported every slide's
+            // title as "no such placeholder," even though a raw-callback trace showed the correct
+            // rect firing — just not synchronously within `postKeyEvent`'s own return. The IDENTICAL
+            // deferred-internal-dispatch-queue shape T3's own `.uno:GoToCell` investigation found
+            // (task-3-report.md §3), now confirmed for `postKeyEvent`-driven selection too — a REAL
+            // input event GUARANTEES eventual firing (T4's own finding, vs. `postUnoCommand`, which
+            // does not), but "eventual" is not "synchronous." Same fix: a throwaway
+            // `pumpDedicatedThreadForPendingDispatch` call between polls gives LOK's own internal
+            // queue a turn, `goToCellVerificationAttempts` sized identically (this mechanism has not
+            // earned its own independently-derived budget yet).
+            var rect = documents[docId]?.lastGraphicSelectionRectTwips
+            var attempts = 1
+            while rect == nil, attempts < Self.slidePlaceholderPositionAttempts {
+                pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: slide)
+                rect = documents[docId]?.lastGraphicSelectionRectTwips
+                attempts += 1
+            }
+            if attempts > 1 {
+                // Evidence line, permanent — the same shape (and the same purpose) as the
+                // `[LOKBridge sheets] GoToCell` line this file already carries: how often the race
+                // actually fires, and which attempt it resolved on, never silent. This is what makes
+                // `slidePlaceholderPositionAttempts` a MEASURED budget rather than a guessed one, and
+                // what will show the next reader whether it is still adequate.
+                FileHandle.standardError.write(Data(
+                    "[LOKBridge slides] placeholder positioning (slide \(slide), tab \(tabCount)) needed \(attempts) attempt(s), landed=\(rect != nil)\n".utf8))
+            }
+            guard let rect else {
+                return nil
+            }
+            landedRect = rect
+        }
+        return landedRect
+    }
+
+    /// Enters text-edit mode on whatever shape is currently selected (`F2` — Impress's own standard
+    /// "edit this object's text" key, the identical convention this bridge's own `set`/`format`
+    /// mechanisms rely on being universal rather than re-deriving per app), selects all of that
+    /// shape's own text (`.uno:SelectAll` — a common, well-known, argument-less UNO command, none of
+    /// the hazard-class-1/2 risk this bridge's own `add_sheet`/`ColumnWidth` investigations found for
+    /// LESS common commands), reads it back via `getTextSelection` (`readSelectionTextOnDedicatedThread`,
+    /// this bridge's own established single read-path — see that function's own header), then exits
+    /// edit mode (`Escape`) to leave the document in the SAME object-selected-but-not-editing state
+    /// `selectSlidePlaceholderOnDedicatedThread` itself produces, never mid-edit.
+    /// **`part` added, live-falsified without it**: the FIRST live drill of this mechanism reported
+    /// slide 1's title correctly but slides 2/3 as "empty" — positioning (already pump-verified) was
+    /// fine, but `getTextSelection` came back empty right after `.uno:SelectAll`. Same deferred-
+    /// internal-dispatch shape as the positioning fix right above, one layer later in the same
+    /// mechanism: `.uno:SelectAll` is `postUnoCommand`-driven (fire-and-forget, this bridge's own
+    /// established "may not land synchronously" class), so a pump between it and the read is not
+    /// optional ceremony, it is what makes the read see the selection SelectAll just made. One pump,
+    /// not a poll-until-non-empty loop — an empty read here can be a GENUINELY empty placeholder,
+    /// which this bridge has no way to distinguish from "SelectAll hasn't landed yet" by content
+    /// alone, so this gives the queue one honest chance to drain rather than guessing from the result.
+    /// **Deletion-red proof (office-agent-tools T6, 2026-08-24)**: skipped the `.uno:SelectAll`
+    /// dispatch itself (not just its pump), rebuilt, reran the live `info`/`read` drill — every
+    /// title/body came back "(empty title placeholder)"/"(empty)": the PLACEHOLDER WAS FOUND
+    /// (position-verification, proof B's own mechanism, still intact) but its TEXT read empty — a
+    /// signature specifically distinct from proof A's "(no title placeholder)" (nothing found at
+    /// all). Confirms this dispatch is load-bearing on its own, not merely the pump around it.
+    /// Reverted, confirmed byte-identical, reran green.
+    private func readSelectedShapeTextOnDedicatedThread(_ doc: OpenDocument, agentViewId: Int32, part: Int) -> String {
+        doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyInput.rawValue), 0, Int32(SlidesKeyCode.f2))
+        doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyUp.rawValue), 0, Int32(SlidesKeyCode.f2))
+        pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: part)
+        postUnoCommandOnDedicatedThread(doc, ".uno:SelectAll", [:], notifyWhenFinished: true)
+        pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: part)
+        let text = readSelectionTextOnDedicatedThread(doc)
+        doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyInput.rawValue), 0, Int32(SlidesKeyCode.escape))
+        doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyUp.rawValue), 0, Int32(SlidesKeyCode.escape))
+        return text
+    }
+
+    /// The write half of `readSelectedShapeTextOnDedicatedThread`'s own edit-mode dance: F2,
+    /// select-all, then REPLACE the selection with `text` via ext-text-input — this bridge's own
+    /// proven mechanism for general (non-formula) text insertion, already live-tested for Calc cells
+    /// (`writeOneCellOnDedicatedThread`'s own header). `postWindowExtTextInputEvent`'s `nWindowId: 0`
+    /// resolves relative to whichever view `setView` most recently asserted (confirmed by reading
+    /// `postExtTextInputOnDedicatedThread`'s own existing, primary-view-only call site — the IDENTICAL
+    /// LOK C call, the only difference is WHICH view this bridge asserted first) — so this internal
+    /// method reaches the agent view by asserting it itself, never by adding a new wire frame: the
+    /// wire's own `slidesSetText` request already carries the text end to end, and how THIS bridge
+    /// fulfills it is an implementation detail, not a new door for `OfficeHelperClient` to open.
+    /// `.input` then `.end` with EMPTY text — `OfficeWireFrame.extTextInputEvent`'s own header has the
+    /// full "why `.end`'s own text argument is always sent empty" account (LOK ignores it either way).
+    /// Exits edit mode via `Escape` afterward, same as the read path.
+    /// `part` added — same pump-between-F2-and-SelectAll-and-the-real-action fix
+    /// `readSelectedShapeTextOnDedicatedThread`'s own header explains; a write that types into a
+    /// selection SelectAll has not actually made yet would insert alongside existing content instead
+    /// of replacing it, silently.
+    /// **Deletion-red proof (office-agent-tools T6, 2026-08-24)**: skipped both `postWindowExtTextInputEvent`
+    /// dispatches (the actual write), rebuilt, reran
+    /// `testLiveSetTextChangesOnlyTheTargetedSlideProvenBySaveAndIndependentReopen` live — slide 2's
+    /// title/body read back as the ORIGINAL, untouched text ("Norma T6 Slide Two"/"second bullet"),
+    /// not "CHANGED TITLE"/"CHANGED BODY", at BOTH verification layers: the independent-reopen LOK
+    /// read AND the raw `unzip -p content.xml` filesystem seal (which correctly asserted "must
+    /// contain the new title text" / "OLD title must be gone" and both correctly failed). Proves the
+    /// write dispatch itself is load-bearing, and proves the filesystem seal genuinely detects an
+    /// absence of change rather than passing by construction. Reverted, confirmed byte-identical,
+    /// reran green.
+    private func writeSelectedShapeTextOnDedicatedThread(_ doc: OpenDocument, agentViewId: Int32, part: Int, text: String) {
+        doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyInput.rawValue), 0, Int32(SlidesKeyCode.f2))
+        doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyUp.rawValue), 0, Int32(SlidesKeyCode.f2))
+        pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: part)
+        postUnoCommandOnDedicatedThread(doc, ".uno:SelectAll", [:], notifyWhenFinished: true)
+        pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: part)
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
+        doc.handle.pointee.pClass.pointee.postWindowExtTextInputEvent?(doc.handle, 0, Int32(OfficeExtTextInputType.input.rawValue), text)
+        doc.handle.pointee.pClass.pointee.postWindowExtTextInputEvent?(doc.handle, 0, Int32(OfficeExtTextInputType.end.rawValue), "")
+        doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyInput.rawValue), 0, Int32(SlidesKeyCode.escape))
+        doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyUp.rawValue), 0, Int32(SlidesKeyCode.escape))
+    }
+
+    private func slidesInfoOnDedicatedThread(docId: String) throws -> [OfficeSlideInfo] {
+        guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        guard doc.kind == .presentation else { throw SaveError.notPresentation(docId: docId, kind: doc.kind) }
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+
+        let partCount = Int(doc.handle.pointee.pClass.pointee.getParts?(doc.handle) ?? 0)
+        var slides: [OfficeSlideInfo] = []
+        slides.reserveCapacity(partCount)
+        for part in 0..<partCount {
+            let name: String
+            if let cName = doc.handle.pointee.pClass.pointee.getPartName?(doc.handle, Int32(part)) {
+                defer { free(cName) }
+                name = String(cString: cName)
+            } else {
+                name = "Slide \(part + 1)" // defensive fallback — getPartName should not fail for a real part index
+            }
+            let title: String?
+            if let rect = try selectSlidePlaceholderOnDedicatedThread(docId: docId, slide: part, tabCount: 1) {
+                _ = rect // positioning succeeded; the rect itself is not needed once past verification
+                guard let agentViewId = documents[docId]?.agentViewId else { throw SaveError.noAgentView(docId) }
+                title = readSelectedShapeTextOnDedicatedThread(doc, agentViewId: agentViewId, part: part)
+            } else {
+                title = nil
+            }
+            slides.append(OfficeSlideInfo(name: name, title: title))
+        }
+        // `selectSlidePlaceholderOnDedicatedThread` leaves the agent view parked mid-selection on the
+        // LAST slide it touched — restore the primary view as current before returning, matching
+        // `sheetsInfoOnDedicatedThread`'s own "a read-only probe must never leave things parked
+        // somewhere a later call did not expect" discipline (that function's own header).
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        return slides
+    }
+
+    private func slidesReadOnDedicatedThread(docId: String, slide: Int) throws -> (title: String?, body: String?) {
+        guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        guard doc.kind == .presentation else { throw SaveError.notPresentation(docId: docId, kind: doc.kind) }
+        let partCount = Int(doc.handle.pointee.pClass.pointee.getParts?(doc.handle) ?? 0)
+        guard slide >= 0, slide < partCount else {
+            throw SaveError.slideNotFound(docId: docId, slide: slide, slideCount: partCount)
+        }
+
+        func readField(tabCount: Int) throws -> String? {
+            guard try selectSlidePlaceholderOnDedicatedThread(docId: docId, slide: slide, tabCount: tabCount) != nil else {
+                return nil
+            }
+            guard let agentViewId = documents[docId]?.agentViewId else { throw SaveError.noAgentView(docId) }
+            return readSelectedShapeTextOnDedicatedThread(doc, agentViewId: agentViewId, part: slide)
+        }
+        let title = try readField(tabCount: 1)
+        let body = try readField(tabCount: 2)
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        return (title: title, body: body)
+    }
+
+    /// office-agent-tools T6 fix round 1 (review F-0, **Critical**) — the reviewer reproduced live:
+    /// `add_slide layout:"title_only"` then `set_text title:… body:…` wrote the title, refused on the
+    /// missing body placeholder, and the refusal's own leading clause read "…nothing was written" —
+    /// flatly false, since the title demonstrably WAS, `read` confirmed it, and the adopted tab was
+    /// left dirty with an edit the caller never asked to keep, refusing every later write until the
+    /// human intervened. Ruling 1 makes this reachable with no pre-check available to the agent: a
+    /// slide's layout cannot be read back, so "the agent should have checked first" is not a defence.
+    ///
+    /// **Fix: two passes, not one.** Pass 1 verifies EVERY named field's placeholder exists —
+    /// position, confirm, move on, write NOTHING — before pass 2 writes to any of them. All-or-
+    /// nothing, decided before the first keystroke, mirroring T4's own `unsupportedFormulaCharacter`
+    /// pure pre-validation (`sheetsSetOnDedicatedThread`'s sibling path) and this file's own
+    /// `slidesManagePageOnDedicatedThread` guards (every refusal there also runs before any dispatch).
+    /// This closes the reviewer's exact one-call reproduction: a `title_only` slide now refuses
+    /// on pass 1 (no body placeholder) with `title` untouched, "nothing was written" true by
+    /// construction because pass 1 never reaches `writeSelectedShapeTextOnDedicatedThread` at all.
+    ///
+    /// **The residual this does NOT close, and does not pretend to**: pass 2 still re-positions per
+    /// field (a placeholder proved to exist a moment ago in pass 1 still needs a fresh Tab-cycle to
+    /// reach it in pass 2 — selection is not carried between the two passes), and Tab-cycling is this
+    /// file's own established flake class (`goToCellVerificationAttempts`, T3's own finding). So a
+    /// transient positioning flake in pass 2 — AFTER pass 1 proved existence and AFTER an earlier
+    /// field in this SAME call already wrote — remains structurally possible.
+    /// **Narrowed, not closed, by the RED-full-suite follow-up**: that flake was caught in the act
+    /// (the full suite's own `.partialSetFailure` on slide 2's body — task-6-report.md §9.1), the
+    /// budget hypothesis for it was measured and FALSIFIED (§9.4), and `writeField` now re-posts the
+    /// whole positioning once, which absorbs a single discrete loss (forced red/green, §9.5). Two
+    /// consecutive losses still reach the caller — deliberately, since that is a different diagnosis.
+    /// `applied` is still
+    /// tracked through pass 2 for exactly this reason: the moment a pass-2 positioning failure lands
+    /// with `applied` non-empty, it is wrapped in `.partialSetFailure`, mirroring
+    /// `sheetsSetOnDedicatedThread`'s own identical `index > 0` wrapping for the SAME root cause (a
+    /// per-field "nothing was written" description is field-scoped truth, not call-scoped truth, the
+    /// instant an earlier field in this SAME call already applied) — never left to reach the caller
+    /// as a bare `slidePlaceholderNotFound` whose own text would once again contradict reality.
+    private func slidesSetTextOnDedicatedThread(docId: String, slide: Int, title: String?, body: String?) throws -> [String] {
+        guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        guard doc.kind == .presentation else { throw SaveError.notPresentation(docId: docId, kind: doc.kind) }
+        let partCount = Int(doc.handle.pointee.pClass.pointee.getParts?(doc.handle) ?? 0)
+        guard slide >= 0, slide < partCount else {
+            throw SaveError.slideNotFound(docId: docId, slide: slide, slideCount: partCount)
+        }
+
+        // Pass 1 — existence only, nothing written. A slide missing EITHER named placeholder
+        // refuses here, before pass 2 ever runs, so "nothing was written" stays true for every
+        // refusal this pass can produce.
+        if title != nil {
+            guard try selectSlidePlaceholderOnDedicatedThread(docId: docId, slide: slide, tabCount: 1) != nil else {
+                throw SaveError.slidePlaceholderNotFound(docId: docId, slide: slide, field: "title")
+            }
+        }
+        if body != nil {
+            guard try selectSlidePlaceholderOnDedicatedThread(docId: docId, slide: slide, tabCount: 2) != nil else {
+                throw SaveError.slidePlaceholderNotFound(docId: docId, slide: slide, field: "body")
+            }
+        }
+
+        // Pass 2 — both named placeholders are now KNOWN to exist; write to them.
+        func writeField(tabCount: Int, text: String, fieldName: String) throws {
+            // **Retry the WHOLE positioning here, and ONLY here** (office-agent-tools T6 fix round 1,
+            // the RED-full-suite follow-up — see task-6-report.md §9.4/§9.5). Three things justify a
+            // retry on this one call site and on no other:
+            //
+            // 1. **A `nil` here cannot be structural.** Pass 1 proved this exact placeholder exists,
+            //    on this same dedicated thread, within this same call. **Precisely (fix round 2,
+            //    re-review New-3)**: the deck is not unmutated in between — pass 2's own title write
+            //    is a mutation, and saying otherwise overstated the premise. The claim that actually
+            //    holds, and that is all the retry needs: a TEXT write into an existing shape neither
+            //    ADDS NOR REMOVES shapes, so it cannot change whether the body placeholder exists or
+            //    how many Tab presses reach it. So the retry can only ever absorb a transient loss;
+            //    it is structurally incapable of masking a genuine absence, which is what makes it safe
+            //    here and NOT safe in `read`/`info`/pass 1, where `nil` is genuinely ambiguous and a
+            //    retry would tax every legitimate refusal for no information gain.
+            // 2. **Re-posting is the only action the measurement leaves on the table.** The attempt
+            //    distribution (`slidePlaceholderPositionAttempts`' own header) is bimodal: successes
+            //    land at attempt 2, always; non-landings are never rescued by more pumping. The
+            //    residual flake is a DISCRETE LOSS of an Escape/Tab key event or its selection
+            //    callback, not a slow arrival — so a fresh Escape + fresh Tab posts is the fix shape,
+            //    and a bigger pump budget provably is not.
+            // 3. **It also cures the likeliest concrete mechanism.** A write leaves the shape in
+            //    text-edit mode; one Escape exits edit mode but leaves the object SELECTED, and
+            //    Tab-cycling from "an object is already selected" lands off-by-one and can run off
+            //    the end of the slide's shape list into `nil`. The retry's own fresh Escape starts
+            //    from the deselected state the mechanism assumes.
+            //
+            // Bounded deliberately small (2 whole positionings, not a loop) — a second consecutive
+            // discrete loss is a different diagnosis (suspect the callback delivery path, not the
+            // keys) and must surface as a failure rather than be absorbed silently. The evidence
+            // line inside `selectSlidePlaceholderOnDedicatedThread` logs every retried attempt, so a
+            // recurrence stays observable instead of becoming invisible the moment it stops failing.
+            //
+            // **FORCED RED/GREEN (office-agent-tools T6, 2026-08-24)** — the original flake could not
+            // be reproduced on demand (2 full suite passes under saturating load never hit it), so it
+            // was FORCED instead: a temporary probe made this line's first positioning return `nil`
+            // for `body` only, plus a temporary flag to disable the retry below.
+            //   RED  (force on, retry OFF): 6 failures, and the refusal text reproduced the ORIGINAL
+            //        full-suite failure byte for byte — "body failed after title in this SAME
+            //        set_text call already applied: slide 2 in <id> has no body placeholder —
+            //        nothing was written." Same assertion count (6) as the real failure.
+            //   GREEN (force on, retry ON):  `Executed 1 test, with 0 failures`, AND exactly ONE
+            //        "re-posting Escape+Tab once" evidence line — which is what proves the force
+            //        still fired and the RETRY is what absorbed it, rather than the probe having
+            //        silently stopped working (a green that would otherwise prove nothing).
+            // Probe reverted, tree confirmed byte-identical (`git diff` empty).
+            // **Do not overclaim this**: it proves the retry absorbs a single discrete loss. That it
+            // cures the ORIGINAL flake is argued from the measured attempt distribution
+            // (`slidePlaceholderPositionAttempts`' header), not from a reproduced-and-cured instance.
+            var positioned = try selectSlidePlaceholderOnDedicatedThread(docId: docId, slide: slide, tabCount: tabCount)
+            if positioned == nil {
+                FileHandle.standardError.write(Data(
+                    "[LOKBridge slides] pass-2 positioning for \(fieldName) on slide \(slide) returned nil although pass 1 proved it exists — re-posting Escape+Tab once\n".utf8))
+                positioned = try selectSlidePlaceholderOnDedicatedThread(docId: docId, slide: slide, tabCount: tabCount)
+            }
+            guard positioned != nil else {
+                throw SaveError.slidePlaceholderNotFound(docId: docId, slide: slide, field: fieldName)
+            }
+            guard let agentViewId = documents[docId]?.agentViewId else { throw SaveError.noAgentView(docId) }
+            writeSelectedShapeTextOnDedicatedThread(doc, agentViewId: agentViewId, part: slide, text: text)
+        }
+        var applied: [String] = []
+        if let title {
+            do {
+                try writeField(tabCount: 1, text: title, fieldName: "title")
+                applied.append("title")
+            } catch let error as SaveError {
+                guard applied.isEmpty else {
+                    throw SaveError.partialSetFailure(reason:
+                        "title failed after \(applied.joined(separator: ", ")) in this SAME set_text "
+                        + "call already applied: \(error.description) Note: \"nothing was written\" "
+                        + "above describes title alone, not the whole call — "
+                        + "\(applied.joined(separator: ", ")) already landed.")
+                }
+                throw error
+            }
+        }
+        if let body {
+            do {
+                try writeField(tabCount: 2, text: body, fieldName: "body")
+                applied.append("body")
+            } catch let error as SaveError {
+                guard applied.isEmpty else {
+                    throw SaveError.partialSetFailure(reason:
+                        "body failed after \(applied.joined(separator: ", ")) in this SAME set_text "
+                        + "call already applied: \(error.description) Note: \"nothing was written\" "
+                        + "above describes body alone, not the whole call — "
+                        + "\(applied.joined(separator: ", ")) already landed.")
+                }
+                throw error
+            }
+        }
+        // **Whole-branch review Q6 fold-in — set_text's write is now proven by a RE-READ, not by a
+        // selection.** `writeSelectedShapeTextOnDedicatedThread` returns `Void`: every signal this
+        // function had was that the placeholder SELECTION landed, which says the keystrokes were
+        // aimed correctly and nothing at all about whether the text arrived. That is the same
+        // "no write verb's proof may be a return code" standard the rest of this arc is held to,
+        // and `slidesReadOnDedicatedThread` — the exact primitive `slides read` already ships —
+        // makes it cheap.
+        //
+        // Runs ONCE, after BOTH fields, deliberately: a per-field read would double the Tab-cycle
+        // positioning traffic on the very path whose measured residual is a discrete positioning
+        // loss (`slidePlaceholderPositionAttempts`' header), i.e. the check would make the thing it
+        // is checking for more likely.
+        //
+        // **`nil` from the read-back is NOT treated as a disagreement.** A `nil` here means the
+        // read's own positioning missed, which is the known transient — and pass 1 already proved
+        // the placeholder exists. Failing on `nil` would turn a flake in the INSTRUMENT into a
+        // reported write failure on a write that in fact landed, which is strictly worse than the
+        // gap being closed. Only a read-back that genuinely SUCCEEDS and disagrees throws.
+        if !applied.isEmpty {
+            let readBack = try slidesReadOnDedicatedThread(docId: docId, slide: slide)
+            if let title, applied.contains("title"), let got = readBack.title, got != title {
+                doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+                throw SaveError.slideTextVerificationFailed(docId: docId, slide: slide, field: "title")
+            }
+            if let body, applied.contains("body"), let got = readBack.body, got != body {
+                doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+                throw SaveError.slideTextVerificationFailed(docId: docId, slide: slide, field: "body")
+            }
+        }
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        return applied
+    }
+
+    private func slidesManagePageOnDedicatedThread(docId: String, op: OfficeSlidesManagePageOp, slide: Int?, at: Int?,
+                                                    to: Int?, layout: OfficeSlidesLayoutPreset?) throws -> Int {
+        guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        guard doc.kind == .presentation else { throw SaveError.notPresentation(docId: docId, kind: doc.kind) }
+        let partCount = Int(doc.handle.pointee.pClass.pointee.getParts?(doc.handle) ?? 0)
+        if op == .add {
+            // `at` is allowed to equal `partCount` itself (append past the last existing index) —
+            // unlike `slide`/`to` elsewhere in this function, which must be a real EXISTING slide.
+            // Only a genuinely out-of-range `at` (negative, impossible from the wire's own 1-based
+            // `.positive()` validation; or greater than `partCount`) refuses. Reuses `.slideNotFound`
+            // — its own message text is neutral enough to describe either "no such existing slide" or
+            // "no such insertion point" honestly.
+            if let at, at < 0 || at > partCount {
+                throw SaveError.slideNotFound(docId: docId, slide: at, slideCount: partCount)
+            }
+            return try slidesAddOnDedicatedThread(docId: docId, doc: doc, at: at, layout: layout, partCount: partCount)
+        }
+        if op == .delete, let slide {
+            guard slide >= 0, slide < partCount else {
+                throw SaveError.slideNotFound(docId: docId, slide: slide, slideCount: partCount)
+            }
+            guard partCount > 1 else { throw SaveError.lastSlide(docId: docId) }
+            return try slidesDeleteOnDedicatedThread(docId: docId, doc: doc, slide: slide, partCount: partCount)
+        }
+        if op == .reorder, let slide, let to {
+            guard slide >= 0, slide < partCount else {
+                throw SaveError.slideNotFound(docId: docId, slide: slide, slideCount: partCount)
+            }
+            // Reuses `.slideNotFound` for an out-of-range `to` too — its own message text ("no slide
+            // N in docId — this presentation has M slides") is neutral about WHICH operand supplied
+            // N, so it reads correctly for either.
+            guard to >= 0, to < partCount else {
+                throw SaveError.slideNotFound(docId: docId, slide: to, slideCount: partCount)
+            }
+            return try slidesReorderOnDedicatedThread(docId: docId, doc: doc, from: slide, to: to, partCount: partCount)
+        }
+        // Unreachable — every op (`.add`/`.delete`/`.reorder`) now has a real case above, and the
+        // wire's own decode guard (`OfficeWireFrame.slidesManagePage`'s per-op paired-field contract,
+        // `OfficeWireCodecTests.testSlidesManagePagePerOpFieldShapeIsRejectedAsMalformed`) guarantees
+        // `.delete`'s `slide` and `.reorder`'s `slide`+`to` are never nil by the time a frame decodes
+        // successfully — mirroring `sheetsManageSheetOnDedicatedThread`'s own `.rename`/`newName`
+        // precondition for the identical class of already-guaranteed invariant.
+        preconditionFailure("slidesManagePageOnDedicatedThread(\(op.rawValue)) reached with a nil required field — the wire decode's own invariant was violated")
+    }
+
+    /// office-agent-tools T6 fix round 1 (review F-5/F-6) — `getPartInfo`'s `hash` field
+    /// (`SdrPage::GetUniqueID()`, research §7): a monotonic per-object counter, genuine OBJECT
+    /// IDENTITY, unlike title/name content. Live-measured (a temporary probe, since reverted,
+    /// this fix round's own commit) before this parser was written — the JSON shape is
+    /// `{"masterPageCount":...,...,"name":"T6Slide1","hash":67}`: `hash` is a raw JSON NUMBER, NOT
+    /// a string (unlike the type-27 callback envelope's own `viewId`, which IS a string — measured
+    /// separately, never assumed to generalize from one LOK JSON payload to another). Page-level
+    /// fields, `hash` included, are OMITTED entirely (not merely `null`) when the page lookup
+    /// itself fails (research §3: "else `SAL_WARN`-logged and *omitted*"), so this returns `nil`
+    /// rather than crashing.
+    /// **Corrected, fix round 2 (re-review New-1)**: this comment used to claim a missing key
+    /// "feeds this file's own verify-and-retry discipline." That was FALSE at every call site, and
+    /// dangerously so — `nil` does not feed a retry, it makes the comparison VACUOUS: a permutation
+    /// of `[nil, nil, nil]` equals `[nil, nil, nil]`, so `verified()` passes on attempt 1 with
+    /// nothing having happened and the retry loop is never entered. The arc's own
+    /// description-contradicting-code class, sitting in the doc comment of the mechanism introduced
+    /// to fix a check that was blind to its own failure mode.
+    /// What is true NOW: every structural call site REFUSES BEFORE DISPATCHING on any `nil` in its
+    /// baseline (`SaveError.slideIdentityUnavailable`), so a decode failure can never be laundered
+    /// into a false identity match — see `slidesReorderOnDedicatedThread`'s own guard for why
+    /// `reorder` was the exposed one and its two siblings were not.
+    private func partHashOnDedicatedThread(_ doc: OpenDocument, part: Int) -> Int? {
+        guard let cInfo = doc.handle.pointee.pClass.pointee.getPartInfo?(doc.handle, Int32(part)) else {
+            return nil
+        }
+        defer { free(cInfo) }
+        guard let data = String(cString: cInfo).data(using: .utf8),
+              let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            return nil
+        }
+        return (object["hash"] as? NSNumber)?.intValue
+    }
+
+    /// **Verification redesign, fix round 1 (review F-5, F-6).** The original content-based check
+    /// (`titleAt(to) == movingTitle`) shipped with two real defects, both closed here:
+    /// - **F-5**: content is not identity. A slide `add_slide` itself creates has an EMPTY title
+    ///   placeholder (live-confirmed by the reviewer), so two such slides compare `"" == ""` —
+    ///   verification could pass on a deck it was specifically written to catch errors on, without
+    ///   any move having happened correctly, or at all.
+    /// - **F-6**: `titleAt` rides `selectSlidePlaceholderOnDedicatedThread`'s own Tab-cycling, this
+    ///   file's established flake class. The baseline (`movingTitle`) was captured ONCE, before
+    ///   dispatch, with no retry — a single flake there poisoned every one of the 20 post-dispatch
+    ///   retry attempts (only the AFTER side ever re-read), reporting a completed mutation as a
+    ///   failure and leaving an adopted document dirty.
+    ///
+    /// `getPartInfo`'s `hash` (`partHashOnDedicatedThread`, immediately above) resolves both:
+    /// it is genuine per-object identity (never accidentally shared by two distinct pages, empty-
+    /// titled or not), and it is a DIRECT positional query with no Tab-cycling involved at all — the
+    /// baseline capture below cannot flake the way `titleAt`'s ever could, closing F-6 as a
+    /// structural side effect of closing F-5, not a second mechanism bolted on. This does not
+    /// reverse the earlier title-over-hash adjudication for the SAVE+REOPEN proof — research §7
+    /// still means hash dies on reload, so that proof (this task's own non-negotiable obligation)
+    /// stays content-based, in the live test suite, through `slidesRead`/`content.xml`. The two
+    /// mechanisms now serve the two jobs they each actually fit: hash for in-session identity, this
+    /// task's original content-based approach for reload-durable proof.
+    ///
+    /// Verifies the FULL expected permutation, not merely `hashAt(to) == movingHash` — closes a
+    /// gap a single-position check cannot see: a wrong slide moving to a DIFFERENT position while,
+    /// by coincidence, the right slide still lands at `to`. `expectedHashes` is computed directly
+    /// (remove at `from`, insert at `to`) rather than simulated step-by-step through the actual
+    /// `MovePage*` dispatch sequence — the same array operation regardless of how many single-step
+    /// swaps produce it.
+    ///
+    /// office-agent-tools T6, Probe B — reachability was UNDETERMINED FROM SOURCE going in:
+    /// `slides-lok-research.md` §2 "R1" found no arbitrary-index move UNO command at all — the only
+    /// primitives are selection-based `MovePageUp`/`Down`/`First`/`Last`
+    /// (`SlideSorterViewShell::ExecMovePage*`), and whether SELECTION (not LOK's own "current part")
+    /// actually follows `setPart` in a genuinely headless session — one that never shows a Slide
+    /// Sorter panel — was flagged as unknowable without a live run. **Confirmed live: it does, one
+    /// step (index 1 -> index 2), verified two ways at once — see the probe test's own header
+    /// (`OfficeSlidesCommandTests.testProbeInvestigatesWhetherReorderIsReachableHeadless`) for why
+    /// index 1, never index 0.** Multi-step (`abs(to - from) > 1`) composes the SAME primitive
+    /// repeatedly — research's own finding that `MovePageUp`/`Down` clamp safely at the document
+    /// boundary rather than erroring — and IS independently live-verified
+    /// (`testLiveReorderMultiStepMovesAcrossTwoPositionsProvenBySaveAndIndependentReopen`, distance
+    /// 2 forwards; `testLiveReorderMultiStepMovesBackwardsProvenBySaveAndIndependentReopen`,
+    /// distance 2 backwards, exercising `MovePageUp` specifically).
+    ///
+    /// **Dispatched on the PRIMARY view, `destroyAgentViewIfAnyOnDedicatedThread` first — NOT the
+    /// agent-view isolation `selectSlidePlaceholderOnDedicatedThread`'s own READ path uses
+    /// elsewhere in this file, and a deliberate decision, not an oversight.**
+    /// `sheetsManageSheetOnDedicatedThread`'s own header carries the full two-round live history this
+    /// borrows wholesale rather than re-earning empirically: dispatching a STRUCTURAL, page/sheet-
+    /// list-level mutation (`.uno:Remove`) from the agent view produced a genuine 30s HANG whenever
+    /// an agent view merely existed for that doc; dispatching `.uno:Add`/`.uno:Name` from the agent
+    /// view made THEIR OWN post-dispatch verification never converge at all across repeated isolated
+    /// reruns, full budget burned every time. `MovePage*` is implemented on `SlideSorterViewShell` —
+    /// the SAME structural, view-shell-entangled class as those three commands, arguably more so —
+    /// so this starts from the already-proven-safe shape rather than re-discovering the hang live.
+    /// **Sheets' own disclosed residual carries over unchanged, not closed here either**: primary-
+    /// view `setPart` can move an ADOPTED document's own visible primary-view slide selection —
+    /// disclosed on all three structural verbs' own tool description as of fix round 1 (review F-8),
+    /// not `reorder` alone. See that function's own header and task-4-report.md's own accounting.
+    private func slidesReorderOnDedicatedThread(docId: String, doc: OpenDocument, from: Int, to: Int,
+                                                 partCount: Int) throws -> Int {
+        if from == to { return partCount } // no-op — nothing to move, nothing to verify
+
+        var beforeHashes: [Int?] = []
+        beforeHashes.reserveCapacity(partCount)
+        for part in 0..<partCount {
+            beforeHashes.append(partHashOnDedicatedThread(doc, part: part))
+        }
+        // **fix round 2, re-review New-1 (Important) — the `nil == nil` false-pass, closed.**
+        // `verified()` below compares `hashesNow() == expectedHashes`. If `getPartInfo` yields `nil`
+        // for every part, a PERMUTATION of `[nil, nil, nil]` is still `[nil, nil, nil]`, so
+        // `verified()` returns true on attempt 1 with no move needing to have happened — `reorder`
+        // reports success unconditionally and the retry loop is never entered. That is precisely the
+        // silently-no-op-verb-reporting-success outcome spec ruling 3 called unacceptable, and unlike
+        // its two siblings `reorder` has no independent guard to catch it: `delete_slide` is saved by
+        // its `newPartCount == partCount - 1` count check and `add_slide` by `newSlideIsGenuinelyNew()`,
+        // but `reorder` never changes the part count at all.
+        // **Not a defect this fix round introduced** — the previous `titleAt(to) == movingTitle` had
+        // the identical hole at HIGHER reachability (a Tab-cycle `nil` is the observed flake class; a
+        // `getPartInfo` `nil` needs a page-lookup failure). It is closed here rather than inherited.
+        // Refuses BEFORE `destroyAgentViewIfAnyOnDedicatedThread`/`setPart`/any dispatch, matching
+        // this file's own refuse-before-mutating posture (`slidesManagePageOnDedicatedThread`'s
+        // guards) — so the error can honestly say nothing was changed.
+        //
+        // **RED PROOF for the hash mechanism itself (fix round 2, folded into New-1)** — the
+        // re-review's point was sharp: "the live suite passes, which shows `getPartInfo` works in
+        // this build; it does not show the check can FAIL." Three temporary probes, run on
+        // `testLiveReorderMultiStepMovesAcrossTwoPositionsProvenBySaveAndIndependentReopen`,
+        // each reverted (tree confirmed byte-identical, `git diff` empty):
+        //
+        //   R1  hash forced nil, THIS GUARD REMOVED, move dispatch skipped
+        //       -> 5 failures, and `XCTAssertTrue(reorderResult.ok)` PASSED — `reorder` reported
+        //          SUCCESS on a document that never moved. New-1's false-pass, reproduced live.
+        //   R2  hash forced nil, this guard PRESENT
+        //       -> 6 failures, `ok: false`, "could not read per-slide identity … so reorder could
+        //          not be verified — nothing was changed." The guard converts R1's silent success
+        //          into an honest refusal.
+        //   R3  REAL hash, this guard present, move dispatch skipped
+        //       -> 6 failures, `ok: false`, "wrote to reorder(1 -> 3) … but could not confirm".
+        //          The hash comparison genuinely DETECTS a no-op move — it is load-bearing, not
+        //          vacuously passing.
+        //
+        // The failure COUNT is itself the discriminator, not incidental: R1 has one fewer failure
+        // than R2/R3 precisely because the `reorderResult.ok` assertion passed in R1 and failed in
+        // the other two. That is the difference between "silently reported success" and "correctly
+        // refused", visible in the count alone.
+        guard !beforeHashes.contains(where: { $0 == nil }) else {
+            throw SaveError.slideIdentityUnavailable(docId: docId, verb: "reorder")
+        }
+
+        var expectedHashes = beforeHashes
+        let movingHash = expectedHashes.remove(at: from)
+        expectedHashes.insert(movingHash, at: to)
+
+        destroyAgentViewIfAnyOnDedicatedThread(doc, docId: docId)
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(from))
+        pumpDedicatedThreadForPendingDispatch(doc, viewId: doc.viewId, part: from)
+
+        let steps = to - from
+        let command = steps > 0 ? ".uno:MovePageDown" : ".uno:MovePageUp"
+        for _ in 0..<abs(steps) {
+            postUnoCommandOnDedicatedThread(doc, command, [:], notifyWhenFinished: true)
+            pumpDedicatedThreadForPendingDispatch(doc, viewId: doc.viewId, part: from)
+        }
+
+        func hashesNow() -> [Int?] {
+            let newPartCount = Int(doc.handle.pointee.pClass.pointee.getParts?(doc.handle) ?? 0)
+            guard newPartCount == partCount else { return [] }
+            return (0..<newPartCount).map { partHashOnDedicatedThread(doc, part: $0) }
+        }
+        func verified() -> Bool { hashesNow() == expectedHashes }
+
+        var ok = verified()
+        var attempts = 1
+        while !ok, attempts < Self.slidesManageVerificationAttempts {
+            pumpDedicatedThreadForPendingDispatch(doc, viewId: doc.viewId, part: to)
+            ok = verified()
+            attempts += 1
+        }
+        if attempts > 1 {
+            FileHandle.standardError.write(Data(
+                "[LOKBridge slides] reorder needed \(attempts) attempt(s) before verification succeeded (or the budget was exhausted)\n".utf8))
+        }
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        guard ok else {
+            throw SaveError.writeVerificationFailed(docId: docId, address: "reorder(\(from + 1) -> \(to + 1))")
+        }
+        return partCount
+    }
+
+    /// office-agent-tools T6 — `delete_slide`'s real mechanism. `.uno:DeletePage` (research's own
+    /// slot table, `sd/sdi/sdraw.sdi:661`) takes NO args at all — selection-based, exactly like
+    /// `MovePage*` — so this rides `slidesReorderOnDedicatedThread`'s own just-proven shape wholesale
+    /// rather than re-deriving it: same primary-view dispatch (`destroyAgentViewIfAnyOnDedicatedThread`
+    /// first, NOT the agent-view isolation the read path uses — see that function's own header for
+    /// the full two-round sheets precedent this borrows), same `notifyWhenFinished: true` (controller
+    /// instruction #1), same disclosed residual (primary-view `setPart` can move an adopted
+    /// document's own visible slide selection — disclosed on all three structural verbs as of fix
+    /// round 1, review F-8).
+    ///
+    /// **Verification is NOT just count-minus-one, and — fix round 1, review F-5/R10's own note —
+    /// not content-based either anymore.** Research's own finding: `DeleteActualPage()`
+    /// (`drviews4.cxx:99-142`) swallows its own failures — a dispatch that silently no-ops would still
+    /// need to be caught, and a raw count check cannot distinguish "the RIGHT slide was deleted" from
+    /// "some OTHER slide was deleted and the count still dropped by one." The original title-based
+    /// survivor check shared reorder's own F-5 exposure: two surviving slides with equal (including
+    /// empty) titles could false-match a wrong-slide deletion, and title-reading's own Tab-cycling
+    /// carried reorder's own F-6 baseline-flake risk. Same fix, same reasoning as
+    /// `slidesReorderOnDedicatedThread`'s own header — see that function's `partHashOnDedicatedThread`
+    /// doc comment for the full account: this captures every SURVIVING slide's own HASH before
+    /// dispatch (never the deleted slide's — that one is expected to disappear), then asserts the
+    /// exact same survivor hash sequence, in the same order, comes back after.
+    private func slidesDeleteOnDedicatedThread(docId: String, doc: OpenDocument, slide: Int, partCount: Int) throws -> Int {
+        var survivorHashes: [Int?] = []
+        survivorHashes.reserveCapacity(partCount - 1)
+        for part in 0..<partCount where part != slide {
+            survivorHashes.append(partHashOnDedicatedThread(doc, part: part))
+        }
+
+        // fix round 2, re-review New-1 — **for symmetry, not because this verb is exposed the way
+        // `reorder` is.** `delete_slide` already has an independent guard `reorder` lacks: the
+        // `newPartCount == partCount - 1` length check in `hashesNow()` below means an all-`nil`
+        // survivor list still has to come back at the RIGHT LENGTH, so a total no-op cannot pass.
+        // What an all-`nil` set WOULD still hide is a wrong-slide deletion (right count, wrong
+        // victim) — the exact discrimination the hash switch was made to gain. Refusing before any
+        // dispatch keeps the two structural verbs' contracts identical rather than leaving a reader
+        // to work out which one is guarded and why.
+        guard !survivorHashes.contains(where: { $0 == nil }) else {
+            throw SaveError.slideIdentityUnavailable(docId: docId, verb: "delete_slide")
+        }
+
+        destroyAgentViewIfAnyOnDedicatedThread(doc, docId: docId)
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(slide))
+        pumpDedicatedThreadForPendingDispatch(doc, viewId: doc.viewId, part: slide)
+        postUnoCommandOnDedicatedThread(doc, ".uno:DeletePage", [:], notifyWhenFinished: true)
+        pumpDedicatedThreadForPendingDispatch(doc, viewId: doc.viewId, part: max(0, slide - 1))
+
+        func hashesNow() -> [Int?] {
+            let newPartCount = Int(doc.handle.pointee.pClass.pointee.getParts?(doc.handle) ?? 0)
+            guard newPartCount == partCount - 1 else { return [] } // sentinel length mismatch — `verified()` below never mistakes this for a real survivor list
+            return (0..<newPartCount).map { partHashOnDedicatedThread(doc, part: $0) }
+        }
+        func verified() -> Bool { hashesNow() == survivorHashes }
+
+        var ok = verified()
+        var attempts = 1
+        while !ok, attempts < Self.slidesManageVerificationAttempts {
+            pumpDedicatedThreadForPendingDispatch(doc, viewId: doc.viewId, part: max(0, slide - 1))
+            ok = verified()
+            attempts += 1
+        }
+        if attempts > 1 {
+            FileHandle.standardError.write(Data(
+                "[LOKBridge slides] delete needed \(attempts) attempt(s) before verification succeeded (or the budget was exhausted)\n".utf8))
+        }
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        guard ok else {
+            throw SaveError.writeVerificationFailed(docId: docId, address: "delete_slide(\(slide + 1))")
+        }
+        return partCount - 1
+    }
+
+    /// office-agent-tools T6 — `add_slide`'s real mechanism. Coordinator instruction: `setPart`-then-
+    /// relative `InsertPage`, NEVER `InsertPos` (`SfxUInt16Item`, research's own semantics — 0-based?
+    /// 1-based? relative-to-current? — left explicitly UNRESOLVED, "flagged for live-testing rather
+    /// than guessed" and then never guessed). This dispatches `.uno:InsertPage` completely BARE
+    /// (`[:]`, no args at all — `PageName`/`WhatLayout`/`IsPageBack`/`IsPageObj`/`InsertPos` are ALL
+    /// optional per the slot table) after `setPart`ing the PREDECESSOR position, relying on research's
+    /// own citation that insert acts "relative to `DrawViewShell::GetActualPage()`" — **live-confirmed
+    /// by this function's own test to land immediately AFTER the current part**, not before, not
+    /// always-at-the-end (`OfficeSlidesCommandTests.testLiveAddSlideInsertsAtEveryRequestedPosition`).
+    /// Position 0 (new slide becomes the very first) has no real predecessor to `setPart` onto, so
+    /// this inserts after position 0 as usual and then dispatches `.uno:MovePageFirst` as a correction
+    /// step — relying on a SECOND live-confirmed fact, that a freshly inserted page becomes the
+    /// current/selected part automatically, so `MovePageFirst`'s own selection-based targeting needs
+    /// no extra `setPart` to reach it.
+    ///
+    /// Same primary-view dispatch as `reorder`/`delete_slide` (`destroyAgentViewIfAnyOnDedicatedThread`
+    /// first — see `slidesReorderOnDedicatedThread`'s own header for the full sheets precedent this
+    /// still rides), same `notifyWhenFinished: true`, same disclosed residual (all three structural
+    /// verbs as of fix round 1, review F-8).
+    ///
+    /// **Layout assignment: dispatched, live-drilled, correction on two claims — fix round 1, review
+    /// F-4.** Ruling 1 (`slides-lok-research.md` §3) means LOK exposes NO layout read-back API — this
+    /// IN-PROCESS function cannot self-verify `.uno:AssignLayout` the way it self-verifies position,
+    /// and that much was always true. What was NOT true, and has been corrected: this function's own
+    /// prior header claimed "no re-read even in principle," overstating ruling 1 into a place it does
+    /// not reach — a SAVED-BYTES seal (this task's own established `content.xml` filesystem-seal
+    /// technique, not a LOK API) DOES observe layout's effect, live-confirmed by
+    /// `testLiveAddSlideWithLayoutBlankStripsPlaceholdersProvenBySavedBytes`: `layout:
+    /// "blank"` on a fresh slide produces a `read`ing of `title: nil` ("no title placeholder" — the
+    /// placeholder was never created, distinct from an EMPTY one) where every other layout's default
+    /// new-slide shape produces `title: ""` (placeholder present, empty) — the nil/empty distinction
+    /// this bridge documents elsewhere as load-bearing, now doing double duty as the layout
+    /// discriminator. The prior header also claimed this "type":"long" tag had been observed live
+    /// with "no failure mode... absence of an error/dialog/crash" — false; no dispatch had run at
+    /// all before this fix round's own drill. It has now actually run, and the claim is true.
+    /// `WhatPage`/`WhatLayout` (`SfxUInt32Item` per the slot table, `sd/sdi/sdraw.sdi:2137-2138`) use
+    /// JSON type `"long"` — an educated guess (parallel to `sheets`' own `Index`, a `SfxUInt16Item`,
+    /// resolved live to `"unsigned short"`) that the live drill now actually confirms rather than
+    /// merely licenses: `blank` demonstrably strips the new slide's own placeholder frames, exactly
+    /// `SdPage::SetAutoLayout`'s documented behavior for empty placeholders (research §4).
+    ///
+    /// **Position verification, fix round 1 (review F-5/F-6) — hash-based, not content-based, for the
+    /// same reasons `slidesReorderOnDedicatedThread`'s own header explains in full** (that function's
+    /// `partHashOnDedicatedThread` doc comment is the canonical account, not repeated here): captures
+    /// every EXISTING slide's own hash before dispatch, then — skipping exactly the new slide's own
+    /// expected resting index — asserts the same survivor hash sequence, in order, comes back after.
+    /// The mirror image of `slidesDeleteOnDedicatedThread`'s own "skip the deleted index" check.
+    /// **One check `add_slide` gets that `delete_slide`/`reorder` structurally cannot**: the NEW
+    /// slide's own hash must be ABSENT from the before-set entirely — proving it is a genuinely new
+    /// object LOK just created, not the same object duplicated or an existing one silently moved into
+    /// place, a distinction content-based verification could never have drawn (a duplicated object
+    /// could carry duplicated, matching content) but object identity draws for free.
+    private func slidesAddOnDedicatedThread(docId: String, doc: OpenDocument, at: Int?,
+                                             layout: OfficeSlidesLayoutPreset?, partCount: Int) throws -> Int {
+        var beforeHashes: [Int?] = []
+        beforeHashes.reserveCapacity(partCount)
+        for part in 0..<partCount {
+            beforeHashes.append(partHashOnDedicatedThread(doc, part: part))
+        }
+
+        // Omitted `at` -> append at the end (one past the last valid index, `partCount`). Clamped
+        // defensively (`OfficeCommandConsumer`'s own `at` decode is the real range guard; this is
+        // belt-and-braces against calling this function directly with something out of range).
+        let targetIndex = max(0, min(at ?? partCount, partCount))
+        let predecessorIndex = max(0, targetIndex == 0 ? 0 : targetIndex - 1)
+
+        destroyAgentViewIfAnyOnDedicatedThread(doc, docId: docId)
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(predecessorIndex))
+        pumpDedicatedThreadForPendingDispatch(doc, viewId: doc.viewId, part: predecessorIndex)
+        postUnoCommandOnDedicatedThread(doc, ".uno:InsertPage", [:], notifyWhenFinished: true)
+        pumpDedicatedThreadForPendingDispatch(doc, viewId: doc.viewId, part: targetIndex)
+
+        if targetIndex == 0 {
+            postUnoCommandOnDedicatedThread(doc, ".uno:MovePageFirst", [:], notifyWhenFinished: true)
+            pumpDedicatedThreadForPendingDispatch(doc, viewId: doc.viewId, part: 0)
+        }
+
+        if let layout {
+            let args: [String: Any] = [
+                "WhatPage": ["type": "long", "value": targetIndex],
+                "WhatLayout": ["type": "long", "value": layout.autoLayoutValue],
+            ]
+            postUnoCommandOnDedicatedThread(doc, ".uno:AssignLayout", args, notifyWhenFinished: true)
+            pumpDedicatedThreadForPendingDispatch(doc, viewId: doc.viewId, part: targetIndex)
+        }
+
+        func survivorsNow() -> [Int?] {
+            let newPartCount = Int(doc.handle.pointee.pClass.pointee.getParts?(doc.handle) ?? 0)
+            guard newPartCount == partCount + 1 else { return [] }
+            var hashes: [Int?] = []
+            hashes.reserveCapacity(partCount)
+            for part in 0..<newPartCount where part != targetIndex {
+                hashes.append(partHashOnDedicatedThread(doc, part: part))
+            }
+            return hashes
+        }
+        func newSlideIsGenuinelyNew() -> Bool {
+            guard let newHash = partHashOnDedicatedThread(doc, part: targetIndex) else { return false }
+            return !beforeHashes.contains(where: { $0 == newHash })
+        }
+        func verified() -> Bool { survivorsNow() == beforeHashes && newSlideIsGenuinelyNew() }
+
+        var ok = verified()
+        var attempts = 1
+        while !ok, attempts < Self.slidesManageVerificationAttempts {
+            pumpDedicatedThreadForPendingDispatch(doc, viewId: doc.viewId, part: targetIndex)
+            ok = verified()
+            attempts += 1
+        }
+        if attempts > 1 {
+            FileHandle.standardError.write(Data(
+                "[LOKBridge slides] add needed \(attempts) attempt(s) before verification succeeded (or the budget was exhausted)\n".utf8))
+        }
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        guard ok else {
+            throw SaveError.writeVerificationFailed(docId: docId, address: "add_slide(at \(targetIndex + 1))")
+        }
+        return partCount + 1
+    }
+
+
+    // MARK: - office-agent-tools T7: docs — Writer's own vocabulary
+    //
+    // Every mechanism below is cited to `docs-lok-research.md` (LibreOffice
+    // `11482c8f71bc76ed6260bc03b1576a52a788ab4f`) and was NOT re-derived. Four facts govern all of
+    // them:
+    //
+    //  1. **`setPart` is NEVER called for a text document, at all.** Not gated-and-skipped: absent.
+    //     `SwXTextDocument::setPart` is `GotoPage(nPart + 1)` — a CARET MOVE
+    //     (`sw/source/uibase/uno/unotxdoc.cxx:3410-3419`), and an ungated one is the proven cause of
+    //     Stage B's reversed-text bug (fixed in `27aa1941`; `OpenDocument.kind`'s own header carries
+    //     the full account). The type gate already exists at every part-scoped call site in this file
+    //     and this task adds no second one — `docs` code simply has no `setPart` to gate.
+    //  2. **The caret and selection ARE per-view** (research §5.2, an 8-hop chain from
+    //     `SfxLokHelper::setView` to `SwView::Activate` -> `SwDocShell::SetView`), so every verb runs
+    //     on the AGENT view (`ensureAgentViewOnDedicatedThread`) and the user's own caret is never
+    //     moved. That half is confirmed in practice — no drill has ever produced misplaced text.
+    //
+    //     ⚠️ **The undo half of the same ruling is FALSE, and this comment used to assert it.** The
+    //     STORAGE is shared (`sw::UndoManager` hangs off `SwDoc`, not `SwView`), but LOK gates undo
+    //     per-view on top of that: `sw::UndoManager::GetLastUndoInfo`
+    //     (`sw/source/core/undo/docundo.cxx:456-472`) REFUSES, in LOK mode outside repair mode, any
+    //     undo whose top action's `GetViewShellId()` differs from the asking view's, and its only
+    //     escape (`IsViewUndoActionIndependent`, `:367-430`) requires BOTH that action and the asking
+    //     view's own earlier action to be `SwUndoId::TYPING` — which `PASTE_CLIPBOARD` never is.
+    //     ⟹ **an agent edit does NOT land in the user's usable ⌘Z stack: their ⌘Z is refused and
+    //     silently does nothing.** Live-pinned by `OfficeDocsCommandTests
+    //     .testLiveAHumanUndoOnTheirOwnViewCannotTakeBackAnAgentEditAndSilentlyDoesNothing`, and
+    //     `docs.ts`'s tool description says exactly that ("there is NO WAY TO UNDO IT … their ⌘Z will
+    //     simply do nothing") — NOT what this comment previously claimed it said.
+    //  3. **Every dispatch passes `notifyWhenFinished: true`** (research L4) — it is what makes the
+    //     dispatch `SfxCallMode::SYNCHRON` and it is the only reason `replace`'s boolean exists at all.
+    //     It is still not proof the write landed: every verb here VERIFIES BY RE-READ.
+    //  4. **`read` deep-copies the whole document** into a temporary `SwDoc` before serializing
+    //     (`SwTransferable::GetData`, `sw/source/uibase/dochdl/swdtflvr.cxx:488-540`), so its cost
+    //     scales with DOCUMENT size, not with the text returned. Every write verb here pays for two
+    //     of those reads (before, to compute the expected result; after, to verify it). That is a
+    //     deliberate trade: the alternative is trusting a dispatch this bridge has been burned by
+    //     three times for silently no-op'ing.
+
+    /// The one text-read door: `.uno:SelectAll` + `getTextSelection("text/plain;charset=utf-8")` on
+    /// the AGENT view (research §3.1/§3.7 — `SID_SELECTALL` takes no arguments, has no `Asynchron;`
+    /// in its slot, opens no dialog, and cannot null-deref: "the safest command in this report").
+    /// UTF-8, no BOM, paragraphs separated by `\n` on macOS (`SwAsciiOptions`' `GetSystemLineEnd()`,
+    /// research §3.4) — which is why the paragraph count `docsInfo` reports is literally
+    /// `text.split("\n").count` and therefore self-consistent with what `read` returns, rather than a
+    /// second, possibly-disagreeing measurement (research §4.2: Writer exposes no paragraph query at
+    /// all).
+    ///
+    /// **`resetSelection` afterward is defence in depth — and it is NOT load-bearing, measured, not
+    /// assumed.** The hazard is real in shape: `doc_paste` REPLACES the current selection, and this
+    /// function leaves the WHOLE DOCUMENT selected on the agent view, so a `read` followed by an
+    /// `insert` (exactly the sequence every write verb below performs internally) could in principle
+    /// paste over the entire body — a failure that would also PASS a naive `hasPrefix`/`hasSuffix`
+    /// placement check, because the document afterwards *is* the inserted text.
+    ///
+    /// **But it does not happen, and the honest reason is a different mechanism**: deleting BOTH
+    /// `resetSelection` calls (here and in `docsInsertOnDedicatedThread`) and re-running
+    /// `testLiveDocsReadThenInsertDoesNotPasteOverTheWholeDocument` live still PASSES — because
+    /// `.uno:GoToStartOfDoc`/`.uno:GoToEndOfDoc` resolve to `SwWrtShell::StartOfSection()`/
+    /// `EndOfSection()`, which move the cursor WITHOUT extending, collapsing the selection before
+    /// `paste` ever runs. Kept anyway (it costs one C call and it makes the invariant local rather
+    /// than a property of two other commands), but recorded as what it is: this bridge's protection
+    /// against the paste-over-everything class is the positioning dispatch, and the full
+    /// expected-text equality every write verb asserts is what would CATCH it if that ever changed.
+    ///
+    /// A `nil` from `getTextSelection` is NOT an error — `SwXTextDocument::getSelection()` always
+    /// constructs a `SwTransferable` for a live `SwWrtShell`, so "nothing selected" surfaces as `""`
+    /// (research §3.1). An empty document legitimately reads `""`.
+    private func docsReadTextOnDedicatedThread(_ doc: OpenDocument, docId: String) throws -> String {
+        let agentViewId = try ensureAgentViewOnDedicatedThread(docId: docId)
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
+        // NO setPart — see this section's own header, fact 1.
+        postUnoCommandOnDedicatedThread(doc, ".uno:SelectAll", [:], notifyWhenFinished: true)
+
+        // **Retry-on-empty, with a bounded pump budget.** `.uno:SelectAll` is dispatched through
+        // `postUnoCommand`, whose effect this bridge has been burned by three times for landing on a
+        // deferred internal queue rather than synchronously — the identical shape
+        // `selectionTextOnDedicatedThread` (`.uno:GoToCell`) and
+        // `selectSlidePlaceholderOnDedicatedThread` (Tab-driven selection) both already pay for.
+        //
+        // **What prompted it, and what is and is NOT proven — corrected after review, because the
+        // first version of this comment told a mechanism story the instrument below cannot support.**
+        //  - PROMPT: one full unscoped suite run had the single-unconditional-pump version return
+        //    `""` for a document whose saved `content.xml` assertions, in that same drill, passed.
+        //    So the file was fine and the READ was empty. That observation is real.
+        //  - NOT PROVEN: that this loop fixes it. The `""` has never recurred, and — see the
+        //    evidence line's own note below — no run has ever needed more than ONE pump, so the
+        //    extra headroom this loop adds over the old code has never once been exercised. Whether
+        //    2-5 further pumps would have rescued that read is **unobserved**.
+        //  - WITHDRAWN: the original "load-dependent" story. The measured pattern is deterministic,
+        //    not load-shaped (again, see below).
+        //  - OPEN, and named as a residual rather than quietly closed by this loop: the original
+        //    `""` is still unexplained.
+        //
+        // Kept regardless, because it strictly dominates the old code — the old one pumped exactly
+        // once and read once; this reads first (which the measured pattern shows is often enough on
+        // its own) and then pumps up to five times — at the cost of one extra `getTextSelection` on
+        // the common path.
+        //
+        // **Not self-restoring, deliberately**: `""` remains reachable — a genuinely empty document
+        // simply costs the whole budget in cheap 64x64 tile paints and still answers `""`. This
+        // stops at the FIRST non-empty read rather than looping until some assertion passes.
+        //
+        // Why an empty read matters at all: every write verb reads twice (before, to compute the
+        // expected result; after, to verify it). A spurious `""` on either read makes the two
+        // disagree, so the verb REFUSES with "the outcome is UNKNOWN" — loud, not silent, but a
+        // false alarm on a write that actually succeeded is its own harm.
+        var text = readSelectionTextOnDedicatedThread(doc)
+        var pumps = 0
+        while text.isEmpty, pumps < Self.docsSelectAllReadMaxPumps {
+            pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: 0)
+            text = readSelectionTextOnDedicatedThread(doc)
+            pumps += 1
+        }
+        if pumps > 0 {
+            // Permanent evidence line — and it counts **PUMPS**, deliberately, not "attempts". The
+            // first version counted attempts, which made every observed line read `needed 2
+            // attempt(s)`; a reviewer correctly pointed out that this is ONE pump, i.e. exactly what
+            // the old unconditional-pump code did, so the line could not distinguish this loop from
+            // the code it replaced. Counting pumps makes the comparison direct: **`pumps=1` is
+            // old-code-equivalent; only `pumps >= 2` is this loop doing something the old code could
+            // not.**
+            //
+            // Measured, counted rather than inferred, on a clean 15-drill run (`pkill`ed first, 0
+            // leaked helpers): those drills perform **29** whole-document reads and produce **14**
+            // lines — so 15 reads needed no pump at all, 14 needed exactly one, and **none needed
+            // two or more**. ⟹ this loop has never once done anything the old unconditional-pump
+            // code could not, which is why its efficacy against the original `""` is unobserved.
+            //
+            // (An earlier version of this note claimed the pattern was "first read of a document
+            // needs 0, every later read needs exactly 1". That is ALMOST right and therefore worth
+            // striking: `testLiveDocsReplaceIsCaseSensitiveAndAWrongCaseSearchChangesNothing`
+            // performs 4 reads and logs only 2, so at least one non-first read also needed no pump.
+            // No mechanism is claimed here beyond the counts above.)
+            //
+            // `empty=` still distinguishes a real read from a retried-and-still-empty one.
+            FileHandle.standardError.write(Data(
+                "[LOKBridge docs] SelectAll read needed \(pumps) pump(s), empty=\(text.isEmpty)\n".utf8))
+        }
+        doc.handle.pointee.pClass.pointee.resetSelection?(doc.handle)
+        return text
+    }
+
+    /// `docsReadTextOnDedicatedThread`'s own pump budget — the number of extra pumps AFTER the first
+    /// unpumped read, so the worst case is 5 pumps and 6 `getTextSelection` calls. Sized like
+    /// `slidePlaceholderPositionAttempts`/`docsUnoResultAttempts` rather than independently derived;
+    /// this mechanism has not earned its own number, and no observed run has ever needed more than
+    /// ONE pump, so the number is headroom rather than a measured requirement. Each pump is one cheap
+    /// 64x64 tile paint, so a genuinely empty document pays five of those and nothing else.
+    private static let docsSelectAllReadMaxPumps = 5
+
+    /// Shared entry guard for every `docs` verb: the document must be open AND must be a Writer text
+    /// document. `.notTextDocument` mirrors `.notSpreadsheet`/`.notPresentation` — composed from this
+    /// bridge's own words, never LOK-thrown text.
+    private func requireTextDocumentOnDedicatedThread(_ docId: String) throws -> OpenDocument {
+        guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        guard doc.kind == .text else { throw SaveError.notTextDocument(docId: docId, kind: doc.kind) }
+        return doc
+    }
+
+    private func docsReadOnDedicatedThread(docId: String) throws -> String {
+        let doc = try requireTextDocumentOnDedicatedThread(docId)
+        return try docsReadTextOnDedicatedThread(doc, docId: docId)
+    }
+
+    /// `pages` is `getParts()` — for Writer that IS the page count
+    /// (`SwXTextDocument::getParts` is `pWrtShell->GetPageCnt()`, `unotxdoc.cxx:3421-3430`), O(1) and
+    /// free (`SwRootFrame::GetPageNum()` returns the cached `mnPhyPageNums` counter; no `CalcLayout`).
+    /// **Disclosed honestly rather than presented as exact**: that counter counts the page frames
+    /// CURRENTLY CONSTRUCTED, and Writer paginates lazily, so a session that has painted no tiles can
+    /// under-report (research §4.1, LT-7). `docsReadTextOnDedicatedThread` runs FIRST here and its
+    /// pump performs a real `paintPartTile`, which is the closest thing to a layout nudge this bridge
+    /// has; the `docs.ts` description still says the count can lag on a document nothing has rendered.
+    ///
+    /// `paragraphs`/`characters` are derived from the SAME text `read` returns — so `info` is NOT
+    /// cheaper than `read` for Writer (unlike `sheets info`, which has `getDataArea`). That cost is
+    /// accepted deliberately: a `docs info` reporting only a page count tells a model almost nothing,
+    /// and the read is the cost the very next call was going to pay anyway.
+    private func docsInfoOnDedicatedThread(docId: String) throws -> (pages: Int, paragraphs: Int, characters: Int) {
+        let doc = try requireTextDocumentOnDedicatedThread(docId)
+        let text = try docsReadTextOnDedicatedThread(doc, docId: docId)
+        let pages = Int(doc.handle.pointee.pClass.pointee.getParts?(doc.handle) ?? 0)
+        return (pages: pages, paragraphs: Self.docsParagraphCount(text), characters: text.count)
+    }
+
+    /// Paragraph count == `\n`-separated line count, never a count that drops empty lines: an empty
+    /// paragraph in the middle of a document is a real paragraph, and `read`'s own text shows it as
+    /// an empty line. `""` (a genuinely empty document) is ONE paragraph, matching what Writer shows.
+    /// **Residual, disclosed not closed** (research §3.4, LT-5): whether a TABLE or a text frame in
+    /// the body contributes extra `\n`s through the ASCII writer was not traced at the pin, so on a
+    /// table-bearing document this count is "the paragraph count of the text `read` returns," which
+    /// is the property that actually matters (one document, not two disagreeing measurements) — it is
+    /// not independently claimed to equal Writer's own internal node count.
+    static func docsParagraphCount(_ text: String) -> Int {
+        text.split(separator: "\n", omittingEmptySubsequences: false).count
+    }
+
+    /// Non-overlapping, left-to-right, literal, case-SENSITIVE occurrence count — the count the
+    /// engine's `REPLACE_ALL` will actually make, by construction of the payload
+    /// `docsReplaceOnDedicatedThread` sends (`AlgorithmType2: ABSOLUTE`, `TransliterateFlags: 0`,
+    /// `SearchFlags: 0`, `Pattern/Content/AsianOptions/Backward: false`). Left-to-right and
+    /// non-overlapping matter: `find:"aa"` in `"aaaa"` is TWO replacements, not three, and a naive
+    /// overlapping count would disagree with the engine and trip ruling 1's own tripwire on a correct
+    /// replacement.
+    ///
+    /// `.literal` is Foundation's exact code-unit compare — no case folding, no canonical
+    /// equivalence, no diacritic insensitivity — which is the closest available match to the engine's
+    /// `SearchAlgorithms2::ABSOLUTE` with `TransliterationFlags::NONE`.
+    static func docsCountOccurrences(of find: String, in text: String) -> Int {
+        guard !find.isEmpty else { return 0 }
+        var count = 0
+        var searchStart = text.startIndex
+        while searchStart < text.endIndex,
+              let found = text.range(of: find, options: [.literal], range: searchStart..<text.endIndex) {
+            count += 1
+            searchStart = found.upperBound
+        }
+        return count
+    }
+
+    /// The `SearchItem` payload, built TOTALLY — never partially, never relying on a default.
+    ///
+    /// **This is the L1/L2 landmine, and the reason every member below is present:** a missing or
+    /// unconvertible `SearchItem` reaches `SvxSearchCmd eCommand = s_pSrchItem->GetCommand();`
+    /// (`sw/source/uibase/uiview/viewsrch.cxx:266`) guarded only by an `OSL_ENSURE` that compiles out
+    /// — a RELEASE-BUILD null dereference on a cold helper. Worse, `SwView::s_pSrchItem`
+    /// (`sw/inc/view.hxx:167`) is a PROCESS-GLOBAL static shared by every Writer view and every
+    /// Writer document in this helper, so on a WARM helper the same bug silently replaces using the
+    /// PREVIOUS search's strings — possibly another document's. And the degradation is total, not
+    /// per-member: if any single member's `PutValue` returns false the WHOLE `SvxSearchItem` is
+    /// dropped from the item set (`sfx2/source/appl/appuno.cxx:360-365`), and an unrecognised JSON
+    /// `"type"` tag appends a VOID Any rather than being skipped
+    /// (`comphelper/source/misc/sequenceashashmap.cxx:385-387`), which then fails `PutValue`. One
+    /// mistyped tag here IS the null deref.
+    ///
+    /// **Two members the research's own §2.7 recommended shape OMITS, added after reading the
+    /// constructor:** `SvxSearchItem::SvxSearchItem` (`svl/source/items/srchitem.cxx:93-107`)
+    /// defaults `m_aSearchOpt` to **`TransliterationFlags::IGNORE_CASE`** and then lets
+    /// `SvtSearchOptions` override the algorithm (wildcard/regex/similarity) from user config. Left
+    /// unset, the engine would match case-INSENSITIVELY (and possibly as a REGEX) while this
+    /// bridge's own count is literal and case-sensitive — the two would disagree on a perfectly
+    /// ordinary `find`, and ruling 1's tripwire would fire AFTER the document was already mutated.
+    ///
+    /// Types are transcribed from the members' own `PutValue` arms, not guessed:
+    /// `AlgorithmType2` is `return (rVal >>= m_aSearchOpt.AlgorithmType2)` on a `sal_Int16`
+    /// (`srchitem.cxx:605-606`) so its tag MUST be `"short"` (`"long"` yields `sal_Int32` and the
+    /// strict extraction fails); `SearchFlags` is a strict `>>=` on `sal_Int32` so `"long"`;
+    /// `Command` and `TransliterateFlags` go through `ExtractNumericAny` so `"long"` is accepted.
+    /// `SearchAlgorithms2::ABSOLUTE == 1` — read from
+    /// `offapi/com/sun/star/util/SearchAlgorithms2.idl:20` at the pinned SHA.
+    ///
+    /// `Locale` is deliberately NOT sent: `FUNC_Search` overwrites it unconditionally
+    /// (`viewsrch.cxx:861`). `SearchItem.Selection` is not a settable member at all (research §2.6),
+    /// which is one reason v1 offers no scoped replace.
+    private static func docsSearchArguments(find: String, replaceWith: String) -> [String: Any] {
+        [
+            "SearchItem.SearchString": ["type": "string", "value": find],
+            "SearchItem.ReplaceString": ["type": "string", "value": replaceWith],
+            // SvxSearchCmd: FIND = 0, FIND_ALL = 1, REPLACE = 2, REPLACE_ALL = 3
+            // (`include/svl/srchitem.hxx:36-42`). v1 only ever sends REPLACE_ALL — see
+            // `docsReplaceOnDedicatedThread`'s own header for why REPLACE (2) is NOT "replace the
+            // first occurrence".
+            "SearchItem.Command": ["type": "long", "value": 3],
+            "SearchItem.Backward": ["type": "boolean", "value": false],
+            "SearchItem.Pattern": ["type": "boolean", "value": false],
+            "SearchItem.Content": ["type": "boolean", "value": false],
+            "SearchItem.AsianOptions": ["type": "boolean", "value": false],
+            "SearchItem.SearchFlags": ["type": "long", "value": 0],
+            "SearchItem.TransliterateFlags": ["type": "long", "value": 0],
+            "SearchItem.AlgorithmType2": ["type": "short", "value": 1],
+            "Quiet": ["type": "boolean", "value": true],
+        ]
+    }
+
+    /// `.uno:ExecuteSearch` with a fully-specified `REPLACE_ALL` `SearchItem`, then THREE independent
+    /// checks, because no single one of them is sufficient:
+    ///
+    ///  1. **Our own count** (`docsCountOccurrences`) over the text read immediately before — the
+    ///     ONLY count that exists, since the engine's `nFound` is collapsed to a bool at
+    ///     `viewsrch.cxx:395` and `unoAnyToJson` cannot serialize even that bool's value (research L3).
+    ///  2. **The engine's boolean**, from `LOK_CALLBACK_UNO_COMMAND_RESULT` — ruling 1's own
+    ///     cross-check, wired but ⚠️ **currently UNREACHABLE on this bridge, measured** (see
+    ///     `handleCallback`'s `.unoCommandResult` arm for the full account and the raw-callback
+    ///     trace: `setView`'s `MoveShellToFirstShell` puts the agent view at the head of the very
+    ///     list `getViewId` scans, and the agent view has no `registerCallback`, so LOK never
+    ///     constructs the listener). When it does arrive, `success: true` ⟺ at least one
+    ///     replacement and a disagreement with (1) throws `.replaceCountDisagreement`. When it does
+    ///     NOT — today, always — that is "no cross-check available", never manufactured into
+    ///     agreement OR disagreement. An ABSENT `success` key (the engine's `DONTKNOW` state) is
+    ///     treated the same way.
+    ///  3. **Full expected-text equality on re-read.** This is the placement assertion: it proves the
+    ///     replacements landed WHERE they were, in order, with nothing else disturbed. It also covers
+    ///     the case a residual-occurrence check would get wrong — `replaceWith` CONTAINING `find`
+    ///     (replacing "a" with "aa" leaves plenty of "a"s behind and is still correct).
+    ///
+    /// **REPLACE_ALL, always — `all: false` is refused at the daemon, not silently approximated.**
+    /// `SvxSearchCmd::REPLACE` (2) is not "replace the first occurrence": it is the UI Replace
+    /// button — replace the CURRENT SELECTION if it matches, then find the next
+    /// (`viewsrch.cxx:321-358`, and with no selection it replaces AT THE CURSOR) — stateful and
+    /// order-dependent. Approximating "first only" with it would put a wrong edit in the user's file.
+    ///
+    /// **Disclosed residual (research L2), cosmetic:** a `docs replace` writes the process-global
+    /// `s_pSrchItem`, so this helper's Find & Replace state for every Writer document afterwards
+    /// carries these strings. Nothing reads them back, and a fully-specified payload means no later
+    /// dispatch of ours ever depends on them.
+    private func docsReplaceOnDedicatedThread(docId: String, find: String, replaceWith: String) throws -> Int {
+        let doc = try requireTextDocumentOnDedicatedThread(docId)
+        let before = try docsReadTextOnDedicatedThread(doc, docId: docId)
+        let counted = Self.docsCountOccurrences(of: find, in: before)
+        let agentViewId = try ensureAgentViewOnDedicatedThread(docId: docId)
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
+
+        if var cleared = documents[docId] {
+            cleared.lastUnoCommandResult = nil
+            documents[docId] = cleared
+        }
+        postUnoCommandOnDedicatedThread(doc, ".uno:ExecuteSearch",
+                                        Self.docsSearchArguments(find: find, replaceWith: replaceWith),
+                                        notifyWhenFinished: true)
+
+        // The result is QUEUED, not delivered inline — `DispatchResultListener::dispatchFinished`
+        // calls `mpCallbackFlushHandlers[nView]->queue(...)` (`init.cxx:5106`), so "the dispatch was
+        // synchronous" does not mean "the callback already fired." Same pump-and-poll shape
+        // `selectSlidePlaceholderOnDedicatedThread` uses for its own push-only signal, and the same
+        // permanent evidence line, so the budget stays MEASURED rather than guessed.
+        var engineResult = Self.matchingSearchResult(documents[docId]?.lastUnoCommandResult)
+        var attempts = 1
+        while engineResult == nil, attempts < Self.docsUnoResultAttempts {
+            pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: 0)
+            engineResult = Self.matchingSearchResult(documents[docId]?.lastUnoCommandResult)
+            attempts += 1
+        }
+        FileHandle.standardError.write(Data(
+            "[LOKBridge docs] ExecuteSearch result needed \(attempts) attempt(s), observed=\(engineResult == nil ? "none" : String(describing: engineResult!))\n".utf8))
+
+        // An ABSENT `success` key (DispatchResultState::DONTKNOW) is "no cross-check available", not
+        // a disagreement — never manufactured into one. A result that never arrived at all is the
+        // same: the re-read below is the check that always runs.
+        if let engineSucceeded = engineResult ?? nil, engineSucceeded != (counted > 0) {
+            throw SaveError.replaceCountDisagreement(docId: docId, counted: counted,
+                                                     engineSucceeded: engineSucceeded)
+        }
+
+        let expected = before.replacingOccurrences(of: find, with: replaceWith, options: [.literal])
+        let after = try docsReadTextOnDedicatedThread(doc, docId: docId)
+        guard after == expected else {
+            throw SaveError.docsVerificationFailed(docId: docId, what: "replacing \"\(Self.docsBrief(find))\"",
+                                                   expectedLength: expected.count, actualLength: after.count)
+        }
+        return counted
+    }
+
+    /// `nil` when no result has been observed, or when the observed one belongs to some OTHER command
+    /// — every `notifyWhenFinished: true` dispatch in this file produces one of these, so "a result
+    /// arrived" is not "MY result arrived". `.some(nil)` means the search's own result arrived but
+    /// carried no `success` key.
+    private static func matchingSearchResult(_ observed: (commandName: String, success: Bool?)?) -> Bool?? {
+        guard let observed, observed.commandName == ".uno:ExecuteSearch" else { return nil }
+        return .some(observed.success)
+    }
+    /// Poll budget for the queued `UNO_COMMAND_RESULT`. Sized to `slidePlaceholderPositionAttempts`
+    /// deliberately — the same push-only-signal shape, and this mechanism has not earned an
+    /// independently-derived budget of its own; the stderr line above is what will show the next
+    /// reader whether it is still adequate. Running OUT of budget is not a failure: the cross-check
+    /// is simply unavailable for that call and the re-read verification still runs.
+    private static let docsUnoResultAttempts = 6
+
+    /// How much of a caller-supplied string an error may quote — mirrors
+    /// `OfficeCommandConsumer.brief`'s own purpose on the other side of the wire. A document's own
+    /// body has no business in an error string.
+    private static func docsBrief(_ value: String, max limit: Int = 60) -> String {
+        guard value.count > limit else { return value }
+        return String(value.prefix(limit)) + "…"
+    }
+
+    /// `insert`/`append` — `paste`, NOT `.uno:InsertText` (ruling 2, research §6.3/§9.3). Three
+    /// reasons, all confirmed at the pin: `paste` is ONE undo step (`SwTrnsfrActionAndUndo` brackets
+    /// it with `StartUndo(SwUndoId::PASTE_CLIPBOARD)`/`EndUndo`, `swdtflvr.cxx:230-252`) where
+    /// `.uno:InsertText` costs roughly one per word (`SwWrtShell::InsertByWord` calls `Insert()` per
+    /// letter-numeric run and `SwUndoInsert::CanGrouping` refuses to merge across that boundary —
+    /// so a user's single ⌘Z after an agent `insert` would get back the last WORD); `paste` returns a
+    /// real boolean where `.uno:InsertText` is a SILENT no-op on a missing or mistyped argument
+    /// (`if (pItem)`, `sw/source/uibase/shells/textsh.cxx:153-156`, research L7); and `paste` is
+    /// synchronous by construction (no `SynchronMode` property is added on its internal path).
+    ///
+    /// Positioning is `.uno:GoToStartOfDoc`/`.uno:GoToEndOfDoc` — neither declares `Asynchron;` in
+    /// its slot and neither takes any argument at all (research §6.4), so the malformed-argument
+    /// failure class does not apply to them. `resetSelection` runs FIRST regardless: `doc_paste`
+    /// REPLACES the current selection, and this bridge's own read path leaves the whole document
+    /// selected.
+    ///
+    /// `asNewParagraph` prepends a real `\n` to the pasted bytes rather than dispatching
+    /// `.uno:InsertPara` — that command was located but its Execute handler was NOT vetted in the
+    /// research's own dialog-hazard sweep (research §8, §11), and this file does not dispatch
+    /// unvetted command names. Plain-text paste turns `\n` into a paragraph break, which is the same
+    /// mechanism `read` inverts when it reports paragraphs.
+    ///
+    /// Returns the paragraph count AFTER the insert, read back from the same verification read.
+    private func docsInsertOnDedicatedThread(docId: String, text: String, atStart: Bool,
+                                             asNewParagraph: Bool) throws -> Int {
+        let doc = try requireTextDocumentOnDedicatedThread(docId)
+        let before = try docsReadTextOnDedicatedThread(doc, docId: docId)
+        let agentViewId = try ensureAgentViewOnDedicatedThread(docId: docId)
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
+        doc.handle.pointee.pClass.pointee.resetSelection?(doc.handle)
+        postUnoCommandOnDedicatedThread(doc, atStart ? ".uno:GoToStartOfDoc" : ".uno:GoToEndOfDoc",
+                                        [:], notifyWhenFinished: true)
+        pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: 0)
+
+        // A brand-new empty document has one empty paragraph; prepending a break there would leave a
+        // stray blank first paragraph, so the break is only added when there is real text to append
+        // after. Computed from `before`, which is the same text the expectation below is built from.
+        let separator = (asNewParagraph && !before.isEmpty) ? "\n" : ""
+        let payload = atStart ? text + separator : separator + text
+        let byteCount = payload.utf8.count
+        let pasted = "text/plain;charset=utf-8".withCString { mimePtr in
+            payload.withCString { textPtr in
+                doc.handle.pointee.pClass.pointee.paste?(doc.handle, mimePtr, textPtr, byteCount) ?? false
+            }
+        }
+        guard pasted else { throw SaveError.pasteFailed(docId) }
+
+        let expected = atStart ? payload + before : before + payload
+        let after = try docsReadTextOnDedicatedThread(doc, docId: docId)
+        guard after == expected else {
+            throw SaveError.docsVerificationFailed(
+                docId: docId, what: atStart ? "inserting at the start" : "appending at the end",
+                expectedLength: expected.count, actualLength: after.count)
+        }
+        return Self.docsParagraphCount(after)
+    }
+
+    /// office-agent-tools T4 — the shared JSON-args UNO dispatch this task's own three new sheet-
+    /// management commands use. NOT applied retroactively to `.uno:GoToCell`'s own existing inline
+    /// dispatch (`selectionTextOnDedicatedThread`) — that call is already proven and unrelated to
+    /// this task's own scope; this helper exists only for the code THIS task adds.
+    ///
+    /// **`notifyWhenFinished` — controller finding, `docs-lok-research.md` L4 (2026-08-24), added for
+    /// office-agent-tools T6's own NEW call sites only.** `doc_postUnoCommand` injects
+    /// `SynchronMode=false` (`desktop/source/lib/init.cxx`), but `SfxDispatchController_Impl::dispatch`
+    /// (`sfx2/source/control/unoctitm.cxx:655-657`) OVERRIDES it to `SfxCallMode::SYNCHRON` whenever a
+    /// listener exists — and a listener exists exactly when `bNotifyWhenFinished` is `true`. Defaults
+    /// `false` so this file's own TEN pre-existing call sites (all still passing the literal `false`
+    /// this comment used to hardcode) are BYTE-IDENTICAL in behavior — retrofitting them is a separate,
+    /// deliberately out-of-scope change the controller is queuing on its own terms, `.uno:Save`/
+    /// `.uno:Undo` in particular having their own fire-and-forget reasoning that needs its own
+    /// re-examination, not a blanket flip. **Caveat this file inherits, not resolves**: the DISPATCH
+    /// (the Execute handler actually running) is provably synchronous under `true`; whether any
+    /// RESULTING LOK CALLBACK is flushed before this call returns is NOT proven from source
+    /// (`DispatchResultListener::dispatchFinished` still *enqueues* via `mpCallbackFlushHandlers`) — a
+    /// state actually CHANGED by the command (e.g. what `.uno:SelectAll` selects) is safe to read
+    /// synchronously afterward; a PUSH NOTIFICATION about that change is a separate question this flag
+    /// does not settle. Verify by re-read regardless, exactly as this bridge already does everywhere
+    /// else.
+    private func postUnoCommandOnDedicatedThread(_ doc: OpenDocument, _ command: String, _ args: [String: Any],
+                                                 notifyWhenFinished: Bool = false) {
+        guard let data = try? JSONSerialization.data(withJSONObject: args),
+              let argsString = String(data: data, encoding: .utf8) else {
+            return // unreachable for this file's own String/Int-only payloads — never throws, matching GoToCell's own fire-and-forget posture on a build failure
+        }
+        command.withCString { commandPtr in
+            argsString.withCString { argsPtr in
+                doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, argsPtr, notifyWhenFinished)
+            }
+        }
     }
 
     // MARK: - Callback translation
@@ -1580,11 +5042,139 @@ final class LOKBridge: OfficeDocumentBridge {
             event = OfficeDocumentEvent.parseCellCursor(payload)
         case LOKCallbackType.cellFormula:
             event = OfficeDocumentEvent.parseCellFormula(payload)
+        case LOKCallbackType.graphicSelection:
+            // office-agent-tools T6 — internal state only, never an `OfficeDocumentEvent` (nothing
+            // outside this bridge needs it, and Stage A's wire vocabulary is not the right place to
+            // grow a case for a signal that never crosses the app<->helper wire). Write-back, not an
+            // in-place mutation — `OpenDocument` is a struct (see this type's own `documents`
+            // dictionary), the same get/mutate/write-back idiom `createAgentViewOnDedicatedThread`
+            // already uses for its own per-docId state. Defensive fallback only — a live drill found
+            // this bridge's own two-view design always fires `.graphicViewSelection` instead (below)
+            // by the time any slides mechanism runs; never observed live.
+            if var doc = documents[docId] {
+                doc.lastGraphicSelectionRectTwips = Self.parseGraphicSelectionRect(payload)
+                documents[docId] = doc
+            }
+            event = nil
+        case LOKCallbackType.unoCommandResult:
+            // office-agent-tools T7 — internal state only, never an `OfficeDocumentEvent` (same
+            // reasoning `.graphicSelection` above gives: nothing outside this bridge needs it, and
+            // Stage A's wire vocabulary is not the place to grow a case for a signal that never
+            // crosses the app<->helper wire).
+            //
+            // ⚠️ **MEASURED: this callback does NOT currently arrive for a `docs` verb, and the
+            // reason is worth writing down rather than leaving as a mystery.**
+            //
+            // I first reasoned it WOULD: `doc_postUnoCommand` builds its `DispatchResultListener`
+            // only when `bNotifyWhenFinished && pDocument->mpCallbackFlushHandlers.count(nView)`,
+            // with `nView = SfxLokHelper::getViewId(pDocument->mnDocumentId)`
+            // (`desktop/source/lib/init.cxx:5312, 5502-5507`) — and that helper
+            // (`sfx2/source/view/lokhelper.cxx:291-308`) is a scan from `SfxViewShell::GetFirst()`
+            // for the first shell matching the DocId, not "the current view". I concluded that scan
+            // returns the PRIMARY view, which `openOnDedicatedThread` does register a callback on.
+            //
+            // Live measurement says otherwise: across every `docs replace` drill the evidence line
+            // in `docsReplaceOnDedicatedThread` reads `observed=none`, and a full raw-callback trace
+            // of one drill shows types 1, 2, 5, 8, 24, 25, 27, 28, 35, 44, 60, 70, 73 — and **no
+            // type 16 at all**. Callbacks plainly flow, so a handler exists; the listener is simply
+            // never constructed. The mechanism the first reading missed is `setView`'s own hop 4:
+            // `SfxApplication::SetViewFrame_Impl` calls `MoveShellToFirstShell(*pViewShell)`, which
+            // moves the newly-current shell to the FRONT of the very list `getViewId` scans. Every
+            // `docs` verb asserts `setView(agentView)` first, so `getViewId` returns the AGENT
+            // view — which has no `registerCallback` of its own — and `count(nView)` is 0.
+            //
+            // Left in place deliberately rather than deleted: it costs nothing, it is correct if a
+            // result ever does arrive, and `docsReplaceOnDedicatedThread` treats "no result" as "no
+            // cross-check available" rather than as agreement. What actually does the verifying is
+            // the full expected-text re-read — a strictly STRONGER check than the boolean (it knows
+            // what the text should be, not merely that something changed), proven so by a forced red:
+            // dropping `SearchItem.TransliterateFlags` makes the engine match case-insensitively and
+            // it is the re-read, not this callback, that catches it. Making the boolean reachable
+            // would mean registering a second callback on the agent view — a real change to
+            // multi-view callback traffic, for a signal that is redundant here. Named, not done.
+            if var doc = documents[docId], let parsed = Self.parseUnoCommandResult(payload) {
+                doc.lastUnoCommandResult = parsed
+                documents[docId] = doc
+            }
+            event = nil
+        case LOKCallbackType.graphicViewSelection:
+            // office-agent-tools T6 — the ONE actually observed live (`.graphicSelection`'s own
+            // header has the full account). `viewId` is checked against THIS docId's own agent view
+            // before accepting the rect — a firing for the PRIMARY view (a human clicking around an
+            // adopted tab while this mechanism runs) must never be mistaken for this bridge's own
+            // agent-view selection landing; silently ignored, not merely unfiltered-and-hoped-safe.
+            // **Deletion-red proof (office-agent-tools T6, 2026-08-24)**: inverted to `viewId !=
+            // agentViewId` (accept only what this filter is supposed to reject), rebuilt, reran
+            // `testLiveSlidesInfoReadsRealTitlesFromThreeSlideFixture` live — every title/body came
+            // back "(no title placeholder)"/"(empty)", the exact "nothing was ever recorded"
+            // signature, not some unrelated symptom. Reverted, confirmed byte-identical
+            // (`git diff --stat`), reran green. This filter is load-bearing, not incidentally
+            // passing.
+            if var doc = documents[docId], let agentViewId = doc.agentViewId,
+               let (viewId, selection) = Self.parseGraphicViewSelectionEnvelope(payload),
+               viewId == agentViewId {
+                doc.lastGraphicSelectionRectTwips = Self.parseGraphicSelectionRect(selection)
+                documents[docId] = doc
+            }
+            event = nil
         default:
             event = nil
         }
         guard let event else { return }
         onEvent?(docId, event)
+    }
+
+    /// Parses `LOK_CALLBACK_GRAPHIC_SELECTION`'s raw payload: `"x, y, width, height, angle, {...}"`
+    /// — mirrors `OfficeDocumentEvent.parseCellCursor`'s own comma-split shape exactly (this bridge's
+    /// own established parsing idiom for a LOK rect-shaped callback), taking only the first four
+    /// fields; `angle` and the optional trailing JSON properties are not needed for verification and
+    /// are silently ignored, never validated. An empty selection's own payload shape was not
+    /// characterized live before this was written — `nil` on anything that does not parse as at
+    /// least four comma-separated integers, which a genuine empty-selection firing (if this callback
+    /// ever produces one) would also hit, safely: `selectSlidePlaceholderOnDedicatedThread` treats
+    /// "no rect observed" as "nothing new was selected" either way.
+    private static func parseGraphicSelectionRect(_ payload: String) -> OfficeTwipsRect? {
+        let fields = payload.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        guard fields.count >= 4,
+              let x = Int64(fields[0]), let y = Int64(fields[1]),
+              let width = Int64(fields[2]), let height = Int64(fields[3]) else {
+            return nil
+        }
+        return OfficeTwipsRect(x: x, y: y, width: width, height: height)
+    }
+
+    /// Parses `LOK_CALLBACK_UNO_COMMAND_RESULT`'s JSON payload — shape confirmed by reading
+    /// `DispatchResultListener::dispatchFinished` at the pin (`desktop/source/lib/init.cxx:5086-5107`),
+    /// not inferred from a sample. `success` is deliberately OPTIONAL, not defaulted: that writer
+    /// emits the key only when the dispatch result state is not `DONTKNOW` (`:5091-5095`), and a
+    /// missing key means "the engine declined to say," which is a different fact from `false` and
+    /// must not be silently collapsed into it — `docsReplaceOnDedicatedThread` treats an absent
+    /// `success` as "no cross-check available" and says so, rather than manufacturing a disagreement
+    /// or a false agreement. Returns `nil` only when the payload is not an object with a
+    /// `commandName` — i.e. not a result frame at all.
+    private static func parseUnoCommandResult(_ payload: String) -> (commandName: String, success: Bool?)? {
+        guard let data = payload.data(using: .utf8),
+              let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let commandName = object["commandName"] as? String else {
+            return nil
+        }
+        return (commandName, object["success"] as? Bool)
+    }
+
+    /// Parses `LOK_CALLBACK_GRAPHIC_VIEW_SELECTION`'s own JSON envelope — confirmed live to be
+    /// `{"viewId": "<id>", "part": "<n>", "mode": "<n>", "selection": "<the bare
+    /// x,y,width,height,angle,{...} string>"}` (the header's own doc comment names only `viewId`/
+    /// `selection`; `part`/`mode` are real fields this live drill also observed, silently ignored
+    /// here — this bridge only needs the two the header promises). `viewId` decodes as a STRING
+    /// ("1"), not a JSON number — `Int32(...)` on it, never a numeric cast.
+    private static func parseGraphicViewSelectionEnvelope(_ payload: String) -> (viewId: Int32, selection: String)? {
+        guard let data = payload.data(using: .utf8),
+              let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let viewIdString = object["viewId"] as? String, let viewId = Int32(viewIdString),
+              let selection = object["selection"] as? String else {
+            return nil
+        }
+        return (viewId, selection)
     }
 
     // The two raw-payload parsers formerly lived here as `private static func`s. Moved to

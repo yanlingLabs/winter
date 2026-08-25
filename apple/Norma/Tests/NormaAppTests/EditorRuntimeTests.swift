@@ -45,17 +45,24 @@ final class EditorFakeScheduler {
         return true
     }
 
+    // crash-fix round 1 (Family B): one of the investigation's named recorder types
+    // (`EditorFakeScheduler.scheduler.getter`, broker-crash-investigation.md §2) — reached by
+    // `EditorRuntime.syncBannerTimer`'s own fire-and-forget straggler `Task`, same mechanism as
+    // `OfficeRuntime.perform`. `[weak self]` + straggler-safe fallbacks throughout, including the
+    // nested `Cancellable` closure below.
     var scheduler: BrowserRuntime.Scheduler {
         BrowserRuntime.Scheduler(
-            now: { [unowned self] in self.current },
-            mainAsync: { [unowned self] work in
+            now: { [weak self] in self?.current ?? .distantPast },
+            mainAsync: { [weak self] work in
+                guard let self else { return }
                 if self.autoRun { work() } else { self.pendingWork.append(work) }
             },
-            timer: { [unowned self] fireAt, work in
+            timer: { [weak self] fireAt, work in
+                guard let self else { return BrowserRuntime.Scheduler.Cancellable { } }
                 self.nextId += 1
                 let id = self.nextId
                 self.armed.append(Armed(id: id, fireAt: fireAt, work: work))
-                return BrowserRuntime.Scheduler.Cancellable { [unowned self] in self.cancelled.append(id) }
+                return BrowserRuntime.Scheduler.Cancellable { [weak self] in self?.cancelled.append(id) }
             })
     }
 }
@@ -100,27 +107,35 @@ final class EditorCEFRecorder {
         return true
     }
 
+    // crash-fix round 1 (Family B): NOT one of the investigation's named recorder types, but
+    // found sharing the identical mechanism — this recorder's `driver` is assigned into a live
+    // `EditorRuntime` (see call sites below) exactly as `EditorFakeScheduler.scheduler` is, so it
+    // is equally reachable by a fire-and-forget straggler `Task`. Same `[weak self]` fix.
     var driver: EditorRuntime.CEFDriver {
         EditorRuntime.CEFDriver(
-            assetRoot: { [unowned self] in self.assetRoot },
-            registerAssetRoot: { [unowned self] root in
+            assetRoot: { [weak self] in self?.assetRoot },
+            registerAssetRoot: { [weak self] root in
+                guard let self else { return }
                 self.registeredRoots.append(root)
                 self.log.append("assetRoot \(root)")
             },
-            ensureInitialized: { [unowned self] in self.initialises },
-            failureReason: { [unowned self] in self.failure },
-            createBrowser: { [unowned self] container, url, backgroundColorARGB in
+            ensureInitialized: { [weak self] in self?.initialises ?? false },
+            failureReason: { [weak self] in self?.failure },
+            createBrowser: { [weak self] container, url, backgroundColorARGB in
+                guard let self else { return }
                 self.boundsAtCreate = container.bounds
                 self.createdURLs.append(url)
                 self.createdBackgroundColors.append(backgroundColorARGB)
                 self.log.append("create \(url)")
             },
-            browserIdentifier: { [unowned self] _ in self.nextBrowserId() },
-            closeBrowser: { [unowned self] _ in
+            browserIdentifier: { [weak self] _ in self?.nextBrowserId() ?? 0 },
+            closeBrowser: { [weak self] _ in
+                guard let self else { return }
                 self.closeCount += 1
                 self.log.append("close")
             },
-            executeCDP: { [unowned self] _, method, params, completion in
+            executeCDP: { [weak self] _, method, params, completion in
+                guard let self else { return }
                 self.log.append("cdp \(method)")
                 self.cdp.append((method, params, completion))
             })

@@ -1319,6 +1319,106 @@ final class OfficeRuntimeReducerTests: XCTestCase {
                        "the late-arriving stale attempt is compensated, not allowed to clobber")
     }
 
+    // MARK: - T2 broker-review F2 (2026-08-22): opensInFlight, the per-path in-flight-open marker
+    //
+    // Reproduces, reducer-level and fully deterministic (no helper, no timing, no polling), the
+    // double-open race `OfficeAgentBroker`'s own review found: two independent `.openRequested`s for
+    // the SAME never-before-open path (a tab's own open racing the agent broker's) used to both
+    // dispatch their own `.helperOpen` — see `OfficeRuntimeState.opensInFlight`'s own header for the
+    // corruption that produces, and why it is `OfficeAgentBroker`-specific (a caller that snapshots a
+    // docId once, unlike a tab that re-reads `$state` reactively). Confirmed RED against the
+    // pre-fix reducer (both events dispatched their own `.helperOpen`, the second `secondEffects`
+    // assertion below failed) before the fix landed — see task-2-report.md's fix-round section.
+
+    func testTwoConcurrentOpenRequestsForTheSameNeverBeforeOpenPathDispatchOnlyOneHelperOpen() {
+        let (afterFirst, firstEffects) = reduce(ready(), [.openRequested(path: "/concurrent.xlsx")])
+        XCTAssertEqual(firstEffects, [.helperOpen(path: "/concurrent.xlsx", pathGeneration: 0)], "sanity")
+        XCTAssertTrue(afterFirst.opensInFlight.contains("/concurrent.xlsx"), "sanity — marked in flight")
+
+        let (afterSecond, secondEffects) = reduce(afterFirst, [.openRequested(path: "/concurrent.xlsx")])
+        XCTAssertEqual(secondEffects, [], "a SECOND concurrent open for a path already being opened "
+                       + "must not dispatch its own .helperOpen — exactly two independent opens racing "
+                       + "is what produced the corruption (two docIds minted, the loser's docId "
+                       + "compensating-closed out from under whichever caller is still holding it)")
+        XCTAssertEqual(afterSecond, afterFirst, "mutation-free: the second, suppressed request changes "
+                       + "nothing — not even the ticket, which the first request already captured")
+    }
+
+    /// **Fix-round F2, insertion site 2**: the SAME marker must be set for paths flushed out of
+    /// `pendingOpens`, not only for an immediate `.ready`-phase open — otherwise the race survives
+    /// through the boot path (the daemon's very first office call is exactly this queued-then-flushed
+    /// shape: nothing was open yet, so a queued open racing a tab's own queued open for the identical
+    /// path would still double-dispatch on flush without this).
+    func testHelperBecameReadyFlushAlsoMarksEachFlushedPathInFlight() {
+        let (starting, _) = reduce(OfficeRuntimeState(), [.openRequested(path: "/a.xlsx")])
+        let (flushed, effects) = reduce(starting, [.helperBecameReady])
+        XCTAssertEqual(effects, [.helperOpen(path: "/a.xlsx", pathGeneration: 0)], "sanity")
+        XCTAssertTrue(flushed.opensInFlight.contains("/a.xlsx"), "a path flushed out of pendingOpens "
+                      + "must be marked in-flight exactly like an immediate .ready-phase open")
+
+        let (_, secondEffects) = reduce(flushed, [.openRequested(path: "/a.xlsx")])
+        XCTAssertEqual(secondEffects, [], "the flushed open is still in flight — a concurrent second "
+                       + "must join it, not double-dispatch")
+    }
+
+    /// **The discriminating test for "clear the marker only in `.closeRequested` and a NON-STALE
+    /// landing, never in a stale-drop."** open₁ (ticket 0) → close (bumps to 1, clears the marker) →
+    /// open₂ (ticket 1, sets the marker again) → open₁'s now-stale `.opened` lands. A design that
+    /// ALSO cleared the marker on that stale drop would wrongly empty it WHILE open₂ is still
+    /// genuinely in flight — reopening the exact guard this field exists to hold shut, one
+    /// interleaving deeper. Every step's own effects are asserted, not just the final state, so a
+    /// broken `.closeRequested` (fails to clear) and a broken stale-drop (wrongly clears) each fail a
+    /// DIFFERENT assertion below rather than being indistinguishable from one another.
+    func testAStaleOpenedLandingWhileAReplacementIsStillInFlightMustNotReopenTheGuard() {
+        let (afterFirstOpen, _) = reduce(ready(), [.openRequested(path: "/a.xlsx")])
+        let (afterClose, _) = reduce(afterFirstOpen, [.closeRequested(path: "/a.xlsx")])
+        XCTAssertFalse(afterClose.opensInFlight.contains("/a.xlsx"), "sanity — close clears the marker "
+                       + "even though open₁ (ticket 0) is still out there, unresolved")
+
+        let (afterSecondOpen, secondOpenEffects) = reduce(afterClose, [.openRequested(path: "/a.xlsx")])
+        XCTAssertEqual(secondOpenEffects, [.helperOpen(path: "/a.xlsx", pathGeneration: 1)],
+                       "sanity — the close cleared the marker, so this fresh request must dispatch")
+        XCTAssertTrue(afterSecondOpen.opensInFlight.contains("/a.xlsx"), "sanity — open₂ now in flight")
+
+        // open₁'s stale `.opened` (ticket 0) lands late — dropped via the existing pathGeneration guard.
+        let (afterStaleLands, staleEffects) = reduce(afterSecondOpen, [
+            .opened(path: "/a.xlsx", docId: "doc-a-first", stagedPath: "/staged/doc-a-first",
+                   metadata: metadata, pathGeneration: 0)
+        ])
+        XCTAssertEqual(staleEffects, [.helperClose(docId: "doc-a-first"), .deleteStagedCopy(docId: "doc-a-first")], "sanity")
+        XCTAssertTrue(afterStaleLands.opensInFlight.contains("/a.xlsx"), "the stale drop must NOT clear "
+                      + "the marker — open₂ (ticket 1) is still genuinely in flight")
+
+        // The discriminating assertion: a THIRD open request, while open₂ is still outstanding, must
+        // still be suppressed — proving the marker survived the stale landing intact.
+        let (_, thirdEffects) = reduce(afterStaleLands, [.openRequested(path: "/a.xlsx")])
+        XCTAssertEqual(thirdEffects, [], "open₂ is still in flight — a third request must still be "
+                       + "joined, not double-dispatched")
+
+        // Finally open₂'s own legitimate `.opened` (ticket 1) lands and the marker clears normally.
+        let (final, finalEffects) = reduce(afterStaleLands, [
+            .opened(path: "/a.xlsx", docId: "doc-a-second", stagedPath: "/staged/doc-a-second",
+                   metadata: metadata, pathGeneration: 1)
+        ])
+        XCTAssertEqual(finalEffects, [.watchFile(path: "/a.xlsx")], "sanity")
+        XCTAssertFalse(final.opensInFlight.contains("/a.xlsx"), "cleared once the CURRENT attempt resolves")
+    }
+
+    func testAnAcceptedOpenFailedClearsTheInFlightMarkerSoTheSamePathCanBeRetried() {
+        let (afterOpen, _) = reduce(ready(), [.openRequested(path: "/fails.xlsx")])
+        XCTAssertTrue(afterOpen.opensInFlight.contains("/fails.xlsx"), "sanity")
+
+        let (state, _) = reduce(afterOpen, [
+            .openFailed(path: "/fails.xlsx", reason: "disk full", pathGeneration: 0)
+        ])
+        XCTAssertFalse(state.opensInFlight.contains("/fails.xlsx"), "a failed open must not wedge the "
+                       + "path shut forever")
+
+        let (_, retryEffects) = reduce(state, [.openRequested(path: "/fails.xlsx")])
+        XCTAssertEqual(retryEffects, [.helperOpen(path: "/fails.xlsx", pathGeneration: 0)],
+                       "a retry after a failure must be free to dispatch, not silently swallowed")
+    }
+
     /// **"open → reload → old .opened lands"** — the brief's own named interleaving: two external
     /// changes close enough together that BOTH mint their own reload before either's own reopen
     /// lands. `.externalChangeDetected` reads `doc.docId` from `documents[path]`, which NEITHER
@@ -1742,6 +1842,20 @@ final class OfficeRuntimeWatcherTests: XCTestCase {
             clipboardPaste: { _, _, _ in },
             undo: { _ in },
             redo: { _ in },
+            sheetsInfo: { _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
+            sheetsRead: { _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
+            sheetsSet: { _, _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
+            sheetsResize: { _, _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
+            sheetsManageSheet: { _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
+            sheetsFormat: { _, _, _, _, _, _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
+            slidesInfo: { _ in throw OfficeHelperClientError.serverError(reason: "fake driver: slides not implemented") },
+            slidesRead: { _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: slides not implemented") },
+            slidesSetText: { _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: slides not implemented") },
+            slidesManagePage: { _, _, _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: slides not implemented") },
+            docsInfo: { _ in throw OfficeHelperClientError.serverError(reason: "fake driver: docs not implemented") },
+            docsRead: { _ in throw OfficeHelperClientError.serverError(reason: "fake driver: docs not implemented") },
+            docsReplace: { _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: docs not implemented") },
+            docsInsert: { _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: docs not implemented") },
             stateDirectory: stateDir)
     }
 

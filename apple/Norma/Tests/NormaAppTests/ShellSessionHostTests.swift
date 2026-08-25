@@ -2815,15 +2815,18 @@ final class ShellSessionHostTests: XCTestCase {
         let scheduler: EditorFakeScheduler
     }
 
-    /// **Every double a live `EditorRuntime` reaches through an `[unowned self]` closure, held for
-    /// the whole test.**
+    /// **Every double a live `EditorRuntime` reaches through a closure, held for the whole test.**
     ///
-    /// Not belt-and-braces — measured, as a crash, on the first run. The doubles hand out closure
-    /// structs (`CEFDriver`, `Scheduler`, `Slot`) that capture their recorder unowned, exactly as
-    /// `BrowserRuntimeTests`' do; a recorder a test never mentions AGAIN (the slot recorder, in the
-    /// tests that only assert on the table) is released the moment the local factory value is last
-    /// used, and the runtime's next hub registration reads a dangling reference. Holding them here
-    /// ties their lifetime to the test case rather than to a local's last mention.
+    /// Not belt-and-braces — measured, as a crash, on the first run (back when the doubles captured
+    /// `[unowned self]`; crash-fix round 1, broker-crash-investigation.md §2, converted
+    /// `EditorCEFRecorder`/`EditorSlotRecorder`/`EditorFakeScheduler` to `[weak self]`). The doubles
+    /// hand out closure structs (`CEFDriver`, `Scheduler`, `Slot`) that capture their recorder,
+    /// exactly as `BrowserRuntimeTests`' do; a recorder a test never mentions AGAIN (the slot
+    /// recorder, in the tests that only assert on the table) is released the moment the local
+    /// factory value is last used, and the runtime's next hub registration would now silently find
+    /// nothing there rather than reading a dangling reference. Holding them here still ties their
+    /// lifetime to the test case rather than to a local's last mention — a dropped registration is
+    /// exactly as wrong an outcome as a crash was, just quieter.
     private var editorDoubles: [AnyObject] = []
 
     /// office-plumbing Task 5: same reasoning as `editorDoubles` immediately above — a recorder a
@@ -4149,6 +4152,20 @@ final class ShellSessionHostTests: XCTestCase {
                 clipboardPaste: { _, _, _ in },
                 undo: { _ in },
                 redo: { _ in },
+                sheetsInfo: { _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
+                sheetsRead: { _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
+                sheetsSet: { _, _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
+                sheetsResize: { _, _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
+                sheetsManageSheet: { _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
+                sheetsFormat: { _, _, _, _, _, _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
+                slidesInfo: { _ in throw OfficeHelperClientError.serverError(reason: "fake driver: slides not implemented") },
+                slidesRead: { _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: slides not implemented") },
+                slidesSetText: { _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: slides not implemented") },
+                slidesManagePage: { _, _, _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: slides not implemented") },
+                docsInfo: { _ in throw OfficeHelperClientError.serverError(reason: "fake driver: docs not implemented") },
+                docsRead: { _ in throw OfficeHelperClientError.serverError(reason: "fake driver: docs not implemented") },
+                docsReplace: { _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: docs not implemented") },
+                docsInsert: { _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: docs not implemented") },
                 stateDirectory: stateDirectory)
         }
     }

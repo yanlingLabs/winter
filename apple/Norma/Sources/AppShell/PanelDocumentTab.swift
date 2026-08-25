@@ -26,12 +26,23 @@ let officeFormulaBarReferenceWidth: CGFloat = 56
 /// `editorViewportUnknownFailureReason`'s own reasoning.
 let officeDocumentUnknownFailureReason = "the office helper stopped before it came up"
 
+/// Office Stage C — the sentence for `.closedUnderTab`: the document this tab was showing stopped
+/// being open in the runtime while the tab itself was still on screen and still wanted it.
+///
+/// **Deliberately says "something", not "the agent".** The tab cannot know WHO closed it: the one
+/// reducer transition that can remove a live `documents[path]` entry with a healthy helper and no
+/// recorded open failure is `.closeRequested` (`OfficeRuntimeReducer`, the arm behind
+/// `OfficeRuntime.close(_:)`), and every caller of that door reaches the same arm. Naming the
+/// agent would be a guess dressed as a fact — the honest claim is the one this tab can actually
+/// make from what it observed.
+let officeDocumentClosedUnderTabReason = "something closed it while this tab was still open"
+
 // MARK: - Pure: the viewport plan
 
 /// Every not-the-canvas state a `.document` tab can be in. Each is a calm sentence (or a spinner);
-/// `.failed` is the only one with an action (obligation 5's "Reopen" affordance) — `.openFailed` has
-/// none, mirroring `EditorViewportState.openFailed`'s own posture (retry lives at the door that
-/// opened it, `openDocumentTab`'s `retryOpen`, not in the tab itself).
+/// `.failed` and `.closedUnderTab` are the two with an action (obligation 5's "Reopen" affordance)
+/// — `.openFailed` has none, mirroring `EditorViewportState.openFailed`'s own posture (retry lives
+/// at the door that opened it, `openDocumentTab`'s `retryOpen`, not in the tab itself).
 enum OfficeDocumentViewportState: Equatable {
     /// A document tab pointing at nothing. Unreachable through any shipped door — `openDocumentTab`
     /// always sets an absolute path — rendered honestly rather than as a blank rectangle, mirroring
@@ -49,6 +60,20 @@ enum OfficeDocumentViewportState: Equatable {
     /// This one document refused to open — the helper is fine; the file was not
     /// (`OfficeRuntimeState.openFailures`).
     case openFailed(path: String, reason: String)
+    /// **Office Stage C — the document was closed out from under a tab that still wants it.** The
+    /// helper is fine, this path recorded no open failure, and this tab HAD the document a moment
+    /// ago: something called `OfficeRuntime.close(_:)` for a path whose tab is still on screen (the
+    /// `OfficeAgentBroker` mirror interleaving its own rule-1 comment discloses is the reachable
+    /// producer). Pre-fix this fell through to `.booting` — an indefinite spinner with no text and
+    /// no way out.
+    ///
+    /// **A case of its own rather than reusing `.failed`, and the reason is the RENDERING, not
+    /// taxonomy**: `OfficeDocumentViewportStateView`'s `.failed` arm hardcodes the title "The
+    /// office helper stopped". The helper did not stop here — it is running, and it is still
+    /// serving every other document. Routing this through `.failed` would put a sentence on screen
+    /// that contradicts the state that produced it. Offers the SAME Reopen affordance, under a
+    /// title that is true.
+    case closedUnderTab(reason: String)
 }
 
 /// What a `.document` tab must show: the canvas, or one of the calm states above. Mirrors
@@ -84,8 +109,17 @@ enum OfficeDocumentViewportPlan: Equatable {
 /// `PanelDocumentTabModel.requestOpenIfNeeded`) — which is also exactly the ask whose own retry
 /// (carry 4: `.failed` retries like `.idle`) makes the pristine case self-heal within one run-loop
 /// turn, matching the T5 review's own "self-heals" framing of the underlying over-delivery race.
+/// **`documentVanished` (Office Stage C) is the model's own bookkeeping too, for the same reason
+/// `hasRequestedOpen` is** — the literal state cannot answer it. A document closed out from under a
+/// live tab leaves `documents[path] == nil`, `phase == .ready` and `openFailures[path] == nil`:
+/// byte-for-byte the state of a path nobody has opened yet. Only a model that WATCHED the entry be
+/// there and then not be there can tell the two apart, which is what
+/// `PanelDocumentTabModel.documentVanished` records. **Deliberately NOT given a default value**:
+/// there is exactly one production caller (`PanelDocumentTabModel.plan`), and a default is how a
+/// future second one would silently reintroduce the spinner this parameter exists to remove.
 func officeDocumentViewportPlan(path: String?, state: OfficeRuntimeState?,
-                                hasRequestedOpen: Bool) -> OfficeDocumentViewportPlan {
+                                hasRequestedOpen: Bool,
+                                documentVanished: Bool) -> OfficeDocumentViewportPlan {
     guard let path, !path.isEmpty else { return .renderState(.noFile) }
     guard let state else { return .renderState(.booting) }
 
@@ -99,6 +133,15 @@ func officeDocumentViewportPlan(path: String?, state: OfficeRuntimeState?,
     }
     if let reason = state.openFailures[path] {
         return .renderState(.openFailed(path: path, reason: reason))
+    }
+    // Office Stage C — checked LAST of the named cases, and the order is load-bearing in both
+    // directions. Above it: `phase == .failed` (a dead helper wipes every document, so a vanish is
+    // ALSO true then — but "the helper stopped" is the more specific and more useful sentence) and
+    // `openFailures[path]` (the `.reloadFailed` reducer arm removes `documents[path]` and records a
+    // per-path reason in the SAME transition, so that reason wins over this generic one). Below it:
+    // `.booting`, which is what this arm rescues the tab from.
+    if documentVanished {
+        return .renderState(.closedUnderTab(reason: officeDocumentClosedUnderTabReason))
     }
     return .renderState(.booting)
 }
@@ -148,6 +191,189 @@ func officeColumnLetters(_ column: Int) -> String {
 func officeCellReference(column: Int, row: Int) -> String {
     "\(officeColumnLetters(column))\(row + 1)"
 }
+
+// MARK: - Pure: the INVERSE of the pair above (office-agent-tools T3 — `sheets` needs to turn the
+// agent's own A1-string operands back into 0-based indices; "reuse the A1 conversion Stage B T8
+// already built and tested — do not write a second one" means walking these boundaries backwards,
+// not re-deriving them)
+
+/// The inverse of `officeColumnLetters`: bijective base-26 letters ("A", "AA", "AAA", …) back to a
+/// 0-based column index. Case-insensitive (the agent's own `range` operand may arrive in either
+/// case) and otherwise strict — `nil` for anything that is not one or more consecutive ASCII letters
+/// (empty, digits, punctuation, whitespace).
+///
+/// Each place value is `letter - 'A' + 1` before multiplying by 26, the SAME "subtract one before
+/// dividing" bijective-numeration construction `officeColumnLetters`'s own header explains (there is
+/// no digit for zero in this system) — walked in the opposite direction: that function peels off the
+/// LEAST-significant letter first by repeated division; this one folds the string left-to-right,
+/// which is the natural direction for the same place-value arithmetic when the letters already have
+/// their significance order (most-significant first, exactly as written).
+///
+/// **T5 fix round, Critical-1 — this function is TOTAL. It refuses; it never traps.** The original
+/// accumulated with plain `value * 26 + …`, which Swift TRAPS on overflow (only `&*` wraps), in
+/// `-O` as well as debug — and every caller reaches it from an agent-controlled `range` string that
+/// nothing upstream bounded (`sheets.ts`'s `A1_RANGE_SHAPE` had an unbounded `[A-Za-z]+` under a
+/// `.max(64)`). `range:"ZZZZZZZZZZZZZZ1"` — 14 letters, well inside 64 characters, a plain model
+/// typo — therefore aborted **Norma.app itself**, taking every open office document's unsaved edits
+/// with it. Measured, not reasoned: `task-5-fixround-report.md` §2 records the SIGTRAP for that
+/// exact string against a verbatim copy of the original.
+///
+/// Two independent guards, and the FIRST is the load-bearing one:
+///
+/// 1. **`officeColumnMaxLetters` (3).** Calc's real maximum column is XFD — three letters, 16,384
+///    columns — so a fourth letter is always invalid, whatever it spells. This is what actually
+///    closes the hole, because checked arithmetic alone would NOT have: a 13-letter run returns a
+///    perfectly finite 2.58e18, which then overflows one line later in `OfficeCellRange.cellCount`'s
+///    own `columnCount * rowCount` at the consumer's very next statement (`range:"A1:AAAAAAAAAAAAAA4"`
+///    — measured, same report §2). Bounding the INPUT is the only fix that bounds everything
+///    downstream of it.
+/// 2. **Overflow-reporting arithmetic.** Unreachable through guard 1 (three letters peak at 18,277)
+///    and kept deliberately anyway: it is what makes the function's `Int?` contract honest for any
+///    future caller, and it means a later widening of guard 1 degrades to a refusal rather than to
+///    an app abort. Labelled here rather than left to look like the real protection.
+///
+/// **Deliberately LEXICAL, not SEMANTIC** — this stays the pure inverse of `officeColumnLetters` and
+/// does NOT learn Calc's 16,384-column grid limit: "XFE" (three letters, one column past XFD)
+/// still resolves here and is refused downstream by LOK's own position verification, which is
+/// exactly what `OfficeSheetsFormatTests`' own position-verification drill rides — see that drill's
+/// header. A grid bound here would have silently deleted the only non-mutant way to prove that
+/// check is real.
+let officeColumnMaxLetters = 3
+
+func officeColumnIndex(fromLetters letters: String) -> Int? {
+    guard !letters.isEmpty, letters.count <= officeColumnMaxLetters else { return nil }
+    var value = 0
+    for scalar in letters.unicodeScalars {
+        let upper: UInt32
+        switch scalar.value {
+        case 65...90: upper = scalar.value        // 'A'...'Z'
+        case 97...122: upper = scalar.value - 32   // 'a'...'z' -> 'A'...'Z'
+        default: return nil
+        }
+        let (scaled, scaleOverflow) = value.multipliedReportingOverflow(by: 26)
+        guard !scaleOverflow else { return nil }
+        let (next, addOverflow) = scaled.addingReportingOverflow(Int(upper - 65 + 1))
+        guard !addOverflow else { return nil }
+        value = next
+    }
+    return value - 1
+}
+
+/// The inverse of `officeCellReference`: an A1-style cell reference ("A1", "aa100") to a 0-based
+/// `(column, row)` pair. Case-insensitive on the letters (upcased before `officeColumnIndex`); the
+/// row must be a bare positive decimal integer — no sign, no leading/trailing whitespace, no digits
+/// before the letters, nothing after. `nil` for anything else: this is the one place real A1
+/// SEMANTICS live for the agent's own operands (the daemon tool validates `range`'s wire SHAPE only
+/// — a bare non-empty string — never its meaning), so wire strictness applies here: a malformed cell
+/// reference refuses, it is never guessed at or clamped to something nearby.
+///
+/// **T5 fix round, Critical-1's ROW half — the door the review's own prescription would have left
+/// open.** `Int(rest)` happily parses `"9223372036854775807"` (19 digits, exactly `Int.max`), so
+/// `range:"A1:B9223372036854775807"` — 23 characters, inside `sheets.ts`'s `.max(64)`, matching its
+/// `[1-9][0-9]*` shape — used to parse cleanly and then abort the app on the CONSUMER'S VERY NEXT
+/// LINE, where `range.cellCount` computes `2 * Int.max`. Measured SIGTRAP, `task-5-fixround-report.md`
+/// §2. Bounding only the letter run would have fixed one half of one class.
+///
+/// `officeRowMaxDigits` (7) is the symmetric, deliberately LEXICAL bound — 9,999,999 is comfortably
+/// past Calc's real 1,048,576-row maximum, so it refuses nothing a real sheet can address, and it
+/// keeps an out-of-grid ROW ("D9999999") available as a live position-verification vector exactly as
+/// `officeColumnMaxLetters` keeps "XFE" available as the column one. Together the two bounds cap
+/// `OfficeCellRange.cellCount` at 18,278 x 10^7 ~= 1.8e11 — every downstream `Int` computation on a
+/// parsed range is total by construction, not by inspection.
+let officeRowMaxDigits = 7
+
+func officeParseCellReference(_ reference: String) -> (column: Int, row: Int)? {
+    let letters = reference.prefix(while: { $0.isASCII && $0.isLetter })
+    let rest = reference[letters.endIndex...]
+    guard !letters.isEmpty, !rest.isEmpty, rest.count <= officeRowMaxDigits,
+          rest.allSatisfy({ $0.isASCII && $0.isNumber }) else { return nil }
+    guard let column = officeColumnIndex(fromLetters: letters.uppercased()) else { return nil }
+    guard let oneBasedRow = Int(rest), oneBasedRow >= 1 else { return nil }
+    return (column: column, row: oneBasedRow - 1)
+}
+
+/// A resolved `sheets read` range: 0-based, INCLUSIVE on every edge, always normalized to
+/// (top-left, bottom-right) regardless of which corner order the caller gave — `officeParseRange`
+/// is the only producer.
+struct OfficeCellRange: Equatable {
+    var startColumn: Int
+    var startRow: Int
+    var endColumn: Int
+    var endRow: Int
+    var columnCount: Int { endColumn - startColumn + 1 }
+    var rowCount: Int { endRow - startRow + 1 }
+    var cellCount: Int { columnCount * rowCount }
+}
+
+/// Parses `sheets read`'s own `range` operand: either one cell ("A1", a one-cell range) or an
+/// A1:A1-style span ("A1:C10"). Order-independent — "C10:A1" normalizes identically to "A1:C10",
+/// since a model-authored caller has no particular reason to always give reading-order corners the
+/// way a human dragging a mouse would. `nil` for anything malformed, INCLUDING a syntactically
+/// plausible but semantically bad half (a bad corner poisons the whole range — never defaulted to
+/// whatever half DID parse). Sheet-qualification ("Sheet1!A1") is deliberately rejected here — that
+/// is the `sheet` operand's own job, kept as a separate, required field (spec §2's own table) rather
+/// than folded into range syntax.
+func officeParseRange(_ range: String) -> OfficeCellRange? {
+    let parts = range.split(separator: ":", omittingEmptySubsequences: false)
+    guard parts.count == 1 || parts.count == 2 else { return nil }
+    guard let first = officeParseCellReference(String(parts[0])) else { return nil }
+    guard let second = parts.count == 2 ? officeParseCellReference(String(parts[1])) : first else { return nil }
+    return OfficeCellRange(
+        startColumn: min(first.column, second.column), startRow: min(first.row, second.row),
+        endColumn: max(first.column, second.column), endRow: max(first.row, second.row))
+}
+
+/// office-agent-tools T3 — the cell-count ceiling `sheets read` enforces BEFORE any LOK work, at
+/// range-parse time, in `OfficeCommandConsumer`. Not a UI nicety: an unbounded grid becomes a WORSE
+/// failure than an honest refusal would be. `PanelCommandConsumer.resultMaxLength` (64 KiB, mirroring
+/// the wire's `PANEL_COMMAND_RESULT_MAX_LENGTH`) refuses an over-cap `result` WHOLE at the daemon's
+/// `parseParams`; the app's `try?` on that send swallows the rejection; the command then silently
+/// expires on `OFFICE_READ_DEADLINE_MS` (155s) — the agent is told "timed out" (OUTCOME UNKNOWN, per
+/// this feature's own spec) for a range that could have been refused, correctly, in under a second.
+/// 2,000 keeps even a worst-realistic-case grid of 20-character text cells comfortably under the
+/// wire cap (`PanelDocumentTabTests.testOfficeReadRangeMaxCellsKeepsAWorstRealisticGridUnderThe
+/// ResultCap` measures this directly rather than trusting the arithmetic in this comment) while
+/// still covering every ordinary read — a 40-column x 50-row report, a 10-column x 200-row export.
+let officeReadRangeMaxCells = 2_000
+
+/// office-agent-tools T4 — `sheets set`'s own real cap, mirroring `officeReadRangeMaxCells` exactly
+/// (checked in `OfficeCommandConsumer.handleSheetsSet`, before the broker/LOK are ever reached) but
+/// smaller, deliberately: `sheets.ts`'s own copy of this same number (`sheetsSetMaxCells`) has the
+/// full reasoning — each written cell costs a real per-cell LOK round trip (select, verify, type,
+/// verify again), not one bulk probe, so the safe ceiling is much lower than a read's. Kept as TWO
+/// independently-maintained constants (TS and Swift), on the SAME precedent `officeReadRangeMaxCells`
+/// already set: the daemon's own copy refuses cheaply before a round trip is even attempted; this
+/// one is the REAL enforcement, since only this side can compute `range`'s true cell count.
+let officeWriteRangeMaxCells = 200
+
+/// office-agent-tools T5 fix round (review Important-1) — `sheets format`'s WIDTH-phase cap, on
+/// COLUMNS, alongside — never instead of — the 2,000-cell cap the same verb already applies to
+/// `range`. The two measure different things: the width phase does not select `range`, it selects
+/// the whole-column Name-Box span `range`'s columns cover, so `range:"A1:BXW1"` is 1,999 cells (under
+/// the cell cap) and 1,999 ENTIRE columns.
+///
+/// **The number is MEASURED, and the measurement corrected the finding that asked for it.** The
+/// review's severity claim was a wedged helper — "office wedges for every document until the app is
+/// restarted" — resting on `getTextSelection` serialising whole columns of the sheet's full 1,048,576
+/// rows. **It does not.** Two purpose-built fixtures, driven through the real helper (V-1,
+/// `task-5-fixround-report.md` §3), with the width phase's cost measured as its MARGINAL cost over
+/// the same call's cell-attribute baseline:
+///
+///     100,000 used rows x 3 used columns   width 3 cols +0.13s   64 cols +0.50s   1,999 cols +0.50s
+///     20,000 used rows x 200 used columns  width 3 cols +0.04s   64 cols +0.34s   1,999 cols +2.44s
+///
+/// The selection is bounded by the USED data area, not by the grid, and the worst case measured — an
+/// entire 4-million-cell workbook, every column, on the one dedicated LOK thread — is under three
+/// seconds against a 155-second deadline. No wedge, at any width, on any shape tried.
+///
+/// So this cap is kept for the two reasons that survive the measurement, and its size comes FROM the
+/// measurement rather than from taste: an operand reaching LOK should be bounded rather than merely
+/// observed to be survivable at the sizes anyone has tried, and a `width` call naming hundreds of
+/// columns is far more likely a model error than an intention — refusing it in milliseconds beats
+/// spending seconds on it. 256 sits an order of magnitude above any real formatting call and, at the
+/// 200-column measurement above, costs 1.6 seconds — so it cannot refuse work anyone actually wants
+/// while still bounding the shape. It is NOT a wedge guard; nothing measured here wedges.
+let officeFormatWidthMaxColumns = 256
 
 /// PURE: the formula bar's own ref-display decision, extracted from `OfficeFormulaBar.referenceText`
 /// (advisor review, this task) so it can be pinned directly, independent of SwiftUI/`@Published`
@@ -320,6 +546,39 @@ final class PanelDocumentTabModel: ObservableObject {
     /// own ask went out.
     private(set) var hasRequestedOpen = false
 
+    /// **Office Stage C — "this tab has actually SEEN its document open on this runtime."** The
+    /// other half of the vanish detection below: `documentVanished` is only meaningful for a tab
+    /// that had the entry and lost it, and no field of `OfficeRuntimeState` can say that (see
+    /// `officeDocumentViewportPlan`'s own `documentVanished` note — a lost document and a
+    /// never-opened one are the identical state). Reset with the rest of the gate on a runtime
+    /// change: a fresh runtime instance has shown this tab nothing yet.
+    private var sawDocument = false
+
+    /// **What the plan reads.** True from the moment this model observes its document gone off a
+    /// healthy runtime with no per-path failure, false again the moment a document is back at this
+    /// path. See `OfficeDocumentViewportState.closedUnderTab`.
+    private(set) var documentVanished = false
+
+    /// **The structural bound on the automatic re-open** — the whole reason the re-arm below cannot
+    /// become an open/close loop. It is NOT enough to reason that a loop "should not arise" (after
+    /// the tab re-opens it owns the document, so a later broker call adopts under rule 1 rather
+    /// than opening, and there is no second close to lose): that argument is about the ORDINARY
+    /// interleaving, and this counter is what holds when the ordinary case does not.
+    ///
+    /// Counted per (runtime, path) for that pairing's whole lifetime, and **deliberately never
+    /// reset by a successful re-open** — resetting on success is precisely what would re-enable the
+    /// loop (vanish → reopen → counter cleared → vanish → reopen → …, forever). The only reset is
+    /// the gate's own runtime-identity reset, a user/session-driven transition the vanish cycle
+    /// cannot itself cause. Once spent, a further vanish still renders `.closedUnderTab` — the tab
+    /// is still recoverable, just by the user's own Reopen click (`retryOpen`, which consults no
+    /// gate at all) instead of automatically.
+    private var vanishReopenCount = 0
+
+    /// One. The ordinary interleaving produces exactly one vanish per tab (see
+    /// `vanishReopenCount`'s own note), so one automatic retry covers the real case and any larger
+    /// number would only buy repeats of a retry that already did not help.
+    static let maxAutomaticReopensAfterVanish = 1
+
     init(tabId: String, path: String?) {
         self.tabId = tabId
         self.path = path
@@ -389,19 +648,87 @@ final class PanelDocumentTabModel: ObservableObject {
     func requestOpenIfNeeded() {
         guard let runtime = runtimeRef, let path, !path.isEmpty else { return }
         guard let state = runtimeState else { return }
-        guard state.documents[path] == nil, state.openFailures[path] == nil else { return }
+
+        // **The document is here.** The original early return, now also the one place `sawDocument`
+        // is armed and `documentVanished` is disarmed: a path showing a document is, by definition,
+        // not a path whose document went away. Returns BEFORE the runtime-identity reset below,
+        // exactly as the pre-Stage-C code did — an already-open path asks for nothing, whichever
+        // runtime is holding it.
+        //
+        // **One honest consequence of that order, stated rather than glossed.** If this tab's very
+        // FIRST sight of a runtime already has the document open (nobody's ordinary path — the tab
+        // is normally the one that opened it, and then `openRequestedRuntime` is already this
+        // runtime), `openRequestedRuntime` is still some other instance here. A later loss then
+        // trips the identity reset FIRST, which clears `sawDocument`, so that loss reads as a plain
+        // "nothing open yet" rather than as a vanish: the tab shows `.booting` and dispatches a
+        // fresh open on a fresh gate. Not stuck — it self-heals through the ordinary path — it just
+        // gets a spinner instead of the sentence for that one exotic ordering.
+        if state.documents[path] != nil {
+            sawDocument = true
+            documentVanished = false
+            return
+        }
+
+        // **Moved ABOVE the `openFailures` guard (Office Stage C), and it has to be.** A fresh
+        // runtime instance has never shown this tab anything, so `sawDocument`/`documentVanished`/
+        // `vanishReopenCount` must reset in lockstep with the rest of the gate — otherwise a
+        // session departure and return (which mints a new `OfficeRuntime`) would read this tab's
+        // memory of the OLD runtime's document as a vanish on the NEW one, and paint a failure
+        // sentence over a tab that is merely booting again. (A fresh instance's `openFailures` is
+        // empty, so nothing observable changes for the pre-existing fields by running this first.)
         if openRequestedRuntime !== runtime {
             openRequestedRuntime = runtime
             openRequestedPaths = []
             hasRequestedOpen = false
+            sawDocument = false
+            documentVanished = false
+            vanishReopenCount = 0
         }
+
+        guard state.openFailures[path] == nil else { return }
+
+        // **Office Stage C — the vanish.** Reached only with: no document at this path, a recorded
+        // sighting of one on THIS runtime, and no per-path open failure. `phase != .failed` is the
+        // load-bearing exclusion, not tidiness: `.helperDied`/`.helperUnavailable` wipe every
+        // document wholesale, so a dead helper satisfies every other clause here — and the re-arm
+        // below would then dispatch an automatic `open()` into a `.failed` phase, which (carry 4)
+        // retries exactly like `.idle`, i.e. it would silently restart the helper. Obligation 5 is
+        // explicit that a retry out of `.failed` is a user action and never an automatic one; this
+        // clause is what keeps that true. The `.failed` phase already has its own plan arm and its
+        // own Reopen button, so nothing is lost by standing aside here.
+        if sawDocument, state.phase != .failed {
+            documentVanished = true
+            // Consumed: the NEXT vanish must be detected on its own fresh sighting, not on this
+            // one — otherwise a single sighting would arm every subsequent empty-state broadcast.
+            sawDocument = false
+            if vanishReopenCount < Self.maxAutomaticReopensAfterVanish {
+                vanishReopenCount += 1
+                // The re-arm, and the only thing that ever removes a path from this set short of a
+                // runtime change. Without it the gate below is spent for this model's whole life
+                // and nothing self-heals; with it, the plan's `.closedUnderTab` sentence is what
+                // the user sees only for as long as the re-open takes to land.
+                openRequestedPaths.remove(path)
+            }
+        }
+
         guard openRequestedPaths.insert(path).inserted else { return }
         // Never synchronous — this can run from inside the runtime's own `@Published` `willSet`
         // (the state sink above), i.e. in the middle of a reducer step; the hop is what keeps that
         // re-entry impossible. `open` is NOT `async` (unlike `EditorRuntime.openFile`) but the same
         // discipline still applies to the CALL, not just an await.
+        //
+        // **`guard !isRetired` (Office Stage C) — load-bearing the moment the re-arm above exists,
+        // and verified against the real ordering, not assumed.** `ShellSessionHost.closePanelTab`
+        // calls `officeRuntime.close(path)` and only THEN `PanelDocumentTabModels.discard(tabId:)`,
+        // and `OfficeRuntime.state` is `@Published`, so it publishes synchronously: a user closing
+        // a document tab reaches this method through the sink while this model is still live and
+        // still holding its runtime. That close is indistinguishable here from the broker's own —
+        // so without this guard the re-arm would schedule an open for a tab that is about to be
+        // discarded, and the user's × would leave a document open on the helper with no tab
+        // watching it. The retirement lands (synchronously, one line later) before this hop runs.
         Task { @MainActor [weak self, weak runtime] in
-            self?.hasRequestedOpen = true
+            guard let self, !self.isRetired else { return }
+            self.hasRequestedOpen = true
             runtime?.open(path)
         }
     }
@@ -442,7 +769,8 @@ final class PanelDocumentTabModel: ObservableObject {
     /// `PanelEditorTabModel.plan` does.
     var plan: OfficeDocumentViewportPlan {
         officeDocumentViewportPlan(path: path, state: runtimeRef == nil ? nil : runtimeState,
-                                   hasRequestedOpen: hasRequestedOpen)
+                                   hasRequestedOpen: hasRequestedOpen,
+                                   documentVanished: documentVanished)
     }
 
     /// office-plumbing Task 8: this tab's own banner text, or `nil` — mirrors `PanelEditorTabModel
@@ -1212,22 +1540,35 @@ struct OfficeDocumentViewportStateView: View {
             case .booting:
                 ProgressView().controlSize(.small)
             case .failed(let reason):
-                VStack(spacing: panelEditorChromeGap) {
-                    Text("The office helper stopped")
-                        .font(Typography.emptyStateSubtitle)
-                        .foregroundStyle(.primary)
-                    Text(reason)
-                        .font(Typography.caption())
-                        .foregroundStyle(Theme.textMuted)
-                        .multilineTextAlignment(.center)
-                    reopenButton
-                }
-                .padding(.horizontal, panelTabPillInset)
+                reopenable(title: "The office helper stopped", reason: reason)
+            case .closedUnderTab(let reason):
+                // Office Stage C — the SAME affordance as `.failed` under a title that is true of
+                // THIS state: the helper never stopped here. See
+                // `OfficeDocumentViewportState.closedUnderTab` for why that distinction is what
+                // earned this its own case rather than a second spelling of `.failed`.
+                reopenable(title: "This document was closed", reason: reason)
             case .openFailed(let path, let reason):
                 message("This document couldn't be opened", path: path, detail: reason)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// The two reopenable states' shared body — one title, one calm sentence, one Reopen button.
+    /// Extracted when `.closedUnderTab` joined `.failed` (Office Stage C) so the affordance itself
+    /// cannot drift between them; only the title differs, which is the whole point of the split.
+    private func reopenable(title: String, reason: String) -> some View {
+        VStack(spacing: panelEditorChromeGap) {
+            Text(title)
+                .font(Typography.emptyStateSubtitle)
+                .foregroundStyle(.primary)
+            Text(reason)
+                .font(Typography.caption())
+                .foregroundStyle(Theme.textMuted)
+                .multilineTextAlignment(.center)
+            reopenButton
+        }
+        .padding(.horizontal, panelTabPillInset)
     }
 
     private var reopenButton: some View {

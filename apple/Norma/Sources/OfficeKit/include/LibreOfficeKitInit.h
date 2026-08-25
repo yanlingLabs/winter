@@ -10,6 +10,28 @@
 #ifndef INCLUDED_LIBREOFFICEKIT_LIBREOFFICEKITINIT_H
 #define INCLUDED_LIBREOFFICEKIT_LIBREOFFICEKITINIT_H
 
+// office-agent-tools T3 third re-review — sweep finding, disclosed rather than ported. Diffed
+// against the engine's own copy at the pinned commit (/private/tmp/lo-recut/core): this vendored
+// copy is a genuinely OLDER upstream revision — renamed macros (TARGET_LIB/TARGET_MERGED_LIB here
+// vs SOFFICEAPP_LIB/MERGED_LIB there), an `extendUnoPath` this codebase still carries that upstream
+// has since removed entirely, and a rewritten Windows code path (proper UTF-16 handling via
+// lok_string_to_wide_string/lok_wide_string_to_string, a new lok_stat wrapper) this vendored copy
+// lacks. Not the same hazard class C1/C1-split found: nothing here is a struct member the compiler
+// silently offsets wrong — `lok_init_2` is this codebase's own compiled code (this whole header is
+// included directly, not linked against a pre-built library for this part), called by name, so its
+// contract is whatever this file itself defines, not something that can silently drift out from
+// under a caller the way a hand-maintained struct layout can.
+//
+// Checked for the one difference that looked like it could matter on macOS specifically: the
+// "is this the real libsofficeapp or the tiny merged-build stub" file-size threshold differs (100
+// bytes here, 1000 upstream) — confirmed INERT for this codebase's actual vendored product-set, not
+// merely assumed: no `libsofficeapp.dylib` exists in the vendored tree at all, so both versions'
+// logic falls through to the merged-lib path via "file not found," never reaching the size branch
+// either threshold gates. Every substantive remaining difference is Windows-only, a platform this
+// codebase does not build for. Not ported — the risk of introducing an untestable regression in
+// Windows-only code this repo has no way to exercise outweighs aligning a file whose one
+// macOS-relevant behavioral difference is already confirmed to not fire.
+
 #include "LibreOfficeKit.h"
 
 #if defined __GNUC__ || defined __clang__

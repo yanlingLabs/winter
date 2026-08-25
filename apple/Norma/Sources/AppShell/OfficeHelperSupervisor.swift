@@ -50,22 +50,39 @@ final class OfficeHelperClient {
     /// request/reply path entirely, so this fires independently of `ping`/`open`/`close` calls).
     /// Settable, not an `AsyncStream` (carry: don't add more single-consumer coupling than the
     /// brief already has, but don't build multicast yet either — Task 4's job). `nil` by default.
-    var onDocumentEvent: ((String, OfficeDocumentEvent) -> Void)? {
+    ///
+    /// crash-fix round 1 (§4/finding 3, broker-crash-investigation.md): `@Sendable` on all four
+    /// properties here — not just on `OfficeWireConnection`'s own callbacks below — closes the gap
+    /// the investigation found: `OfficeWireConnection`'s reader delivers pushes from the
+    /// cooperative pool with no isolation promise, but this class was not itself isolated and its
+    /// four properties were plain (non-`Sendable`) closure types, so a closure literal at a
+    /// `@MainActor`-isolated assignment site (e.g. `ShellSessionHost.wireOfficeTileCallbacks`)
+    /// could infer `@MainActor` isolation for itself with at most a warning under Swift 5.9's
+    /// default checking — proven reachable: that inferred isolation is exactly what
+    /// `-enable-actor-data-race-checks` caught, tracing back to this `didSet` (traps 3/3 on the
+    /// live tests before this fix). A closure at a `@Sendable`-typed slot can no longer infer
+    /// `@MainActor`, which is what removes the runtime trap; assigning a genuinely actor-isolated
+    /// closure here now instead surfaces as a Sendable-conformance *warning* at the call site
+    /// (an error under the Swift 6 language mode this project has not yet adopted) rather than
+    /// silent inference — every real assignment site already does nothing but
+    /// `Task { @MainActor [weak self] in … }`, which was and remains warning-free.
+    var onDocumentEvent: (@Sendable (String, OfficeDocumentEvent) -> Void)? {
         didSet { connection.onDocumentEvent = { [onDocumentEvent] docId, event in onDocumentEvent?(docId, event) } }
     }
 
     /// Task 4 — the tile-pipeline counterparts to `onDocumentEvent` above, same settable-closure
     /// shape (not an `AsyncStream`, same carry-driven restraint) proxied straight through to the
-    /// underlying `OfficeWireConnection`'s own dedicated push callbacks.
-    var onTile: ((UInt64, String, TileKey, Int, Int, Int, Data) -> Void)? {
+    /// underlying `OfficeWireConnection`'s own dedicated push callbacks. `@Sendable` for the same
+    /// reason `onDocumentEvent` above is — see that property's own header.
+    var onTile: (@Sendable (UInt64, String, TileKey, Int, Int, Int, Data) -> Void)? {
         didSet { connection.onTile = { [onTile] seq, docId, key, generation, width, height, pixels in
             onTile?(seq, docId, key, generation, width, height, pixels)
         } }
     }
-    var onTileFailed: ((UInt64, String, TileKey, String) -> Void)? {
+    var onTileFailed: (@Sendable (UInt64, String, TileKey, String) -> Void)? {
         didSet { connection.onTileFailed = { [onTileFailed] seq, docId, key, reason in onTileFailed?(seq, docId, key, reason) } }
     }
-    var onInvalidated: ((UInt64, String, [TileKey]) -> Void)? {
+    var onInvalidated: (@Sendable (UInt64, String, [TileKey]) -> Void)? {
         didSet { connection.onInvalidated = { [onInvalidated] seq, docId, keys in onInvalidated?(seq, docId, keys) } }
     }
 
@@ -301,6 +318,183 @@ final class OfficeHelperClient {
         let reply = try await expectReply(seq: seq)
         switch reply {
         case .agentKeyEventOk: return
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    // MARK: - office-agent-tools T3: sheets info/read
+
+    func sheetsInfo(docId: String) async throws -> (sheets: [OfficeSheetInfo], activeSheet: String) {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.sheetsInfo(seq: seq, docId: docId))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .sheetsInfoOk(_, _, let sheets, let activeSheet): return (sheets, activeSheet)
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    /// `range` is already an A1 string ("A1:C10") — see `OfficeWireFrame.sheetsRead`'s own header for
+    /// why this client never builds it from column/row integers itself.
+    func sheetsRead(docId: String, sheet: String, range: String, formulas: Bool) async throws -> [[String]] {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.sheetsRead(seq: seq, docId: docId, sheet: sheet, range: range, formulas: formulas))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .sheetsReadOk(_, _, let rows): return rows
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    // MARK: - office-agent-tools T4: sheets write verbs
+
+    func sheetsSet(docId: String, sheet: String, range: String, cellAddresses: [String], cellValues: [String]) async throws -> Int {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.sheetsSet(seq: seq, docId: docId, sheet: sheet, range: range,
+                                             cellAddresses: cellAddresses, cellValues: cellValues))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .sheetsSetOk(_, _, let cellsWritten): return cellsWritten
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    func sheetsResize(docId: String, sheet: String, dimension: OfficeSheetsResizeDimension,
+                      op: OfficeSheetsResizeOp, selectionRange: String) async throws -> (usedEndColumn: Int, usedEndRow: Int) {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.sheetsResize(seq: seq, docId: docId, sheet: sheet, dimension: dimension,
+                                                op: op, selectionRange: selectionRange))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .sheetsResizeOk(_, _, let usedEndColumn, let usedEndRow): return (usedEndColumn, usedEndRow)
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    func sheetsManageSheet(docId: String, op: OfficeSheetsManageSheetOp, name: String, newName: String?) async throws -> [String] {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.sheetsManageSheet(seq: seq, docId: docId, op: op, name: name, newName: newName))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .sheetsManageSheetOk(_, _, let sheets): return sheets
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    // MARK: - office-agent-tools T5: sheets format
+
+    func sheetsFormat(docId: String, sheet: String, range: String, columnSpan: String?,
+                      bold: Bool?, italic: Bool?, numberFormat: OfficeSheetsNumberFormatPreset?,
+                      align: OfficeSheetsAlign?, width: Double?) async throws -> [String] {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.sheetsFormat(seq: seq, docId: docId, sheet: sheet, range: range,
+                                                columnSpan: columnSpan, bold: bold, italic: italic,
+                                                numberFormat: numberFormat, align: align, width: width))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .sheetsFormatOk(_, _, let applied): return applied
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    // MARK: - office-agent-tools T6: slides
+
+    func slidesInfo(docId: String) async throws -> [OfficeSlideInfo] {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.slidesInfo(seq: seq, docId: docId))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .slidesInfoOk(_, _, let slides): return slides
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    func slidesRead(docId: String, slide: Int) async throws -> (title: String?, body: String?) {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.slidesRead(seq: seq, docId: docId, slide: slide))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .slidesReadOk(_, _, let title, let body): return (title, body)
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    func slidesSetText(docId: String, slide: Int, title: String?, body: String?) async throws -> [String] {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.slidesSetText(seq: seq, docId: docId, slide: slide, title: title, body: body))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .slidesSetTextOk(_, _, let applied): return applied
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    func slidesManagePage(docId: String, op: OfficeSlidesManagePageOp, slide: Int?, at: Int?, to: Int?,
+                          layout: OfficeSlidesLayoutPreset?) async throws -> Int {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.slidesManagePage(seq: seq, docId: docId, op: op, slide: slide, at: at,
+                                                     to: to, layout: layout))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .slidesManagePageOk(_, _, let slideCount): return slideCount
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    // MARK: - office-agent-tools T7: docs
+
+    func docsInfo(docId: String) async throws -> (pages: Int, paragraphs: Int, characters: Int) {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.docsInfo(seq: seq, docId: docId))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .docsInfoOk(_, _, let pages, let paragraphs, let characters):
+            return (pages: pages, paragraphs: paragraphs, characters: characters)
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    func docsRead(docId: String) async throws -> String {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.docsRead(seq: seq, docId: docId))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .docsReadOk(_, _, let text): return text
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    func docsReplace(docId: String, find: String, replaceWith: String) async throws -> Int {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.docsReplace(seq: seq, docId: docId, find: find, replaceWith: replaceWith))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .docsReplaceOk(_, _, let replaced): return replaced
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    func docsInsert(docId: String, text: String, atStart: Bool, asNewParagraph: Bool) async throws -> Int {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.docsInsert(seq: seq, docId: docId, text: text, atStart: atStart,
+                                              asNewParagraph: asNewParagraph))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .docsInsertOk(_, _, let paragraphs): return paragraphs
         case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
         default: throw OfficeHelperClientError.unexpectedReply(reply)
         }

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { z } from "zod";
 import {
   PANEL_COMMAND_RESULT_MAX_LENGTH, PANEL_COMMAND_ACTIONS, PANEL_COMMAND_ARGS_MAX_JSON_BYTES,
+  BROWSER_COMMAND_ACTIONS, OFFICE_COMMAND_ACTIONS,
 } from "@norma/protocol";
 import { ToolRegistry, MAX_OUTPUT, type ToolContext } from "../../../src/agent/tools/registry";
 import { registerToolSearchTool } from "../../../src/agent/tools/toolsearch";
@@ -208,11 +209,35 @@ describe("browser: registration", () => {
     expect(h.recorded.map((r) => r.action)).toEqual(["click"]);
   });
 
-  test("every command verb is a real PANEL_COMMAND_ACTIONS value, and every action has a deadline", () => {
-    for (const v of BROWSER_INTERACT_VERBS) expect(PANEL_COMMAND_ACTIONS).toContain(v);
-    for (const v of ["navigate", "back", "read", "screenshot"] as const) expect(PANEL_COMMAND_ACTIONS).toContain(v);
-    // Every wire action this tool can name has a deadline, and no orphan deadlines exist.
-    expect(Object.keys(BROWSER_DEADLINES_MS).sort()).toEqual([...PANEL_COMMAND_ACTIONS].sort());
+  // office-agent-tools T1 repartitioned this tripwire: `PANEL_COMMAND_ACTIONS` is now the flat union
+  // of BOTH tool families (`BROWSER_COMMAND_ACTIONS` + `OFFICE_COMMAND_ACTIONS`, events.ts), so an
+  // exact-equality check against the WHOLE enum would fail the instant office gained its own verbs —
+  // which it did, the moment this file's `bun test` was run against T1's events.ts edit alone, before
+  // this test was repartitioned (verified: the 22 office verbs showed up as an unequal-array diff
+  // against this test's old body). Repartitioned to the BROWSER family's own exact set, not weakened
+  // to a subset check — `office-commands.test.ts` carries the identical exact-equality tripwire for
+  // `OFFICE_DEADLINES_MS` / `OFFICE_COMMAND_ACTIONS`, and this file's own membership assertion below
+  // pins that the two families' lists don't overlap and together account for the whole wire enum.
+  test("every command verb is a real BROWSER_COMMAND_ACTIONS value, and every action has a deadline", () => {
+    for (const v of BROWSER_INTERACT_VERBS) expect(BROWSER_COMMAND_ACTIONS).toContain(v);
+    for (const v of ["navigate", "back", "read", "screenshot"] as const) expect(BROWSER_COMMAND_ACTIONS).toContain(v);
+    // Every wire action this tool can name has a deadline, and no orphan deadlines exist. EXACT
+    // equality, not a subset check — see the test-name comment above for why weakening this is the
+    // one edit this task must not make.
+    expect(Object.keys(BROWSER_DEADLINES_MS).sort()).toEqual([...BROWSER_COMMAND_ACTIONS].sort());
+  });
+
+  // The two families' lists partition the wire enum: no verb belongs to both, and together they are
+  // exactly `PANEL_COMMAND_ACTIONS` — the fact `PANEL_COMMAND_ACTIONS`'s own doc comment (events.ts)
+  // asserts of itself. Checked here rather than only in office-commands.test.ts because this is the
+  // one file that already imports the browser half; a drift in either direction (a verb added to one
+  // family's array but not composed into the union, or a verb accidentally listed in both) reds here
+  // without needing to touch the office suite.
+  test("BROWSER_COMMAND_ACTIONS and OFFICE_COMMAND_ACTIONS partition PANEL_COMMAND_ACTIONS", () => {
+    const browserSet = new Set(BROWSER_COMMAND_ACTIONS);
+    for (const v of OFFICE_COMMAND_ACTIONS) expect(browserSet.has(v as never)).toBe(false);
+    expect([...BROWSER_COMMAND_ACTIONS, ...OFFICE_COMMAND_ACTIONS].sort())
+      .toEqual([...PANEL_COMMAND_ACTIONS].sort());
   });
 });
 

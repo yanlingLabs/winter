@@ -488,7 +488,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             sendResult: { [weak host] sessionId, commandId, ok, result, imageBase64 in
                 host?.sendPanelCommandResult(sessionId: sessionId, commandId: commandId, ok: ok,
                                              result: result, imageBase64: imageBase64)
-            })
+            },
+            // office-agent-tools T3 — the one door `sheets info`/`read` need onto real office
+            // behaviour: `host.officeAgentBroker`, the SAME single, lazily-minted, app-wide broker
+            // instance Task 2 built (`ShellSessionHost.officeAgentBroker`) — never a second path to
+            // `OfficeRuntime`. `[weak host]`, matching every other closure this construction site
+            // already captures `host` with.
+            officeAgentBroker: { [weak host] _ in host?.officeAgentBroker })
         panelCommands = commands
         host.onPanelCommand = { [weak commands] command in commands?.handle(command) }
         let controller = AppWindowController(
@@ -820,6 +826,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // so `boot()`'s window-less state is fully settled first, exactly as a real summon would be.
         if ProcessInfo.processInfo.environment["NORMA_PANEL_SMOKE"] == "1" {
             DispatchQueue.main.async { [weak self] in self?.summonAppWindow(navigatingTo: .newChat) }
+        }
+        // office-agent Task 8: the headless gate's own door — summon the window ALREADY SHOWING a
+        // named session, which is the one state the gate cannot otherwise reach.
+        //
+        // Why this exists at all (the same reasoning `NORMA_PANEL_SMOKE` above carries, one step
+        // further): every `sheets`/`slides`/`docs` verb is gated by `officeReach` on the daemon
+        // side, which requires a panel-capable harness ATTACHED TO THAT SESSION — and the app
+        // attaches to whatever session its window is showing. Norma is `LSUIElement`, so it opens
+        // no window at launch; `NORMA_PANEL_SMOKE` opens one at `.newChat`, which attaches to no
+        // session at all. `ShellDestination.session(_:)` is exactly the right destination and it
+        // already exists, but its ONLY call site is `openOutputFileFromPanel` — a click door. There
+        // is no URL scheme, no launch argument and no RPC that aims the app at a session, so
+        // without this the gate's only route would be AX-clicking an UNNAMED sidebar row by index:
+        // an input mechanism that cannot tell the right row from any other, which is precisely the
+        // "check blind to its own failure mode" defect class this arc keeps catching.
+        //
+        // Like the door above it, this DRIVES THE REAL PATH AND ADDS NO SECOND ONE — it calls the
+        // same `summonAppWindow(navigatingTo:)` primitive every "open in app" affordance uses, with
+        // a destination the app already constructs elsewhere. Deferred one run-loop turn for the
+        // same reason: `boot()`'s window-less state must be fully settled first.
+        //
+        // RETRIED, because a single deferred call is a RACE and losing it is silent.
+        // `summonAppWindow` bails with `guard let model = appModel else { … return }`, and one
+        // run-loop turn after `boot()` is not a guarantee that `appModel` exists yet. When the race
+        // is lost the summon simply does not happen: no window, no error, no log the gate can see —
+        // observed as a gate run where the app was alive and healthy, the daemon and helper were
+        // servicing documents correctly, and accessibility reported zero named elements because
+        // there was no shell window at all. Re-arming until `appWindow` actually exists turns that
+        // silent loss into an eventual success, and the retries are idempotent (`summonAppWindow`
+        // re-summons an existing window rather than making a second one).
+        if let gateSession = ProcessInfo.processInfo.environment["NORMA_GATE_SESSION"], !gateSession.isEmpty {
+            var attemptsLeft = 40   // 40 × 500ms = 20s, comfortably past a cold boot
+            func armSummon() {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                    guard let self else { return }
+                    self.summonAppWindow(navigatingTo: .session(gateSession))
+                    attemptsLeft -= 1
+                    if self.appWindow == nil && attemptsLeft > 0 { armSummon() }
+                }
+            }
+            armSummon()
         }
         #endif
     }

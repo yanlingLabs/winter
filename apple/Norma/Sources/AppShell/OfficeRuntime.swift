@@ -328,11 +328,24 @@ struct OfficeRuntimeState: Equatable {
     /// deliberate, not an oversight: bumping on close/reload alone is already sufficient to
     /// distinguish every interleaving that matters (a close moves the counter forward, so a fresh
     /// re-open minted AFTER that close reads a strictly newer ticket than whatever open was in
-    /// flight before it — see `OfficeRuntimeReducerTests`' own two-rapid-open-close-open row), and
-    /// NOT bumping keeps two ordinary concurrent opens of the same never-yet-opened path (a double
-    /// click, both racing the identical `documents[path] == nil` guard) sharing one ticket, so
-    /// neither is spuriously cancelled — whichever `.opened` lands second still resolves through the
-    /// PRE-EXISTING `previousEntry.docId != docId` compensating-close logic one arm below, unchanged.
+    /// flight before it — see `OfficeRuntimeReducerTests`' own two-rapid-open-close-open row).
+    ///
+    /// **Correction, T2 broker-review F2 (2026-08-22): the paragraph below is no longer how two
+    /// ordinary concurrent opens of the same never-yet-opened path are handled — kept for the
+    /// historical record, not as current behavior.** It used to read: "NOT bumping keeps two ordinary
+    /// concurrent opens of the same never-yet-opened path (a double click, both racing the identical
+    /// `documents[path] == nil` guard) sharing one ticket, so neither is spuriously cancelled —
+    /// whichever `.opened` lands second still resolves through the PRE-EXISTING `previousEntry.docId
+    /// != docId` compensating-close logic one arm below, unchanged." That was true, and was FINE for
+    /// its own caller at the time (a UI element that re-reads `$state` reactively, so it never
+    /// matters which of two docIds survives). It stopped being fine the moment a caller could snapshot
+    /// a docId once and act on it later without re-reading `$state` — `OfficeAgentBroker.awaitOpen`
+    /// does exactly that, and the loser's docId can be the one it is actively holding when the second
+    /// landing compensating-closes it out from under an in-progress action. `opensInFlight` (this
+    /// state's own next field) now suppresses the SECOND `.openRequested` entirely — the two-callers-
+    /// share-one-ticket situation this paragraph described can no longer arise for a never-before-open
+    /// path, because there is no longer a second dispatch to share the ticket with. See that field's
+    /// own header for the full account, including why it is cleared where it is and not elsewhere.
     ///
     /// **Fix round 1 (review F2) — a fresh open's CAPTURE is also RECORDED, not only read.** Both
     /// sites that mint a `.helperOpen` ticket for a path with no bump of its own (the `.ready`-phase
@@ -396,6 +409,61 @@ struct OfficeRuntimeState: Equatable {
     /// construction (a session's very first runtime) is the only place this dict is legitimately
     /// empty; every other boundary now strictly advances it.
     var pathGenerations: [String: Int] = [:]
+
+    /// **T2 broker-review F2 (2026-08-22) — per-path in-flight-open marker.** Deliberately tagged
+    /// with the review that found it, not bare "F2": `pathGenerations`' own header a few paragraphs
+    /// up already carries an UNRELATED, earlier "review F2" (Office Stage B Task 9's own death/
+    /// teardown-bump review) — the identical short name for two different findings cost real time to
+    /// untangle once already; do not repeat that.
+    ///
+    /// **What this closes.** `.openRequested`'s `.ready` arm used to guard ONLY on
+    /// `documents[path] == nil` — "is this path already open" — with nothing recording "is an open
+    /// for this path already DISPATCHED but not yet landed." Two independent callers asking to open
+    /// the SAME never-before-open path close together (a tab's own open racing `OfficeAgentBroker`'s,
+    /// or simply a double click) both read `documents[path] == nil`, both captured the SAME ticket
+    /// (a fresh open deliberately does not bump — see `pathGenerations`' own header), and both
+    /// dispatched their OWN `.helperOpen`. `pathGenerations`' own header used to defend this as fine:
+    /// "whichever `.opened` lands second still resolves through the PRE-EXISTING `previousEntry.docId
+    /// != docId` compensating-close logic... unchanged" — true for a caller that re-reads `$state`
+    /// reactively (a tab), false for `OfficeAgentBroker`, which snapshots a docId ONCE
+    /// (`awaitOpen`) and keeps using it: the loser's docId can be the one a caller is actively
+    /// holding when it gets compensating-closed out from under it, mid-action or mid-`defer`. See
+    /// `task-2-report.md`'s fix-round section for the full account, including the residual this field
+    /// alone does not close (the broker's own `runOnce` also has to treat "already in flight" as
+    /// adoption — this field only stops the SECOND `.helperOpen` from ever being dispatched, which is
+    /// necessary but not sufficient on its own).
+    ///
+    /// **Written at BOTH sites that emit a fresh `.helperOpen` with no bump of their own** — the
+    /// `.ready`-phase immediate dispatch, and `.helperBecameReady`'s queue flush. Omitting the second
+    /// would leave the race alive through the boot path (the daemon's very first office call is
+    /// exactly the queued-then-flushed shape).
+    ///
+    /// **Cleared in exactly three places — and the choice of which three is the load-bearing part:**
+    /// `.closeRequested`'s own unconditional block (alongside `pendingOpens`/`openFailures`/the
+    /// banner dicts — same "treat the close as authoritative immediately" posture those already
+    /// take), and the NON-STALE (ticket-matches-current) branch of `.opened` and of `.openFailed`.
+    /// **Deliberately NOT cleared in either's STALE-DROP branch.** Trace why: open₁ (ticket 0, marker
+    /// set) → close (bumps to 1, marker cleared) → open₂ (ticket 1, marker set again) → open₁'s own
+    /// now-stale `.opened` lands. If the stale-drop ALSO cleared the marker, it would empty it WHILE
+    /// open₂ is still genuinely in flight — reopening the exact guard this field exists to hold shut,
+    /// one interleaving deeper. The invariant that makes "clear only on close + non-stale landing"
+    /// correct: while a path sits in this set, the only things that can have bumped its generation out
+    /// (making some OTHER attempt's landing stale) are `.closeRequested`, which already cleared this
+    /// field itself when it did so, and the three whole-runtime resets — `.helperDied`,
+    /// `.helperUnavailable`, and `.teardownRequested` — each of which bumps EVERY existing path's own
+    /// ticket (`fresh.pathGenerations = state.pathGenerations.mapValues { $0 + 1 }`) while ALSO
+    /// resetting to a brand-new `OfficeRuntimeState()` that starts this set EMPTY and never copies the
+    /// old one forward. So any path this set held going into one of those three is bumped AND evicted
+    /// from the set in that same transition, not bumped-while-still-present — the invariant survives
+    /// them, but not for free, and is named here rather than left to be rediscovered against
+    /// `pathGenerations`' own header (coordinator re-review, 2026-08-22). Reload/restore bump
+    /// generations too, but both require `documents[path]` to already exist, which is disjoint from
+    /// this field by construction (nothing is ever inserted here except from the `documents[path] ==
+    /// nil` branch). So a stale landing arriving while the marker is STILL set can only mean a NEWER
+    /// attempt is the one holding it — never itself, never a ghost. Proven both directions by
+    /// `OfficeRuntimeReducerTests.testAStaleOpenedLandingWhileAReplacementIsStillInFlightMustNot
+    /// ReopenTheGuard`.
+    var opensInFlight: Set<String> = []
 }
 
 /// Office Stage B Task 7 — one path's own recovery offer: a sidecar this runtime found newer than
@@ -794,7 +862,13 @@ enum OfficeRuntimeReducer {
                 // way Editor's one CEF browser is — T6 gives every open document its OWN tab and tile
                 // canvas). An already-open path is simply left alone; T6's tab layer owns dedupe/
                 // activate against ITS OWN already-open tab, mirroring `openFileTab`'s contract.
-                guard state.documents[path] == nil else { return (next, []) }
+                // T2 broker-review F2 (2026-08-22) — also guard on `opensInFlight`: a path someone
+                // ELSE already asked to open (dispatched, not yet landed) must be JOINED, not given a
+                // second, independent `.helperOpen` — see that field's own header for the corruption
+                // this closes and why. `documents[path] == nil` alone used to be the only test.
+                guard state.documents[path] == nil, !state.opensInFlight.contains(path) else {
+                    return (next, [])
+                }
                 // Office Stage B Task 9 — CAPTURES the current per-path ticket, never bumps it (see
                 // `OfficeRuntimeState.pathGenerations`'s own header for why a fresh open is the one
                 // attempt kind that reads rather than advances this counter). Fix round 1 (review
@@ -803,6 +877,10 @@ enum OfficeRuntimeReducer {
                 // existing (see the field header's own account).
                 let ticket = state.pathGenerations[path, default: 0]
                 next.pathGenerations[path] = ticket
+                // T2 broker-review F2 — mark this path in flight; cleared by `.closeRequested` or by
+                // this exact attempt's own non-stale `.opened`/`.openFailed` landing (see
+                // `opensInFlight`'s own header for why NOT in a stale-drop).
+                next.opensInFlight.insert(path)
                 return (next, [.helperOpen(path: path, pathGeneration: ticket)])
             }
 
@@ -825,6 +903,11 @@ enum OfficeRuntimeReducer {
             for path in queued {
                 let ticket = next.pathGenerations[path, default: 0]
                 next.pathGenerations[path] = ticket
+                // T2 broker-review F2 — the SAME marker the `.ready`-phase immediate open sets, for
+                // the identical reason: without it the race survives through the boot path (a queued
+                // open flushed here, then a second `.openRequested` for the same path landing right
+                // after the flush but before this attempt's own `.opened`, would still double-dispatch).
+                next.opensInFlight.insert(path)
                 effects.append(.helperOpen(path: path, pathGeneration: ticket))
             }
             return (next, effects)
@@ -861,9 +944,16 @@ enum OfficeRuntimeReducer {
             // by a per-path ticket mismatch instead of a docId mismatch. No `.unwatchFile`: a dropped
             // attempt never reached the `.watchFile` emission below, so there is nothing watching to
             // stop.
+            // T2 broker-review F2 — deliberately NOT `next.opensInFlight.remove(path)` here. See
+            // `opensInFlight`'s own header for the full invariant; short version: while this path is
+            // marked in flight, the only thing that can have made THIS landing stale is a close, and a
+            // close already cleared the marker itself — so if the marker is still set at this exact
+            // instant, it belongs to a NEWER attempt, not this dropped one, and clearing it here would
+            // wrongly let a third request slip past a still-genuinely-in-flight open.
             guard pathGeneration == state.pathGenerations[path, default: 0] else {
                 return (next, [.helperClose(docId: docId), .deleteStagedCopy(docId: docId)])
             }
+            next.opensInFlight.remove(path) // T2 broker-review F2 — THIS attempt is the current one; done.
             next.openFailures.removeValue(forKey: path)
             // office-plumbing Task 8: a document that just (re)opened cannot still be saying it was
             // deleted — the reload success path is what answers a deleted-then-restored file.
@@ -913,7 +1003,10 @@ enum OfficeRuntimeReducer {
             // has the full account). A stale failure has nothing left to compensate (nothing was ever
             // opened on the helper for a FAILED attempt) — dropping it is a plain no-op, `next`
             // untouched, unlike `.opened`'s own drop.
+            // T2 broker-review F2 — same "do not clear on a stale drop" discipline as `.opened`'s own
+            // identical guard just above; see `opensInFlight`'s own header for the invariant.
             guard pathGeneration == state.pathGenerations[path, default: 0] else { return (next, []) }
+            next.opensInFlight.remove(path) // T2 broker-review F2 — a failed open must not wedge the path shut.
             next.openFailures[path] = reason
             let basename = (path as NSString).lastPathComponent
             return (next, [.emitBanner(reason: "Couldn't open \(basename): \(reason)")])
@@ -925,6 +1018,12 @@ enum OfficeRuntimeReducer {
             // `OfficeRuntimeState.pathGenerations`'s own header names as exactly why a docId-keyed
             // guard alone could never catch this case). Every other line in this arm is unchanged.
             next.pathGenerations[path, default: 0] += 1
+            // T2 broker-review F2 — cleared HERE, unconditionally, same posture as every other dict
+            // in this block: a close is authoritative immediately, not "eventually once whatever was
+            // in flight gets around to landing." This is what keeps a close-then-immediate-reopen
+            // (the ordinary "two rapid open/close/open" shape a few lines below already covers for
+            // `pathGenerations`) from wedging shut waiting on an attempt this close already superseded.
+            next.opensInFlight.remove(path)
             next.pendingOpens.removeAll { $0 == path }
             next.openFailures.removeValue(forKey: path)
             next.documentBanners.removeValue(forKey: path) // Task 8: no path to still be a document about
@@ -1477,6 +1576,49 @@ final class OfficeRuntime: ObservableObject {
         var undo: (_ docId: String) async -> Void
         /// `.uno:Redo`, same posture as `undo` above.
         var redo: (_ docId: String) async -> Void
+        /// office-agent-tools T3 — read-only, no reducer/effect of its own (unlike `open`/`save`):
+        /// there is nothing in `OfficeRuntimeState` for a sheet-info query to update, so
+        /// `OfficeRuntime.sheetsInfo(docId:)` calls straight through to this closure and returns its
+        /// answer directly, the same "no state to change" posture `clipboardCopy` almost has (that
+        /// one still writes the system pasteboard as a side effect; this one has no side effect at
+        /// all). Throws exactly like `open`/`save` (a docId this connection cannot reach, or a
+        /// non-spreadsheet document) — never silently swallowed, since a caller here has no `nil`
+        /// answer to sensibly fall back to the way `clipboardCopy`'s `String?` does.
+        var sheetsInfo: (_ docId: String) async throws -> (sheets: [OfficeSheetInfo], activeSheet: String)
+        /// office-agent-tools T3 — same no-reducer posture as `sheetsInfo` above. `range` is already
+        /// an A1 string; see `OfficeWireFrame.sheetsRead`'s own header for why.
+        var sheetsRead: (_ docId: String, _ sheet: String, _ range: String, _ formulas: Bool) async throws -> [[String]]
+        /// office-agent-tools T4 — same no-reducer, THROWS-through posture as `sheetsInfo`/
+        /// `sheetsRead` above (a write caller needs to know WHY it failed): there is nothing in
+        /// `OfficeRuntimeState` for a cell write to update either — LOK's own invalidation callbacks
+        /// are what repaint the canvas (the SAME mechanism a human's own edit already rides), not a
+        /// reducer transition this file would have to model.
+        var sheetsSet: (_ docId: String, _ sheet: String, _ range: String, _ cellAddresses: [String],
+                        _ cellValues: [String]) async throws -> Int
+        var sheetsResize: (_ docId: String, _ sheet: String, _ dimension: OfficeSheetsResizeDimension,
+                           _ op: OfficeSheetsResizeOp, _ selectionRange: String) async throws -> (usedEndColumn: Int, usedEndRow: Int)
+        var sheetsManageSheet: (_ docId: String, _ op: OfficeSheetsManageSheetOp, _ name: String,
+                                _ newName: String?) async throws -> [String]
+        /// office-agent-tools T5 — same no-reducer, throws-through posture as every sibling above.
+        /// See `OfficeRuntime.sheetsFormat`'s own header (below) for the full contract this closure
+        /// carries — this field only threads it through, one more layer of the same shape.
+        var sheetsFormat: (_ docId: String, _ sheet: String, _ range: String, _ columnSpan: String?,
+                           _ bold: Bool?, _ italic: Bool?, _ numberFormat: OfficeSheetsNumberFormatPreset?,
+                           _ align: OfficeSheetsAlign?, _ width: Double?) async throws -> [String]
+        /// office-agent-tools T6 — slides, same no-reducer, throws-through posture as every sheets
+        /// sibling above.
+        var slidesInfo: (_ docId: String) async throws -> [OfficeSlideInfo]
+        var slidesRead: (_ docId: String, _ slide: Int) async throws -> (title: String?, body: String?)
+        var slidesSetText: (_ docId: String, _ slide: Int, _ title: String?, _ body: String?) async throws -> [String]
+        var slidesManagePage: (_ docId: String, _ op: OfficeSlidesManagePageOp, _ slide: Int?, _ at: Int?,
+                               _ to: Int?, _ layout: OfficeSlidesLayoutPreset?) async throws -> Int
+        /// office-agent-tools T7 — docs, same no-reducer, throws-through posture as every sibling
+        /// above.
+        var docsInfo: (_ docId: String) async throws -> (pages: Int, paragraphs: Int, characters: Int)
+        var docsRead: (_ docId: String) async throws -> String
+        var docsReplace: (_ docId: String, _ find: String, _ replaceWith: String) async throws -> Int
+        var docsInsert: (_ docId: String, _ text: String, _ atStart: Bool,
+                         _ asNewParagraph: Bool) async throws -> Int
         /// **Office Stage B Task 2b — the shared helper's own `--state-path`.** A plain stored
         /// value, unlike every sibling above: it is a FACT about the shared supervisor's
         /// configuration (`OfficeHelperSupervisor.statePath`, exposing `Configuration
@@ -1670,6 +1812,111 @@ final class OfficeRuntime: ObservableObject {
         }
     }
 
+    // MARK: office-agent-tools T3 — sheets info/read
+
+    /// Sheet names, each one's used range, and the active sheet's name for `docId`. Unlike
+    /// `open`/`close`/`save`, this does not go through `dispatch`/`perform` at all: a read query has
+    /// no reducer EFFECT (`OfficeAgentBroker`'s own task-2 report calls this out explicitly — "a read
+    /// has no reducer effects") because there is nothing in `OfficeRuntimeState` for it to update, so
+    /// routing it through the event/effect machinery built for state-CHANGING doors would be
+    /// ceremony with nothing to guard. Calls straight through to `driver.sheetsInfo`, which in
+    /// production is routed through `ShellSessionHost`'s ONE `OfficeHelperRequestQueue` — the SAME
+    /// serialization every other Driver call gets — just without a reducer dispatch wrapping it.
+    ///
+    /// `docId` is a PARAMETER, not resolved from `path` via `state.documents[path]` — every caller
+    /// (`OfficeAgentBroker.perform`'s `action` closure) already has the docId in hand from its own
+    /// adopt-or-open step, and re-deriving it here would risk observing a DIFFERENT docId if a reload
+    /// raced in between (the exact hazard `OfficeAgentBroker`'s own rule-2 `defer` re-verify exists
+    /// to guard against one layer up).
+    func sheetsInfo(docId: String) async throws -> (sheets: [OfficeSheetInfo], activeSheet: String) {
+        try await driver.sheetsInfo(docId)
+    }
+
+    /// Same no-reducer posture as `sheetsInfo` above. `range` is already an A1 string, and `sheet` is
+    /// resolved to a part index by the HELPER, never here — see `OfficeWireFrame.sheetsRead`'s own
+    /// header for why.
+    func sheetsRead(docId: String, sheet: String, range: String, formulas: Bool) async throws -> [[String]] {
+        try await driver.sheetsRead(docId, sheet, range, formulas)
+    }
+
+    // MARK: - office-agent-tools T4: sheets write verbs — same no-reducer, throws-through posture
+
+    func sheetsSet(docId: String, sheet: String, range: String, cellAddresses: [String], cellValues: [String]) async throws -> Int {
+        try await driver.sheetsSet(docId, sheet, range, cellAddresses, cellValues)
+    }
+    func sheetsResize(docId: String, sheet: String, dimension: OfficeSheetsResizeDimension,
+                      op: OfficeSheetsResizeOp, selectionRange: String) async throws -> (usedEndColumn: Int, usedEndRow: Int) {
+        try await driver.sheetsResize(docId, sheet, dimension, op, selectionRange)
+    }
+    func sheetsManageSheet(docId: String, op: OfficeSheetsManageSheetOp, name: String, newName: String?) async throws -> [String] {
+        try await driver.sheetsManageSheet(docId, op, name, newName)
+    }
+
+    /// office-agent-tools T5 — **the shared function this task's own sharing obligation names**:
+    /// applies `bold`/`italic`/`numberFormat`/`align`/`width` over an A1 `range` on a named sheet,
+    /// every operand optional and independent (`nil` means "leave this attribute alone," never
+    /// "reset it to default"). `columnSpan` is `width`'s own separate column-span selection (`nil`
+    /// unless `width` is non-nil — see `OfficeWireFrame.sheetsFormat`'s own header for why `width`,
+    /// alone among these five, needs one). Returns the attribute NAMES actually applied, a subset of
+    /// `["bold","italic","numberFormat","align","width"]` in that order.
+    ///
+    /// **This is the ONE function a future human-facing formatting UI calls too — not a second path
+    /// to LOK.** The agent's own route is `OfficeCommandConsumer.handleSheetsFormat` →
+    /// `OfficeAgentBroker.perform(access: .write, ...)` → THIS function; a SwiftUI toolbar button
+    /// bound to an already-open tab (which already has its own `docId`/`sheet`/selection in hand, and
+    /// needs neither the broker's adopt-or-open dance — the document is already open by construction
+    /// — nor its fence/dirty checks, which exist for an AGENT that might be reaching an unattended
+    /// document, not a human already looking at their own) can call this SAME function directly:
+    ///
+    /// ```swift
+    /// let applied = try await officeRuntime.sheetsFormat(
+    ///     docId: openTab.docId, sheet: openTab.activeSheetName, range: selection.a1Range,
+    ///     columnSpan: nil, bold: true, italic: nil, numberFormat: nil, align: nil, width: nil)
+    /// ```
+    ///
+    /// No agent-specific prose leaks into this layer — `formatSheetsFormat`'s "applied bold, width to
+    /// Sheet1!A1:C10 in budget.xlsx" sentence is composed one layer up, in `OfficeCommandConsumer`,
+    /// the same separation `sheetsSet`/`sheetsResize`/`sheetsManageSheet` already hold to (this file's
+    /// own no-reducer posture doc, above): a toolbar caller gets the plain, structured truth (which
+    /// attributes landed) and composes whatever UI feedback it wants from that, never a sentence
+    /// baked for a model to read.
+    func sheetsFormat(docId: String, sheet: String, range: String, columnSpan: String?,
+                      bold: Bool?, italic: Bool?, numberFormat: OfficeSheetsNumberFormatPreset?,
+                      align: OfficeSheetsAlign?, width: Double?) async throws -> [String] {
+        try await driver.sheetsFormat(docId, sheet, range, columnSpan, bold, italic, numberFormat, align, width)
+    }
+
+    // MARK: - office-agent-tools T6: slides — same no-reducer, throws-through posture as sheets
+
+    func slidesInfo(docId: String) async throws -> [OfficeSlideInfo] {
+        try await driver.slidesInfo(docId)
+    }
+    func slidesRead(docId: String, slide: Int) async throws -> (title: String?, body: String?) {
+        try await driver.slidesRead(docId, slide)
+    }
+    func slidesSetText(docId: String, slide: Int, title: String?, body: String?) async throws -> [String] {
+        try await driver.slidesSetText(docId, slide, title, body)
+    }
+    func slidesManagePage(docId: String, op: OfficeSlidesManagePageOp, slide: Int?, at: Int?, to: Int?,
+                          layout: OfficeSlidesLayoutPreset?) async throws -> Int {
+        try await driver.slidesManagePage(docId, op, slide, at, to, layout)
+    }
+
+    // MARK: - office-agent-tools T7: docs — same no-reducer, throws-through posture as sheets/slides
+
+    func docsInfo(docId: String) async throws -> (pages: Int, paragraphs: Int, characters: Int) {
+        try await driver.docsInfo(docId)
+    }
+    func docsRead(docId: String) async throws -> String {
+        try await driver.docsRead(docId)
+    }
+    func docsReplace(docId: String, find: String, replaceWith: String) async throws -> Int {
+        try await driver.docsReplace(docId, find, replaceWith)
+    }
+    func docsInsert(docId: String, text: String, atStart: Bool, asNewParagraph: Bool) async throws -> Int {
+        try await driver.docsInsert(docId, text, atStart, asNewParagraph)
+    }
+
     /// One `saveAndAwaitOutcome` caller, still waiting. Kept per PATH (a table, not a single slot) —
     /// two overlapping close-sheet saves for two DIFFERENT documents are legal and independent, the
     /// same reasoning `EditorSaveCoordinator.waiters`' own per-seq table gives; unlike that type this
@@ -1701,6 +1948,31 @@ final class OfficeRuntime: ObservableObject {
     }
 
     // MARK: - The dirty-close sheet's missing half: draining LOK's own post-save bookkeeping
+
+    /// ─────────────────────────────────────────────────────────────────────────────────────────
+    /// **TWO DRAINS EXIST FOR ONE BUG. READ THIS BEFORE CHANGING EITHER.**
+    ///
+    /// This is the **dirty-close sheet's** drain, guarding the USER's `×`-then-Save path
+    /// (`ShellSessionHost.resolveDirtyDocumentTabClose`). `OfficeAgentBroker.drainDirty` is the
+    /// **broker's** drain, guarding the AGENT write path. Same bug, same investigation
+    /// (`task-2-report.md`), two implementations that landed 26 minutes apart on parallel branches
+    /// and did not know about each other; the office-agent merge brought them into one tree.
+    ///
+    /// They are NOT interchangeable, and neither strictly dominates:
+    ///   * **this one** never consults `dirty` — an unconditional awaited helper round trip, so it
+    ///     has the SOUND ENTRY (no path gets zero wait), at an `O(selection)` cost per call, with
+    ///     its own barrier completeness explicitly unproven (see below);
+    ///   * **`drainDirty`** watches `$state` for LOK's own real `.uno:ModifiedStatus=false`, which
+    ///     is a genuinely STRONGER barrier on the ordinary path, but is inert whenever `dirty` is
+    ///     already clear — i.e. on `restoredPendingSave`/`saveFailedPendingSave`.
+    ///
+    /// **If you go to "fix" `drainDirty`, do not delete its `dirty == true` entry guard.** That is
+    /// not the unsound part and removing it changes nothing measurable: its barrier is a `$state`
+    /// sink whose `dirty != true` check resolves on `@Published`'s synchronous replay to a new
+    /// subscriber, so it resumes during `.sink(...)` itself. Verified by deleting the guard and
+    /// re-running `OfficeAgentBrokerTests`: 37/37, indistinguishable. The unsound part is the
+    /// `dirty`-watching BARRIER. See `drainDirty`'s own header for the full account.
+    /// ─────────────────────────────────────────────────────────────────────────────────────────
 
     /// **Added after a live diagnostic matrix measured its absence killing the shared, app-wide
     /// office helper roughly 4 times out of 5 on an ordinary "dirty tab, choose Save, close" —

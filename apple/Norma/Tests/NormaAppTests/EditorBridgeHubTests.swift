@@ -17,18 +17,24 @@ final class EditorSlotRecorder {
     private(set) var clearCount = 0
     private(set) var answers: [(queryId: UInt64, success: Bool, json: String)] = []
 
+    // crash-fix round 1 (Family B): one of the investigation's named recorder types
+    // (`EditorSlotRecorder.slot.getter`, broker-crash-investigation.md §2) — reached by
+    // `EditorBridgeHub.clear()`'s own fire-and-forget straggler `Task`, same mechanism as
+    // `OfficeRuntime.perform`. `[weak self]` + straggler-safe fallbacks throughout.
     var slot: EditorBridgeHub.Slot {
         EditorBridgeHub.Slot(
-            install: { [unowned self] handler in
+            install: { [weak self] handler in
+                guard let self else { return }
                 self.installCount += 1
                 self.handler = handler
             },
-            clear: { [unowned self] in
+            clear: { [weak self] in
+                guard let self else { return }
                 self.clearCount += 1
                 self.handler = nil
             },
-            respond: { [unowned self] queryId, success, json in
-                self.answers.append((queryId, success, json))
+            respond: { [weak self] queryId, success, json in
+                self?.answers.append((queryId, success, json))
             })
     }
 
