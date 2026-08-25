@@ -26,12 +26,23 @@ let officeFormulaBarReferenceWidth: CGFloat = 56
 /// `editorViewportUnknownFailureReason`'s own reasoning.
 let officeDocumentUnknownFailureReason = "the office helper stopped before it came up"
 
+/// Office Stage C — the sentence for `.closedUnderTab`: the document this tab was showing stopped
+/// being open in the runtime while the tab itself was still on screen and still wanted it.
+///
+/// **Deliberately says "something", not "the agent".** The tab cannot know WHO closed it: the one
+/// reducer transition that can remove a live `documents[path]` entry with a healthy helper and no
+/// recorded open failure is `.closeRequested` (`OfficeRuntimeReducer`, the arm behind
+/// `OfficeRuntime.close(_:)`), and every caller of that door reaches the same arm. Naming the
+/// agent would be a guess dressed as a fact — the honest claim is the one this tab can actually
+/// make from what it observed.
+let officeDocumentClosedUnderTabReason = "something closed it while this tab was still open"
+
 // MARK: - Pure: the viewport plan
 
 /// Every not-the-canvas state a `.document` tab can be in. Each is a calm sentence (or a spinner);
-/// `.failed` is the only one with an action (obligation 5's "Reopen" affordance) — `.openFailed` has
-/// none, mirroring `EditorViewportState.openFailed`'s own posture (retry lives at the door that
-/// opened it, `openDocumentTab`'s `retryOpen`, not in the tab itself).
+/// `.failed` and `.closedUnderTab` are the two with an action (obligation 5's "Reopen" affordance)
+/// — `.openFailed` has none, mirroring `EditorViewportState.openFailed`'s own posture (retry lives
+/// at the door that opened it, `openDocumentTab`'s `retryOpen`, not in the tab itself).
 enum OfficeDocumentViewportState: Equatable {
     /// A document tab pointing at nothing. Unreachable through any shipped door — `openDocumentTab`
     /// always sets an absolute path — rendered honestly rather than as a blank rectangle, mirroring
@@ -49,6 +60,20 @@ enum OfficeDocumentViewportState: Equatable {
     /// This one document refused to open — the helper is fine; the file was not
     /// (`OfficeRuntimeState.openFailures`).
     case openFailed(path: String, reason: String)
+    /// **Office Stage C — the document was closed out from under a tab that still wants it.** The
+    /// helper is fine, this path recorded no open failure, and this tab HAD the document a moment
+    /// ago: something called `OfficeRuntime.close(_:)` for a path whose tab is still on screen (the
+    /// `OfficeAgentBroker` mirror interleaving its own rule-1 comment discloses is the reachable
+    /// producer). Pre-fix this fell through to `.booting` — an indefinite spinner with no text and
+    /// no way out.
+    ///
+    /// **A case of its own rather than reusing `.failed`, and the reason is the RENDERING, not
+    /// taxonomy**: `OfficeDocumentViewportStateView`'s `.failed` arm hardcodes the title "The
+    /// office helper stopped". The helper did not stop here — it is running, and it is still
+    /// serving every other document. Routing this through `.failed` would put a sentence on screen
+    /// that contradicts the state that produced it. Offers the SAME Reopen affordance, under a
+    /// title that is true.
+    case closedUnderTab(reason: String)
 }
 
 /// What a `.document` tab must show: the canvas, or one of the calm states above. Mirrors
@@ -84,8 +109,17 @@ enum OfficeDocumentViewportPlan: Equatable {
 /// `PanelDocumentTabModel.requestOpenIfNeeded`) — which is also exactly the ask whose own retry
 /// (carry 4: `.failed` retries like `.idle`) makes the pristine case self-heal within one run-loop
 /// turn, matching the T5 review's own "self-heals" framing of the underlying over-delivery race.
+/// **`documentVanished` (Office Stage C) is the model's own bookkeeping too, for the same reason
+/// `hasRequestedOpen` is** — the literal state cannot answer it. A document closed out from under a
+/// live tab leaves `documents[path] == nil`, `phase == .ready` and `openFailures[path] == nil`:
+/// byte-for-byte the state of a path nobody has opened yet. Only a model that WATCHED the entry be
+/// there and then not be there can tell the two apart, which is what
+/// `PanelDocumentTabModel.documentVanished` records. **Deliberately NOT given a default value**:
+/// there is exactly one production caller (`PanelDocumentTabModel.plan`), and a default is how a
+/// future second one would silently reintroduce the spinner this parameter exists to remove.
 func officeDocumentViewportPlan(path: String?, state: OfficeRuntimeState?,
-                                hasRequestedOpen: Bool) -> OfficeDocumentViewportPlan {
+                                hasRequestedOpen: Bool,
+                                documentVanished: Bool) -> OfficeDocumentViewportPlan {
     guard let path, !path.isEmpty else { return .renderState(.noFile) }
     guard let state else { return .renderState(.booting) }
 
@@ -99,6 +133,15 @@ func officeDocumentViewportPlan(path: String?, state: OfficeRuntimeState?,
     }
     if let reason = state.openFailures[path] {
         return .renderState(.openFailed(path: path, reason: reason))
+    }
+    // Office Stage C — checked LAST of the named cases, and the order is load-bearing in both
+    // directions. Above it: `phase == .failed` (a dead helper wipes every document, so a vanish is
+    // ALSO true then — but "the helper stopped" is the more specific and more useful sentence) and
+    // `openFailures[path]` (the `.reloadFailed` reducer arm removes `documents[path]` and records a
+    // per-path reason in the SAME transition, so that reason wins over this generic one). Below it:
+    // `.booting`, which is what this arm rescues the tab from.
+    if documentVanished {
+        return .renderState(.closedUnderTab(reason: officeDocumentClosedUnderTabReason))
     }
     return .renderState(.booting)
 }
@@ -503,6 +546,39 @@ final class PanelDocumentTabModel: ObservableObject {
     /// own ask went out.
     private(set) var hasRequestedOpen = false
 
+    /// **Office Stage C — "this tab has actually SEEN its document open on this runtime."** The
+    /// other half of the vanish detection below: `documentVanished` is only meaningful for a tab
+    /// that had the entry and lost it, and no field of `OfficeRuntimeState` can say that (see
+    /// `officeDocumentViewportPlan`'s own `documentVanished` note — a lost document and a
+    /// never-opened one are the identical state). Reset with the rest of the gate on a runtime
+    /// change: a fresh runtime instance has shown this tab nothing yet.
+    private var sawDocument = false
+
+    /// **What the plan reads.** True from the moment this model observes its document gone off a
+    /// healthy runtime with no per-path failure, false again the moment a document is back at this
+    /// path. See `OfficeDocumentViewportState.closedUnderTab`.
+    private(set) var documentVanished = false
+
+    /// **The structural bound on the automatic re-open** — the whole reason the re-arm below cannot
+    /// become an open/close loop. It is NOT enough to reason that a loop "should not arise" (after
+    /// the tab re-opens it owns the document, so a later broker call adopts under rule 1 rather
+    /// than opening, and there is no second close to lose): that argument is about the ORDINARY
+    /// interleaving, and this counter is what holds when the ordinary case does not.
+    ///
+    /// Counted per (runtime, path) for that pairing's whole lifetime, and **deliberately never
+    /// reset by a successful re-open** — resetting on success is precisely what would re-enable the
+    /// loop (vanish → reopen → counter cleared → vanish → reopen → …, forever). The only reset is
+    /// the gate's own runtime-identity reset, a user/session-driven transition the vanish cycle
+    /// cannot itself cause. Once spent, a further vanish still renders `.closedUnderTab` — the tab
+    /// is still recoverable, just by the user's own Reopen click (`retryOpen`, which consults no
+    /// gate at all) instead of automatically.
+    private var vanishReopenCount = 0
+
+    /// One. The ordinary interleaving produces exactly one vanish per tab (see
+    /// `vanishReopenCount`'s own note), so one automatic retry covers the real case and any larger
+    /// number would only buy repeats of a retry that already did not help.
+    static let maxAutomaticReopensAfterVanish = 1
+
     init(tabId: String, path: String?) {
         self.tabId = tabId
         self.path = path
@@ -572,19 +648,78 @@ final class PanelDocumentTabModel: ObservableObject {
     func requestOpenIfNeeded() {
         guard let runtime = runtimeRef, let path, !path.isEmpty else { return }
         guard let state = runtimeState else { return }
-        guard state.documents[path] == nil, state.openFailures[path] == nil else { return }
+
+        // **The document is here.** The original early return, now also the one place `sawDocument`
+        // is armed and `documentVanished` is disarmed: a path showing a document is, by definition,
+        // not a path whose document went away. Returns BEFORE the runtime-identity reset below,
+        // exactly as the pre-Stage-C code did — an already-open path asks for nothing, whichever
+        // runtime is holding it.
+        if state.documents[path] != nil {
+            sawDocument = true
+            documentVanished = false
+            return
+        }
+
+        // **Moved ABOVE the `openFailures` guard (Office Stage C), and it has to be.** A fresh
+        // runtime instance has never shown this tab anything, so `sawDocument`/`documentVanished`/
+        // `vanishReopenCount` must reset in lockstep with the rest of the gate — otherwise a
+        // session departure and return (which mints a new `OfficeRuntime`) would read this tab's
+        // memory of the OLD runtime's document as a vanish on the NEW one, and paint a failure
+        // sentence over a tab that is merely booting again. (A fresh instance's `openFailures` is
+        // empty, so nothing observable changes for the pre-existing fields by running this first.)
         if openRequestedRuntime !== runtime {
             openRequestedRuntime = runtime
             openRequestedPaths = []
             hasRequestedOpen = false
+            sawDocument = false
+            documentVanished = false
+            vanishReopenCount = 0
         }
+
+        guard state.openFailures[path] == nil else { return }
+
+        // **Office Stage C — the vanish.** Reached only with: no document at this path, a recorded
+        // sighting of one on THIS runtime, and no per-path open failure. `phase != .failed` is the
+        // load-bearing exclusion, not tidiness: `.helperDied`/`.helperUnavailable` wipe every
+        // document wholesale, so a dead helper satisfies every other clause here — and the re-arm
+        // below would then dispatch an automatic `open()` into a `.failed` phase, which (carry 4)
+        // retries exactly like `.idle`, i.e. it would silently restart the helper. Obligation 5 is
+        // explicit that a retry out of `.failed` is a user action and never an automatic one; this
+        // clause is what keeps that true. The `.failed` phase already has its own plan arm and its
+        // own Reopen button, so nothing is lost by standing aside here.
+        if sawDocument, state.phase != .failed {
+            documentVanished = true
+            // Consumed: the NEXT vanish must be detected on its own fresh sighting, not on this
+            // one — otherwise a single sighting would arm every subsequent empty-state broadcast.
+            sawDocument = false
+            if vanishReopenCount < Self.maxAutomaticReopensAfterVanish {
+                vanishReopenCount += 1
+                // The re-arm, and the only thing that ever removes a path from this set short of a
+                // runtime change. Without it the gate below is spent for this model's whole life
+                // and nothing self-heals; with it, the plan's `.closedUnderTab` sentence is what
+                // the user sees only for as long as the re-open takes to land.
+                openRequestedPaths.remove(path)
+            }
+        }
+
         guard openRequestedPaths.insert(path).inserted else { return }
         // Never synchronous — this can run from inside the runtime's own `@Published` `willSet`
         // (the state sink above), i.e. in the middle of a reducer step; the hop is what keeps that
         // re-entry impossible. `open` is NOT `async` (unlike `EditorRuntime.openFile`) but the same
         // discipline still applies to the CALL, not just an await.
+        //
+        // **`guard !isRetired` (Office Stage C) — load-bearing the moment the re-arm above exists,
+        // and verified against the real ordering, not assumed.** `ShellSessionHost.closePanelTab`
+        // calls `officeRuntime.close(path)` and only THEN `PanelDocumentTabModels.discard(tabId:)`,
+        // and `OfficeRuntime.state` is `@Published`, so it publishes synchronously: a user closing
+        // a document tab reaches this method through the sink while this model is still live and
+        // still holding its runtime. That close is indistinguishable here from the broker's own —
+        // so without this guard the re-arm would schedule an open for a tab that is about to be
+        // discarded, and the user's × would leave a document open on the helper with no tab
+        // watching it. The retirement lands (synchronously, one line later) before this hop runs.
         Task { @MainActor [weak self, weak runtime] in
-            self?.hasRequestedOpen = true
+            guard let self, !self.isRetired else { return }
+            self.hasRequestedOpen = true
             runtime?.open(path)
         }
     }
@@ -625,7 +760,8 @@ final class PanelDocumentTabModel: ObservableObject {
     /// `PanelEditorTabModel.plan` does.
     var plan: OfficeDocumentViewportPlan {
         officeDocumentViewportPlan(path: path, state: runtimeRef == nil ? nil : runtimeState,
-                                   hasRequestedOpen: hasRequestedOpen)
+                                   hasRequestedOpen: hasRequestedOpen,
+                                   documentVanished: documentVanished)
     }
 
     /// office-plumbing Task 8: this tab's own banner text, or `nil` — mirrors `PanelEditorTabModel
@@ -1395,22 +1531,35 @@ struct OfficeDocumentViewportStateView: View {
             case .booting:
                 ProgressView().controlSize(.small)
             case .failed(let reason):
-                VStack(spacing: panelEditorChromeGap) {
-                    Text("The office helper stopped")
-                        .font(Typography.emptyStateSubtitle)
-                        .foregroundStyle(.primary)
-                    Text(reason)
-                        .font(Typography.caption())
-                        .foregroundStyle(Theme.textMuted)
-                        .multilineTextAlignment(.center)
-                    reopenButton
-                }
-                .padding(.horizontal, panelTabPillInset)
+                reopenable(title: "The office helper stopped", reason: reason)
+            case .closedUnderTab(let reason):
+                // Office Stage C — the SAME affordance as `.failed` under a title that is true of
+                // THIS state: the helper never stopped here. See
+                // `OfficeDocumentViewportState.closedUnderTab` for why that distinction is what
+                // earned this its own case rather than a second spelling of `.failed`.
+                reopenable(title: "This document was closed", reason: reason)
             case .openFailed(let path, let reason):
                 message("This document couldn't be opened", path: path, detail: reason)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// The two reopenable states' shared body — one title, one calm sentence, one Reopen button.
+    /// Extracted when `.closedUnderTab` joined `.failed` (Office Stage C) so the affordance itself
+    /// cannot drift between them; only the title differs, which is the whole point of the split.
+    private func reopenable(title: String, reason: String) -> some View {
+        VStack(spacing: panelEditorChromeGap) {
+            Text(title)
+                .font(Typography.emptyStateSubtitle)
+                .foregroundStyle(.primary)
+            Text(reason)
+                .font(Typography.caption())
+                .foregroundStyle(Theme.textMuted)
+                .multilineTextAlignment(.center)
+            reopenButton
+        }
+        .padding(.horizontal, panelTabPillInset)
     }
 
     private var reopenButton: some View {

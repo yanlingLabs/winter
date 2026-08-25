@@ -72,20 +72,20 @@ final class PanelDocumentTabTests: XCTestCase {
     // MARK: - Pure: officeDocumentViewportPlan
 
     func testNoPathRendersNoFile() {
-        XCTAssertEqual(officeDocumentViewportPlan(path: nil, state: OfficeRuntimeState(), hasRequestedOpen: false),
+        XCTAssertEqual(officeDocumentViewportPlan(path: nil, state: OfficeRuntimeState(), hasRequestedOpen: false, documentVanished: false),
                        .renderState(.noFile))
-        XCTAssertEqual(officeDocumentViewportPlan(path: "", state: OfficeRuntimeState(), hasRequestedOpen: false),
+        XCTAssertEqual(officeDocumentViewportPlan(path: "", state: OfficeRuntimeState(), hasRequestedOpen: false, documentVanished: false),
                        .renderState(.noFile))
     }
 
     func testNoRuntimeStateRendersBooting() {
-        XCTAssertEqual(officeDocumentViewportPlan(path: "/a.xlsx", state: nil, hasRequestedOpen: false),
+        XCTAssertEqual(officeDocumentViewportPlan(path: "/a.xlsx", state: nil, hasRequestedOpen: false, documentVanished: false),
                        .renderState(.booting))
     }
 
     func testAnOpenDocumentShowsTheCanvasWithEveryFieldCarriedThrough() {
         let state = documentState(path: "/a.xlsx", docId: "d1", type: .spreadsheet, parts: 3, activePart: 2)
-        XCTAssertEqual(officeDocumentViewportPlan(path: "/a.xlsx", state: state, hasRequestedOpen: true),
+        XCTAssertEqual(officeDocumentViewportPlan(path: "/a.xlsx", state: state, hasRequestedOpen: true, documentVanished: false),
                        .showCanvas(path: "/a.xlsx", docId: "d1", type: .spreadsheet, parts: 3,
                                   sizeTwips: sizeTwips, activePart: 2))
     }
@@ -97,7 +97,7 @@ final class PanelDocumentTabTests: XCTestCase {
         var state = documentState(path: "/a.xlsx")
         state.phase = .failed
         state.failureReason = "irrelevant"
-        XCTAssertNotEqual(officeDocumentViewportPlan(path: "/a.xlsx", state: state, hasRequestedOpen: true),
+        XCTAssertNotEqual(officeDocumentViewportPlan(path: "/a.xlsx", state: state, hasRequestedOpen: true, documentVanished: false),
                           .renderState(.failed(reason: "irrelevant")))
     }
 
@@ -106,14 +106,14 @@ final class PanelDocumentTabTests: XCTestCase {
     /// at anything (it never tried).
     func testFailedPhaseWithNoRequestedOpenYetRendersBootingNotFailed() {
         let state = failedState()
-        XCTAssertEqual(officeDocumentViewportPlan(path: "/a.xlsx", state: state, hasRequestedOpen: false),
+        XCTAssertEqual(officeDocumentViewportPlan(path: "/a.xlsx", state: state, hasRequestedOpen: false, documentVanished: false),
                        .renderState(.booting))
     }
 
     /// The genuine case: this tab DID ask, and the runtime is `.failed` — the Reopen affordance.
     func testFailedPhaseAfterThisTabAskedRendersFailedWithTheReason() {
         let state = failedState(reason: "the office helper stopped unexpectedly.")
-        XCTAssertEqual(officeDocumentViewportPlan(path: "/a.xlsx", state: state, hasRequestedOpen: true),
+        XCTAssertEqual(officeDocumentViewportPlan(path: "/a.xlsx", state: state, hasRequestedOpen: true, documentVanished: false),
                        .renderState(.failed(reason: "the office helper stopped unexpectedly.")))
     }
 
@@ -121,7 +121,7 @@ final class PanelDocumentTabTests: XCTestCase {
     /// empty one.
     func testFailedPhaseWithNoReasonUsesTheFallbackSentence() {
         let state = failedState(reason: nil)
-        XCTAssertEqual(officeDocumentViewportPlan(path: "/a.xlsx", state: state, hasRequestedOpen: true),
+        XCTAssertEqual(officeDocumentViewportPlan(path: "/a.xlsx", state: state, hasRequestedOpen: true, documentVanished: false),
                        .renderState(.failed(reason: officeDocumentUnknownFailureReason)))
     }
 
@@ -129,14 +129,14 @@ final class PanelDocumentTabTests: XCTestCase {
         var state = OfficeRuntimeState()
         state.phase = .ready
         state.openFailures["/bad.docx"] = "garbage file"
-        XCTAssertEqual(officeDocumentViewportPlan(path: "/bad.docx", state: state, hasRequestedOpen: true),
+        XCTAssertEqual(officeDocumentViewportPlan(path: "/bad.docx", state: state, hasRequestedOpen: true, documentVanished: false),
                        .renderState(.openFailed(path: "/bad.docx", reason: "garbage file")))
     }
 
     func testReadyWithNoDocumentAndNoFailureRendersBooting() {
         var state = OfficeRuntimeState()
         state.phase = .ready
-        XCTAssertEqual(officeDocumentViewportPlan(path: "/a.xlsx", state: state, hasRequestedOpen: false),
+        XCTAssertEqual(officeDocumentViewportPlan(path: "/a.xlsx", state: state, hasRequestedOpen: false, documentVanished: false),
                        .renderState(.booting))
     }
 
@@ -144,7 +144,7 @@ final class PanelDocumentTabTests: XCTestCase {
         var state = OfficeRuntimeState()
         state.phase = .starting
         state.pendingOpens = ["/a.xlsx"]
-        XCTAssertEqual(officeDocumentViewportPlan(path: "/a.xlsx", state: state, hasRequestedOpen: true),
+        XCTAssertEqual(officeDocumentViewportPlan(path: "/a.xlsx", state: state, hasRequestedOpen: true, documentVanished: false),
                        .renderState(.booting))
     }
 
