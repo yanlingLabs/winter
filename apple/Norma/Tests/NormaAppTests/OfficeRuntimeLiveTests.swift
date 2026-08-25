@@ -2286,6 +2286,132 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         _ = host.teardownAllOfficeRuntimesAndStopHelper()
     }
 
+    // MARK: - dirty-close-helper-kill fix: the drain, proven repeatedly against the real helper
+
+    /// **The mechanism proof for `OfficeRuntime.drainUntilClean`** — full account:
+    /// `.superpowers/sdd/2026-08-20-office-editable/dirty-close-helper-kill-fix-report.md`; original
+    /// diagnosis `.superpowers/sdd/2026-08-22-office-agent-tools/task-2-report.md` §6/§7 concern 1.
+    ///
+    /// Reproduces the EXACT sequence `ShellSessionHost.resolveDirtyDocumentTabClose`'s Save choice
+    /// drives against a real document, through REAL production wiring (`ShellSessionHost
+    /// .officeRuntime` -> the real `OfficeHelperSupervisor` -> the real, seatbelted
+    /// `NormaOfficeHelper` -> the real vendored LibreOffice) — never `ShellSessionHost`'s own
+    /// panel-tab/sheet machinery, which this codebase's `ShellSessionHostTests` always drives against
+    /// a FAKE driver on purpose (that file's own `makeHost` comment: two office-live tests racing the
+    /// SAME real helper subprocess was measured directly, mid-review, as a source of failures
+    /// unrelated to whatever either test was actually proving). This is the "manual path" the
+    /// diagnostic matrix itself used (task-2-report.md's evidence table, diagC/diagC-prime) to
+    /// isolate the drain as the one variable — open, real typed edit, `saveAndAwaitOutcome`, drain,
+    /// close, repeated — reproduced here as a permanent regression tripwire rather than the temporary
+    /// diagnostic methods that report's own Appendix says were "deleted before the final commit."
+    /// `ShellSessionHostTests.testRequestCloseTabOnADirtyDocumentTabSaveChoiceThatSucceedsWaitsForThe
+    /// DrainRoundTripBeforeClosing` (plus its own
+    /// `...SaveRetryThatSucceedsAfterAnEarlierFailureStillWaitsForTheDrain` sibling, added at the
+    /// fix-round review that found the drain's first `dirty`-gated version unsound — see
+    /// `OfficeRuntime.drainUntilClean`'s own doc comment) is this fix's OTHER half — the fast,
+    /// always-run wiring pin that catches a regression at the call site alone, against a fake driver
+    /// whose `clipboardCopy` a test can suspend on demand; this test instead proves the underlying
+    /// MECHANISM truly holds against real LOK's own `clipboardCopy`, which a fake driver cannot.
+    ///
+    /// **Looped 5 times on ONE runtime/helper, not 5 independent helpers** — the bug is specifically
+    /// that closing ONE document kills the process every OTHER open document also depends on
+    /// (`OfficeHelperRequestQueue` is one FIFO across every session, this file's own header). Proving
+    /// the fix means proving the SAME helper survives repeatedly, not that five fresh helpers each
+    /// survive once. Each lap both exercises the fix and re-opens the just-closed path — doubling as
+    /// the next lap's own "the helper is still genuinely functional, not merely technically
+    /// `isRunning`" proof, the same reasoning task-2-report.md gives for keeping its own committed
+    /// tripwire on one runtime rather than a fresh host per assertion. A final reopen after the last
+    /// lap covers the one case looping alone would miss: whether the LAST close was itself lethal,
+    /// with nothing left in the loop to reveal it.
+    ///
+    /// **This test's own RED measurement is not committed here** (this codebase's own established
+    /// practice, per the diagnostic matrix's own history) — done by hand for the fix's SDD report:
+    /// comment out the one `await runtime.drainUntilClean(docPath)` line below, rerun, record how
+    /// many of the 5 laps saw the helper die. The report names the observed rate both ways.
+    func testDirtyCloseSheetSaveSequenceRepeatedlyThroughTheRealHelperNeverKillsTheSharedProcess() async throws {
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent()
+            .appendingPathComponent("NormaOfficeHelper")
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
+                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                        + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
+        let vendorRoot = Self.vendorProductSetRoot
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
+                      "LibreOffice vendor tree not present at \(vendorRoot.path) — run "
+                        + "`bun run libreoffice:fetch` from the repo root.")
+        let fixturePath = Self.fixturesRoot.appendingPathComponent("gate.odt").path
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: fixturePath), "gate.odt fixture missing")
+
+        let stateDir = makeScratchDirectory()
+        let directory = SessionDirectory(lister: { [] })
+        let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        host.makeOfficeHelperSupervisor = {
+            OfficeHelperSupervisor(configuration: OfficeHelperSupervisor.Configuration(
+                helperExecutableURL: helperURL,
+                socketDirectory: stateDir,
+                extraArguments: ["--lok-root", vendorRoot.path, "--sandbox-profile", Self.sandboxProfilePath.path]))
+        }
+        let runtime = host.officeRuntime(for: "S1")
+
+        let scratchDir = makeScratchDirectory()
+        let docPath = scratchDir.appendingPathComponent("dirty-close-loop.odt").path
+        try Data(contentsOf: URL(fileURLWithPath: fixturePath)).write(to: URL(fileURLWithPath: docPath))
+
+        let iterations = 5
+        for lap in 1...iterations {
+            runtime.open(docPath)
+            let settled = await waitUntil(timeout: 90) {
+                runtime.stateSnapshot.documents[docPath] != nil || runtime.stateSnapshot.phase == .failed
+            }
+            XCTAssertTrue(settled, "lap \(lap): never settled — phase: \(runtime.stateSnapshot.phase)")
+            guard let doc = runtime.stateSnapshot.documents[docPath] else {
+                return XCTFail("lap \(lap): open failed — "
+                               + "\(runtime.stateSnapshot.openFailures[docPath] ?? "no reason recorded")")
+            }
+            guard let client = host.officeHelperSupervisor?.client else {
+                return XCTFail("lap \(lap): no live client to drive the real edit door through")
+            }
+            try await postRealEdit(client: client, docId: doc.docId, marker: "T4EDIT")
+            let becameDirty = await waitUntil(timeout: 15) { runtime.stateSnapshot.documents[docPath]?.dirty == true }
+            XCTAssertTrue(becameDirty, "lap \(lap): the real edit never marked the document dirty")
+
+            // The dirty-close sheet's own Save door — `saveAndAwaitOutcome`, not the fire-and-forget
+            // `save`, exactly matching `resolveDirtyDocumentTabClose`'s own call.
+            let outcome = await runtime.saveAndAwaitOutcome(docPath)
+            XCTAssertEqual(outcome, .saved, "lap \(lap): expected a clean save")
+
+            // THE FIX under test — this test's own header has the RED-measurement instruction.
+            let drained = await runtime.drainUntilClean(docPath)
+            XCTAssertTrue(drained, "lap \(lap): the drain's own round trip (driver.clipboardCopy) "
+                          + "timed out rather than completing — not itself a failure (the write "
+                          + "already landed regardless) but worth knowing if a 15s stall starts "
+                          + "happening for real")
+
+            runtime.close(docPath)
+
+            guard let helperPID = host.officeHelperSupervisor?.process?.processIdentifier else {
+                return XCTFail("lap \(lap): supervisor has no live process left to check")
+            }
+            XCTAssertTrue(isProcessAlive(helperPID), "lap \(lap): the shared helper died after an "
+                          + "ordinary dirty-close-sheet Save sequence")
+        }
+
+        // The strongest liveness proof (task-2-report.md's own reasoning for its committed tripwire):
+        // a dead/zombie helper cannot complete a fresh open, whereas `isProcessAlive` alone only
+        // proves the PID still exists, not that the process can still do anything useful. This also
+        // covers the one case the loop above alone would miss: whether the LAST close was itself
+        // lethal, with no further lap left to reveal it.
+        runtime.open(docPath)
+        let reopened = await waitUntil(timeout: 90) {
+            runtime.stateSnapshot.documents[docPath] != nil || runtime.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(reopened, "the helper survived every close but could not complete one more "
+                      + "open — phase: \(runtime.stateSnapshot.phase)")
+        XCTAssertNotNil(runtime.stateSnapshot.documents[docPath], "final liveness reopen must "
+                        + "succeed: \(runtime.stateSnapshot.openFailures[docPath] ?? "no reason recorded")")
+
+        _ = host.teardownAllOfficeRuntimesAndStopHelper()
+    }
+
     // MARK: - The r4 vendor re-cut: .docx is a read-WRITE format again, end to end
 
     /// **The docx drill the read-only demotion existed in place of.** Whole-branch review I2 held

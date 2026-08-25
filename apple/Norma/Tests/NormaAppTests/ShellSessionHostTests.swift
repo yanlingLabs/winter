@@ -4050,6 +4050,29 @@ final class ShellSessionHostTests: XCTestCase {
             for continuation in continuations { continuation.resume() } // outside the lock, same reason as above
         }
 
+        /// dirty-close-helper-kill fix-round review (IMPORTANT-1) — `OfficeRuntime.drainUntilClean`'s
+        /// own round trip now goes through THIS door (`driver.clipboardCopy`, called directly, never
+        /// through `postClipboardCopy`), not through `dirty`. Same "held until resumed" shape as
+        /// `requestTiles` immediately above, for the identical reason: a test needs to prove a close
+        /// is withheld while the round trip is genuinely still in flight, which requires holding it
+        /// open on demand rather than letting this recorder answer instantly.
+        private var clipboardCopySuspended = false
+        private var pendingClipboardCopyContinuations: [CheckedContinuation<Void, Never>] = []
+        private var _clipboardCopyCalls: [String] = []
+        var clipboardCopyCalls: [String] { lock.lock(); defer { lock.unlock() }; return _clipboardCopyCalls }
+
+        func suspendClipboardCopy() {
+            lock.lock(); clipboardCopySuspended = true; lock.unlock()
+        }
+        func resumeClipboardCopy() {
+            lock.lock()
+            clipboardCopySuspended = false
+            let continuations = pendingClipboardCopyContinuations
+            pendingClipboardCopyContinuations = []
+            lock.unlock()
+            for continuation in continuations { continuation.resume() } // outside the lock, same reason as above
+        }
+
         var driver: OfficeRuntime.Driver {
             OfficeRuntime.Driver(
                 helperState: { [unowned self] in self.state },
@@ -4114,7 +4137,17 @@ final class ShellSessionHostTests: XCTestCase {
                 },
                 postKey: { _, _, _, _, _ in }, postMouse: { _, _, _, _, _, _, _, _ in },
                 postExtTextInput: { _, _, _, _ in },
-                clipboardCopy: { _, _ in nil },
+                clipboardCopy: { [unowned self] docId, _ in
+                    self.lock.lock(); self._clipboardCopyCalls.append(docId); let suspended = self.clipboardCopySuspended
+                    if !suspended { self.lock.unlock(); return nil }
+                    self.lock.unlock()
+                    await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                        self.lock.lock()
+                        self.pendingClipboardCopyContinuations.append(continuation)
+                        self.lock.unlock()
+                    }
+                    return nil
+                },
                 clipboardCut: { _, _ in nil },
                 clipboardPaste: { _, _, _ in },
                 undo: { _ in },
@@ -4632,6 +4665,14 @@ final class ShellSessionHostTests: XCTestCase {
     /// AFTER it. `saveTempPaths` points at a REAL file with real bytes — `OfficeRuntime.placeAtomically`
     /// copies FROM it, so a nonexistent temp would fail the save (`testSaveAndAwaitOutcomeReturnsFailed
     /// WhenThePlaceCannotFindTheHelpersTempFile`'s own case, deliberately not this one).
+    ///
+    /// **dirty-close-helper-kill fix-round review (IMPORTANT-1) — no longer keyed on `dirty` at all.**
+    /// `OfficeRuntime.drainUntilClean` now performs an awaited round trip (`driver.clipboardCopy`)
+    /// rather than waiting for `dirty` to clear (that proxy turned out to be unsound — see the
+    /// function's own doc comment). `OfficeDriverRecorder.clipboardCopy` answers immediately by
+    /// default, so this test needs no special handling to stay fast; the test that actually PINS the
+    /// drain's own wait — proving close is withheld while the round trip is genuinely still in
+    /// flight — is the one immediately below, which explicitly suspends it.
     func testRequestCloseTabOnADirtyDocumentTabSaveChoiceThatSucceedsClosesAfterSaving() async throws {
         let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
         let (host, factory, mgmt) = await makeHostWithManagement(rows: rows)
@@ -4651,6 +4692,178 @@ final class ShellSessionHostTests: XCTestCase {
         await feedWaitUntil { mgmt.methods.contains("panel.closeTab") }
         XCTAssertEqual(try? String(contentsOfFile: path, encoding: .utf8), "rendered",
                        "a successful save must land on the real path before the tab closes")
+        // Full-suite-only flake note: this used to be an immediate, un-waited XCTAssertTrue. Under a
+        // heavily loaded full-suite run (2840 tests, real subprocesses elsewhere) it was observed
+        // failing here even though `panel.closeTab` had already fired — plausible MainActor/Task
+        // scheduling delay under contention rather than a causality violation (the recorder's own
+        // append happens-before the continuation resume, which happens-before `drainUntilClean`
+        // returns, which happens-before `closePanelTab` is ever called), never reproduced in
+        // isolation or in a same-order grouped run. Widened to a bounded poll, matching this file's
+        // own established idiom for anything that depends on async completion rather than asserting
+        // a Swift-structured-concurrency happens-before edge is ALSO instantaneously observable.
+        await officeWaitUntil(timeout: 5) { office.recorder.clipboardCopyCalls.contains(docId) }
+        XCTAssertTrue(office.recorder.clipboardCopyCalls.contains(docId), "the drain's own round trip "
+                      + "must actually have been attempted for this docId")
+        try? FileManager.default.removeItem(atPath: path)
+    }
+
+    /// **The wiring pin — this is the test that would have caught the shipped bug.** The task this
+    /// fix implements names it exactly: "closing a dirty office document tab and choosing Save kills
+    /// the shared LibreOffice helper process roughly 4 times out of 5"
+    /// (`.superpowers/sdd/2026-08-22-office-editable/dirty-close-helper-kill-fix-report.md`,
+    /// `task-2-report.md` §6/§7 concern 1 for the original diagnosis).
+    ///
+    /// **Fix-round review IMPORTANT-1 rewrote the mechanism this proves.** The first version of this
+    /// test suspended on `dirty`, staying `true` until a `modifiedChanged(false)` event was delivered
+    /// — review found that gate unsound (`OfficeRuntime.drainUntilClean`'s own doc comment has the
+    /// full account: the reducer itself can clear `dirty` synchronously, with no real callback,
+    /// exactly on the recovery-restore and failed-save-retry paths). The fix now performs a real
+    /// awaited round trip (`driver.clipboardCopy`) instead, so this test suspends THAT — `office
+    /// .recorder.suspendClipboardCopy()` — rather than withholding a state event, and asserts the tab
+    /// is still open while the round trip is parked, then resumes it and asserts the close proceeds.
+    ///
+    /// Pre-fix (either version of the fix), `resolveDirtyDocumentTabClose` called `closePanelTab` the
+    /// INSTANT `saveAndAwaitOutcome` resolved `.saved`, without waiting on anything — so this asserts
+    /// the tab is STILL OPEN while the round trip is parked (this is the RED case: reverting the drain
+    /// call in `ShellSessionHost.resolveDirtyDocumentTabClose` back to a bare
+    /// `self?.closePanelTab(tabId)` makes the first `XCTAssertFalse` below fail, immediately,
+    /// deterministically — no live helper, no flake, no repetition needed to see it) — and only closes
+    /// once the round trip is allowed to resolve.
+    func testRequestCloseTabOnADirtyDocumentTabSaveChoiceThatSucceedsWaitsForTheDrainRoundTripBeforeClosing() async throws {
+        let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+        let (host, factory, mgmt) = await makeHostWithManagement(rows: rows)
+        defer { host.deselect() }
+        let office = officeFactory()
+        host.makeOfficeRuntime = office.make
+        let (runtime, path, docId) = try await makeDirtyDocumentTab(
+            host: host, factory: factory, sessionId: "S1", tabId: "t1", scratchPrefix: "savedrain")
+        let renderedPath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rendered-\(UUID().uuidString).xlsx").path
+        try Data("rendered".utf8).write(to: URL(fileURLWithPath: renderedPath))
+        office.recorder.saveTempPaths[docId] = renderedPath
+        office.recorder.suspendClipboardCopy()
+        host.presentDirtyCloseSheet = { _, _, respond in respond(.save) }
+
+        host.requestCloseTab("t1")
+
+        // Full-suite-only flake note: widened from 2s to 8s after a heavily loaded full-suite run
+        // (2840 tests, real subprocesses elsewhere) was observed missing the 2s bound here — an
+        // unrelated real-animation-timer test (`SurfaceWindowTests`, its own 5s `pollUntil` bound)
+        // failed the SAME way in that SAME run, corroborating system-level scheduling pressure over
+        // a bug in this test's own logic. Never reproduced in isolation or in a same-order grouped
+        // run of this file's own office tab-close tests.
+        await officeWaitUntil(timeout: 8) { office.recorder.saveCalls.contains(docId) }
+        await officeWaitUntil(timeout: 8) { office.recorder.clipboardCopyCalls.contains(docId) }
+        // Give a premature close every chance to race ahead if the drain were ever dropped — the
+        // exact beat pre-fix code did not wait through.
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertFalse(mgmt.methods.contains("panel.closeTab"), "a successful save must not close the "
+                       + "tab while the drain's own round trip is still outstanding — this is the "
+                       + "exact sequence that killed the shared helper roughly 4 times out of 5")
+        XCTAssertNotNil(runtime.stateSnapshot.documents[path], "the document must still be open, mid-drain")
+
+        office.recorder.resumeClipboardCopy()
+
+        await feedWaitUntil { mgmt.methods.contains("panel.closeTab") }
+        XCTAssertNil(runtime.stateSnapshot.documents[path], "once the round trip resolves, the drain "
+                     + "completes and the close proceeds")
+        try? FileManager.default.removeItem(atPath: path)
+    }
+
+    /// **Fix-round review IMPORTANT-1's own reachable case, driven end to end through the real gate.**
+    /// A sheet-Save RETRY that SUCCEEDS after an earlier failure on the SAME tab is exactly the
+    /// scenario the review named: `saveFailedPendingSave` makes `.saveSucceeded` clear `dirty`
+    /// SYNCHRONOUSLY on the retry's own success (`OfficeRuntime.swift`'s `.saveSucceeded` reducer arm,
+    /// whole-branch review C1), which is precisely why the first (dirty-gated) version of the drain
+    /// gave this path ZERO wait rather than the bounded one its own doc comment claimed. Proves the
+    /// fix by the SAME suspend/resume mechanism as the test above, on the retry leg specifically:
+    /// first Save fails (tab stays open, `saveFailedPendingSave` set), second Save succeeds with the
+    /// round trip suspended, and the close must still wait for it.
+    func testRequestCloseTabOnADirtyDocumentTabSaveRetryThatSucceedsAfterAnEarlierFailureStillWaitsForTheDrain() async throws {
+        let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+        let (host, factory, mgmt) = await makeHostWithManagement(rows: rows)
+        defer { host.deselect() }
+        let office = officeFactory()
+        host.makeOfficeRuntime = office.make
+        let (runtime, path, docId) = try await makeDirtyDocumentTab(
+            host: host, factory: factory, sessionId: "S1", tabId: "t1", scratchPrefix: "saveretry")
+        office.recorder.saveFailures[docId] = "disk full"
+        host.presentDirtyCloseSheet = { _, _, respond in respond(.save) }
+        host.requestCloseTab("t1")
+        // Full-suite-only flake note: widened from 2s to 8s — see the sibling test's own identical
+        // note immediately above this one in the file for the full account.
+        await officeWaitUntil(timeout: 8) { office.recorder.saveCalls.contains(docId) }
+        try? await Task.sleep(nanoseconds: 100_000_000) // let the failed save's outcome settle
+        XCTAssertNotNil(runtime.stateSnapshot.documents[path], "setup: the failed save must not have closed anything")
+        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.dirty, true, "setup: still dirty after the failure")
+
+        // The retry: this time the save succeeds. `saveTempPaths` must point at a REAL file with real
+        // bytes here too (same requirement the plain-success test's own comment names) — otherwise
+        // `placeAtomically` fails downstream on the default temp path even after `saveFailures` is
+        // cleared, which would mask this test's own point behind an unrelated place failure.
+        // `saveFailedPendingSave` (set by the failure above) makes the reducer's own `.saveSucceeded`
+        // arm clear `dirty` SYNCHRONOUSLY the instant this second save lands — before this test ever
+        // asks the drain anything — so if the drain were still gated on `dirty`, it would already
+        // read `false` here and skip its wait entirely.
+        let retryRenderedPath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rendered-retry-\(UUID().uuidString).xlsx").path
+        try Data("rendered-retry".utf8).write(to: URL(fileURLWithPath: retryRenderedPath))
+        office.recorder.saveTempPaths[docId] = retryRenderedPath
+        office.recorder.saveFailures.removeValue(forKey: docId)
+        office.recorder.suspendClipboardCopy()
+        host.presentDirtyCloseSheet = { _, _, respond in respond(.save) }
+        host.requestCloseTab("t1")
+
+        await officeWaitUntil(timeout: 8) { office.recorder.saveCalls.filter { $0 == docId }.count == 2 }
+        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.dirty, false, "sanity: the reducer's own "
+                       + "synchronous clear on a successful retry already fired — the OLD dirty-gated "
+                       + "drain would stop right here")
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertFalse(mgmt.methods.contains("panel.closeTab"), "the retry's own successful save must "
+                       + "still wait for the drain's round trip, even though dirty already reads "
+                       + "false — this is IMPORTANT-1's own reachable path")
+        XCTAssertNotNil(runtime.stateSnapshot.documents[path], "still open, mid-drain, on the retry leg")
+
+        office.recorder.resumeClipboardCopy()
+
+        await feedWaitUntil { mgmt.methods.contains("panel.closeTab") }
+        XCTAssertNil(runtime.stateSnapshot.documents[path], "once the round trip resolves, the retry's "
+                     + "close proceeds")
+        try? FileManager.default.removeItem(atPath: path)
+    }
+
+    /// **Honesty obligation (dirty-close-helper-kill fix, task item 3): a drain whose round trip never
+    /// resolves must still proceed, not hang forever or turn a landed save into a reported failure.**
+    /// Calls `OfficeRuntime.drainUntilClean` directly (bypassing the tab-close gate, whose own default
+    /// 15s bound would make this test slow for no added proof) with a short `timeout`, having
+    /// suspended the fake driver's `clipboardCopy` so the round trip never answers — mirroring a
+    /// helper that is genuinely still unresponsive. Asserts the call RETURNS (does not hang) within a
+    /// small multiple of `timeout`, and that its own `@discardableResult` answers `false` — the
+    /// caller-facing signal that this was a timeout, not a genuine round trip, which
+    /// `resolveDirtyDocumentTabClose` deliberately still ignores (closes anyway) per the same
+    /// function's own doc comment: the write already landed, so a stalled drain must not become a
+    /// reported save failure.
+    func testDrainUntilCleanTimesOutAndProceedsRatherThanHangingWhenTheRoundTripNeverResolves() async throws {
+        let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+        let (host, factory, _) = await makeHostWithManagement(rows: rows)
+        defer { host.deselect() }
+        let office = officeFactory()
+        host.makeOfficeRuntime = office.make
+        let (runtime, path, docId) = try await makeDirtyDocumentTab(
+            host: host, factory: factory, sessionId: "S1", tabId: "t1", scratchPrefix: "draintimeout")
+        office.recorder.suspendClipboardCopy()
+
+        let start = Date()
+        let drained = await runtime.drainUntilClean(path, timeout: 0.2)
+        let elapsed = Date().timeIntervalSince(start)
+
+        XCTAssertFalse(drained, "a drain whose round trip never resolves must report it timed out, "
+                       + "not that it succeeded")
+        XCTAssertGreaterThanOrEqual(elapsed, 0.2, "must actually wait out the bound, not return early")
+        XCTAssertLessThan(elapsed, 5.0, "must not hang well past its own bound")
+        XCTAssertTrue(office.recorder.clipboardCopyCalls.contains(docId), "the round trip must "
+                      + "actually have been attempted, not skipped")
+        office.recorder.resumeClipboardCopy() // release the parked continuation so it doesn't leak past this test
         try? FileManager.default.removeItem(atPath: path)
     }
 

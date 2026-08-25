@@ -1051,10 +1051,23 @@ final class ShellSessionHost: ObservableObject {
             // has. `nil` on failure (never `""`, which is LOK's own legal "nothing selected"
             // answer) — the same discrimination `close`/`unsubscribeTiles` already draw between
             // "nothing to report" and "a real, empty-but-valid result."
+            //
+            // dirty-close-helper-kill fix-round review, second pass — **`OfficeRuntime.drainUntilClean`
+            // is now also a caller of this closure**, using its answer only as "did a round trip
+            // happen," never the text itself. The `guard let client` miss below answers `nil` exactly
+            // like a real empty-selection reply, with NO round trip to the helper at all (the FIFO
+            // pass through `queue.run` still happens; the SolarMutex half never does) — logged here,
+            // where the degradation actually occurs, so a caller reporting "drained" in this state is
+            // observable rather than silently indistinguishable from a real probe. Harmless today (no
+            // client also means no helper for a close to endanger) but worth knowing about.
             clipboardCopy: { [weak supervisor] docId, part in
                 do {
                     return try await queue.run {
-                        guard let client = supervisor?.client else { return nil }
+                        guard let client = supervisor?.client else {
+                            NSLog("[ShellSessionHost] office clipboardCopy(\(docId)): no live client — "
+                                  + "answering nil with no round trip reaching the helper")
+                            return nil
+                        }
                         return try await client.clipboardCopy(docId: docId, part: part)
                     }
                 } catch {
@@ -1561,6 +1574,23 @@ final class ShellSessionHost: ObservableObject {
     /// header states for every other door on that object — a session that departed WHILE the sheet was
     /// up retains its dirty runtime (this task's own `releaseOfficeRuntimeIfClean` fix), so the runtime
     /// this resolves is the SAME one the sheet was originally shown for, not a fresh mint.
+    ///
+    /// **The `.saved` leg drains before it closes — this is the fix for a live, shipped bug, not
+    /// belt-and-braces.** Pre-fix, this method called `closePanelTab(tabId)` the INSTANT
+    /// `saveAndAwaitOutcome` resolved `.saved`, without ever checking whether the helper's own
+    /// bookkeeping had caught up — a diagnostic matrix measured that sequence killing the shared,
+    /// app-wide office helper roughly 4 times out of 5 (full account: `OfficeRuntime.drainUntilClean`'s
+    /// own doc comment, and `.superpowers/sdd/2026-08-22-office-agent-tools/task-2-report.md` §6/§7
+    /// concern 1). `drainUntilClean` is a no-op the instant `path` has no OPEN document at all — which
+    /// covers `.noModel` (nothing was ever open to be dirty about) and the silent, non-sheet close path
+    /// one level up in `requestCloseTab` (a CLEAN tab's `×` never reaches this method at all, so
+    /// ⌘S-then-× was never at risk and needs no separate treatment). **It is deliberately NOT gated on
+    /// `dirty`** — fix-round review IMPORTANT-1 found that gate unsound (the reducer can clear `dirty`
+    /// synchronously with no real callback behind it, on the recovery-restore and failed-save-retry
+    /// paths specifically — both ordinary, reachable sequences), so the drain instead performs a real
+    /// awaited round trip to the helper every time a document is open here, regardless of what `dirty`
+    /// happens to read; see that function's own doc comment for the full mechanism. `.failed` cannot
+    /// reach this arm at all — see the `case .keepOpen, .awaitSave` comment below.
     private func resolveDirtyDocumentTabClose(tabId: String, choice: DirtyCloseChoice) {
         switch dirtyCloseAction(dirty: true, choice: choice) {
         case .close:
@@ -1574,11 +1604,18 @@ final class ShellSessionHost: ObservableObject {
                 let outcome = await runtime.saveAndAwaitOutcome(path)
                 switch dirtyCloseActionAfterSave(outcome) {
                 case .close:
+                    await runtime.drainUntilClean(path)
                     self?.closePanelTab(tabId)
                 case .keepOpen, .awaitSave:
                     // `.failed`: the reducer's own `.saveFailed` arm already wrote the sentence into
                     // `documentBanners[path]` (`OfficeRuntimeReducer`'s own doc) — the tab simply stays,
-                    // mirroring the editor's identical posture toward T9's banner.
+                    // mirroring the editor's identical posture toward T9's banner. Pinned, not merely
+                    // true by omission: `dirtyCloseActionAfterSave(.failed) == .keepOpen`
+                    // (`EditorTabTests`' own exhaustive truth table) means a failed save can NEVER
+                    // reach the `.close` arm above through this door — so the one save outcome the
+                    // diagnostic matrix never exercised (task-2-report.md §7 concern 8: "the matrix
+                    // only exercised the success path") is also the one outcome that structurally
+                    // never asks anything to drain or close here at all.
                     break
                 }
             }
