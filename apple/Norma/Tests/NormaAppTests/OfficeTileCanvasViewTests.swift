@@ -2122,6 +2122,7 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// app-wide FIFO. So the recorder counts, and this asserts the count.
     func testABurstOfTypingProducesExactlyOneSaveNotOnePerKeystroke() async {
         let (runtime, recorder) = await makeOpenedRuntime()
+        runtime.autoSaveEnabled = true
         runtime.autoSaveDebounceInterval = 0.05
         // The REAL docId the runtime minted — not a literal. A hardcoded "doc-1" reaches no
         // document, `dirty` stays false, and the test then measures the clean-document path while
@@ -2151,6 +2152,7 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// saved unconditionally would look correct in the test above.
     func testACleanDocumentNeverSavesEvenWhenTheDebounceFires() async {
         let (runtime, recorder) = await makeOpenedRuntime()
+        runtime.autoSaveEnabled = true
         runtime.autoSaveDebounceInterval = 0.05
         // No `.modifiedChanged(true)` — `dirty` stays false.
         runtime.postKeyEvent(path: gatePath, type: .keyInput, charCode: 65, keyCode: 512)
@@ -2166,6 +2168,7 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// together they pin "exactly as many saves as there were quiet periods".
     func testTwoSeparatedBurstsProduceTwoSaves() async {
         let (runtime, recorder) = await makeOpenedRuntime()
+        runtime.autoSaveEnabled = true
         runtime.autoSaveDebounceInterval = 0.05
         let docId = runtime.stateSnapshot.documents[gatePath]?.docId ?? ""
         XCTAssertFalse(docId.isEmpty, "setup: the fixture must be open")
@@ -2190,6 +2193,7 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     /// all, because it looks saved.
     func testUndoReArmsTheDebouncedSave() async {
         let (runtime, _) = await makeOpenedRuntime()
+        runtime.autoSaveEnabled = true
         runtime.autoSaveDebounceInterval = 5.0    // long, so the arming is observable before it fires
         XCTAssertFalse(runtime.autoSaveIsArmedForTesting(path: gatePath))
         runtime.postUndo(path: gatePath)

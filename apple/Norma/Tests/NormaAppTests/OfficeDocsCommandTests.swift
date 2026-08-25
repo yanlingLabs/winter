@@ -530,14 +530,24 @@ final class OfficeDocsCommandTests: XCTestCase {
         // disk**. That proves the undo happened AND that it was persisted — end to end, off disk,
         // through both requirements at once. A `postUndo` that silently did nothing would leave
         // UNDOMARKER in those bytes and fail here.
+        // The undo genuinely changed the document, so LOK's own ModifiedStatus must say so. This is
+        // the assertion that makes the test non-vacuous: a `postUndo` that silently did nothing —
+        // the pre-R3 behaviour — leaves the document CLEAN, and would fail here even if the read
+        // above somehow passed.
+        XCTAssertTrue(runtime.stateSnapshot.documents[path]?.dirty ?? false,
+                      "an undo that really changed the document must mark it modified")
+
+        // And it must be persistable: an explicit save lands the undone state on disk, proving the
+        // undo is not merely an in-memory illusion. (`OfficeRuntime.autoSaveEnabled` is OFF — see
+        // its own header for the reproducible content loss that parked it — so this test drives the
+        // save itself rather than waiting for a debounce that will not fire.)
+        runtime.save(path)
         let settledClean = await waitUntilLive { runtime.stateSnapshot.documents[path]?.dirty == false }
-        XCTAssertTrue(settledClean, "the debounced save must land the undone state on disk — if the "
-                        + "document never goes clean, instant-save did not run for the undo")
+        XCTAssertTrue(settledClean, "the post-undo save must land")
         let savedXML = try readODFEntry(atPath: path, entry: "content.xml")
         XCTAssertFalse(savedXML.contains("UNDOMARKER"),
                        "the SAVED bytes must no longer carry the agent's text: the human's ⌘Z took "
-                         + "it back and instant-save persisted that. Still present means either the "
-                         + "undo did nothing or the save did")
+                         + "it back. Still present means either the undo did nothing or the save did")
     }
 
     // MARK: - office-live-edit R2 — how many paragraphs one paste actually makes

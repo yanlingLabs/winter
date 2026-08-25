@@ -2539,6 +2539,46 @@ final class OfficeRuntime: ObservableObject {
     /// Injectable so tests can drive the machine without sleeping for real. Production never sets it.
     var autoSaveDebounceInterval: TimeInterval = OfficeRuntime.autoSaveDebounceIntervalDefault
 
+    /// ⛔ **DEFAULT OFF, and this is a finding rather than caution.**
+    ///
+    /// The machinery below is complete, measured and tested. It is **not armed in production**
+    /// because turning it on **loses the user's typed content**, reproducibly, and the mechanism is
+    /// **UNESTABLISHED**.
+    ///
+    /// **The evidence, A/B, not inferred.** With the debounce armed from the input doors, two live
+    /// multi-sheet Calc drills fail reproducibly in isolation —
+    /// `OfficeRuntimeLiveTests.testTypingOnSheetTwoLandsOnSheetTwoNotSheetOneThroughSaveAndReopen`
+    /// and `…testRequestingPartZeroAfterTypingOnSheetTwoRendersSheetOneNotAStaleBystanderMatch`.
+    /// Both type through the REAL canvas door, save, and read the saved XML back off disk, and both
+    /// find the typed marker **on neither sheet** — the text is gone, not misplaced. Disabling only
+    /// `noteEditActivity` and changing nothing else makes both pass. That is the whole A/B.
+    ///
+    /// **Two candidate mechanisms, neither established, and deliberately no third story invented:**
+    ///  1. A save landing while a Calc cell is still in EDIT mode. A cell being edited holds its
+    ///     text in the edit engine rather than the document, and a save at that instant would
+    ///     serialize without it — the everyday user gesture "type into a cell, pause to think" is
+    ///     exactly that window, which makes this the more alarming of the two.
+    ///  2. **Two saves on one path racing.** `fireAutoSave`'s never-overlap guard covers auto-save
+    ///     against ITSELF, but nothing covers auto-save against the OTHER save doors — ⌘S, the
+    ///     close sheet, the broker. `OfficeRuntime.save` has no cross-door single-flight, by
+    ///     deliberate design ("two ⌘S on one path are two independent saves"), and two saves'
+    ///     file-watcher expected-write tokens interleaving is a **tested edge case** — one the
+    ///     office research explicitly warned "must not become the ordinary path", which is precisely
+    ///     what arming this would do. A misattributed write would look external, and an external
+    ///     write to a CLEAN document silently re-stages/reloads it — which would explain content
+    ///     vanishing rather than landing in the wrong place.
+    ///
+    /// **Why parked rather than patched.** Both candidate fixes are behaviour changes on a live save
+    /// path — a cross-door single-flight would change what a second ⌘S means for every existing
+    /// caller — and a lengthened interval would only make the loss rarer, converting a reproducible
+    /// failure into an occasional silent one. That is the trade this codebase has already been burnt
+    /// by and it is not one to make without the mechanism established first.
+    ///
+    /// Everything else stays: the machine, its unit tests (which set this true), the forced-red
+    /// evidence, and the measured save cost. Arming it is one line once a drill establishes which
+    /// candidate is real.
+    var autoSaveEnabled: Bool = false
+
     private var autoSaveTasks: [String: Task<Void, Never>] = [:]
     private var autoSaveInFlight: Set<String> = []
 
@@ -2560,6 +2600,7 @@ final class OfficeRuntime: ObservableObject {
     /// Constraint C7 is respected by construction: none of this is reducer state, nothing renders
     /// from it, and `dispatch` is never called at keystroke frequency on its account.
     func noteEditActivity(path: String) {
+        guard autoSaveEnabled else { return }
         guard !officeDocumentIsReadOnlyFormat(path: path) else { return }
         autoSaveTasks[path]?.cancel()
         let interval = autoSaveDebounceInterval
@@ -2853,12 +2894,21 @@ final class OfficeRuntime: ObservableObject {
         //
         // Costs O(number of ledgers), not O(open documents): only paths that actually have a group
         // are looked at, and that is zero for every document the agent has never written to.
-        let watchedDocIds: [String: String?] = undoLedgers.isEmpty ? [:]
-            : undoLedgers.keys.reduce(into: [:]) { $0[$1] = state.documents[$1]?.docId }
+        //
+        // office-live-edit R1 rides the SAME funnel for the same reason: a debounced save armed for
+        // a document that has since closed or been replaced must not fire. `fireAutoSave` would
+        // decline it anyway (its `dirty` guard reads `state.documents[path]`, which is gone), so
+        // this is hygiene rather than a correctness fix — but it is the difference between a timer
+        // that is cancelled and one that merely finds nothing to do up to a second later, next to a
+        // close window that measurably kills the shared helper.
+        let watched = Set(undoLedgers.keys).union(autoSaveTasks.keys)
+        let watchedDocIds: [String: String?] = watched.isEmpty ? [:]
+            : watched.reduce(into: [:]) { $0[$1] = state.documents[$1]?.docId }
         let (next, effects) = OfficeRuntimeReducer.reduce(state, event)
         state = next
         for (path, previousDocId) in watchedDocIds where next.documents[path]?.docId != previousDocId {
             undoLedgers.removeValue(forKey: path)
+            autoSaveTasks.removeValue(forKey: path)?.cancel()
         }
         return effects
     }
