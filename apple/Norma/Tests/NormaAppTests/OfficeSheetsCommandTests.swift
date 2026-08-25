@@ -202,6 +202,67 @@ final class OfficeSheetsCommandTests: XCTestCase {
         try await pressReturn(client: client, docId: docId)
     }
 
+    // MARK: - office-live-edit R1 — what a save actually costs
+
+    /// **The measurement the debounce interval is chosen against.** Nothing in this repo recorded
+    /// how long one office save actually takes, and the engine research names that number as "the
+    /// whole feasibility question" for instant save — a save is a full container rewrite (the whole
+    /// document re-rendered inside the helper, then a full-file copy, an `fsync` and a `rename`),
+    /// and it holds the one app-wide FIFO while it runs.
+    ///
+    /// **This asserts a RELATIONSHIP, not a stopwatch number.** A test that pinned "a save takes
+    /// under 250 ms" would be a machine-speed flake with no design meaning. What must hold for the
+    /// debounce to be coherent is that a save on an ordinary document finishes comfortably inside
+    /// the idle interval — otherwise every burst would still be saving when the next one armed, and
+    /// the design would silently degrade to the re-arm path on every edit. The measured number is
+    /// PRINTED so a human can see the real cost and revisit the interval on evidence.
+    ///
+    /// ⚠️ Scope, stated rather than implied: every office fixture in this repo is under 30 KB, so
+    /// this measures the FLOOR. The cost is O(document size) and the curve for a multi-megabyte
+    /// document is unmeasured — which is exactly why `fireAutoSave` never overlaps saves and re-arms
+    /// instead, so a document too slow for the interval degrades to "as often as it can".
+    func testLiveSaveWallClockIsWellInsideTheAutoSaveDebounceInterval() async throws {
+        try requireLiveEngine()
+        let path = try makeWritableCopy(of: "gate.ods", as: "save-cost.ods")
+        let stateDir = makeScratchDirectory()
+        let host = makeLiveHost(stateDir: stateDir,
+                                dirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)])
+        await host.directory.refresh()
+        let runtime = host.officeRuntime(for: "S1")
+        runtime.open(path)
+        let opened = await waitUntilLive { runtime.stateSnapshot.documents[path] != nil || runtime.stateSnapshot.phase == .failed }
+        XCTAssertTrue(opened, "setup: the fixture must open cleanly")
+        let doc = try XCTUnwrap(runtime.stateSnapshot.documents[path])
+        let client = try XCTUnwrap(host.officeHelperSupervisor?.client)
+
+        var elapsed: [TimeInterval] = []
+        for round in 0..<3 {
+            // A REAL edit before each save. Measuring a save of an unmodified document would time
+            // the `DontSaveIfUnmodified` fast path, not a save — the arc's own vacuous-drill shape.
+            try await typeOneCharacterOnPrimaryView(client: client, docId: doc.docId)
+            XCTAssertEqual(runtime.stateSnapshot.documents[path]?.dirty, true,
+                           "round \(round): the edit must really have dirtied the document, or this "
+                             + "times the unmodified fast path instead of a save")
+            let started = Date()
+            let outcome = await runtime.saveAndAwaitOutcome(path)
+            elapsed.append(Date().timeIntervalSince(started))
+            guard case .saved = outcome else {
+                return XCTFail("round \(round): the save must succeed to be worth timing: \(outcome)")
+            }
+        }
+
+        let worst = elapsed.max() ?? 0
+        print(String(format: "[save cost] gate.ods, 3 rounds: %@ — worst %.3fs, debounce %.3fs",
+                     elapsed.map { String(format: "%.3fs", $0) }.joined(separator: ", "),
+                     worst, OfficeRuntime.autoSaveDebounceIntervalDefault))
+        XCTAssertLessThan(worst, OfficeRuntime.autoSaveDebounceIntervalDefault,
+                          "a save on an ordinary document must finish inside the idle interval, or "
+                            + "the debounce degrades to the never-overlap re-arm path on every "
+                            + "single edit. Worst measured: \(worst)s")
+
+        _ = host.teardownAllOfficeRuntimesAndStopHelper()
+    }
+
     // MARK: - office-live-edit R3 — Calc's ⌘Z behaviour change, pinned
 
     /// **⛔ THE CALC DRILL. This pins a DELIBERATE CHANGE to behaviour the user already had, which

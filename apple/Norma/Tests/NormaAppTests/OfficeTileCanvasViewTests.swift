@@ -328,6 +328,13 @@ final class OfficeTileCanvasViewTests: XCTestCase {
         // shape as `ShellSessionHostTests.OfficeDriverRecorder`/`PanelDocumentTabTests
         // .DocumentOfficeDriverRecorder` and this codebase's wider precedent.
         private let lock = NSLock()
+        /// office-live-edit R1 — how many times the debounced auto-save actually reached the driver.
+        /// A COUNT, not a bool: the whole claim of a debounce is "N edits produced ONE save", and a
+        /// bool cannot tell one save from five.
+        private var _saveCalls: [String] = []
+        var saveCalls: [String] {
+            lock.lock(); defer { lock.unlock() }; return _saveCalls
+        }
         private var _subscribeCalls: [(docId: String, part: Int, zoomPPT: Int, viewportTwips: OfficeTwipsRect)] = []
         var subscribeCalls: [(docId: String, part: Int, zoomPPT: Int, viewportTwips: OfficeTwipsRect)] {
             lock.lock(); defer { lock.unlock() }; return _subscribeCalls
@@ -407,7 +414,10 @@ final class OfficeTileCanvasViewTests: XCTestCase {
                     type: documentType, parts: 1,
                     sizeTwips: OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)) },
                 close: { _ in },
-                save: { _, _ in "/tmp/officetilecanvasviewtests-unused-save" },
+                save: { [weak self] docId, _ in
+                    self?.lock.lock(); self?._saveCalls.append(docId); self?.lock.unlock()
+                    return "/tmp/officetilecanvasviewtests-unused-save"
+                },
                 // crash-fix round 1 (Family B): same fire-and-forget-outlives-the-test mechanism as
                 // `BrokerOfficeDriverRecorder` (broker-crash-investigation.md §2) — this recorder is
                 // one of the "sibling recorders" the investigation names, reached by the same
@@ -2101,6 +2111,90 @@ final class OfficeTileCanvasViewTests: XCTestCase {
         // is the "engine cannot tell me" path. It must degrade to exactly ONE action, never zero:
         // the counts above are the assertion that it does.
         view.unmount()
+    }
+
+    // MARK: - office-live-edit R1 — instant save, debounced and coalesced
+
+    /// **The claim, and the only assertion shape that can carry it: N edits produce ONE save.**
+    ///
+    /// A bool ("did it save?") would pass against a save-per-keystroke implementation, which is the
+    /// exact thing this design exists to avoid — one save is a full container rewrite holding the
+    /// app-wide FIFO. So the recorder counts, and this asserts the count.
+    func testABurstOfTypingProducesExactlyOneSaveNotOnePerKeystroke() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        runtime.autoSaveDebounceInterval = 0.05
+        // The REAL docId the runtime minted — not a literal. A hardcoded "doc-1" reaches no
+        // document, `dirty` stays false, and the test then measures the clean-document path while
+        // claiming to measure coalescing.
+        let docId = runtime.stateSnapshot.documents[gatePath]?.docId ?? ""
+        XCTAssertFalse(docId.isEmpty, "setup: the fixture must be open before this drives edits")
+        runtime.handle(documentEvent: .modifiedChanged(true), docId: docId)
+        XCTAssertEqual(runtime.stateSnapshot.documents[gatePath]?.dirty, true,
+                       "setup: the document must really be dirty, or this measures the clean path")
+
+        for code in 0..<12 {
+            runtime.postKeyEvent(path: gatePath, type: .keyInput, charCode: 65 + code, keyCode: 512 + code)
+        }
+        await runtime.drainInputChainForTesting()
+        let saved = await waitUntil { recorder.saveCalls.count >= 1 }
+        XCTAssertTrue(saved, "twelve keystrokes must eventually produce a save")
+        // Let any second save that a non-coalescing implementation would fire arrive before counting.
+        try? await Task.sleep(nanoseconds: 400_000_000)
+        XCTAssertEqual(recorder.saveCalls.count, 1,
+                       "twelve keystrokes, ONE save — a count above one means the burst was not "
+                         + "coalesced and every keystroke is paying a full document rewrite")
+    }
+
+    /// **The control arm.** Same door, same interval, but the document is CLEAN — so the debounce
+    /// must fire and then decline to save. Without this, an implementation that simply never saved
+    /// would be indistinguishable from one that coalesces correctly, and an implementation that
+    /// saved unconditionally would look correct in the test above.
+    func testACleanDocumentNeverSavesEvenWhenTheDebounceFires() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        runtime.autoSaveDebounceInterval = 0.05
+        // No `.modifiedChanged(true)` — `dirty` stays false.
+        runtime.postKeyEvent(path: gatePath, type: .keyInput, charCode: 65, keyCode: 512)
+        await runtime.drainInputChainForTesting()
+        try? await Task.sleep(nanoseconds: 400_000_000)
+        XCTAssertEqual(recorder.saveCalls.count, 0,
+                       "an unmodified document must cost NOTHING — not even a helper request. This "
+                         + "is what keeps an idle document off the shared FIFO entirely")
+    }
+
+    /// Two separate edit bursts, separated by more than the interval, are two saves — the debounce
+    /// coalesces a burst, it does not swallow later work. The complement of the coalescing test:
+    /// together they pin "exactly as many saves as there were quiet periods".
+    func testTwoSeparatedBurstsProduceTwoSaves() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        runtime.autoSaveDebounceInterval = 0.05
+        let docId = runtime.stateSnapshot.documents[gatePath]?.docId ?? ""
+        XCTAssertFalse(docId.isEmpty, "setup: the fixture must be open")
+        runtime.handle(documentEvent: .modifiedChanged(true), docId: docId)
+
+        runtime.postKeyEvent(path: gatePath, type: .keyInput, charCode: 65, keyCode: 512)
+        await runtime.drainInputChainForTesting()
+        let first = await waitUntil { recorder.saveCalls.count >= 1 }
+        XCTAssertTrue(first, "the first burst must save")
+
+        // The save cleared LOK's ModifiedStatus in production; re-dirty for the second burst.
+        runtime.handle(documentEvent: .modifiedChanged(true), docId: docId)
+        runtime.postKeyEvent(path: gatePath, type: .keyInput, charCode: 66, keyCode: 513)
+        await runtime.drainInputChainForTesting()
+        let second = await waitUntil { recorder.saveCalls.count >= 2 }
+        XCTAssertTrue(second, "a later, separate burst must save again — a debounce that coalesced "
+                        + "across quiet periods would lose the second edit until something else saved")
+    }
+
+    /// Undo is an EDIT, and must re-arm the save like any other. Without this the document could be
+    /// left on disk in a state the user had already taken back — which is worse than not saving at
+    /// all, because it looks saved.
+    func testUndoReArmsTheDebouncedSave() async {
+        let (runtime, _) = await makeOpenedRuntime()
+        runtime.autoSaveDebounceInterval = 5.0    // long, so the arming is observable before it fires
+        XCTAssertFalse(runtime.autoSaveIsArmedForTesting(path: gatePath))
+        runtime.postUndo(path: gatePath)
+        XCTAssertTrue(runtime.autoSaveIsArmedForTesting(path: gatePath),
+                      "⌘Z changes the document, so it must arm the save exactly as typing does")
     }
 
     /// **office-live-edit R3 — ⌘Z must dispatch with `Repair: true`.** Without it LOK refuses any

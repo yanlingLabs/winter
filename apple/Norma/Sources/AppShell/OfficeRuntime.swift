@@ -2317,6 +2317,7 @@ final class OfficeRuntime: ObservableObject {
     /// is the one sibling that does NOT gate — copying out is a pure read, not a mutation.
     func postKeyEvent(path: String, type: OfficeKeyEventType, charCode: Int, keyCode: Int) {
         guard let doc = state.documents[path], !officeDocumentIsReadOnlyFormat(path: path) else { return }
+        noteEditActivity(path: path)
         let docId = doc.docId
         let part = doc.activePart
         let previous = inputChainTail
@@ -2362,6 +2363,7 @@ final class OfficeRuntime: ObservableObject {
     /// exactly like an ordinary keystroke does, so it is gated on the identical terms.
     func postExtTextInput(path: String, type: OfficeExtTextInputType, text: String) {
         guard let doc = state.documents[path], !officeDocumentIsReadOnlyFormat(path: path) else { return }
+        noteEditActivity(path: path)
         let docId = doc.docId
         let part = doc.activePart
         let previous = inputChainTail
@@ -2402,6 +2404,7 @@ final class OfficeRuntime: ObservableObject {
     /// followed by a delete), the same reason it is not grouped with Copy's own un-gated posture.
     func postClipboardCut(path: String) {
         guard let doc = state.documents[path], !officeDocumentIsReadOnlyFormat(path: path) else { return }
+        noteEditActivity(path: path)
         let docId = doc.docId
         let part = doc.activePart
         let previous = inputChainTail
@@ -2424,6 +2427,7 @@ final class OfficeRuntime: ObservableObject {
     /// typing does.
     func postClipboardPaste(path: String, text: String) {
         guard let doc = state.documents[path], !officeDocumentIsReadOnlyFormat(path: path) else { return }
+        noteEditActivity(path: path)
         let docId = doc.docId
         let part = doc.activePart
         let previous = inputChainTail
@@ -2459,6 +2463,7 @@ final class OfficeRuntime: ObservableObject {
     /// this change, not a silent no-op.
     func postUndo(path: String) {
         guard let doc = state.documents[path], !officeDocumentIsReadOnlyFormat(path: path) else { return }
+        noteEditActivity(path: path)
         let docId = doc.docId
         let previous = inputChainTail
         inputChainTail = Task { [driver, weak self] in
@@ -2484,6 +2489,7 @@ final class OfficeRuntime: ObservableObject {
     /// agent edit was taken back.
     func postRedo(path: String) {
         guard let doc = state.documents[path], !officeDocumentIsReadOnlyFormat(path: path) else { return }
+        noteEditActivity(path: path)
         let docId = doc.docId
         let previous = inputChainTail
         inputChainTail = Task { [driver, weak self] in
@@ -2501,6 +2507,106 @@ final class OfficeRuntime: ObservableObject {
             }
         }
     }
+
+    // MARK: office-live-edit R1 — instant save, debounced and coalesced
+
+    /// **The idle interval before an edited document saves itself.**
+    ///
+    /// "Instant save after every edit" cannot be literal, and the reason is structural rather than a
+    /// tuning preference: **one save is a full container rewrite** — the whole document re-rendered
+    /// inside the helper (ODF/OOXML are ZIP packages; `ZipPackage::commitChanges` writes a complete
+    /// new archive and copies it over the target), then a full-file copy, an `fsync` and a `rename`
+    /// in the user's own directory — and the helper leg holds the **one app-wide FIFO** every other
+    /// document and session queues behind. Per-keystroke saving would mean N complete rewrites of
+    /// the whole file to record N characters.
+    ///
+    /// So: **debounce, and coalesce.** A burst of typing arms one save, not one per keystroke.
+    ///
+    /// 900 ms is chosen against a measured floor, not guessed: `saveAndAwaitOutcome` on this repo's
+    /// office fixtures completes in the low hundreds of milliseconds (`OfficeSheetsCommandTests
+    /// .testLiveSaveWallClockIsWellInsideTheAutoSaveDebounceInterval` measures it and asserts the
+    /// relationship rather than a bare number). It is long enough that ordinary typing rhythm never
+    /// triggers a save mid-word, and short enough to read as immediate.
+    ///
+    /// ⚠️ **The cost curve for LARGE documents is UNMEASURED** — every fixture in this repo is under
+    /// 30 KB, and nothing here records a save of a multi-megabyte spreadsheet. Since the cost is
+    /// O(document size), a large document's save will exceed this interval. That is handled by
+    /// construction rather than by the number: `fireAutoSave` never starts a save while one is in
+    /// flight for the same path, it re-arms instead — so a document too slow to save in 900 ms
+    /// degrades to "saves as often as it can", never to overlapping saves.
+    static let autoSaveDebounceIntervalDefault: TimeInterval = 0.9
+
+    /// Injectable so tests can drive the machine without sleeping for real. Production never sets it.
+    var autoSaveDebounceInterval: TimeInterval = OfficeRuntime.autoSaveDebounceIntervalDefault
+
+    private var autoSaveTasks: [String: Task<Void, Never>] = [:]
+    private var autoSaveInFlight: Set<String> = []
+
+    /// **Called by every door that can CHANGE the document** — typing, IME, paste, cut, undo, redo —
+    /// plus a belt on LOK's own `ModifiedStatus` transition for anything that changes the document
+    /// by a route the app did not post itself.
+    ///
+    /// Why the input doors and not `ModifiedStatus` alone: **`STATE_CHANGED` is a TRANSITION.** On a
+    /// clean document the first keystroke fires `modified=true` and every subsequent keystroke fires
+    /// nothing at all, so a timer armed only on that signal would fire once, mid-burst, rather than
+    /// once the user stopped. The app's own input doors are the per-keystroke signal, and they are at
+    /// the right layer: they are what the app SENDS, so they cost nothing to observe.
+    ///
+    /// Deliberately NOT `postMouseEvent`: a click or drag only moves the caret or extends a
+    /// selection — it cannot mutate content on its own (that needs a key/IME/paste event, all of
+    /// which are here). Re-arming on mouse movement would postpone a save while the user was merely
+    /// looking around.
+    ///
+    /// Constraint C7 is respected by construction: none of this is reducer state, nothing renders
+    /// from it, and `dispatch` is never called at keystroke frequency on its account.
+    func noteEditActivity(path: String) {
+        guard !officeDocumentIsReadOnlyFormat(path: path) else { return }
+        autoSaveTasks[path]?.cancel()
+        let interval = autoSaveDebounceInterval
+        autoSaveTasks[path] = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(max(0, interval) * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            await self?.fireAutoSave(path: path)
+        }
+    }
+
+    /// The trailing edge. Three guards, and each is load-bearing for a different reason.
+    private func fireAutoSave(path: String) {
+        autoSaveTasks.removeValue(forKey: path)
+        // (1) Nothing to write. The engine has its own `DontSaveIfUnmodified` lever, but refusing
+        //     here is strictly better: it costs no helper request at all, so an idle document never
+        //     touches the shared FIFO. This is also what makes the agent's own writes free of
+        //     double-saving — the broker already saved, so `dirty` is false by the time this runs.
+        guard state.documents[path]?.dirty == true else { return }
+        // (2) NEVER overlap saves on one path. `OfficeRuntime.save` has no coalescing of its own by
+        //     deliberate design ("two ⌘S on one path are two independent saves"), and overlapping
+        //     saves are already a known cost to the file-watcher's self-attribution bookkeeping —
+        //     two saves' expected-write tokens interleaving is a tested EDGE case, and an
+        //     instant-save design must not make it the ordinary path. Re-arming rather than dropping
+        //     is what keeps a slow document saving as often as it can instead of not at all.
+        guard !autoSaveInFlight.contains(path) else {
+            noteEditActivity(path: path)
+            return
+        }
+        // (3) Through the ORDINARY save path — `saveAndAwaitOutcome`, which is `doc_saveAs` into the
+        //     fence plus an atomic place. Never `.uno:Save`: that route enters `GUIStoreModel`,
+        //     where two dialog sites have NO LibreOfficeKit guard and can be reached via the
+        //     SAVE→SAVEAS promotion, and a modal on the single dedicated LOK thread wedges EVERY
+        //     open office document until the app restarts. More saves means that path would be
+        //     travelled far more often, so the existing choice matters more here, not less.
+        autoSaveInFlight.insert(path)
+        Task { [weak self] in
+            _ = await self?.saveAndAwaitOutcome(path)
+            self?.autoSaveFinished(path: path)
+        }
+    }
+
+    private func autoSaveFinished(path: String) {
+        autoSaveInFlight.remove(path)
+    }
+
+    /// Test-only: is a debounced save currently armed for this path?
+    func autoSaveIsArmedForTesting(path: String) -> Bool { autoSaveTasks[path] != nil }
 
     // MARK: office-live-edit R3 — the undo ledger's actor-side doors
     //
@@ -2696,6 +2802,13 @@ final class OfficeRuntime: ObservableObject {
         switch event {
         case .modifiedChanged(let modified):
             perform(dispatch(.modifiedStatusChanged(docId: docId, modified: modified)))
+            // office-live-edit R1 — the BELT on the debounced save. The input doors are the primary
+            // trigger (see `noteEditActivity`); this catches a document that became dirty by a route
+            // the app did not post — and it is only a belt precisely BECAUSE this signal is a
+            // transition: it fires on clean→dirty and then stays silent however much more is typed.
+            if modified, let path = state.documents.first(where: { $0.value.docId == docId })?.key {
+                noteEditActivity(path: path)
+            }
         case .caretRect, .textSelection, .textSelectionStart, .textSelectionEnd, .cellCursor, .cellFormula:
             let activePart = state.documents.first(where: { $0.value.docId == docId })?.value.activePart ?? 0
             cursorStore.apply(docId: docId, event: event, activePart: activePart)
