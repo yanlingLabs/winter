@@ -654,6 +654,15 @@ final class PanelDocumentTabModel: ObservableObject {
         // not a path whose document went away. Returns BEFORE the runtime-identity reset below,
         // exactly as the pre-Stage-C code did — an already-open path asks for nothing, whichever
         // runtime is holding it.
+        //
+        // **One honest consequence of that order, stated rather than glossed.** If this tab's very
+        // FIRST sight of a runtime already has the document open (nobody's ordinary path — the tab
+        // is normally the one that opened it, and then `openRequestedRuntime` is already this
+        // runtime), `openRequestedRuntime` is still some other instance here. A later loss then
+        // trips the identity reset FIRST, which clears `sawDocument`, so that loss reads as a plain
+        // "nothing open yet" rather than as a vanish: the tab shows `.booting` and dispatches a
+        // fresh open on a fresh gate. Not stuck — it self-heals through the ordinary path — it just
+        // gets a spinner instead of the sentence for that one exotic ordering.
         if state.documents[path] != nil {
             sawDocument = true
             documentVanished = false
