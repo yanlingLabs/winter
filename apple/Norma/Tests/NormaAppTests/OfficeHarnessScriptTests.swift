@@ -16,20 +16,20 @@ final class OfficeHarnessScriptTests: XCTestCase {
 
     func testTheDrillPlanCarriesEveryDrillInOrderWithUniqueIds() throws {
         let steps = OfficeHarnessPlan.steps
-        XCTAssertEqual(steps.count, 88, "the plan's own step count — a change here is a change to "
-                       + "what the harness actually runs")
+        XCTAssertEqual(steps.count, 103, "the plan's own step count — a change here is a change to "
+                       + "what the harness actually runs (88 through Stage B + Stage C's 15)")
 
         let drills = steps.map(\.drill)
-        XCTAssertEqual(Set(drills), Set(0...25), "every drill from 0 (setup) to 25 (Stage B hygiene "
+        XCTAssertEqual(Set(drills), Set(0...29), "every drill from 0 (setup) to 29 (Stage C hygiene "
                        + "re-check) must be present")
         XCTAssertEqual(drills, drills.sorted(), "the steps must be in drill order — the transcript is "
                        + "read as twenty-six groups, never interleaved")
         XCTAssertEqual(Set(steps.map(\.id)).count, steps.count,
                        "step ids must be unique — the harness's own action switch matches on them")
-        for drill in 0...25 {
+        for drill in 0...29 {
             XCTAssertNotNil(OfficeHarnessPlan.drillTitles[drill], "drill \(drill) has no title for the transcript")
         }
-        XCTAssertEqual(Set(OfficeHarnessPlan.drillTitles.keys), Set(0...25), "drillTitles must have no orphaned entries either")
+        XCTAssertEqual(Set(OfficeHarnessPlan.drillTitles.keys), Set(0...29), "drillTitles must have no orphaned entries either")
 
         // Every id names its own drill as a literal prefix — the same discipline that makes
         // `perform(_:)`'s switch and this pin agree by construction rather than by two hand-kept lists.
@@ -150,6 +150,111 @@ final class OfficeHarnessScriptTests: XCTestCase {
     func testDrillTwentyFoursInternalOrderIsWidenedPassThroughThenCFBRefusalThenLiveness() throws {
         let ids = OfficeHarnessPlan.steps.filter { $0.drill == 24 }.map(\.id)
         XCTAssertEqual(ids, ["24.xlsmOpens", "24.odgOpens", "24.cfbRefusal", "24.livenessAfterRefusal"])
+    }
+
+    // MARK: - office-agent-tools Task 9: Stage C drill internal order
+
+    /// **Drills 27's and 28's internal order is the entire evidence chain, in order.** The tab must
+    /// be OPEN before a baseline can be taken (there is no tile store entry otherwise), the baseline
+    /// must precede the command (a hash and a digest taken afterwards prove nothing), the repaint
+    /// check must follow the command, and `disk` must be LAST because it is the only step that reads
+    /// all four facts and renders the verdict. A reorder here would let a step pass on a baseline
+    /// captured after the very write it is meant to detect — the generic sorted-by-drill check
+    /// cannot catch an intra-drill reorder, which is why this pin is written out per drill.
+    func testStageCsWriteDrillsRunOpenBaselineCommandRepaintDisk() throws {
+        for drill in [27, 28] {
+            let ids = OfficeHarnessPlan.steps.filter { $0.drill == drill }.map(\.id)
+            XCTAssertEqual(ids, ["\(drill).open", "\(drill).baseline", "\(drill).command",
+                                 "\(drill).repaint", "\(drill).disk"],
+                           "drill \(drill)'s steps are not in evidence-chain order")
+        }
+    }
+
+    /// **Drill 26's own internal order**: the consumer must exist before anything can be handed to
+    /// it, and the UNRECOGNIZED check runs before the fence check deliberately — it is the cheapest
+    /// proof that the channel answers at all, so a failure there tells you the later fence refusal's
+    /// silence (if any) is a channel problem rather than a fence problem.
+    func testDrillTwentySixsInternalOrderIsWireThenUnrecognizedThenFence() throws {
+        let ids = OfficeHarnessPlan.steps.filter { $0.drill == 26 }.map(\.id)
+        XCTAssertEqual(ids, ["26.wire", "26.unrecognized", "26.outsideFence"])
+    }
+
+    // MARK: - office-agent-tools Task 9: the agent-write evidence classifier
+
+    /// The one branch that may pass, and it requires ALL FOUR facts. Written as an exhaustive sweep
+    /// of the 16 combinations rather than four hand-picked cases, so a future edit that widens
+    /// `.proven` cannot slip past by not having a test aimed at it.
+    func testOnlyAllFourFactsTogetherProveAnAgentWrite() {
+        var passing: [[Bool]] = []
+        for ok in [false, true] {
+            for repainted in [false, true] {
+                for changed in [false, true] {
+                    for marker in [false, true] {
+                        let evidence = classifyOfficeAgentWriteEvidence(
+                            commandOk: ok, tileRepainted: repainted,
+                            bytesChanged: changed, savedBytesCarryMarker: marker)
+                        XCTAssertNotEqual(evidence.branch, .unrecognized,
+                                          "no combination of the four facts may fall through to "
+                                          + "UNRECOGNIZED: ok=\(ok) repainted=\(repainted) "
+                                          + "changed=\(changed) marker=\(marker)")
+                        XCTAssertFalse(evidence.verdict.isEmpty)
+                        if evidence.passes { passing.append([ok, repainted, changed, marker]) }
+                    }
+                }
+            }
+        }
+        XCTAssertEqual(passing, [[true, true, true, true]],
+                       "exactly one of the sixteen combinations may pass — all four facts true")
+    }
+
+    /// **The arc's own worst class, pinned as a branch rather than as an unreached assertion**: a
+    /// command that reports success while the file's bytes are unchanged must land on `.silentNoOp`
+    /// and must FAIL, no matter what the tile did.
+    func testASuccessfulCommandThatChangedNoBytesIsASilentNoOpAndFails() {
+        for repainted in [false, true] {
+            let evidence = classifyOfficeAgentWriteEvidence(
+                commandOk: true, tileRepainted: repainted, bytesChanged: false, savedBytesCarryMarker: false)
+            XCTAssertEqual(evidence.branch, .silentNoOp)
+            XCTAssertFalse(evidence.passes, "a silent no-op must never pass")
+            XCTAssertTrue(evidence.recognized, "it is a recognized diagnosis — recognized, and still red")
+            XCTAssertTrue(evidence.verdict.contains("SILENT NO-OP"))
+        }
+    }
+
+    /// A refusal is a legitimate product outcome AND a red for a drill whose claim is that a write
+    /// landed. Both halves asserted, because collapsing them is how a fence refusal would quietly
+    /// become "the write drill passed".
+    func testARefusedCommandIsRecognizedButStillFails() {
+        let evidence = classifyOfficeAgentWriteEvidence(
+            commandOk: false, tileRepainted: true, bytesChanged: true, savedBytesCarryMarker: true)
+        XCTAssertEqual(evidence.branch, .commandRefused)
+        XCTAssertTrue(evidence.recognized)
+        XCTAssertFalse(evidence.passes)
+    }
+
+    /// The two partial diagnoses are genuinely distinct and neither is absorbed into the other:
+    /// bytes changed WITHOUT the marker is "wrote the wrong thing"; marker present but no repaint is
+    /// "the file is right, the open view did not follow".
+    func testTheTwoPartialBranchesAreDistinctAndBothFail() {
+        let wrongThing = classifyOfficeAgentWriteEvidence(
+            commandOk: true, tileRepainted: true, bytesChanged: true, savedBytesCarryMarker: false)
+        XCTAssertEqual(wrongThing.branch, .changedWithoutTheMarker)
+        XCTAssertFalse(wrongThing.passes)
+
+        let noRepaint = classifyOfficeAgentWriteEvidence(
+            commandOk: true, tileRepainted: false, bytesChanged: true, savedBytesCarryMarker: true)
+        XCTAssertEqual(noRepaint.branch, .savedWithoutRepaint)
+        XCTAssertFalse(noRepaint.passes)
+        XCTAssertNotEqual(wrongThing.branch, noRepaint.branch)
+    }
+
+    /// **`.unrecognized` must still fail closed even though the four-boolean domain cannot reach
+    /// it.** The sweep above proves it is unreachable TODAY; this pins the behaviour so that a fifth
+    /// fact, or a reordered guard, cannot make an unreachable branch quietly become a passing one.
+    func testTheUnrecognizedBranchFailsClosedIfItIsEverReached() {
+        let poisoned = OfficeAgentWriteEvidence(branch: .unrecognized, verdict: "UNRECOGNIZED — probe")
+        XCTAssertFalse(poisoned.recognized)
+        XCTAssertFalse(poisoned.passes)
     }
 
     // MARK: - Cross-language wire parity: PanelTabKind's "document" literal

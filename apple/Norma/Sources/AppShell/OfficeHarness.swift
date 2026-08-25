@@ -2,6 +2,10 @@
 import AppKit
 import CryptoKit
 import Foundation
+// office-agent-tools T9: drills 26-28 build `SessionEvent.PanelCommand`s (NormaProtocol) and seed
+// the session's working-directory fence with `SessionDirEntry` (NormaKit).
+import NormaKit
+import NormaProtocol
 #if canImport(Darwin)
 import Darwin
 #endif
@@ -157,6 +161,39 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
     private var dedicatedProcess10: Process?
     private var dedicatedConnection10: OfficeWireConnection?
     private var dedicatedClient10: OfficeHelperClient?
+
+    // MARK: - office-agent-tools Task 9: Stage C agent-command drill state
+
+    /// The session id every Stage C drill's command carries. The SAME id `0.setup` builds the runtime
+    /// under, because the broker resolves its runtime and its working-directory fence BY SESSION ID
+    /// (`ShellSessionHost.officeAgentBroker`'s own wiring) — a different id here would silently reach
+    /// a different runtime and the drills would prove nothing about the tab that is actually open.
+    static let agentSessionId = "office-harness-session"
+
+    /// The real `PanelCommandConsumer` drills 26-28 feed. Built in `26.wire`, not `0.setup`, so a run
+    /// that never reaches Stage C never constructs one.
+    private var agentConsumer: PanelCommandConsumer?
+    /// `commandId` -> what `sendResult` handed back. `PanelCommandConsumer` guarantees EXACTLY ONE
+    /// result per command (its own `Call` latch), so an id appearing twice here is itself a finding;
+    /// `awaitAgentResult` reports that rather than silently taking the last one.
+    private var agentResults: [String: (ok: Bool, result: String?, count: Int)] = [:]
+
+    private var t27DocId = ""
+    private var t27BaselineTileHash = ""
+    private var t27BaselineFileDigest = ""
+    private var t27CommandOk = false
+    private var t27Repainted = false
+    /// Deliberately ASCII and deliberately absent from every committed fixture — `27.baseline`
+    /// asserts the pristine file does NOT already contain it, so a total no-op cannot pass the way
+    /// the T8 gate's own `sheets.format` step once did against an already-bold A1.
+    static let t27Marker = "NORMA T9 AGENT SHEETS"
+
+    private var t28DocId = ""
+    private var t28BaselineTileHash = ""
+    private var t28BaselineFileDigest = ""
+    private var t28CommandOk = false
+    private var t28Repainted = false
+    static let t28Marker = "NORMA T9 AGENT DOCS"
 
     // MARK: - office-editable Task 10: Stage B drill state
 
@@ -592,6 +629,25 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
         case "25.statePaths": return await performStatePaths25()
         case "25.userCachesUntouched": return await performUserCachesUntouched25()
 
+        case "26.wire": return await performWire26()
+        case "26.unrecognized": return await performUnrecognized26()
+        case "26.outsideFence": return await performOutsideFence26()
+
+        case "27.open": return await performOpen27()
+        case "27.baseline": return await performBaseline27()
+        case "27.command": return await performCommand27()
+        case "27.repaint": return await performRepaint27()
+        case "27.disk": return await performDisk27()
+
+        case "28.open": return await performOpen28()
+        case "28.baseline": return await performBaseline28()
+        case "28.command": return await performCommand28()
+        case "28.repaint": return await performRepaint28()
+        case "28.disk": return await performDisk28()
+
+        case "29.statePaths": return await performStatePaths29()
+        case "29.userCachesUntouched": return await performUserCachesUntouched29()
+
         default: return (false, "the harness has no action for this step")
         }
     }
@@ -629,8 +685,25 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
             .filter { $0.activationPolicy == .regular }
             .map(\.processIdentifier))
 
-        let directory = SessionDirectory(lister: { [] })
+        // office-agent-tools T9 — the directory carries ONE code row, whose single working directory
+        // is this run's own `fixturesScratchDir`. Two reasons, both load-bearing for Stage C:
+        //
+        //  1. `OfficeAgentBroker`'s rule 5 (the fence) resolves every verb's `path` against
+        //     `workingDirectories(sessionId)`, which `ShellSessionHost.officeAgentBroker` reads fresh
+        //     off `directory.rows`. With the old empty lister EVERY agent verb refuses, so drills
+        //     27/28 could never reach a write and drill 26's out-of-fence step could not tell a real
+        //     fence refusal from "there is no session".
+        //  2. The fence is then a REAL fence with a REAL inside and outside, so `26.outsideFence`
+        //     aims at a sibling of the scratch root rather than at nothing.
+        //
+        // Drills 0-25 read `directory.rows` nowhere, so this is additive to them.
+        let scratchDirsRow = SessionSummary(
+            sessionId: Self.agentSessionId, title: nil, createdAt: 1, scope: "global",
+            cwd: fixturesScratchDir.path, mode: "code",
+            dirs: [SessionDirEntry(path: fixturesScratchDir.path, locked: true)])
+        let directory = SessionDirectory(lister: { [scratchDirsRow] })
         let sessionHost = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        await directory.refresh()
         let stateDir = sharedSupervisorStateDir
         // The REAL embedded path: THIS process is a genuinely built Norma.app (the harness runs
         // inside it, never a bare xctest host), so `.production()`'s own `helperExecutableURL`
@@ -645,9 +718,11 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
                 socketDirectory: stateDir))
         }
         host = sessionHost
-        runtime = sessionHost.officeRuntime(for: "office-harness-session")
+        runtime = sessionHost.officeRuntime(for: Self.agentSessionId)
+        let fencedDirs = sessionHost.directory.rows.first(where: { $0.sessionId == Self.agentSessionId })?.dirs ?? []
         return (true, "scratch root \(scratchRoot.path); host wired at \(stateDir.path); "
-                     + "6 fixture(s) copied; real embedded helper path")
+                     + "6 fixture(s) copied; real embedded helper path; agent fence = "
+                     + "\(fencedDirs.map(\.path))")
     }
 
     // MARK: Drill 1 — helper boot + version pin echo (a dedicated, throwaway helper)
@@ -2383,7 +2458,461 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
                      + "Stage B's own new steps (\(after.count) entrie(s), unchanged since 0.setup's own baseline)")
     }
 
+    // MARK: - office-agent-tools Task 9, drill 26: the agent's command channel
+
+    /// Build a `SessionEvent.PanelCommand` **as wire JSON and decode it**, never with a memberwise
+    /// initialiser — `PanelCommand`'s own init is internal to NormaProtocol, and going through the
+    /// real decode is the honest shape anyway: it is byte-for-byte what `parseServerLine` hands the
+    /// live pump, so a drill cannot describe a payload the daemon could not emit. (Identical
+    /// reasoning, and identical code, to `OfficeCommandConsumerTests.command(_:)`'s own doc — stated
+    /// again here rather than shared, because an app-target harness and a test target have no file
+    /// to share it in.)
+    private func makeAgentCommand(_ action: String, args: [String: Any]? = nil,
+                                  commandId: String, deadlineMs: Int = 185_000)
+        -> SessionEvent.PanelCommand? {
+        var fields: [String: Any] = [
+            "type": "panel_command", "seq": 1, "sessionId": Self.agentSessionId, "ts": 0,
+            "commandId": commandId, "action": action, "deadlineMs": deadlineMs,
+        ]
+        if let args { fields["args"] = args }
+        guard let data = try? JSONSerialization.data(withJSONObject: fields),
+              case .panelCommand(let decoded)? = try? JSONDecoder().decode(SessionEvent.self, from: data)
+        else { return nil }
+        return decoded
+    }
+
+    /// Hand a command to the REAL `PanelCommandConsumer` and wait for its ONE result.
+    ///
+    /// **The whole point of routing through `PanelCommandConsumer` rather than calling
+    /// `OfficeCommandConsumer.handle` directly** is that the office/browser fork
+    /// (`isOfficeAction`'s prefix test) is a production line of code with a failure mode — a verb
+    /// routed to the wrong consumer — that only this entry point can exercise. `BrowserRuntime`'s
+    /// own `init` is two assignments and starts no CEF (verified in `BrowserRuntime.swift`), which
+    /// is what makes constructing one here compatible with this harness's never-start-CEF rule.
+    ///
+    /// Returns `nil` on TIMEOUT, and the caller must treat that as a failure rather than as "no
+    /// answer yet": a dropped command is exactly the silent-degradation mode
+    /// `SessionEvent.PanelCommand`'s own doc warns about, and a drill that shrugged at it would be
+    /// blind to the thing it exists to detect.
+    private func awaitAgentResult(_ commandId: String, timeout: TimeInterval)
+        async -> (ok: Bool, result: String?, count: Int)? {
+        let answered = await waitUntil(timeout: timeout) { self.agentResults[commandId] != nil }
+        guard answered else { return nil }
+        return agentResults[commandId]
+    }
+
+    private func performWire26() async -> (Bool, String) {
+        guard let sessionHost = host else { return (false, "0.setup must run first") }
+        let broker = sessionHost.officeAgentBroker
+        let consumer = PanelCommandConsumer(
+            runtime: BrowserRuntime(),
+            sendResult: { [weak self] _, commandId, ok, result, _ in
+                guard let self else { return }
+                let previous = self.agentResults[commandId]?.count ?? 0
+                self.agentResults[commandId] = (ok: ok, result: result, count: previous + 1)
+            },
+            officeAgentBroker: { sessionId in sessionId == Self.agentSessionId ? broker : nil })
+        agentConsumer = consumer
+        let fenced = sessionHost.directory.rows.first(where: { $0.sessionId == Self.agentSessionId })?.dirs ?? []
+        guard !fenced.isEmpty else {
+            return (false, "the session has NO working directories — every agent verb would refuse at "
+                          + "the fence and drills 27/28 would prove nothing; 0.setup's own row is wrong")
+        }
+        return (true, "a real PanelCommandConsumer over an INERT BrowserRuntime (its init starts no "
+                     + "CEF), wired at ShellSessionHost's REAL officeAgentBroker for session "
+                     + "\(Self.agentSessionId); fence = \(fenced.map(\.path))")
+    }
+
+    /// **The UNRECOGNIZED rule, live.** `office.sheets.frobnicate` is namespaced (so the prefix fork
+    /// routes it to the office consumer) and implemented by nothing (so it lands on `handle`'s
+    /// `default:` arm). The claim is NOT "an unknown verb is rejected" — that is cheap. The claim is
+    /// that a REFUSAL ARRIVES AT ALL, promptly, instead of the command being dropped: a dropped
+    /// office command is indistinguishable from a slow one until the daemon's `deadlineMs` expires,
+    /// at which point the agent is told "timed out" for a verb the app simply never understood. That
+    /// silent-wrong-answer mode is what this step is aimed at, so a TIMEOUT here is a RED, never an
+    /// inconclusive.
+    private func performUnrecognized26() async -> (Bool, String) {
+        guard let consumer = agentConsumer else { return (false, "26.wire must run first") }
+        let commandId = "t9-unrecognized-\(UUID().uuidString.prefix(8))"
+        guard let command = makeAgentCommand("office.sheets.frobnicate",
+                                             args: ["path": fixturePaths["gate.xlsx"] ?? "/nonexistent"],
+                                             commandId: commandId) else {
+            return (false, "the unrecognized-verb command did not decode as a panel_command")
+        }
+        consumer.handle(command)
+        // Two orders of magnitude inside the command's own 185s deadline, on purpose: this arm is
+        // synchronous in the consumer, so anything that is not near-instant is the drop this step
+        // exists to catch, not slowness.
+        guard let answer = await awaitAgentResult(commandId, timeout: 10) else {
+            return (false, "UNRECOGNIZED VERB WAS DROPPED — no result arrived within 10s for "
+                          + "`office.sheets.frobnicate`. On the wire this presents to the agent as a "
+                          + "deadline timeout, not as \"the app does not know that verb\".")
+        }
+        guard answer.count == 1 else {
+            return (false, "the consumer answered \(answer.count) times for one commandId — "
+                          + "PanelCommandConsumer's exactly-one-result latch did not hold")
+        }
+        guard !answer.ok else {
+            return (false, "an unimplemented office verb reported SUCCESS (ok:true) — result: "
+                          + "\(answer.result ?? "nil")")
+        }
+        guard let text = answer.result, !text.isEmpty else {
+            return (false, "the refusal arrived with an EMPTY reason — the agent would be told it "
+                          + "failed with no way to know why")
+        }
+        return (true, "an unimplemented office verb is REFUSED, not dropped: ok=false, one result, "
+                     + "reason=\"\(text.prefix(160))\"")
+    }
+
+    /// **The fence, live, and the half that is easy to forget**: a refusal is only a fence if the
+    /// file it was aimed at is genuinely untouched afterwards. The out-of-fence target is a REAL,
+    /// VALID `.xlsx` (a seventh copy of `gate.xlsx`) placed in a SIBLING of the scratch fixtures
+    /// directory — a garbage path would refuse for the wrong reason and this step would pass while
+    /// proving nothing about the fence.
+    private func performOutsideFence26() async -> (Bool, String) {
+        guard let consumer = agentConsumer else { return (false, "26.wire must run first") }
+        let outsideDir = scratchRoot.appendingPathComponent("t26-outside-fence", isDirectory: true)
+        try? FileManager.default.createDirectory(at: outsideDir, withIntermediateDirectories: true)
+        let target = outsideDir.appendingPathComponent("outside.xlsx")
+        try? FileManager.default.removeItem(at: target)
+        do {
+            try FileManager.default.copyItem(at: Self.committedFixturesRoot.appendingPathComponent("gate.xlsx"),
+                                             to: target)
+        } catch { return (false, "could not stage the out-of-fence target: \(error)") }
+        guard let digestBefore = Self.fileDigest(atPath: target.path) else {
+            return (false, "could not digest the out-of-fence target before the command")
+        }
+        guard !target.path.hasPrefix(fixturesScratchDir.path) else {
+            return (false, "the \"outside\" target \(target.path) is actually INSIDE the fence "
+                          + "\(fixturesScratchDir.path) — this step would pass vacuously")
+        }
+
+        let commandId = "t9-outfence-\(UUID().uuidString.prefix(8))"
+        guard let command = makeAgentCommand("office.sheets.set", args: [
+            "path": target.path, "sheet": "Sheet1", "range": "D8",
+            "values": [[Self.t27Marker]],
+        ], commandId: commandId) else {
+            return (false, "the out-of-fence command did not decode as a panel_command")
+        }
+        consumer.handle(command)
+        guard let answer = await awaitAgentResult(commandId, timeout: 25) else {
+            return (false, "no result arrived for the out-of-fence verb within 25s — a fence refusal "
+                          + "is computed before any helper work, so this is a drop, not slowness")
+        }
+        guard !answer.ok else {
+            return (false, "A WRITE OUTSIDE THE SESSION'S WORKING DIRECTORIES REPORTED SUCCESS — "
+                          + "result: \(answer.result ?? "nil")")
+        }
+        guard let digestAfter = Self.fileDigest(atPath: target.path), digestAfter == digestBefore else {
+            return (false, "the out-of-fence file's BYTES CHANGED despite the refusal — "
+                          + "before=\(digestBefore.prefix(16)) after="
+                          + "\(Self.fileDigest(atPath: target.path)?.prefix(16).description ?? "unreadable")")
+        }
+        return (true, "a real .xlsx one directory OUTSIDE the fence is refused (ok=false, "
+                     + "reason=\"\((answer.result ?? "").prefix(160))\") AND its bytes are "
+                     + "byte-identical afterwards (sha256 \(digestBefore.prefix(16))… unchanged)")
+    }
+
+    // MARK: - Drill 27: sheets — command arrives -> the OPEN tab repaints -> disk changed
+
+    private var t27Path: String { fixturesScratchDir.appendingPathComponent("t9-agent-sheets.xlsx").path }
+
+    private func performOpen27() async -> (Bool, String) {
+        do {
+            try? FileManager.default.removeItem(atPath: t27Path)
+            try FileManager.default.copyItem(at: Self.committedFixturesRoot.appendingPathComponent("gate.xlsx"),
+                                             to: URL(fileURLWithPath: t27Path))
+        } catch { return (false, "could not stage a fresh gate.xlsx copy: \(error)") }
+        runtime.open(t27Path)
+        let settled = await waitUntil(timeout: 35) {
+            self.runtime.stateSnapshot.documents[self.t27Path] != nil || self.runtime.stateSnapshot.phase == .failed
+        }
+        guard settled, let doc = runtime.stateSnapshot.documents[t27Path] else {
+            return (false, "the agent-sheets fixture never opened: \(runtime.stateSnapshot.openFailures[t27Path] ?? "?")")
+        }
+        t27DocId = doc.docId
+        return (true, "opened a fresh gate.xlsx copy as the OPEN TAB the agent will edit under, "
+                     + "docId=\(t27DocId) — the broker must ADOPT this document (rule 1), not open a "
+                     + "second one, which is what makes a repaint of THIS tile store meaningful")
+    }
+
+    private func performBaseline27() async -> (Bool, String) {
+        guard !t27DocId.isEmpty else { return (false, "27.open must run first") }
+        // The anti-vacuity guard, and the one the T8 gate's own `sheets.format` step lacked: if the
+        // pristine fixture already carried the marker, every later assertion would pass on a total
+        // no-op. Checked at the BYTES, at run time, never assumed from the fixture's reputation.
+        let pristineStrings = Self.readXLSXSharedStrings(atPath: t27Path) ?? ""
+        guard !pristineStrings.contains(Self.t27Marker) else {
+            return (false, "the pristine fixture ALREADY contains \"\(Self.t27Marker)\" — every later "
+                          + "step in this drill would pass on a no-op; pick a marker the fixture does "
+                          + "not ship")
+        }
+        guard let digest = Self.fileDigest(atPath: t27Path) else {
+            return (false, "could not digest the fixture before the command")
+        }
+        t27BaselineFileDigest = digest
+
+        let viewport = officeViewportTwips(scrollOrigin: .zero, visibleSize: CGSize(width: 512, height: 512), zoomPPT: 1000)
+        let key = TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0)
+        runtime.subscribeTiles(path: t27Path, part: 0, zoomPPT: 1000, viewportTwips: viewport)
+        let filled = await waitUntil(timeout: 25) { self.runtime.tileStore.tile(docId: self.t27DocId, key: key) != nil }
+        guard filled, let entry = runtime.tileStore.tile(docId: t27DocId, key: key) else {
+            return (false, "the cold tile never arrived — there is no baseline to compare a repaint against")
+        }
+        guard entry.pixels.contains(where: { $0 != 0 }) else { return (false, "tile (0,0) is entirely blank") }
+        t27BaselineTileHash = Self.sha256Hex(entry.pixels)
+        return (true, "pristine sharedStrings does NOT carry \"\(Self.t27Marker)\" (anti-vacuity, "
+                     + "checked at the bytes); file sha256=\(t27BaselineFileDigest.prefix(16))…; "
+                     + "cold tile (0,0) non-blank, sha256=\(t27BaselineTileHash.prefix(16))…")
+    }
+
+    private func performCommand27() async -> (Bool, String) {
+        guard let consumer = agentConsumer, !t27DocId.isEmpty else {
+            return (false, "26.wire and 27.open must run first")
+        }
+        let commandId = "t9-sheets-set-\(UUID().uuidString.prefix(8))"
+        guard let command = makeAgentCommand("office.sheets.set", args: [
+            "path": t27Path, "sheet": "Sheet1", "range": "D8", "values": [[Self.t27Marker]],
+        ], commandId: commandId) else {
+            return (false, "the sheets.set command did not decode as a panel_command")
+        }
+        consumer.handle(command)
+        guard let answer = await awaitAgentResult(commandId, timeout: 80) else {
+            return (false, "NO RESULT within 80s for office.sheets.set — the command was dropped or "
+                          + "the write wedged; on the wire the agent would see only a timeout")
+        }
+        guard answer.count == 1 else {
+            return (false, "the consumer answered \(answer.count) times for one commandId")
+        }
+        t27CommandOk = answer.ok
+        // Deliberately NOT a hard failure here. `27.disk`'s classifier owns the verdict, and it has a
+        // named branch for a refusal — recording the fact and letting the classifier speak keeps one
+        // place responsible for "what does this combination mean", which is the whole reason that
+        // function exists.
+        return (answer.ok, answer.ok
+                ? "office.sheets.set answered ok through the REAL PanelCommandConsumer fork: "
+                  + "\"\((answer.result ?? "").prefix(200))\""
+                : "office.sheets.set was REFUSED: \"\((answer.result ?? "").prefix(240))\"")
+    }
+
+    private func performRepaint27() async -> (Bool, String) {
+        guard !t27DocId.isEmpty, !t27BaselineTileHash.isEmpty else { return (false, "27.baseline must run first") }
+        let key = TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0)
+        let viewport = officeViewportTwips(scrollOrigin: .zero, visibleSize: CGSize(width: 512, height: 512), zoomPPT: 1000)
+        // Both halves, exactly as drill 14 does and for the same reason: `subscribeTiles` never
+        // re-requests a key the store still holds, so asking again WITHOUT a prior eviction would be
+        // a cache-hit tautology rather than a repaint.
+        let evicted = await waitUntil(timeout: 20) { self.runtime.tileStore.tile(docId: self.t27DocId, key: key) == nil }
+        guard evicted else {
+            t27Repainted = false
+            return (false, "the agent's write never invalidated (evicted) tile (0,0) of the OPEN "
+                          + "document — there is no repaint to prove. 27.disk's classifier will name "
+                          + "this branch if the bytes did change.")
+        }
+        runtime.subscribeTiles(path: t27Path, part: 0, zoomPPT: 1000, viewportTwips: viewport)
+        let filled = await waitUntil(timeout: 25) { self.runtime.tileStore.tile(docId: self.t27DocId, key: key) != nil }
+        guard filled, let entry = runtime.tileStore.tile(docId: t27DocId, key: key) else {
+            t27Repainted = false
+            return (false, "the re-subscribe after eviction never produced a fresh tile (0,0)")
+        }
+        let freshHash = Self.sha256Hex(entry.pixels)
+        guard freshHash != t27BaselineTileHash else {
+            t27Repainted = false
+            return (false, "the refreshed tile is BYTE-IDENTICAL to the pre-command baseline — the "
+                          + "store evicted and refilled, but nothing on screen actually changed")
+        }
+        t27Repainted = true
+        return (true, "the OPEN tab's tile (0,0) was evicted (invalidation proven, not assumed) and a "
+                     + "re-subscribe repainted it to a DIFFERENT hash: "
+                     + "\(t27BaselineTileHash.prefix(16))… -> \(freshHash.prefix(16))…")
+    }
+
+    private func performDisk27() async -> (Bool, String) {
+        guard !t27BaselineFileDigest.isEmpty else { return (false, "27.baseline must run first") }
+        let digestAfter = Self.fileDigest(atPath: t27Path)
+        let bytesChanged = digestAfter != nil && digestAfter != t27BaselineFileDigest
+        // Read out of the CONTAINER's own XML, never back through LOK: an in-memory read would be
+        // satisfied by an unsaved edit and would prove nothing about what reached disk. This is the
+        // T8 gate's own C2 lesson, applied here before it could recur.
+        let savedStrings = Self.readXLSXSharedStrings(atPath: t27Path) ?? ""
+        let carriesMarker = savedStrings.contains(Self.t27Marker)
+        let evidence = classifyOfficeAgentWriteEvidence(
+            commandOk: t27CommandOk, tileRepainted: t27Repainted,
+            bytesChanged: bytesChanged, savedBytesCarryMarker: carriesMarker)
+        let facts = "ok=\(t27CommandOk) repainted=\(t27Repainted) bytesChanged=\(bytesChanged) "
+                  + "savedBytesCarryMarker=\(carriesMarker) "
+                  + "(sha256 \(t27BaselineFileDigest.prefix(16))… -> \(digestAfter?.prefix(16).description ?? "unreadable"))"
+        return (evidence.passes, "\(evidence.verdict) [\(facts)]")
+    }
+
+    // MARK: - Drill 28: docs — the same chain, second family, sealed against content.xml
+
+    private var t28Path: String { fixturesScratchDir.appendingPathComponent("t9-agent-docs.odt").path }
+
+    private func performOpen28() async -> (Bool, String) {
+        do {
+            try? FileManager.default.removeItem(atPath: t28Path)
+            try FileManager.default.copyItem(at: Self.committedFixturesRoot.appendingPathComponent("gate.odt"),
+                                             to: URL(fileURLWithPath: t28Path))
+        } catch { return (false, "could not stage a fresh gate.odt copy: \(error)") }
+        runtime.open(t28Path)
+        let settled = await waitUntil(timeout: 35) {
+            self.runtime.stateSnapshot.documents[self.t28Path] != nil || self.runtime.stateSnapshot.phase == .failed
+        }
+        guard settled, let doc = runtime.stateSnapshot.documents[t28Path] else {
+            return (false, "the agent-docs fixture never opened: \(runtime.stateSnapshot.openFailures[t28Path] ?? "?")")
+        }
+        t28DocId = doc.docId
+        return (true, "opened a fresh gate.odt copy as the OPEN TAB for the docs chain, docId=\(t28DocId)")
+    }
+
+    private func performBaseline28() async -> (Bool, String) {
+        guard !t28DocId.isEmpty else { return (false, "28.open must run first") }
+        let pristineBody = Self.readODFBodyText(atPath: t28Path) ?? ""
+        guard !pristineBody.contains(Self.t28Marker) else {
+            return (false, "the pristine gate.odt ALREADY contains \"\(Self.t28Marker)\" — this drill "
+                          + "would pass on a no-op")
+        }
+        guard let digest = Self.fileDigest(atPath: t28Path) else {
+            return (false, "could not digest gate.odt before the command")
+        }
+        t28BaselineFileDigest = digest
+
+        let viewport = officeViewportTwips(scrollOrigin: .zero, visibleSize: CGSize(width: 512, height: 512), zoomPPT: 1000)
+        let key = TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0)
+        runtime.subscribeTiles(path: t28Path, part: 0, zoomPPT: 1000, viewportTwips: viewport)
+        let filled = await waitUntil(timeout: 25) { self.runtime.tileStore.tile(docId: self.t28DocId, key: key) != nil }
+        guard filled, let entry = runtime.tileStore.tile(docId: t28DocId, key: key) else {
+            return (false, "the cold tile never arrived — no baseline to compare a repaint against")
+        }
+        guard entry.pixels.contains(where: { $0 != 0 }) else { return (false, "tile (0,0) is entirely blank") }
+        t28BaselineTileHash = Self.sha256Hex(entry.pixels)
+        return (true, "pristine content.xml does NOT carry \"\(Self.t28Marker)\" (anti-vacuity, at the "
+                     + "bytes); file sha256=\(t28BaselineFileDigest.prefix(16))…; cold tile (0,0) "
+                     + "non-blank, sha256=\(t28BaselineTileHash.prefix(16))…")
+    }
+
+    private func performCommand28() async -> (Bool, String) {
+        guard let consumer = agentConsumer, !t28DocId.isEmpty else {
+            return (false, "26.wire and 28.open must run first")
+        }
+        let commandId = "t9-docs-append-\(UUID().uuidString.prefix(8))"
+        guard let command = makeAgentCommand("office.docs.append", args: [
+            "path": t28Path, "text": Self.t28Marker,
+        ], commandId: commandId) else {
+            return (false, "the docs.append command did not decode as a panel_command")
+        }
+        consumer.handle(command)
+        guard let answer = await awaitAgentResult(commandId, timeout: 80) else {
+            return (false, "NO RESULT within 80s for office.docs.append — dropped or wedged")
+        }
+        guard answer.count == 1 else {
+            return (false, "the consumer answered \(answer.count) times for one commandId")
+        }
+        t28CommandOk = answer.ok
+        return (answer.ok, answer.ok
+                ? "office.docs.append answered ok through the SAME PanelCommandConsumer fork: "
+                  + "\"\((answer.result ?? "").prefix(200))\""
+                : "office.docs.append was REFUSED: \"\((answer.result ?? "").prefix(240))\"")
+    }
+
+    private func performRepaint28() async -> (Bool, String) {
+        guard !t28DocId.isEmpty, !t28BaselineTileHash.isEmpty else { return (false, "28.baseline must run first") }
+        let key = TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0)
+        let viewport = officeViewportTwips(scrollOrigin: .zero, visibleSize: CGSize(width: 512, height: 512), zoomPPT: 1000)
+        let evicted = await waitUntil(timeout: 20) { self.runtime.tileStore.tile(docId: self.t28DocId, key: key) == nil }
+        guard evicted else {
+            t28Repainted = false
+            return (false, "the agent's append never invalidated (evicted) tile (0,0) of the OPEN "
+                          + "document — 28.disk's classifier will name this branch if the bytes changed")
+        }
+        runtime.subscribeTiles(path: t28Path, part: 0, zoomPPT: 1000, viewportTwips: viewport)
+        let filled = await waitUntil(timeout: 25) { self.runtime.tileStore.tile(docId: self.t28DocId, key: key) != nil }
+        guard filled, let entry = runtime.tileStore.tile(docId: t28DocId, key: key) else {
+            t28Repainted = false
+            return (false, "the re-subscribe after eviction never produced a fresh tile (0,0)")
+        }
+        let freshHash = Self.sha256Hex(entry.pixels)
+        guard freshHash != t28BaselineTileHash else {
+            t28Repainted = false
+            return (false, "the refreshed tile is BYTE-IDENTICAL to the pre-command baseline")
+        }
+        t28Repainted = true
+        return (true, "the OPEN tab's tile (0,0) was evicted and repainted to a DIFFERENT hash: "
+                     + "\(t28BaselineTileHash.prefix(16))… -> \(freshHash.prefix(16))…")
+    }
+
+    private func performDisk28() async -> (Bool, String) {
+        guard !t28BaselineFileDigest.isEmpty else { return (false, "28.baseline must run first") }
+        let digestAfter = Self.fileDigest(atPath: t28Path)
+        let bytesChanged = digestAfter != nil && digestAfter != t28BaselineFileDigest
+        let savedBody = Self.readODFBodyText(atPath: t28Path) ?? ""
+        let carriesMarker = savedBody.contains(Self.t28Marker)
+        let evidence = classifyOfficeAgentWriteEvidence(
+            commandOk: t28CommandOk, tileRepainted: t28Repainted,
+            bytesChanged: bytesChanged, savedBytesCarryMarker: carriesMarker)
+        let facts = "ok=\(t28CommandOk) repainted=\(t28Repainted) bytesChanged=\(bytesChanged) "
+                  + "savedBytesCarryMarker=\(carriesMarker) "
+                  + "(sha256 \(t28BaselineFileDigest.prefix(16))… -> \(digestAfter?.prefix(16).description ?? "unreadable"))"
+        return (evidence.passes, "\(evidence.verdict) [\(facts)]")
+    }
+
+    // MARK: - Drill 29: Stage C hygiene re-check
+
+    private func performStatePaths29() async -> (Bool, String) {
+        let stageCPaths = [t27Path, t28Path,
+                           scratchRoot.appendingPathComponent("t26-outside-fence").path]
+        for path in stageCPaths {
+            guard path.hasPrefix(scratchRoot.path) else {
+                return (false, "\(path) is not under the harness's own scratch root \(scratchRoot.path)")
+            }
+            guard !path.contains(".norma") else { return (false, "\(path) touches a .norma path") }
+        }
+        // The out-of-fence target is "outside" only relative to the SESSION's working directories —
+        // it is still inside this run's own scratch root, which is what the hard rule is about. Said
+        // explicitly because the two senses of "outside" are one word apart and a reader who
+        // conflates them would think this drill escaped its root.
+        return (true, "all \(stageCPaths.count) Stage C path(s) live under \(scratchRoot.path); "
+                     + "26's out-of-fence target is outside the SESSION's working directories but "
+                     + "still inside this run's own root — no Stage C path touches ~/.norma or ~/.norma-dev")
+    }
+
+    private func performUserCachesUntouched29() async -> (Bool, String) {
+        let realOfficeDir = OfficeHelperSupervisor.Configuration.defaultStateDirectory()
+        let after = (try? FileManager.default.contentsOfDirectory(atPath: realOfficeDir.path).sorted()) ?? []
+        guard after == userOfficeDirListingBeforeRun else {
+            return (false, "the real Application Support Office directory's listing CHANGED during "
+                          + "Stage C's own drills — before=\(userOfficeDirListingBeforeRun) after=\(after)")
+        }
+        return (true, "the real Application Support Office directory is STILL untouched after Stage "
+                     + "C's own agent drills (\(after.count) entrie(s), unchanged since 0.setup)")
+    }
+
     // MARK: - Shared helpers
+
+    /// sha256 of a whole file. `nil` if it cannot be read — and every caller distinguishes `nil` from
+    /// "unchanged" rather than folding the two together, since an unreadable file after a write is
+    /// itself a finding.
+    private static func fileDigest(atPath path: String) -> String? {
+        guard let data = FileManager.default.contents(atPath: path) else { return nil }
+        return sha256Hex(data)
+    }
+
+    /// The `.xlsx` sibling of `readODFBodyText` — `unzip -p <path> xl/sharedStrings.xml`. A string
+    /// cell's TEXT lives there, not in `sheet1.xml` (which carries only the shared-string index), so
+    /// this is where a `sheets set` of text actually lands on disk.
+    private static func readXLSXSharedStrings(atPath path: String) -> String? {
+        let unzip = Process()
+        unzip.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+        unzip.arguments = ["-p", path, "xl/sharedStrings.xml"]
+        let pipe = Pipe()
+        unzip.standardOutput = pipe
+        unzip.standardError = Pipe()
+        do { try unzip.run() } catch { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        unzip.waitUntilExit()
+        return String(data: data, encoding: .utf8)
+    }
 
     private static let sixFixtureNames = ["gate.xlsx", "gate.ods", "gate.pptx", "gate.odp", "gate.docx", "gate.odt"]
 
