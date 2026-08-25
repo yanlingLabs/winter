@@ -610,6 +610,118 @@ final class OfficeAgentBrokerTests: XCTestCase {
                        + "still be open — this is the leak the re-review found, disclosed, not fixed")
     }
 
+    // MARK: - Office Stage C: the MIRROR interleaving, and the tab it used to strand
+
+    /// **The whole interleaving, through the real broker, with a real tab model joined to it.**
+    /// The mirror of `testBrokerJoinsAnAlreadyInFlightOpenAsAdoptionRatherThanMintingASecondOne`:
+    /// there a tab opened first and the broker joined it; here the BROKER opens first and a
+    /// `PanelDocumentTabModel` joins, so `adopted` correctly lands `false`, rule 2's `defer`
+    /// correctly closes what this call opened — and the tab that joined loses its view.
+    ///
+    /// **This test does not change what the broker does.** Rule 2 still fires: `closeCalls` is
+    /// asserted non-empty below, deliberately. What it pins is that the tab left behind is
+    /// RECOVERABLE — `.closedUnderTab` with the Reopen affordance, then one automatic re-open that
+    /// lands — instead of `.renderState(.booting)` with a spent gate, which is what this exact
+    /// sequence produced before Stage C and what `OfficeAgentBroker`'s rule-1 comment disclosed.
+    ///
+    /// Every ordering here is held by a latch, never by a sleep: the broker's own open is suspended
+    /// inside the fake driver until this test releases it, the action is suspended until this test
+    /// releases it, and the tab's re-open is suspended on a third latch so the `.closedUnderTab`
+    /// state can be observed rather than raced past.
+    func testTheMirrorInterleavingLeavesTheJoinedTabRecoverableRatherThanSpinning() async throws {
+        let scratch = makeScratchDirectory()
+        let path = scratch.appendingPathComponent("mirror.xlsx").path
+        writeDummyFile(at: path)
+        let office = BrokerOfficeDriverRecorder()
+        let host = makeHost(office: office, dirs: [SessionDirEntry(path: scratch.path, locked: true)])
+        await host.directory.refresh()
+
+        /// Like this file's other `Gate`, but it REMEMBERS having been opened — a latch released
+        /// before the thing it gates ever runs must not deadlock, and this test re-arms the driver
+        /// gate mid-flight, where that ordering is not under its control.
+        final class Latch: @unchecked Sendable {
+            private let lock = NSLock()
+            private var release: (() -> Void)?
+            private var isOpen = false
+            func wait() async {
+                await withCheckedContinuation { continuation in
+                    lock.lock()
+                    if isOpen { lock.unlock(); continuation.resume(); return }
+                    release = { continuation.resume() }
+                    lock.unlock()
+                }
+            }
+            func open() {
+                lock.lock(); isOpen = true; let r = release; release = nil; lock.unlock()
+                r?()
+            }
+        }
+        let firstOpen = Latch(), action = Latch(), reopen = Latch()
+        office.openGate = { await firstOpen.wait() }
+
+        let runtime = host.officeRuntime(for: "S1")
+        let performTask = Task<String, Error> { @MainActor in
+            try await host.officeAgentBroker.perform(
+                sessionId: "S1", path: path, access: .read, requestId: UUID().uuidString
+            ) { _, docId, adopted in
+                XCTAssertFalse(adopted, "setup: THIS call must be the OPENER — that is the mirror case")
+                await action.wait()
+                return "read \(docId)"
+            }
+        }
+        let inFlight = await waitUntil { runtime.stateSnapshot.opensInFlight.contains(path) }
+        XCTAssertTrue(inFlight, "setup: the broker's own open never registered in flight")
+
+        // The tab joins the broker's in-flight open — the real door, `PanelDocumentTabModel`, not a
+        // bare `runtime.open(path)`: the gate this fix re-arms lives on the model.
+        let model = PanelDocumentTabModel(tabId: "t1", path: path)
+        model.bind(host: host, sessionId: "S1")
+        model.activate()
+        let asked = await waitUntil { model.hasRequestedOpen }
+        XCTAssertTrue(asked, "setup: the tab never asked, so it never joined")
+
+        firstOpen.open()
+        let shown = await waitUntil { runtime.stateSnapshot.documents[path] != nil }
+        XCTAssertTrue(shown, "setup: the shared open never landed")
+        XCTAssertEqual(office.openCalls.count, 1, "setup: ONE driver open — the tab joined, it did "
+                       + "not mint a second")
+        guard case .showCanvas = model.plan else {
+            return XCTFail("setup: the joined tab must be showing the canvas before the close")
+        }
+
+        // Hold the tab's eventual re-open so the state it lands in is observable, not raced past.
+        office.openGate = { await reopen.wait() }
+        action.open()
+        _ = try await performTask.value
+
+        let closed = await waitUntil { runtime.stateSnapshot.documents[path] == nil }
+        XCTAssertTrue(closed, "rule 2 must still fire — this fix does not weaken it")
+        XCTAssertEqual(office.closeCalls.count, 1, "and it must reach the driver, exactly once")
+
+        let recoverable = await waitUntil {
+            model.plan == .renderState(.closedUnderTab(reason: officeDocumentClosedUnderTabReason))
+        }
+        XCTAssertTrue(recoverable, "pre-fix the joined tab fell through to .renderState(.booting): "
+                      + "an indefinite spinner, no error text, no Reopen affordance")
+
+        // **`opensInFlight`, not `openCalls`, is what proves the re-arm here** — this fake driver's
+        // `open` appends to `openCalls` only AFTER awaiting its gate, and that gate is deliberately
+        // still held, so a count of 2 is not yet observable. The reducer registering the path
+        // in-flight is: it means the model's deferred `open()` really was dispatched.
+        let rearmed = await waitUntil { runtime.stateSnapshot.opensInFlight.contains(path) }
+        XCTAssertTrue(rearmed, "pre-fix `openRequestedPaths` was spent for this model's whole "
+                      + "lifetime, so nothing ever self-healed")
+
+        reopen.open()
+        let secondOpen = await waitUntil { office.openCalls.count == 2 }
+        XCTAssertTrue(secondOpen, "and it must reach the driver as a genuine second open")
+        let restored = await waitUntil { runtime.stateSnapshot.documents[path] != nil }
+        XCTAssertTrue(restored, "the automatic re-open must actually land")
+        guard case .showCanvas = model.plan else {
+            return XCTFail("the joined tab must get its canvas back")
+        }
+    }
+
     // MARK: - Rule 3: dirty refusal
 
     func testRefusesAWriteOnADirtyAdoptedDocumentNamingTheTab() async throws {
