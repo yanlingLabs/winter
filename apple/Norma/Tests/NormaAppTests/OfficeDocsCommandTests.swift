@@ -522,17 +522,16 @@ final class OfficeDocsCommandTests: XCTestCase {
                         + "marker text: \(text)")
         // **What "one press" is proven against: the SAVED BYTES on disk, not a flag.**
         //
-        // Instant-save is armed, so ⌘Z — which is an edit — re-arms the debounce and the undone
-        // state lands on disk on its own. Waiting for the document to go clean is therefore waiting
-        // for a real save to have happened, and reading `content.xml` back afterwards proves the
-        // undo both happened AND was persisted. That is strictly stronger than asserting `dirty`,
-        // and it is what makes this test its own positive control: a `postUndo` that silently did
-        // nothing — the pre-R3 behaviour this test was INVERTED from — leaves UNDOMARKER in those
-        // bytes and fails here.
-        // The save is issued EXPLICITLY rather than waited for, because `autoSaveEnabled` ships
-        // OFF (see its own header for the post-save close-window blocker). This works either way:
-        // armed, the debounce would have saved already and this is harmless; disarmed, this is the
-        // save. What is asserted is the same either way — the SAVED BYTES.
+        // The save is issued EXPLICITLY, because `autoSaveEnabled` ships **OFF** (see its own header
+        // for the post-save close-window blocker that keeps it parked). Waiting for the document to
+        // go clean is therefore waiting for THIS save to have landed, and reading `content.xml` back
+        // afterwards proves the undo both happened AND was persisted — strictly stronger than
+        // asserting `dirty`, and what makes this test its own positive control: a `postUndo` that
+        // silently did nothing (the pre-R3 behaviour this test was INVERTED from) leaves UNDOMARKER
+        // in those bytes and fails here.
+        //
+        // Deliberately written to hold either way: if instant-save is ever armed, the debounce will
+        // already have saved and this call is harmless, and the assertions below are unchanged.
         runtime.save(path)
         let settledClean = await waitUntilLive { runtime.stateSnapshot.documents[path]?.dirty == false }
         XCTAssertTrue(settledClean, "the post-undo save must land the undone state on disk")

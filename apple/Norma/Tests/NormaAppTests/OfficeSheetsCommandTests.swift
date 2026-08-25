@@ -41,7 +41,23 @@ final class OfficeSheetsCommandTests: XCTestCase {
 
     private var scratchDirs: [URL] = []
 
+    /// **Every live host this suite creates, torn down in `tearDown` — the STRUCTURAL fix for a
+    /// measured helper leak.**
+    ///
+    /// This suite built 27 live hosts and called `teardownAllOfficeRuntimesAndStopHelper()` in only
+    /// 2 of them, leaving **22 `NormaOfficeHelper` processes resident** after a full run. That is
+    /// real debt, not tidiness: leaked helpers hold the shared socket directory and CPU, and they
+    /// are a documented source of spurious reds for whoever runs the suite next (the same class that
+    /// already produced a 69-helper leak elsewhere in this suite).
+    ///
+    /// Registered HERE, in the one factory every test goes through, rather than as 25 more
+    /// end-of-test calls — a per-test cleanup that must be remembered is one that will be forgotten
+    /// by the next test added, which is exactly how this got to 27-versus-2.
+    private var liveHosts: [ShellSessionHost] = []
+
     override func tearDown() {
+        for host in liveHosts { _ = host.teardownAllOfficeRuntimesAndStopHelper() }
+        liveHosts = []
         for dir in scratchDirs { try? FileManager.default.removeItem(at: dir) }
         scratchDirs = []
         super.tearDown()
@@ -98,6 +114,7 @@ final class OfficeSheetsCommandTests: XCTestCase {
                 extraArguments: ["--lok-root", Self.vendorProductSetRoot.path,
                                  "--sandbox-profile", Self.sandboxProfilePath.path]))
         }
+        liveHosts.append(host)
         return host
     }
 

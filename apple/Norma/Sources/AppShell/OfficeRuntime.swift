@@ -3255,16 +3255,35 @@ final class OfficeRuntime: ObservableObject {
         // is armed when a key event is ENQUEUED, not when it is delivered. That is why it is fixed
         // here rather than filed.
         //
-        // **The tail is captured SYNCHRONOUSLY, here on the actor, at the instant the save is
-        // issued** — the same shape every input door already uses (`let previous = inputChainTail`).
-        // That is the load-bearing detail: it waits for exactly the edits that preceded this save,
-        // and NOT for anything typed after it, so a user who keeps typing through a ⌘S does not
-        // stall their own save indefinitely.
+        // **The tail is READ synchronously here on the actor, at the instant the save is issued —
+        // and, unlike every input door, it is NOT reassigned.** The doors do
+        // `let previous = inputChainTail; inputChainTail = Task { await previous.value; … }`, which
+        // both waits AND extends the chain, so each door orders itself behind its predecessors and
+        // ahead of its successors. A save must do only the first half: it reads the tail and leaves
+        // `inputChainTail` alone.
         //
-        // No deadlock is possible: nothing on the input chain awaits a save, and this join happens
-        // BEFORE `driver.save` enters the app-wide `OfficeHelperRequestQueue` — so it never nests a
-        // `queue.run` inside another, which is the one thing that would wedge all office I/O
-        // permanently.
+        // That asymmetry is exactly what makes the fix correct, so it is worth stating rather than
+        // glossing as "the same shape". Because the save does not join the chain, it waits for
+        // precisely the edits that PRECEDED it and never for anything typed after — a user who keeps
+        // typing straight through a ⌘S does not stall their own save — and, equally, no later
+        // keystroke is made to queue behind a save, which would have put the whole save round trip
+        // into the typing latency of a document being actively edited.
+        //
+        // **Liveness, now that a save depends on the input chain — BOUNDED, and written down here
+        // because nothing else records it.** Every queued input verb resolves through
+        // `OfficeHelperClient`, whose `requestTimeout` is `configuration.handshakeTimeout`
+        // (`OfficeHelperSupervisor.swift:870`), defaulting to 30.0 s (`:611`) and enforced per reply
+        // by `connection.nextFrame(timeout:)` (`:106`) — so each queued request either completes or
+        // times out within that bound and the chain always drains. A save is therefore delayed by at
+        // most 30 s per input request already queued ahead of it — it is not, and cannot become, an
+        // unbounded wait. `testASaveWithNothingInFlightStillLandsPromptlyAndCompletely` is the
+        // control arm on the ordinary case, and it asserts a <10 s bound.
+        //
+        // No deadlock is possible, and both halves were checked: nothing built into the input chain
+        // awaits a save door, and this join happens BEFORE `driver.save` enters the app-wide
+        // `OfficeHelperRequestQueue` — every `queue.run` lives inside a Driver closure, so the join
+        // is strictly outside the FIFO and can never nest one `queue.run` inside another, which is
+        // the one thing that would wedge all office I/O permanently.
         let inputChainAtSaveTime = inputChainTail
         Task { [weak self, driver] in
             guard let self else { return }
