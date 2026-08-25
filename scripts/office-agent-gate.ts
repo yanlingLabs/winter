@@ -587,11 +587,12 @@ function journalOffset(sessionId: string): number {
  * layer entirely. Pairing is by `callId`, never by adjacency.
  */
 function lastToolResultFromJournal(
-  sessionId: string, toolName: string, argsSubstring: string, fromOffset: number,
+  sessionId: string, toolName: string, argsSubstring: string, fromOffset: number, toOffset?: number,
 ): { output: string; isError: boolean } | null {
   const journal = journalPath(sessionId);
   if (!existsSync(journal)) return null;
   let text = readFileSync(journal, "utf8");
+  if (toOffset !== undefined) text = text.slice(0, toOffset);
   if (fromOffset > 0) {
     text = text.slice(fromOffset);
     // The offset is taken between turns, so it lands on a line boundary — but if a partial line
@@ -1237,17 +1238,23 @@ async function main(): Promise<number> {
   // which truncates every tool result to one 120-char line and therefore cannot carry a grid.
   const readEvent = lastToolResultFromJournal(sessionId, "sheets", '"verb":"read"', readFence);
 
-  // PERMANENT EVIDENCE that the fence is load-bearing rather than decorative: the same scan run
-  // unfenced. When the pre-fence region also holds a matching read, an unfenced scan had a
-  // pre-relaunch record available to match — which is what this step used to do.
-  const unfenced = lastToolResultFromJournal(sessionId, "sheets", '"verb":"read"', 0);
-  const preFenceHadOne = unfenced !== null && (readEvent === null || unfenced.output !== readEvent.output);
+  // PERMANENT EVIDENCE that the fence is load-bearing rather than decorative.
+  //
+  // The measured hazard is NOT "the unfenced scan picks a different record on a healthy run" — on a
+  // healthy run the last matching record IS this turn's, so both agree and the fence looks
+  // pointless. The hazard is the FALLBACK: if this turn's read never dispatches or errors, an
+  // unfenced scan silently reaches BACKWARDS to a pre-relaunch record and reports PASS for the very
+  // persistence failure the step exists to catch. So what gets reported here is whether such a
+  // record exists in the pre-fence region at all — i.e. whether the fence had anything to exclude.
+  const expectedA4Early = xlsxCell(join(WORK_DIR, "budget.xlsx"), "xl/worksheets/sheet1.xml", "A4");
+  const preFence = lastToolResultFromJournal(sessionId, "sheets", '"verb":"read"', 0, readFence);
   log(`   journal fence: offset ${readFence} of ${journalOffset(sessionId)} bytes`
     + ` — post-relaunch read record: ${readEvent ? "found" : "NONE"};`
-    + ` an unfenced scan would have matched a ${preFenceHadOne ? "DIFFERENT (pre-relaunch) record" : "record from the same turn"}`);
+    + ` pre-relaunch read records available to an UNFENCED scan: ${preFence ? "YES" : "none"}`
+    + `${preFence && preFence.output.includes(expectedA4Early ?? "\u0000") ? " (and one of them CARRIES the expected value — an unfenced scan could have passed on it)" : ""}`);
   // Expected value read from the FILE at runtime, so the assertion cannot be satisfied by a string
   // the model saw in an earlier prompt.
-  const expectedA4 = xlsxCell(join(WORK_DIR, "budget.xlsx"), "xl/worksheets/sheet1.xml", "A4");
+  const expectedA4 = expectedA4Early;
   let ok = false;
   let detail: string;
   if (expectedA4 === null || expectedA4 === "") {
