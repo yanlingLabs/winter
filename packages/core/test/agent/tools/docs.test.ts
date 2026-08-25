@@ -539,14 +539,14 @@ describe("append texts[]", () => {
     });
     // And `texts` itself must never reach the wire — the app decodes `text`, and an unknown key
     // would be silently ignored there rather than refused.
-    expect(Object.keys(h.recorded[0].args)).toEqual(["path", "text"]);
+    expect(Object.keys(h.recorded[0]?.args ?? {})).toEqual(["path", "text"]);
   });
 
   test("one-paragraph `text` is completely unchanged by the new operand", async () => {
     const h = makeHarness();
     const result = await h.run({ verb: "append", path: DOC, text: "solo" });
     expect(result.isError).toBe(false);
-    expect(h.recorded[0].args).toEqual({ path: DOC, text: "solo" });
+    expect(h.recorded[0]?.args).toEqual({ path: DOC, text: "solo" });
   });
 
   test("text AND texts together REFUSES — it never picks one", async () => {
