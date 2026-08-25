@@ -3216,8 +3216,35 @@ final class OfficeRuntime: ObservableObject {
     /// whole lifetime, the exact class of leak the `lok-profile-*` sweep in `LOKBridge` was written
     /// to close for a different directory).
     private func performSave(path: String, docId: String, part: Int, myGeneration: Int) {
+        // ⛔ **office-live-edit R1 fix round, C-1 — the save must JOIN THE INPUT CHAIN before it
+        // serializes anything.**
+        //
+        // Every input verb (`postKeyEvent`, `postExtTextInput`, paste, cut, undo, redo) is ordered on
+        // `inputChainTail`; saving was NOT. Two independent chains feeding one request queue means a
+        // save issued while key events are still queued **overtakes them**, and `doc_saveAs` then
+        // serializes the document as it was BEFORE those edits — writing the pre-edit file over the
+        // user's own path and reporting success, with no banner.
+        //
+        // It is a real gesture, not a synthetic race: type, press Return, press ⌘S. Measured live at
+        // the BASE commit as well as here, so it is pre-existing Stage B behaviour — but requirement
+        // 1's debounced save turned it from a narrow race into the ORDINARY path, because a debounce
+        // is armed when a key event is ENQUEUED, not when it is delivered. That is why it is fixed
+        // here rather than filed.
+        //
+        // **The tail is captured SYNCHRONOUSLY, here on the actor, at the instant the save is
+        // issued** — the same shape every input door already uses (`let previous = inputChainTail`).
+        // That is the load-bearing detail: it waits for exactly the edits that preceded this save,
+        // and NOT for anything typed after it, so a user who keeps typing through a ⌘S does not
+        // stall their own save indefinitely.
+        //
+        // No deadlock is possible: nothing on the input chain awaits a save, and this join happens
+        // BEFORE `driver.save` enters the app-wide `OfficeHelperRequestQueue` — so it never nests a
+        // `queue.run` inside another, which is the one thing that would wedge all office I/O
+        // permanently.
+        let inputChainAtSaveTime = inputChainTail
         Task { [weak self, driver] in
             guard let self else { return }
+            await inputChainAtSaveTime.value
             do {
                 let tempPath = try await driver.save(docId, part)
                 guard myGeneration == self.generation, self.state.documents[path]?.docId == docId else {

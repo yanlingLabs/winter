@@ -4048,6 +4048,193 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         _ = host.teardownAllOfficeRuntimesAndStopHelper()
     }
 
+    /// ⛔ **office-live-edit R1 fix round — C-1: a save must not overtake the typing it is meant to
+    /// persist.**
+    ///
+    /// `OfficeRuntime.save` dispatches `.saveRequested` straight into `performSave`, while every
+    /// input verb goes through the SEPARATE `inputChainTail` chain. The two chains feed one request
+    /// queue independently, so a save issued while key events are still waiting on the input chain
+    /// **overtakes them and serializes the document as it was BEFORE them** — writing the pre-edit
+    /// file over the user's own path and reporting success, with no banner.
+    ///
+    /// **This is a REAL user gesture, not a synthetic one:** type into a cell, press Return, press
+    /// ⌘S. The whole window is the input chain's delivery latency, and a human easily beats it.
+    /// `dirty` stays `true` (LOK still holds the text) so the next save heals it — permanent loss
+    /// needs a crash after the ⌘S, or the user acting on the file in between.
+    ///
+    /// **The reason this drill does NOT drain the input chain is the entire point.** Every other
+    /// typing drill in this file calls `drainInputChainForTesting()` before saving, which is exactly
+    /// why none of them ever caught this: draining is what a correct save must do FOR ITSELF, and
+    /// doing it in the test hid the bug for the whole of Stage B. This drill deliberately behaves
+    /// like the user does.
+    ///
+    /// Pre-existing on `main` — it reproduces at the base commit — but requirement 1's debounced
+    /// save made it the ORDINARY path rather than a narrow race, because the debounce is armed at
+    /// key ENQUEUE time, not delivery time. That is why it is fixed here.
+    func testASaveIssuedWhileTypingIsStillInFlightPersistsTheTypingNotThePreEditDocument() async throws {
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
+                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR")
+        let vendorRoot = Self.vendorProductSetRoot
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
+                      "LibreOffice vendor tree not present at \(vendorRoot.path)")
+        let fixturePath = Self.fixturesRoot.appendingPathComponent("gate.ods").path
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: fixturePath), "gate.ods fixture missing")
+
+        let stateDir = makeScratchDirectory()
+        let directory = SessionDirectory(lister: { [] })
+        let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        host.makeOfficeHelperSupervisor = {
+            OfficeHelperSupervisor(configuration: OfficeHelperSupervisor.Configuration(
+                helperExecutableURL: helperURL,
+                socketDirectory: stateDir,
+                extraArguments: ["--lok-root", vendorRoot.path, "--sandbox-profile", Self.sandboxProfilePath.path]))
+        }
+        let runtime = host.officeRuntime(for: "S1")
+        let scratchDir = makeScratchDirectory()
+        let docPath = scratchDir.appendingPathComponent("save-ordering-drill.ods").path
+        try Data(contentsOf: URL(fileURLWithPath: fixturePath)).write(to: URL(fileURLWithPath: docPath))
+
+        runtime.open(docPath)
+        let settled = await waitUntil(timeout: 90) {
+            runtime.stateSnapshot.documents[docPath] != nil || runtime.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(settled, "never settled — phase: \(runtime.stateSnapshot.phase)")
+        guard let doc = runtime.stateSnapshot.documents[docPath] else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("did not open: \(runtime.stateSnapshot.openFailures[docPath] ?? "no reason")")
+        }
+
+        let model = PanelDocumentTabModel(tabId: "save-ordering", path: docPath)
+        let view = OfficeTileCanvasView(runtime: runtime, path: docPath, docId: doc.docId,
+                                        sizeTwips: doc.sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 512, height: 512)
+        view.mount()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 512, height: 512),
+                              styleMask: [.borderless], backing: .buffered, defer: true)
+        window.contentView = view
+
+        let clickPoint = view.convert(NSPoint(x: 10, y: 10), to: nil)
+        func mouse(_ type: NSEvent.EventType) -> NSEvent {
+            try! XCTUnwrap(NSEvent.mouseEvent(with: type, location: clickPoint, modifierFlags: [],
+                                              timestamp: 0, windowNumber: window.windowNumber, context: nil,
+                                              eventNumber: 0, clickCount: 1, pressure: 1))
+        }
+        func key(_ type: NSEvent.EventType, _ characters: String, _ keyCode: UInt16) -> NSEvent {
+            try! XCTUnwrap(NSEvent.keyEvent(with: type, location: .zero, modifierFlags: [], timestamp: 0,
+                                            windowNumber: window.windowNumber, context: nil,
+                                            characters: characters, charactersIgnoringModifiers: characters,
+                                            isARepeat: false, keyCode: keyCode))
+        }
+        view.mouseDown(with: mouse(.leftMouseDown))
+        view.mouseUp(with: mouse(.leftMouseUp))
+
+        let marker = "T4EDIT"
+        let physicalKeyCodes: [Character: UInt16] = ["T": 17, "4": 21, "E": 14, "D": 2, "I": 34]
+        for character in marker {
+            let code = try XCTUnwrap(physicalKeyCodes[character])
+            view.keyDown(with: key(.keyDown, String(character), code))
+            view.keyUp(with: key(.keyUp, String(character), code))
+        }
+        view.keyDown(with: key(.keyDown, "\r", 36))    // Return commits the cell edit
+        view.keyUp(with: key(.keyUp, "\r", 36))
+
+        // ⛔ **NO `drainInputChainForTesting()` HERE.** The save is issued the instant the last key
+        // event is ENQUEUED, which is exactly what a user pressing ⌘S does. Adding a drain here
+        // would test the fix's own precondition instead of the fix.
+        let beforeStat = officeFileStat(atPath: docPath)
+        runtime.save(docPath)
+        let landed = await waitUntil(timeout: 30) { officeFileStat(atPath: docPath) != beforeStat }
+        XCTAssertTrue(landed, "the save never landed on disk at all")
+
+        let content = try readODFContentXML(atPath: docPath)
+        XCTAssertTrue(content.contains(marker),
+                      "the SAVED file must contain the text the user had just typed. Missing means "
+                        + "the save overtook the input chain and serialized the PRE-EDIT document "
+                        + "onto the user's own path — while reporting success, with no banner. "
+                        + "Saved body: \(strippedODFBodyText(content))")
+        // The untouched NEIGHBOURING cell, not A1. Typing straight after a click REPLACES the
+        // clicked cell's content (ordinary spreadsheet UX — `typeOneCharacterOnPrimaryView`'s own
+        // header says so), so `gate.ods`'s A1 seed "NORMA GATE" is legitimately gone here; asserting
+        // it survived would be asserting the gesture did NOT work. A2 is what proves this was a save
+        // of the SAME document with one cell changed, rather than some other document entirely.
+        //
+        // Worth recording, because the two arms discriminate perfectly: UNFIXED, this drill failed on
+        // the marker being ABSENT while the A1 seed was still PRESENT — the literal signature of the
+        // pre-edit document being written. FIXED, the marker is present and the A1 seed is gone,
+        // which is the post-edit document. Nothing else produces that flip.
+        XCTAssertTrue(content.contains("office stage A embed probe"),
+                      "and the fixture's own UNTOUCHED cell must survive — this must be a save of "
+                        + "the same document with one cell changed, never a different document")
+
+        _ = host.teardownAllOfficeRuntimesAndStopHelper()
+    }
+
+    /// **The control arm for the drill above.** The fix makes `performSave` join `inputChainTail`
+    /// before it serializes; the failure mode of a fix like that is a save that waits for something
+    /// that never finishes, or waits on the wrong thing. This proves a save with NOTHING in flight
+    /// still lands promptly and completely — so the join cannot have been implemented as an
+    /// unconditional stall.
+    ///
+    /// It also pins the ordering claim from the other side: the marker is typed AND drained BEFORE
+    /// the save is issued, so the save has nothing to wait for and must behave exactly as it always
+    /// did.
+    func testASaveWithNothingInFlightStillLandsPromptlyAndCompletely() async throws {
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path), "helper not built")
+        let vendorRoot = Self.vendorProductSetRoot
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
+                      "LibreOffice vendor tree not present")
+        let fixturePath = Self.fixturesRoot.appendingPathComponent("gate.ods").path
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: fixturePath), "gate.ods fixture missing")
+
+        let stateDir = makeScratchDirectory()
+        let directory = SessionDirectory(lister: { [] })
+        let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        host.makeOfficeHelperSupervisor = {
+            OfficeHelperSupervisor(configuration: OfficeHelperSupervisor.Configuration(
+                helperExecutableURL: helperURL,
+                socketDirectory: stateDir,
+                extraArguments: ["--lok-root", vendorRoot.path, "--sandbox-profile", Self.sandboxProfilePath.path]))
+        }
+        let runtime = host.officeRuntime(for: "S1")
+        let scratchDir = makeScratchDirectory()
+        let docPath = scratchDir.appendingPathComponent("save-ordering-control.ods").path
+        try Data(contentsOf: URL(fileURLWithPath: fixturePath)).write(to: URL(fileURLWithPath: docPath))
+
+        runtime.open(docPath)
+        let settled = await waitUntil(timeout: 90) {
+            runtime.stateSnapshot.documents[docPath] != nil || runtime.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(settled)
+        guard let doc = runtime.stateSnapshot.documents[docPath],
+              let client = host.officeHelperSupervisor?.client else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("did not open")
+        }
+
+        try await client.postMouse(docId: doc.docId, part: 0, type: .buttonDown, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await client.postMouse(docId: doc.docId, part: 0, type: .buttonUp, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await postRawUppercaseMarker(client: client, docId: doc.docId, marker: "AAAA")
+        // Everything is already delivered — this save has an EMPTY input chain to join.
+        await runtime.drainInputChainForTesting()
+
+        let started = Date()
+        let beforeStat = officeFileStat(atPath: docPath)
+        runtime.save(docPath)
+        let landed = await waitUntil(timeout: 30) { officeFileStat(atPath: docPath) != beforeStat }
+        let elapsed = Date().timeIntervalSince(started)
+        XCTAssertTrue(landed, "a save with nothing in flight must still land — if this hangs, the "
+                        + "input-chain join was implemented as an unconditional wait")
+        XCTAssertLessThan(elapsed, 10.0, "and it must land PROMPTLY: joining an already-finished "
+                            + "chain costs nothing. \(elapsed)s means the join is waiting on "
+                            + "something that is not the input chain")
+        let content = try readODFContentXML(atPath: docPath)
+        XCTAssertTrue(content.contains("AAAA"), "the control arm's own edit must be saved too")
+
+        _ = host.teardownAllOfficeRuntimesAndStopHelper()
+    }
+
     /// **office-live-edit STEP 0 — LT-1, the drill the whole of requirement 3 rests on.**
     ///
     /// The engine research (`.superpowers/research/office-undo-save-engine.md`, Q1/Q2) establishes
