@@ -85,16 +85,58 @@
  * The second is the strongest UI fact available anywhere in this app: not a static label, but the
  * document's own content read back through the live LibreOffice view.
  *
- * Two caveats stated rather than hidden:
+ * Caveats stated rather than hidden — this leg is the one part of the gate that is NOT reliable:
  *  - AppleScript's `entire contents` returns EMPTY on this app's SwiftUI hosting view while direct
  *    child traversal works — a silent false negative. The reader below is therefore **JXA**
  *    (`osascript -l JavaScript`) doing an explicit recursive walk and emitting JSON.
- *  - A shell window that renders the document correctly and then VANISHES seconds later was
- *    observed during development (app still alive, LibreOffice still servicing the document). It
- *    was traced to `.onAppear` re-firing and re-entering the panel dismantle, and mitigated with a
- *    one-shot latch — but a later run still reached a window-less state whose ROOT CAUSE IS NOT
- *    ESTABLISHED. Hence `UI-FAIL` as its own verdict class: this leg is real evidence when it
- *    passes and is not permitted to condemn a verb when it fails.
+ *  - **The shell window is created unreliably in this Debug configuration, and ROOT CAUSE IS NOT
+ *    ESTABLISHED.** What was measured, so the next person does not re-derive it:
+ *      · when the window DOES appear, both facts above are present and stable for ~35-45s, then
+ *        the window degrades and disappears while the app stays alive and LibreOffice keeps
+ *        servicing the document;
+ *      · the window frequently never appears at all, with the app attached and every office verb
+ *        working — proving attachment and window presentation are independent;
+ *      · this is NOT specific to the gate's door: launching with the PRE-EXISTING
+ *        `NORMA_PANEL_SMOKE=1` produced no window either, on the same build;
+ *      · it is not the spawn method — direct-exec, `open -n --env`, and a plain shell launch all
+ *        reproduce it;
+ *      · `tell application id "com.norma.app.dev" to activate` answers
+ *        `Application isn't running (-600)` for a directly-exec'd bundle, so activation cannot be
+ *        used to force the window up.
+ *    ⟹ `UI-FAIL` is its own verdict class and does NOT fail the run. This leg is real evidence
+ *    when it passes and is not permitted to condemn a verb when it fails. Fixing the window
+ *    presentation is a named follow-up, not something this gate papers over.
+ *  - One measurement trap worth keeping: the AX reader takes the FIRST process matching the dev
+ *    bundle id, so a LEFTOVER app instance makes it read the wrong window. That produced three
+ *    consecutive "the window never appears" conclusions while the real instance was rendering the
+ *    document perfectly. `ui.singleInstance` now asserts the invariant instead of assuming it.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * REPRODUCING THE DELETION-RED (the house evidence standard: prove the gate can FAIL)
+ *
+ * A gate nobody has seen fail is not evidence. This one was proven by breaking a REAL mechanism —
+ * not by mutating an expectation — in `apple/Norma/Sources/OfficeHelper/LOKBridge.swift`, at the
+ * top of `sheetsSetOnDedicatedThread`'s per-cell write loop:
+ *
+ *     if ProcessInfo.processInfo.environment["NORMA_GATE_BREAK_SHEETS_SET"] == "1" {
+ *         return cellAddresses.count      // skip every write, still report full success
+ *     }
+ *
+ * That is precisely the failure this gate exists to catch: a verb that silently no-ops while
+ * reporting success. Rebuild the Debug app, then `bun run scripts/office-agent-gate.ts
+ * --break-sheets-set`.
+ *
+ * OBSERVED RESULT, and why it is the right red:
+ *   - the TOOL reported success:   `↳ wrote 2 cells to Sheet1!A4:B4 in budget.xlsx`
+ *   - the AGENT narrated success:  "Updated `Sheet1!A4:B4` with "QUARTERLY REVIEW" and `1234`."
+ *   - the GATE went red anyway, naming the exact cells under test:
+ *         sheets.set — saved bytes: A4=null (want "QUARTERLY REVIEW"), B4=null (want "1234")
+ *   - the INDEPENDENT helper re-open leg went red too, showing the file's real content (rows 1-2
+ *     only, no row 4) — two legs, one cause, neither derived from the other
+ *   - every OTHER verb stayed green, so the break is scoped rather than a blanket failure, and
+ *     `RESULT: FAIL` with exit 1
+ *
+ * The probe is reverted; the product tree contains none of it.
  *
  * ─────────────────────────────────────────────────────────────────────────────────────────────
  * WHAT THIS GATE DOES NOT COVER — read this before trusting a green run
@@ -211,6 +253,13 @@ function killHelpers(): void {
 function gateEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   return {
     ...process.env,
+    // `--break-sheets-set` arms the DELETION-RED probe. Read this before assuming it works today:
+    // the probe is deliberately NOT compiled into the shipped helper, so passing this flag against
+    // an unmodified tree changes NOTHING and the gate stays green. Reproducing the red requires
+    // re-applying the four-line patch documented in the gate's header ("REPRODUCING THE
+    // DELETION-RED"), rebuilding, and then passing this flag. Stated plainly because a flag that
+    // silently does nothing while claiming to break a verb would be its own kind of lie.
+    ...(process.argv.includes("--break-sheets-set") ? { NORMA_GATE_BREAK_SHEETS_SET: "1" } : {}),
     NORMA_HOME: HOME_DIR,
     NORMA_PROFILE: "dev",
     // Belt and braces: nothing in this gate may ever reach `open -g -b com.norma.app` and launch
@@ -263,6 +312,17 @@ async function startApp(sessionId: string): Promise<void> {
   log(`   app binary built ${builtAt.toISOString()}`);
 
   killHelpers();
+  // EXACTLY ONE dev-app instance, or the UI leg measures the wrong process.
+  //
+  // This cost a wrong conclusion during development: a leftover instance from an earlier launch
+  // was still running, the AX reader takes the FIRST process matching the bundle id, and it kept
+  // reading that window-less leftover — producing "the window never appears" for three runs while
+  // the real instance was rendering the document perfectly. A measurement artifact reported as a
+  // product failure is exactly the class this gate exists to prevent, so the invariant is enforced
+  // rather than assumed. Only ever `com.norma.app.dev` — the DIST app is never touched.
+  spawnSync("pkill", ["-9", "-f", `${DERIVED_DATA}.*MacOS/Norma`], { encoding: "utf8" });
+  await sleep(1500);
+
   const logPath = join(GATE_ROOT, "app.log");
   let appLog = "";
   app = spawn(appBinary, [], {
@@ -427,7 +487,8 @@ const AX_READER = String.raw`
 function run(argv) {
   const se = Application("System Events");
   const procs = se.applicationProcesses.whose({ bundleIdentifier: argv[0] })();
-  if (procs.length === 0) return JSON.stringify({ ok: false, reason: "no running process with bundle id " + argv[0] });
+  if (procs.length === 0) return JSON.stringify({ ok: false, procCount: 0, reason: "no running process with bundle id " + argv[0] });
+  // procs[0] is only meaningful when there is exactly ONE. See the gate's assertSingleAppInstance.
   const p = procs[0];
   const out = [];
   function walk(el, depth) {
@@ -443,11 +504,11 @@ function run(argv) {
   const wins = [];
   const ws = p.windows();
   for (let i = 0; i < ws.length; i++) { try { wins.push(String(ws[i].name())); } catch (e) { wins.push(""); } walk(ws[i], 0); }
-  return JSON.stringify({ ok: true, windows: wins, elements: out });
+  return JSON.stringify({ ok: true, procCount: procs.length, windows: wins, elements: out });
 }
 `;
 
-function readAx(): { ok: boolean; reason?: string; windows: string[]; elements: AxElement[] } {
+function readAx(): { ok: boolean; reason?: string; procCount?: number; windows: string[]; elements: AxElement[] } {
   const scriptPath = join(GATE_ROOT, "ax-reader.js");
   writeFileSync(scriptPath, AX_READER);
   const r = spawnSync("osascript", ["-l", "JavaScript", scriptPath, APP_BUNDLE_ID], { encoding: "utf8", timeout: 60_000 });
@@ -464,16 +525,70 @@ function readAx(): { ok: boolean; reason?: string; windows: string[]; elements: 
 
 /** Poll, because the shell mounts asynchronously and a single read races it. A bound that expires
  *  is reported as UI-FAIL naming what it waited for — never silently treated as absent. */
-async function waitForAx(predicate: (els: AxElement[]) => boolean, budgetMs: number): Promise<{ hit: boolean; last: AxElement[]; reason?: string }> {
+async function waitForAx(predicate: (els: AxElement[]) => boolean, budgetMs: number): Promise<{ hit: boolean; last: AxElement[]; reason?: string; windows?: string[] }> {
   const deadline = Date.now() + budgetMs;
   let last: AxElement[] = [];
   let reason: string | undefined;
+  let windows: string[] = [];
+  let polls = 0;
   while (Date.now() < deadline) {
     const snap = readAx();
-    if (!snap.ok) { reason = snap.reason; } else { last = snap.elements; if (predicate(last)) return { hit: true, last }; }
+    polls += 1;
+    if (!snap.ok) { reason = snap.reason; } else {
+      last = snap.elements; windows = snap.windows;
+      if (predicate(last)) return { hit: true, last, windows };
+    }
+    // The window's own titles are the cheapest signal for WHY a UI fact is missing: an app with no
+    // window at all is a different failure from an app whose window is up but unnamed inside.
+    if (polls % 4 === 0) log(`      (ax poll ${polls}: windows=${JSON.stringify(windows)}, named=${last.length})`);
     await sleep(2500);
   }
-  return { hit: false, last, reason };
+  return { hit: false, last, reason, windows };
+}
+
+/**
+ * THE UI LEG, asserted at the ONE moment it is reliably observable.
+ *
+ * Called immediately after the app comes up with the document tab already present — NOT at the end
+ * of the run. That placement is measured, not stylistic: the shell window renders the document
+ * correctly and stays readable for roughly 35-45 seconds, then degrades and disappears while the
+ * app stays alive and LibreOffice keeps servicing the document. Asserting late produced two UI-FAILs
+ * on a run whose every byte was correct.
+ *
+ * The vanishing window is a REAL, pre-existing defect and is reported as such (see the gate's
+ * summary) rather than hidden by this placement — but a gate must read a fact while the fact is
+ * there, and a verb must never be condemned by a window that closed itself 80 seconds later.
+ */
+async function assertUiFacts(): Promise<void> {
+  const tabWait = await waitForAx((els) => els.some((e) => e.name.includes("budget.xlsx")), 45_000);
+  const snapProcs = readAx().procCount;
+  if (snapProcs !== undefined && snapProcs !== 1) {
+    record("ui.singleInstance", false, "UI-FAIL",
+      `${snapProcs} processes share the dev bundle id — the AX reader cannot know which one it read. `
+      + "Every UI verdict below would be untrustworthy.");
+  } else {
+    record("ui.singleInstance", true, "UI-FAIL", "exactly one dev-app process — the AX reader is looking at the right one");
+  }
+  record(
+    "ui.documentTab", tabWait.hit, "UI-FAIL",
+    tabWait.hit
+      ? `an AX element names the open document: "${tabWait.last.find((e) => e.name.includes("budget.xlsx"))?.name}"`
+      : `no AX element naming budget.xlsx within 45s${tabWait.reason ? ` (${tabWait.reason})` : ""}; windows=${JSON.stringify(tabWait.windows)}, ${tabWait.last.length} named elements`,
+  );
+  // The formula bar renders the REAL cell content of the REAL file — the strongest UI fact this app
+  // offers, because it is the document's own content rather than a static label.
+  const barWait = await waitForAx((els) => els.some((e) => /^[A-Z]+\d+:/.test(e.name)), 30_000);
+  const bar = barWait.last.find((e) => /^[A-Z]+\d+:/.test(e.name))?.name ?? "";
+  const pristineA1 = xlsxCell(join(PRISTINE_DIR, "budget.xlsx"), "xl/worksheets/sheet1.xml", "A1") ?? "";
+  // Non-vacuous: the bar must name a cell AND carry that cell's real content, computed from the
+  // fixture's own bytes rather than typed in from memory.
+  const carriesContent = barWait.hit && pristineA1.length > 0 && bar.includes(pristineA1);
+  record(
+    "ui.formulaBar", carriesContent, "UI-FAIL",
+    carriesContent
+      ? `the formula bar shows the document's own live content: "${bar}" (contains cell A1's real value ${JSON.stringify(pristineA1)})`
+      : `formula bar ${barWait.hit ? `read "${bar}" but it does not carry A1's real value ${JSON.stringify(pristineA1)}` : "not found in the AX tree"}`,
+  );
 }
 
 // ── the verb steps ───────────────────────────────────────────────────────────────────────────
@@ -754,10 +869,26 @@ async function main(): Promise<void> {
   log(`   code session: ${sessionId}`);
 
   // ── Phase 4: app through the door + a real document tab ────────────────────────────────────
-  step("Phase 4 — launch the DEV app through NORMA_GATE_SESSION, open a document tab");
+  // ORDER IS LOAD-BEARING: the tab is created BEFORE the app launches.
+  //
+  // `panel.openTab` mints tab state DAEMON-side, so it does not need the app running — and giving
+  // the app a tab to show before its panel ever opens is what keeps the window alive. Measured: a
+  // panel that mounts with ZERO tabs tears the whole window down a few seconds later (the CEF
+  // `DoClose` -> `performClose:` on the parent window class that `NORMA_PANEL_SMOKE`'s own comment
+  // documents). With the tab already present the panel mounts onto real content instead.
+  step("Phase 4 — open the document tab, THEN launch the DEV app through NORMA_GATE_SESSION");
+  await openDocumentTab(sessionId, join(WORK_DIR, "budget.xlsx"));
   await startApp(sessionId);
   log("   app running");
-  await openDocumentTab(sessionId, join(WORK_DIR, "budget.xlsx"));
+
+  // ── The UI leg runs FIRST, before any agent turn. ───────────────────────────────────────────
+  // Ordering is measured, not arbitrary. The window is readable for roughly 35-45s and a single
+  // agent turn costs 20-40s, so asserting after the attach proof lands PAST the observable window
+  // and reports two UI-FAILs on a run whose every byte is correct — which is exactly what happened
+  // before this move. The document tab was opened before the app launched, so these facts are
+  // available the moment the shell renders; nothing is gained by waiting.
+  step("Phase 4b — LIVE UI FACTS through accessibility scripting (UI-FAIL is its own verdict class)");
+  await assertUiFacts();
 
   // The attach proof, using the only honest instrument there is: a real verb.
   const reach = await agentTurn(sessionId, "Use the sheets tool's info verb on budget.xlsx.");
@@ -788,8 +919,9 @@ async function main(): Promise<void> {
   stopApp();
   await sleep(4000);
   killHelpers();
-  await startApp(sessionId);
+  // Same ordering rule as Phase 4 — the tab exists before the panel can mount empty.
   await openDocumentTab(sessionId, join(WORK_DIR, "budget.xlsx"));
+  await startApp(sessionId);
   await sleep(3000);
 
   step("Phase 7 — FILE EVIDENCE (unzip + XML on the saved bytes)");
@@ -807,24 +939,6 @@ async function main(): Promise<void> {
     sawQuarterly
       ? 'the freshly-reopened document reports "QUARTERLY REVIEW" in the range — the write survived save+reload'
       : `the freshly-reopened document did NOT report "QUARTERLY REVIEW": ${readBack.stdout.slice(-400)}`,
-  );
-
-  // ── Phase 9: the UI leg ────────────────────────────────────────────────────────────────────
-  step("Phase 9 — LIVE UI FACTS through accessibility scripting (weakest leg: UI-FAIL is its own class)");
-  const tabWait = await waitForAx((els) => els.some((e) => e.name.includes("budget.xlsx")), 60_000);
-  record(
-    "ui.documentTab", tabWait.hit, "UI-FAIL",
-    tabWait.hit
-      ? `an AX element names the open document: ${tabWait.last.find((e) => e.name.includes("budget.xlsx"))?.name}`
-      : `no AX element naming budget.xlsx within 60s${tabWait.reason ? ` (${tabWait.reason})` : ""}; saw ${tabWait.last.length} named elements`,
-  );
-  // The formula bar renders the REAL cell content of the REAL file — the strongest UI fact in the
-  // app, because it is content rather than a static label.
-  const barWait = await waitForAx((els) => els.some((e) => /^A\d+:/.test(e.name)), 30_000);
-  const bar = barWait.last.find((e) => /^A\d+:/.test(e.name))?.name ?? "";
-  record(
-    "ui.formulaBar", barWait.hit, "UI-FAIL",
-    barWait.hit ? `the formula bar shows live cell content: "${bar}"` : "no formula-bar element found in the AX tree",
   );
 
   // ── Phase 10: characterizations (reality, not the ideal) ───────────────────────────────────
