@@ -283,25 +283,37 @@ final class OfficeAgentBroker {
             // driver with a genuinely-delayed readiness would cost for one narrow, structurally-
             // reasoned window.
             //
-            // **Residual, disclosed not solved (see `task-2-report.md`'s fix-round section): the
-            // MIRROR interleaving still exists.** If THIS call's own open is the one in flight and a
-            // tab's open joins IT instead, this call still correctly believes `adopted == false` (it
-            // really did initiate the open) and its own `defer` still correctly closes what it opened
-            // per rule 2's own contract — but the tab that joined in the meantime loses its view when
-            // that close fires. Pre-fix that interleaving silently corrupted (a wrong or dead docId);
-            // post-fix there is no corruption, but **what the tab actually shows is not a recoverable
-            // state — verified against `officeDocumentViewportPlan`/`requestOpenIfNeeded`
-            // (`PanelDocumentTab.swift`), not assumed (coordinator re-review, 2026-08-22):**
-            // `documents[resolvedPath]` going nil from this close falls the tab through every named
-            // case to `.renderState(.booting)` — an indefinite spinner, no error text, no Reopen
-            // affordance (only `.failed` renders one) — and `requestOpenIfNeeded`'s own gate
-            // (`openRequestedPaths`, at most one `open()` per (runtime, path) for this model's whole
-            // lifetime) never fires again for this path on this runtime, so nothing here self-heals.
-            // The tab is stuck until the user closes it and reopens the file, which mints a fresh
-            // `PanelDocumentTabModel` with an empty gate. A real improvement over silent corruption,
-            // not a full fix. A complete fix needs multi-owner reference counting for one open
-            // document, which is a design question above this broker's pay grade, not a fix-round
-            // patch.
+            // **Residual, HALF fixed as of Office Stage C — the two halves are different claims and
+            // only one of them changed.** The MIRROR interleaving itself still exists: if THIS
+            // call's own open is the one in flight and a tab's open joins IT instead, this call
+            // still correctly believes `adopted == false` (it really did initiate the open) and its
+            // own `defer` still correctly closes what it opened per rule 2's own contract — so the
+            // tab that joined in the meantime still loses its view when that close fires. **That
+            // half is unchanged and nothing below claims otherwise.**
+            //
+            // **What IS fixed is what the tab does about it.** Pre-Stage-C the tab was STUCK:
+            // `documents[resolvedPath]` going nil from this close fell it through every named case
+            // of `officeDocumentViewportPlan` to `.renderState(.booting)` — an indefinite spinner,
+            // no error text, no Reopen affordance — and `requestOpenIfNeeded`'s own gate
+            // (`openRequestedPaths`, `PanelDocumentTab.swift`) never fired again for that path, so
+            // nothing self-healed; only closing the tab and reopening the file recovered it (a
+            // fresh `PanelDocumentTabModel`, an empty gate). It now lands in
+            // `OfficeDocumentViewportState.closedUnderTab` — a real state, an honest sentence, and
+            // the Reopen affordance — and re-arms its own gate for ONE automatic re-open per
+            // (runtime, path) for that pairing's whole lifetime
+            // (`PanelDocumentTabModel.maxAutomaticReopensAfterVanish`, deliberately never reset by
+            // a successful re-open, which is the structural half of why this cannot become an
+            // open/close loop; the behavioural half is that once the tab owns the document again, a
+            // later broker call ADOPTS it under rule 1 and there is no second close to lose). In
+            // the ordinary case the user sees a flicker instead of a dead tab. Drilled end to end,
+            // this broker included, by
+            // `testTheMirrorInterleavingLeavesTheJoinedTabRecoverableRatherThanSpinning`.
+            //
+            // **The deliberate follow-up, named rather than silently dropped: multi-owner REFERENCE
+            // COUNTING for one open document**, so this close never fires at all while another
+            // owner still holds it. That changes this broker's core lifecycle (the same design gap
+            // the `defer`'s own comment below names), which is why the recoverability half landed
+            // on its own and this did not.
             runtime = existing
             docId = try await awaitOpen(existing, path: resolvedPath)
             adopted = true
@@ -325,7 +337,10 @@ final class OfficeAgentBroker {
         // running) — closing blindly BY PATH in that window would close a document this call never
         // touched. Does not close the residual named in rule 1's own comment above (a re-verify on a
         // docId that legitimately IS still this call's own does not stop rule 2 from correctly, and
-        // now visibly, closing it out from under a caller who merely joined).
+        // now visibly, closing it out from under a caller who merely joined) — Office Stage C
+        // changed what that JOINER does next, never whether this close fires. It still fires, and
+        // `testTheMirrorInterleavingLeavesTheJoinedTabRecoverableRatherThanSpinning` asserts
+        // `closeCalls == 1` on that very path to keep it that way.
         //
         // **Disclosed, not fixed (coordinator re-review, 2026-08-22): the mismatch branch — the docId
         // check above failing — leaks the REPLACEMENT document for the rest of the session.** On a
