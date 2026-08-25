@@ -58,14 +58,27 @@
  *    preflight that turns that into one clear sentence, and the gate roots itself at a SHORT `/tmp`
  *    path.
  *
- *    ⚠️ **A CORRECTION, recorded because getting it wrong is instructive.** An earlier version of
- *    this header claimed the daemon "reports listening on a socket it never created" — that the
- *    over-long path produced `core.lock` and no `core.sock`. **That is FALSE and there is no such
- *    product bug.** Re-tested at a 127-byte socket path: while the daemon is running,
- *    `run/` contains a real `srw------- core.sock`. The original observation listed the directory
- *    AFTER killing the daemon, and the daemon REMOVES ITS SOCKET ON SHUTDOWN — so what looked like
- *    "never created" was ordinary cleanup. Wrong conclusion AND wrong supporting fact, from an
- *    instrument that measured after the fact rather than during it.
+ *    ⚠️ **A WITHDRAWN CLAIM, and a SECOND one withdrawn on top of it. Both recorded, because the
+ *    pattern is more useful than either.**
+ *
+ *    An earlier version of this header claimed the daemon "reports listening on a socket it never
+ *    created" — that an over-long path produced `core.lock` and no `core.sock`. **That conclusion
+ *    is FALSE and there is no such product bug.** Re-tested at a 127-byte socket path: while the
+ *    daemon is RUNNING, `run/` contains a real `srw------- core.sock`. Independently re-tested in
+ *    review at 127/141/147/157 bytes — socket created every time.
+ *
+ *    I then explained the false observation by saying the daemon "removes its socket on shutdown",
+ *    so I had listed the directory after killing it. **That mechanism is ALSO unsupported** — a
+ *    SIGTERM shutdown removes the lock AND the socket (my own re-test printed `total 0`, not a
+ *    lone lock), and SIGKILL leaves both. Neither path produces the "lock, no socket" state I
+ *    originally described.
+ *
+ *    ⟹ **The original observation is not reproducible and its mechanism is UNESTABLISHED.** That is
+ *    the honest end state: substituting a second unverified story for the first is the same error
+ *    a second time, which is exactly what happened here — inside the paragraph correcting it.
+ *    What IS established, by direct measurement: `sun_path` = 103 exactly (bind probe: 103 OK,
+ *    104 "path too long"), the socket is created at over-long paths, and the app still dies at
+ *    exit 133. The preflight below stands on those, and on nothing that needs the retracted story.
  *
  * 2. **The office tools need the app ATTACHED TO THIS SESSION**, and the app attaches to whatever
  *    session its window shows. Norma is `LSUIElement` — no window at launch — so this gate drives
@@ -147,7 +160,44 @@
  *   - every OTHER verb stayed green, so the break is scoped rather than a blanket failure, and
  *     `RESULT: FAIL` with exit 1
  *
- * The probe is reverted; the product tree contains none of it.
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * THE SECOND PROBE — `--break-sheets-read`, and why the first one cannot replace it
+ *
+ * Breaking `sheetsSet` CANNOT prove the read leg. With the write suppressed, A4 is empty, so the
+ * read step has no value to look for and goes red on its emptiness GUARD — which is exactly how an
+ * earlier round's read-leg evidence came to be hollow (the red was recorded as proof that the
+ * assertion discriminates; it was not testing the assertion at all).
+ *
+ * So there is a second probe, aimed at the read path itself, in `LOKBridge.swift`'s `sheetsRead`
+ * — note the body is a single-expression implicit return, so adding a statement means the existing
+ * line needs an explicit `return`:
+ *
+ *     func sheetsRead(docId: String, sheet: String, range: String, formulas: Bool) throws -> [[String]] {
+ *         if ProcessInfo.processInfo.environment["NORMA_GATE_BREAK_SHEETS_READ"] == "1" {
+ *             return [["NORMA GATE", "42"], ["office stage A embed probe", ""]]   // plausible, but omits A4
+ *         }
+ *         return try thread.sync { try self.sheetsReadOnDedicatedThread(…) }      // `return` added
+ *     }
+ *
+ * `sheetsSet` still works, so the file GENUINELY contains the value and only a prose-reading gate
+ * could stay green. Rebuild the Debug app, then
+ * `bun run scripts/office-agent-gate.ts --no-build --break-sheets-read`.
+ *
+ * OBSERVED RESULT:
+ *   - `sheets.set` PASS — the bytes really are on disk
+ *   - `sheets.read` FILE-FAIL, from the assertion under test:
+ *         the tool_result did NOT contain A4's saved value "QUARTERLY REVIEW". Full tool_result:
+ *         Sheet1!A1:B4 (values):
+ *         NORMA GATE	42
+ *         office stage A embed probe
+ *     — printed as a FULL MULTI-LINE GRID, which is itself proof the journal carries what stdout
+ *     structurally cannot (the CLI's whole stdout for that call was `↳ Sheet1!A1:B4 (values):`)
+ *   - every other verb green, exit 1
+ *
+ * With the SET probe instead, the read step now reports `INCONCLUSIVE — … This is the guard firing,
+ * NOT the tool-result assertion`, so a guard can never again be mistaken for the assertion.
+ *
+ * Both probes are reverted; the product tree contains neither.
  *
  * ─────────────────────────────────────────────────────────────────────────────────────────────
  * WHAT THIS GATE DOES NOT COVER — read this before trusting a green run
@@ -310,13 +360,14 @@ function killHelpers(): void {
 function gateEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   return {
     ...process.env,
-    // `--break-sheets-set` arms the DELETION-RED probe AND names sheets.set as the expected red.
-    // Read this before assuming it works today:
+    // `--break-sheets-set` / `--break-sheets-read` arm the two DELETION-RED probes and name the
+    // step expected to go red. Read this before assuming either works today:
     // the probe is deliberately NOT compiled into the shipped helper, so passing this flag against
     // an unmodified tree changes NOTHING and the gate stays green. Reproducing the red requires
-    // re-applying the four-line patch documented in the gate's header ("REPRODUCING THE
-    // DELETION-RED"), rebuilding, and then passing this flag. Stated plainly because a flag that
-    // silently does nothing while claiming to break a verb would be its own kind of lie.
+    // re-applying the corresponding patch documented in this file's header ("REPRODUCING THE
+    // DELETION-RED" for the set leg, "THE SECOND PROBE" for the read leg), rebuilding, and then
+    // passing the flag. Stated plainly because a flag that silently does nothing while claiming to
+    // break a verb would be its own kind of lie.
     ...(process.argv.includes("--break-sheets-set") ? { NORMA_GATE_BREAK_SHEETS_SET: "1" } : {}),
     ...(process.argv.includes("--break-sheets-read") ? { NORMA_GATE_BREAK_SHEETS_READ: "1" } : {}),
     NORMA_HOME: HOME_DIR,
