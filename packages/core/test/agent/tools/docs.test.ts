@@ -104,14 +104,24 @@ describe("registration", () => {
   // The tool description is a shipped artifact this arc has already caught contradicting the code
   // once (T5's Minor-5: a description that was not merely untested but FALSE). These three claims
   // are the ones a model will act on and the ones the code below actually enforces.
-  test("the description states the three facts the code enforces — undo is REFUSED, literal find, no first-only replace", () => {
+  test("the description states the three facts the code enforces — a human's ⌘Z undoes the whole call, literal find, no first-only replace", () => {
     const h = makeHarness();
     const description = h.registry.specFor("docs", WORKDIR, "code")?.description ?? "";
-    // Ruling 4's user-facing half, CORRECTED by T7's own live drill: LOK refuses a cross-view undo
-    // outside repair mode (`docundo.cxx:456-472`), so a human's ⌘Z cannot take back a docs edit and
-    // silently does nothing. The description must say that, not the ruling's original "shared" text.
-    expect(description).toContain("NO WAY TO UNDO IT");
-    expect(description).toContain("⌘Z will simply do nothing");
+    // Ruling 4's user-facing half, CORRECTED TWICE and worth reading in order. T7's live drill
+    // falsified the ruling's original "the human's ⌘Z gets it back" (LOK refuses a cross-view undo
+    // OUTSIDE REPAIR MODE — `docundo.cxx:456-472`), and the description was rewritten to say ⌘Z did
+    // nothing. office-live-edit R3 then dispatched ⌘Z WITH `Repair`, which is precisely the escape
+    // those five words named, so the original conclusion is true again — but for a mechanism nobody
+    // had built at the time, not because T7 was wrong.
+    //
+    // Two claims are asserted, not one, and the second is the load-bearing one: a description that
+    // said only "a human can undo" would be satisfied by per-action undo, where taking back a
+    // 200-cell write costs 200 presses. The GRANULARITY is what the ledger delivers and what a
+    // model needs to know before deciding how to split its work across calls.
+    expect(description).toContain("cannot undo from here");
+    expect(description).toContain("takes back your whole tool call");
+    // And the fact that must NOT come back: the old claim, now false.
+    expect(description).not.toContain("⌘Z will simply do nothing");
     // Ruling 1: literal, case-sensitive.
     expect(description).toContain("LITERAL and CASE-SENSITIVE");
     // The v1 narrowing, stated where a model will read it rather than discovered by refusal.

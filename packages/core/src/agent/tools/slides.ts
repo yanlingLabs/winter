@@ -287,8 +287,9 @@ export function registerSlidesTool(r: ToolRegistry, deps: SlidesToolDeps): void 
     name: "slides",
     description:
       "Read and edit a presentation Norma has access to (.pptx, .odp — any format the office engine "
-      + "can open). Every write verb SAVES immediately — there is no separate save step, and no undo "
-      + "from here (the file changes right away; a human's ⌘Z in an open tab is unaffected). "
+      + "can open). Every write verb SAVES immediately — there is no separate save step, and you "
+      + "cannot undo from here. A HUMAN can: if they have the file open in a tab, one press of ⌘Z "
+      + "takes back your whole tool call, and ⌘⇧Z puts it back. "
       + "Slides are numbered 1-based, matching how a human counts them — every verb below targets a "
       + "slide BY THAT NUMBER ONLY, never by its name (see info's own entry for why a slide's name is "
       + "not a stable way to refer to it). Pick a verb:\n"
