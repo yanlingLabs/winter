@@ -45,9 +45,9 @@
  * `ENV-FAIL`  the gate could not run truthfully (no AX trust, socket path too long, app died,
  *             daemon unreachable). NOT a verdict about any verb.
  * `FILE-FAIL` a verb's bytes are wrong. This is the real product signal.
- * `UI-FAIL`   a live UI fact was absent. Reported separately and deliberately weighted lower —
- *             see "the UI leg" below — so a flaky window can never be mistaken for a broken verb,
- *             and, more importantly, never the reverse.
+ * `UI-SKIP`   a live UI fact was not observable. Reported OUTSIDE the pass/fail tally — never as a
+ *             failure that "does not block", which would just train readers to ignore the section.
+ *             So a flaky window can never be mistaken for a broken verb, nor the reverse.
  *
  * ─────────────────────────────────────────────────────────────────────────────────────────────
  * FIVE THINGS THIS GATE LEARNED THE HARD WAY (none of them in the ledger before Task 8)
@@ -103,9 +103,10 @@
  *      · `tell application id "com.norma.app.dev" to activate` answers
  *        `Application isn't running (-600)` for a directly-exec'd bundle, so activation cannot be
  *        used to force the window up.
- *    ⟹ `UI-FAIL` is its own verdict class and does NOT fail the run. This leg is real evidence
- *    when it passes and is not permitted to condemn a verb when it fails. Fixing the window
- *    presentation is a named follow-up, not something this gate papers over.
+ *    ⟹ these observations are reported as `UI-SKIP`, OUTSIDE the verdict tally. The predicates are
+ *    real and have been observed green, but until the window is fixed they cannot detect a
+ *    regression, so counting them either way would be dishonest. Fixing the window presentation is
+ *    a named follow-up for Task 9; restoring these to real verdicts belongs with it.
  *  - One measurement trap worth keeping: the AX reader takes the FIRST process matching the dev
  *    bundle id, so a LEFTOVER app instance makes it read the wrong window. That produced three
  *    consecutive "the window never appears" conclusions while the real instance was rendering the
@@ -175,6 +176,11 @@ const DERIVED_DATA = join(GATE_ROOT, "dd");
 /** The one hard limit behind header note 1. */
 const SUN_PATH_MAX = 103;
 
+/** Bun's `spawnSync` default is 2,621,440 bytes and a clean Debug build emits ~4 MB on stdout;
+ *  overflowing it SIGTERMs the child. 256 MB is not a guess about this build's size, it is
+ *  headroom chosen so that growth in build verbosity can never silently re-break the command. */
+const BUILD_MAX_BUFFER = 256 * 1024 * 1024;
+
 const APP_BUNDLE_ID = "com.norma.app.dev";
 const DAEMON_BOOT_TIMEOUT_MS = 60_000;
 const APP_BOOT_TIMEOUT_MS = 90_000;
@@ -190,22 +196,44 @@ function log(line = ""): void { console.log(line); }
 function step(line: string): void { console.log(`\n[${String(Date.now() - t0).padStart(7)}ms] ── ${line}`); }
 function sleep(ms: number): Promise<void> { return new Promise((r) => setTimeout(r, ms)); }
 
-type VerdictClass = "ENV-FAIL" | "FILE-FAIL" | "UI-FAIL";
+type VerdictClass = "ENV-FAIL" | "FILE-FAIL" | "UI-SKIP";
+
+/** Why the UI observations sit OUTSIDE the pass/fail tally rather than being a failure that never
+ *  blocks. A permanent 2-of-3 FAIL that is documented as "ignore this" trains every future reader
+ *  to ignore the UI section — which is this arc's own defect class relocated into the gate. The
+ *  predicates are kept intact and reported honestly as UNAVAILABLE; restoring them to real
+ *  verdicts is Task 9's window-presentation fix, not a thing this gate should paper over. */
+const UI_SKIP_REASON =
+  "The shell window is created unreliably in this Debug configuration (root cause unestablished; "
+  + "not the gate's door — the pre-existing NORMA_PANEL_SMOKE loses its window too). These "
+  + "predicates are REAL and have been observed green, but until that is fixed they cannot detect "
+  + "a regression, so they are reported and NOT counted. Restoring them is Task 9's job.";
 interface Verdict { name: string; ok: boolean; kind: VerdictClass; detail: string; }
 const verdicts: Verdict[] = [];
 function record(name: string, ok: boolean, kind: VerdictClass, detail: string): boolean {
   verdicts.push({ name, ok, kind, detail });
-  log(`   [${ok ? "PASS" : `FAIL/${kind}`}] ${name} — ${detail}`);
+  log(`   [${ok ? "PASS" : `${kind === "UI-SKIP" ? "UNAVAIL" : "FAIL"}/${kind}`}] ${name} — ${detail}`);
   return ok;
 }
 
-/** An environment problem is never a verdict about a verb. Bail loudly and say which. */
+/** Raised instead of exiting, so teardown always gets to run. See `GateExit`/`withTeardown`. */
+class GateExit extends Error {
+  constructor(readonly code: number) { super(`gate exit ${code}`); }
+}
+
+/**
+ * An environment problem is never a verdict about a verb. Bail loudly and say which.
+ *
+ * THROWS rather than calling `process.exit`. `process.exit` inside the `try` skips the `finally`
+ * outright, which is exactly how this gate came to leak a daemon, an app and its helpers on every
+ * single run while its own teardown banner never printed once.
+ */
 function envFail(message: string): never {
   log(`\n╭─ ENV-FAIL ────────────────────────────────────────────────`);
   log(`│ ${message}`);
   log(`╰───────────────────────────────────────────────────────────`);
   log("\nRESULT: ENV-FAIL — the gate could not run truthfully. NO verb was judged.");
-  process.exit(2);
+  throw new GateExit(2);
 }
 
 // ── preflight ────────────────────────────────────────────────────────────────────────────────
@@ -245,15 +273,24 @@ function axTrustProbe(): { ok: boolean; detail: string } {
 let daemon: ChildProcess | undefined;
 let app: ChildProcess | undefined;
 
+/**
+ * Kill THIS GATE's office helpers — never every `NormaOfficeHelper` on the machine.
+ *
+ * The harness leaks helpers and a leaked helper poisons the next run's results, so this must be
+ * thorough; but an unscoped `pkill -9 -f NormaOfficeHelper` also SIGKILLs the helper belonging to
+ * `/Applications/Norma.app`, the user's daily driver — pulling LibreOffice out from under an office
+ * tab they have open. That brushes the repo's "never kill a running Norma.app" hard rule, so the
+ * pattern is scoped to the gate's own DerivedData path exactly as `stopApp` already scopes its own.
+ */
 function killHelpers(): void {
-  // The harness leaks helpers, and a leaked helper poisons the next run's results. Standing rule.
-  spawnSync("pkill", ["-9", "-f", "NormaOfficeHelper"], { encoding: "utf8" });
+  spawnSync("pkill", ["-9", "-f", `${DERIVED_DATA}.*NormaOfficeHelper`], { encoding: "utf8" });
 }
 
 function gateEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   return {
     ...process.env,
-    // `--break-sheets-set` arms the DELETION-RED probe. Read this before assuming it works today:
+    // `--break-sheets-set` arms the DELETION-RED probe AND names sheets.set as the expected red.
+    // Read this before assuming it works today:
     // the probe is deliberately NOT compiled into the shipped helper, so passing this flag against
     // an unmodified tree changes NOTHING and the gate stays green. Reproducing the red requires
     // re-applying the four-line patch documented in the gate's header ("REPRODUCING THE
@@ -274,7 +311,6 @@ async function startDaemon(): Promise<void> {
   const sock = join(HOME_DIR, "run", "core.sock");
   assertSocketPathFits("daemon", sock);
   const logPath = join(GATE_ROOT, "daemon.log");
-  const out = Bun.file(logPath);
   daemon = spawn(process.execPath, [CLI_ENTRY, "daemon", "run"], {
     cwd: join(REPO_ROOT, "packages", "cli"),
     env: gateEnv(),
@@ -344,12 +380,15 @@ async function startApp(sessionId: string): Promise<void> {
         + appLog.slice(-2000),
       );
     }
-    // Attachment is the fact we actually need, and it has exactly one honest instrument: the
-    // daemon's own refusal text. Poll a cheap verb rather than guessing at a fixed sleep.
-    if (Date.now() - t0 > 0 && existsSync(join(HOME_DIR, "run", "core.sock"))) {
+    // What this actually waits for: the app process printing ANYTHING, which is the cheapest proof
+    // it got past dyld and started running. It is deliberately NOT an attachment check — attachment
+    // is proven later by a real verb (the only honest instrument for it), which `envFail`s on its
+    // own. Said plainly because the previous comment here claimed to "poll a cheap verb" and did
+    // not, which is the arc's "description contradicting the code" class.
+    if (existsSync(join(HOME_DIR, "run", "core.sock"))) {
       await sleep(2000);
       writeFileSync(logPath, appLog);
-      if (appLog.length > 0) return; // it printed something → it is running
+      if (appLog.length > 0) return;
     }
     await sleep(500);
   }
@@ -401,6 +440,41 @@ async function agentTurn(sessionId: string | null, prompt: string): Promise<Turn
 
 function stripAnsi(s: string): string { return s.replace(/\x1b\[[0-9;]*m/g, ""); }
 
+/**
+ * Extract the TOOL's own result block for one verb from a turn's stdout.
+ *
+ * The CLI prints a dispatch line then the tool's result, indented under a `↳` marker:
+ *
+ *     ⚙ sheets {"verb":"read","path":"…","sheet":"Sheet1","range":"A1:B4"}
+ *       ↳ Sheet1!A1:B4 (values):
+ *       | A1 | NORMA GATE |
+ *
+ * Everything after the LAST such block that is not indented is the model's narration, and is
+ * discarded here. That separation is the whole point: `sheets.read` originally asserted on the raw
+ * merged stdout, so a model that skipped the tool call entirely and merely narrated
+ * "A4 contains QUARTERLY REVIEW" passed — and that exact string was already in the session's
+ * context, verbatim, from the `sheets.set` prompt a few turns earlier. The step advertised as the
+ * independent fresh-open leg could be satisfied by pure narration.
+ *
+ * Returns "" when the verb never dispatched at all, which is itself a failure the caller reports.
+ */
+function toolResultFor(stdout: string, verb: string): string {
+  const lines = stdout.split("\n");
+  const start = lines.findIndex((l) => l.includes("⚙ ") && l.includes(`"verb":"${verb}"`));
+  if (start < 0) return "";
+  const out: string[] = [];
+  let seenArrow = false;
+  for (let i = start + 1; i < lines.length; i++) {
+    const l = lines[i];
+    if (l.includes("⚙ ")) break;                       // the next tool dispatch ends this block
+    if (l.trimStart().startsWith("↳")) { seenArrow = true; out.push(l); continue; }
+    // Tool output continues while lines stay indented; the model's prose starts at column 0.
+    if (seenArrow && (l.startsWith(" ") || l.startsWith("|") || l.trim() === "")) { out.push(l); continue; }
+    if (seenArrow) break;
+  }
+  return out.join("\n");
+}
+
 // ── file-byte evidence ───────────────────────────────────────────────────────────────────────
 
 /**
@@ -415,12 +489,6 @@ function zipEntry(file: string, entry: string): string {
   return (r.stdout as Buffer).toString("utf8");
 }
 
-function zipEntryNames(file: string): string[] {
-  const r = spawnSync("unzip", ["-Z1", file], { encoding: "utf8" });
-  if (r.status !== 0) return [];
-  return r.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
-}
-
 /** The #1 defect class in this arc, four occurrences, as a reusable guard: an assertion that would
  *  also hold against the untouched fixture proves nothing. Compared on raw bytes. */
 function differsFromPristine(name: string): boolean {
@@ -428,11 +496,6 @@ function differsFromPristine(name: string): boolean {
   const pristine = join(PRISTINE_DIR, name);
   if (!existsSync(live) || !existsSync(pristine)) return false;
   return !readFileSync(live).equals(readFileSync(pristine));
-}
-
-/** All text in a spreadsheet's shared-string table plus its inline cell values. */
-function xlsxAllText(file: string): string {
-  return zipEntry(file, "xl/sharedStrings.xml") + "\n" + zipEntry(file, "xl/worksheets/sheet1.xml");
 }
 
 /**
@@ -467,6 +530,39 @@ function xlsxCell(file: string, sheetEntry: string, ref: string): string | null 
     return items[Number(v)] ?? null;
   }
   return v;
+}
+
+/**
+ * Resolve one cell's FONT ATTRIBUTES by walking the real style chain:
+ * `<c r=… s="n">` -> `cellXfs[n]` -> `fontId` -> that `<font>`.
+ *
+ * Returned as a delta-able record so a step can assert what CHANGED rather than what is true —
+ * which is the difference between a real check and this arc's #1 defect. `sheets.format` originally
+ * asserted "A1 is bold" and passed against the UNTOUCHED fixture, because A1 (`s="1"` -> `xf#1` ->
+ * `fontId="4"` -> `<font><b val="true"/>…`) SHIPS BOLD. A total no-op stayed green.
+ */
+function xlsxCellFont(file: string, sheetEntry: string, ref: string): { found: boolean; bold: boolean; italic: boolean; xml: string } {
+  const miss = { found: false, bold: false, italic: false, xml: "" };
+  const sheet = zipEntry(file, sheetEntry);
+  const cell = sheet.match(new RegExp(`<c r="${ref}"([^>]*)>`));
+  if (!cell) return miss;
+  // A cell with no `s=` uses cellXf 0, exactly as the format does.
+  const xfIndex = Number(cell[1].match(/\ss="(\d+)"/)?.[1] ?? "0");
+  const styles = zipEntry(file, "xl/styles.xml");
+  const cellXfs = styles.match(/<cellXfs[^>]*>([\s\S]*?)<\/cellXfs>/)?.[1] ?? "";
+  const xf = [...cellXfs.matchAll(/<xf\b[^>]*>/g)].map((x) => x[0])[xfIndex];
+  if (!xf) return miss;
+  const fontId = Number(xf.match(/fontId="(\d+)"/)?.[1] ?? "-1");
+  const fontsBlock = styles.match(/<fonts[^>]*>([\s\S]*?)<\/fonts>/)?.[1] ?? "";
+  const font = [...fontsBlock.matchAll(/<font\b[\s\S]*?<\/font>|<font\b[^>]*\/>/g)].map((x) => x[0])[fontId] ?? "";
+  if (!font) return miss;
+  // `<b/>` and `<b val="true"/>` both mean bold; `<b val="false"/>` explicitly does not.
+  const on = (tag: string) => {
+    const m = font.match(new RegExp(`<${tag}\\b([^>]*)>`));
+    if (!m) return false;
+    return !/val="false"/.test(m[1]);
+  };
+  return { found: true, bold: on("b"), italic: on("i"), xml: font };
 }
 
 function odpAllText(file: string): string { return zipEntry(file, "content.xml"); }
@@ -524,7 +620,7 @@ function readAx(): { ok: boolean; reason?: string; procCount?: number; windows: 
 }
 
 /** Poll, because the shell mounts asynchronously and a single read races it. A bound that expires
- *  is reported as UI-FAIL naming what it waited for — never silently treated as absent. */
+ *  is reported as UI-SKIP naming what it waited for — never silently treated as absent. */
 async function waitForAx(predicate: (els: AxElement[]) => boolean, budgetMs: number): Promise<{ hit: boolean; last: AxElement[]; reason?: string; windows?: string[] }> {
   const deadline = Date.now() + budgetMs;
   let last: AxElement[] = [];
@@ -552,8 +648,8 @@ async function waitForAx(predicate: (els: AxElement[]) => boolean, budgetMs: num
  * Called immediately after the app comes up with the document tab already present — NOT at the end
  * of the run. That placement is measured, not stylistic: the shell window renders the document
  * correctly and stays readable for roughly 35-45 seconds, then degrades and disappears while the
- * app stays alive and LibreOffice keeps servicing the document. Asserting late produced two UI-FAILs
- * on a run whose every byte was correct.
+ * app stays alive and LibreOffice keeps servicing the document. Asserting late produced two missing
+ * UI observations on a run whose every byte was correct.
  *
  * The vanishing window is a REAL, pre-existing defect and is reported as such (see the gate's
  * summary) rather than hidden by this placement — but a gate must read a fact while the fact is
@@ -563,14 +659,14 @@ async function assertUiFacts(): Promise<void> {
   const tabWait = await waitForAx((els) => els.some((e) => e.name.includes("budget.xlsx")), 45_000);
   const snapProcs = readAx().procCount;
   if (snapProcs !== undefined && snapProcs !== 1) {
-    record("ui.singleInstance", false, "UI-FAIL",
+    record("ui.singleInstance", false, "UI-SKIP",
       `${snapProcs} processes share the dev bundle id — the AX reader cannot know which one it read. `
       + "Every UI verdict below would be untrustworthy.");
   } else {
-    record("ui.singleInstance", true, "UI-FAIL", "exactly one dev-app process — the AX reader is looking at the right one");
+    record("ui.singleInstance", true, "UI-SKIP", "exactly one dev-app process — the AX reader is looking at the right one");
   }
   record(
-    "ui.documentTab", tabWait.hit, "UI-FAIL",
+    "ui.documentTab", tabWait.hit, "UI-SKIP",
     tabWait.hit
       ? `an AX element names the open document: "${tabWait.last.find((e) => e.name.includes("budget.xlsx"))?.name}"`
       : `no AX element naming budget.xlsx within 45s${tabWait.reason ? ` (${tabWait.reason})` : ""}; windows=${JSON.stringify(tabWait.windows)}, ${tabWait.last.length} named elements`,
@@ -584,7 +680,7 @@ async function assertUiFacts(): Promise<void> {
   // fixture's own bytes rather than typed in from memory.
   const carriesContent = barWait.hit && pristineA1.length > 0 && bar.includes(pristineA1);
   record(
-    "ui.formulaBar", carriesContent, "UI-FAIL",
+    "ui.formulaBar", carriesContent, "UI-SKIP",
     carriesContent
       ? `the formula bar shows the document's own live content: "${bar}" (contains cell A1's real value ${JSON.stringify(pristineA1)})`
       : `formula bar ${barWait.hit ? `read "${bar}" but it does not carry A1's real value ${JSON.stringify(pristineA1)}` : "not found in the AX tree"}`,
@@ -650,26 +746,27 @@ function buildVerbSteps(): VerbStep[] {
     {
       id: "sheets.format",
       file: "budget.xlsx",
-      prompt: "Make cell A1 of Sheet1 in budget.xlsx bold.",
+      // Targets A2, NOT A1, and asks for italic as well as bold — both deliberate.
+      // Pristine A1 SHIPS BOLD (s="1" -> xf#1 -> fontId=4 -> <b val="true"/>), so the original
+      // "make A1 bold" step passed against the untouched fixture: a total no-op stayed green, the
+      // arc's #1 defect class at its fifth occurrence. Pristine A2 carries font#0
+      // (<font><sz val="10"/><name val="Arial"/></font>) — neither bold nor italic — and NO font in
+      // the fixture is italic at all, so this cannot pass without a real change.
+      prompt: "Make cell A2 of Sheet1 in budget.xlsx bold and italic.",
       assert() {
-        const sheet = zipEntry(xlsx, "xl/worksheets/sheet1.xml");
-        const styles = zipEntry(xlsx, "xl/styles.xml");
-        const m = sheet.match(/<c r="A1"[^>]*\bs="(\d+)"/);
-        if (!m) return [false, "no style index on cell A1 in the saved sheet XML"];
-        const xfIndex = Number(m[1]);
-        // Resolve A1's cellXf -> its font -> does that font carry <b/>? Computed from the file, not
-        // assumed: `format` is the ONE verb that does not read back what it wrote, so its proof has
-        // to come entirely from the bytes.
-        const cellXfsBlock = styles.match(/<cellXfs[^>]*>([\s\S]*?)<\/cellXfs>/)?.[1] ?? "";
-        const xfs = [...cellXfsBlock.matchAll(/<xf\b[^>]*>/g)].map((x) => x[0]);
-        const xf = xfs[xfIndex];
-        if (!xf) return [false, `cell A1 names style index ${xfIndex} but cellXfs holds only ${xfs.length} entries`];
-        const fontId = Number(xf.match(/fontId="(\d+)"/)?.[1] ?? "-1");
-        const fontsBlock = styles.match(/<fonts[^>]*>([\s\S]*?)<\/fonts>/)?.[1] ?? "";
-        const fonts = [...fontsBlock.matchAll(/<font\b[\s\S]*?<\/font>|<font\b[^>]*\/>/g)].map((x) => x[0]);
-        const font = fonts[fontId] ?? "";
-        const bold = /<b\b[^>]*\/?>/.test(font);
-        return [bold, `A1 -> xf#${xfIndex} -> font#${fontId}; bold=${bold} (font xml: ${font.slice(0, 120)})`];
+        const before = xlsxCellFont(join(PRISTINE_DIR, "budget.xlsx"), "xl/worksheets/sheet1.xml", "A2");
+        const after = xlsxCellFont(xlsx, "xl/worksheets/sheet1.xml", "A2");
+        if (!after.found) return [false, "cell A2 has no resolvable font in the saved workbook"];
+        // Asserted as a DELTA against the pristine file read at runtime, never as a fixed truth:
+        // the step fails if the fixture ever ships already-bold/italic, instead of silently
+        // becoming vacuous the way its predecessor did.
+        if (before.bold || before.italic) {
+          return [false, `the pristine fixture already has A2 bold=${before.bold} italic=${before.italic} — `
+            + "this step would be VACUOUS; retarget it at a cell the fixture does not already style"];
+        }
+        const ok = after.bold && after.italic;
+        return [ok, `A2 font bold/italic: pristine=${before.bold}/${before.italic} -> saved=${after.bold}/${after.italic}`
+          + ` (want true/true; saved font xml: ${after.xml.slice(0, 90)})`];
       },
     },
 
@@ -764,19 +861,55 @@ function seedFixtures(): void {
 }
 
 function buildApp(): void {
-  const gen = spawnSync("xcodegen", ["generate"], { cwd: APP_PROJECT_DIR, encoding: "utf8", timeout: 300_000 });
+  const gen = spawnSync("xcodegen", ["generate"], { cwd: APP_PROJECT_DIR, encoding: "utf8", timeout: 300_000, maxBuffer: BUILD_MAX_BUFFER });
   if (gen.status !== 0) envFail(`xcodegen generate failed:\n${gen.stdout}\n${gen.stderr}`);
   log("   xcodegen generate: ok");
+
   const build = spawnSync("xcodebuild", [
     "-project", "Norma.xcodeproj", "-scheme", "Norma", "-configuration", "Debug",
-    "-destination", "platform=macOS",
+    // Pinned to arm64: a bare `platform=macOS` resolves to TWO destinations on this host and
+    // xcodebuild warns "Using the first of multiple matching destinations". The repo is arm64-only
+    // (the vendored LibreOffice/CEF libraries have no x86_64 slice), so naming it removes an
+    // ambiguity rather than making a choice.
+    "-destination", "platform=macOS,arch=arm64",
     // ALWAYS explicit: xcodegen mints a new DerivedData hash each run and a stale path silently
     // re-tests a days-old binary. That is in this repo's scar tissue.
     "-derivedDataPath", DERIVED_DATA, "build",
-  ], { cwd: APP_PROJECT_DIR, encoding: "utf8", timeout: 1_800_000 });
-  if (build.status !== 0) {
-    const errs = (build.stdout || "").split("\n").filter((l) => l.includes("error:")).slice(-15).join("\n");
-    envFail(`xcodebuild (Debug) failed:\n${errs || (build.stderr || "").slice(-2000)}`);
+  ], {
+    cwd: APP_PROJECT_DIR, encoding: "utf8", timeout: 1_800_000,
+    // ⛔ THE FIELD WITHOUT WHICH THIS COMMAND CANNOT SUCCEED. Bun's `spawnSync` defaults to a
+    // 2,621,440-byte maxBuffer and a clean Debug build of this app emits ~4 MB on stdout. When the
+    // buffer fills, `spawnSync` SIGTERMs the child — so the gate KILLED ITS OWN BUILD, reported
+    // `** BUILD INTERRUPTED **`, and blamed the app. `bun run verify:office-agent` had therefore
+    // never once completed; every green run in the task report came from `--no-build` over a
+    // by-hand build.
+    maxBuffer: BUILD_MAX_BUFFER,
+  });
+
+  const stdout = build.stdout || "";
+  const stderr = build.stderr || "";
+  if (build.status !== 0 || build.error) {
+    // `build.error` is the ONLY field that says ENOBUFS. Reading `status` alone told the operator
+    // the app build failed when the truth was that the gate killed it — this arc's "a guard that
+    // turns a loud crash into a silent wrong answer" class, in the gate's own plumbing.
+    const harnessError = build.error ? `harness error: ${(build.error as Error).message}` : "";
+    const signal = build.signal ? `killed by ${build.signal}` : "";
+    // BUILD INTERRUPTED / BUILD FAILED are first-class markers: an interrupted build contains no
+    // line matching `error:` at all, so filtering only for that printed nothing useful.
+    const markers = stdout.split("\n").filter((l) =>
+      l.includes("error:") || l.includes("** BUILD INTERRUPTED **") || l.includes("** BUILD FAILED **"))
+      .slice(-15).join("\n");
+    envFail(
+      "xcodebuild (Debug) did not produce a build.\n"
+      + [harnessError, signal].filter(Boolean).map((x) => `  ${x}\n`).join("")
+      + (harnessError.includes("ENOBUFS")
+        ? "  ENOBUFS means THE GATE killed the build, not the project — raise BUILD_MAX_BUFFER.\n"
+        : "")
+      + (markers || stderr.slice(-2000)),
+    );
+  }
+  if (!stdout.includes("** BUILD SUCCEEDED **")) {
+    envFail(`xcodebuild exited 0 but never printed "** BUILD SUCCEEDED **" — treat this as a failed build.\n${stdout.slice(-1500)}`);
   }
   log("   xcodebuild Debug: BUILD SUCCEEDED");
 }
@@ -821,10 +954,14 @@ function newestCodeSessionId(): string | undefined {
   return undefined;
 }
 
-async function main(): Promise<void> {
+async function main(): Promise<number> {
   const argv = process.argv.slice(2);
   const noBuild = argv.includes("--no-build");
-  const breakVerb = argv.find((a) => a.startsWith("--break="))?.slice("--break=".length);
+  // ONE flag, not two. `--break-sheets-set` both arms the probe (via gateEnv) and names the step
+  // expected to go red. Previously these were separate (`--break-sheets-set` + `--break=<id>`) and
+  // passing only the latter produced a green run plus the line "STILL PASSING (the gate is BLIND to
+  // this break)" — which reads as a damning finding when in fact nothing had been broken.
+  const breakVerb = argv.includes("--break-sheets-set") ? "sheets.set" : undefined;
 
   log("═══ Office Stage C — the headless agent gate ═══");
   log(`repo root : ${REPO_ROOT}`);
@@ -884,10 +1021,10 @@ async function main(): Promise<void> {
   // ── The UI leg runs FIRST, before any agent turn. ───────────────────────────────────────────
   // Ordering is measured, not arbitrary. The window is readable for roughly 35-45s and a single
   // agent turn costs 20-40s, so asserting after the attach proof lands PAST the observable window
-  // and reports two UI-FAILs on a run whose every byte is correct — which is exactly what happened
+  // and loses both UI observations on a run whose every byte is correct — exactly what happened
   // before this move. The document tab was opened before the app launched, so these facts are
   // available the moment the shell renders; nothing is gained by waiting.
-  step("Phase 4b — LIVE UI FACTS through accessibility scripting (UI-FAIL is its own verdict class)");
+  step("Phase 4b — LIVE UI OBSERVATIONS through accessibility scripting (reported, NOT counted — see UI_SKIP_REASON)");
   await assertUiFacts();
 
   // The attach proof, using the only honest instrument there is: a real verb.
@@ -933,12 +1070,20 @@ async function main(): Promise<void> {
   // A helper re-open, corroborating the raw-bytes leg through the real stack.
   step("Phase 8 — helper re-open read-back (the same bytes, through LibreOffice)");
   const readBack = await agentTurn(sessionId, "Read cells A1:B4 of Sheet1 in budget.xlsx and show me the values.");
-  const sawQuarterly = readBack.stdout.includes("QUARTERLY REVIEW");
+  // THE TOOL'S OWN RESULT BLOCK, never the merged stdout — see toolResultFor. The expected string
+  // is read out of the file the agent was asked to write, at runtime, so this leg cannot be
+  // satisfied by a model repeating a value it saw in an earlier prompt.
+  const readResult = toolResultFor(readBack.stdout, "read");
+  const expectedA4 = xlsxCell(join(WORK_DIR, "budget.xlsx"), "xl/worksheets/sheet1.xml", "A4") ?? "";
+  const dispatched = readResult.length > 0;
+  const sawIt = dispatched && expectedA4.length > 0 && readResult.includes(expectedA4);
   record(
-    "sheets.read (fresh open through the helper)", sawQuarterly, "FILE-FAIL",
-    sawQuarterly
-      ? 'the freshly-reopened document reports "QUARTERLY REVIEW" in the range — the write survived save+reload'
-      : `the freshly-reopened document did NOT report "QUARTERLY REVIEW": ${readBack.stdout.slice(-400)}`,
+    "sheets.read (fresh open through the helper)", sawIt, "FILE-FAIL",
+    !dispatched
+      ? `the sheets read verb never dispatched — no tool result block in the turn (stdout tail: ${readBack.stdout.slice(-300)})`
+      : sawIt
+        ? `the freshly-reopened document's own TOOL RESULT reports A4's saved value ${JSON.stringify(expectedA4)} — the write survived save+reload`
+        : `the tool result did NOT contain A4's saved value ${JSON.stringify(expectedA4)}. Tool result was:\n${readResult.slice(0, 500)}`,
   );
 
   // ── Phase 10: characterizations (reality, not the ideal) ───────────────────────────────────
@@ -958,42 +1103,65 @@ async function main(): Promise<void> {
 
   // ── Verdict ────────────────────────────────────────────────────────────────────────────────
   step("VERDICT");
-  const fileFails = verdicts.filter((v) => !v.ok && v.kind === "FILE-FAIL");
-  const uiFails = verdicts.filter((v) => !v.ok && v.kind === "UI-FAIL");
+  const fileVerdicts = verdicts.filter((v) => v.kind === "FILE-FAIL");
+  const fileFails = fileVerdicts.filter((v) => !v.ok);
+  // UI verdicts are reported OUTSIDE the pass/fail tally — see UI_SKIP_REASON.
+  const uiVerdicts = verdicts.filter((v) => v.kind === "UI-SKIP");
+  const uiFails = uiVerdicts.filter((v) => !v.ok);
   log("");
-  for (const v of verdicts) log(`  ${v.ok ? "PASS      " : v.kind.padEnd(10)} ${v.name}`);
+  log("  ── file evidence (the gate's verdict) ──");
+  for (const v of fileVerdicts) log(`  ${v.ok ? "PASS      " : "FILE-FAIL "} ${v.name}`);
   log("");
-  log(`  file evidence : ${verdicts.filter((v) => v.kind === "FILE-FAIL").length - fileFails.length}/${verdicts.filter((v) => v.kind === "FILE-FAIL").length} passed`);
-  log(`  ui evidence   : ${verdicts.filter((v) => v.kind === "UI-FAIL").length - uiFails.length}/${verdicts.filter((v) => v.kind === "UI-FAIL").length} passed`);
+  log("  ── UI observations (NOT part of the verdict) ──");
+  for (const v of uiVerdicts) log(`  ${v.ok ? "observed  " : "UI-SKIP   "} ${v.name}`);
+  log("");
+  log(`  file evidence : ${fileVerdicts.length - fileFails.length}/${fileVerdicts.length} passed  <- this decides the run`);
+  log(`  ui observed   : ${uiVerdicts.length - uiFails.length}/${uiVerdicts.length}`);
+  if (uiFails.length > 0) {
+    log("");
+    log(`  ${uiFails.length} UI fact(s) were NOT observable this run. ${UI_SKIP_REASON}`);
+  }
 
   if (breakVerb) {
     const broken = verdicts.find((v) => v.name === breakVerb);
     log(`\n  DELETION-RED CHECK for "${breakVerb}": ${broken ? (broken.ok ? "STILL PASSING (the gate is BLIND to this break)" : "correctly RED") : "no such step"}`);
     if (broken && !broken.ok) log(`    red message: ${broken.detail}`);
+    if (broken?.ok) {
+      log("    ⚠ Before reading that as the gate being blind: the probe is NOT compiled into a");
+      log("      clean tree. Arming it also requires the four-line patch documented in this file's");
+      log("      header. Without it, a green run here is the gate working correctly.");
+    }
   }
 
   if (fileFails.length > 0) {
     log("\n  Failing verbs, with the agent's own transcript for diagnosis ONLY (never evidence):");
-    for (const v of fileFails) log(`\n  ── ${v.name}\n     ${v.detail}\n     transcript tail: ${(turnLog[v.name] ?? "").slice(-500)}`);
+    for (const v of fileFails) log(`\n  ── ${v.name}\n     ${v.detail}\n     transcript tail: ${(turnLog[v.name] ?? "(no transcript captured for this step)").slice(-500)}`);
     log(`\nRESULT: FAIL — ${fileFails.length} verb(s) did not change the file the way the prompt asked.`);
-    process.exit(1);
-  }
-  if (uiFails.length > 0) {
-    log(`\nRESULT: PASS WITH UI-FAIL — every verb's BYTES are correct; ${uiFails.length} live UI fact(s) were not observable.`);
-    log("  This is deliberately not a hard failure: the UI leg's window instability is a known,");
-    log("  root-cause-unestablished issue (see this file's header), and a flaky window must never");
-    log("  be allowed to condemn a verb whose saved bytes are provably right.");
-    process.exit(0);
+    return 1;
   }
   log("\nRESULT: PASS — the real agent, driven by user-phrased prompts, changed the real files'");
-  log("  real bytes correctly through the real LibreOffice, and the live UI showed it.");
-  process.exit(0);
+  log("  real bytes correctly through the real LibreOffice.");
+  if (uiFails.length > 0) log(`  (${uiFails.length}/${uiVerdicts.length} UI observations unavailable — reported above, not counted.)`);
+  return 0;
 }
 
-// Teardown must run whatever happens — a leaked app, daemon or helper poisons the NEXT run.
+// Teardown must run whatever happens — a leaked app, daemon or helper poisons the NEXT run, and a
+// leftover app instance is the exact measurement trap that cost three wrong conclusions.
+//
+// The exit code is RETURNED through the `finally` and applied afterwards. Calling `process.exit()`
+// inside the `try` — which every exit path here used to do — skips the `finally` entirely: the
+// teardown banner never printed once, and every run leaked its daemon, its app and its helpers.
 async function withTeardown(): Promise<void> {
+  let code = 0;
   try {
-    await main();
+    code = await main();
+  } catch (err) {
+    if (err instanceof GateExit) {
+      code = err.code;
+    } else {
+      console.error("\nunexpected gate error:", err);
+      code = 3;
+    }
   } finally {
     step("Teardown");
     stopApp();
@@ -1009,9 +1177,7 @@ async function withTeardown(): Promise<void> {
       log(`   --keep: left ${GATE_ROOT} in place`);
     }
   }
+  process.exit(code);
 }
 
-withTeardown().catch((err) => {
-  console.error("\nunexpected gate error:", err);
-  process.exit(3);
-});
+await withTeardown();
