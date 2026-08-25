@@ -827,6 +827,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if ProcessInfo.processInfo.environment["NORMA_PANEL_SMOKE"] == "1" {
             DispatchQueue.main.async { [weak self] in self?.summonAppWindow(navigatingTo: .newChat) }
         }
+        // office-agent Task 8: the headless gate's own door — summon the window ALREADY SHOWING a
+        // named session, which is the one state the gate cannot otherwise reach.
+        //
+        // Why this exists at all (the same reasoning `NORMA_PANEL_SMOKE` above carries, one step
+        // further): every `sheets`/`slides`/`docs` verb is gated by `officeReach` on the daemon
+        // side, which requires a panel-capable harness ATTACHED TO THAT SESSION — and the app
+        // attaches to whatever session its window is showing. Norma is `LSUIElement`, so it opens
+        // no window at launch; `NORMA_PANEL_SMOKE` opens one at `.newChat`, which attaches to no
+        // session at all. `ShellDestination.session(_:)` is exactly the right destination and it
+        // already exists, but its ONLY call site is `openOutputFileFromPanel` — a click door. There
+        // is no URL scheme, no launch argument and no RPC that aims the app at a session, so
+        // without this the gate's only route would be AX-clicking an UNNAMED sidebar row by index:
+        // an input mechanism that cannot tell the right row from any other, which is precisely the
+        // "check blind to its own failure mode" defect class this arc keeps catching.
+        //
+        // Like the door above it, this DRIVES THE REAL PATH AND ADDS NO SECOND ONE — it calls the
+        // same `summonAppWindow(navigatingTo:)` primitive every "open in app" affordance uses, with
+        // a destination the app already constructs elsewhere. Deferred one run-loop turn for the
+        // same reason: `boot()`'s window-less state must be fully settled first.
+        if let gateSession = ProcessInfo.processInfo.environment["NORMA_GATE_SESSION"], !gateSession.isEmpty {
+            DispatchQueue.main.async { [weak self] in self?.summonAppWindow(navigatingTo: .session(gateSession)) }
+        }
         #endif
     }
 
