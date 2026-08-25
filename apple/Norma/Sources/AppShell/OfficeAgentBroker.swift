@@ -409,6 +409,41 @@ final class OfficeAgentBroker {
         }
     }
 
+    /// ─────────────────────────────────────────────────────────────────────────────────────────
+    /// **TWO DRAINS EXIST FOR ONE BUG. READ THIS BEFORE CHANGING EITHER.**
+    ///
+    /// This is the **broker's** drain, guarding the AGENT write path (`runOnce`'s `.saved` arm).
+    /// `OfficeRuntime.drainUntilClean` is the **dirty-close sheet's** drain, guarding the USER's
+    /// `×`-then-Save path (`ShellSessionHost.resolveDirtyDocumentTabClose`). Same bug, same
+    /// investigation (`task-2-report.md`), two implementations that landed 26 minutes apart on
+    /// parallel branches and did not know about each other. They are NOT interchangeable:
+    ///
+    ///   * **this one** watches `runtime.$state` for LOK's own real `.uno:ModifiedStatus=false` —
+    ///     a genuinely stronger barrier ON THE ORDINARY PATH, since it waits for the actual
+    ///     completion signal rather than a proxy;
+    ///   * **`drainUntilClean`** performs an unconditional awaited helper round trip
+    ///     (`clipboardCopy`) and consults `dirty` for NOTHING — a sound entry, at an
+    ///     `O(selection)` cost per call, with its own completeness explicitly unproven.
+    ///
+    /// **The unsound part of THIS function is the BARRIER, not the entry guard — do not "fix" it by
+    /// deleting the guard.** `main`'s fix-round review (IMPORTANT-1) established that `dirty` is
+    /// cleared SYNCHRONOUSLY by `OfficeRuntimeReducer.saveSucceeded` on the `restoredPendingSave`
+    /// and `saveFailedPendingSave` paths, so a `dirty`-gated drain is inert exactly there. Deleting
+    /// the `guard` below changes NOTHING: the barrier is a `$state` sink whose own `dirty != true`
+    /// check resolves on `@Published`'s synchronous replay to a new subscriber (`awaitOpen`'s own
+    /// header states and depends on that replay), so it resumes during `.sink(...)` itself. Measured,
+    /// not argued — with the guard deleted, `OfficeAgentBrokerTests` ran 37/37 indistinguishable.
+    /// The guard is only a fast path to a conclusion the sink reaches a microsecond later.
+    ///
+    /// Closing it for real needs a barrier that never consults `dirty`: either routing this arm
+    /// through `drainUntilClean`, or the no-op/health-check verb `drainUntilClean`'s own header
+    /// already files as the correct long-term fix. Both are behaviour changes on a live save path
+    /// and are deliberately NOT taken here — the zero-wait close this leaves open is traced
+    /// unreachable on every ordinary path (every route to either flag implies a tab owns the path,
+    /// which makes a broker call `adopted` and disarms rule 2's `defer`). Current behaviour is pinned
+    /// honestly by `testCharacterizationWriteVerbsDrainDoesNotWaitAtAllWhenDirtyIsAlreadyClearAtSaveTime`,
+    /// against the waiting-leg test directly above it.
+    /// ─────────────────────────────────────────────────────────────────────────────────────────
     /// **Rule 4's own completion, added after this task's own live drills measured its absence
     /// killing the shared office helper.** `saveAndAwaitOutcome`'s `.saved` resolves the instant
     /// `placeAtomically` lands on disk — but `OfficeRuntimeReducer.saveSucceeded`'s own header states

@@ -1949,6 +1949,31 @@ final class OfficeRuntime: ObservableObject {
 
     // MARK: - The dirty-close sheet's missing half: draining LOK's own post-save bookkeeping
 
+    /// ─────────────────────────────────────────────────────────────────────────────────────────
+    /// **TWO DRAINS EXIST FOR ONE BUG. READ THIS BEFORE CHANGING EITHER.**
+    ///
+    /// This is the **dirty-close sheet's** drain, guarding the USER's `×`-then-Save path
+    /// (`ShellSessionHost.resolveDirtyDocumentTabClose`). `OfficeAgentBroker.drainDirty` is the
+    /// **broker's** drain, guarding the AGENT write path. Same bug, same investigation
+    /// (`task-2-report.md`), two implementations that landed 26 minutes apart on parallel branches
+    /// and did not know about each other; the office-agent merge brought them into one tree.
+    ///
+    /// They are NOT interchangeable, and neither strictly dominates:
+    ///   * **this one** never consults `dirty` — an unconditional awaited helper round trip, so it
+    ///     has the SOUND ENTRY (no path gets zero wait), at an `O(selection)` cost per call, with
+    ///     its own barrier completeness explicitly unproven (see below);
+    ///   * **`drainDirty`** watches `$state` for LOK's own real `.uno:ModifiedStatus=false`, which
+    ///     is a genuinely STRONGER barrier on the ordinary path, but is inert whenever `dirty` is
+    ///     already clear — i.e. on `restoredPendingSave`/`saveFailedPendingSave`.
+    ///
+    /// **If you go to "fix" `drainDirty`, do not delete its `dirty == true` entry guard.** That is
+    /// not the unsound part and removing it changes nothing measurable: its barrier is a `$state`
+    /// sink whose `dirty != true` check resolves on `@Published`'s synchronous replay to a new
+    /// subscriber, so it resumes during `.sink(...)` itself. Verified by deleting the guard and
+    /// re-running `OfficeAgentBrokerTests`: 37/37, indistinguishable. The unsound part is the
+    /// `dirty`-watching BARRIER. See `drainDirty`'s own header for the full account.
+    /// ─────────────────────────────────────────────────────────────────────────────────────────
+
     /// **Added after a live diagnostic matrix measured its absence killing the shared, app-wide
     /// office helper roughly 4 times out of 5 on an ordinary "dirty tab, choose Save, close" —
     /// full account: `.superpowers/sdd/2026-08-22-office-agent-tools/task-2-report.md` §6's evidence

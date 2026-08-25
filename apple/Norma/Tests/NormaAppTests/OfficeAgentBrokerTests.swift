@@ -968,6 +968,88 @@ final class OfficeAgentBrokerTests: XCTestCase {
         XCTAssertTrue(closed, "close must fire only once the drain has resolved")
     }
 
+    /// **CHARACTERIZATION — pins what the broker's drain does TODAY on the path it cannot cover,
+    /// deliberately NOT written to make a fix look present.** Sibling to
+    /// `testWriteVerbDrainsDirtyBeforeReturningAndBeforeClosingASelfOpenedDocument` directly above,
+    /// which pins the drain genuinely WAITING when `dirty == true`. This one pins the opposite leg:
+    /// when `dirty` is already `!= true` at the moment `.saved` lands, `drainDirty` performs **no
+    /// wait at all** — `perform` returns and rule 2's `defer` closes with nothing ever waited for.
+    ///
+    /// **Why that leg matters, and why it is not merely theoretical.** `OfficeRuntimeReducer`'s
+    /// `.saveSucceeded` arm clears `dirty` SYNCHRONOUSLY, with no LOK callback behind it, for the two
+    /// app-held cases `restoredPendingSave` (a recovery-sidecar restore) and `saveFailedPendingSave`
+    /// (a retry succeeding after an earlier failure) — pinned by
+    /// `OfficeRuntimeReducerTests.testSaveSucceededClearsDirtyAndRestoredPendingSaveWhenSetByARestore`,
+    /// against the ordinary-edit control `testSaveSucceededDoesNotForceDirtyFalseForAnOrdinaryEdit`.
+    /// So on those two REACHABLE paths the drain characterized here is **inert**, and a close follows
+    /// a successful save with zero barrier — the very shape `main`'s own fix-round review
+    /// (IMPORTANT-1) identified and closed for the dirty-close SHEET by replacing the `dirty` barrier
+    /// with an unconditional real helper round trip (`OfficeRuntime.drainUntilClean`). The broker's
+    /// own drain has not had that treatment; see `drainDirty`'s own header for the divergence and why
+    /// it is documented rather than patched.
+    ///
+    /// **On the construction, stated plainly rather than overclaimed.** This drives the inert leg by
+    /// never making the document dirty in the first place, not by staging a real sidecar restore
+    /// (which needs a live helper, an autosave sidecar and a crash — `OfficeRuntimeLiveTests`' own
+    /// recovery drill). That is a faithful probe of THIS function specifically because `drainDirty`
+    /// reads nothing but `documents[path]?.dirty`: every route to `dirty != true` at `.saved` enters
+    /// the identical branch, so what is measured here is exactly what the recovery routes get. The
+    /// reducer tests named above pin those routes actually reaching this state; this test pins what
+    /// the drain then does about it. Neither half is inferred.
+    ///
+    /// **Removing `drainDirty`'s `dirty == true` entry guard would NOT change this result** — the
+    /// barrier below it is a `runtime.$state.sink` whose own `dirty != true` check resolves on
+    /// `@Published`'s synchronous replay to a new subscriber (this file's own `awaitOpen` header
+    /// states and depends on that replay). The guard is a fast path to a conclusion the sink reaches
+    /// regardless; the unsound part is the `dirty`-watching BARRIER, not the guard. Measured, not
+    /// argued: with the guard deleted this suite ran 37/37 indistinguishable.
+    func testCharacterizationWriteVerbsDrainDoesNotWaitAtAllWhenDirtyIsAlreadyClearAtSaveTime() async throws {
+        let scratch = makeScratchDirectory()
+        let path = scratch.appendingPathComponent("draininert.xlsx").path
+        writeDummyFile(at: path)
+        let office = BrokerOfficeDriverRecorder()
+        let host = makeHost(office: office, dirs: [SessionDirEntry(path: scratch.path, locked: true)])
+        await host.directory.refresh()
+
+        final class DirtyAtSaveBox: @unchecked Sendable { var value: Bool? }
+        let dirtyAtSave = DirtyAtSaveBox()
+
+        let started = Date()
+        let result = try await host.officeAgentBroker.perform(
+            sessionId: "S1", path: path, access: .write, requestId: UUID().uuidString
+        ) { runtime, docId, _ in
+            let rendered = FileManager.default.temporaryDirectory
+                .appendingPathComponent("draininert-\(UUID().uuidString).xlsx").path
+            try? Data("edited bytes".utf8).write(to: URL(fileURLWithPath: rendered))
+            office.saveTempPaths[docId] = rendered
+            // **The whole point: NO `.modifiedChanged(true)` injection.** The sibling test above
+            // injects it to drive the waiting leg; withholding it leaves `dirty == false` when
+            // `.saved` lands, which is the state the two reducer-cleared cases also arrive in.
+            dirtyAtSave.value = runtime.stateSnapshot.documents[path]?.dirty
+            return "edited"
+        }
+        let elapsed = Date().timeIntervalSince(started)
+
+        XCTAssertEqual(result, "edited")
+        XCTAssertEqual(dirtyAtSave.value, false, "setup: this test is only meaningful if the document "
+                       + "really is clean when the save lands — otherwise it silently becomes a "
+                       + "duplicate of the waiting-leg test above")
+
+        // The characterization itself: no barrier ran. Nothing ever injected a
+        // `.modifiedChanged(false)`, and yet `perform` returned — so the drain waited for nothing.
+        // The bound is deliberately far below `drainDirty`'s own 15s timeout: this pins that the
+        // drain returned IMMEDIATELY, not that it merely finished eventually by timing out.
+        XCTAssertLessThan(elapsed, 5.0, "the drain must have returned without waiting — an elapsed "
+                          + "time near drainDirty's own 15s bound would mean it blocked and timed "
+                          + "out instead, which is DIFFERENT behaviour than this pins")
+
+        let closed = await waitUntil { office.closeCalls.count == 1 }
+        XCTAssertTrue(closed, "rule 2's defer still closes what this call opened")
+        XCTAssertEqual(office.saveCalls.count, 1, "sanity: the save really did run — an inert drain "
+                       + "after NO save would prove nothing about the drain at all")
+    }
+
+
     /// **Deliberately built on the ADOPTED shape, not the open-fresh one.** An open-fresh write that
     /// fails is closed by this call's own `defer` the instant the error propagates (rule 2 — close
     /// only what you opened, unconditionally) — a document nobody was ever watching, so there is
