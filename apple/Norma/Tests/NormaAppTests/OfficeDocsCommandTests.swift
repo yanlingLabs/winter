@@ -41,7 +41,16 @@ final class OfficeDocsCommandTests: XCTestCase {
 
     private var scratchDirs: [URL] = []
 
+    /// Every live host this suite creates, torn down in `tearDown` — the same structural fix, and
+    /// the same measured leak, as `OfficeSheetsCommandTests`. Before it, a full run of this suite
+    /// left **16 `NormaOfficeHelper` processes resident**; after it, zero. Registered in the ONE
+    /// factory every test goes through rather than as an end-of-test call per test, because a
+    /// cleanup that has to be remembered is one the next test added will forget.
+    private var liveHosts: [ShellSessionHost] = []
+
     override func tearDown() {
+        for host in liveHosts { _ = host.teardownAllOfficeRuntimesAndStopHelper() }
+        liveHosts = []
         for dir in scratchDirs { try? FileManager.default.removeItem(at: dir) }
         scratchDirs = []
         super.tearDown()
@@ -88,6 +97,7 @@ final class OfficeDocsCommandTests: XCTestCase {
                 extraArguments: ["--lok-root", Self.vendorProductSetRoot.path,
                                  "--sandbox-profile", Self.sandboxProfilePath.path]))
         }
+        liveHosts.append(host)
         return host
     }
 
