@@ -52,21 +52,21 @@
  * ─────────────────────────────────────────────────────────────────────────────────────────────
  * FIVE THINGS THIS GATE LEARNED THE HARD WAY (none of them in the ledger before Task 8)
  *
- * 1. **`sockaddr_un.sun_path` is 103 bytes** (measured by bind probe: 103 OK, 104 "path too long").
- *    A `NORMA_HOME` under a deep temp root makes the app die ~2s after launch with exit 133
- *    (SIGTRAP), NO crash report and NO log line.
+ * 1. **`sockaddr_un.sun_path` is 103 bytes** (bind probe: 103 OK, 104 "path too long"; confirmed
+ *    independently in review). A `NORMA_HOME` under a deep temp root makes the app die ~2s after
+ *    launch with exit 133 (SIGTRAP), NO crash report and NO log line. `assertSocketPathFits` is the
+ *    preflight that turns that into one clear sentence, and the gate roots itself at a SHORT `/tmp`
+ *    path.
  *
- *    **And the daemon actively lies about it — reproduced deliberately, not inferred.** Started on
- *    a 138-byte socket path, `norma-core` printed
+ *    ⚠️ **A CORRECTION, recorded because getting it wrong is instructive.** An earlier version of
+ *    this header claimed the daemon "reports listening on a socket it never created" — that the
+ *    over-long path produced `core.lock` and no `core.sock`. **That is FALSE and there is no such
+ *    product bug.** Re-tested at a 127-byte socket path: while the daemon is running,
+ *    `run/` contains a real `srw------- core.sock`. The original observation listed the directory
+ *    AFTER killing the daemon, and the daemon REMOVES ITS SOCKET ON SHUTDOWN — so what looked like
+ *    "never created" was ordinary cleanup. Wrong conclusion AND wrong supporting fact, from an
+ *    instrument that measured after the fact rather than during it.
  *
- *        norma-core 0.2.013 listening on /tmp/nog-sunpath-probe/ddd…/eee…/run/core.sock
- *
- *    and `<home>/run/` then contained **`core.lock` and NO `core.sock` at all**. The daemon reports
- *    listening on a socket it never created, exits 0, and stays up — so the failure presents at the
- *    far end from its cause (the app, silently trapping, minutes later). `assertSocketPathFits` is
- *    the preflight that turns that into one clear sentence, and the gate roots itself at a SHORT
- *    `/tmp` path. **This is a real product-level silent failure, worth a look independently of this
- *    gate** — `packages/core/src/daemon.ts` prints that line unconditionally after `listen`.
  * 2. **The office tools need the app ATTACHED TO THIS SESSION**, and the app attaches to whatever
  *    session its window shows. Norma is `LSUIElement` — no window at launch — so this gate drives
  *    the `NORMA_GATE_SESSION` DEBUG door (added in Task 8) rather than AX-clicking an unnamed
@@ -191,6 +191,18 @@ const SUN_PATH_MAX = 103;
  *  headroom chosen so that growth in build verbosity can never silently re-break the command. */
 const BUILD_MAX_BUFFER = 256 * 1024 * 1024;
 
+/**
+ * How many file-evidence verdicts a complete run MUST report — pinned, not derived.
+ *
+ * Without this the tally's denominator is whatever `VERB_STEPS` happens to hold, so deleting a step
+ * turns 8/8 into a green 7/7 and the gate silently stops testing something while still reporting
+ * success. That is this arc's #1 defect class one level up: the SCORE itself going vacuous. Raise
+ * it deliberately when adding a step.
+ *
+ * = VERB_STEPS.length (7) + the Phase 8 journal read-back (1).
+ */
+const EXPECTED_FILE_VERDICTS = 8;
+
 const APP_BUNDLE_ID = "com.norma.app.dev";
 const DAEMON_BOOT_TIMEOUT_MS = 60_000;
 const APP_BOOT_TIMEOUT_MS = 90_000;
@@ -257,8 +269,7 @@ function assertSocketPathFits(label: string, path: string): void {
       `${label} socket path is ${bytes} bytes; sockaddr_un.sun_path holds ${SUN_PATH_MAX}.\n`
       + `  ${path}\n`
       + `  This is NOT a configuration nit — it makes the Mac app die ~2s after launch with exit\n`
-      + `  133 (SIGTRAP), no crash report and no log line, while the daemon still reports\n`
-      + `  "listening on" the same over-long path. Root the gate somewhere shorter.`,
+      + `  133 (SIGTRAP), no crash report and no log line. Root the gate somewhere shorter.`,
     );
   }
   log(`   socket path fits: ${bytes}/${SUN_PATH_MAX} bytes — ${path}`);
@@ -482,38 +493,41 @@ async function agentTurn(sessionId: string | null, prompt: string): Promise<Turn
 function stripAnsi(s: string): string { return s.replace(/\x1b\[[0-9;]*m/g, ""); }
 
 /**
- * Extract the TOOL's own result block for one verb from a turn's stdout.
+ * The daemon's own UNTRUNCATED `tool_result` for the last matching tool call, read from the
+ * session's append-only JSONL.
  *
- * The CLI prints a dispatch line then the tool's result, indented under a `↳` marker:
+ * **This exists because asserting a cell value from the CLI's stdout is not merely fragile, it is
+ * STRUCTURALLY IMPOSSIBLE.** `packages/cli/src/main.ts:659` renders a tool result as
+ * `e.output.split("\n")[0]?.slice(0, 120)` — the FIRST LINE, capped at 120 characters. A
+ * multi-row `sheets read` therefore prints only its header (`↳ Sheet1!A1:B4 (values):`) and the
+ * grid never reaches stdout at all. An earlier version of this step scraped stdout for the expected
+ * value and "passed": the string it matched came from the MODEL'S markdown table, in a session that
+ * had the same string in context from the `sheets.set` prompt ninety events earlier. The step
+ * advertised as the independent fresh-open leg was satisfied by prose — the exact thing this whole
+ * gate exists to make impossible, inside the gate.
  *
- *     ⚙ sheets {"verb":"read","path":"…","sheet":"Sheet1","range":"A1:B4"}
- *       ↳ Sheet1!A1:B4 (values):
- *       | A1 | NORMA GATE |
- *
- * Everything after the LAST such block that is not indented is the model's narration, and is
- * discarded here. That separation is the whole point: `sheets.read` originally asserted on the raw
- * merged stdout, so a model that skipped the tool call entirely and merely narrated
- * "A4 contains QUARTERLY REVIEW" passed — and that exact string was already in the session's
- * context, verbatim, from the `sheets.set` prompt a few turns earlier. The step advertised as the
- * independent fresh-open leg could be satisfied by pure narration.
- *
- * Returns "" when the verb never dispatched at all, which is itself a failure the caller reports.
+ * The session JSONL is the authoritative record (`packages/protocol/src/events.ts`:
+ * `ToolResultEvent { callId, output, isError }`, `output` unbounded), so this sidesteps the CLI
+ * layer entirely. Pairing is by `callId`, never by adjacency.
  */
-function toolResultFor(stdout: string, verb: string): string {
-  const lines = stdout.split("\n");
-  const start = lines.findIndex((l) => l.includes("⚙ ") && l.includes(`"verb":"${verb}"`));
-  if (start < 0) return "";
-  const out: string[] = [];
-  let seenArrow = false;
-  for (let i = start + 1; i < lines.length; i++) {
-    const l = lines[i];
-    if (l.includes("⚙ ")) break;                       // the next tool dispatch ends this block
-    if (l.trimStart().startsWith("↳")) { seenArrow = true; out.push(l); continue; }
-    // Tool output continues while lines stay indented; the model's prose starts at column 0.
-    if (seenArrow && (l.startsWith(" ") || l.startsWith("|") || l.trim() === "")) { out.push(l); continue; }
-    if (seenArrow) break;
+function lastToolResultFromJournal(
+  sessionId: string, toolName: string, argsSubstring: string,
+): { output: string; isError: boolean } | null {
+  const journal = join(HOME_DIR, "sessions", "global", `${sessionId}.jsonl`);
+  if (!existsSync(journal)) return null;
+  const wanted = new Set<string>();
+  let latest: { output: string; isError: boolean } | null = null;
+  for (const line of readFileSync(journal, "utf8").split("\n")) {
+    if (!line.trim()) continue;
+    let ev: { type?: string; name?: string; argsJson?: string; callId?: string; output?: string; isError?: boolean };
+    try { ev = JSON.parse(line); } catch { continue; }
+    if (ev.type === "tool_call" && ev.name === toolName && (ev.argsJson ?? "").includes(argsSubstring) && ev.callId) {
+      wanted.add(ev.callId);
+    } else if (ev.type === "tool_result" && ev.callId && wanted.has(ev.callId)) {
+      latest = { output: ev.output ?? "", isError: ev.isError === true };
+    }
   }
-  return out.join("\n");
+  return latest;
 }
 
 // ── file-byte evidence ───────────────────────────────────────────────────────────────────────
@@ -595,7 +609,11 @@ function xlsxCellFont(file: string, sheetEntry: string, ref: string): { found: b
   if (!xf) return miss;
   const fontId = Number(xf.match(/fontId="(\d+)"/)?.[1] ?? "-1");
   const fontsBlock = styles.match(/<fonts[^>]*>([\s\S]*?)<\/fonts>/)?.[1] ?? "";
-  const font = [...fontsBlock.matchAll(/<font\b[\s\S]*?<\/font>|<font\b[^>]*\/>/g)].map((x) => x[0])[fontId] ?? "";
+  // Self-closing form FIRST in the alternation. With the paired form first, a `<font/>` gets
+  // swallowed by `<font\b[\s\S]*?</font>` reaching forward to the NEXT font's closing tag, which
+  // silently shifts every subsequent index by one — so a cell would be checked against the wrong
+  // font. Zero self-closing fonts exist in today's fixtures, so this is latent, not live.
+  const font = [...fontsBlock.matchAll(/<font\b[^>]*\/>|<font\b[\s\S]*?<\/font>/g)].map((x) => x[0])[fontId] ?? "";
   if (!font) return miss;
   // `<b/>` and `<b val="true"/>` both mean bold; `<b val="false"/>` explicitly does not.
   const on = (tag: string) => {
@@ -801,6 +819,13 @@ function buildVerbSteps(): VerbStep[] {
         // Asserted as a DELTA against the pristine file read at runtime, never as a fixed truth:
         // the step fails if the fixture ever ships already-bold/italic, instead of silently
         // becoming vacuous the way its predecessor did.
+        // `before.found` FIRST: xlsxCellFont returns {bold:false, italic:false} on ANY read failure,
+        // so an unreadable pristine cell would otherwise look like an unstyled one and the vacuity
+        // guard below would pass on a fiction.
+        if (!before.found) {
+          return [false, "cell A2's font could not be resolved in the PRISTINE fixture — the vacuity "
+            + "guard cannot run, so this step's result would be meaningless"];
+        }
         if (before.bold || before.italic) {
           return [false, `the pristine fixture already has A2 bold=${before.bold} italic=${before.italic} — `
             + "this step would be VACUOUS; retarget it at a cell the fixture does not already style"];
@@ -1111,26 +1136,35 @@ async function main(): Promise<number> {
   // A helper re-open, corroborating the raw-bytes leg through the real stack.
   step("Phase 8 — helper re-open read-back (the same bytes, through LibreOffice)");
   const readBack = await agentTurn(sessionId, "Read cells A1:B4 of Sheet1 in budget.xlsx and show me the values.");
-  // THE TOOL'S OWN RESULT BLOCK, never the merged stdout — see toolResultFor. The expected string
-  // is read out of the file the agent was asked to write, at runtime, so this leg cannot be
-  // satisfied by a model repeating a value it saw in an earlier prompt.
-  const readResult = toolResultFor(readBack.stdout, "read");
-  // Keyed by the RECORD name, not a VERB_STEPS id — otherwise this step's failure prints an empty
-  // transcript tail (its verdict name is not in VERB_STEPS).
   turnLog["sheets.read (fresh open through the helper)"] = readBack.stdout.slice(-1200);
-  const expectedA4 = xlsxCell(join(WORK_DIR, "budget.xlsx"), "xl/worksheets/sheet1.xml", "A4") ?? "";
-  const dispatched = readResult.length > 0;
-  const sawIt = dispatched && expectedA4.length > 0 && readResult.includes(expectedA4);
-  record(
-    "sheets.read (fresh open through the helper)", sawIt, "FILE-FAIL",
-    !dispatched
-      ? `the sheets read verb never dispatched — no tool result block in the turn (stdout tail: ${readBack.stdout.slice(-300)})`
-      : sawIt
-        ? `the freshly-reopened document's own TOOL RESULT reports A4's saved value ${JSON.stringify(expectedA4)} — the write survived save+reload`
-        : `the tool result did NOT contain A4's saved value ${JSON.stringify(expectedA4)}. Tool result was:\n${readResult.slice(0, 500)}`,
-  );
 
-  // ── Phase 10: characterizations (reality, not the ideal) ───────────────────────────────────
+  // THE DAEMON'S OWN UNTRUNCATED tool_result, from the session JSONL — never the CLI's stdout,
+  // which truncates every tool result to one 120-char line and therefore cannot carry a grid.
+  const readEvent = lastToolResultFromJournal(sessionId, "sheets", '"verb":"read"');
+  // Expected value read from the FILE at runtime, so the assertion cannot be satisfied by a string
+  // the model saw in an earlier prompt.
+  const expectedA4 = xlsxCell(join(WORK_DIR, "budget.xlsx"), "xl/worksheets/sheet1.xml", "A4");
+  let ok = false;
+  let detail: string;
+  if (expectedA4 === null || expectedA4 === "") {
+    // Guard, NOT evidence. A previous round's deletion-red went red HERE rather than on the tool
+    // result, and was mistakenly recorded as proof that the read leg discriminates. Reported as its
+    // own distinct outcome so it can never again be mistaken for the assertion under test.
+    detail = "INCONCLUSIVE — cell A4 is empty/unreadable in the saved workbook, so there is no value "
+      + "to look for. This is the guard firing, NOT the tool-result assertion; sheets.set's own "
+      + "verdict is the one to read.";
+  } else if (!readEvent) {
+    detail = `the sheets read verb never dispatched — no tool_call/tool_result pair for "verb":"read" in the session journal`;
+  } else if (readEvent.isError) {
+    detail = `the read verb returned an ERROR: ${readEvent.output.slice(0, 300)}`;
+  } else {
+    ok = readEvent.output.includes(expectedA4);
+    detail = ok
+      ? `the freshly-reopened document's own untruncated tool_result carries A4's saved value ${JSON.stringify(expectedA4)}`
+      : `the tool_result did NOT contain A4's saved value ${JSON.stringify(expectedA4)}. Full tool_result:\n${readEvent.output.slice(0, 600)}`;
+  }
+  record("sheets.read (fresh open through the helper)", ok, "FILE-FAIL", detail);
+
   step("Phase 10 — CHARACTERIZATIONS of disclosed limitations (these describe reality, not an ideal)");
   log("   docs/undo    : a human's ⌘Z CANNOT take back a `docs` edit and silently does nothing");
   log("                  (spec §docs ruling 4 as amended; sw::UndoManager::GetLastUndoInfo refuses");
@@ -1149,6 +1183,9 @@ async function main(): Promise<number> {
   step("VERDICT");
   const fileVerdicts = verdicts.filter((v) => v.kind === "FILE-FAIL");
   const fileFails = fileVerdicts.filter((v) => !v.ok);
+  // The denominator is PINNED. A run that reports fewer verdicts than expected has silently stopped
+  // testing something, and a shrinking 7/7 would otherwise read as green.
+  const countMismatch = fileVerdicts.length !== EXPECTED_FILE_VERDICTS;
   // UI verdicts are reported OUTSIDE the pass/fail tally — see UI_SKIP_REASON.
   const uiVerdicts = verdicts.filter((v) => v.kind === "UI-SKIP");
   const uiFails = uiVerdicts.filter((v) => !v.ok);
@@ -1160,6 +1197,10 @@ async function main(): Promise<number> {
   for (const v of uiVerdicts) log(`  ${v.ok ? "observed  " : "UI-SKIP   "} ${v.name}`);
   log("");
   log(`  file evidence : ${fileVerdicts.length - fileFails.length}/${fileVerdicts.length} passed  <- this decides the run`);
+  if (countMismatch) {
+    log(`  ⚠ EXPECTED ${EXPECTED_FILE_VERDICTS} file verdicts, got ${fileVerdicts.length} — the gate is`);
+    log(`    testing LESS than it is supposed to. A shrunken tally is not a pass.`);
+  }
   log(`  ui observed   : ${uiVerdicts.length - uiFails.length}/${uiVerdicts.length}`);
   if (uiFails.length > 0) {
     log("");
@@ -1177,6 +1218,11 @@ async function main(): Promise<number> {
     }
   }
 
+  if (countMismatch) {
+    log(`\nRESULT: FAIL — the gate reported ${fileVerdicts.length} file verdicts, not the pinned `
+      + `${EXPECTED_FILE_VERDICTS}. Steps went missing; fix that before reading any other result.`);
+    return 1;
+  }
   if (fileFails.length > 0) {
     log("\n  Failing verbs, with the agent's own transcript for diagnosis ONLY (never evidence):");
     for (const v of fileFails) log(`\n  ── ${v.name}\n     ${v.detail}\n     transcript tail: ${(turnLog[v.name] ?? "(no transcript captured for this step)").slice(-500)}`);
@@ -1238,6 +1284,19 @@ async function withTeardown(): Promise<void> {
     }
   }
   process.exit(code);
+}
+
+// ^C during a ~4-minute run must not leak the app, daemon and helpers it has already started —
+// the same leak C4 fixed for the normal exit paths. Best-effort and synchronous: a signal handler
+// cannot await, so this uses the process-scoped kills rather than `stopDaemon`'s close-event wait.
+for (const sig of ["SIGINT", "SIGTERM"] as const) {
+  process.on(sig, () => {
+    log(`\n[${sig}] interrupted — tearing down before exit`);
+    try { stopApp(); } catch { /* best effort */ }
+    try { if (daemon?.pid) process.kill(daemon.pid, "SIGKILL"); } catch { /* gone */ }
+    try { killHelpers(); } catch { /* best effort */ }
+    process.exit(130);
+  });
 }
 
 await withTeardown();
