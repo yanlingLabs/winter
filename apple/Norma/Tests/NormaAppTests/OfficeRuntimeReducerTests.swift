@@ -3451,7 +3451,7 @@ final class OfficeUndoLedgerTests: XCTestCase {
         ledger.recordAgentEdit(topDepth: 2, count: 2)
         ledger.recordAgentEdit(topDepth: 5, count: 3)
         XCTAssertEqual(ledger.undoStepSize(undoDepth: 5), 3)
-        ledger.didUndo(count: 3, redoDepth: 3)
+        ledger.didUndo(count: 3, undoDepth: 2, redoDepth: 3)
         XCTAssertEqual(ledger.undoStepSize(undoDepth: 2), 2)
     }
 
@@ -3484,9 +3484,9 @@ final class OfficeUndoLedgerTests: XCTestCase {
         var ledger = OfficeUndoLedger()
         ledger.recordAgentEdit(topDepth: 4, count: 3)
         XCTAssertEqual(ledger.undoStepSize(undoDepth: 4), 3)
-        ledger.didUndo(count: 3, redoDepth: 3)
+        ledger.didUndo(count: 3, undoDepth: 1, redoDepth: 3)
         XCTAssertEqual(ledger.redoStepSize(redoDepth: 3), 3)
-        ledger.didRedo(count: 3, undoDepth: 4)
+        ledger.didRedo(count: 3, undoDepth: 4, redoDepth: 0)
         XCTAssertEqual(ledger.undoStepSize(undoDepth: 4), 3,
                        "and back again — the group survives a full undo/redo round trip")
     }
@@ -3495,7 +3495,7 @@ final class OfficeUndoLedgerTests: XCTestCase {
     func testANewAgentEditForgetsTheRedoSide() {
         var ledger = OfficeUndoLedger()
         ledger.recordAgentEdit(topDepth: 2, count: 2)
-        ledger.didUndo(count: 2, redoDepth: 2)
+        ledger.didUndo(count: 2, undoDepth: 0, redoDepth: 2)
         XCTAssertFalse(ledger.pendingRedo.isEmpty)
         ledger.recordAgentEdit(topDepth: 1, count: 1)
         XCTAssertTrue(ledger.pendingRedo.isEmpty)
@@ -3507,9 +3507,27 @@ final class OfficeUndoLedgerTests: XCTestCase {
         var ledger = OfficeUndoLedger()
         ledger.recordAgentEdit(topDepth: 3, count: 3)
         _ = ledger.undoStepSize(undoDepth: 3)
-        ledger.didUndo(count: 3, redoDepth: 3)
+        ledger.didUndo(count: 3, undoDepth: 0, redoDepth: 3)
         XCTAssertEqual(ledger.redoStepSize(redoDepth: 1), 1,
                        "the redo stack is shallower than the group — the group cannot be on top of it")
+    }
+
+    /// **Review F-5 — the pop is keyed on DEPTH as well as size.** A 1-action agent group must
+    /// survive a ⌘Z that took back the USER's own later single edit. Matching on size alone popped
+    /// it (the fallback returns 1, so `top.count == 1` matched) and silently discarded a group that
+    /// had never been used. The outcome was identical for a 1-action group, so nothing was
+    /// observably broken — which is exactly why it needs a test rather than a comment.
+    func testAOneActionAgentGroupSurvivesAnUndoOfTheUsersOwnLaterEdit() {
+        var ledger = OfficeUndoLedger()
+        ledger.recordAgentEdit(topDepth: 3, count: 1)   // the agent's single-action group at depth 3
+        // The user then types: depth 4. One ⌘Z takes back THEIR action, leaving depth 3.
+        XCTAssertEqual(ledger.undoStepSize(undoDepth: 4), 1)
+        ledger.didUndo(count: 1, undoDepth: 3, redoDepth: 1)
+        XCTAssertEqual(ledger.pendingUndo.count, 1,
+                       "the agent's group was NOT the thing undone — it must still be remembered")
+        XCTAssertEqual(ledger.pendingUndo.last?.topDepth, 3)
+        // And it is still usable: the next ⌘Z is now against the agent's group.
+        XCTAssertEqual(ledger.undoStepSize(undoDepth: 3), 1)
     }
 
     /// Closing or reloading the document must void everything: a stale group would make one ⌘Z take
@@ -3517,7 +3535,7 @@ final class OfficeUndoLedgerTests: XCTestCase {
     func testForgettingVoidsBothSides() {
         var ledger = OfficeUndoLedger()
         ledger.recordAgentEdit(topDepth: 3, count: 3)
-        ledger.didUndo(count: 3, redoDepth: 3)
+        ledger.didUndo(count: 3, undoDepth: 0, redoDepth: 3)
         ledger.forgetEverything()
         XCTAssertTrue(ledger.pendingUndo.isEmpty)
         XCTAssertTrue(ledger.pendingRedo.isEmpty)

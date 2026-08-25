@@ -192,6 +192,14 @@ const DocsArgs = z.object({
    *  against the exact text it predicted, so a batch that lands wrong fails loudly rather than
    *  reporting which ops it believes it did.
    *
+   *  ⚠️ **The honest limit of that, review F-6.** "Strictly stronger" is true of the RESULT
+   *  CONTRACT — a partial paste can never be reported as success. It is not true of the DOCUMENT: a
+   *  failed verification throws before the broker's save, so an ADOPTED document is left holding the
+   *  partial paste, dirty and unsaved, while the agent is told the call failed. That is pre-existing
+   *  for single-`text` append; `texts` widens the blast radius from one paragraph to up to 50.
+   *  Disclosed in the tool description rather than fixed here, because the fix is a rollback path
+   *  the engine does not offer.
+   *
    *  Bounds are doubled deliberately: `.max(50)` elements AND a joined-length check in the ladder
    *  against the same 4 000-character ceiling `text` itself carries, because 50 × 2 000 would
    *  otherwise be 100 000 characters aimed at an 8 KiB wire cap whose overflow is an opaque schema
@@ -340,6 +348,11 @@ export function registerDocsTool(r: ToolRegistry, deps: DocsToolDeps): void {
       + "own refusal tells you if that's the problem.\n"
       + "A document a human has open with UNSAVED changes refuses every write, naming the tab — save "
       + "or discard those edits first.\n"
+      + "If insert or append reports that it could not verify what it wrote, the text may still be "
+      + "sitting in the document unsaved — nothing was saved, but if a human had that file open, "
+      + "their tab is now holding an edit they did not ask for, and every later write to it is "
+      + "refused until they save or discard it. Re-read before doing anything else. With texts this "
+      + "covers all the paragraphs in the call, not one.\n"
       + "**A timeout means the outcome is UNKNOWN, never that a write failed to happen** — the app "
       + "may have completed it and lost the race home. Re-read the document before ever retrying a "
       + "write verb. insert/append are the dangerous ones to resend: they ADD text, so a blind retry "

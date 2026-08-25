@@ -1549,9 +1549,21 @@ struct OfficeUndoLedger: Equatable {
         return max(1, min(top.count, undoDepth))
     }
 
-    /// A ⌘Z of `count` actions just completed, leaving the redo stack `redoDepth` deep.
-    mutating func didUndo(count: Int, redoDepth: Int) {
-        if let top = pendingUndo.last, top.count == count { pendingUndo.removeLast() }
+    /// A ⌘Z of `count` actions just completed, leaving the stacks `undoDepth`/`redoDepth` deep.
+    ///
+    /// **The pop is keyed on the group's DEPTH as well as its size (review F-5).** Matching on size
+    /// alone wrongly popped a 1-action agent group whenever a ⌘Z took back the USER's own later
+    /// single edit — the fallback returns 1, `didUndo` then saw `top.count == 1`, and the group was
+    /// discarded without ever being used. No observable defect today, because the next ⌘Z falls back
+    /// to 1 action, which for a 1-action group is the identical outcome — but it is only latent
+    /// while that fallback stays 1, and "harmless because of a constant somewhere else" is exactly
+    /// the kind of coupling that stops being true silently. `undoDepth + count` is where the stack
+    /// stood before these actions came off, i.e. the group's own `topDepth` if this really was it.
+    mutating func didUndo(count: Int, undoDepth: Int, redoDepth: Int) {
+        if let top = pendingUndo.last, top.count == count, top.topDepth == undoDepth + count {
+            pendingUndo.removeLast()
+        }
+        pendingUndo.removeAll { $0.topDepth > undoDepth }
         guard count > 0, redoDepth >= count else { return }
         pendingRedo.removeAll { $0.topDepth > redoDepth - count }
         pendingRedo.append(Group(topDepth: redoDepth, count: count))
@@ -1565,10 +1577,14 @@ struct OfficeUndoLedger: Equatable {
         return max(1, min(top.count, redoDepth))
     }
 
-    /// A ⌘⇧Z of `count` actions just completed, leaving the undo stack `undoDepth` deep — the group
-    /// goes back onto the undo side so a second ⌘Z takes it off whole again.
-    mutating func didRedo(count: Int, undoDepth: Int) {
-        if let top = pendingRedo.last, top.count == count { pendingRedo.removeLast() }
+    /// A ⌘⇧Z of `count` actions just completed, leaving the stacks `undoDepth`/`redoDepth` deep —
+    /// the group goes back onto the undo side so a second ⌘Z takes it off whole again. Same
+    /// depth-keyed pop as `didUndo`, for the same reason.
+    mutating func didRedo(count: Int, undoDepth: Int, redoDepth: Int) {
+        if let top = pendingRedo.last, top.count == count, top.topDepth == redoDepth + count {
+            pendingRedo.removeLast()
+        }
+        pendingRedo.removeAll { $0.topDepth > redoDepth }
         guard count > 0, undoDepth >= count else { return }
         pendingUndo.removeAll { $0.topDepth > undoDepth - count }
         pendingUndo.append(Group(topDepth: undoDepth, count: count))
@@ -2477,7 +2493,7 @@ final class OfficeRuntime: ObservableObject {
             guard steps > 0 else { return }
             for _ in 0..<steps { await driver.undo(docId, true) }
             if let after = await driver.undoDepth(docId) {
-                await self?.noteUndoCompleted(path: path, count: steps, redoDepth: after.redo)
+                await self?.noteUndoCompleted(path: path, count: steps, undoDepth: after.undo, redoDepth: after.redo)
             }
         }
     }
@@ -2503,7 +2519,7 @@ final class OfficeRuntime: ObservableObject {
             guard steps > 0 else { return }
             for _ in 0..<steps { await driver.redo(docId, true) }
             if let after = await driver.undoDepth(docId) {
-                await self?.noteRedoCompleted(path: path, count: steps, undoDepth: after.undo)
+                await self?.noteRedoCompleted(path: path, count: steps, undoDepth: after.undo, redoDepth: after.redo)
             }
         }
     }
@@ -2539,45 +2555,35 @@ final class OfficeRuntime: ObservableObject {
     /// Injectable so tests can drive the machine without sleeping for real. Production never sets it.
     var autoSaveDebounceInterval: TimeInterval = OfficeRuntime.autoSaveDebounceIntervalDefault
 
-    /// ⛔ **DEFAULT OFF, and this is a finding rather than caution.**
+    /// **ARMED. The kill switch for instant save, and the record of what it took to earn it.**
     ///
-    /// The machinery below is complete, measured and tested. It is **not armed in production**
-    /// because turning it on **loses the user's typed content**, reproducibly, and the mechanism is
-    /// **UNESTABLISHED**.
+    /// This shipped `false` for one commit, because arming it **lost the user's typed content** in
+    /// two live multi-sheet Calc drills — reproducibly, A/B'd. That parking commit named two
+    /// candidate mechanisms and **a review measured both and falsified both**:
     ///
-    /// **The evidence, A/B, not inferred.** With the debounce armed from the input doors, two live
-    /// multi-sheet Calc drills fail reproducibly in isolation —
-    /// `OfficeRuntimeLiveTests.testTypingOnSheetTwoLandsOnSheetTwoNotSheetOneThroughSaveAndReopen`
-    /// and `…testRequestingPartZeroAfterTypingOnSheetTwoRendersSheetOneNotAStaleBystanderMatch`.
-    /// Both type through the REAL canvas door, save, and read the saved XML back off disk, and both
-    /// find the typed marker **on neither sheet** — the text is gone, not misplaced. Disabling only
-    /// `noteEditActivity` and changing nothing else makes both pass. That is the whole A/B.
+    ///  - *"a save landing mid-cell-edit"* — **FALSE.** A save taken while a Calc cell is still in
+    ///    edit mode CONTAINS the in-progress text; LOK serializes it.
+    ///  - *"two saves on one path racing"* — **FALSE, twice.** Two back-to-back saves keep the text,
+    ///    and decisively: the debounced save loses it with **nothing racing it at all**. The
+    ///    cross-door single-flight that comment sent the next implementer to build would have fixed
+    ///    nothing, on a live save path.
     ///
-    /// **Two candidate mechanisms, neither established, and deliberately no third story invented:**
-    ///  1. A save landing while a Calc cell is still in EDIT mode. A cell being edited holds its
-    ///     text in the edit engine rather than the document, and a save at that instant would
-    ///     serialize without it — the everyday user gesture "type into a cell, pause to think" is
-    ///     exactly that window, which makes this the more alarming of the two.
-    ///  2. **Two saves on one path racing.** `fireAutoSave`'s never-overlap guard covers auto-save
-    ///     against ITSELF, but nothing covers auto-save against the OTHER save doors — ⌘S, the
-    ///     close sheet, the broker. `OfficeRuntime.save` has no cross-door single-flight, by
-    ///     deliberate design ("two ⌘S on one path are two independent saves"), and two saves'
-    ///     file-watcher expected-write tokens interleaving is a **tested edge case** — one the
-    ///     office research explicitly warned "must not become the ordinary path", which is precisely
-    ///     what arming this would do. A misattributed write would look external, and an external
-    ///     write to a CLEAN document silently re-stages/reloads it — which would explain content
-    ///     vanishing rather than landing in the wrong place.
+    /// **The real mechanism was ORDERING, and it was never this feature's.** `performSave` did not
+    /// join `inputChainTail`, so a save issued while key events were still queued serialized the
+    /// PRE-EDIT document — see its own header. Pre-existing Stage B behaviour, reproduced at the
+    /// base commit; instant-save only made it the ordinary path, because a debounce arms when a key
+    /// event is ENQUEUED, not when it is delivered. With `performSave` joining the input chain, both
+    /// Calc drills pass with this armed, and so does the whole suite.
     ///
-    /// **Why parked rather than patched.** Both candidate fixes are behaviour changes on a live save
-    /// path — a cross-door single-flight would change what a second ⌘S means for every existing
-    /// caller — and a lengthened interval would only make the loss rarer, converting a reproducible
-    /// failure into an occasional silent one. That is the trade this codebase has already been burnt
-    /// by and it is not one to make without the mechanism established first.
+    /// 🔑 **The lesson worth keeping, because it is the one this arc keeps re-learning:** the
+    /// parking decision was right and the stated reason was wrong. Stopping on a reproducible loss
+    /// cost nothing; the two confident mechanisms — neither measured, both plausible — would have
+    /// cost the next implementer a wrong fix. A stated mechanism is a claim, and a claim needs a
+    /// measurement, even when the decision it supports is correct.
     ///
-    /// Everything else stays: the machine, its unit tests (which set this true), the forced-red
-    /// evidence, and the measured save cost. Arming it is one line once a drill establishes which
-    /// candidate is real.
-    var autoSaveEnabled: Bool = false
+    /// Kept as a property rather than inlined so a live problem can be switched off in one edit, and
+    /// so tests can arm it explicitly rather than depending on this default.
+    var autoSaveEnabled: Bool = true
 
     private var autoSaveTasks: [String: Task<Void, Never>] = [:]
     private var autoSaveInFlight: Set<String> = []
@@ -2664,9 +2670,9 @@ final class OfficeRuntime: ObservableObject {
         return steps
     }
 
-    func noteUndoCompleted(path: String, count: Int, redoDepth: Int) {
+    func noteUndoCompleted(path: String, count: Int, undoDepth: Int, redoDepth: Int) {
         var ledger = undoLedgers[path] ?? OfficeUndoLedger()
-        ledger.didUndo(count: count, redoDepth: redoDepth)
+        ledger.didUndo(count: count, undoDepth: undoDepth, redoDepth: redoDepth)
         undoLedgers[path] = ledger
     }
 
@@ -2677,9 +2683,9 @@ final class OfficeRuntime: ObservableObject {
         return steps
     }
 
-    func noteRedoCompleted(path: String, count: Int, undoDepth: Int) {
+    func noteRedoCompleted(path: String, count: Int, undoDepth: Int, redoDepth: Int) {
         var ledger = undoLedgers[path] ?? OfficeUndoLedger()
-        ledger.didRedo(count: count, undoDepth: undoDepth)
+        ledger.didRedo(count: count, undoDepth: undoDepth, redoDepth: redoDepth)
         undoLedgers[path] = ledger
     }
 
