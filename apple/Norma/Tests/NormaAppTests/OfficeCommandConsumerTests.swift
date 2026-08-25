@@ -849,6 +849,79 @@ final class OfficeCommandConsumerTests: XCTestCase {
         XCTAssertFalse(driverCalled)
     }
 
+    /// **Whole-branch review F3 — the silent-drop this arc has now ruled on three times.**
+    /// `align`/`numberFormat` decode through a CLOSED enum's `init(rawValue:)`, so a present-but-
+    /// undecodable value collapsed to `nil`, indistinguishable from absent. Paired with a valid
+    /// attribute the at-least-one guard passed and the call SUCCEEDED, reporting `applied bold`
+    /// while dropping the alignment entirely.
+    ///
+    /// The pairing with `bold: true` is the whole point and is why this could not be caught by a
+    /// simpler test: sent ALONE, a bad `align` already refused — with the misleading "name at least
+    /// one attribute" message, but it refused. It is only alongside a good attribute that the drop
+    /// goes silent AND reports success.
+    func testSheetsFormatRefusesAPresentButUndecodableAlignOrNumberFormat() async {
+        let path = makeScratchFile()
+        let dir = (path as NSString).deletingLastPathComponent
+        var driverCalled = false
+        let world = makeSheetsWorld(
+            workingDirs: [SessionDirEntry(path: dir, locked: true)],
+            sheetsFormat: { _, _, _, _, _, _, _, _, _ in driverCalled = true; return ["bold"] })
+
+        // Every wrong-TYPE arm too, not just a wrong string — the T5 round-2 lesson that a guard
+        // gated on one type arm lets every other type walk past into "absent".
+        let badValues: [(String, Any)] = [
+            ("align", "centre"), ("align", 5), ("align", true), ("align", ["left"]),
+            ("numberFormat", "pct"), ("numberFormat", 2), ("numberFormat", false),
+        ]
+        for (index, (key, bad)) in badValues.enumerated() {
+            sent.removeAll()
+            world.consumer.handle(command("office.sheets.format",
+                                           args: ["path": path, "sheet": "Sheet1", "range": "A1",
+                                                  "bold": true, key: bad],
+                                           commandId: "pcmd-f3-\(index)"))
+            await waitUntil { !self.sent.isEmpty }
+            XCTAssertEqual(sent.first?.ok, false, "\(key)=\(bad) must refuse, not silently drop: \(sent)")
+            XCTAssertTrue(sent.first?.result?.contains("`\(key)` must be one of") == true,
+                          "\(key)=\(bad) must get its OWN refusal naming the legal set: \(sent)")
+        }
+        XCTAssertFalse(driverCalled, "nothing may reach the driver on a refused operand")
+    }
+
+    /// The control arm, so F3's fix cannot become an over-refusal: every legal value must get PAST
+    /// the operand gate and reach the driver.
+    ///
+    /// It asserts reaching the driver rather than `ok == true` deliberately. The first draft did
+    /// assert `ok == true` and failed on `numberFormat=currency` with *"Couldn't save budget.xlsx:
+    /// The file 'unused-save' couldn't be opened"* — this fake world has no working save leg, so the
+    /// call legitimately ends `ok: false` AFTER the format applied. Asserting overall success would
+    /// have been asserting something this harness cannot deliver, and the claim under test is
+    /// narrower anyway: a legal operand is not refused at the gate. Both halves are checked (the
+    /// driver ran, and the message is not an operand refusal) so it cannot pass on a different error.
+    func testSheetsFormatStillAcceptsEveryLegalAlignAndNumberFormat() async {
+        let path = makeScratchFile()
+        let dir = (path as NSString).deletingLastPathComponent
+        let cases: [(String, [String])] = [
+            ("align", OfficeSheetsAlign.allCases.map(\.rawValue)),
+            ("numberFormat", OfficeSheetsNumberFormatPreset.allCases.map(\.rawValue)),
+        ]
+        for (key, values) in cases {
+            for value in values {
+                sent.removeAll()
+                var driverCalled = false
+                let world = makeSheetsWorld(
+                    workingDirs: [SessionDirEntry(path: dir, locked: true)],
+                    sheetsFormat: { _, _, _, _, _, _, _, _, _ in driverCalled = true; return [key] })
+                world.consumer.handle(command("office.sheets.format",
+                                               args: ["path": path, "sheet": "Sheet1", "range": "A1", key: value],
+                                               commandId: "pcmd-ok-\(key)-\(value)"))
+                await waitUntil { !self.sent.isEmpty }
+                XCTAssertTrue(driverCalled, "\(key)=\(value) is legal and must reach the driver: \(sent)")
+                XCTAssertFalse(sent.first?.result?.contains("must be one of") == true,
+                               "\(key)=\(value) is legal and must not hit the operand refusal: \(sent)")
+            }
+        }
+    }
+
     /// The partial-failure lifecycle sentence — `handleSheetsFormat`'s own catch block, mirroring
     /// `handleSheetsSet`'s established shape: appended only when more than one attribute could
     /// plausibly have been in flight, phrased conditionally ("if an earlier attribute already

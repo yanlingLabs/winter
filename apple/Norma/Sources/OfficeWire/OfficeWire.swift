@@ -1260,7 +1260,9 @@ public enum OfficeSheetsManageSheetOp: String, Equatable, Sendable {
 /// office-agent-tools T5 — `sheetsFormat`'s horizontal alignment. Same strict-enum, refuse-don't-
 /// default-on-unrecognized discipline as `OfficeSheetsResizeDimension`/`Op` above. v1 has no
 /// vertical-alignment case — not exposed, not planned for this pass (`sheets.ts`'s own doc says so).
-public enum OfficeSheetsAlign: String, Equatable, Sendable {
+// F3: `CaseIterable` so the consumer's refusal can NAME the legal set instead of hand-listing
+// it — a hand-listed set is a second source of truth that drifts the moment a case is added.
+public enum OfficeSheetsAlign: String, Equatable, Sendable, CaseIterable {
     case left
     case center
     case right
@@ -1272,7 +1274,9 @@ public enum OfficeSheetsAlign: String, Equatable, Sendable {
 /// format" request AND this bridge's own internal normalizer for every OTHER preset, if the preset
 /// commands turn out to TOGGLE rather than set an absolute state (see `LOKBridge
 /// .sheetsFormatOnDedicatedThread`'s own header for which one this engine build actually is).
-public enum OfficeSheetsNumberFormatPreset: String, Equatable, Sendable {
+// F3: `CaseIterable` so the consumer's refusal can NAME the legal set instead of hand-listing
+// it — a hand-listed set is a second source of truth that drifts the moment a case is added.
+public enum OfficeSheetsNumberFormatPreset: String, Equatable, Sendable, CaseIterable {
     case general
     case number
     case percent

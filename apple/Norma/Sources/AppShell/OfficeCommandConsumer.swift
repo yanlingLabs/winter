@@ -515,6 +515,27 @@ struct OfficeCommandConsumer {
                                    + "\(officeReadRangeMaxCells)-cell limit on one format call — ask for "
                                    + "a smaller range.", nil)
         }
+        // **Whole-branch review F3 — the last two operands that never got the `isPresent` treatment
+        // `at`/`layout`/`width` already have.** Both decode through a CLOSED enum's `init(rawValue:)`,
+        // so a present-but-undecodable value — `align: "centre"`, `numberFormat: "pct"`, or either
+        // one sent as a number/bool/array — collapsed to `nil`, which is indistinguishable from
+        // "absent". Paired with any other attribute the at-least-one guard below was satisfied, so
+        // `bold: true, align: "centre"` SUCCEEDED, reported `applied bold`, and dropped the
+        // alignment silently: the model asked for something, was told it worked, and it did not
+        // happen. Third ruling on this exact shape in this arc; same remedy, so all five of
+        // `format`'s optional operands now answer a wrong value the same way.
+        //
+        // Checked for BOTH keys before any of them is read, so the refusal names the operand the
+        // caller actually got wrong rather than whichever one happens to be decoded first.
+        for key in ["align", "numberFormat"] where Self.isPresent(command.args, key) {
+            let decoded: Bool = key == "align"
+                ? Self.optionalAlign(command.args) != nil
+                : Self.optionalNumberFormatPreset(command.args) != nil
+            guard decoded else {
+                return sendResult(command.sessionId, command.commandId, false,
+                                   key == "align" ? Self.invalidAlignRefusal : Self.invalidNumberFormatRefusal, nil)
+            }
+        }
         let bold = Self.optionalBool(command.args, "bold")
         let italic = Self.optionalBool(command.args, "italic")
         let numberFormat = Self.optionalNumberFormatPreset(command.args)
@@ -1339,6 +1360,18 @@ struct OfficeCommandConsumer {
     private static func optionalBool(_ args: [String: SessionEvent.JSONValue]?, _ key: String) -> Bool? {
         guard case .bool(let value)? = args?[key] else { return nil }
         return value
+    }
+    /// F3. Names the legal set, the way every other closed-enum refusal in this file does — a model
+    /// that sent `centre` needs to be told `center` exists, not merely that it was wrong.
+    private static var invalidAlignRefusal: String {
+        "`align` must be one of " + OfficeSheetsAlign.allCases.map { "`\($0.rawValue)`" }.joined(separator: ", ") + "."
+    }
+    /// F3, `numberFormat`'s half. The preset set is closed by ratified ruling (spec §2 — a free-form
+    /// format code is a mini-language whose failure modes land in the user's saved file), so naming
+    /// the members is the only way a caller can correct itself.
+    private static var invalidNumberFormatRefusal: String {
+        "`numberFormat` must be one of "
+            + OfficeSheetsNumberFormatPreset.allCases.map { "`\($0.rawValue)`" }.joined(separator: ", ") + "."
     }
     private static func optionalAlign(_ args: [String: SessionEvent.JSONValue]?) -> OfficeSheetsAlign? {
         guard case .string(let raw)? = args?["align"] else { return nil }
