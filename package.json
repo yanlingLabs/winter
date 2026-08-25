@@ -11,6 +11,7 @@
     "version:sync": "bun run scripts/sync-version.ts",
     "version:bump": "bun run scripts/bump-version.ts",
     "verify:workflow": "bun run scripts/verify-workflow-compiled.ts",
+    "verify:office-agent": "bun run scripts/office-agent-gate.ts",
     "icons:render": "bun run scripts/render-icons.ts",
     "cef:fetch": "bun run scripts/fetch-cef.ts",
     "monaco:fetch": "bun run scripts/fetch-monaco.ts",
