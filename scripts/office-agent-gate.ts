@@ -414,30 +414,39 @@ function stopApp(): void {
 }
 
 /**
- * Stop the daemon and WAIT for it to actually be gone, escalating to SIGKILL.
+ * Stop the daemon and WAIT for the child to be REAPED, then report exactly what happened.
  *
- * Fire-and-forget SIGTERM was not enough: the gate's own residual-process check found the daemon
- * still resident immediately after teardown printed "daemon stopped", because SIGTERM shutdown is
- * asynchronous. "Zero residual processes at exit" has to be observed, not requested — a leaked
- * daemon holds the temp home's socket and poisons the next run.
+ * Two false readings had to be designed out, both observed live:
+ *  - Fire-and-forget `SIGTERM` printed "daemon stopped" while the daemon was still resident;
+ *    SIGTERM shutdown is asynchronous.
+ *  - Polling `kill(pid, 0)` reports a ZOMBIE as alive. The daemon is our own child, so between its
+ *    exit and our reaping it, the pid still exists — which produced a `⚠ LEAKED` line for a process
+ *    that `ps` showed as already gone.
+ *
+ * Awaiting the child handle's own `close` event is the authority: it fires only after the process
+ * is reaped, so it cannot see a zombie and cannot self-match anything.
  */
-function stopDaemon(): number | undefined {
+async function stopDaemon(): Promise<string> {
   const child = daemon;
   daemon = undefined;
-  if (!child || child.pid === undefined) return undefined;
+  if (!child || child.pid === undefined) return "none-started";
   const pid = child.pid;
-  if (child.exitCode !== null) return pid;
-  try { child.kill("SIGTERM"); } catch { /* already gone */ }
-  const deadline = Date.now() + 10_000;
-  while (Date.now() < deadline) {
-    if (child.exitCode !== null) return pid;
-    try { process.kill(pid, 0); } catch { return pid; }   // ESRCH -> it is gone
-    spawnSync("sleep", ["0.2"]);
-  }
-  // Still alive after 10s of asking politely.
-  try { child.kill("SIGKILL"); } catch { /* gone */ }
-  spawnSync("sleep", ["0.5"]);
-  return pid;
+  if (child.exitCode !== null || child.signalCode !== null) return `pid ${pid} gone`;
+
+  const closed = new Promise<boolean>((resolve) => {
+    child.once("close", () => resolve(true));
+    setTimeout(() => resolve(false), 10_000);
+  });
+  try { child.kill("SIGTERM"); } catch { return `pid ${pid} gone`; }
+  if (await closed) return `pid ${pid} gone`;
+
+  // Still not reaped after 10s of asking politely.
+  const killed = new Promise<boolean>((resolve) => {
+    child.once("close", () => resolve(true));
+    setTimeout(() => resolve(false), 5_000);
+  });
+  try { child.kill("SIGKILL"); } catch { return `pid ${pid} gone`; }
+  return (await killed) ? `pid ${pid} gone (SIGKILL)` : `pid ${pid} RESIDENT`;
 }
 
 // ── driving the REAL agent ───────────────────────────────────────────────────────────────────
@@ -1200,31 +1209,23 @@ async function withTeardown(): Promise<void> {
   } finally {
     step("Teardown");
     stopApp();
-    const daemonPid = stopDaemon();
+    const daemonState = await stopDaemon();
     killHelpers();
 
-    // Residuals REPORTED, not assumed from having called the kills — the first honest teardown
-    // printed "daemon stopped" while the daemon was still resident.
+    // Residuals REPORTED, not assumed from having called the kills.
     //
     // The app and helper legs match on `DERIVED_DATA`, which really is in their argv (it is part of
     // the binary path). **The daemon deliberately does NOT use `pgrep`**: its argv is
     // `bun <worktree>/packages/cli/src/main.ts daemon run` and the temp `NORMA_HOME` lives in its
-    // ENVIRONMENT, not its arguments — so any `pgrep -f` pattern mentioning the home can never
-    // match it, and would report `daemons=0` whether or not one survived. A check blind to its own
-    // failure mode, in the very verification added to answer "teardown never runs". (A pattern
-    // loose enough to match, like `daemon run`, has the opposite defect: it self-matches the shell
-    // running the check — which produced two phantom "1 surviving daemon" readings during this
-    // work.) The held child pid is exact, needs no argv, and cannot self-match.
+    // ENVIRONMENT, not its arguments — so any `pgrep -f` pattern naming the home can never match
+    // it and would report 0 whether or not one survived: a check blind to its own failure mode,
+    // inside the fix for "teardown never runs". A pattern loose enough to match (`daemon run`) has
+    // the opposite defect — it self-matches the shell running the check, which produced two phantom
+    // "surviving daemon" readings during this work. The child handle's own `close` event is exact.
     const residual = (pattern: string) =>
       (spawnSync("pgrep", ["-f", pattern], { encoding: "utf8" }).stdout || "").trim().split("\n").filter(Boolean).length;
     const leftApp = residual(`${DERIVED_DATA}.*MacOS/Norma`);
     const leftHelpers = residual(`${DERIVED_DATA}.*NormaOfficeHelper`);
-    let daemonState = "none-started";
-    if (daemonPid !== undefined) {
-      let alive = false;
-      try { process.kill(daemonPid, 0); alive = true; } catch { alive = false; }
-      daemonState = alive ? `pid ${daemonPid} RESIDENT` : `pid ${daemonPid} gone`;
-    }
     const clean = leftApp === 0 && leftHelpers === 0 && !daemonState.includes("RESIDENT");
     log(`   residual: app=${leftApp} helpers=${leftHelpers} daemon=${daemonState}${clean ? " (clean)" : " ⚠ LEAKED"}`);
     if (!process.argv.includes("--keep")) {
