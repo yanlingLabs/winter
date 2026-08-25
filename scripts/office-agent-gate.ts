@@ -493,9 +493,22 @@ async function agentTurn(sessionId: string | null, prompt: string): Promise<Turn
 
 function stripAnsi(s: string): string { return s.replace(/\x1b\[[0-9;]*m/g, ""); }
 
+/** The one place the session journal's path is derived. Pinned rather than re-resolved at each
+ *  call site, so a scan can never silently read a different file than the fence was taken on. */
+function journalPath(sessionId: string): string {
+  return join(HOME_DIR, "sessions", "global", `${sessionId}.jsonl`);
+}
+
+/** Current journal length in bytes — the fence marker. Taken immediately before a prompt is issued,
+ *  so everything at or beyond it belongs to that turn and nothing earlier can be matched. */
+function journalOffset(sessionId: string): number {
+  const j = journalPath(sessionId);
+  return existsSync(j) ? statSync(j).size : 0;
+}
+
 /**
  * The daemon's own UNTRUNCATED `tool_result` for the last matching tool call, read from the
- * session's append-only JSONL.
+ * session's append-only JSONL, **scanning only beyond `fromOffset`**.
  *
  * **This exists because asserting a cell value from the CLI's stdout is not merely fragile, it is
  * STRUCTURALLY IMPOSSIBLE.** `packages/cli/src/main.ts:659` renders a tool result as
@@ -507,18 +520,39 @@ function stripAnsi(s: string): string { return s.replace(/\x1b\[[0-9;]*m/g, "");
  * advertised as the independent fresh-open leg was satisfied by prose — the exact thing this whole
  * gate exists to make impossible, inside the gate.
  *
+ * **`fromOffset` is not tidiness — without it the step silently stops testing what it is for.**
+ * Phase 8's entire reason for existing is that it runs AFTER a full app quit + helper kill +
+ * relaunch, proving the value came off DISK rather than out of a still-open in-memory document. But
+ * the journal also holds earlier reads of the same cell from before the relaunch, and an unfenced
+ * scan happily matches one of those: measured on a clean run's own journal, truncating it before
+ * the Phase 8 prompt still returned a non-error result containing the expected value. The step
+ * would report PASS from a PRE-RELAUNCH record — a green light for precisely the persistence
+ * failure it was built to catch. Every record is still daemon-authored (so the model cannot fake
+ * one either way), but "daemon-authored" was never the property under test; "read after a restart"
+ * was.
+ *
  * The session JSONL is the authoritative record (`packages/protocol/src/events.ts`:
  * `ToolResultEvent { callId, output, isError }`, `output` unbounded), so this sidesteps the CLI
  * layer entirely. Pairing is by `callId`, never by adjacency.
  */
 function lastToolResultFromJournal(
-  sessionId: string, toolName: string, argsSubstring: string,
+  sessionId: string, toolName: string, argsSubstring: string, fromOffset: number,
 ): { output: string; isError: boolean } | null {
-  const journal = join(HOME_DIR, "sessions", "global", `${sessionId}.jsonl`);
+  const journal = journalPath(sessionId);
   if (!existsSync(journal)) return null;
+  let text = readFileSync(journal, "utf8");
+  if (fromOffset > 0) {
+    text = text.slice(fromOffset);
+    // The offset is taken between turns, so it lands on a line boundary — but if a partial line
+    // ever leads, drop it rather than parse-failing silently on a truncated record.
+    if (text.length > 0 && !text.startsWith("{")) {
+      const nl = text.indexOf("\n");
+      text = nl >= 0 ? text.slice(nl + 1) : "";
+    }
+  }
   const wanted = new Set<string>();
   let latest: { output: string; isError: boolean } | null = null;
-  for (const line of readFileSync(journal, "utf8").split("\n")) {
+  for (const line of text.split("\n")) {
     if (!line.trim()) continue;
     let ev: { type?: string; name?: string; argsJson?: string; callId?: string; output?: string; isError?: boolean };
     try { ev = JSON.parse(line); } catch { continue; }
@@ -1138,12 +1172,28 @@ async function main(): Promise<number> {
 
   // A helper re-open, corroborating the raw-bytes leg through the real stack.
   step("Phase 8 — helper re-open read-back (the same bytes, through LibreOffice)");
+  // THE FENCE, taken BEFORE the prompt is issued. Everything at or beyond this offset belongs to
+  // the post-relaunch turn; anything earlier — including this session's own pre-relaunch reads of
+  // the same cell — is invisible to the scan below. Without it the step matches a record taken
+  // before Phase 6's restart and reports PASS for exactly the persistence failure it exists to
+  // catch (measured: replaying the scan against a clean run's journal truncated before this point
+  // still returned a non-error result carrying the expected value).
+  const readFence = journalOffset(sessionId);
   const readBack = await agentTurn(sessionId, "Read cells A1:B4 of Sheet1 in budget.xlsx and show me the values.");
   turnLog["sheets.read (fresh open through the helper)"] = readBack.stdout.slice(-1200);
 
   // THE DAEMON'S OWN UNTRUNCATED tool_result, from the session JSONL — never the CLI's stdout,
   // which truncates every tool result to one 120-char line and therefore cannot carry a grid.
-  const readEvent = lastToolResultFromJournal(sessionId, "sheets", '"verb":"read"');
+  const readEvent = lastToolResultFromJournal(sessionId, "sheets", '"verb":"read"', readFence);
+
+  // PERMANENT EVIDENCE that the fence is load-bearing rather than decorative: the same scan run
+  // unfenced. When the pre-fence region also holds a matching read, an unfenced scan had a
+  // pre-relaunch record available to match — which is what this step used to do.
+  const unfenced = lastToolResultFromJournal(sessionId, "sheets", '"verb":"read"', 0);
+  const preFenceHadOne = unfenced !== null && (readEvent === null || unfenced.output !== readEvent.output);
+  log(`   journal fence: offset ${readFence} of ${journalOffset(sessionId)} bytes`
+    + ` — post-relaunch read record: ${readEvent ? "found" : "NONE"};`
+    + ` an unfenced scan would have matched a ${preFenceHadOne ? "DIFFERENT (pre-relaunch) record" : "record from the same turn"}`);
   // Expected value read from the FILE at runtime, so the assertion cannot be satisfied by a string
   // the model saw in an earlier prompt.
   const expectedA4 = xlsxCell(join(WORK_DIR, "budget.xlsx"), "xl/worksheets/sheet1.xml", "A4");
@@ -1157,7 +1207,8 @@ async function main(): Promise<number> {
       + "to look for. This is the guard firing, NOT the tool-result assertion; sheets.set's own "
       + "verdict is the one to read.";
   } else if (!readEvent) {
-    detail = `the sheets read verb never dispatched — no tool_call/tool_result pair for "verb":"read" in the session journal`;
+    detail = "the sheets read verb never dispatched AFTER the relaunch — no tool_call/tool_result "
+      + `pair for "verb":"read" beyond journal offset ${readFence} in ${journalPath(sessionId)}`;
   } else if (readEvent.isError) {
     detail = `the read verb returned an ERROR: ${readEvent.output.slice(0, 300)}`;
   } else {
