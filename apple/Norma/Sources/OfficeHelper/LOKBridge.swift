@@ -515,6 +515,15 @@ final class LOKBridge: OfficeDocumentBridge {
         /// it split `.unsupportedFormulaCharacter` out of `.writeVerificationFailed` for exactly this
         /// reason (see that case's own header).
         case slideIdentityUnavailable(docId: String, verb: String)
+        /// **Whole-branch review Q6 fold-in.** `slides set_text`'s only proof used to be a verified
+        /// placeholder SELECTION followed by a `void` write call — a selection landing says the
+        /// keystrokes were aimed correctly, never that the text arrived. Deliberately NOT
+        /// `.writeVerificationFailed`, whose text tells the caller to "re-read the CELL": that case
+        /// is Calc-shaped and is already a ledgered wording residual (whole-branch F7) for the paths
+        /// that use it; adding a NEW use of a known-wrong sentence on a slides path would be making
+        /// that residual worse rather than leaving it alone. `field` names WHICH placeholder
+        /// disagreed, so the caller does not have to re-read both to find out.
+        case slideTextVerificationFailed(docId: String, slide: Int, field: String)
         /// office-agent-tools T7 — a `docs` verb was asked for a document that is not a Writer text
         /// document. Mirrors `.notSpreadsheet`/`.notPresentation` exactly, composed entirely from
         /// this bridge's own words.
@@ -615,6 +624,10 @@ final class LOKBridge: OfficeDocumentBridge {
                 // an earlier attribute…", a run-on the reviewer's own live reproduction quoted
                 // verbatim as evidence nobody had read the composed string end-to-end.
                 return "slide \(slide + 1) in \(docId) has no \(field) placeholder — nothing was written."
+            case .slideTextVerificationFailed(let docId, let slide, let field):
+                return "wrote the \(field) of slide \(slide + 1) in \(docId), but reading it back "
+                    + "returned something else — the outcome is UNKNOWN. Re-read the slide before "
+                    + "trusting or retrying this write."
             case .slideIdentityUnavailable(let docId, let verb):
                 return "could not read per-slide identity from \(docId), so \(verb) could not be "
                     + "verified — nothing was changed. The outcome is known (unchanged), not unknown; "
@@ -3550,10 +3563,23 @@ final class LOKBridge: OfficeDocumentBridge {
     ///
     /// Returns which attribute NAMES were reached — `["bold","italic","numberFormat","align","width"]`
     /// filtered to what was actually named, in that fixed order — "posted," the same honest-not-a-
-    /// claim-of-effect posture `keyEventOk`/`undoOk` already hold to (this bridge's real proof is the
-    /// caller's own save-reopen-readback, per this task's own proof obligations, not a synchronous
-    /// confirmation this function has no cheap way to make for a formatting attribute the way
-    /// `sheetsResizeOnDedicatedThread`'s own `getDataArea` read can for a dimension change).
+    /// claim-of-effect posture `keyEventOk`/`undoOk` already hold to. This bridge's real proof is the
+    /// caller's own save-reopen-readback, per this task's own proof obligations; there is no
+    /// synchronous confirmation here.
+    ///
+    /// **Correction (whole-branch review F1 addendum).** The sentence that used to end this paragraph
+    /// drew a contrast that does not exist: it said format cannot make the kind of confirmation
+    /// "`sheetsResizeOnDedicatedThread`'s own `getDataArea` read can for a dimension change."
+    /// `sheetsResizeOnDedicatedThread` reads `getDataArea` exactly ONCE, AFTER its dispatch, and
+    /// RETURNS the values (`usedEndColumn`/`usedEndRow`) — it never compares them to anything. **It
+    /// is a report, not a confirmation**, so it verifies no more than this function does. Both verbs
+    /// are unverified-by-re-read today; that is a named residual for both, not a property one of them
+    /// has and the other lacks.
+    ///
+    /// For whoever makes resize's verification real: a before/after `getDataArea` delta only
+    /// discriminates when the inserted/deleted rows intersect the USED area — an insert below the
+    /// data area legitimately changes nothing, so a naive delta assertion produces false failures on
+    /// correct work.
     private func sheetsFormatOnDedicatedThread(docId: String, sheet: String, range: String, columnSpan: String?,
                                                bold: Bool?, italic: Bool?, numberFormat: OfficeSheetsNumberFormatPreset?,
                                                align: OfficeSheetsAlign?, width: Double?) throws -> [String] {
@@ -4051,6 +4077,35 @@ final class LOKBridge: OfficeDocumentBridge {
                         + "\(applied.joined(separator: ", ")) already landed.")
                 }
                 throw error
+            }
+        }
+        // **Whole-branch review Q6 fold-in — set_text's write is now proven by a RE-READ, not by a
+        // selection.** `writeSelectedShapeTextOnDedicatedThread` returns `Void`: every signal this
+        // function had was that the placeholder SELECTION landed, which says the keystrokes were
+        // aimed correctly and nothing at all about whether the text arrived. That is the same
+        // "no write verb's proof may be a return code" standard the rest of this arc is held to,
+        // and `slidesReadOnDedicatedThread` — the exact primitive `slides read` already ships —
+        // makes it cheap.
+        //
+        // Runs ONCE, after BOTH fields, deliberately: a per-field read would double the Tab-cycle
+        // positioning traffic on the very path whose measured residual is a discrete positioning
+        // loss (`slidePlaceholderPositionAttempts`' header), i.e. the check would make the thing it
+        // is checking for more likely.
+        //
+        // **`nil` from the read-back is NOT treated as a disagreement.** A `nil` here means the
+        // read's own positioning missed, which is the known transient — and pass 1 already proved
+        // the placeholder exists. Failing on `nil` would turn a flake in the INSTRUMENT into a
+        // reported write failure on a write that in fact landed, which is strictly worse than the
+        // gap being closed. Only a read-back that genuinely SUCCEEDS and disagrees throws.
+        if !applied.isEmpty {
+            let readBack = try slidesReadOnDedicatedThread(docId: docId, slide: slide)
+            if let title, applied.contains("title"), let got = readBack.title, got != title {
+                doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+                throw SaveError.slideTextVerificationFailed(docId: docId, slide: slide, field: "title")
+            }
+            if let body, applied.contains("body"), let got = readBack.body, got != body {
+                doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+                throw SaveError.slideTextVerificationFailed(docId: docId, slide: slide, field: "body")
             }
         }
         doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)

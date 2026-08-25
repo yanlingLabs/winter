@@ -1473,9 +1473,23 @@ struct OfficeCommandConsumer {
         return "\(sheets.count) sheet\(sheets.count == 1 ? "" : "s") in \(name): \(sheets.joined(separator: ", "))"
     }
 
+    /// **Whole-branch review F1 addendum — this used to say "applied", over a helper contract that
+    /// explicitly is not a claim of effect.** `sheetsFormatOnDedicatedThread` returns which attribute
+    /// NAMES were reached, "posted", the same posture `keyEventOk`/`undoOk` hold to — no formatting
+    /// attribute is read back anywhere on this path. Rendering that as "applied" told the model a
+    /// stronger thing than the layer below it knows, which is the description-contradicting-code
+    /// class this arc has now hit repeatedly. `set` may say "wrote" because it verifies position and
+    /// re-reads; `format` may not.
+    ///
+    /// Deliberately still names the attributes and the range: the smallest useful truth is what was
+    /// REQUESTED and where, plus an honest note that it was not confirmed — not a vaguer sentence
+    /// that also drops the useful part. The word "saved" IS earned: rule 4's save-through awaits a
+    /// real `.saved` outcome before this string is ever built.
     private static func formatSheetsFormat(path: String, sheet: String, range: String, applied: [String]) -> String {
         let name = (path as NSString).lastPathComponent
-        return "applied \(applied.joined(separator: ", ")) to \(sheet)!\(range) in \(name)"
+        return "set \(applied.joined(separator: ", ")) on \(sheet)!\(range) in \(name) and saved. "
+            + "Norma posts formatting to LibreOffice without reading it back, so this reports what was "
+            + "requested, not a confirmed result — re-read the range if you need to be sure."
     }
 
     // MARK: - office-agent-tools T6: slides result formatting
