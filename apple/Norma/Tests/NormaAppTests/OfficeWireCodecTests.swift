@@ -289,9 +289,11 @@ final class OfficeWireCodecTests: XCTestCase {
             "sheetsSet": #"{"type":"sheetsSet","seq":1,"docId":"d","sheet":"Sheet1","range":"A1","cellAddresses":["A1"],"cellValues":["x"]}"#,
             "sheetsResize": #"{"type":"sheetsResize","seq":1,"docId":"d","sheet":"Sheet1","dimension":"row","op":"insert","selectionRange":"1:1"}"#,
             "sheetsManageSheet": #"{"type":"sheetsManageSheet","seq":1,"docId":"d","op":"add","name":"Q3"}"#,
+            "sheetsManageSheetBatch": #"{"type":"sheetsManageSheetBatch","seq":1,"docId":"d","ops":[{"op":"add","name":"Q3"}]}"#,
             "sheetsSetOk": #"{"type":"sheetsSetOk","seq":1,"docId":"d","cellsWritten":1}"#,
             "sheetsResizeOk": #"{"type":"sheetsResizeOk","seq":1,"docId":"d","usedEndColumn":1,"usedEndRow":1}"#,
             "sheetsManageSheetOk": #"{"type":"sheetsManageSheetOk","seq":1,"docId":"d","sheets":["Sheet1","Q3"]}"#,
+            "sheetsManageSheetBatchOk": #"{"type":"sheetsManageSheetBatchOk","seq":1,"docId":"d","sheets":["Sheet1","Q3"],"applied":1}"#,
             // office-agent-tools T5 — sheets format.
             "sheetsFormat": #"{"type":"sheetsFormat","seq":1,"docId":"d","sheet":"Sheet1","range":"A1:C10","bold":true}"#,
             "sheetsFormatOk": #"{"type":"sheetsFormatOk","seq":1,"docId":"d","applied":["bold"]}"#,
@@ -302,10 +304,12 @@ final class OfficeWireCodecTests: XCTestCase {
             // `.add`'s own legal minimal shape (slide/to absent) — see `slidesManagePage`'s own
             // header for the per-op field contract this fixture satisfies.
             "slidesManagePage": #"{"type":"slidesManagePage","seq":1,"docId":"d","op":"add"}"#,
+            "slidesManagePageBatch": #"{"type":"slidesManagePageBatch","seq":1,"docId":"d","ops":[{"op":"delete","slide":0}]}"#,
             "slidesInfoOk": #"{"type":"slidesInfoOk","seq":1,"docId":"d","slides":[]}"#,
             "slidesReadOk": #"{"type":"slidesReadOk","seq":1,"docId":"d"}"#,
             "slidesSetTextOk": #"{"type":"slidesSetTextOk","seq":1,"docId":"d","applied":["title"]}"#,
             "slidesManagePageOk": #"{"type":"slidesManagePageOk","seq":1,"docId":"d","slideCount":1}"#,
+            "slidesManagePageBatchOk": #"{"type":"slidesManagePageBatchOk","seq":1,"docId":"d","slideCount":1,"applied":1}"#,
             // office-agent-tools T7 — docs. `docsReplace`'s `find` is non-empty and newline-free and
             // `docsInsert`'s `text` is non-empty because the decoder REFUSES otherwise (see those
             // cases' own decode guards) — a fixture that skipped those fields would decode as
@@ -896,4 +900,93 @@ final class OfficeWireCodecTests: XCTestCase {
     func testArgsParserOnEmptyInput() {
         XCTAssertEqual(OfficeWireArgs.parse([]), [:])
     }
+
+    // MARK: - office-finish Job 2: the batch frames
+
+    /// Both batch request frames and both batch reply frames survive encode → decode byte-for-byte in
+    /// meaning, including a heterogeneous `ops` list and the OPTIONAL `failure`.
+    func testBatchFramesRoundTrip() {
+        let sheetOps = [
+            OfficeSheetsManageSheetOperation(op: .add, name: "Q3", newName: nil),
+            OfficeSheetsManageSheetOperation(op: .rename, name: "Sheet1", newName: "Summary"),
+            OfficeSheetsManageSheetOperation(op: .delete, name: "Old", newName: nil),
+        ]
+        let slideOps = [
+            OfficeSlidesManagePageOperation(op: .add, slide: nil, at: 2, to: nil, layout: .blank),
+            OfficeSlidesManagePageOperation(op: .delete, slide: 0, at: nil, to: nil, layout: nil),
+            OfficeSlidesManagePageOperation(op: .reorder, slide: 3, at: nil, to: 1, layout: nil),
+        ]
+        let frames: [OfficeWireFrame] = [
+            .sheetsManageSheetBatch(seq: 7, docId: "d", ops: sheetOps),
+            .slidesManagePageBatch(seq: 8, docId: "d", ops: slideOps),
+            .sheetsManageSheetBatchOk(seq: 9, docId: "d", sheets: ["a", "b"], applied: 2, failure: nil),
+            .sheetsManageSheetBatchOk(seq: 10, docId: "d", sheets: ["a"], applied: 1, failure: "no sheet named \"x\""),
+            .slidesManagePageBatchOk(seq: 11, docId: "d", slideCount: 4, applied: 3, failure: nil),
+            .slidesManagePageBatchOk(seq: 12, docId: "d", slideCount: 4, applied: 0, failure: "boom"),
+        ]
+        for frame in frames {
+            guard let line = String(data: frame.encodedLine(), encoding: .utf8),
+                  let decoded = OfficeWireFrame.decode(line.trimmingCharacters(in: .newlines)) else {
+                return XCTFail("did not decode: \(frame)")
+            }
+            XCTAssertEqual(decoded, frame)
+        }
+    }
+
+    /// A malformed batch is refused WHOLE — never trimmed, never partially accepted. Trimming a batch
+    /// of position-based operations silently changes what was asked for, which is why every one of
+    /// these is `.rejected` rather than a shorter `ops`.
+    func testBatchFrameShapeIsRejectedAsMalformed() {
+        let manyOps = (0..<(OfficeWireBatchLimits.maxOperationsPerBatch + 1))
+            .map { #"{"op":"add","name":"s\#($0)"}"# }.joined(separator: ",")
+        let lines = [
+            // ops missing entirely, and ops empty — an empty batch is malformed, not a no-op.
+            #"{"type":"sheetsManageSheetBatch","seq":1,"docId":"d"}"#,
+            #"{"type":"sheetsManageSheetBatch","seq":1,"docId":"d","ops":[]}"#,
+            // over the operation ceiling.
+            #"{"type":"sheetsManageSheetBatch","seq":1,"docId":"d","ops":[\#(manyOps)]}"#,
+            // an element that is not an object.
+            #"{"type":"sheetsManageSheetBatch","seq":1,"docId":"d","ops":["add"]}"#,
+            // the per-element rename<->newName pairing, both directions.
+            #"{"type":"sheetsManageSheetBatch","seq":1,"docId":"d","ops":[{"op":"rename","name":"a"}]}"#,
+            #"{"type":"sheetsManageSheetBatch","seq":1,"docId":"d","ops":[{"op":"add","name":"a","newName":"b"}]}"#,
+            // an unrecognized op, refused rather than defaulted.
+            #"{"type":"sheetsManageSheetBatch","seq":1,"docId":"d","ops":[{"op":"duplicate","name":"a"}]}"#,
+            // slides: the per-element combination rules, one instance of each.
+            #"{"type":"slidesManagePageBatch","seq":1,"docId":"d","ops":[{"op":"add","slide":0}]}"#,
+            #"{"type":"slidesManagePageBatch","seq":1,"docId":"d","ops":[{"op":"delete"}]}"#,
+            #"{"type":"slidesManagePageBatch","seq":1,"docId":"d","ops":[{"op":"reorder","slide":0}]}"#,
+            // a present-but-wrong-TYPED index refuses; it is never folded into "absent".
+            #"{"type":"slidesManagePageBatch","seq":1,"docId":"d","ops":[{"op":"delete","slide":"0"}]}"#,
+            // and a present-but-out-of-range one refuses on magnitude (OfficeWireBatchLimits).
+            #"{"type":"slidesManagePageBatch","seq":1,"docId":"d","ops":[{"op":"delete","slide":10000}]}"#,
+            #"{"type":"slidesManagePageBatch","seq":1,"docId":"d","ops":[{"op":"delete","slide":-1}]}"#,
+            // an unrecognized layout refuses rather than silently giving Impress's default.
+            #"{"type":"slidesManagePageBatch","seq":1,"docId":"d","ops":[{"op":"add","layout":"spiral"}]}"#,
+            // a NEGATIVE applied count on the reply is malformed — a ledger cannot describe -1 ops.
+            #"{"type":"sheetsManageSheetBatchOk","seq":1,"docId":"d","sheets":[],"applied":-1}"#,
+        ]
+        for line in lines {
+            switch OfficeWireCodec.decodeInbound(line) {
+            case .rejected(let seq, let reason):
+                XCTAssertEqual(seq, 1, "for: \(line)")
+                XCTAssertEqual(reason, "malformed", "for: \(line)")
+            case .frame, .tilePending, .tileHeaderMalformed, .unreadable:
+                XCTFail("expected .rejected(seq: 1, reason: \"malformed\") for: \(line)")
+            }
+        }
+        // The deletion-red half: the LEGAL shapes must still decode, so the refusals above are
+        // discriminating rather than a decoder that rejects everything.
+        let legal = [
+            #"{"type":"sheetsManageSheetBatch","seq":1,"docId":"d","ops":[{"op":"add","name":"a"},{"op":"rename","name":"a","newName":"b"}]}"#,
+            #"{"type":"slidesManagePageBatch","seq":1,"docId":"d","ops":[{"op":"add","at":1,"layout":"blank"},{"op":"reorder","slide":2,"to":0}]}"#,
+            #"{"type":"sheetsManageSheetBatchOk","seq":1,"docId":"d","sheets":["a"],"applied":0}"#,
+        ]
+        for line in legal {
+            guard case .frame = OfficeWireCodec.decodeInbound(line) else {
+                return XCTFail("a legal batch frame must decode: \(line)")
+            }
+        }
+    }
+
 }
