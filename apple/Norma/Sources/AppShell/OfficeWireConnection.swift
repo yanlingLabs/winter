@@ -22,10 +22,25 @@ final class OnceFlag: @unchecked Sendable {
 /// on top. `OfficeSupervisorTests`' token-mismatch case uses this directly, with no supervisor
 /// involved, to assert the WIRE PROTOCOL's own refusal behavior against the fake helper fixture.
 ///
-/// **Only one outstanding `nextFrame` wait at a time.** Every Stage A caller (the supervisor's own
-/// handshake; `OfficeHelperClient`'s ping/open/close) always awaits one reply before sending the
-/// next request — there is no pipelining to support yet. `nextFrame` delivers frames to at most
-/// one waiter; if none is waiting, decoded frames queue for the next call.
+/// **Two wait shapes, and only one of them is still single-outstanding.**
+///
+/// * `nextFrame(seq:timeout:)` — **demultiplexed**, added by office-finish Job 1. Any number may be
+///   outstanding at once; each returns exactly the frame carrying its own seq and leaves every other
+///   frame alone. Every `OfficeHelperClient` request uses this.
+/// * `nextFrame(timeout:)` — the original **anonymous** wait: "hand me whatever arrives next."
+///   Still **one outstanding at a time** (one `waiter` slot, last registration wins), which is all
+///   its two remaining callers need — the supervisor's own hello handshake and the harness/test
+///   hello waits, both of which own the connection exclusively at that moment.
+///
+/// The original header said "Only one outstanding `nextFrame` wait at a time … there is no
+/// pipelining to support yet." That was true of the callers, never enforced by this class, and the
+/// gap was load-bearing: two overlapping waits silently orphaned the older one (the `waiter` slot is
+/// overwritten and nothing resumes the loser until its own timeout), while `OfficeHelperClient`
+/// discarded any frame whose seq did not match. One interleave therefore desynchronized the whole
+/// stream permanently. See `seqWaiters`' own header for the measurement.
+///
+/// If no waiter of either kind claims a decoded reply, it queues (`frameQueue`) for the next call —
+/// bounded, and every drop is logged, since queued frames no longer self-drain.
 ///
 /// **Why not a `TaskGroup` race against `Task.sleep` for the timeout**, which looks like the
 /// obvious shape: a `for await` loop over `transport.incoming` does not actually stop when its
@@ -80,6 +95,36 @@ final class OfficeWireConnection: @unchecked Sendable {
     private var pendingTileHeader: TileWireHeader?
     private var frameQueue: [OfficeWireFrame] = []
     private var waiter: PendingWait?
+    /// office-finish Job 1 — seq-keyed waiters, the demultiplexer. `waiter` above stays exactly as
+    /// it was and serves the two ANONYMOUS callers that cannot name a seq up front (the
+    /// supervisor's handshake, `OfficeHelperSupervisor.swift:838`, and the harness/test `hello`
+    /// waits); `seqWaiters` serves `nextFrame(seq:timeout:)`, which every `OfficeHelperClient`
+    /// request now uses.
+    ///
+    /// **Why this exists.** Before it, this connection delivered "whatever frame arrived next" to
+    /// whoever happened to be waiting, and `OfficeHelperClient.expectReply` threw
+    /// `.unexpectedReply` on a seq mismatch — **consuming and discarding the frame**. With two
+    /// concurrent requests in flight on one connection (the shipping app has exactly one such
+    /// surface today, `OfficeHarness`'s raw `supervisor?.client` calls, and instant save creates a
+    /// second writer that races them) that is not merely a failed request: the discarded frame was
+    /// the OTHER request's answer, so that request then starves for its full 30 s timeout, and the
+    /// stream stays permanently one frame out of step. Measured cost: the office harness collapsed
+    /// from 102/103 in ~155 s to 76/103 in 442 s from a single interleave.
+    ///
+    /// **Soundness rests on seq uniqueness**, which is why `OfficeWireSeqAllocator.nextSeq()` is now
+    /// lock-guarded (`OfficeWire.swift`) — it was a bare `var next: UInt64` whose only protection was
+    /// that every production caller happened to be serialized behind one FIFO. A demux keyed on a
+    /// value two racing callers can both mint would misroute silently, which is strictly worse than
+    /// the desync it replaces.
+    private var seqWaiters: [UInt64: PendingWait] = [:]
+    /// How many decoded reply frames nobody is waiting for this connection will hold before it
+    /// starts dropping the oldest. Only reached by frames whose requester already timed out and
+    /// walked away, so on a healthy connection it stays at 0 — 64 is "far past anything normal,
+    /// still trivially small" (a control frame is bytes; tile PIXELS never enter this queue at all,
+    /// they go straight to `onTile`). Before the seq demux this bound was unnecessary because the
+    /// queue self-drained destructively; it is necessary now, and it logs every drop.
+    private static let unclaimedFrameQueueCapacity = 64
+    private var droppedUnclaimedFrames = 0
     private var streamClosed = false
     private var readerTask: Task<Void, Never>?
 
@@ -189,6 +234,64 @@ final class OfficeWireConnection: @unchecked Sendable {
         }
     }
 
+    /// office-finish Job 1 — the demultiplexing counterpart to `nextFrame(timeout:)`: waits for the
+    /// reply carrying exactly `seq`, and is unaffected by any other frame arriving first.
+    ///
+    /// Three things it must do that the anonymous version does not, each a real hole if skipped:
+    ///
+    /// 1. **Scan `frameQueue` for `seq` on entry**, not just `first`. The reply can already have
+    ///    landed in the gap between `connection.send` returning and this call registering — that is
+    ///    the same send→await window `nextFrame(timeout:)`'s own header describes, and it is wider
+    ///    here because another request's frames may sit ahead of ours in the queue.
+    /// 2. **Leave frames it does not want in the queue.** Consuming-and-discarding a mismatched
+    ///    frame is precisely the bug being fixed: that frame is somebody else's answer.
+    /// 3. **Register under `seq`, so `ingest` can route to it directly** rather than handing it
+    ///    whatever arrived.
+    func nextFrame(seq: UInt64, timeout: TimeInterval) async -> OfficeWireFrame? {
+        await withCheckedContinuation { (continuation: CheckedContinuation<OfficeWireFrame?, Never>) in
+            let once = OnceFlag()
+            lock.lock()
+            if let index = frameQueue.firstIndex(where: { $0.seq == seq }) {
+                let frame = frameQueue.remove(at: index)
+                lock.unlock()
+                if once.trip() { continuation.resume(returning: frame) }
+                return
+            }
+            if streamClosed {
+                lock.unlock()
+                if once.trip() { continuation.resume(returning: nil) }
+                return
+            }
+            // A second wait on a seq already being awaited would silently orphan the first waiter
+            // (dictionary assignment overwrites it, and nothing would ever resume it — it would
+            // starve for its full timeout). That cannot happen with a correct allocator, so it is a
+            // programming error, not a runtime condition: log loudly and resume the OLD waiter with
+            // `nil` rather than leaving it hanging. Never silently.
+            // Disclosed gap, seen and reasoned about rather than missed: this releases the lock to
+            // resume the orphan and re-acquires it below WITHOUT re-scanning `frameQueue` or
+            // re-checking `streamClosed` in between, so a stream that closed in that window costs
+            // the new waiter its full timeout instead of an immediate `nil`. Left as is because the
+            // branch is unreachable — reaching it requires the (now lock-guarded) allocator to mint
+            // a duplicate seq — and because it is the loudest path in this file: the NSLog below is
+            // a bug report, not a runtime condition.
+            if let orphan = seqWaiters.removeValue(forKey: seq) {
+                lock.unlock()
+                NSLog("[OfficeWireConnection] two concurrent waits on seq %llu — the seq allocator "
+                      + "minted a duplicate; failing the older wait", seq)
+                if orphan.once.trip() { orphan.continuation.resume(returning: nil) }
+                lock.lock()
+            }
+            seqWaiters[seq] = PendingWait(once: once, continuation: continuation)
+            lock.unlock()
+
+            Task {
+                try? await Task.sleep(nanoseconds: UInt64(max(0, timeout) * 1_000_000_000))
+                self.clearSeqWaiterIfStillPending(seq, once)
+                if once.trip() { continuation.resume(returning: nil) }
+            }
+        }
+    }
+
     /// If `waiter` is still the one registered under `once` (i.e. `ingest`/`ingestClosed` hasn't
     /// already claimed and cleared it), clear it — so a frame arriving AFTER this timeout has
     /// already fired finds no waiter to (incorrectly) resume a second time. A plain, non-async
@@ -199,6 +302,16 @@ final class OfficeWireConnection: @unchecked Sendable {
     private func clearWaiterIfStillPending(_ once: OnceFlag) {
         lock.lock()
         if waiter?.once === once { waiter = nil }
+        lock.unlock()
+    }
+
+    /// `clearWaiterIfStillPending`'s seq-keyed twin, and it must compare `once` identity rather than
+    /// merely `seqWaiters[seq] != nil`: a timed-out wait on seq N and a LATER wait on the same seq N
+    /// (possible only after an allocator wrap, but the check costs nothing) must not clear each
+    /// other's registration.
+    private func clearSeqWaiterIfStillPending(_ seq: UInt64, _ once: OnceFlag) {
+        lock.lock()
+        if seqWaiters[seq]?.once === once { seqWaiters.removeValue(forKey: seq) }
         lock.unlock()
     }
 
@@ -347,12 +460,57 @@ final class OfficeWireConnection: @unchecked Sendable {
                 NSLog("[OfficeWireConnection] dropped an undecodable line from the helper: %@", line)
             }
         }
+        // office-finish Job 1 — the demux, in the one place frames become available.
+        //
+        // Order matters and is deliberate: a frame whose seq a caller is explicitly waiting for goes
+        // to THAT caller, and only what nobody claimed by seq is offered to the anonymous waiter.
+        // The reverse order would re-open the whole bug — the anonymous waiter (the handshake) would
+        // swallow a reply a concurrent request had already asked for by name.
+        //
+        // Every claimed frame is collected here, under THIS lock hold, and resumed after
+        // `lock.unlock()` below — the same discipline the push arrays above already follow, for the
+        // same reason (never resume a continuation, or invoke a caller closure, while holding
+        // `lock`). Collecting ALL of them rather than one is not an optimisation: `ingest` routinely
+        // decodes several lines from a single read chunk, and the previous code delivered at most
+        // one frame per call. With one waiter that was harmless (the next `nextFrame` drained the
+        // queue itself); with N seq waiters it would leave N-1 of them asleep until the next chunk
+        // arrived — which, if this chunk contained every outstanding reply, is never.
+        var seqDeliveries: [(PendingWait, OfficeWireFrame)] = []
+        if !seqWaiters.isEmpty {
+            var unclaimed: [OfficeWireFrame] = []
+            unclaimed.reserveCapacity(frameQueue.count)
+            for frame in frameQueue {
+                if let pendingWait = seqWaiters.removeValue(forKey: frame.seq) {
+                    seqDeliveries.append((pendingWait, frame))
+                } else {
+                    unclaimed.append(frame)
+                }
+            }
+            frameQueue = unclaimed
+        }
         if waiter != nil, !frameQueue.isEmpty {
             toDeliver = frameQueue.removeFirst()
             pending = waiter
             waiter = nil
         }
+        // Nothing claimed these: either a reply to a request that already timed out and walked away,
+        // or a reply nobody ever asked for. Before the demux they were self-draining — the next
+        // `expectReply` consumed one and threw — so the queue could not grow. Now they persist, so
+        // they need a bound, and the bound needs a VOICE: a silently dropped frame is the
+        // guard-that-degrades-silently failure this file's own headers keep naming. Dropping the
+        // OLDEST is the right end: the newest unclaimed frame is the one most likely to still be
+        // wanted.
+        while frameQueue.count > Self.unclaimedFrameQueueCapacity {
+            let dropped = frameQueue.removeFirst()
+            droppedUnclaimedFrames += 1
+            NSLog("[OfficeWireConnection] unclaimed frame queue exceeded %d — dropped the oldest "
+                  + "(seq %llu); %d dropped on this connection so far",
+                  Self.unclaimedFrameQueueCapacity, dropped.seq, droppedUnclaimedFrames)
+        }
         lock.unlock()
+        for (pendingWait, frame) in seqDeliveries where pendingWait.once.trip() {
+            pendingWait.continuation.resume(returning: frame)
+        }
         for (docId, event) in pushesToDeliver {
             onDocumentEvent?(docId, event)
         }
@@ -389,9 +547,19 @@ final class OfficeWireConnection: @unchecked Sendable {
         streamClosed = true
         let pending = waiter
         waiter = nil
+        // office-finish Job 1 — EVERY seq waiter, not just the anonymous one. Missing this is the
+        // difference between "the helper died and every in-flight request learns so immediately"
+        // and "every in-flight request hangs for its full 30 s timeout on a socket that is already
+        // gone" — and the save-liveness landmine (a save's bound is per queued request plus
+        // backlog) makes that difference user-visible, not merely slow.
+        let orphanedSeqWaiters = Array(seqWaiters.values)
+        seqWaiters.removeAll()
         lock.unlock()
         if let pending, pending.once.trip() {
             pending.continuation.resume(returning: nil)
+        }
+        for orphan in orphanedSeqWaiters where orphan.once.trip() {
+            orphan.continuation.resume(returning: nil)
         }
         guard !alreadyClosed else { return }
         onClosed?()

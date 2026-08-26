@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { realpathSync } from "node:fs";
 import { resolveLeafSymlinks, canonicalizeForWrite } from "../paths";
-import { OFFICE_DEADLINES_MS, officeCommandArgs, officeSheetsSetArgs, type OfficeCommandAction } from "../../panel/office-commands";
+import { OFFICE_DEADLINES_MS, officeCommandArgs, officeSheetsSetArgs, officeSheetsBatchArgs, officeBatchArgsTooLarge, OFFICE_BATCH_MAX_OPS, type OfficeCommandAction } from "../../panel/office-commands";
 import type { ToolRegistry } from "./registry";
 import type { PanelCommandAction, PanelCommandOutcome } from "../../panel/commands";
 import type { SessionDirs } from "../../sessions/dirs";
@@ -94,6 +94,7 @@ const SheetsArgs = z.object({
     "insert_rows", "insert_cols", "delete_rows", "delete_cols",
     "add_sheet", "delete_sheet", "rename_sheet",
     "format",
+    "batch",
   ]),
   /** Absolute (or, mirroring `resolveWithinAny`, resolved against the session's primary working
    *  directory if relative) — spec §2's own table. Required for EVERY verb; a missing path is
@@ -164,6 +165,31 @@ const SheetsArgs = z.object({
   name: z.string().min(1).max(256).optional(),
   /** `rename_sheet` ONLY — the sheet's new name. */
   newName: z.string().min(1).max(256).optional(),
+  /** `batch` ONLY — several sheet operations applied IN ORDER, in ONE call.
+   *
+   *  **Why this operand exists and the others do not compose into it.** `add_sheet`/`delete_sheet`/
+   *  `rename_sheet` are the sheet verbs that are position/identity-based and non-idempotent, and
+   *  building a workbook means several of them. Each as its own call pays a whole open+save cycle
+   *  and its own enqueue behind the app's ONE app-wide `OfficeHelperRequestQueue`; all of them in
+   *  one call pay that once.
+   *
+   *  **Bounded twice, both bounds computed rather than picked.** `OFFICE_BATCH_MAX_OPS` (20) is a
+   *  TIME bound — the whole batch rides ONE helper request and therefore ONE 30 s request timeout —
+   *  and is mirrored app-side in `OfficeWireBatchLimits.maxOperationsPerBatch`, the load-bearing
+   *  copy. The serialized size is checked separately, before dispatch, against the same 8 KiB
+   *  `panel_command.args` cap the wire enforces, so an over-size batch gets a sentence naming the
+   *  real limit instead of the wire's opaque schema error.
+   *
+   *  Every element's own operands are the same ones the single verbs take, with the same rules: a
+   *  `rename_sheet` element needs `newName`, and an `add_sheet`/`delete_sheet` element must not
+   *  carry one. A malformed element refuses the WHOLE batch, naming that element's 1-based index —
+   *  skipping it and reporting success is the silent-wrong-answer failure this tool's numeric
+   *  guards exist to prevent. */
+  ops: z.array(z.object({
+    op: z.enum(["add_sheet", "delete_sheet", "rename_sheet"]),
+    name: z.string().min(1).max(256),
+    newName: z.string().min(1).max(256).optional(),
+  })).min(1).max(OFFICE_BATCH_MAX_OPS).optional(),
   /** `format` ONLY — bold text on/off, an ABSOLUTE state (not a toggle): `true` makes the range
    *  bold regardless of its current state, `false` makes it explicitly not-bold, and — the operand
    *  this verb builds its whole contract on — LEAVING THIS KEY OUT of the call touches bold-ness not
@@ -475,6 +501,25 @@ export function registerSheetsTool(r: ToolRegistry, deps: SheetsToolDeps): void 
       + "• rename_sheet — path, name (the sheet to rename), newName. Can change which sheet is shown "
       + "as ACTIVE in a document a human already has open — a real, visible side effect on that tab "
       + "(a timing-dependent one, not guaranteed on every call).\n"
+      + "\u2022 batch \u2014 path, ops (a list of up to 20 operations, applied IN ORDER, in one "
+      + "call). Use this whenever you need more than one of add_sheet/delete_sheet/rename_sheet \u2014 building a "
+      + "workbook's sheet structure is the normal case. It is faster than separate calls because the whole batch "
+      + "opens the document once, applies every operation, and saves once.\n"
+      + "  Each operation is {op: \"add_sheet\"|\"delete_sheet\"|\"rename_sheet\", name, newName (rename_sheet only)}.\n"
+      + "  WHAT A FAILED BATCH DOES, exactly: operations run in order and STOP at the first "
+      + "failure. If any operation fails, NOTHING IS SAVED \u2014 the file on disk still holds its "
+      + "previous contents, and the refusal tells you which operation failed, why, how many "
+      + "applied before it, and which were never attempted. On disk a batch is all-or-nothing. "
+      + "This never saves a partial batch to salvage it: a silent partial write you did not ask "
+      + "for would be worse than a truthful refusal. One caveat you must act on: if a human "
+      + "already had the file open in a tab, the operations that DID apply are sitting unsaved in "
+      + "their tab, and every later write to that file will be refused until they save or discard "
+      + "them \u2014 retrying cannot clear that; only they can. The refusal says which case you are in.\n"
+      + "  Every operation that reports as applied was VERIFIED by re-reading the document \u2014 not "
+      + "merely dispatched. A timeout is still OUTCOME UNKNOWN: because the batch saves once at the "
+      + "end, either all of it reached the file or none of it did, so a single info call tells you "
+      + "which. Never re-send a batch on a timeout without reading first \u2014 these operations are "
+      + "position-based, so a blind resend can act on the wrong sheet entirely.\n"
       + "• format — path, sheet, range, and at least one of bold (boolean), italic (boolean), "
       + "numberFormat (\"general\"/\"number\"/\"percent\"/\"currency\"/\"date\" — a closed preset "
       + "set, not an arbitrary format code), align (\"left\"/\"center\"/\"right\"), width (column "
@@ -608,6 +653,27 @@ export function registerSheetsTool(r: ToolRegistry, deps: SheetsToolDeps): void 
           throw new Error('sheets rename_sheet needs `newName` — the sheet\'s new name.');
         }
       }
+      if (a.verb === "batch") {
+        if (!a.ops || a.ops.length === 0) {
+          throw new Error("sheets batch needs `ops` — a non-empty list of {op, name, newName?} "
+            + "operations applied in order.");
+        }
+        // Per-element operand rules, refusing the WHOLE batch and naming the 1-based index. The zod
+        // schema above cannot express these: it knows each element's field TYPES, not which fields a
+        // given `op` requires or forbids — the same reason the single verbs' rules live in this
+        // ladder rather than in the schema.
+        for (let i = 0; i < a.ops.length; i++) {
+          const o = a.ops[i]!;
+          if (o.op === "rename_sheet" && !o.newName) {
+            throw new Error(`sheets batch operation ${i + 1} is a rename_sheet and needs \`newName\` — `
+              + "the sheet's new name.");
+          }
+          if (o.op !== "rename_sheet" && o.newName !== undefined) {
+            throw new Error(`sheets batch operation ${i + 1} is a ${o.op} and must not carry `
+              + "`newName` — only rename_sheet uses it.");
+          }
+        }
+      }
       if (a.verb === "format") {
         if (a.bold === undefined && a.italic === undefined && a.numberFormat === undefined
             && a.align === undefined && a.width === undefined) {
@@ -648,6 +714,10 @@ export function registerSheetsTool(r: ToolRegistry, deps: SheetsToolDeps): void 
         args = officeCommandArgs(resolvedPath, { name: a.name! });
       } else if (a.verb === "rename_sheet") {
         args = officeCommandArgs(resolvedPath, { name: a.name!, newName: a.newName! });
+      } else if (a.verb === "batch") {
+        args = officeSheetsBatchArgs(resolvedPath, a.ops!);
+        const tooLarge = officeBatchArgsTooLarge(args, a.ops!.length);
+        if (tooLarge) throw new Error(`sheets batch: ${tooLarge}`);
       } else if (a.verb === "format") {
         // Built conditionally, one key at a time — never `{ ..., bold: a.bold }` with `a.bold`
         // possibly `undefined` — so an omitted operand is OMITTED from the wire object entirely

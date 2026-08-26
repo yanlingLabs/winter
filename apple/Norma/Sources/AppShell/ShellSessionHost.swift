@@ -1178,6 +1178,20 @@ final class ShellSessionHost: ObservableObject {
                     return try await client.sheetsManageSheet(docId: docId, op: op, name: name, newName: newName)
                 }
             },
+            // office-finish Job 2 — the batch closure, same `queue.run` routing and same
+            // throws-all-the-way-back posture as its single-op sibling directly above. It is ONE
+            // `queue.run` for the whole batch, never one per operation: the batch is one wire
+            // request by construction (`OfficeWireFrame.sheetsManageSheetBatch`'s own header), and
+            // `OfficeHelperRequestQueue`'s header forbids a nested `run` outright — an inner call
+            // awaits the outer's own tail, which deadlocks all office I/O permanently.
+            sheetsManageSheetBatch: { [weak supervisor] docId, ops in
+                try await queue.run {
+                    guard let client = supervisor?.client else {
+                        throw OfficeHelperClientError.serverError(reason: "the office helper is not running")
+                    }
+                    return try await client.sheetsManageSheetBatch(docId: docId, ops: ops)
+                }
+            },
             sheetsFormat: { [weak supervisor] docId, sheet, range, columnSpan, bold, italic, numberFormat, align, width in
                 try await queue.run {
                     guard let client = supervisor?.client else {
@@ -1221,6 +1235,16 @@ final class ShellSessionHost: ObservableObject {
                     }
                     return try await client.slidesManagePage(docId: docId, op: op, slide: slide, at: at,
                                                               to: to, layout: layout)
+                }
+            },
+            // office-finish Job 2 — the slides batch closure; see `sheetsManageSheetBatch` above
+            // for why it is ONE `queue.run` for the whole batch.
+            slidesManagePageBatch: { [weak supervisor] docId, ops in
+                try await queue.run {
+                    guard let client = supervisor?.client else {
+                        throw OfficeHelperClientError.serverError(reason: "the office helper is not running")
+                    }
+                    return try await client.slidesManagePageBatch(docId: docId, ops: ops)
                 }
             },
             docsInfo: { [weak supervisor] docId in

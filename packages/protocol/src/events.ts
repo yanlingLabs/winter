@@ -657,9 +657,9 @@ export const BROWSER_COMMAND_ACTIONS = [
  *  (`packages/core/src/panel/office-commands.ts`) read obviously and so a future non-office command
  *  can never collide with one of these. Three kinds, mirroring spec §2's tables exactly:
  *
- *   - `sheets` (11): info, read, set, insert_rows, insert_cols, delete_rows, delete_cols, add_sheet,
- *     delete_sheet, rename_sheet, format
- *   - `slides` (6): info, read, set_text, add_slide, delete_slide, reorder
+ *   - `sheets` (12): info, read, set, insert_rows, insert_cols, delete_rows, delete_cols, add_sheet,
+ *     delete_sheet, rename_sheet, format, batch
+ *   - `slides` (7): info, read, set_text, add_slide, delete_slide, reorder, batch
  *   - `docs` (5): info, read, replace, insert, append
  *
  *  Every kind's `info`/`read` are the read half — `info` doubles as the drivability probe, spec §1 —
@@ -671,8 +671,10 @@ export const OFFICE_COMMAND_ACTIONS = [
   "office.sheets.delete_rows", "office.sheets.delete_cols",
   "office.sheets.add_sheet", "office.sheets.delete_sheet", "office.sheets.rename_sheet",
   "office.sheets.format",
+  "office.sheets.batch",
   "office.slides.info", "office.slides.read", "office.slides.set_text",
   "office.slides.add_slide", "office.slides.delete_slide", "office.slides.reorder",
+  "office.slides.batch",
   "office.docs.info", "office.docs.read", "office.docs.replace",
   "office.docs.insert", "office.docs.append",
 ] as const;

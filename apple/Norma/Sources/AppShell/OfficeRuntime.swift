@@ -1719,6 +1719,11 @@ final class OfficeRuntime: ObservableObject {
                            _ op: OfficeSheetsResizeOp, _ selectionRange: String) async throws -> (usedEndColumn: Int, usedEndRow: Int)
         var sheetsManageSheet: (_ docId: String, _ op: OfficeSheetsManageSheetOp, _ name: String,
                                 _ newName: String?) async throws -> [String]
+        /// office-finish Job 2 — N sheet operations in ONE helper request, returning the post-state
+        /// sheet list plus the prefix ledger. Same no-reducer, throws-through posture as every
+        /// sibling; a per-operation FAILURE is not a throw, it is `failure` in the returned tuple.
+        var sheetsManageSheetBatch: (_ docId: String, _ ops: [OfficeSheetsManageSheetOperation])
+            async throws -> (sheets: [String], applied: Int, failure: String?)
         /// office-agent-tools T5 — same no-reducer, throws-through posture as every sibling above.
         /// See `OfficeRuntime.sheetsFormat`'s own header (below) for the full contract this closure
         /// carries — this field only threads it through, one more layer of the same shape.
@@ -1732,6 +1737,9 @@ final class OfficeRuntime: ObservableObject {
         var slidesSetText: (_ docId: String, _ slide: Int, _ title: String?, _ body: String?) async throws -> [String]
         var slidesManagePage: (_ docId: String, _ op: OfficeSlidesManagePageOp, _ slide: Int?, _ at: Int?,
                                _ to: Int?, _ layout: OfficeSlidesLayoutPreset?) async throws -> Int
+        /// office-finish Job 2 — the slides counterpart to `sheetsManageSheetBatch` above.
+        var slidesManagePageBatch: (_ docId: String, _ ops: [OfficeSlidesManagePageOperation])
+            async throws -> (slideCount: Int, applied: Int, failure: String?)
         /// office-agent-tools T7 — docs, same no-reducer, throws-through posture as every sibling
         /// above.
         var docsInfo: (_ docId: String) async throws -> (pages: Int, paragraphs: Int, characters: Int)
@@ -1996,6 +2004,14 @@ final class OfficeRuntime: ObservableObject {
         try await driver.sheetsManageSheet(docId, op, name, newName)
     }
 
+    /// office-finish Job 2 — N sheet operations in ONE helper request. See
+    /// `OfficeWireFrame.sheetsManageSheetBatch` for the one-request contract and
+    /// `sheetsManageSheetBatchOk` for the prefix ledger this returns.
+    func sheetsManageSheetBatch(docId: String, ops: [OfficeSheetsManageSheetOperation]) async throws
+        -> (sheets: [String], applied: Int, failure: String?) {
+        try await driver.sheetsManageSheetBatch(docId, ops)
+    }
+
     /// office-agent-tools T5 — **the shared function this task's own sharing obligation names**:
     /// applies `bold`/`italic`/`numberFormat`/`align`/`width` over an A1 `range` on a named sheet,
     /// every operand optional and independent (`nil` means "leave this attribute alone," never
@@ -2044,6 +2060,12 @@ final class OfficeRuntime: ObservableObject {
     func slidesManagePage(docId: String, op: OfficeSlidesManagePageOp, slide: Int?, at: Int?, to: Int?,
                           layout: OfficeSlidesLayoutPreset?) async throws -> Int {
         try await driver.slidesManagePage(docId, op, slide, at, to, layout)
+    }
+
+    /// office-finish Job 2 — the slides counterpart to `sheetsManageSheetBatch`.
+    func slidesManagePageBatch(docId: String, ops: [OfficeSlidesManagePageOperation]) async throws
+        -> (slideCount: Int, applied: Int, failure: String?) {
+        try await driver.slidesManagePageBatch(docId, ops)
     }
 
     // MARK: - office-agent-tools T7: docs — same no-reducer, throws-through posture as sheets/slides
@@ -2813,9 +2835,47 @@ final class OfficeRuntime: ObservableObject {
     /// Injectable so tests can drive the machine without sleeping for real. Production never sets it.
     var autoSaveDebounceInterval: TimeInterval = OfficeRuntime.autoSaveDebounceIntervalDefault
 
-    /// ⛔ **STILL DEFAULT OFF — but for a THIRD blocker, found only by the office harness, and
-    /// nothing like the first two. Rounds 1 and 2 are both genuinely CLOSED.** Every mechanism on
-    /// this page is MEASURED; round 1's were not, and that is still the most important thing here.
+    /// ✅ **ARMED — office-finish, after round 4 closed the last blocker.** This shipped OFF through
+    /// three rounds; the history below is kept in full, in order, because it is the record of what
+    /// each round measured and what each got wrong. Every mechanism on this page is MEASURED; round
+    /// 1's were not, and that is still the most important thing here.
+    ///
+    /// ### Round 4 (office-finish) — the harness blocker is CLOSED, and it was a real defect
+    ///
+    /// Round 3 parked this because arming collapsed the office harness (76/103 in 442 s, against
+    /// 102/103 in ~155 s), and correctly refused to write that off as "the harness's problem". It
+    /// was not. The defect was real, one layer below both: `OfficeWireConnection` supported ONE
+    /// outstanding wait, and `OfficeHelperClient.expectReply` threw `.unexpectedReply` on a seq
+    /// mismatch — **consuming and discarding the frame**. Since that frame is another request's
+    /// answer, one interleave both failed the request that received it AND starved the request that
+    /// was owed it, permanently. Instant save merely made a second writer exist for the first time.
+    ///
+    /// **The fix is the demultiplexer** (`OfficeWireConnection.nextFrame(seq:timeout:)` plus a
+    /// lock-guarded `OfficeWireSeqAllocator`, since a demux keyed on a seq two racing callers could
+    /// both mint would misroute SILENTLY). Red/green/control, hermetic, in
+    /// `OfficeSupervisorTests`: GREEN 2/2; RED (`expectReply` reverted, one variable) 2/2 fail with
+    /// the harness's own signature; CONTROL (skip-the-mismatched-frame instead of demultiplexing)
+    /// 2/2 fail — it loses the frame AND does not fix the concurrent case.
+    ///
+    /// **The three gates arming is taken on, all re-measured on the shipping build:**
+    ///  - the testifying drill `testAnArmedInstantSaveFollowedImmediatelyByAClose…` — **3/3 pass**,
+    ///    on top of round 3's 9/9-vs-3/3;
+    ///  - the **office harness, ARMED: 103/103 four times** (149–150 s), i.e. better than the base
+    ///    commit's own 102/103 — measured four times because the original failure was a cascade and
+    ///    one clean run would prove little;
+    ///  - the **full Swift suite: 3086/3087**. The single failure is
+    ///    `OfficeSlidesCommandTests.testLiveSetTextTitleOnlyAndBodyOnly…`, which is the documented
+    ///    rotating isolation-clean live drill (the base commit scores 3082/**1** on this machine with
+    ///    the same shape). **Arming is provably inert for it**: `autoSaveEnabled` gates exactly one
+    ///    entry point, `noteEditActivity`, whose only callers are the six input doors in this file,
+    ///    and that test posts no input at all — it drives `set_text` through the broker. It passes
+    ///    **5/5 in isolation** on the same armed binary.
+    ///
+    /// ⛔ **What is still true and must stay true:** instant save makes the app an UNPROMPTED writer
+    /// to the wire. Round 3's warning was right; what changed is that the wire can now cope with a
+    /// second writer instead of the invariant being held by convention at 29 call sites. Any NEW
+    /// surface that assumes the app only speaks when spoken to is still a hazard — the difference is
+    /// that it would now have to bypass `expectReply` to become one.
     ///
     /// **Rounds 1 and 2 are done** — the ordering bug (round 1) was fixed in `performSave`, and the
     /// post-save close window (round 2) is fixed by `awaitCloseBarrier`. In counts
@@ -2827,7 +2887,7 @@ final class OfficeRuntime: ObservableObject {
     ///  - armed office-adjacent suites **358/0**, armed FULL Swift suite **3084/0** — cleaner than
     ///    the base commit `69c9c230` scored on the same machine in the same session (3082/**1**).
     ///
-    /// ### Round 3's blocker — ARMING DESYNCHRONIZES THE OFFICE HARNESS'S WIRE
+    /// ### Round 3's blocker — ARMING DESYNCHRONIZED THE OFFICE HARNESS'S WIRE (CLOSED in round 4)
     /// The Swift suites are all green armed. The **office harness is not**, and it is the surface
     /// that catches this because it is the one that talks to `OfficeHelperClient` DIRECTLY:
     ///
@@ -2854,7 +2914,10 @@ final class OfficeRuntime: ObservableObject {
     /// required gate red, and the reason is that instant save makes the app an UNPROMPTED writer to
     /// the wire for the first time. Any surface that assumed the app only speaks when spoken to now
     /// has a second writer. The harness is one such surface; the sweep for others is the work, and it
-    /// has not been done. **Do not flip this without doing it.**
+    /// has not been done. **Do not flip this without doing it.** — *round 4 did it: the app-side
+    /// enumeration is re-verified in `.superpowers/research/office-finish-report.md` (29 client
+    /// sites, every one inside `queue.run`, counted not eyeballed), and the wire itself no longer
+    /// depends on that enumeration staying true.*
     ///
     /// ### Round 1 — my stated mechanisms were wrong, and the decision was still right
     /// Arming this lost the user's typed content in two live Calc drills. I named two candidates and
@@ -2912,7 +2975,7 @@ final class OfficeRuntime: ObservableObject {
     /// hard way: **a CRITERION is a claim too.** The drill this was parked against passed, and the
     /// pass meant nothing; only probing what it actually did revealed that.
     ///
-    var autoSaveEnabled: Bool = false
+    var autoSaveEnabled: Bool = true
 
     private var autoSaveTasks: [String: Task<Void, Never>] = [:]
     private var autoSaveInFlight: Set<String> = []

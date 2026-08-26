@@ -1,4 +1,4 @@
-import { OFFICE_COMMAND_ACTIONS } from "@norma/protocol";
+import { OFFICE_COMMAND_ACTIONS, PANEL_COMMAND_ARGS_MAX_JSON_BYTES } from "@norma/protocol";
 
 // ================================================================================================
 // office-agent-tools T1 (task-1-brief.md; design
@@ -36,7 +36,7 @@ export type OfficeCommandAction = (typeof OFFICE_COMMAND_ACTIONS)[number];
  *  wrongly gated as a write merely over-asks for approval, never under-asks. But "wrongly classified,
  *  safely" is still wrong, and Task 4 needs this partition to be RIGHT, not merely safe-by-default.
  *  So the true ground truth is no longer this filter — it is
- *  `office-commands.test.ts`'s literal, hand-spelled `EXPECTED_SIDE` table, naming all 22 verbs one
+ *  `office-commands.test.ts`'s literal, hand-spelled `EXPECTED_SIDE` table, naming all 24 verbs one
  *  by one. This filter is what Task 4 actually reads at runtime (kept exactly as it was, per that
  *  review's own instruction: "keep the fail-safe default"); the hand-spelled table is what PROVES
  *  the filter's output is correct, not merely internally consistent with itself. */
@@ -225,9 +225,9 @@ function deadlinesFor<A extends readonly OfficeCommandAction[]>(
 }
 
 /** Every `OFFICE_COMMAND_ACTIONS` value maps to exactly one of the two deadlines above. Composed
- *  from the two partitioned arrays rather than hand-typed as 22 literal entries — `browser.ts`'s own
+ *  from the two partitioned arrays rather than hand-typed as 24 literal entries — `browser.ts`'s own
  *  `BROWSER_DEADLINES_MS` hand-types nine because each of those nine has an INDEPENDENTLY reasoned
- *  number; these 22 do not, they have exactly two, so hand-typing here would be twenty duplicate
+ *  number; these 24 do not, they have exactly two, so hand-typing here would be twenty-two duplicate
  *  lines with nothing left to say that the read/write split above hasn't already said.
  *  `office-commands.test.ts` carries the EXACT-EQUALITY tripwire against `OFFICE_COMMAND_ACTIONS` —
  *  the task brief's own words, "the identical exact-equality tripwire" the browser suite has. */
@@ -292,4 +292,82 @@ export function officeSheetsSetArgs(
   values: ReadonlyArray<ReadonlyArray<string | number | boolean>>,
 ): Record<string, unknown> {
   return { path, sheet, range, values };
+}
+
+/**
+ * office-finish Job 2 — the batch verbs' own dedicated, typed builders (`sheets batch`,
+ * `slides batch`), the same shape `officeSheetsSetArgs` above is and for the same stated reason:
+ * `officeCommandArgs` is primitives-only by contract, and `ops` is a nested array.
+ *
+ * **Every operation object is built KEY BY KEY, conditionally** — never `{ ...op }` and never
+ * `{ at: op.at }` with `op.at` possibly `undefined`. That is C6's absent-means-untouched contract
+ * (`sheets.ts`'s `format` builder states it in full), applied per element inside a loop, which is
+ * precisely where it is easiest to get wrong: `JSON.stringify` happens to drop an `undefined` value
+ * today, so a spread would look correct until the day a field defaults to `null` instead, at which
+ * point the app would read a present-but-meaningless key. Enforced here, not hoped for downstream.
+ *
+ * These take ALREADY-ZOD-VALIDATED operations. The `ops.length` ceiling and the serialized-byte
+ * check live in the tools, before dispatch, so a refusal names the real limit instead of surfacing
+ * the wire's opaque `PANEL_COMMAND_ARGS_MAX_JSON_BYTES` schema error.
+ */
+export function officeSheetsBatchArgs(
+  path: string,
+  ops: ReadonlyArray<{ op: string; name: string; newName?: string }>,
+): Record<string, unknown> {
+  return {
+    path,
+    ops: ops.map((o) => {
+      const out: Record<string, unknown> = { op: o.op, name: o.name };
+      if (o.newName !== undefined) out.newName = o.newName;
+      return out;
+    }),
+  };
+}
+
+export function officeSlidesBatchArgs(
+  path: string,
+  ops: ReadonlyArray<{ op: string; slide?: number; at?: number; to?: number; layout?: string }>,
+): Record<string, unknown> {
+  return {
+    path,
+    ops: ops.map((o) => {
+      const out: Record<string, unknown> = { op: o.op };
+      if (o.slide !== undefined) out.slide = o.slide;
+      if (o.at !== undefined) out.at = o.at;
+      if (o.to !== undefined) out.to = o.to;
+      if (o.layout !== undefined) out.layout = o.layout;
+      return out;
+    }),
+  };
+}
+
+/**
+ * office-finish Job 2 — the ceiling on how many operations one batch may carry, mirrored from the
+ * Swift wire's own `OfficeWireBatchLimits.maxOperationsPerBatch`. **Two hand-mirrored constants, and
+ * that is deliberate rather than sloppy**: the daemon's copy is what makes a refusal immediate and
+ * specific, the Swift copy is what makes it TRUE (`panel_command.args` is
+ * `z.record(z.string(), z.unknown())` with only a byte cap, and the daemon is not the only possible
+ * producer of one). The same two-layer arrangement every numeric office operand already uses.
+ *
+ * The number is a TIME bound, not a taste: a batch is ONE wire request, so all N operations share
+ * one 30 s `requestTimeout`. Measured: a full 20-operation `sheets batch` through the real helper on
+ * a real workbook costs 4.57 s for the whole call (open + 20 operations + save + atomic place) —
+ * `OfficeSheetsCommandTests.testLiveSheetsBatchOfTwentyOperationsAppliesThemAllWellInsideOne
+ * RequestTimeout` asserts that bound, it does not merely print it.
+ */
+export const OFFICE_BATCH_MAX_OPS = 20;
+
+/**
+ * office-finish Job 2 — the pre-dispatch byte check. `PANEL_COMMAND_ARGS_MAX_JSON_BYTES` is enforced
+ * at the wire as a field-level zod `.refine` whose message names neither the tool, the verb, nor the
+ * operation — actionable to nobody. This runs first, in the tool, and returns a sentence a model can
+ * do something with. Measures exactly what the wire measures (`Buffer.byteLength` of the serialized
+ * `args`, UTF-8 bytes) so the two can never disagree about whether a given call fits.
+ */
+export function officeBatchArgsTooLarge(args: Record<string, unknown>, opCount: number): string | null {
+  const bytes = Buffer.byteLength(JSON.stringify(args), "utf8");
+  if (bytes <= PANEL_COMMAND_ARGS_MAX_JSON_BYTES) return null;
+  return `this batch of ${opCount} operations serializes to ${bytes} bytes, over the `
+    + `${PANEL_COMMAND_ARGS_MAX_JSON_BYTES}-byte limit for one command. Send fewer operations per call, `
+    + "or shorten the names.";
 }

@@ -532,8 +532,10 @@ final class OfficeDocsCommandTests: XCTestCase {
                         + "marker text: \(text)")
         // **What "one press" is proven against: the SAVED BYTES on disk, not a flag.**
         //
-        // The save is issued EXPLICITLY, because `autoSaveEnabled` ships **OFF** (see its own header
-        // for the post-save close-window blocker that keeps it parked). Waiting for the document to
+        // The save is issued EXPLICITLY rather than relying on instant save. `autoSaveEnabled` now
+        // ships **ON** (office-finish armed it — see its own header for the four rounds), but this
+        // drill must not depend on that: it would then be timing-dependent on the 0.9 s debounce,
+        // which is exactly the defect that made round 3's arming criterion vacuous. Waiting for the document to
         // go clean is therefore waiting for THIS save to have landed, and reading `content.xml` back
         // afterwards proves the undo both happened AND was persisted — strictly stronger than
         // asserting `dirty`, and what makes this test its own positive control: a `postUndo` that

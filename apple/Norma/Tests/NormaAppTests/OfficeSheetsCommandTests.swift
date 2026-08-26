@@ -1829,4 +1829,88 @@ final class OfficeSheetsCommandTests: XCTestCase {
         XCTAssertTrue(repainted, "the canvas never repainted — a sheets set on an open, clean document "
                      + "must invalidate and repaint the tile the same way a human's own edit does")
     }
+
+    // MARK: - office-finish Job 2: the batch verb, live
+
+    /// **The batch's central claim, proven against the real bytes: on disk a batch is
+    /// ALL-OR-NOTHING.** A batch whose MIDDLE operation fails must leave the file byte-identical to
+    /// what it was before the call, and must come back as a REFUSAL carrying the per-operation
+    /// ledger — never as a success, and never as a partly-saved document nobody asked for.
+    ///
+    /// The failing operation is real, not injected: `delete_sheet` on a name that does not exist. So
+    /// this drives the same LOK guard production does, through the real helper, on a real workbook.
+    ///
+    /// **Why the hash, and not "the result said it refused".** "It refused" is a claim about the
+    /// message; "the file did not change" is a claim about the disk, and only the second is what the
+    /// tool description promises a model. The control arm named in
+    /// `.superpowers/research/office-finish-report.md` neuters the throw (returns the ledger as a
+    /// SUCCESS instead), which leaves the refusal-shaped assertions unreachable but makes THIS
+    /// assertion go red — which is how we know it is the load-bearing one.
+    func testLiveSheetsBatchWithAFailingMiddleOperationSavesNothingAndReturnsTheLedger() async throws {
+        try requireLiveEngine()
+        let path = try makeWritableCopy(of: "gate.xlsx")
+        let stateDir = makeScratchDirectory()
+        let host = makeLiveHost(stateDir: stateDir, dirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)])
+        await host.directory.refresh()
+
+        let before = try Data(contentsOf: URL(fileURLWithPath: path))
+
+        let sent = await send(command("office.sheets.batch", args: [
+            "path": path,
+            "ops": [
+                ["op": "add_sheet", "name": "BatchOne"],
+                ["op": "delete_sheet", "name": "ThisSheetDoesNotExist"],
+                ["op": "add_sheet", "name": "BatchThree"],
+            ],
+        ], sessionId: "S1", commandId: "pcmd-batch-partial"), through: host)
+
+        XCTAssertFalse(sent.ok, "a batch with a failing operation must REFUSE: \(sent)")
+        let text = sent.result ?? ""
+        XCTAssertTrue(text.contains("stopped at operation 2 of 3"), "the ledger must name the failed operation: \(text)")
+        XCTAssertTrue(text.contains("operation 3 was not attempted"), "the ledger must account for the tail: \(text)")
+        XCTAssertTrue(text.contains("NOTHING WAS SAVED"), "the ledger must state the disk is unchanged: \(text)")
+
+        let after = try Data(contentsOf: URL(fileURLWithPath: path))
+        XCTAssertEqual(before, after,
+                       "a partially-applied batch must leave the file BYTE-IDENTICAL — a silent partial "
+                       + "save is the outcome this design exists to refuse")
+    }
+
+    /// The green half, and the **timing measurement the batch's own N ceiling is set from**: a full
+    /// 20-operation batch — `OfficeWireBatchLimits.maxOperationsPerBatch`, the cap itself — through
+    /// the real helper on a real workbook, in one call.
+    ///
+    /// The assertion is not decorative. The whole batch rides ONE helper request and therefore ONE
+    /// `requestTimeout` (30 s, `OfficeHelperSupervisor.Configuration.handshakeTimeout` reused as
+    /// `requestTimeout`), so the cap is only defensible while N operations finish FAR inside it. This
+    /// bounds the measured whole-call time — open, 20 operations, save, place — at 20 s, and the
+    /// per-operation cost recorded in `.superpowers/research/office-finish-report.md` comes from this
+    /// drill's own printed elapsed time.
+    func testLiveSheetsBatchOfTwentyOperationsAppliesThemAllWellInsideOneRequestTimeout() async throws {
+        try requireLiveEngine()
+        let path = try makeWritableCopy(of: "gate.xlsx")
+        let stateDir = makeScratchDirectory()
+        let host = makeLiveHost(stateDir: stateDir, dirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)])
+        await host.directory.refresh()
+
+        let count = OfficeWireBatchLimits.maxOperationsPerBatch
+        let ops = (0..<count).map { ["op": "add_sheet", "name": "B\($0)"] }
+        let started = Date()
+        let sent = await send(command("office.sheets.batch", args: ["path": path, "ops": ops],
+                                      sessionId: "S1", commandId: "pcmd-batch-20"), through: host)
+        let elapsed = Date().timeIntervalSince(started)
+        print("[MEASURE] a \(count)-operation sheets batch, whole call (open+ops+save+place): "
+              + String(format: "%.2f", elapsed) + "s")
+
+        XCTAssertTrue(sent.ok, "\(sent)")
+        XCTAssertTrue(sent.result?.contains("applied \(count) operations") == true, "\(sent)")
+        for index in 0..<count {
+            XCTAssertTrue(sent.result?.contains("B\(index)") == true,
+                          "the post-state sheet list must name every sheet the batch added: \(sent)")
+        }
+        XCTAssertLessThan(elapsed, 20.0,
+                          "a full \(count)-operation batch took \(elapsed)s — it rides ONE 30s request "
+                          + "timeout, so the ceiling is only defensible while this stays far inside it")
+    }
+
 }

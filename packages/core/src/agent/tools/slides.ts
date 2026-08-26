@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { OFFICE_DEADLINES_MS, officeCommandArgs, type OfficeCommandAction } from "../../panel/office-commands";
+import { OFFICE_DEADLINES_MS, officeCommandArgs, officeSlidesBatchArgs, officeBatchArgsTooLarge, OFFICE_BATCH_MAX_OPS, type OfficeCommandAction } from "../../panel/office-commands";
 import type { ToolRegistry } from "./registry";
 import type { PanelCommandAction, PanelCommandOutcome } from "../../panel/commands";
 import type { SessionDirs } from "../../sessions/dirs";
@@ -135,7 +135,7 @@ const SlidesLayoutPreset = z.enum([
 export type SlidesLayoutPreset = z.infer<typeof SlidesLayoutPreset>;
 
 const SlidesArgs = z.object({
-  verb: z.enum(["info", "read", "set_text", "add_slide", "delete_slide", "reorder"]),
+  verb: z.enum(["info", "read", "set_text", "add_slide", "delete_slide", "reorder", "batch"]),
   /** Absolute (or resolved against the session's primary working directory if relative) — spec §2's
    *  own table. Required for EVERY verb; a missing path is malformed, never defaulted — matches
    *  `sheets.ts`'s identical wire-strictness rule for the same operand. */
@@ -173,6 +173,31 @@ const SlidesArgs = z.object({
   /** `reorder` ONLY — the 1-based position `slide` moves TO. Required for `reorder` (checked below) —
    *  there is no sensible reorder without a target. */
   to: z.number().int().positive().max(10_000).optional(),
+  /** `batch` ONLY — several slide operations applied IN ORDER, in ONE call.
+   *
+   *  **Why it exists.** `add_slide`/`delete_slide`/`reorder` are the position-based, non-idempotent
+   *  slide verbs, and building a deck means many of them. Each as its own tool call pays a whole
+   *  open+save cycle plus its own enqueue behind the app's ONE app-wide office request queue; all of
+   *  them in one call pay that once.
+   *
+   *  **Bounded twice, both computed.** `OFFICE_BATCH_MAX_OPS` (20) is a TIME bound — the whole batch
+   *  rides ONE helper request and so ONE 30 s request timeout — mirrored app-side in
+   *  `OfficeWireBatchLimits.maxOperationsPerBatch`, which is the load-bearing copy. Serialized size
+   *  is checked separately, before dispatch, against the same 8 KiB cap the wire enforces.
+   *
+   *  Element operands are the single verbs' own, with the same combination rules: an `add_slide`
+   *  element may carry `at`/`layout` and must not carry `slide`/`to`; a `delete_slide` element needs
+   *  `slide` alone; a `reorder` element needs `slide` and `to`. Every index is bounded exactly as its
+   *  top-level twin is, for exactly the same reason (`1e30` is an integer to `Number.isInteger`, and
+   *  an unbounded index reaches an `Int(Double)` app-side that TRAPS and aborts the app). A malformed
+   *  element refuses the WHOLE batch, naming its 1-based index. */
+  ops: z.array(z.object({
+    op: z.enum(["add_slide", "delete_slide", "reorder"]),
+    slide: z.number().int().positive().max(10_000).optional(),
+    at: z.number().int().positive().max(10_000).optional(),
+    to: z.number().int().positive().max(10_000).optional(),
+    layout: SlidesLayoutPreset.optional(),
+  })).min(1).max(OFFICE_BATCH_MAX_OPS).optional(),
 });
 type SlidesArgs = z.infer<typeof SlidesArgs>;
 
@@ -320,6 +345,25 @@ export function registerSlidesTool(r: ToolRegistry, deps: SlidesToolDeps): void 
       + "• delete_slide — path, slide. Refused if it would delete the presentation's LAST "
       + "slide.\n"
       + "• reorder — path, slide (which slide), to (the 1-based position it moves to).\n"
+      + "\u2022 batch \u2014 path, ops (a list of up to 20 operations, applied IN ORDER, in one "
+      + "call). Use this whenever you need more than one of add_slide/delete_slide/reorder \u2014 building a "
+      + "deck is the normal case. It is faster than separate calls because the whole batch "
+      + "opens the document once, applies every operation, and saves once.\n"
+      + "  Each operation is {op: \"add_slide\"|\"delete_slide\"|\"reorder\", slide, at, to, layout} \u2014 the same operands those verbs take singly.\n"
+      + "  WHAT A FAILED BATCH DOES, exactly: operations run in order and STOP at the first "
+      + "failure. If any operation fails, NOTHING IS SAVED \u2014 the file on disk still holds its "
+      + "previous contents, and the refusal tells you which operation failed, why, how many "
+      + "applied before it, and which were never attempted. On disk a batch is all-or-nothing. "
+      + "This never saves a partial batch to salvage it: a silent partial write you did not ask "
+      + "for would be worse than a truthful refusal. One caveat you must act on: if a human "
+      + "already had the file open in a tab, the operations that DID apply are sitting unsaved in "
+      + "their tab, and every later write to that file will be refused until they save or discard "
+      + "them \u2014 retrying cannot clear that; only they can. The refusal says which case you are in.\n"
+      + "  Every operation that reports as applied was VERIFIED by re-reading the document \u2014 not "
+      + "merely dispatched. A timeout is still OUTCOME UNKNOWN: because the batch saves once at the "
+      + "end, either all of it reached the file or none of it did, so a single info call tells you "
+      + "which. Never re-send a batch on a timeout without reading first \u2014 these operations are "
+      + "position-based, so a blind resend can act on the wrong slide entirely.\n"
       + "add_slide/delete_slide/reorder can each change which slide is shown as ACTIVE in a "
       + "document a human already has open — a real, visible side effect on that tab (mirrors "
       + "sheets' own rename_sheet residual; each of these three verbs' own mechanism moves the "
@@ -357,6 +401,42 @@ export function registerSlidesTool(r: ToolRegistry, deps: SlidesToolDeps): void 
         if (a.title === undefined && a.body === undefined) {
           throw new Error("slides set_text needs at least one of `title`, `body` — an absent key "
             + "means \"leave alone,\" so a call naming neither would do nothing.");
+        }
+      }
+      if (a.verb === "batch") {
+        if (!a.ops || a.ops.length === 0) {
+          throw new Error("slides batch needs `ops` — a non-empty list of operations applied in order.");
+        }
+        // Per-element combination rules, refusing the WHOLE batch and naming the 1-based index. The
+        // schema knows each element's field TYPES; it cannot express which fields a given `op`
+        // requires or forbids — the same reason the single verbs' rules live in this ladder.
+        for (let i = 0; i < a.ops.length; i++) {
+          const o = a.ops[i]!;
+          const n = i + 1;
+          if (o.op === "add_slide") {
+            if (o.slide !== undefined || o.to !== undefined) {
+              throw new Error(`slides batch operation ${n} is an add_slide — it takes \`at\` and `
+                + "`layout`, never `slide` or `to`.");
+            }
+          } else if (o.op === "delete_slide") {
+            if (o.slide === undefined) {
+              throw new Error(`slides batch operation ${n} is a delete_slide and needs \`slide\` — `
+                + "which slide (1-based) to remove.");
+            }
+            if (o.at !== undefined || o.to !== undefined || o.layout !== undefined) {
+              throw new Error(`slides batch operation ${n} is a delete_slide — it takes \`slide\` and `
+                + "nothing else.");
+            }
+          } else {
+            if (o.slide === undefined || o.to === undefined) {
+              throw new Error(`slides batch operation ${n} is a reorder and needs both \`slide\` and `
+                + "`to` — the 1-based slide to move and where it goes.");
+            }
+            if (o.at !== undefined || o.layout !== undefined) {
+              throw new Error(`slides batch operation ${n} is a reorder — it takes \`slide\` and \`to\`, `
+                + "and nothing else.");
+            }
+          }
         }
       }
       if (a.verb === "reorder") {
@@ -402,6 +482,10 @@ export function registerSlidesTool(r: ToolRegistry, deps: SlidesToolDeps): void 
         if (a.at !== undefined) fields.at = a.at;
         if (a.layout !== undefined) fields.layout = a.layout;
         args = officeCommandArgs(resolvedPath, fields);
+      } else if (a.verb === "batch") {
+        args = officeSlidesBatchArgs(resolvedPath, a.ops!);
+        const tooLarge = officeBatchArgsTooLarge(args, a.ops!.length);
+        if (tooLarge) throw new Error(`slides batch: ${tooLarge}`);
       } else if (a.verb === "reorder") {
         args = officeCommandArgs(resolvedPath, { slide: a.slide!, to: a.to! });
       } else {

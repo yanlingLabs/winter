@@ -93,8 +93,8 @@ final class OfficeCommandConsumerTests: XCTestCase {
     /// All 22 verbs `OFFICE_COMMAND_ACTIONS` (events.ts) names as of T1 — hand-spelled here rather
     /// than imported, since there is deliberately NO Swift mirror of that list to import FROM (this
     /// file's own header, and `OfficeCommandConsumer.swift`'s). If the TS list drifts from this one,
-    /// `office-commands.test.ts`'s own count assertion (11 sheets + 6 slides + 5 docs = 22) is the
-    /// tripwire that catches it on the TS side; this array exists only to drive the SAME 22 through
+    /// `office-commands.test.ts`'s own count assertion (12 sheets + 7 slides + 5 docs = 24) is the
+    /// tripwire that catches it on the TS side; this array exists only to drive these 22 through
     /// the Swift consumer in one test, not to be a second source of truth.
     static let allOfficeVerbsAsOfT1 = [
         "office.sheets.info", "office.sheets.read", "office.sheets.set",
@@ -111,7 +111,7 @@ final class OfficeCommandConsumerTests: XCTestCase {
     /// T3 gave `sheets.info`/`.read` real (async) behaviour; T4 gave `sheets.set`/`.insert_rows`/
     /// `.insert_cols`/`.delete_rows`/`.delete_cols`/`.add_sheet`/`.delete_sheet`/`.rename_sheet` the
     /// same; T5 adds `sheets.format`; T6 adds every `slides` verb (`info`/`read`/`set_text`/
-    /// `add_slide`/`delete_slide`/`reorder`) — 17 of the 22 verbs are real now, leaving 5 STILL on
+    /// `add_slide`/`delete_slide`/`reorder`) — 17 of the 22 verbs were real at T6, leaving 5 STILL on
     /// T1's own synchronous refusal shell (every `docs` verb — Stage C's last remaining stage's own
     /// job). Every pre-existing test below that needs "an office verb that still answers
     /// synchronously with the not-implemented refusal, for ANY verb" picks from this list rather than
@@ -243,7 +243,7 @@ final class OfficeCommandConsumerTests: XCTestCase {
     }
 
     /// A verb this file cannot even parse into (kind, verb) — still answered, never a crash. Nothing
-    /// TODAY sends this (the daemon only ever emits `office.<kind>.<verb>`, all 22 well-formed), but
+    /// TODAY sends this (the daemon only ever emits `office.<kind>.<verb>`, all 24 well-formed), but
     /// `action` decodes as a plain `String` with no shape guarantee (`SessionEvent.swift`), so this
     /// file must not assume its own parser succeeds — the same posture
     /// `testUnknownPanelCommandVerbStillDecodes` (NormaProtocol) takes for the wire layer beneath it.
@@ -328,6 +328,15 @@ final class OfficeCommandConsumerTests: XCTestCase {
         sheetsManageSheet: @escaping (String, OfficeSheetsManageSheetOp, String, String?) async throws -> [String] = { _, _, _, _ in
             throw OfficeHelperClientError.serverError(reason: "sheetsManageSheet not stubbed for this test")
         },
+        // office-finish Job 2 — same "explicit stub per test, throw if unstubbed" shape.
+        sheetsManageSheetBatch: @escaping (String, [OfficeSheetsManageSheetOperation]) async throws
+            -> (sheets: [String], applied: Int, failure: String?) = { _, _ in
+            throw OfficeHelperClientError.serverError(reason: "sheetsManageSheetBatch not stubbed for this test")
+        },
+        slidesManagePageBatch: @escaping (String, [OfficeSlidesManagePageOperation]) async throws
+            -> (slideCount: Int, applied: Int, failure: String?) = { _, _ in
+            throw OfficeHelperClientError.serverError(reason: "slidesManagePageBatch not stubbed for this test")
+        },
         // office-agent-tools T5 — same "explicit stub per test, throw if unstubbed" shape as every
         // sibling above.
         sheetsFormat: @escaping (String, String, String, String?, Bool?, Bool?, OfficeSheetsNumberFormatPreset?,
@@ -393,9 +402,11 @@ final class OfficeCommandConsumerTests: XCTestCase {
             undoDepth: { _ in nil },
             sheetsInfo: sheetsInfo, sheetsRead: sheetsRead,
             sheetsSet: sheetsSet, sheetsResize: sheetsResize, sheetsManageSheet: sheetsManageSheet,
+            sheetsManageSheetBatch: sheetsManageSheetBatch,
             sheetsFormat: sheetsFormat,
             slidesInfo: slidesInfo, slidesRead: slidesRead, slidesSetText: slidesSetText,
             slidesManagePage: slidesManagePage,
+            slidesManagePageBatch: slidesManagePageBatch,
             docsInfo: docsInfo, docsRead: docsRead, docsReplace: docsReplace, docsInsert: docsInsert,
             stateDirectory: FileManager.default.temporaryDirectory)
         let runtime = OfficeRuntime(sessionId: "s1", driver: driver)
@@ -1729,4 +1740,137 @@ final class OfficeCommandConsumerTests: XCTestCase {
         XCTAssertTrue(text.contains("41 characters"), "\(text)")
         XCTAssertTrue(text.contains("under-report"), "the page count's own caveat must reach the model: \(text)")
     }
+
+    // MARK: - office-finish Job 2: the batch verbs
+
+    /// Every malformed batch shape refuses **before the broker or driver is ever reached** — nothing
+    /// is opened, nothing is dirtied — and names the offending operation's 1-based index, so the
+    /// model does not have to bisect at one deadline per probe. `driverCalled` is what makes that
+    /// first claim real rather than asserted.
+    func testSheetsBatchRefusesMalformedOpsWithoutTouchingTheDriver() async {
+        let overLimit = (0..<(OfficeWireBatchLimits.maxOperationsPerBatch + 1))
+            .map { ["op": "add_sheet", "name": "s\($0)"] }
+        let cases: [(args: [String: Any], mustMention: String)] = [
+            (["path": "/tmp/a.xlsx"], "ops"),
+            (["path": "/tmp/a.xlsx", "ops": []], "empty"),
+            (["path": "/tmp/a.xlsx", "ops": overLimit], "\(OfficeWireBatchLimits.maxOperationsPerBatch)"),
+            (["path": "/tmp/a.xlsx", "ops": ["add_sheet"]], "operation 1"),
+            (["path": "/tmp/a.xlsx", "ops": [["op": "add_sheet", "name": "a"], ["op": "nope", "name": "b"]]], "operation 2"),
+            (["path": "/tmp/a.xlsx", "ops": [["op": "rename_sheet", "name": "a"]]], "operation 1"),
+            (["path": "/tmp/a.xlsx", "ops": [["op": "add_sheet", "name": "a", "newName": "b"]]], "operation 1"),
+            (["path": "/tmp/a.xlsx", "ops": [["op": "add_sheet"]]], "operation 1"),
+        ]
+        for (index, c) in cases.enumerated() {
+            var driverCalled = false
+            let world = makeSheetsWorld(sheetsManageSheetBatch: { _, _ in
+                driverCalled = true
+                return (["Sheet1"], 0, nil)
+            })
+            sent.removeAll()
+            world.consumer.handle(command("office.sheets.batch", args: c.args))
+            await waitUntil { !self.sent.isEmpty }
+            XCTAssertEqual(sent.first?.ok, false, "case \(index): \(c.args)")
+            XCTAssertTrue(sent.first?.result?.contains(c.mustMention) == true,
+                          "case \(index) must mention \"\(c.mustMention)\": \(String(describing: sent.first?.result))")
+            XCTAssertFalse(driverCalled, "case \(index): a malformed batch must refuse before the driver")
+        }
+    }
+
+    /// The slides half, including the two shapes that could otherwise degrade SILENTLY rather than
+    /// loudly: a wrong-TYPED index (`slide:"2"`) and an unrecognized `layout`. Both must refuse. A
+    /// decoder that folded either into "absent" would append a slide at Impress's default layout and
+    /// report success — the `add_slide at:"3"` failure this project already paid for once.
+    func testSlidesBatchRefusesMalformedOpsIncludingWrongTypedIndexAndLayout() async {
+        let cases: [(args: [String: Any], mustMention: String)] = [
+            (["path": "/tmp/a.odp", "ops": [["op": "delete_slide"]]], "operation 1"),
+            (["path": "/tmp/a.odp", "ops": [["op": "reorder", "slide": 2]]], "operation 1"),
+            (["path": "/tmp/a.odp", "ops": [["op": "add_slide", "slide": 1]]], "operation 1"),
+            (["path": "/tmp/a.odp", "ops": [["op": "delete_slide", "slide": "2"]]], "operation 1"),
+            (["path": "/tmp/a.odp", "ops": [["op": "delete_slide", "slide": 1e30]]], "operation 1"),
+            (["path": "/tmp/a.odp", "ops": [["op": "add_slide", "layout": "spiral"]]], "operation 1"),
+            (["path": "/tmp/a.odp", "ops": [["op": "add_slide"], ["op": "reorder", "slide": 1, "at": 2, "to": 3]]], "operation 2"),
+        ]
+        for (index, c) in cases.enumerated() {
+            var driverCalled = false
+            let world = makeSheetsWorld(slidesManagePageBatch: { _, _ in
+                driverCalled = true
+                return (1, 0, nil)
+            })
+            sent.removeAll()
+            world.consumer.handle(command("office.slides.batch", args: c.args))
+            await waitUntil { !self.sent.isEmpty }
+            XCTAssertEqual(sent.first?.ok, false, "case \(index): \(c.args)")
+            XCTAssertTrue(sent.first?.result?.contains(c.mustMention) == true,
+                          "case \(index) must mention \"\(c.mustMention)\": \(String(describing: sent.first?.result))")
+            XCTAssertFalse(driverCalled, "case \(index): a malformed batch must refuse before the driver")
+        }
+    }
+
+    /// **The ledger, enumerated over the whole applied×total matrix.** This is hand-written string
+    /// assembly with four branches, which is exactly the kind of code that reads correct and prints
+    /// "operations 1-0 applied" or "operations 4-3 were not attempted" in production. Every row here
+    /// pins a real sentence, and the two `XCTAssertFalse`s pin the two impossible ranges by name.
+    func testABatchLedgerDescribesEveryOperationAndInventsNoImpossibleRange() async {
+        let rows: [(total: Int, applied: Int, mustContain: [String], mustNotContain: [String])] = [
+            (1, 0, ["stopped at operation 1 of 1", "No operation applied; operation 1 failed."], ["not attempted"]),
+            (2, 0, ["No operation applied; operation 1 failed; operation 2 was not attempted."], ["1-0"]),
+            (2, 1, ["Operation 1 applied and was verified; operation 2 failed."], ["not attempted", "1-1"]),
+            (3, 1, ["Operation 1 applied and was verified; operation 2 failed; operation 3 was not attempted."], ["1-1"]),
+            (5, 2, ["Operations 1-2 applied and were verified; operation 3 failed; operations 4-5 were not attempted."], []),
+            (5, 4, ["Operations 1-4 applied and were verified; operation 5 failed."], ["not attempted"]),
+        ]
+        for row in rows {
+            let path = makeScratchFile()
+            let ops = (0..<row.total).map { ["op": "add_sheet", "name": "s\($0)"] }
+            let world = makeSheetsWorld(
+                workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+                sheetsManageSheetBatch: { _, _ in (["Sheet1"], row.applied, "the engine said no") },
+                save: { [self] _, _ in self.makeScratchFile() })
+            sent.removeAll()
+            world.consumer.handle(command("office.sheets.batch",
+                                          args: ["path": path, "ops": ops]))
+            await waitUntil { !self.sent.isEmpty }
+            let text = sent.first?.result ?? ""
+            XCTAssertEqual(sent.first?.ok, false, "a partial batch must be a REFUSAL: \(text)")
+            for needle in row.mustContain {
+                XCTAssertTrue(text.contains(needle),
+                              "total=\(row.total) applied=\(row.applied) must contain \"\(needle)\": \(text)")
+            }
+            for needle in row.mustNotContain {
+                XCTAssertFalse(text.contains(needle),
+                               "total=\(row.total) applied=\(row.applied) must NOT contain \"\(needle)\": \(text)")
+            }
+            XCTAssertTrue(text.contains("NOTHING WAS SAVED"),
+                          "the ledger must state that nothing reached disk: \(text)")
+        }
+    }
+
+    /// A batch where every operation applies is a SUCCESS, and says how many — the green half, so the
+    /// refusals above are discriminating rather than "the batch verb always refuses".
+    func testAFullyAppliedBatchSucceedsAndReportsThePostState() async {
+        let path = makeScratchFile()
+        let world = makeSheetsWorld(
+            workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+            sheetsManageSheetBatch: { _, ops in
+                XCTAssertEqual(ops.count, 3)
+                XCTAssertEqual(ops.map(\.op), [.add, .rename, .delete])
+                XCTAssertEqual(ops[1].newName, "Summary")
+                return (["Sheet1", "Summary"], ops.count, nil)
+            },
+            save: { [self] _, _ in self.makeScratchFile() })
+        world.consumer.handle(command("office.sheets.batch", args: [
+            "path": path,
+            "ops": [
+                ["op": "add_sheet", "name": "Q3"],
+                ["op": "rename_sheet", "name": "Sheet1", "newName": "Summary"],
+                ["op": "delete_sheet", "name": "Q3"],
+            ],
+        ]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, true, "\(String(describing: sent.first?.result))")
+        let text = sent.first?.result ?? ""
+        XCTAssertTrue(text.contains("applied 3 operations"), text)
+        XCTAssertTrue(text.contains("Summary"), "the post-state sheet list must come back: \(text)")
+    }
+
 }

@@ -79,12 +79,12 @@ describe("registration", () => {
   // Mirrors sheets.test.ts's own I6 tripwire: the verb enum pinned literally through the SAME
   // z.toJSONSchema path a real model sees, so the day this tool grows a new verb it fails here
   // first, before that verb ships silently inheriting an unaudited gate classification.
-  test("the verb enum is exactly the 6 verbs this task ships", () => {
+  test("the verb enum is exactly the 7 verbs shipped (6 from T6 + office-finish's batch)", () => {
     const h = makeHarness();
     const spec = h.registry.specFor("slides", WORKDIR, "code");
     const parameters = spec?.parameters as { properties?: { verb?: { enum?: string[] } } } | undefined;
     const verbEnum = parameters?.properties?.verb?.enum;
-    expect(verbEnum).toEqual(["info", "read", "set_text", "add_slide", "delete_slide", "reorder"]);
+    expect(verbEnum).toEqual(["info", "read", "set_text", "add_slide", "delete_slide", "reorder", "batch"]);
   });
 
   test("slides is classified MUTATING in gate.ts, not READ_ONLY — every verb, including info/read, pays this now", () => {

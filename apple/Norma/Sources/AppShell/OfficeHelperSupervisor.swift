@@ -102,8 +102,19 @@ final class OfficeHelperClient {
     /// request can still arrive late and queue, exactly the shape that made this reachable. A seq
     /// mismatch — of any frame type, `.error` included — throws `.unexpectedReply`, never
     /// `.serverError`: only a same-seq `.error` is genuinely this request's own answer.
+    /// **office-finish Job 1 — this now DEMULTIPLEXES rather than "takes the next frame and hopes."**
+    /// `connection.nextFrame(seq:timeout:)` returns only the frame carrying this request's own seq;
+    /// a frame belonging to anyone else is left in the connection's queue for its real owner instead
+    /// of being consumed and discarded.
+    ///
+    /// The behaviour that changed, stated plainly because a test asserted the old one: a late reply
+    /// to an already-abandoned request used to be handed to whatever request was CURRENTLY waiting,
+    /// which then failed with `.unexpectedReply`. It is now simply not delivered to that request,
+    /// which proceeds normally. The seq check below is kept as a belt — with the demux it can no
+    /// longer fire — because it costs nothing and a future connection change that reintroduced
+    /// mis-delivery should fail loudly here rather than hand a caller somebody else's answer.
     private func expectReply(seq: UInt64) async throws -> OfficeWireFrame {
-        guard let reply = await connection.nextFrame(timeout: requestTimeout) else {
+        guard let reply = await connection.nextFrame(seq: seq, timeout: requestTimeout) else {
             throw OfficeHelperClientError.timedOut
         }
         guard reply.seq == seq else { throw OfficeHelperClientError.unexpectedReply(reply) }
@@ -405,6 +416,24 @@ final class OfficeHelperClient {
         }
     }
 
+    /// office-finish Job 2 — N sheet operations in ONE request. See
+    /// `OfficeWireFrame.sheetsManageSheetBatch`'s own header for why it must be one request, and
+    /// `sheetsManageSheetBatchOk` for what the returned `applied`/`failure` prefix ledger means.
+    /// **`failure` non-nil is NOT an error here** — it is a truthful partial answer, and the caller
+    /// (`OfficeCommandConsumer`) is what turns it into a refusal carrying the ledger.
+    func sheetsManageSheetBatch(docId: String, ops: [OfficeSheetsManageSheetOperation]) async throws
+        -> (sheets: [String], applied: Int, failure: String?) {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.sheetsManageSheetBatch(seq: seq, docId: docId, ops: ops))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .sheetsManageSheetBatchOk(_, _, let sheets, let applied, let failure):
+            return (sheets, applied, failure)
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
     // MARK: - office-agent-tools T5: sheets format
 
     func sheetsFormat(docId: String, sheet: String, range: String, columnSpan: String?,
@@ -465,6 +494,21 @@ final class OfficeHelperClient {
         let reply = try await expectReply(seq: seq)
         switch reply {
         case .slidesManagePageOk(_, _, let slideCount): return slideCount
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    /// office-finish Job 2 — the slides counterpart to `sheetsManageSheetBatch` above; same
+    /// one-request contract, same prefix ledger.
+    func slidesManagePageBatch(docId: String, ops: [OfficeSlidesManagePageOperation]) async throws
+        -> (slideCount: Int, applied: Int, failure: String?) {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.slidesManagePageBatch(seq: seq, docId: docId, ops: ops))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .slidesManagePageBatchOk(_, _, let slideCount, let applied, let failure):
+            return (slideCount, applied, failure)
         case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
         default: throw OfficeHelperClientError.unexpectedReply(reply)
         }

@@ -321,6 +321,22 @@ public enum OfficeWireFrame: Equatable, Sendable {
     /// decode refuses a `.rename` with no `newName`, and a non-`.rename` op that supplies one, rather
     /// than silently ignoring either mismatch).
     case sheetsManageSheet(seq: UInt64, docId: String, op: OfficeSheetsManageSheetOp, name: String, newName: String?)
+    /// office-finish Job 2 — N `sheetsManageSheet` operations in ONE request.
+    ///
+    /// **Why one request and not N.** The daemon's write deadline counts a fixed number of R-bounded
+    /// requests (`packages/core/src/panel/office-commands.ts` §A: open/adopt + depth + edit + depth +
+    /// save = H + 4R = 210 500 ms, shipped at 215 000). That budget is per TOOL CALL, not per
+    /// operation, and §A item 4 states the batch's obligation in as many words: *"This same constant
+    /// also covers requirement 2's batch, which rides ONE edit request however many operations it
+    /// carries (the `sheets.set` 200-cell precedent) — so the batch surface does not need a number of
+    /// its own and does not move this one again."* A batch built as N wire round trips would cost
+    /// H + (N+3)R and blow that budget at N = 2. This frame is what keeps the promise.
+    ///
+    /// Operations apply IN ORDER and stop at the first failure — they are position-based and
+    /// non-idempotent, so there is no other honest order and no way to skip one and continue. The
+    /// reply's `applied` count is what turns the resulting prefix into something a model can
+    /// reconcile; see `sheetsManageSheetBatchOk`.
+    case sheetsManageSheetBatch(seq: UInt64, docId: String, ops: [OfficeSheetsManageSheetOperation])
     /// office-agent-tools T5 — applies `bold`/`italic`/`numberFormat`/`align`/`width` over one A1
     /// `range` on ONE named sheet, every field OPTIONAL and independent: a `nil` field means "leave
     /// this attribute alone," never "reset it to default" (spec: the whole contract this verb is
@@ -405,6 +421,10 @@ public enum OfficeWireFrame: Equatable, Sendable {
     ///    `layout` MUST both be nil.
     case slidesManagePage(seq: UInt64, docId: String, op: OfficeSlidesManagePageOp, slide: Int?,
                           at: Int?, to: Int?, layout: OfficeSlidesLayoutPreset?)
+    /// office-finish Job 2 — N `slidesManagePage` operations in ONE request. Identical shape,
+    /// identical ordering/stop-at-first-failure contract and identical one-request reasoning as
+    /// `sheetsManageSheetBatch` above; see that case's header.
+    case slidesManagePageBatch(seq: UInt64, docId: String, ops: [OfficeSlidesManagePageOperation])
 
     // MARK: office-agent-tools T7 — docs
 
@@ -626,6 +646,23 @@ public enum OfficeWireFrame: Equatable, Sendable {
     /// returns, and the only way a caller learns whether `add`'s requested name survived Calc's own
     /// silent sanitization (`CreateValidTabName`) verbatim or was altered.
     case sheetsManageSheetOk(seq: UInt64, docId: String, sheets: [String])
+    /// office-finish Job 2 — answers a `sheetsManageSheetBatch`. **This is the per-operation
+    /// ledger**, and it is a count rather than an array because the execution model is a strict
+    /// prefix: operations run in order and stop at the first failure, so for a batch of N,
+    ///
+    ///  * operations `1 ... applied` APPLIED and were verified by re-read;
+    ///  * operation `applied + 1` FAILED, and `failure` says why (nil iff `applied == N`);
+    ///  * operations `applied + 2 ... N` were NOT ATTEMPTED.
+    ///
+    /// That is complete information about every operation, in two small fields that cannot approach
+    /// the 64 KiB result cap (`PanelCommandConsumer.resultMaxLength`) — an over-cap result is refused
+    /// whole and the model gets silence until the deadline, so a ledger that could grow with N was
+    /// not an option.
+    ///
+    /// `sheets` is the workbook's real post-state sheet list, re-read after the LAST applied
+    /// operation — the same "smallest useful truth" `sheetsManageSheetOk` returns, and what lets a
+    /// caller reconcile a partial batch against what it intended without a second call.
+    case sheetsManageSheetBatchOk(seq: UInt64, docId: String, sheets: [String], applied: Int, failure: String?)
     /// office-agent-tools T5 — answers a successful `sheetsFormat`: which attribute NAMES were
     /// actually applied (`"bold"`, `"italic"`, `"numberFormat"`, `"align"`, `"width"` — a subset of
     /// those five, in that fixed order, never empty since the caller must have named at least one).
@@ -652,6 +689,10 @@ public enum OfficeWireFrame: Equatable, Sendable {
     /// the same "smallest useful truth, not merely ok" posture `sheetsResizeOk`/`sheetsManageSheetOk`
     /// already have for their own structural ops.
     case slidesManagePageOk(seq: UInt64, docId: String, slideCount: Int)
+    /// office-finish Job 2 — answers a `slidesManagePageBatch`. Same prefix ledger as
+    /// `sheetsManageSheetBatchOk` (see its header for what `applied`/`failure` mean); `slideCount` is
+    /// the presentation's real post-state slide count after the last applied operation.
+    case slidesManagePageBatchOk(seq: UInt64, docId: String, slideCount: Int, applied: Int, failure: String?)
 
     // MARK: office-agent-tools T7 — docs replies
 
@@ -688,11 +729,11 @@ public enum OfficeWireFrame: Equatable, Sendable {
         // office-agent-tools T3 — sheets info/read.
         "sheetsInfo", "sheetsRead",
         // office-agent-tools T4 — sheets write verbs.
-        "sheetsSet", "sheetsResize", "sheetsManageSheet",
+        "sheetsSet", "sheetsResize", "sheetsManageSheet", "sheetsManageSheetBatch",
         // office-agent-tools T5 — sheets format.
         "sheetsFormat",
         // office-agent-tools T6 — slides.
-        "slidesInfo", "slidesRead", "slidesSetText", "slidesManagePage",
+        "slidesInfo", "slidesRead", "slidesSetText", "slidesManagePage", "slidesManagePageBatch",
         // office-agent-tools T7 — docs.
         "docsInfo", "docsRead", "docsReplace", "docsInsert",
         "helloOk", "refused", "pong", "opened", "openFailed", "closed", "saved", "saveFailed",
@@ -702,9 +743,9 @@ public enum OfficeWireFrame: Equatable, Sendable {
         "error", "documentEvent",
         "subscribed", "unsubscribed", "tileRequestAccepted", "tile", "tileFailed", "invalidated",
         "sheetsInfoOk", "sheetsReadOk",
-        "sheetsSetOk", "sheetsResizeOk", "sheetsManageSheetOk",
+        "sheetsSetOk", "sheetsResizeOk", "sheetsManageSheetOk", "sheetsManageSheetBatchOk",
         "sheetsFormatOk",
-        "slidesInfoOk", "slidesReadOk", "slidesSetTextOk", "slidesManagePageOk",
+        "slidesInfoOk", "slidesReadOk", "slidesSetTextOk", "slidesManagePageOk", "slidesManagePageBatchOk",
         "docsInfoOk", "docsReadOk", "docsReplaceOk", "docsInsertOk",
     ]
 
@@ -734,11 +775,13 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .sheetsSet: return "sheetsSet"
         case .sheetsResize: return "sheetsResize"
         case .sheetsManageSheet: return "sheetsManageSheet"
+        case .sheetsManageSheetBatch: return "sheetsManageSheetBatch"
         case .sheetsFormat: return "sheetsFormat"
         case .slidesInfo: return "slidesInfo"
         case .slidesRead: return "slidesRead"
         case .slidesSetText: return "slidesSetText"
         case .slidesManagePage: return "slidesManagePage"
+        case .slidesManagePageBatch: return "slidesManagePageBatch"
         case .docsInfo: return "docsInfo"
         case .docsRead: return "docsRead"
         case .docsReplace: return "docsReplace"
@@ -775,11 +818,13 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .sheetsSetOk: return "sheetsSetOk"
         case .sheetsResizeOk: return "sheetsResizeOk"
         case .sheetsManageSheetOk: return "sheetsManageSheetOk"
+        case .sheetsManageSheetBatchOk: return "sheetsManageSheetBatchOk"
         case .sheetsFormatOk: return "sheetsFormatOk"
         case .slidesInfoOk: return "slidesInfoOk"
         case .slidesReadOk: return "slidesReadOk"
         case .slidesSetTextOk: return "slidesSetTextOk"
         case .slidesManagePageOk: return "slidesManagePageOk"
+        case .slidesManagePageBatchOk: return "slidesManagePageBatchOk"
         case .docsInfoOk: return "docsInfoOk"
         case .docsReadOk: return "docsReadOk"
         case .docsReplaceOk: return "docsReplaceOk"
@@ -813,11 +858,13 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .sheetsSet(let seq, _, _, _, _, _): return seq
         case .sheetsResize(let seq, _, _, _, _, _): return seq
         case .sheetsManageSheet(let seq, _, _, _, _): return seq
+        case .sheetsManageSheetBatch(let seq, _, _): return seq
         case .sheetsFormat(let seq, _, _, _, _, _, _, _, _, _): return seq
         case .slidesInfo(let seq, _): return seq
         case .slidesRead(let seq, _, _): return seq
         case .slidesSetText(let seq, _, _, _, _): return seq
         case .slidesManagePage(let seq, _, _, _, _, _, _): return seq
+        case .slidesManagePageBatch(let seq, _, _): return seq
         case .docsInfo(let seq, _): return seq
         case .docsRead(let seq, _): return seq
         case .docsReplace(let seq, _, _, _): return seq
@@ -854,11 +901,13 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .sheetsSetOk(let seq, _, _): return seq
         case .sheetsResizeOk(let seq, _, _, _): return seq
         case .sheetsManageSheetOk(let seq, _, _): return seq
+        case .sheetsManageSheetBatchOk(let seq, _, _, _, _): return seq
         case .sheetsFormatOk(let seq, _, _): return seq
         case .slidesInfoOk(let seq, _, _): return seq
         case .slidesReadOk(let seq, _, _, _): return seq
         case .slidesSetTextOk(let seq, _, _): return seq
         case .slidesManagePageOk(let seq, _, _): return seq
+        case .slidesManagePageBatchOk(let seq, _, _, _, _): return seq
         case .docsInfoOk(let seq, _, _, _, _): return seq
         case .docsReadOk(let seq, _, _): return seq
         case .docsReplaceOk(let seq, _, _): return seq
@@ -1004,6 +1053,9 @@ public enum OfficeWireFrame: Equatable, Sendable {
             payload["op"] = op.rawValue
             payload["name"] = name
             if let newName { payload["newName"] = newName }
+        case .sheetsManageSheetBatch(_, let docId, let ops):
+            payload["docId"] = docId
+            payload["ops"] = ops.map { $0.jsonObject() }
         case .sheetsFormat(_, let docId, let sheet, let range, let columnSpan, let bold, let italic,
                            let numberFormat, let align, let width):
             payload["docId"] = docId
@@ -1025,6 +1077,11 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .sheetsManageSheetOk(_, let docId, let sheets):
             payload["docId"] = docId
             payload["sheets"] = sheets
+        case .sheetsManageSheetBatchOk(_, let docId, let sheets, let applied, let failure):
+            payload["docId"] = docId
+            payload["sheets"] = sheets
+            payload["applied"] = applied
+            if let failure { payload["failure"] = failure }
         case .sheetsFormatOk(_, let docId, let applied):
             payload["docId"] = docId
             payload["applied"] = applied
@@ -1045,6 +1102,9 @@ public enum OfficeWireFrame: Equatable, Sendable {
             if let at { payload["at"] = at }
             if let to { payload["to"] = to }
             if let layout { payload["layout"] = layout.rawValue }
+        case .slidesManagePageBatch(_, let docId, let ops):
+            payload["docId"] = docId
+            payload["ops"] = ops.map { $0.jsonObject() }
         case .slidesInfoOk(_, let docId, let slides):
             payload["docId"] = docId
             payload["slides"] = slides.map { $0.jsonObject() }
@@ -1058,6 +1118,11 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .slidesManagePageOk(_, let docId, let slideCount):
             payload["docId"] = docId
             payload["slideCount"] = slideCount
+        case .slidesManagePageBatchOk(_, let docId, let slideCount, let applied, let failure):
+            payload["docId"] = docId
+            payload["slideCount"] = slideCount
+            payload["applied"] = applied
+            if let failure { payload["failure"] = failure }
         case .docsInfo(_, let docId), .docsRead(_, let docId):
             payload["docId"] = docId
         case .docsReplace(_, let docId, let find, let replaceWith):
@@ -1287,6 +1352,142 @@ public enum OfficeSheetsResizeDimension: String, Equatable, Sendable {
 public enum OfficeSheetsResizeOp: String, Equatable, Sendable {
     case insert
     case delete
+}
+
+/// office-finish Job 2 — the caps a BATCH of position-based operations is bounded by, on BOTH ends
+/// of this wire. Two independent ceilings, each computed rather than picked:
+///
+/// * `maxOperationsPerBatch` is a TIME bound. A batch is deliberately ONE wire request carrying N
+///   operations (see `sheetsManageSheetBatch`'s own header for why it must be), so the whole batch
+///   lives inside ONE `requestTimeout` — 30 s (`OfficeHelperSupervisor.Configuration
+///   .handshakeTimeout`, reused as `requestTimeout`). N is therefore capped so that N × the measured
+///   per-operation cost stays far below 30 s, not merely under it. **Measured, not guessed**: a
+///   full 20-operation `sheets batch` through the real helper on a real workbook costs **4.57 s for
+///   the WHOLE call** — open, 20 operations, save, and the atomic place — i.e. under a sixth of the
+///   one timeout the batch has to live inside, with the per-operation share a fraction of that
+///   again. The drill is
+///   `OfficeSheetsCommandTests.testLiveSheetsBatchOfTwentyOperationsAppliesThemAllWellInsideOne
+///   RequestTimeout`, and it asserts the bound rather than only printing it.
+/// * The BYTE bound is the daemon's, not this file's: `PANEL_COMMAND_ARGS_MAX_JSON_BYTES` (8 KiB,
+///   `packages/protocol/src/events.ts`) caps the serialized `args`, and the tool refuses over-size
+///   batches with a specific message BEFORE dispatch rather than letting the wire's own `.refine`
+///   produce an opaque schema error. It is stated here so the two are findable together; enforcing
+///   it here would be too late to say anything useful.
+///
+/// A batch is never empty: an empty `ops` is malformed, not a no-op that reports success.
+public enum OfficeWireBatchLimits {
+    public static let maxOperationsPerBatch = 20
+
+    /// The magnitude ceiling on a batch element's `slide`/`at`/`to`, on the WIRE — 0-based here, so
+    /// this is an exclusive upper bound mirroring the app's own 1-based `officeSlideMaxIndex`
+    /// (10 000) and `slides.ts`'s `.max(10_000)`. Three copies is the established two-layer
+    /// arrangement plus this one, and this one is the layer the HELPER trusts.
+    ///
+    /// **Honest scope, so this reads as what it is:** `intValue` is already total (`NSNumber as? Int`
+    /// is a conditional bridge, never a trapping `Int(Double)`), and every helper-side consumer
+    /// guards its own range before doing arithmetic — so this bound closes no live crash. It is here
+    /// because the batch is a NEW decode surface and the discipline for one is "bounded at both
+    /// layers," not "bounded wherever a crash was demonstrated." **The single-op `slidesManagePage`
+    /// decode does NOT carry this bound**; that asymmetry is stated rather than quietly implied, and
+    /// it is safe for the reason just given, not because anyone checked it twice.
+    public static let maxSlideIndexExclusive = 10_000
+}
+
+/// office-finish Job 2 — ONE operation inside a `sheetsManageSheetBatch`. The exact operand triple
+/// the single-op `sheetsManageSheet` frame already carries, with the identical `op == .rename` <->
+/// `newName != nil` pairing rule enforced at decode — per element, so a malformed element refuses
+/// the WHOLE batch rather than being skipped (a skipped op reported as success is the
+/// silent-wrong-answer outcome this arc rates as worse than a crash).
+public struct OfficeSheetsManageSheetOperation: Equatable, Sendable {
+    public let op: OfficeSheetsManageSheetOp
+    public let name: String
+    public let newName: String?
+
+    public init(op: OfficeSheetsManageSheetOp, name: String, newName: String?) {
+        self.op = op
+        self.name = name
+        self.newName = newName
+    }
+
+    func jsonObject() -> [String: Any] {
+        var object: [String: Any] = ["op": op.rawValue, "name": name]
+        if let newName { object["newName"] = newName }
+        return object
+    }
+
+    static func decode(_ object: [String: Any]) -> OfficeSheetsManageSheetOperation? {
+        guard let opRaw = object["op"] as? String, let op = OfficeSheetsManageSheetOp(rawValue: opRaw),
+              let name = object["name"] as? String else { return nil }
+        let newName = object["newName"] as? String
+        guard (op == .rename) == (newName != nil) else { return nil }
+        return OfficeSheetsManageSheetOperation(op: op, name: name, newName: newName)
+    }
+}
+
+/// office-finish Job 2 — ONE operation inside a `slidesManagePageBatch`, carrying the same operand
+/// set (and the same per-op combination rules) the single-op `slidesManagePage` frame already
+/// defines: `.add` may carry `at`/`layout` and must not carry `slide`/`to`; `.delete` must carry
+/// `slide` and nothing else; `.reorder` must carry `slide` and `to` and nothing else. Enforced per
+/// element at decode, for the same reason the sheets element enforces its own.
+public struct OfficeSlidesManagePageOperation: Equatable, Sendable {
+    public let op: OfficeSlidesManagePageOp
+    public let slide: Int?
+    public let at: Int?
+    public let to: Int?
+    public let layout: OfficeSlidesLayoutPreset?
+
+    public init(op: OfficeSlidesManagePageOp, slide: Int?, at: Int?, to: Int?,
+                layout: OfficeSlidesLayoutPreset?) {
+        self.op = op
+        self.slide = slide
+        self.at = at
+        self.to = to
+        self.layout = layout
+    }
+
+    func jsonObject() -> [String: Any] {
+        var object: [String: Any] = ["op": op.rawValue]
+        if let slide { object["slide"] = slide }
+        if let at { object["at"] = at }
+        if let to { object["to"] = to }
+        if let layout { object["layout"] = layout.rawValue }
+        return object
+    }
+
+    static func decode(_ object: [String: Any]) -> OfficeSlidesManagePageOperation? {
+        guard let opRaw = object["op"] as? String,
+              let op = OfficeSlidesManagePageOp(rawValue: opRaw) else { return nil }
+        let slide = intValue(object["slide"])
+        let at = intValue(object["at"])
+        let to = intValue(object["to"])
+        // A `slide`/`at`/`to` KEY that is present but not integer-shaped is malformed — never folded
+        // into "absent". `intValue` answers a wrong type and an absent key with the same `nil`, so
+        // presence has to be checked separately, exactly as `OfficeCommandConsumer.isPresent` does
+        // one layer up.
+        for key in ["slide", "at", "to"] where object[key] != nil && intValue(object[key]) == nil {
+            return nil
+        }
+        let layout: OfficeSlidesLayoutPreset?
+        if let raw = object["layout"] as? String {
+            guard let parsed = OfficeSlidesLayoutPreset(rawValue: raw) else { return nil }
+            layout = parsed
+        } else if object["layout"] != nil {
+            return nil
+        } else {
+            layout = nil
+        }
+        for value in [slide, at, to] {
+            guard value == nil || (value! >= 0 && value! < OfficeWireBatchLimits.maxSlideIndexExclusive) else {
+                return nil
+            }
+        }
+        switch op {
+        case .add: guard slide == nil, to == nil else { return nil }
+        case .delete: guard slide != nil, at == nil, to == nil, layout == nil else { return nil }
+        case .reorder: guard slide != nil, to != nil, at == nil, layout == nil else { return nil }
+        }
+        return OfficeSlidesManagePageOperation(op: op, slide: slide, at: at, to: to, layout: layout)
+    }
 }
 
 /// `sheetsManageSheet`'s operation.
@@ -2464,6 +2665,12 @@ public enum OfficeWireCodec {
                 return .rejected(seq: seq, reason: "malformed")
             }
             return .frame(.sheetsManageSheet(seq: seq, docId: docId, op: op, name: name, newName: newName))
+        case "sheetsManageSheetBatch":
+            guard let docId = object["docId"] as? String,
+                  let ops = decodeBatchOps(object["ops"], OfficeSheetsManageSheetOperation.decode) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.sheetsManageSheetBatch(seq: seq, docId: docId, ops: ops))
         case "sheetsFormat":
             guard let docId = object["docId"] as? String, let sheet = object["sheet"] as? String,
                   let range = object["range"] as? String else {
@@ -2512,6 +2719,15 @@ public enum OfficeWireCodec {
                 return .rejected(seq: seq, reason: "malformed")
             }
             return .frame(.sheetsManageSheetOk(seq: seq, docId: docId, sheets: sheets))
+        case "sheetsManageSheetBatchOk":
+            guard let docId = object["docId"] as? String, let sheets = object["sheets"] as? [String],
+                  let applied = intValue(object["applied"]), applied >= 0 else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            let failure = object["failure"] as? String
+            guard object["failure"] == nil || failure != nil else { return .rejected(seq: seq, reason: "malformed") }
+            return .frame(.sheetsManageSheetBatchOk(seq: seq, docId: docId, sheets: sheets,
+                                                    applied: applied, failure: failure))
         case "sheetsFormatOk":
             guard let docId = object["docId"] as? String, let applied = object["applied"] as? [String] else {
                 return .rejected(seq: seq, reason: "malformed")
@@ -2561,6 +2777,12 @@ public enum OfficeWireCodec {
             }
             guard shapeIsValid else { return .rejected(seq: seq, reason: "malformed") }
             return .frame(.slidesManagePage(seq: seq, docId: docId, op: op, slide: slide, at: at, to: to, layout: layout))
+        case "slidesManagePageBatch":
+            guard let docId = object["docId"] as? String,
+                  let ops = decodeBatchOps(object["ops"], OfficeSlidesManagePageOperation.decode) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.slidesManagePageBatch(seq: seq, docId: docId, ops: ops))
         case "slidesInfoOk":
             guard let docId = object["docId"] as? String,
                   let slides = OfficeWireFrame.decodeSlideInfos(object["slides"]) else {
@@ -2583,6 +2805,15 @@ public enum OfficeWireCodec {
                 return .rejected(seq: seq, reason: "malformed")
             }
             return .frame(.slidesManagePageOk(seq: seq, docId: docId, slideCount: slideCount))
+        case "slidesManagePageBatchOk":
+            guard let docId = object["docId"] as? String, let slideCount = intValue(object["slideCount"]),
+                  let applied = intValue(object["applied"]), applied >= 0 else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            let failure = object["failure"] as? String
+            guard object["failure"] == nil || failure != nil else { return .rejected(seq: seq, reason: "malformed") }
+            return .frame(.slidesManagePageBatchOk(seq: seq, docId: docId, slideCount: slideCount,
+                                                   applied: applied, failure: failure))
         case "docsInfo":
             guard let docId = object["docId"] as? String else { return .rejected(seq: seq, reason: "malformed") }
             return .frame(.docsInfo(seq: seq, docId: docId))
@@ -2698,15 +2929,31 @@ func decodedRepairFlag(_ object: [String: Any]) -> Bool? {
 }
 
 /// Mints strictly increasing `seq` values for one connection's OUTBOUND frames, starting at 1
-/// (never 0 — see `OfficeWireCodec.unreadableSeqSentinel`). Not thread-safe by itself; callers
-/// that touch it from more than one queue must serialize (both `OfficeHelperServer`'s
-/// per-connection handler and `OfficeWireConnection` already run their own frame traffic on one
-/// queue each).
+/// (never 0 — see `OfficeWireCodec.unreadableSeqSentinel`).
+///
+/// **office-finish Job 1 — now lock-guarded, and the previous header's exemption was false.** It
+/// read: *"Not thread-safe by itself; callers that touch it from more than one queue must serialize
+/// (both `OfficeHelperServer`'s per-connection handler and `OfficeWireConnection` already run their
+/// own frame traffic on one queue each)."* `OfficeWireConnection` runs its READER on one task; it
+/// has never serialized its writers, and `OfficeHelperClient.postKey`/`save`/… are called from
+/// whatever task `OfficeHelperRequestQueue.run`'s operation closure happens to be on — a `Task {}`
+/// body, not a `@MainActor` context. What actually held the invariant was that one app-wide FIFO,
+/// at 29 call sites, plus the convention that nothing else holds a client. The DEBUG office harness
+/// already breaks that convention deliberately.
+///
+/// That mattered little while a duplicate seq merely produced a confusing `.unexpectedReply`. It
+/// matters completely now that `OfficeWireConnection` **routes replies by seq**: two callers handed
+/// the same number would have their answers swapped, silently and plausibly — the
+/// silent-wrong-answer outcome this project rates as worse than a crash. The lock is the cheapest
+/// possible way to make the demultiplexer's key actually unique, and it costs one uncontended
+/// `NSLock` per outbound frame.
 public final class OfficeWireSeqAllocator {
+    private let lock = NSLock()
     private var next: UInt64 = 1
     public init() {}
     public func nextSeq() -> UInt64 {
-        defer { next += 1 }
+        lock.lock()
+        defer { next += 1; lock.unlock() }
         return next
     }
 }
@@ -2743,4 +2990,21 @@ public enum OfficeWireArgs {
         }
         return result
     }
+}
+
+/// office-finish Job 2 — the shared `ops` decode both batch frames use: an array of JSON objects,
+/// non-empty, at most `OfficeWireBatchLimits.maxOperationsPerBatch`, every element decoding cleanly
+/// through `element`. `nil` on ANY of those failing — a malformed or over-long batch is refused
+/// whole, never trimmed and never partially accepted, because a trimmed batch of position-based
+/// operations silently means something different from what was asked.
+private func decodeBatchOps<T>(_ raw: Any?, _ element: ([String: Any]) -> T?) -> [T]? {
+    guard let array = raw as? [Any], !array.isEmpty,
+          array.count <= OfficeWireBatchLimits.maxOperationsPerBatch else { return nil }
+    var out: [T] = []
+    out.reserveCapacity(array.count)
+    for entry in array {
+        guard let object = entry as? [String: Any], let decoded = element(object) else { return nil }
+        out.append(decoded)
+    }
+    return out
 }

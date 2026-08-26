@@ -1095,4 +1095,137 @@ final class OfficeSupervisorTests: XCTestCase {
                             + "not a timeout-shaped wait for bytes that were never coming")
         XCTAssertTrue(box.snapshot().arrivals.isEmpty)
     }
+
+    // MARK: - office-finish Job 1: the reply demultiplexer
+
+    /// Reads exactly one newline-terminated line from `fd`, byte at a time (these frames are tens
+    /// of bytes; simplicity beats buffering here, and a per-byte read cannot over-read into the
+    /// NEXT line, which a buffered read would and which would silently break a peer that must
+    /// answer requests one at a time). `nil` if the peer went away first.
+    private static func readLine(from fd: Int32) -> String? {
+        var bytes: [UInt8] = []
+        var byte: UInt8 = 0
+        while true {
+            let got = read(fd, &byte, 1)
+            guard got == 1 else { return nil }
+            if byte == 0x0A { break }
+            bytes.append(byte)
+        }
+        return String(bytes: bytes, encoding: .utf8)
+    }
+
+    /// A FOREIGN reply frame — one carrying a seq this connection's caller never asked for —
+    /// arriving in the middle of a request must not be handed to that request, and must not be
+    /// thrown away either: it belongs to somebody, and the whole defect this closes is that it was
+    /// **consumed and discarded**, leaving its real owner to starve for a full request timeout on
+    /// an answer that had already arrived.
+    ///
+    /// This is the office harness's measured `[18.twoViewMintAndEditBoth]` failure in a hermetic,
+    /// millisecond-scale form: there, an armed auto-save's `saved(seq:)` for a different docId
+    /// landed inside a raw harness request and desynchronized the stream permanently (76/103 in
+    /// 442 s, against 102/103 in ~155 s).
+    ///
+    /// **Two assertions, and the second is what makes the first non-vacuous.** "The ping
+    /// succeeded" alone would also pass against a fix that merely SKIPPED the foreign frame — the
+    /// same silent discard, one layer down. Claiming the foreign frame afterwards, by its own seq,
+    /// is what proves it was preserved for its owner. It also proves the peer really injected it:
+    /// without the injection this second assertion fails, so the test cannot go green on a peer
+    /// that quietly did nothing.
+    func testAForeignFrameArrivingMidRequestIsPreservedForItsOwnerNotConsumed() async throws {
+        let stateDir = makeScratchDirectory()
+        let socketPath = stateDir.appendingPathComponent("o.sock").path
+        guard let listenFD = bindAndListenScratchSocket(at: socketPath) else { return }
+
+        let foreignSeq: UInt64 = 987_654
+        Thread {
+            let clientFD = accept(listenFD, nil, nil)
+            guard clientFD >= 0 else { return }
+            defer { close(clientFD); close(listenFD) }
+            guard let line = Self.readLine(from: clientFD),
+                  case .ping(let seq)? = OfficeWireFrame.decode(line) else { return }
+            // The interleave, in the order that breaks a non-demultiplexing client: somebody
+            // else's answer FIRST, this request's own answer second.
+            let foreign = OfficeWireFrame.saved(seq: foreignSeq, docId: "another-document",
+                                                tempPath: "/tmp/not-ours.ods").encodedLine()
+            _ = foreign.withUnsafeBytes { write(clientFD, $0.baseAddress!, $0.count) }
+            let pong = OfficeWireFrame.pong(seq: seq).encodedLine()
+            _ = pong.withUnsafeBytes { write(clientFD, $0.baseAddress!, $0.count) }
+            // Hold the connection open: closing here would wake every waiter with `nil` and the
+            // test would be measuring a closed stream instead of the demultiplexer.
+            _ = Self.readLine(from: clientFD)
+        }.start()
+
+        let connection = OfficeWireConnection(socketPath: socketPath)
+        try await connection.open()
+        defer { connection.close() }
+        let client = OfficeHelperClient(connection: connection,
+                                        seqAllocator: OfficeWireSeqAllocator(),
+                                        requestTimeout: 5.0)
+
+        do {
+            try await client.ping()
+        } catch {
+            return XCTFail("a foreign frame arriving mid-request must not fail the request — got \(error)")
+        }
+
+        let preserved = await connection.nextFrame(seq: foreignSeq, timeout: 2.0)
+        guard case .saved(let seq, let docId, _)? = preserved else {
+            return XCTFail("the foreign frame was CONSUMED, not preserved for its owner — "
+                           + "got \(String(describing: preserved))")
+        }
+        XCTAssertEqual(seq, foreignSeq)
+        XCTAssertEqual(docId, "another-document")
+    }
+
+    /// Two requests genuinely in flight at once on ONE connection, answered OUT OF ORDER, must each
+    /// receive its own reply.
+    ///
+    /// **The peer's protocol is the non-vacuity check.** It refuses to answer anything until it has
+    /// READ BOTH request lines — so a client that serialized its two requests (or one whose first
+    /// request consumed the second's answer and left the second waiting) never gets past the first
+    /// wait, and the test fails on the timeout rather than passing for the wrong reason. Concurrency
+    /// here is a precondition the peer enforces, not something the test hopes for.
+    ///
+    /// `requestTimeout: 3.0` rather than production's 30 s so the RED arm fails in seconds instead
+    /// of stalling the suite for a minute.
+    func testTwoConcurrentRequestsOnOneConnectionEachGetItsOwnReplyEvenOutOfOrder() async throws {
+        let stateDir = makeScratchDirectory()
+        let socketPath = stateDir.appendingPathComponent("o.sock").path
+        guard let listenFD = bindAndListenScratchSocket(at: socketPath) else { return }
+
+        Thread {
+            let clientFD = accept(listenFD, nil, nil)
+            guard clientFD >= 0 else { return }
+            defer { close(clientFD); close(listenFD) }
+            var seqs: [UInt64] = []
+            while seqs.count < 2 {
+                guard let line = Self.readLine(from: clientFD),
+                      let frame = OfficeWireFrame.decode(line) else { return }
+                seqs.append(frame.seq)
+            }
+            // Answer the SECOND request first. Deliberate: it is the order a single-waiter client
+            // gets wrong, and it also proves the demultiplexer is not accidentally FIFO.
+            for seq in seqs.reversed() {
+                let reply = OfficeWireFrame.pong(seq: seq).encodedLine()
+                _ = reply.withUnsafeBytes { write(clientFD, $0.baseAddress!, $0.count) }
+            }
+            _ = Self.readLine(from: clientFD)
+        }.start()
+
+        let connection = OfficeWireConnection(socketPath: socketPath)
+        try await connection.open()
+        defer { connection.close() }
+        let client = OfficeHelperClient(connection: connection,
+                                        seqAllocator: OfficeWireSeqAllocator(),
+                                        requestTimeout: 3.0)
+
+        async let first: Void = client.ping()
+        async let second: Void = client.ping()
+        do {
+            _ = try await (first, second)
+        } catch {
+            return XCTFail("two concurrent requests on one connection must both be answered — got \(error)")
+        }
+    }
+
 }

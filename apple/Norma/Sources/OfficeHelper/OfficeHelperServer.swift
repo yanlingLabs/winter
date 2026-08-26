@@ -228,6 +228,15 @@ public protocol OfficeDocumentBridge: AnyObject {
     /// cases, so this bridge would otherwise have no honest signal to report).
     func sheetsManageSheet(docId: String, op: OfficeSheetsManageSheetOp, name: String, newName: String?) throws -> [String]
 
+    /// office-finish Job 2 — N sheet operations, applied IN ORDER, stopping at the first failure.
+    /// Returns the post-state sheet list plus the prefix ledger (`applied` = how many succeeded and
+    /// were verified; `failure` = why operation `applied + 1` failed, `nil` iff all succeeded).
+    /// **A conformer that does not override this gets the loop in the protocol extension below —
+    /// which is correct but pays one hop per operation. `LOKBridge` overrides it so the whole batch
+    /// costs ONE hop onto the dedicated LOK thread, which is the point of the batch.**
+    func sheetsManageSheetBatch(docId: String, ops: [OfficeSheetsManageSheetOperation]) throws
+        -> (sheets: [String], applied: Int, failure: String?)
+
     /// office-agent-tools T5 — applies `bold`/`italic`/`numberFormat`/`align`/`width` over `range` on
     /// `sheet`, every one optional (`nil` means untouched — see `OfficeWireFrame.sheetsFormat`'s own
     /// header for the full contract). `columnSpan` is `width`'s own separate column-span selection,
@@ -267,6 +276,10 @@ public protocol OfficeDocumentBridge: AnyObject {
     func slidesManagePage(docId: String, op: OfficeSlidesManagePageOp, slide: Int?, at: Int?, to: Int?,
                           layout: OfficeSlidesLayoutPreset?) throws -> Int
 
+    /// office-finish Job 2 — the slides counterpart to `sheetsManageSheetBatch`; see its own doc.
+    func slidesManagePageBatch(docId: String, ops: [OfficeSlidesManagePageOperation]) throws
+        -> (slideCount: Int, applied: Int, failure: String?)
+
     // MARK: - office-agent-tools T7: docs
 
     /// `docId`'s page count (`getParts()` — for Writer, parts ARE pages) plus paragraph and character
@@ -285,6 +298,59 @@ public protocol OfficeDocumentBridge: AnyObject {
     /// paragraph first. Returns the paragraph count AFTER the insert. Throws when the document read
     /// back afterwards is not the text the insert should have produced.
     func docsInsert(docId: String, text: String, atStart: Bool, asNewParagraph: Bool) throws -> Int
+}
+
+/// office-finish Job 2 — the default batch implementations: apply the single-op method N times, in
+/// order, stopping at the first failure.
+///
+/// **These exist so a conformer cannot accidentally ship a batch that means something different from
+/// its own single verb.** There is exactly one description of what an operation does (the single-op
+/// method); a batch is that, N times, and nothing else. `LOKBridge` overrides both — not to change
+/// the SEMANTICS but to pay ONE `thread.sync` for the whole batch instead of N, which is the entire
+/// performance argument for batching and the reason the daemon's write deadline still covers it.
+/// Any other conformer (the in-process fake bridge the wire tests drive) gets these and is correct.
+public extension OfficeDocumentBridge {
+    func sheetsManageSheetBatch(docId: String, ops: [OfficeSheetsManageSheetOperation]) throws
+        -> (sheets: [String], applied: Int, failure: String?) {
+        var sheets: [String] = []
+        var applied = 0
+        var failure: String?
+        for operation in ops {
+            do {
+                sheets = try sheetsManageSheet(docId: docId, op: operation.op, name: operation.name,
+                                               newName: operation.newName)
+                applied += 1
+            } catch {
+                failure = "\(error)"
+                break
+            }
+        }
+        // A batch whose FIRST operation failed never learned the post-state list from a successful
+        // call, so read it once here rather than reporting `[]` — an empty list would read as "this
+        // workbook has no sheets," a wrong answer rather than a missing one.
+        if applied == 0 { sheets = (try? sheetsInfo(docId: docId).sheets.map { $0.name }) ?? [] }
+        return (sheets, applied, failure)
+    }
+
+    func slidesManagePageBatch(docId: String, ops: [OfficeSlidesManagePageOperation]) throws
+        -> (slideCount: Int, applied: Int, failure: String?) {
+        var slideCount = -1
+        var applied = 0
+        var failure: String?
+        for operation in ops {
+            do {
+                slideCount = try slidesManagePage(docId: docId, op: operation.op, slide: operation.slide,
+                                                  at: operation.at, to: operation.to, layout: operation.layout)
+                applied += 1
+            } catch {
+                failure = "\(error)"
+                break
+            }
+        }
+        // Same reasoning as the sheets default above: never report a fabricated post-state.
+        if applied == 0 { slideCount = (try? slidesInfo(docId: docId).count) ?? -1 }
+        return (slideCount, applied, failure)
+    }
 }
 
 /// The result of a successful `OfficeDocumentBridge.paintTile` call — helper-internal (never
@@ -1577,6 +1643,19 @@ public final class OfficeHelperServer {
             } catch {
                 writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
             }
+        case .frame(.sheetsManageSheetBatch(let seq, let docId, let ops)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                let outcome = try documentBridge.sheetsManageSheetBatch(docId: docId, ops: ops)
+                writeReply(.sheetsManageSheetBatchOk(seq: seq, docId: docId, sheets: outcome.sheets,
+                                                     applied: outcome.applied, failure: outcome.failure),
+                           writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
         case .frame(.sheetsFormat(let seq, let docId, let sheet, let range, let columnSpan, let bold,
                                   let italic, let numberFormat, let align, let width)):
             guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
@@ -1633,6 +1712,19 @@ public final class OfficeHelperServer {
                 let slideCount = try documentBridge.slidesManagePage(docId: docId, op: op, slide: slide, at: at,
                                                                       to: to, layout: layout)
                 writeReply(.slidesManagePageOk(seq: seq, docId: docId, slideCount: slideCount), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.slidesManagePageBatch(let seq, let docId, let ops)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                let outcome = try documentBridge.slidesManagePageBatch(docId: docId, ops: ops)
+                writeReply(.slidesManagePageBatchOk(seq: seq, docId: docId, slideCount: outcome.slideCount,
+                                                    applied: outcome.applied, failure: outcome.failure),
+                           writer: writer)
             } catch {
                 writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
             }
