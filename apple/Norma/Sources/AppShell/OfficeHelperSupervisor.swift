@@ -102,8 +102,19 @@ final class OfficeHelperClient {
     /// request can still arrive late and queue, exactly the shape that made this reachable. A seq
     /// mismatch — of any frame type, `.error` included — throws `.unexpectedReply`, never
     /// `.serverError`: only a same-seq `.error` is genuinely this request's own answer.
+    /// **office-finish Job 1 — this now DEMULTIPLEXES rather than "takes the next frame and hopes."**
+    /// `connection.nextFrame(seq:timeout:)` returns only the frame carrying this request's own seq;
+    /// a frame belonging to anyone else is left in the connection's queue for its real owner instead
+    /// of being consumed and discarded.
+    ///
+    /// The behaviour that changed, stated plainly because a test asserted the old one: a late reply
+    /// to an already-abandoned request used to be handed to whatever request was CURRENTLY waiting,
+    /// which then failed with `.unexpectedReply`. It is now simply not delivered to that request,
+    /// which proceeds normally. The seq check below is kept as a belt — with the demux it can no
+    /// longer fire — because it costs nothing and a future connection change that reintroduced
+    /// mis-delivery should fail loudly here rather than hand a caller somebody else's answer.
     private func expectReply(seq: UInt64) async throws -> OfficeWireFrame {
-        guard let reply = await connection.nextFrame(timeout: requestTimeout) else {
+        guard let reply = await connection.nextFrame(seq: seq, timeout: requestTimeout) else {
             throw OfficeHelperClientError.timedOut
         }
         guard reply.seq == seq else { throw OfficeHelperClientError.unexpectedReply(reply) }

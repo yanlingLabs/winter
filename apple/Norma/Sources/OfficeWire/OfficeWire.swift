@@ -2698,15 +2698,31 @@ func decodedRepairFlag(_ object: [String: Any]) -> Bool? {
 }
 
 /// Mints strictly increasing `seq` values for one connection's OUTBOUND frames, starting at 1
-/// (never 0 — see `OfficeWireCodec.unreadableSeqSentinel`). Not thread-safe by itself; callers
-/// that touch it from more than one queue must serialize (both `OfficeHelperServer`'s
-/// per-connection handler and `OfficeWireConnection` already run their own frame traffic on one
-/// queue each).
+/// (never 0 — see `OfficeWireCodec.unreadableSeqSentinel`).
+///
+/// **office-finish Job 1 — now lock-guarded, and the previous header's exemption was false.** It
+/// read: *"Not thread-safe by itself; callers that touch it from more than one queue must serialize
+/// (both `OfficeHelperServer`'s per-connection handler and `OfficeWireConnection` already run their
+/// own frame traffic on one queue each)."* `OfficeWireConnection` runs its READER on one task; it
+/// has never serialized its writers, and `OfficeHelperClient.postKey`/`save`/… are called from
+/// whatever task `OfficeHelperRequestQueue.run`'s operation closure happens to be on — a `Task {}`
+/// body, not a `@MainActor` context. What actually held the invariant was that one app-wide FIFO,
+/// at 29 call sites, plus the convention that nothing else holds a client. The DEBUG office harness
+/// already breaks that convention deliberately.
+///
+/// That mattered little while a duplicate seq merely produced a confusing `.unexpectedReply`. It
+/// matters completely now that `OfficeWireConnection` **routes replies by seq**: two callers handed
+/// the same number would have their answers swapped, silently and plausibly — the
+/// silent-wrong-answer outcome this project rates as worse than a crash. The lock is the cheapest
+/// possible way to make the demultiplexer's key actually unique, and it costs one uncontended
+/// `NSLock` per outbound frame.
 public final class OfficeWireSeqAllocator {
+    private let lock = NSLock()
     private var next: UInt64 = 1
     public init() {}
     public func nextSeq() -> UInt64 {
-        defer { next += 1 }
+        lock.lock()
+        defer { next += 1; lock.unlock() }
         return next
     }
 }
