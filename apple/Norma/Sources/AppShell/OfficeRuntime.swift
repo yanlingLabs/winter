@@ -2419,7 +2419,14 @@ final class OfficeRuntime: ObservableObject {
     /// body of the `Driver.close` closure — the single production wrapper, inside `queue.run` — and
     /// `OfficeHarness.swift:1391`, which is `#if DEBUG` test surface. (3) `Driver` is a struct held
     /// only by this type, so every production close is a call to `driver.close(`, and
-    /// `grep -n "driver\.close(" OfficeRuntime.swift` returns the five below. Anything that escapes
+    /// `grep -n "driver\.close(" OfficeRuntime.swift` returns five LINES that resolve to **four
+    /// code sites** — one of the five hits is this comment's own text, and a single site
+    /// (the barriered close helper) serves BOTH row 1 and row 2 below, which is why the table has
+    /// five rows over four sites. (Stated because the scoped review caught the earlier wording
+    /// implying five code sites, i.e. the enumeration padding its own count — inside the artifact
+    /// written so the enumeration could be attacked. A stated enumeration is a claim too, and the
+    /// easier one to get wrong silently: nothing fails to compile when a list is one item short.)
+    /// Anything that escapes
     /// this method escapes it by holding a `Driver` or an `OfficeHelperClient` somewhere new — which
     /// is the thing to check when adding either.
     ///
@@ -2461,11 +2468,20 @@ final class OfficeRuntime: ObservableObject {
     /// would fire straight at the helper. A barrier that disappears exactly when it is needed is
     /// worse than no barrier, because the comment above it still claims protection.
     ///
-    /// The strong capture keeps the runtime alive for the barrier's own bounded duration (≤15 s),
-    /// which is precisely as long as "the close must not race the save" requires. The apparent cycle
+    /// The strong capture keeps the runtime alive for the barrier's own bounded duration, which is
+    /// precisely as long as "the close must not race the save" requires. The apparent cycle
     /// (`self` → `pendingCloseBarriers` → `Task` → `self`) is real but **temporary and
-    /// self-breaking**: the task's last statement removes its own entry, and the task cannot outlive
-    /// `awaitCloseBarrier`'s deadline.
+    /// self-breaking**: the task's last statement removes its own entry, and nothing anywhere
+    /// cancels or bulk-clears that dictionary, so the body always completes and always releases.
+    ///
+    /// **The bound, corrected (scoped review, MINOR-1) — it is NOT ≤15 s.** An earlier version of
+    /// this comment claimed the task "cannot outlive `awaitCloseBarrier`'s deadline". It can: after
+    /// that 15 s wait the body still awaits `driver.close`, which is FIFO-queued and bounded by
+    /// `requestTimeout` = `handshakeTimeout` = **30.0 s** (`OfficeHelperSupervisor.swift:611` →
+    /// `:870` → `:106`). Real worst case is 15 s **plus** backlog × ~30 s. Still bounded, and a dead
+    /// helper resolves instantly (a nil client no-ops; `streamClosed` returns `nil`) — so the
+    /// conclusion "temporary, self-breaking, always releases" survives. The supporting fact did not,
+    /// which is the whole reason it is restated here rather than quietly edited.
     ///
     /// **This is MEASURED, not argued — and the first attempt to measure it was blind.**
     /// `testTeardownRightAfterASaveNeverKillsTheHelperANOTHERSessionIsStillUsing` swapping only this
