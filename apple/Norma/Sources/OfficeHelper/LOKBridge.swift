@@ -2422,12 +2422,20 @@ final class LOKBridge: OfficeDocumentBridge {
         // true` read — genuinely unavoidable with this mechanism (confirmed: `getCommandValues`'s
         // full dispatch table, read directly from the pinned source, has no read-only formula-text
         // query this bridge could use instead).
+        // office-polish Bug 2 — `formulaModeText` is what this function is about to RETURN, read
+        // under Show Formulas. It is the only observable this bridge has for whether the restore
+        // below actually landed (there is no callback for `.uno:ToggleFormula` — see
+        // `toggleFormulaOnDedicatedThread`'s own header), so it is captured on the way out and
+        // handed to the restore. `nil` until the read completes: an early exit has nothing to
+        // verify against and says so, rather than verifying against a stale string.
+        var formulaModeText: String?
         if formulas {
             toggleFormulaOnDedicatedThread(doc)
         }
         defer {
             if formulas {
-                toggleFormulaOnDedicatedThread(doc, pump: (viewId: viewId, part: part))
+                restoreFormulaDisplayOnDedicatedThread(doc, docId: docId, viewId: viewId, part: part,
+                                                       formulaModeText: formulaModeText)
             }
         }
 
@@ -2513,9 +2521,11 @@ final class LOKBridge: OfficeDocumentBridge {
             pumpDedicatedThreadForPendingDispatch(doc, viewId: viewId, part: part)
         }
 
-        // The formula-toggle restore (fix round 4, review I5) is registered as a `defer` above,
-        // right after the ON-toggle — it runs here, guaranteed, on every exit from this function,
-        // not repeated as a plain statement at this tail.
+        // The formula-toggle restore (fix round 4, review I5; VERIFIED as of office-polish Bug 2)
+        // is registered as a `defer` above, right after the ON-toggle — it runs here, guaranteed,
+        // on every exit from this function, not repeated as a plain statement at this tail. It
+        // reads `formulaModeText`, so that assignment must precede the return.
+        formulaModeText = text
         return text
     }
 
@@ -2561,6 +2571,120 @@ final class LOKBridge: OfficeDocumentBridge {
         if let pump {
             pumpDedicatedThreadForPendingDispatch(doc, viewId: pump.viewId, part: pump.part)
         }
+    }
+
+    /// One restore round = a `.uno:ToggleFormula` dispatch plus this many pump-and-re-read turns
+    /// waiting for it to become visible. Sized above `goToCellVerificationAttempts` (4) because
+    /// that budget waits on a command with an observable landing, while this one waits behind
+    /// whatever else is still queued in LOK's dispatcher. A turn costs one throwaway 64x64 tile
+    /// paint and is only spent while the restore is still visibly un-landed.
+    private static let formulaRestoreSettleTurns = 6
+
+    /// How many times the restore may RE-DISPATCH before giving up and saying so. Re-dispatch is
+    /// safe here only because every round ends in a read-back: this converges on an OBSERVED
+    /// state, it never counts toggles. `2` (one retry) rather than a larger number deliberately —
+    /// each extra round widens the window in which a merely-slow first dispatch could still land
+    /// on top of a second one.
+    private static let formulaRestoreRounds = 2
+
+    /// office-polish Bug 2 — the VERIFIED counterpart of `toggleFormulaOnDedicatedThread`'s
+    /// fire-and-forget OFF dispatch, and the fix for a real, user-reported defect.
+    ///
+    /// **What was actually happening.** `.uno:ToggleFormula` is document-wide and `postUnoCommand`
+    /// is asynchronous, so a `formulas: true` read leaves Show Formulas ON until LOK's dispatcher
+    /// drains it. Before this, the OFF-toggle got exactly ONE pump. That is enough when nothing
+    /// else is queued and NOT enough when the dedicated LOK thread has been stalled mid-job —
+    /// which a slow client causes routinely, because `handleCallback` pushes `invalidated`/
+    /// `documentEvent` frames to the client SYNCHRONOUSLY on this very thread. Measured against
+    /// the real helper and the real vendored engine: with a slow tile consumer, one
+    /// `sheets read formulas:true` left the document in Show Formulas mode PERMANENTLY — every
+    /// tile painted formula source (the user's own screenshot) and every later `formulas: false`
+    /// read answered `"=B5*$B$2"` for a cell whose value is `300`. A silent wrong answer handed to
+    /// the model, not merely a cosmetic render fault.
+    ///
+    /// **Pumping alone was measured INSUFFICIENT, which is why this re-dispatches.** The first
+    /// version of this fix pumped up to 8 turns and verified; it correctly DETECTED the failure
+    /// (its own "did NOT land" line fired) but the state never recovered, and the document stayed
+    /// wrong through every later LOK call in that run. So the un-landed dispatch is lost, not
+    /// merely slow, and no amount of waiting fixes it — the command has to be issued again.
+    ///
+    /// **Why re-dispatching a blind TOGGLE is safe here, and would not be anywhere else.** Every
+    /// round ends by READING THE STATE BACK, so this converges on an observed condition instead of
+    /// assuming a parity. `formulaRestoreRounds` is deliberately small for the one residual that
+    /// remains: a first dispatch that is merely slow could still land after a second was issued,
+    /// flipping the document back. That is why a round only re-dispatches after its full settle
+    /// budget has been spent, and why the count is 1 retry rather than many.
+    ///
+    /// **Why this verifies by re-reading the selection rather than by a callback.** There is no
+    /// callback: complete raw-callback traces of a leaking run and of a clean run are IDENTICAL
+    /// (164 callbacks each, `.uno:ToggleFormula` absent from every `STATE_CHANGED` payload and
+    /// every other type) — this file's own I5 finding, re-confirmed here rather than taken on
+    /// trust. The only observable this bridge has is the selection text: under Show Formulas the
+    /// read answers formula SOURCE, and once the restore lands it answers the computed value.
+    ///
+    /// **The blind spot, stated rather than papered over.** When the range contains no formula at
+    /// all, both display modes produce identical text and NOTHING here can tell whether the
+    /// restore landed. That case spends the settle budget blind — strictly more pumping than the
+    /// single pump it replaces — and says so on stderr instead of claiming a verification it did
+    /// not perform. Closing it for real needs a per-view display mode or a synchronous state read,
+    /// neither of which exists on this engine's LOK surface (`getCommandValues`' full dispatch
+    /// table has no formula query, and `setViewOption`'s header slot is unverified against the
+    /// compiled dylib — this file has three precedents of header slots absent from it).
+    private func restoreFormulaDisplayOnDedicatedThread(_ doc: OpenDocument, docId: String,
+                                                        viewId: Int32, part: Int,
+                                                        formulaModeText: String?) {
+        // **The second half of the fix, and it is NOT optional.** Restoring the document's display
+        // mode is not enough on its own: any tile painted while Show Formulas was on is already in
+        // `TileRenderer`'s own cache (`TileRenderer.paint` serves a cache HIT without repainting),
+        // and the engine fires NO `LOK_CALLBACK_INVALIDATE_TILES` for a display-mode change — that
+        // was MEASURED here, twice: with the restore verified and landing (`C5` reading `300`
+        // again), a re-request still returned the formula-source pixels byte-identically. So the
+        // cached pixels have to be dropped explicitly. `rectsTwips: []` is `TileCache.invalidate`'s
+        // own documented "bump everything" form and `part: -1` its own all-parts sentinel; routing
+        // it through `onEvent` rather than touching the cache directly means the SUBSCRIBERS get
+        // their `invalidated` push too, by the exact path a real LOK invalidation already uses —
+        // without which the app would keep painting its own stale copies regardless of what the
+        // helper's cache holds. `defer`, so it also covers the unverifiable-range path and any
+        // future early return.
+        defer { onEvent?(docId, .invalidated(rectsTwips: [], part: -1)) }
+
+        // `contains("=")` is the "is this verifiable at all" test, deliberately loose: a false
+        // POSITIVE (a plain cell whose text happens to contain "=") costs only pump turns and a
+        // diagnostic line, never a wrong result; a false NEGATIVE would silently skip verification
+        // on a range that really did have a formula.
+        guard let formulaModeText, formulaModeText.contains("=") else {
+            toggleFormulaOnDedicatedThread(doc, pump: (viewId: viewId, part: part))
+            for _ in 1..<Self.formulaRestoreSettleTurns {
+                pumpDedicatedThreadForPendingDispatch(doc, viewId: viewId, part: part)
+            }
+            FileHandle.standardError.write(Data((
+                "[LOKBridge sheets] formula-display restore dispatched with no formula in the read's own "
+                    + "text — landing is UNVERIFIABLE for this range; spent the settle budget blind\n").utf8))
+            return
+        }
+
+        var dispatches = 0
+        while dispatches < Self.formulaRestoreRounds {
+            toggleFormulaOnDedicatedThread(doc, pump: (viewId: viewId, part: part))
+            dispatches += 1
+            for turn in 1...Self.formulaRestoreSettleTurns {
+                if readSelectionTextOnDedicatedThread(doc) != formulaModeText {
+                    if dispatches > 1 || turn > 1 {
+                        FileHandle.standardError.write(Data((
+                            "[LOKBridge sheets] formula-display restore landed after \(dispatches) "
+                                + "dispatch(es), \(turn) settle turn(s)\n").utf8))
+                    }
+                    return
+                }
+                pumpDedicatedThreadForPendingDispatch(doc, viewId: viewId, part: part)
+            }
+        }
+        // LOUD, never silent: as far as this bridge can observe, the document is STILL in Show
+        // Formulas mode. A silent return here would be exactly the defect class this fix removes.
+        FileHandle.standardError.write(Data((
+            "[LOKBridge sheets] formula-display restore did NOT land after \(Self.formulaRestoreRounds) "
+                + "dispatch(es) x \(Self.formulaRestoreSettleTurns) settle turn(s) — this document may "
+                + "still be in Show Formulas mode\n").utf8))
     }
 
     /// The one place this bridge calls `getTextSelection` — `selectionTextOnDedicatedThread`'s
