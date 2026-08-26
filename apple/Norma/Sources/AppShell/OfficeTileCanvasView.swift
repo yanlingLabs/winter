@@ -688,17 +688,26 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost, NSTextInputC
             // Deliberately NOT the reload path below: nothing here clears tiles (every painted tile
             // is still valid — growth appends content, it does not move what is already laid out)
             // and nothing resets `scrollOrigin` (the user is reading; their position must survive).
-            // Only the three things a new extent actually invalidates run: the scroll clamp, the
-            // subscription (whose own skip-check is bounded by this same extent), and residency
-            // eligibility (`officeResidencyEligibleTileCount` is a function of `sizeTwips`).
+            //
+            // **And deliberately NO `performSubscribe()`/`evaluateResidencyIfNeeded()` either —
+            // that version was written, MEASURED, and reverted.** A size revision arrives while the
+            // AGENT is mid-verb (it is an agent write that changed the size in the first place), and
+            // both of those issue fresh `subscribeTiles` traffic onto the helper's single dedicated
+            // LOK thread. `subscribeTiles` asserts a part, so for a presentation it lands a `setPart`
+            // in the middle of a verb's own verify-by-re-read — and every Impress page verb verifies
+            // that way because the engine gives no other signal. `bun run verify:office-agent` went
+            // from PASS 8/8 to `slides.add_slide` FILE-FAIL in 4 runs out of 4 with those two calls
+            // present, and back to PASS 8/8 without them (`docs.replace` also failed 1 of those 4).
+            //
+            // Nothing is lost: a new extent only matters once the user scrolls into it, and
+            // scrolling issues its own `scheduleThrottledSubscribe()` on every tick. Residency is a
+            // prefetch heuristic that re-evaluates on the next part/zoom change. So the arm does
+            // exactly one thing — re-clamp how far this canvas may scroll — and touches LOK not at
+            // all.
             if newSizeTwips != sizeTwips {
                 sizeTwips = newSizeTwips
                 scrollOrigin = CGPoint(x: clampedOriginX(scrollOrigin.x), y: clampedOriginY(scrollOrigin.y))
                 relayoutVisibleTiles()
-                performSubscribe()
-                lastResidencyEvaluation = nil
-                prefetchGeneration += 1
-                evaluateResidencyIfNeeded()
             }
             setActivePart(activePart) // the pre-Task-8 drift re-assert, unchanged
             return
