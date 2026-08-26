@@ -1871,7 +1871,19 @@ final class OfficeRuntime: ObservableObject {
         perform(dispatch(.openRequested(path: path)))
     }
 
+    /// Close `path`'s open document. **Synchronous and fire-and-forget, exactly as before** — the
+    /// reducer drops `documents[path]` in this same turn, so `stateSnapshot` reflects the close the
+    /// instant this returns. What office-instant-save Job 1 changed is one level down: the HELPER's
+    /// own close request is now issued behind a barrier (`awaitCloseBarrier`, reached from
+    /// `.helperClose`'s performer). Nothing a caller can observe from here moved.
+    ///
+    /// The debounce cancel is the other half of that fix, and it belongs here rather than in the
+    /// barrier because `autoSaveTasks` is keyed by PATH and `.helperClose` carries only a docId: an
+    /// auto-save armed by the user's last keystroke must not be allowed to fire into the close it is
+    /// racing. Harmless when instant save is parked — the bag is empty, because `noteEditActivity`
+    /// refuses before ever arming one.
     func close(_ path: String) {
+        autoSaveTasks.removeValue(forKey: path)?.cancel()
         perform(dispatch(.closeRequested(path: path)))
     }
 
@@ -2082,7 +2094,17 @@ final class OfficeRuntime: ObservableObject {
     // MARK: - The dirty-close sheet's missing half: draining LOK's own post-save bookkeeping
 
     /// ─────────────────────────────────────────────────────────────────────────────────────────
-    /// **TWO DRAINS EXIST FOR ONE BUG. READ THIS BEFORE CHANGING EITHER.**
+    /// **THREE BARRIERS NOW EXIST FOR ONE BUG. READ THIS BEFORE CHANGING ANY OF THEM.**
+    ///
+    /// office-instant-save Job 1 added the third — `OfficeRuntime.awaitCloseBarrier`, reached from
+    /// `.helperClose`'s own performer. It is the only UNCONDITIONAL one: it sits at the single site
+    /// every real close funnels through, so it needs no call site to remember it, and it is what
+    /// finally covers the clean-tab `×` route (`ShellSessionHost.requestCloseTab:1500-1502` →
+    /// `closePanelTab:1739`), which had no barrier at all. That route's own in-code claim that it
+    /// needed none was wrong and is corrected at `ShellSessionHost.swift`. The two below are now
+    /// **redundant with it** on their own paths, and are kept because their regression tripwires are
+    /// written against them; neither should be deleted without moving those first. Full account and
+    /// measured counts: `.superpowers/research/office-close-race-report.md`.
     ///
     /// This is the **dirty-close sheet's** drain, guarding the USER's `×`-then-Save path
     /// (`ShellSessionHost.resolveDirtyDocumentTabClose`). `OfficeAgentBroker.drainDirty` is the
@@ -2217,12 +2239,43 @@ final class OfficeRuntime: ObservableObject {
         guard let doc = state.documents[path] else { return true }
         let docId = doc.docId
         let part = doc.activePart
-        let sessionId = self.sessionId
         let driver = self.driver
+        return await boundedHelperRoundTrip(label: "drainUntilClean(\(path))", timeout: timeout) {
+            _ = await driver.clipboardCopy(docId, part)
+        }
+    }
+
+    /// **The bounded-wait shell both barriers share — office-instant-save Job 1 factored this OUT of
+    /// `drainUntilClean` rather than writing a second copy of it.** The timeout/`resolved`/single-
+    /// resume discipline is identical for any "await one real helper round trip, but never
+    /// unboundedly" question, and there was no reason for a second implementation of it to exist.
+    ///
+    /// `probe` is deliberately a parameter and not a fixed call, because the two callers ask the same
+    /// question with **different verbs, and the difference is load-bearing**:
+    ///   * `drainUntilClean` probes with `clipboardCopy` — that is the verb its 25-consecutive-close
+    ///     evidence was measured against (its own header), and changing it out from under that
+    ///     evidence would silently invalidate it.
+    ///   * `awaitCloseBarrier` probes with `undoDepth` — part-free and O(1) (two
+    ///     `doc_getCommandValues` integer reads, `LOKBridge.undoDepthOnDedicatedThread`) rather than
+    ///     `clipboardCopy`'s O(selection) serialize-and-discard. That IS the "dedicated no-op/health-
+    ///     check verb" `drainUntilClean`'s own header files as the correct long-term probe. It reaches
+    ///     LOK by the identical route — `queue.run` (the one app-wide FIFO) then `thread.sync` into a
+    ///     real UNO entry (`LOKBridge.undoDepth`, `:1091-1092`) — so it proves the same two things:
+    ///     this request cleared the FIFO ahead of it, and the dedicated LOK thread was free enough to
+    ///     take a call and answer. **`drainUntilClean`'s measured evidence does NOT transfer to it**;
+    ///     `awaitCloseBarrier` carries its own counts (`.superpowers/research/office-close-race-report.md`).
+    ///
+    /// Returns `false` (never throws) if `timeout` elapsed first, and logs — every caller must treat
+    /// that as "proceed anyway", for the reason `drainUntilClean`'s own header gives at length: the
+    /// write already landed, and turning a landed write into a reported failure because the CLEANUP
+    /// took too long is a worse lie than the one the barrier exists to prevent.
+    private func boundedHelperRoundTrip(label: String, timeout: TimeInterval,
+                                        probe: @escaping @MainActor () async -> Void) async -> Bool {
+        let sessionId = self.sessionId
         return await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
             var resolved = false
             let probeTask = Task { @MainActor in
-                _ = await driver.clipboardCopy(docId, part)
+                await probe()
                 guard !resolved else { return }
                 resolved = true
                 continuation.resume(returning: true)
@@ -2232,12 +2285,217 @@ final class OfficeRuntime: ObservableObject {
                 guard !resolved else { return }
                 resolved = true
                 probeTask.cancel()
-                NSLog("[OfficeRuntime] \(sessionId): drainUntilClean(\(path)) round trip timed out "
-                      + "after \(timeout)s — the save already landed; proceeding to close anyway "
-                      + "rather than report a landed write as a failure")
+                NSLog("[OfficeRuntime] \(sessionId): \(label) round trip timed out after "
+                      + "\(timeout)s — the save already landed; proceeding to close anyway rather "
+                      + "than report a landed write as a failure")
                 continuation.resume(returning: false)
             }
             _ = timeoutTask
+        }
+    }
+
+    // MARK: - office-instant-save Job 1 — the close barrier
+
+    /// ─────────────────────────────────────────────────────────────────────────────────────────
+    /// **THE THIRD BARRIER SITE, AND WHY NEITHER EXISTING DRAIN COULD SIMPLY BE CALLED HERE.**
+    /// Read this together with `drainUntilClean`'s and `OfficeAgentBroker.drainDirty`'s headers.
+    ///
+    /// * **`drainDirty` could not be extended**: its barrier watches `$state` for LOK's own real
+    ///   `.uno:ModifiedStatus=false`, and a barrier that waits for `dirty` to BECOME false cannot
+    ///   wait when it is ALREADY false — which is exactly the case that kills the helper here
+    ///   (`OfficeRuntimeReducer`'s `.saveSucceeded` arm clears `dirty` SYNCHRONOUSLY on
+    ///   `restoredPendingSave`/`saveFailedPendingSave`, `OfficeRuntime.swift:1102-1106`). It also
+    ///   lives in the broker; `OfficeRuntime.close` cannot reach up into it.
+    /// * **`drainUntilClean` could not be CALLED here**: it is keyed by **`path`**, and
+    ///   `.helperClose` is keyed by **`docId`** — and the two disagree at every one of the three
+    ///   emit sites, so it would never once probe the document actually being closed:
+    ///     - `.closeRequested` removes `documents[path]` (`:1032`) BEFORE emitting `.helperClose`
+    ///       (`:1050`), so `drainUntilClean` hits its `guard let doc = state.documents[path]` and
+    ///       returns `true` with no round trip at all — a barrier that silently never runs, which is
+    ///       this project's "a guard that turns a loud failure into a silent wrong answer";
+    ///     - `.opened`'s overwrite-orphan compensating close (`:994`) emits for
+    ///       `previousEntry.docId` *after* `documents[path]` has been rewritten to the NEW docId, so
+    ///       the entry is non-nil but names a different document;
+    ///     - `.opened`'s dropped-attempt close (`:954`) returns state untouched for this path, so
+    ///       whatever `documents[path]` holds is unrelated to the docId being closed.
+    ///
+    ///   **Correction, and it is mine (review, MINOR):** an earlier revision of this paragraph said
+    ///   the entry is "ALWAYS nil" at `.helperClose` time. That is true only of the
+    ///   `.closeRequested` route — the one that matters here — and false at the other two. The
+    ///   conclusion held; the supporting fact did not. Recorded rather than quietly amended, because
+    ///   it is an instance of the exact pattern this arc keeps cataloguing.
+    ///
+    /// So it was extended instead: its bounded-wait shell is now `boundedHelperRoundTrip` (shared,
+    /// one implementation), and this is the docId-keyed caller that shell exists to also serve.
+    ///
+    /// **What this closes.** `ShellSessionHost.requestCloseTab`'s CLEAN `.document` leg (`:1500-1502`
+    /// → `closePanelTab` → `officeRuntime.close(path)` at `:1739`) had NO barrier at all, and the
+    /// in-code claim that it needed none was wrong (that comment is corrected). A save is what makes
+    /// a dirty tab clean, so "⌘S, then click the ×" reaches that leg by hand, and the re-review
+    /// measured closing at that timing killing the shared, app-wide helper 2 of 3 times
+    /// (`.superpowers/research/office-live-edit-rereview.md` Q3(c)) — taking every OTHER open
+    /// document with it, since `OfficeHelperRequestQueue` is one FIFO for the whole app.
+    ///
+    /// Putting it HERE, in `.helperClose`'s own performer, rather than at any call site, is what
+    /// covers every **tab/document** close by construction: the clean `×`, the dirty-close sheet,
+    /// `OfficeAgentBroker`'s `defer`-close on its `.failed` leg (`OfficeAgentBroker.swift:365`, a
+    /// disclosed residual this closes for free) and any future caller of `close(_:)` all reach it,
+    /// with no call site left to forget.
+    ///
+    /// ⛔ **`.helperClose` is NOT the only door to the helper's close, and an earlier revision of
+    /// this header claimed it was ("every real close funnels through this one effect"). That was
+    /// FALSE and it left a lethal door open** — `performTeardown` closes documents without going
+    /// through `.helperClose` at all, and `ShellSessionHost.releaseOfficeRuntimeIfClean` reaches it
+    /// on a **surviving** helper. See `OfficeRuntime`'s own `driver.close` enumeration, immediately
+    /// below `performTeardown`, for the complete list and the method it was built with.
+    ///
+    /// **Two halves, and the second is not redundant with the first.**
+    ///  1. *Await this docId's in-flight saves.* The round trip alone is NOT sufficient:
+    ///     `performSave`'s task awaits `inputChainTail` (bounded at 30 s per queued request) BEFORE
+    ///     `driver.save` ever enters the FIFO. A probe issued inside that window passes, `doc_close`
+    ///     enqueues behind it, and the save's own `doc_saveAs` then lands on a document that is
+    ///     already closed. Awaiting the registered save tasks first is what removes that window.
+    ///  2. *One real awaited helper round trip* (`undoDepth`) — the mechanism `drainUntilClean`
+    ///     established: it proves the FIFO ahead of it drained and that the dedicated LOK thread was
+    ///     free enough to take a UNO call and answer, which is the empirically effective barrier
+    ///     against LOK's own internal `exit()`. Same honesty as `drainUntilClean`'s header: this is a
+    ///     measured barrier, not a proof that it closes that race window completely.
+    ///
+    /// **Bounded, never unbounded.** ONE 15 s deadline covers both halves. On expiry it logs and the
+    /// close proceeds — the bytes already landed, and wedging a close forever would be worse than the
+    /// race it guards. Nothing here can deadlock: this runs inside `.helperClose`'s own Task, outside
+    /// every `queue.run` closure, so no FIFO operation is ever nested inside another.
+    ///
+    /// **`close(_:)` stays synchronous and fire-and-forget.** Only the HELPER request is deferred;
+    /// the reducer still removes `documents[path]` in the caller's own turn, so every existing caller
+    /// and every `XCTAssertNil(runtime.stateSnapshot.documents[path])` after a close is untouched.
+    /// ─────────────────────────────────────────────────────────────────────────────────────────
+    private func awaitCloseBarrier(docId: String, timeout: TimeInterval = 15) async {
+        let driver = self.driver
+        _ = await boundedHelperRoundTrip(label: "closeBarrier(\(docId))", timeout: timeout) {
+            [weak self] in
+            // Half 1. A `while` rather than a snapshot `for`: a save registered WHILE we were
+            // awaiting an earlier one must also be waited for. This cannot spin: `.closeRequested`
+            // has already removed `documents[path]`, so `saveAndAwaitOutcome` answers `.noModel`
+            // without registering, `fireAutoSave`'s own `dirty == true` guard refuses, and
+            // `close(_:)` cancelled this path's pending debounce before dispatching. The 15 s
+            // deadline bounds it regardless.
+            while let pending = self?.inFlightSaveTasks[docId]?.values.first {
+                _ = await pending.value
+            }
+            // Half 2.
+            _ = await driver.undoDepth(docId)
+        }
+    }
+
+    /// Every `performSave` task currently in flight, keyed by the docId it is saving. A docId can
+    /// legitimately hold more than one ("two ⌘S on one path are two independent saves" —
+    /// `save(_:)`'s own contract), hence the inner token map rather than a single task.
+    ///
+    /// Registered by `performSave` and removed by that same task's own `defer`, so no exit path —
+    /// including the superseded-generation guard that returns early — can leak an entry.
+    private var inFlightSaveTasks: [String: [UUID: Task<Void, Never>]] = [:]
+
+    /// The close barriers currently running, so a test can await them deterministically. Without
+    /// this a live drill would check helper liveness before `driver.close` had even been issued,
+    /// which would make the drill vacuous rather than merely weak.
+    private var pendingCloseBarriers: [UUID: Task<Void, Never>] = [:]
+
+    /// Test-only: wait until every close this runtime has issued has actually reached the helper.
+    /// Loops rather than snapshotting for the same reason `awaitCloseBarrier`'s half 1 does.
+    func awaitPendingCloseBarriersForTesting() async {
+        while let pending = pendingCloseBarriers.values.first {
+            _ = await pending.value
+        }
+    }
+
+    /// ─────────────────────────────────────────────────────────────────────────────────────────
+    /// **EVERY `driver.close` IN THIS RUNTIME, AND WHETHER IT IS BARRIERED. Built by a stated
+    /// METHOD, so the enumeration can be attacked rather than trusted.**
+    ///
+    /// *Method (re-runnable in three greps).* (1) The wire close is
+    /// `OfficeHelperClient.close(docId:)`. (2) Tree-wide, `grep -rn "client\.close(docId"
+    /// apple/Norma/Sources` returns exactly two hits: `ShellSessionHost.swift:965`, which is the
+    /// body of the `Driver.close` closure — the single production wrapper, inside `queue.run` — and
+    /// `OfficeHarness.swift:1391`, which is `#if DEBUG` test surface. (3) `Driver` is a struct held
+    /// only by this type, so every production close is a call to `driver.close(`, and
+    /// `grep -n "driver\.close(" OfficeRuntime.swift` returns five LINES that resolve to **four
+    /// code sites** — one of the five hits is this comment's own text, and a single site
+    /// (the barriered close helper) serves BOTH row 1 and row 2 below, which is why the table has
+    /// five rows over four sites. (Stated because the scoped review caught the earlier wording
+    /// implying five code sites, i.e. the enumeration padding its own count — inside the artifact
+    /// written so the enumeration could be attacked. A stated enumeration is a claim too, and the
+    /// easier one to get wrong silently: nothing fails to compile when a list is one item short.)
+    /// Anything that escapes
+    /// this method escapes it by holding a `Driver` or an `OfficeHelperClient` somewhere new — which
+    /// is the thing to check when adding either.
+    ///
+    /// | # | site | what it closes | barriered? | why |
+    /// |---|---|---|---|---|
+    /// | 1 | `.helperClose` performer | the document a `close(_:)` asked for | **YES** | the clean `×`, the dirty-close sheet and the broker all arrive here; a save can immediately precede any of them |
+    /// | 2 | `performTeardown` | every document a runtime still holds | **YES** (review IMPORTANT-1) | `releaseOfficeRuntimeIfClean` reaches it on a **surviving** helper, and it fires exactly when the runtime is CLEAN — i.e. just after a save |
+    /// | 3 | `.reloadDocument` performer | the docId a reload SUPERSEDED | no | see below |
+    /// | 4 | `.restoreFromSidecar` performer | the docId a restore SUPERSEDED | no | see below |
+    /// | 5 | `openAndDispatch`'s superseded-generation compensator | a docId whose `open` landed after a teardown | no | see below |
+    ///
+    /// **Why 3–5 are left unbarriered, argued rather than assumed.** The barrier exists for one
+    /// timing: *this runtime just wrote this document, and LOK may still be finishing that write.*
+    /// None of the three is that.
+    ///  - 3 and 4 close a docId that a **reload/restore replaced**. What precedes them is an
+    ///    `open` of a NEW docId, not a save of the old one. A save could in principle have happened
+    ///    earlier on the old docId, but a reload only happens because the FILE CHANGED, and this
+    ///    runtime's own writes are self-attributed and suppressed (`consumeExpectedWrite`), so the
+    ///    reload's trigger is by construction somebody else's write, not ours.
+    ///  - 5 closes a docId this runtime **never finished opening** — the `open` round trip returned
+    ///    after a teardown bumped the generation, so nothing was ever saved through it; there is no
+    ///    post-save work to wait for.
+    ///
+    /// **This is a claim about risk, not a proof of impossibility**, and it is the honest status:
+    /// unlike 1 and 2 it is not backed by a red/green. If a reload- or compensator-close is ever
+    /// seen killing the helper, the fix is one line — `makeBarrieredClose` — at that site.
+    /// ─────────────────────────────────────────────────────────────────────────────────────────
+
+    /// The one way this runtime issues a barriered `driver.close`. Both call sites (`.helperClose`'s
+    /// performer and `performTeardown`) use it, so the two can never drift.
+    ///
+    /// ⚠️ **`self` is captured STRONGLY, and that is load-bearing rather than lazy.** A `[weak self]`
+    /// capture — which the first version used — makes the barrier silently skip on exactly the path
+    /// review IMPORTANT-1 found: `ShellSessionHost.releaseOfficeRuntimeIfClean` does
+    /// `officeRuntimes.removeValue(forKey: sessionId)?.teardown()`, so the table's own strong
+    /// reference is already gone and the temporary returned by `removeValue` is the LAST one. It
+    /// dies the instant `teardown()` returns — before the spawned task's body has run a single line
+    /// — so `self?` would be `nil`, `awaitCloseBarrier` would be skipped entirely, and the close
+    /// would fire straight at the helper. A barrier that disappears exactly when it is needed is
+    /// worse than no barrier, because the comment above it still claims protection.
+    ///
+    /// The strong capture keeps the runtime alive for the barrier's own bounded duration, which is
+    /// precisely as long as "the close must not race the save" requires. The apparent cycle
+    /// (`self` → `pendingCloseBarriers` → `Task` → `self`) is real but **temporary and
+    /// self-breaking**: the task's last statement removes its own entry, and nothing anywhere
+    /// cancels or bulk-clears that dictionary, so the body always completes and always releases.
+    ///
+    /// **The bound, corrected (scoped review, MINOR-1) — it is NOT ≤15 s.** An earlier version of
+    /// this comment claimed the task "cannot outlive `awaitCloseBarrier`'s deadline". It can: after
+    /// that 15 s wait the body still awaits `driver.close`, which is FIFO-queued and bounded by
+    /// `requestTimeout` = `handshakeTimeout` = **30.0 s** (`OfficeHelperSupervisor.swift:611` →
+    /// `:870` → `:106`). Real worst case is 15 s **plus** backlog × ~30 s. Still bounded, and a dead
+    /// helper resolves instantly (a nil client no-ops; `streamClosed` returns `nil`) — so the
+    /// conclusion "temporary, self-breaking, always releases" survives. The supporting fact did not,
+    /// which is the whole reason it is restated here rather than quietly edited.
+    ///
+    /// **This is MEASURED, not argued — and the first attempt to measure it was blind.**
+    /// `testTeardownRightAfterASaveNeverKillsTheHelperANOTHERSessionIsStillUsing` swapping only this
+    /// capture: **strong 5/5 pass, weak 3/3 FAIL** with one `Unspecified Application Error` each.
+    /// The first version of that drill held its own reference to the runtime across the teardown and
+    /// therefore passed 3/3 **with the weak capture too** — it could not see the deallocation at all.
+    /// It now tears down through `ShellSessionHost.teardownOfficeRuntime(for:)` (the real line) and
+    /// asserts the runtime actually deallocates, so it reproduces the lifecycle instead of assuming
+    /// it. Keep that assertion: without it this drill silently stops testing this property.
+    private func makeBarrieredClose(docId: String, token: UUID) -> Task<Void, Never> {
+        Task { @MainActor [self, driver] in
+            await self.awaitCloseBarrier(docId: docId)
+            await driver.close(docId)
+            self.pendingCloseBarriers.removeValue(forKey: token)
         }
     }
 
@@ -2555,9 +2813,48 @@ final class OfficeRuntime: ObservableObject {
     /// Injectable so tests can drive the machine without sleeping for real. Production never sets it.
     var autoSaveDebounceInterval: TimeInterval = OfficeRuntime.autoSaveDebounceIntervalDefault
 
-    /// ⛔ **DEFAULT OFF. Two blockers were found; the first is FIXED, the second is why this is
-    /// still off. Both mechanisms below are MEASURED — the first round's were not, and that is the
-    /// most important thing on this page.**
+    /// ⛔ **STILL DEFAULT OFF — but for a THIRD blocker, found only by the office harness, and
+    /// nothing like the first two. Rounds 1 and 2 are both genuinely CLOSED.** Every mechanism on
+    /// this page is MEASURED; round 1's were not, and that is still the most important thing here.
+    ///
+    /// **Rounds 1 and 2 are done** — the ordering bug (round 1) was fixed in `performSave`, and the
+    /// post-save close window (round 2) is fixed by `awaitCloseBarrier`. In counts
+    /// (`.superpowers/research/office-close-race-report.md`):
+    ///  - `testCleanCloseImmediatelyAfterASave…` **6/6 green vs 3/3 red**, control arm reds a 20 s
+    ///    stall at the `< 10 s` bound;
+    ///  - `testAnArmedInstantSaveFollowedImmediatelyByAClose…` **9/9 green vs 3/3 red**, 45 armed
+    ///    auto-save-then-close laps;
+    ///  - armed office-adjacent suites **358/0**, armed FULL Swift suite **3084/0** — cleaner than
+    ///    the base commit `69c9c230` scored on the same machine in the same session (3082/**1**).
+    ///
+    /// ### Round 3's blocker — ARMING DESYNCHRONIZES THE OFFICE HARNESS'S WIRE
+    /// The Swift suites are all green armed. The **office harness is not**, and it is the surface
+    /// that catches this because it is the one that talks to `OfficeHelperClient` DIRECTLY:
+    ///
+    /// | build (same machine, same session, `NORMA_OFFICE_HARNESS_DIR=/tmp/…`) | harness |
+    /// |---|---|
+    /// | base `69c9c230` | **102 / 103**, 155 s (only `[22.clickCell]`, a budget flake) |
+    /// | this branch, **disarmed** | **101 / 103**, 180 s (`[14.freshTile]` + `[22.clickCell]`, both budget flakes) |
+    /// | this branch, **ARMED** | **76 / 103**, 442 s |
+    ///
+    /// So the close barrier is **not** the cause — disarmed, this branch matches the base. Arming is.
+    /// **The mechanism, read off the failure rather than guessed:** the harness's first armed failure
+    /// is `[18.twoViewMintAndEditBoth] … office helper sent an unexpected reply: saved(seq: 133,
+    /// docId: "099DF20B…")` where an `agentKeyEventOk` was expected — a `saved` frame for a
+    /// **DIFFERENT document**, i.e. an auto-save this scheduler issued, landing in the middle of the
+    /// harness's own raw request. `OfficeHelperClient.expectReply` does not demultiplex (it takes
+    /// `connection.nextFrame` and checks `reply.seq`), so ONE interleave desynchronizes the frame
+    /// stream permanently: every later step times out, which is the whole 76-vs-101 gap and the 442 s
+    /// vs 180 s.
+    ///
+    /// **Why this is not simply "the harness's problem", and what arming needs next.** In PRODUCTION
+    /// every request goes through the single `OfficeHelperRequestQueue`, so nothing there can
+    /// interleave — that argument is probably right, and it is exactly the kind of unmeasured
+    /// mechanism this page exists to warn about. What is measured is only this: arming turns a
+    /// required gate red, and the reason is that instant save makes the app an UNPROMPTED writer to
+    /// the wire for the first time. Any surface that assumed the app only speaks when spoken to now
+    /// has a second writer. The harness is one such surface; the sweep for others is the work, and it
+    /// has not been done. **Do not flip this without doing it.**
     ///
     /// ### Round 1 — my stated mechanisms were wrong, and the decision was still right
     /// Arming this lost the user's typed content in two live Calc drills. I named two candidates and
@@ -2573,42 +2870,65 @@ final class OfficeRuntime: ObservableObject {
     /// debounce arms at key ENQUEUE time, not delivery. **That is fixed** (see `performSave`), and
     /// with it fixed the content loss is gone: both Calc drills pass with this armed.
     ///
-    /// ### Round 2 — the blocker that is still standing: THE POST-SAVE CLOSE WINDOW (constraint C3)
+    /// ### Round 2 — the blocker that WAS standing, and is now closed: THE POST-SAVE CLOSE WINDOW
     /// With the ordering bug fixed and this armed, `testTypingOnSheetTwoLandsOnSheetTwoNotSheetOne
-    /// ThroughSaveAndReopen` fails **2 of 3 runs in isolation**, at the REOPEN, with the helper's own
-    /// `Unspecified Application Error` in the log — the documented signature of LOK calling libc
-    /// `exit()` from inside C++. **Disarmed, the same drill passes 3 of 3.** That is the whole A/B.
+    /// ThroughSaveAndReopen` was recorded failing 2 of 3 runs in isolation, at the REOPEN, with the
+    /// helper's own `Unspecified Application Error` — the documented signature of LOK calling libc
+    /// `exit()` from inside C++. Closing a document too soon after a save kills the SHARED helper,
+    /// and because `OfficeHelperRequestQueue` is one app-wide FIFO it takes every other open document
+    /// with it. Saving on every idle keeps that window open essentially all the time.
     ///
-    /// This is not new behaviour, it is a known hazard made ordinary: closing a document too soon
-    /// after a save kills the SHARED helper, measured at ~4 times in 5, and because
-    /// `OfficeHelperRequestQueue` is one app-wide FIFO **it takes every other open document down with
-    /// it**. Two drains exist for exactly this, but neither covers a plain `runtime.close` — they sit
-    /// on the dirty-close sheet and on the broker's save-through. Saving on every idle keeps that
-    /// window open essentially all the time, which is precisely the risk the office research flagged
-    /// against instant save.
+    /// ### Round 3 (office-instant-save) — that blocker is CLOSED, and the criterion it was measured
+    /// with turned out to be BLIND. Both measured.
     ///
-    /// ### What arming this needs, stated so nobody re-derives it
-    /// A close must not race a save this scheduler started: cancel a pending debounce **and await an
-    /// in-flight auto-save (or drain) before the close proceeds**. `close` is deliberately
-    /// synchronous and fire-and-forget today, so that is a real change to a live lifecycle path —
-    /// not a patch to make a test green, and not something to land after a review has reported.
+    /// **The fix.** `close(_:)` now cancels this path's pending debounce, and `.helperClose`'s own
+    /// performer holds `driver.close` behind `awaitCloseBarrier` — which awaits this docId's
+    /// in-flight saves and then one real helper round trip, under one 15 s bound. It sits at the ONE
+    /// site every real close funnels through, so it covers the clean-tab `\u{d7}` (which had no barrier
+    /// at all), the dirty-close sheet, and the broker alike. Counts:
+    /// `testCleanCloseImmediatelyAfterASaveRepeatedlyThroughTheRealHelperNeverKillsTheSharedProcess`
+    /// **6/6 green vs 3/3 red** (one `Unspecified Application Error` per red run), control arm
+    /// discriminating.
     ///
-    /// 🔑 **The lesson, and it is mine:** stopping on a reproducible loss cost nothing. Stating two
+    /// \u{26d4} **The criterion above cannot be used again — it does not exercise this feature.** Probed
+    /// on this machine, armed, that drill issues **zero** auto-saves in 8 runs: it completes inside
+    /// the 0.9 s debounce, so `fireAutoSave` never runs, and it passes armed for the same reason it
+    /// passes disarmed. It is blind **pre-fix too** (armed + the whole close fix neutered: 3/3 pass,
+    /// 0 auto-saves), so this is not something the fix caused. The recorded 2-of-3 was presumably
+    /// taken on a slower run where the debounce did elapse — which is exactly why a timing-dependent
+    /// drill must not be a gate. **Do not re-derive a decision from it in either direction.**
+    ///
+    /// **The standing pin is `testAnArmedInstantSaveFollowedImmediatelyByAClose
+    /// NeverKillsTheSharedHelper`.** It arms its own runtime instance, keeps production's 0.9 s
+    /// interval, drives the real input doors, calls no save door at all, and closes from inside the
+    /// auto-save's own completion. **9/9 green, 45 armed auto-save-then-close laps, vs 3/3 red with
+    /// the barrier removed.** Its own header records why the close must be taken there and not one
+    /// 20 ms poll later (polled, it passed 3/3 even with the barrier gone — it could not testify).
+    ///
+    /// \u{1f511} **The lesson, and it is mine:** stopping on a reproducible loss cost nothing. Stating two
     /// confident, unmeasured mechanisms nearly cost the next implementer a wrong fix on a live save
-    /// path — my own parking comment pointed at it. *A stated mechanism is a claim, and a claim needs
-    /// a measurement, even when the decision it supports is correct.* Round 2's mechanism above is
-    /// stated only because it was A/B'd, with the helper's own error text as the witness.
+    /// path \u{2014} my own parking comment pointed at it. *A stated mechanism is a claim, and a claim needs
+    /// a measurement, even when the decision it supports is correct.* Round 3 adds the corollary the
+    /// hard way: **a CRITERION is a claim too.** The drill this was parked against passed, and the
+    /// pass meant nothing; only probing what it actually did revealed that.
     ///
-    /// Everything else stays and is recoverable: the machine, its unit tests (which arm it
-    /// explicitly), the forced-red evidence, and the measured 72-97 ms save cost.
     var autoSaveEnabled: Bool = false
 
     private var autoSaveTasks: [String: Task<Void, Never>] = [:]
     private var autoSaveInFlight: Set<String> = []
 
-    /// **Called by every door that can CHANGE the document** — typing, IME, paste, cut, undo, redo —
-    /// plus a belt on LOK's own `ModifiedStatus` transition for anything that changes the document
-    /// by a route the app did not post itself.
+    /// **Called by every door that can CHANGE the document, and by NOTHING else** — typing, IME,
+    /// paste, cut, undo, redo. All six live in this file; there is no other caller.
+    ///
+    /// ⛔ **This paragraph used to end "plus a belt on LOK's own `ModifiedStatus` transition for
+    /// anything that changes the document by a route the app did not post itself." That belt does
+    /// not exist** — it was deliberately removed, and `handleHelperEvent`'s own `.modifiedStatus`
+    /// case states at length why ("the belt covered no real case and cost real saves"). The sentence
+    /// survived the removal, and it is not a harmless leftover: a live drill written against it
+    /// (driving input through `OfficeHelperClient.postKey` directly, which bypasses this file) was
+    /// **inert in 5 of 5 laps** — armed, with a 0.3 s debounce and a 30 s wait, instant save never
+    /// wrote the file once, because nothing had armed it. **A test that means to exercise instant
+    /// save must drive `OfficeRuntime`'s own input doors; a raw wire client will not arm anything.**
     ///
     /// Why the input doors and not `ModifiedStatus` alone: **`STATE_CHANGED` is a TRANSITION.** On a
     /// clean document the first keystroke fires `modified=true` and every subsequent keystroke fires
@@ -2668,7 +2988,20 @@ final class OfficeRuntime: ObservableObject {
 
     private func autoSaveFinished(path: String) {
         autoSaveInFlight.remove(path)
+        onAutoSaveFinishedForTesting?(path)
     }
+
+    /// Test-only, and production never sets it (same posture as `autoSaveDebounceInterval` just
+    /// above). Fires SYNCHRONOUSLY at the instant an auto-save's own `saveAndAwaitOutcome` resolves
+    /// — i.e. the exact `.saved` moment, with no polling latency in between.
+    ///
+    /// It exists because that latency turned out to matter: a first version of
+    /// `OfficeRuntimeLiveTests.testAnArmedInstantSaveFollowedImmediatelyByAClose…` took the close
+    /// after a 20 ms `waitUntil` poll on the file's own stat, and with the close barrier REMOVED it
+    /// still passed 3 of 3 — the window is narrower than one poll. A drill that cannot reach the
+    /// window cannot testify about it either way, so this hook is what lets one close at the timing
+    /// the clean-close drill closes at.
+    var onAutoSaveFinishedForTesting: ((String) -> Void)?
 
     /// Test-only: is a debounced save currently armed for this path?
     func autoSaveIsArmedForTesting(path: String) -> Bool { autoSaveTasks[path] != nil }
@@ -2989,10 +3322,22 @@ final class OfficeRuntime: ObservableObject {
 
             case .helperClose(let docId):
                 // Task 6: the store's own docId-scoped entries die with the document — see
-                // `OfficeTileStore.evictAll`'s own header.
+                // `OfficeTileStore.evictAll`'s own header. Deliberately still SYNCHRONOUS, ahead of
+                // the barrier below: the pixels are dead the instant the reducer dropped the entry,
+                // and holding them for the barrier's duration would be pure waste.
                 tileStore.evictAll(docId: docId)
                 cursorStore.evict(docId: docId)
-                Task { [driver] in await driver.close(docId) }
+                // office-instant-save Job 1 — **the close barrier. Read `awaitCloseBarrier`'s own
+                // header before changing this.** `driver.close` is no longer issued the instant a
+                // close is requested: a close taken straight after a save kills the shared, app-wide
+                // helper (measured), and this is the ONE site every real close funnels through, so
+                // it is the only place a barrier covers every caller by construction.
+                //
+                // The registration below is race-free without any lock: `perform` is synchronous and
+                // `@MainActor`, so this Task's body cannot begin before `perform` returns — the entry
+                // is therefore always in the table before anything can try to remove it.
+                let closeToken = UUID()
+                pendingCloseBarriers[closeToken] = makeBarrieredClose(docId: docId, token: closeToken)
 
             case .subscribe(let docId, let part, let zoomPPT, let viewportTwips):
                 // Task 6: `subscribeTiles` only REGISTERS the subscription and reports which keys
@@ -3284,8 +3629,18 @@ final class OfficeRuntime: ObservableObject {
         // `OfficeHelperRequestQueue` — every `queue.run` lives inside a Driver closure, so the join
         // is strictly outside the FIFO and can never nest one `queue.run` inside another, which is
         // the one thing that would wedge all office I/O permanently.
+        // office-instant-save Job 1 — **register this save so a close can await it.** The barrier's
+        // helper round trip alone is not enough: the `await inputChainAtSaveTime.value` on the very
+        // next line happens BEFORE `driver.save` enters the app-wide FIFO, so a probe issued inside
+        // that window would clear an empty queue, `doc_close` would enqueue behind it, and this
+        // save's `doc_saveAs` would then land on an already-closed document. See
+        // `awaitCloseBarrier`'s header, half 1. Same race-free registration reasoning as
+        // `.helperClose`'s: `performSave` is synchronous and `@MainActor`, so the task's body cannot
+        // start before the assignment below lands.
+        let saveToken = UUID()
         let inputChainAtSaveTime = inputChainTail
-        Task { [weak self, driver] in
+        let saveTask = Task { [weak self, driver] in
+            defer { self?.inFlightSaveTasks[docId]?.removeValue(forKey: saveToken) }
             guard let self else { return }
             await inputChainAtSaveTime.value
             do {
@@ -3396,6 +3751,7 @@ final class OfficeRuntime: ObservableObject {
                 self.resumeSaveWaiters(path: path, docId: docId, outcome: .failed(reason))
             }
         }
+        inFlightSaveTasks[docId, default: [:]][saveToken] = saveTask
     }
 
     // MARK: - Office Stage B Task 2: the watcher-suppression bag
@@ -4003,7 +4359,20 @@ final class OfficeRuntime: ObservableObject {
             // `OfficeTileStore.evictAll`'s own header.
             tileStore.evictAll(docId: docId)
             cursorStore.evict(docId: docId)
-            Task { [driver] in await driver.close(docId) }
+            // ⛔ **office-instant-save review, IMPORTANT-1 — this close is BARRIERED, and the first
+            // version of the fix wrongly exempted it.** That version's comment argued teardown needs
+            // no barrier because "teardown's own caller is stopping the shared helper process
+            // outright". That is true of exactly ONE caller
+            // (`ShellSessionHost.teardownAllOfficeRuntimesAndStopHelper`, which calls
+            // `officeHelperSupervisor?.stop()` right after) and **false of the other**:
+            // `ShellSessionHost.releaseOfficeRuntimeIfClean` (`:1290-1295`) calls `.teardown()`
+            // directly and never touches the supervisor, from a session hop (`:2856`) and from
+            // hiding the shell (`:2954`). It releases a runtime precisely when it is CLEAN — and a
+            // save is what makes a runtime clean. So **⌘S-then-hop-sessions** was the same lethal
+            // timing as ⌘S-then-`×`, on a helper that goes right on living and serving every other
+            // session's documents.
+            let token = UUID()
+            pendingCloseBarriers[token] = makeBarrieredClose(docId: docId, token: token)
         }
         // Task 8: every watch this runtime owns dies HERE, unconditionally — mirrors
         // `EditorRuntime.performTeardown`'s identical ordering (stated at that site: harmless only
@@ -4012,6 +4381,11 @@ final class OfficeRuntime: ObservableObject {
         for (_, watcher) in watchers { watcher.stop() }
         watchers.removeAll()
         diskBaselines.removeAll()
+        // office-instant-save Job 1 — the debounce bag goes too, for the reason `close(_:)`'s own
+        // cancel exists: an auto-save armed by the user's last keystroke must never fire into a
+        // teardown.
+        for (_, task) in autoSaveTasks { task.cancel() }
+        autoSaveTasks.removeAll()
         // Office Stage B Task 2 — the save-suppression bag goes with everything else this runtime
         // holds; mirrors `EditorRuntime`'s own teardown treatment of its identical bag.
         pendingExpectedWrites.removeAll()
