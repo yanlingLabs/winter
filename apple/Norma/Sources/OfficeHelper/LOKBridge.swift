@@ -2546,8 +2546,12 @@ final class LOKBridge: OfficeDocumentBridge {
         if attempts > 1 {
             // Evidence line for task-3-report.md's before/after — how often the race actually
             // fires in practice, and which attempt it resolved on, never silent.
-            FileHandle.standardError.write(Data(
-                "[LOKBridge sheets] GoToCell(\(range)) needed \(attempts) attempt(s) before the selection changed (or the budget was exhausted)\n".utf8))
+            // office-polish review must-fix 2 — through `diagnostic`, not raw stderr: stderr is
+            // `/dev/null` in production (`OfficeHelperSupervisor` never sets `standardError`), so
+            // this line — the evidence trail for a race this arc has spent three rounds on — was
+            // being written to nothing on every real user's machine.
+            diagnostic("[LOKBridge sheets] GoToCell(\(range)) needed \(attempts) attempt(s) before "
+                       + "the selection changed (or the budget was exhausted)")
         }
         if text == baseline {
             // Best-effort straggler flush (round 4) — see the comment above the loop. Only spent on
