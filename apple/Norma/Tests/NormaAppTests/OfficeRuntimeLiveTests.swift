@@ -2014,6 +2014,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
                         + "LOKBridge.saveAsOnDedicatedThread's own header (fix round 4, NEW-2)")
 
         runtime.close(path)
+        await runtime.awaitPendingCloseBarriersForTesting() // same raw-client interleave as above
         _ = host.teardownAllOfficeRuntimesAndStopHelper()
     }
 
@@ -2387,6 +2388,20 @@ final class OfficeRuntimeLiveTests: XCTestCase {
                           + "happening for real")
 
             runtime.close(docPath)
+            // ⚠️ **`awaitPendingCloseBarriersForTesting` is REQUIRED in any drill that mixes
+            // `runtime.close` with RAW `OfficeHelperClient` calls, and this is a real hazard, not
+            // hygiene.** `OfficeHelperClient.expectReply` does not demultiplex: it reads the NEXT
+            // frame off the connection and requires `reply.seq == seq`. Strict request/response
+            // serialization is guaranteed only by `ShellSessionHost`'s single
+            // `OfficeHelperRequestQueue`, which a drill talking to the client DIRECTLY bypasses. So
+            // an app-issued close still in flight and a drill's own raw `postKey` can interleave,
+            // and one of them reads the other's reply — surfacing as `office helper sent an
+            // unexpected reply: closed(seq: …)`. office-instant-save Job 1 did not create that
+            // hazard (the close was always a spawned Task) but it WIDENED the window from ~0 to the
+            // barrier's own ~50 ms round trip, which is enough to make it reproduce under full-suite
+            // contention. Measured: this drill failed exactly that way in a full-suite run and
+            // passes 3/3 in isolation without the wait.
+            await runtime.awaitPendingCloseBarriersForTesting()
 
             guard let helperPID = host.officeHelperSupervisor?.process?.processIdentifier else {
                 return XCTFail("lap \(lap): supervisor has no live process left to check")
@@ -5215,6 +5230,11 @@ final class OfficeRuntimeLiveTests: XCTestCase {
                           + "native autosave fire too")
 
             runtime.close(docPath)
+            // Same raw-client/close interleave the dirty-close loop above documents at length — this
+            // loop's next row types through `OfficeHelperClient` directly, so the previous row's
+            // close must have reached the helper first. Measured: this drill failed with
+            // `unexpected reply: closed(seq: 24, …)` in a full-suite run without this wait.
+            await runtime.awaitPendingCloseBarriersForTesting()
         }
     }
 
