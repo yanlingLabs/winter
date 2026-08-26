@@ -116,6 +116,10 @@ struct OfficeCommandConsumer {
         case "office.sheets.insert_rows", "office.sheets.insert_cols",
              "office.sheets.delete_rows", "office.sheets.delete_cols":
             Task { await handleSheetsResize(command) }
+        case "office.sheets.batch":
+            await handleSheetsBatch(command)
+        case "office.slides.batch":
+            await handleSlidesBatch(command)
         case "office.sheets.add_sheet", "office.sheets.delete_sheet", "office.sheets.rename_sheet":
             Task { await handleSheetsManageSheet(command) }
         case "office.sheets.format":
@@ -476,6 +480,150 @@ struct OfficeCommandConsumer {
         } catch {
             sendResult(command.sessionId, command.commandId, false, Self.message(for: error), nil)
         }
+    }
+
+    // MARK: - office-finish Job 2: the two batch verbs
+
+    /// `office.sheets.batch` — N of `add_sheet`/`delete_sheet`/`rename_sheet`, in order, in ONE call.
+    ///
+    /// **What this promises, and what it does not.**
+    ///
+    ///  * **One helper request, one save.** Every operation rides a single
+    ///    `sheetsManageSheetBatch` wire request, and `OfficeAgentBroker` rule 4 saves ONCE after the
+    ///    whole closure returns. That is what keeps the batch inside the daemon's existing write
+    ///    deadline (`office-commands.ts` §A item 4 states the obligation outright), and it is also
+    ///    what makes the recovery story simple: **on disk the batch is all-or-nothing.**
+    ///  * **A partial batch NEVER saves.** If operation k fails, this throws — before rule 4's save
+    ///    is ever reached — so the file on disk still holds its pre-call bytes. What happens to the
+    ///    operations that DID apply is decided by `adopted`, exactly as it is for a partly-failed
+    ///    `sheets set`: an adopted document is left dirty with changes the human never asked for and
+    ///    refuses every later agent write until they resolve it; a document this call opened itself
+    ///    is closed and its changes discarded. **This never saves the partial batch to dodge that** —
+    ///    the ruling `handleSheetsSet` records ("a silent, unrequested partial save would be worse
+    ///    than a truthful refusal") was made about cells and nothing about a batch changes it.
+    ///  * **The refusal carries a per-operation ledger** (`formatBatchLedger`) so the model can act
+    ///    on it without bisecting at one deadline per probe.
+    ///  * **Verification is per operation, by re-read** — inherited, not re-implemented:
+    ///    `LOKBridge.sheetsManageSheetBatch` calls the same `sheetsManageSheetOnDedicatedThread` the
+    ///    single verb does, and "applied" in the ledger means that function's own before/after
+    ///    sheet-list check passed. The engine lies (a delete swallows its own UNO exceptions), which
+    ///    is why a dispatch's return value is not what any of this rests on.
+    private func handleSheetsBatch(_ command: SessionEvent.PanelCommand) async {
+        guard let path = Self.requiredPath(command.args) else {
+            return sendResult(command.sessionId, command.commandId, false, Self.requiredPathRefusal, nil)
+        }
+        let ops: [OfficeSheetsManageSheetOperation]
+        switch Self.decodeSheetsOps(command.args) {
+        case .success(let decoded): ops = decoded
+        case .failure(let refusal):
+            return sendResult(command.sessionId, command.commandId, false, refusal, nil)
+        }
+        guard let broker = officeAgentBroker(command.sessionId) else {
+            return sendResult(command.sessionId, command.commandId, false, Self.hostGoneRefusal, nil)
+        }
+        do {
+            let resultText = try await broker.perform(
+                sessionId: command.sessionId, path: path, access: .write, requestId: command.commandId
+            ) { runtime, docId, adopted in
+                let outcome = try await runtime.sheetsManageSheetBatch(docId: docId, ops: ops)
+                let postState = Self.formatSheetsManageSheet(path: path, sheets: outcome.sheets)
+                if let failure = outcome.failure {
+                    throw OfficeBatchPartialFailure(message: Self.formatBatchLedger(
+                        verb: "sheets batch", path: path, total: ops.count, applied: outcome.applied,
+                        failure: failure, adopted: adopted, postState: postState))
+                }
+                return "applied \(ops.count) operation\(ops.count == 1 ? "" : "s") to \(path) — \(postState)"
+            }
+            let (ok, text) = Self.capped(resultText)
+            sendResult(command.sessionId, command.commandId, ok, text, nil)
+        } catch {
+            sendResult(command.sessionId, command.commandId, false, Self.message(for: error), nil)
+        }
+    }
+
+    /// `office.slides.batch` — N of `add_slide`/`delete_slide`/`reorder`, in order, in ONE call.
+    /// Identical contract to `handleSheetsBatch` above; read that one's header, it is the same
+    /// promise with a slide count in place of a sheet list.
+    private func handleSlidesBatch(_ command: SessionEvent.PanelCommand) async {
+        guard let path = Self.requiredPath(command.args) else {
+            return sendResult(command.sessionId, command.commandId, false, Self.requiredPathRefusal, nil)
+        }
+        let ops: [OfficeSlidesManagePageOperation]
+        switch Self.decodeSlidesOps(command.args) {
+        case .success(let decoded): ops = decoded
+        case .failure(let refusal):
+            return sendResult(command.sessionId, command.commandId, false, refusal, nil)
+        }
+        guard let broker = officeAgentBroker(command.sessionId) else {
+            return sendResult(command.sessionId, command.commandId, false, Self.hostGoneRefusal, nil)
+        }
+        do {
+            let resultText = try await broker.perform(
+                sessionId: command.sessionId, path: path, access: .write, requestId: command.commandId
+            ) { runtime, docId, adopted in
+                let outcome = try await runtime.slidesManagePageBatch(docId: docId, ops: ops)
+                let postState = Self.formatSlidesManagePage(path: path, slideCount: outcome.slideCount)
+                if let failure = outcome.failure {
+                    throw OfficeBatchPartialFailure(message: Self.formatBatchLedger(
+                        verb: "slides batch", path: path, total: ops.count, applied: outcome.applied,
+                        failure: failure, adopted: adopted, postState: postState))
+                }
+                return "applied \(ops.count) operation\(ops.count == 1 ? "" : "s") to \(path) — \(postState)"
+            }
+            let (ok, text) = Self.capped(resultText)
+            sendResult(command.sessionId, command.commandId, ok, text, nil)
+        } catch {
+            sendResult(command.sessionId, command.commandId, false, Self.message(for: error), nil)
+        }
+    }
+
+    /// office-finish Job 2 — the per-operation ledger a partially-applied batch reports.
+    ///
+    /// It is three sentences rather than a per-operation array, because the execution model IS a
+    /// strict prefix: operations run in order and stop at the first failure, so `applied` alone
+    /// determines the state of all N. Saying it as a count also keeps the whole ledger a few hundred
+    /// bytes whatever N is — an over-cap result (`sheetsResultMaxLength`, 64 KiB) is refused whole
+    /// and the model gets SILENCE until the deadline instead of an error, so a ledger that could grow
+    /// with N was never an option.
+    ///
+    /// The lifecycle sentence is gated on `total > 1` for the same reason `handleSheetsSet` gates its
+    /// own on `cellAddresses.count > 1`: on a single-operation batch there is no applied prefix to
+    /// describe, and describing one anyway would be a claim with nothing behind it.
+    private static func formatBatchLedger(verb: String, path: String, total: Int, applied: Int,
+                                          failure: String, adopted: Bool, postState: String) -> String {
+        let failedIndex = applied + 1
+        var lines: [String] = ["\(verb) stopped at operation \(failedIndex) of \(total): \(failure)"]
+
+        // The prefix, spelled so every operation of the batch is accounted for and none is described
+        // by a range that does not exist (there is no "operations 1-0", and no "not attempted" tail
+        // when the LAST operation is the one that failed).
+        var ledger = applied == 0
+            ? "No operation applied; operation 1 failed"
+            : (applied == 1
+               ? "Operation 1 applied and was verified; operation 2 failed"
+               : "Operations 1-\(applied) applied and were verified; operation \(failedIndex) failed")
+        if failedIndex < total {
+            ledger += failedIndex + 1 == total
+                ? "; operation \(total) was not attempted."
+                : "; operations \(failedIndex + 1)-\(total) were not attempted."
+        } else {
+            ledger += "."
+        }
+        lines.append(ledger)
+
+        lines.append("NOTHING WAS SAVED — \(path) still holds its previous contents on disk. "
+                     + (adopted
+                        ? "This document was already open in the human's own tab, so that tab is now dirty with "
+                          + "the operations that did apply, and every later write to it will be refused until the "
+                          + "human saves or discards it. Re-reading and retrying cannot clear that; only they can."
+                        : "This call opened the document itself, so the operations that applied were discarded "
+                          + "when it closed and the next call starts from the file's saved contents."))
+        lines.append("After the operations that applied: \(postState)")
+        if total > 1 {
+            lines.append("These operations are position-based, so do not re-send the whole batch: re-read the "
+                         + "document first and send only what is still missing.")
+        }
+        return lines.joined(separator: " ")
     }
 
     /// `office.sheets.format` — `bold`/`italic`/`numberFormat`/`align`/`width` over one A1 `range` on
@@ -1310,6 +1458,14 @@ struct OfficeCommandConsumer {
     /// `slide < partCount` bound) total by construction.
     static let officeSlideMaxIndex = 10_000
 
+    /// office-finish Job 2 — the app-side mirror of `sheets.ts`'s own `name`/`newName` `.max(256)`.
+    /// Same two-layer arrangement as `officeSlideMaxIndex` above and for the same stated reason: the
+    /// daemon's copy makes the refusal immediate and specific, this one is what makes it TRUE, since
+    /// the daemon is not the only possible producer of a `panel_command`. Unlike the numeric bounds
+    /// nothing here traps — a long name is a byte-budget and result-cap concern, not a crash — which
+    /// is exactly why it is worth writing down rather than assuming somebody upstream did it.
+    static let officeSheetNameMaxLength = 256
+
     /// **T5 round-2 re-review (Important) — "present but undecodable" as a first-class case, for
     /// EVERY type arm rather than just the numeric one.**
     ///
@@ -1468,6 +1624,185 @@ struct OfficeCommandConsumer {
         return "\(sheet) in \(name) is now \(usedRange)"
     }
 
+    // MARK: - office-finish Job 2: batch operand decoding
+
+    /// office-finish Job 2 — decodes `args["ops"]`, the ONE nested operand these two batch verbs
+    /// carry, into typed wire operations. `nil` means REFUSE THE WHOLE BATCH; the `String` is the
+    /// refusal, and it **names the 1-based index of the offending operation** so the model does not
+    /// have to bisect at 215 s a probe.
+    ///
+    /// ⚠️ **This function is a NEW INBOUND DECODE SURFACE, and it is invisible to the enumeration
+    /// recipe that has kept this file's numeric operands safe.** That recipe (task-5-fixround-report
+    /// §7.1 step 2) is "one grep, one file: `grep -nE 'args\?\[' OfficeCommandConsumer.swift`", and
+    /// it is complete only while every operand is a TOP-LEVEL key. These operations' operands are
+    /// read off the ELEMENT, so that grep finds `args?["ops"]` and nothing inside it. The re-scoped
+    /// enumeration is recorded in `.superpowers/research/office-finish-report.md`; the rule it
+    /// produces, stated here where the code is:
+    ///
+    ///  * every numeric element operand goes through `oneBasedElementIndex` below, which carries the
+    ///    SAME `officeSlideMaxIndex` ceiling and the SAME integrality check `oneBasedIndex` applies
+    ///    to a top-level key — never a bare `Int(...)`, which traps and aborts the app;
+    ///  * a PRESENT-but-wrong-typed operand REFUSES, on every arm. It is never folded into "absent".
+    ///    Folding is how `add_slide at:"3"` once silently appended and reported success — a wrong
+    ///    answer the model was told to trust, which this project rates as worse than the crash it
+    ///    replaced;
+    ///  * an ABSENT operand is omitted from the constructed operation entirely, never carried
+    ///    through as a null.
+    private static func decodeSheetsOps(_ args: [String: SessionEvent.JSONValue]?)
+        -> Result<[OfficeSheetsManageSheetOperation], String> {
+        return decodeOpsArray(args) { index, element in
+            guard case .string(let opRaw)? = element["op"] else {
+                return .failure("operation \(index) needs an `op` of \"add_sheet\", \"delete_sheet\" or \"rename_sheet\".")
+            }
+            let op: OfficeSheetsManageSheetOp
+            switch opRaw {
+            case "add_sheet": op = .add
+            case "delete_sheet": op = .delete
+            case "rename_sheet": op = .rename
+            default:
+                return .failure("operation \(index) has an unknown `op` \"\(opRaw)\" — use \"add_sheet\", "
+                                + "\"delete_sheet\" or \"rename_sheet\".")
+            }
+            guard case .string(let name)? = element["name"], !name.isEmpty,
+                  name.count <= officeSheetNameMaxLength else {
+                return .failure("operation \(index) needs a `name` — a non-empty string of at most "
+                                + "\(officeSheetNameMaxLength) characters.")
+            }
+            var newName: String?
+            if op == .rename {
+                guard case .string(let raw)? = element["newName"], !raw.isEmpty,
+                      raw.count <= officeSheetNameMaxLength else {
+                    return .failure("operation \(index) is a rename_sheet and needs a `newName` — a non-empty "
+                                    + "string of at most \(officeSheetNameMaxLength) characters.")
+                }
+                newName = raw
+            } else if element["newName"] != nil, !isNull(element["newName"]) {
+                return .failure("operation \(index) is a \(opRaw) and must not carry `newName` — only "
+                                + "rename_sheet uses it.")
+            }
+            return .success(OfficeSheetsManageSheetOperation(op: op, name: name, newName: newName))
+        }
+    }
+
+    /// office-finish Job 2 — the slides counterpart. Same rules, same index-naming refusals; see
+    /// `decodeSheetsOps` above for the enumeration warning that governs both.
+    private static func decodeSlidesOps(_ args: [String: SessionEvent.JSONValue]?)
+        -> Result<[OfficeSlidesManagePageOperation], String> {
+        return decodeOpsArray(args) { index, element in
+            guard case .string(let opRaw)? = element["op"] else {
+                return .failure("operation \(index) needs an `op` of \"add_slide\", \"delete_slide\" or \"reorder\".")
+            }
+            let op: OfficeSlidesManagePageOp
+            switch opRaw {
+            case "add_slide": op = .add
+            case "delete_slide": op = .delete
+            case "reorder": op = .reorder
+            default:
+                return .failure("operation \(index) has an unknown `op` \"\(opRaw)\" — use \"add_slide\", "
+                                + "\"delete_slide\" or \"reorder\".")
+            }
+            // Every one of these is present-then-refuse: a key that is there but not a whole number in
+            // 1...officeSlideMaxIndex refuses, and is never read as absent.
+            var slide: Int?
+            var at: Int?
+            var to: Int?
+            for (key, sink) in [("slide", 0), ("at", 1), ("to", 2)] {
+                guard isPresentElement(element, key) else { continue }
+                guard let value = oneBasedElementIndex(element, key) else {
+                    return .failure("operation \(index)'s `\(key)` must be a whole slide number from 1 to "
+                                    + "\(officeSlideMaxIndex).")
+                }
+                if sink == 0 { slide = value } else if sink == 1 { at = value } else { to = value }
+            }
+            var layout: OfficeSlidesLayoutPreset?
+            if isPresentElement(element, "layout") {
+                guard case .string(let raw)? = element["layout"],
+                      let parsed = OfficeSlidesLayoutPreset(rawValue: raw) else {
+                    return .failure("operation \(index)'s `layout` is not one of the layouts add_slide accepts.")
+                }
+                layout = parsed
+            }
+            switch op {
+            case .add:
+                guard slide == nil, to == nil else {
+                    return .failure("operation \(index) is an add_slide — it takes `at` and `layout`, never "
+                                    + "`slide` or `to`.")
+                }
+                return .success(OfficeSlidesManagePageOperation(op: .add, slide: nil, at: at.map { $0 - 1 },
+                                                                to: nil, layout: layout))
+            case .delete:
+                guard let slide, at == nil, to == nil, layout == nil else {
+                    return .failure("operation \(index) is a delete_slide — it needs `slide` and takes nothing else.")
+                }
+                return .success(OfficeSlidesManagePageOperation(op: .delete, slide: slide - 1, at: nil,
+                                                                to: nil, layout: nil))
+            case .reorder:
+                guard let slide, let to, at == nil, layout == nil else {
+                    return .failure("operation \(index) is a reorder — it needs `slide` and `to`, and takes "
+                                    + "nothing else.")
+                }
+                return .success(OfficeSlidesManagePageOperation(op: .reorder, slide: slide - 1, at: nil,
+                                                                to: to - 1, layout: nil))
+            }
+        }
+    }
+
+    /// The shared shape check both decoders above sit on: `ops` must be a non-empty array of objects,
+    /// no longer than `OfficeWireBatchLimits.maxOperationsPerBatch`. Every failure refuses the whole
+    /// batch — a trimmed or partially-accepted batch of position-based operations silently means
+    /// something other than what was asked.
+    private static func decodeOpsArray<T>(
+        _ args: [String: SessionEvent.JSONValue]?,
+        _ element: (Int, [String: SessionEvent.JSONValue]) -> Result<T, String>
+    ) -> Result<[T], String> {
+        guard case .array(let raw)? = args?["ops"] else {
+            return .failure("this office batch verb needs `ops` — a list of operations to apply in order.")
+        }
+        guard !raw.isEmpty else {
+            return .failure("`ops` is empty — a batch with no operations would change nothing.")
+        }
+        guard raw.count <= OfficeWireBatchLimits.maxOperationsPerBatch else {
+            return .failure("`ops` has \(raw.count) operations — at most "
+                            + "\(OfficeWireBatchLimits.maxOperationsPerBatch) fit in one call. Split it.")
+        }
+        var out: [T] = []
+        out.reserveCapacity(raw.count)
+        for (offset, entry) in raw.enumerated() {
+            guard case .object(let object) = entry else {
+                return .failure("operation \(offset + 1) is not an object — every entry in `ops` must be "
+                                + "an object with an `op`.")
+            }
+            switch element(offset + 1, object) {
+            case .success(let decoded): out.append(decoded)
+            case .failure(let reason): return .failure(reason)
+            }
+        }
+        return .success(out)
+    }
+
+    private static func isNull(_ value: SessionEvent.JSONValue?) -> Bool {
+        if case .null? = value { return true }
+        return false
+    }
+
+    /// `isPresent`'s element-level twin — same "an explicit JSON `null` counts as ABSENT" rule, for
+    /// the same reason (see `isPresent`'s own header).
+    private static func isPresentElement(_ element: [String: SessionEvent.JSONValue], _ key: String) -> Bool {
+        guard let value = element[key] else { return false }
+        if case .null = value { return false }
+        return true
+    }
+
+    /// `oneBasedIndex`'s element-level twin, and it must stay byte-for-byte the same predicate: a
+    /// whole number in `1...officeSlideMaxIndex`. The ceiling is what stops `Int(n)` from trapping —
+    /// `1e30` is an "integer" to `Double` and aborts the app plus every open document's unsaved edits
+    /// on the way through `Int(...)`.
+    private static func oneBasedElementIndex(_ element: [String: SessionEvent.JSONValue], _ key: String) -> Int? {
+        guard case .number(let n)? = element[key], n >= 1, n <= Double(officeSlideMaxIndex),
+              n.truncatingRemainder(dividingBy: 1) == 0 else { return nil }
+        return Int(n)
+    }
+
     private static func formatSheetsManageSheet(path: String, sheets: [String]) -> String {
         let name = (path as NSString).lastPathComponent
         return "\(sheets.count) sheet\(sheets.count == 1 ? "" : "s") in \(name): \(sheets.joined(separator: ", "))"
@@ -1566,6 +1901,7 @@ struct OfficeCommandConsumer {
     /// is the whole sentence on its own. Anything else (a genuinely unexpected error shape) falls back
     /// to `"\(error)"` — still answered, never silence, matching this file's whole standing rule.
     private static func message(for error: Error) -> String {
+        if let partial = error as? OfficeBatchPartialFailure { return partial.message }
         if let brokerError = error as? OfficeAgentBrokerError { return brokerError.message }
         if let clientError = error as? OfficeHelperClientError {
             switch clientError {
@@ -1614,4 +1950,20 @@ struct OfficeCommandConsumer {
         guard value.count > limit else { return value }
         return String(value.prefix(limit)) + "…"
     }
+}
+
+/// office-finish Job 2 — thrown out of a batch's `broker.perform` closure when some operations
+/// applied and one did not.
+///
+/// **A throw, deliberately, and this is the load-bearing part of the whole batch design.**
+/// `OfficeAgentBroker.runOnce` runs the closure and only THEN saves; a throw propagates out before
+/// the save is ever reached, so a partially-applied batch cannot reach the disk. Returning a
+/// "successful" result carrying the ledger would have saved the partial batch — the outcome
+/// `OfficeCommandConsumer.handleSheetsSet`'s own ruling calls worse than a truthful refusal.
+///
+/// It carries a pre-composed sentence rather than structured fields because the one channel back to
+/// the model is a single string (`PanelCommandOutcome` has a `result` arm and a `timeout` arm and no
+/// partial-progress arm at all), so composing it anywhere later would only move the same work.
+struct OfficeBatchPartialFailure: Error {
+    let message: String
 }

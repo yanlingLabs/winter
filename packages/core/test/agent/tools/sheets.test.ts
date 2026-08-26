@@ -83,7 +83,7 @@ describe("registration", () => {
   // own dedicated test). T5 adds `format`, the LAST verb this tool will ever register in Stage C —
   // the day the enum grows again (a future stage, not T5), it fails here first, before a new verb
   // ships without its own operand validation/gate audit.
-  test("the verb enum is exactly the 11 verbs T3+T4+T5 shipped", () => {
+  test("the verb enum is exactly the 12 verbs shipped (11 from T3+T4+T5 + office-finish's batch)", () => {
     const h = makeHarness();
     const spec = h.registry.specFor("sheets", WORKDIR, "code");
     const parameters = spec?.parameters as { properties?: { verb?: { enum?: string[] } } } | undefined;
@@ -93,6 +93,7 @@ describe("registration", () => {
       "insert_rows", "insert_cols", "delete_rows", "delete_cols",
       "add_sheet", "delete_sheet", "rename_sheet",
       "format",
+      "batch",
     ]);
   });
 

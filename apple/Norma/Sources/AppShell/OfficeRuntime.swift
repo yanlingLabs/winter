@@ -1719,6 +1719,11 @@ final class OfficeRuntime: ObservableObject {
                            _ op: OfficeSheetsResizeOp, _ selectionRange: String) async throws -> (usedEndColumn: Int, usedEndRow: Int)
         var sheetsManageSheet: (_ docId: String, _ op: OfficeSheetsManageSheetOp, _ name: String,
                                 _ newName: String?) async throws -> [String]
+        /// office-finish Job 2 — N sheet operations in ONE helper request, returning the post-state
+        /// sheet list plus the prefix ledger. Same no-reducer, throws-through posture as every
+        /// sibling; a per-operation FAILURE is not a throw, it is `failure` in the returned tuple.
+        var sheetsManageSheetBatch: (_ docId: String, _ ops: [OfficeSheetsManageSheetOperation])
+            async throws -> (sheets: [String], applied: Int, failure: String?)
         /// office-agent-tools T5 — same no-reducer, throws-through posture as every sibling above.
         /// See `OfficeRuntime.sheetsFormat`'s own header (below) for the full contract this closure
         /// carries — this field only threads it through, one more layer of the same shape.
@@ -1732,6 +1737,9 @@ final class OfficeRuntime: ObservableObject {
         var slidesSetText: (_ docId: String, _ slide: Int, _ title: String?, _ body: String?) async throws -> [String]
         var slidesManagePage: (_ docId: String, _ op: OfficeSlidesManagePageOp, _ slide: Int?, _ at: Int?,
                                _ to: Int?, _ layout: OfficeSlidesLayoutPreset?) async throws -> Int
+        /// office-finish Job 2 — the slides counterpart to `sheetsManageSheetBatch` above.
+        var slidesManagePageBatch: (_ docId: String, _ ops: [OfficeSlidesManagePageOperation])
+            async throws -> (slideCount: Int, applied: Int, failure: String?)
         /// office-agent-tools T7 — docs, same no-reducer, throws-through posture as every sibling
         /// above.
         var docsInfo: (_ docId: String) async throws -> (pages: Int, paragraphs: Int, characters: Int)
@@ -1996,6 +2004,14 @@ final class OfficeRuntime: ObservableObject {
         try await driver.sheetsManageSheet(docId, op, name, newName)
     }
 
+    /// office-finish Job 2 — N sheet operations in ONE helper request. See
+    /// `OfficeWireFrame.sheetsManageSheetBatch` for the one-request contract and
+    /// `sheetsManageSheetBatchOk` for the prefix ledger this returns.
+    func sheetsManageSheetBatch(docId: String, ops: [OfficeSheetsManageSheetOperation]) async throws
+        -> (sheets: [String], applied: Int, failure: String?) {
+        try await driver.sheetsManageSheetBatch(docId, ops)
+    }
+
     /// office-agent-tools T5 — **the shared function this task's own sharing obligation names**:
     /// applies `bold`/`italic`/`numberFormat`/`align`/`width` over an A1 `range` on a named sheet,
     /// every operand optional and independent (`nil` means "leave this attribute alone," never
@@ -2044,6 +2060,12 @@ final class OfficeRuntime: ObservableObject {
     func slidesManagePage(docId: String, op: OfficeSlidesManagePageOp, slide: Int?, at: Int?, to: Int?,
                           layout: OfficeSlidesLayoutPreset?) async throws -> Int {
         try await driver.slidesManagePage(docId, op, slide, at, to, layout)
+    }
+
+    /// office-finish Job 2 — the slides counterpart to `sheetsManageSheetBatch`.
+    func slidesManagePageBatch(docId: String, ops: [OfficeSlidesManagePageOperation]) async throws
+        -> (slideCount: Int, applied: Int, failure: String?) {
+        try await driver.slidesManagePageBatch(docId, ops)
     }
 
     // MARK: - office-agent-tools T7: docs — same no-reducer, throws-through posture as sheets/slides

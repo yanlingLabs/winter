@@ -27,13 +27,13 @@ describe("office-commands: the verb list", () => {
     expect(REEXPORTED_OFFICE_COMMAND_ACTIONS).toBe(OFFICE_COMMAND_ACTIONS);
   });
 
-  test("22 verbs: 11 sheets + 6 slides + 5 docs, spec §2's tables exactly", () => {
+  test("24 verbs: 12 sheets + 7 slides + 5 docs, spec §2's tables plus office-finish's two batch verbs", () => {
     const byKind: Record<"sheets" | "slides" | "docs", number> = {
       sheets: OFFICE_COMMAND_ACTIONS.filter((a) => a.startsWith("office.sheets.")).length,
       slides: OFFICE_COMMAND_ACTIONS.filter((a) => a.startsWith("office.slides.")).length,
       docs: OFFICE_COMMAND_ACTIONS.filter((a) => a.startsWith("office.docs.")).length,
     };
-    expect(byKind).toEqual({ sheets: 11, slides: 6, docs: 5 });
+    expect(byKind).toEqual({ sheets: 12, slides: 7, docs: 5 });
     // Every verb was counted under exactly one kind — catches a stray fourth namespace the three
     // startsWith checks above would otherwise undercount silently rather than fail on.
     expect(byKind.sheets + byKind.slides + byKind.docs).toBe(OFFICE_COMMAND_ACTIONS.length);
@@ -144,7 +144,7 @@ describe("office-commands: the read/write partition and the deadline tripwire", 
 // itself. `OFFICE_READ_ACTIONS`/`OFFICE_WRITE_ACTIONS` are suffix-derived (office-commands.ts) and
 // stay that way — fail-safe (an unrecognized suffix defaults to "write", the safe direction once
 // Task 4 gates the approval flow on `OFFICE_WRITE_ACTIONS`) — but fail-safe is not the same as
-// CORRECT. This table is the independent ground truth: every one of the 22 verbs, named by hand, not
+// CORRECT. This table is the independent ground truth: every one of the 24 verbs, named by hand, not
 // derived by any filter or regex. A verb added to `OFFICE_COMMAND_ACTIONS` without a matching entry
 // here fails on the membership check below; a verb whose SIDE this table and the real derivation
 // disagree on fails on the per-action check — either way, before Task 4 ever reads the split.
@@ -163,12 +163,18 @@ describe("office-commands: the read/write split, pinned literally (Task 4 gates 
     "office.sheets.delete_sheet": "write",
     "office.sheets.rename_sheet": "write",
     "office.sheets.format": "write",
+    // office-finish Job 2 — the batch verbs. They land on the WRITE side through the suffix rule
+    // (`.batch` is neither `.info` nor `.read`), which is what this table exists to confirm rather
+    // than assume: a batch applies add/delete/rename operations and saves, so "write" is not merely
+    // the fail-safe default here, it is the correct answer.
+    "office.sheets.batch": "write",
     "office.slides.info": "read",
     "office.slides.read": "read",
     "office.slides.set_text": "write",
     "office.slides.add_slide": "write",
     "office.slides.delete_slide": "write",
     "office.slides.reorder": "write",
+    "office.slides.batch": "write",
     "office.docs.info": "read",
     "office.docs.read": "read",
     "office.docs.replace": "write",

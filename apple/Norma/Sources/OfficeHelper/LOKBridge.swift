@@ -1124,6 +1124,49 @@ final class LOKBridge: OfficeDocumentBridge {
         try thread.sync { try self.sheetsManageSheetOnDedicatedThread(docId: docId, op: op, name: name, newName: newName) }
     }
 
+    /// office-finish Job 2 — N sheet operations in ONE `thread.sync`, i.e. ONE wire request and ONE
+    /// hop onto the dedicated LOK thread for the whole batch.
+    ///
+    /// **The per-operation body is `sheetsManageSheetOnDedicatedThread` — the SAME function the
+    /// single-op verb calls, unchanged.** That is deliberate and it is the only reason this is safe
+    /// to add: the guards it carries (name-not-found, last-sheet, duplicate-name), the agent-view
+    /// destruction placement its own header spends thirty lines justifying, and **its verification
+    /// by re-read** are one implementation, not two. A batch that re-implemented the operation would
+    /// be this repo's documented drift class — two hand-mirrored copies of one rule — on a path that
+    /// mutates the user's file.
+    ///
+    /// **Verification, per operation, is exactly what the single verb already does**: that function
+    /// reads the sheet-name list before and after and refuses/throws on a mismatch (the engine lies —
+    /// a delete swallows its own UNO exceptions and dispatches are async, so a dispatch's return
+    /// value proves nothing). So "op k applied" in the ledger below means op k was verified by
+    /// re-read, not that a dispatch was issued.
+    ///
+    /// **Stop at the first failure — never continue past it.** These operations are position-based
+    /// and non-idempotent: once op k has failed, every later op names positions that may no longer
+    /// mean what the caller intended. Continuing would produce a document nobody asked for. Nothing
+    /// here saves anything either — the caller's broker saves ONCE, after this whole call returns, so
+    /// a failed batch leaves the file on disk untouched.
+    func sheetsManageSheetBatch(docId: String, ops: [OfficeSheetsManageSheetOperation]) throws
+        -> (sheets: [String], applied: Int, failure: String?) {
+        try thread.sync {
+            guard let doc = self.documents[docId] else { throw SaveError.docNotOpen(docId) }
+            var sheets = self.sheetNamesOnDedicatedThread(doc)
+            var applied = 0
+            var failure: String?
+            for operation in ops {
+                do {
+                    sheets = try self.sheetsManageSheetOnDedicatedThread(
+                        docId: docId, op: operation.op, name: operation.name, newName: operation.newName)
+                    applied += 1
+                } catch {
+                    failure = "\(error)"
+                    break
+                }
+            }
+            return (sheets, applied, failure)
+        }
+    }
+
     // MARK: - office-agent-tools T5: sheets format
 
     func sheetsFormat(docId: String, sheet: String, range: String, columnSpan: String?,
@@ -1159,6 +1202,33 @@ final class LOKBridge: OfficeDocumentBridge {
                           layout: OfficeSlidesLayoutPreset?) throws -> Int {
         try thread.sync { try self.slidesManagePageOnDedicatedThread(docId: docId, op: op, slide: slide, at: at,
                                                                       to: to, layout: layout) }
+    }
+
+    /// office-finish Job 2 — N slide operations in ONE `thread.sync`. Same contract, same reasoning
+    /// and the same one-implementation rule as `sheetsManageSheetBatch` above: the per-operation body
+    /// is `slidesManagePageOnDedicatedThread` verbatim, so each operation carries its own existing
+    /// guards (slide-not-found, last-slide, insertion-point range) and its own verification by
+    /// re-read. Stops at the first failure for the same position-based reason, and saves nothing.
+    func slidesManagePageBatch(docId: String, ops: [OfficeSlidesManagePageOperation]) throws
+        -> (slideCount: Int, applied: Int, failure: String?) {
+        try thread.sync {
+            guard let doc = self.documents[docId] else { throw SaveError.docNotOpen(docId) }
+            var slideCount = Int(doc.handle.pointee.pClass.pointee.getParts?(doc.handle) ?? 0)
+            var applied = 0
+            var failure: String?
+            for operation in ops {
+                do {
+                    slideCount = try self.slidesManagePageOnDedicatedThread(
+                        docId: docId, op: operation.op, slide: operation.slide, at: operation.at,
+                        to: operation.to, layout: operation.layout)
+                    applied += 1
+                } catch {
+                    failure = "\(error)"
+                    break
+                }
+            }
+            return (slideCount, applied, failure)
+        }
     }
 
     // MARK: - office-agent-tools T7: docs
