@@ -2912,7 +2912,7 @@ final class OfficeRuntime: ObservableObject {
     /// hard way: **a CRITERION is a claim too.** The drill this was parked against passed, and the
     /// pass meant nothing; only probing what it actually did revealed that.
     ///
-    var autoSaveEnabled: Bool = false
+    var autoSaveEnabled: Bool = true
 
     private var autoSaveTasks: [String: Task<Void, Never>] = [:]
     private var autoSaveInFlight: Set<String> = []
