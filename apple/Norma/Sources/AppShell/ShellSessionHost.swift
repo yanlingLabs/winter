@@ -1604,7 +1604,7 @@ final class ShellSessionHost: ObservableObject {
     /// ordinary path, and for a reason it did not name: what protected ⌘S-then-`×` was never
     /// `requestCloseTab`'s ROUTING, it was that a human cannot click `×` before LOK's own
     /// `.uno:ModifiedStatus=false` callback has cleared the dot. The clean leg (`:1500-1502` →
-    /// `closePanelTab` → `officeRuntime.close(path)` at `:1714`) had no barrier whatsoever — and
+    /// `closePanelTab` → `officeRuntime.close(path)` at `:1739`) had no barrier whatsoever — and
     /// `dirty` also reaches `false` by a route with no callback behind it at all:
     /// `OfficeRuntimeReducer`'s `.saveSucceeded` arm clears it SYNCHRONOUSLY whenever
     /// `restoredPendingSave` or `saveFailedPendingSave` is set (`OfficeRuntime.swift:1102-1106`),

@@ -452,7 +452,7 @@ final class OfficeAgentBroker {
     /// `.helperClose`'s own performer. It is the only UNCONDITIONAL one: it sits at the single site
     /// every real close funnels through, so it needs no call site to remember it, and it is what
     /// finally covers the clean-tab `×` route (`ShellSessionHost.requestCloseTab:1500-1502` →
-    /// `closePanelTab:1714`), which had no barrier at all. That route's own in-code claim that it
+    /// `closePanelTab:1739`), which had no barrier at all. That route's own in-code claim that it
     /// needed none was wrong and is corrected at `ShellSessionHost.swift`. The two below are now
     /// **redundant with it** on their own paths, and are kept because their regression tripwires are
     /// written against them; neither should be deleted without moving those first. Full account and

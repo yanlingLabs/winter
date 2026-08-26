@@ -2436,7 +2436,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// This one deliberately does **not** — because the route it reproduces does not either.
     ///
     /// `ShellSessionHost.requestCloseTab`'s CLEAN `.document` leg (`:1500-1502`) goes straight to
-    /// `closePanelTab`, whose office arm calls `officeRuntime.close(path)` inline (`:1714`) with no
+    /// `closePanelTab`, whose office arm calls `officeRuntime.close(path)` inline (`:1739`) with no
     /// barrier of any kind between the save that just made the tab clean and the close. A save is
     /// exactly what makes a dirty tab clean, so "⌘S, then click the `×`" reaches that leg by hand,
     /// and the re-review measured that timing killing the shared helper 2 of 3 times
@@ -2540,6 +2540,157 @@ final class OfficeRuntimeLiveTests: XCTestCase {
                       + "open — phase: \(runtime.stateSnapshot.phase)")
         XCTAssertNotNil(runtime.stateSnapshot.documents[docPath], "final liveness reopen must "
                         + "succeed: \(runtime.stateSnapshot.openFailures[docPath] ?? "no reason recorded")")
+
+        _ = host.teardownAllOfficeRuntimesAndStopHelper()
+    }
+
+    // MARK: - office-instant-save review IMPORTANT-1: teardown is a close door too
+
+    /// **The door the first version of the close barrier missed, and the comment that missed it
+    /// claimed completeness.** `.helperClose`'s performer is not the only way a document is closed
+    /// on the helper — `performTeardown` closes every document a runtime holds, without going
+    /// through that effect at all. The first fix exempted it by arguing that teardown's caller stops
+    /// the helper process anyway. That is true of `ShellSessionHost
+    /// .teardownAllOfficeRuntimesAndStopHelper` and **false** of
+    /// `ShellSessionHost.releaseOfficeRuntimeIfClean` (`:1290-1295`), which calls `.teardown()`
+    /// directly, never touches the supervisor, and runs on a session hop (`:2856`) or when the shell
+    /// is hidden (`:2954`).
+    ///
+    /// It releases a runtime **only when it is CLEAN** — and a save is exactly what makes a runtime
+    /// clean. So "⌘S, then switch sessions" was the same lethal timing as "⌘S, then click ×", except
+    /// on a helper that goes right on living and serving every other session's documents.
+    ///
+    /// **That last part is what this drill proves and the other two cannot.** It keeps a SECOND
+    /// session's document open throughout and never tears that one down — so a death here is
+    /// observed the way a user would observe it: somebody else's document stops working. Each lap
+    /// mints a fresh runtime under a fresh session id, which is what a hop away and back actually
+    /// produces.
+    ///
+    /// Typing goes through `OfficeRuntime`'s own input doors, not the raw client, so this drill
+    /// never touches the raw-client interleave documented on the dirty-close loop above.
+    ///
+    /// **RED/GREEN measured** — counts in `.superpowers/research/office-close-race-report.md`. Red
+    /// arm: replace `performTeardown`'s `makeBarrieredClose` with the plain
+    /// `Task { [driver] in await driver.close(docId) }` it used to be.
+    func testTeardownRightAfterASaveNeverKillsTheHelperANOTHERSessionIsStillUsing() async throws {
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent()
+            .appendingPathComponent("NormaOfficeHelper")
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
+                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                        + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
+        let vendorRoot = Self.vendorProductSetRoot
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
+                      "LibreOffice vendor tree not present at \(vendorRoot.path) — run "
+                        + "`bun run libreoffice:fetch` from the repo root.")
+        let fixturePath = Self.fixturesRoot.appendingPathComponent("gate.odt").path
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: fixturePath), "gate.odt fixture missing")
+
+        let stateDir = makeScratchDirectory()
+        let directory = SessionDirectory(lister: { [] })
+        let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        host.makeOfficeHelperSupervisor = {
+            OfficeHelperSupervisor(configuration: OfficeHelperSupervisor.Configuration(
+                helperExecutableURL: helperURL,
+                socketDirectory: stateDir,
+                extraArguments: ["--lok-root", vendorRoot.path, "--sandbox-profile", Self.sandboxProfilePath.path]))
+        }
+
+        let scratchDir = makeScratchDirectory()
+        let docPath = scratchDir.appendingPathComponent("hop-teardown.odt").path
+        try Data(contentsOf: URL(fileURLWithPath: fixturePath)).write(to: URL(fileURLWithPath: docPath))
+        let bystanderPath = scratchDir.appendingPathComponent("bystander.odt").path
+        try Data(contentsOf: URL(fileURLWithPath: fixturePath)).write(to: URL(fileURLWithPath: bystanderPath))
+
+        // The innocent bystander — another session's open document, never torn down. The whole point
+        // of the bug is that ONE session's close kills the process every OTHER session shares.
+        let bystander = host.officeRuntime(for: "S-bystander")
+        bystander.open(bystanderPath)
+        let bystanderOpened = await waitUntil(timeout: 90) {
+            bystander.stateSnapshot.documents[bystanderPath] != nil || bystander.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(bystanderOpened, "setup: the bystander session's document never opened")
+        XCTAssertNotNil(bystander.stateSnapshot.documents[bystanderPath], "setup: bystander open failed")
+
+        let keyCodes: [Character: Int] = [
+            "T": 531 | 0x1000, "E": 516 | 0x1000, "D": 515 | 0x1000, "I": 520 | 0x1000, "4": 260,
+        ]
+
+        for lap in 1...5 {
+            // A FRESH runtime under a fresh session id — what hopping away and back produces.
+            let sessionId = "S-hop-\(lap)"
+            weak var weakRuntime: OfficeRuntime?
+            do {
+                let runtime = host.officeRuntime(for: sessionId)
+                weakRuntime = runtime
+                runtime.open(docPath)
+                let settled = await waitUntil(timeout: 90) {
+                    runtime.stateSnapshot.documents[docPath] != nil || runtime.stateSnapshot.phase == .failed
+                }
+                XCTAssertTrue(settled, "lap \(lap): never settled — phase: \(runtime.stateSnapshot.phase)")
+                guard runtime.stateSnapshot.documents[docPath] != nil else {
+                    return XCTFail("lap \(lap): open failed — "
+                                   + "\(runtime.stateSnapshot.openFailures[docPath] ?? "no reason recorded")")
+                }
+
+                for character in "T4EDIT" {
+                    let keyCode = try XCTUnwrap(keyCodes[character])
+                    let charCode = try XCTUnwrap(character.asciiValue.map(Int.init))
+                    runtime.postKeyEvent(path: docPath, type: .keyInput, charCode: charCode, keyCode: keyCode)
+                    runtime.postKeyEvent(path: docPath, type: .keyUp, charCode: charCode, keyCode: keyCode)
+                }
+                runtime.postKeyEvent(path: docPath, type: .keyInput, charCode: 0, keyCode: 1280)
+                runtime.postKeyEvent(path: docPath, type: .keyUp, charCode: 0, keyCode: 1280)
+
+                let becameDirty = await waitUntil(timeout: 15) { runtime.stateSnapshot.documents[docPath]?.dirty == true }
+                XCTAssertTrue(becameDirty, "lap \(lap): the typed edit never marked the document dirty")
+
+                let outcome = await runtime.saveAndAwaitOutcome(docPath)
+                XCTAssertEqual(outcome, .saved, "lap \(lap): expected a clean save")
+
+            } // the drill's OWN reference dies here, so the host holds the only one left
+
+            // **The gesture: save, then leave the session — through the REAL door.**
+            // `teardownOfficeRuntime(for:)` is `officeRuntimes.removeValue(forKey:)?.teardown()`,
+            // byte-for-byte the line `releaseOfficeRuntimeIfClean` runs (`ShellSessionHost.swift`
+            // `:1277` and `:1294`). Calling `runtime.teardown()` on a reference the drill still
+            // holds would NOT reproduce this: the whole hazard is that the temporary returned by
+            // `removeValue` is the LAST strong reference and dies the moment `teardown()` returns.
+            // The supervisor is deliberately NOT stopped, mirroring that method.
+            let teardownAt = Date()
+            host.teardownOfficeRuntime(for: sessionId)
+
+            // **Non-vacuity, and the settle, in one assertion.** The runtime going away is proof the
+            // drill really did reproduce the release lifecycle rather than a retained teardown — and
+            // with `makeBarrieredClose`'s STRONG capture it is also the barrier's completion signal,
+            // because the task is what holds the last reference until it finishes.
+            let released = await waitUntil(timeout: 20) { weakRuntime == nil }
+            XCTAssertTrue(released, "lap \(lap): the runtime never deallocated — this drill is not "
+                          + "reproducing releaseOfficeRuntimeIfClean's lifecycle and cannot testify")
+            XCTAssertLessThan(Date().timeIntervalSince(teardownAt), 10.0,
+                              "lap \(lap): teardown's barrier must be a bounded round trip, not a "
+                              + "stall — the same control arm the clean-close drill carries")
+
+            guard let helperPID = host.officeHelperSupervisor?.process?.processIdentifier else {
+                return XCTFail("lap \(lap): supervisor has no live process left to check")
+            }
+            XCTAssertTrue(isProcessAlive(helperPID), "lap \(lap): the shared helper died when ONE "
+                          + "session was released straight after a save — and another session's "
+                          + "document was open on it the whole time")
+        }
+
+        // The bystander is the real verdict: a dead or wedged helper cannot still serve it. Closing
+        // and reopening ITS document proves the process is functional, not merely PID-alive.
+        bystander.close(bystanderPath)
+        await bystander.awaitPendingCloseBarriersForTesting()
+        bystander.open(bystanderPath)
+        let bystanderStillWorks = await waitUntil(timeout: 90) {
+            bystander.stateSnapshot.documents[bystanderPath] != nil || bystander.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(bystanderStillWorks, "the bystander session could not complete one more open "
+                      + "— phase: \(bystander.stateSnapshot.phase)")
+        XCTAssertNotNil(bystander.stateSnapshot.documents[bystanderPath],
+                        "the bystander session's document must still open after five hop-releases: "
+                        + "\(bystander.stateSnapshot.openFailures[bystanderPath] ?? "no reason recorded")")
 
         _ = host.teardownAllOfficeRuntimesAndStopHelper()
     }
