@@ -1372,6 +1372,20 @@ public enum OfficeSheetsResizeOp: String, Equatable, Sendable {
 /// A batch is never empty: an empty `ops` is malformed, not a no-op that reports success.
 public enum OfficeWireBatchLimits {
     public static let maxOperationsPerBatch = 20
+
+    /// The magnitude ceiling on a batch element's `slide`/`at`/`to`, on the WIRE — 0-based here, so
+    /// this is an exclusive upper bound mirroring the app's own 1-based `officeSlideMaxIndex`
+    /// (10 000) and `slides.ts`'s `.max(10_000)`. Three copies is the established two-layer
+    /// arrangement plus this one, and this one is the layer the HELPER trusts.
+    ///
+    /// **Honest scope, so this reads as what it is:** `intValue` is already total (`NSNumber as? Int`
+    /// is a conditional bridge, never a trapping `Int(Double)`), and every helper-side consumer
+    /// guards its own range before doing arithmetic — so this bound closes no live crash. It is here
+    /// because the batch is a NEW decode surface and the discipline for one is "bounded at both
+    /// layers," not "bounded wherever a crash was demonstrated." **The single-op `slidesManagePage`
+    /// decode does NOT carry this bound**; that asymmetry is stated rather than quietly implied, and
+    /// it is safe for the reason just given, not because anyone checked it twice.
+    public static let maxSlideIndexExclusive = 10_000
 }
 
 /// office-finish Job 2 — ONE operation inside a `sheetsManageSheetBatch`. The exact operand triple
@@ -1456,6 +1470,11 @@ public struct OfficeSlidesManagePageOperation: Equatable, Sendable {
             return nil
         } else {
             layout = nil
+        }
+        for value in [slide, at, to] {
+            guard value == nil || (value! >= 0 && value! < OfficeWireBatchLimits.maxSlideIndexExclusive) else {
+                return nil
+            }
         }
         switch op {
         case .add: guard slide == nil, to == nil else { return nil }
