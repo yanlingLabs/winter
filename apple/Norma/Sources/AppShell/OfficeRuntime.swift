@@ -2703,9 +2703,20 @@ final class OfficeRuntime: ObservableObject {
     /// Injectable so tests can drive the machine without sleeping for real. Production never sets it.
     var autoSaveDebounceInterval: TimeInterval = OfficeRuntime.autoSaveDebounceIntervalDefault
 
-    /// ⛔ **DEFAULT OFF. Two blockers were found; the first is FIXED, the second is why this is
-    /// still off. Both mechanisms below are MEASURED — the first round's were not, and that is the
-    /// most important thing on this page.**
+    /// ✅ **DEFAULT ON, as of office-instant-save. Two blockers were found and BOTH are now fixed;
+    /// every mechanism below is MEASURED — round 1's were not, and that is still the most important
+    /// thing on this page.** The history is kept in full, because what it records is how each of the
+    /// two decisions was reached, and the second one was nearly reached wrongly.
+    ///
+    /// **What arming rests on, in counts** (`.superpowers/research/office-close-race-report.md`):
+    ///  - the close-race fix itself: `testCleanCloseImmediatelyAfterASave…` **6/6 green vs 3/3 red**,
+    ///    with a control arm that reds a 20 s stall at the `< 10 s` bound;
+    ///  - the feature under its own drill: `testAnArmedInstantSaveFollowedImmediatelyByAClose…`
+    ///    **9/9 green vs 3/3 red**, 45 armed auto-save-then-close laps;
+    ///  - the flipped default's blast radius: office-adjacent suites **358/0 armed**, and the FULL
+    ///    Swift suite **3084/0 armed** — taken on the same machine on which the base commit
+    ///    `69c9c230` itself scored 3082/**1** (an unrelated `OfficeSlidesCommandTests` live drill,
+    ///    isolation-clean), so the armed run is not merely as good as the baseline, it is cleaner.
     ///
     /// ### Round 1 — my stated mechanisms were wrong, and the decision was still right
     /// Arming this lost the user's typed content in two live Calc drills. I named two candidates and
@@ -2721,7 +2732,7 @@ final class OfficeRuntime: ObservableObject {
     /// debounce arms at key ENQUEUE time, not delivery. **That is fixed** (see `performSave`), and
     /// with it fixed the content loss is gone: both Calc drills pass with this armed.
     ///
-    /// ### Round 2 — the blocker that WAS standing: THE POST-SAVE CLOSE WINDOW (constraint C3)
+    /// ### Round 2 — the blocker that WAS standing, and is now closed: THE POST-SAVE CLOSE WINDOW
     /// With the ordering bug fixed and this armed, `testTypingOnSheetTwoLandsOnSheetTwoNotSheetOne
     /// ThroughSaveAndReopen` was recorded failing 2 of 3 runs in isolation, at the REOPEN, with the
     /// helper's own `Unspecified Application Error` — the documented signature of LOK calling libc
@@ -2763,7 +2774,7 @@ final class OfficeRuntime: ObservableObject {
     /// hard way: **a CRITERION is a claim too.** The drill this was parked against passed, and the
     /// pass meant nothing; only probing what it actually did revealed that.
     ///
-    var autoSaveEnabled: Bool = false
+    var autoSaveEnabled: Bool = true
 
     private var autoSaveTasks: [String: Task<Void, Never>] = [:]
     private var autoSaveInFlight: Set<String> = []
