@@ -1596,9 +1596,34 @@ final class ShellSessionHost: ObservableObject {
     /// app-wide office helper roughly 4 times out of 5 (full account: `OfficeRuntime.drainUntilClean`'s
     /// own doc comment, and `.superpowers/sdd/2026-08-22-office-agent-tools/task-2-report.md` §6/§7
     /// concern 1). `drainUntilClean` is a no-op the instant `path` has no OPEN document at all — which
-    /// covers `.noModel` (nothing was ever open to be dirty about) and the silent, non-sheet close path
-    /// one level up in `requestCloseTab` (a CLEAN tab's `×` never reaches this method at all, so
-    /// ⌘S-then-× was never at risk and needs no separate treatment). **It is deliberately NOT gated on
+    /// covers `.noModel` (nothing was ever open to be dirty about).
+    ///
+    /// ⛔ **The sentence that used to stand here — "a CLEAN tab's `×` never reaches this method at
+    /// all, so ⌘S-then-× was never at risk and needs no separate treatment" — was WRONG, and is
+    /// corrected rather than deleted so the mistake is not re-made.** Its conclusion held only on the
+    /// ordinary path, and for a reason it did not name: what protected ⌘S-then-`×` was never
+    /// `requestCloseTab`'s ROUTING, it was that a human cannot click `×` before LOK's own
+    /// `.uno:ModifiedStatus=false` callback has cleared the dot. The clean leg (`:1500-1502` →
+    /// `closePanelTab` → `officeRuntime.close(path)` at `:1714`) had no barrier whatsoever — and
+    /// `dirty` also reaches `false` by a route with no callback behind it at all:
+    /// `OfficeRuntimeReducer`'s `.saveSucceeded` arm clears it SYNCHRONOUSLY whenever
+    /// `restoredPendingSave` or `saveFailedPendingSave` is set (`OfficeRuntime.swift:1102-1106`),
+    /// both ordinary reachable states (restore-from-recovery; a retry that succeeds after a failed
+    /// save). Closing at that timing was measured killing the shared, app-wide helper 2 of 3 times
+    /// (`.superpowers/research/office-live-edit-rereview.md` Q3(c)); re-measured on this branch with
+    /// the barrier removed, a plain save-then-close died **3 of 3**, one `Unspecified Application
+    /// Error` each (`.superpowers/research/office-close-race-report.md`).
+    ///
+    /// **It now DOES need separate treatment, and has it — one level down, not here.**
+    /// `OfficeRuntime.close`'s own `.helperClose` performer holds the barrier
+    /// (`OfficeRuntime.awaitCloseBarrier`), which is the one site every real close funnels through,
+    /// so no call site — this one, the clean `×`, or `OfficeAgentBroker`'s `defer`-close — can
+    /// forget it. The explicit `drainUntilClean` below is therefore now REDUNDANT on this path, and
+    /// is kept deliberately: it is the call this route's own regression tripwires were written
+    /// against (`ShellSessionHostTests.testRequestCloseTabOnADirtyDocumentTabSaveChoiceThatSucceeds
+    /// WaitsForTheDrainRoundTripBeforeClosing` and its retry sibling, plus `OfficeRuntimeLiveTests`'
+    /// dirty-close loop), and dropping a measured barrier to save one round trip on the one path
+    /// that already pays for a modal sheet would be a bad trade. **It is deliberately NOT gated on
     /// `dirty`** — fix-round review IMPORTANT-1 found that gate unsound (the reducer can clear `dirty`
     /// synchronously with no real callback behind it, on the recovery-restore and failed-save-retry
     /// paths specifically — both ordinary, reachable sequences), so the drain instead performs a real
