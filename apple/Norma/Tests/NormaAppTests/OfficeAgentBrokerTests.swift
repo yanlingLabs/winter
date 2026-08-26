@@ -700,7 +700,16 @@ final class OfficeAgentBrokerTests: XCTestCase {
 
         let closed = await waitUntil { runtime.stateSnapshot.documents[path] == nil }
         XCTAssertTrue(closed, "rule 2 must still fire — this fix does not weaken it")
-        XCTAssertEqual(office.closeCalls.count, 1, "and it must reach the driver, exactly once")
+        // office-instant-save Job 1: `waitUntil`, not an immediate read — the SAME reason
+        // `testTheAgentClosesADocumentItOpened`'s own close assertion already gives at `:322-325`
+        // ("`close` closure runs inside a spawned effect Task"), now with one more hop in front of
+        // it: `.helperClose`'s performer holds `driver.close` behind `OfficeRuntime
+        // .awaitCloseBarrier` (its own header has the why). What is asserted is unchanged — the
+        // close reaches the driver, exactly once — only the instant at which that becomes
+        // observable moved, which is precisely the documented behaviour change.
+        let reachedDriver = await waitUntil { office.closeCalls.count == 1 }
+        XCTAssertTrue(reachedDriver, "and it must reach the driver, exactly once — saw "
+                      + "\(office.closeCalls.count)")
 
         let recoverable = await waitUntil {
             model.plan == .renderState(.closedUnderTab(reason: officeDocumentClosedUnderTabReason))
