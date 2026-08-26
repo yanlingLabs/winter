@@ -31,6 +31,11 @@ private enum LOKCallbackType {
     /// was added (`OfficeHelperLiveTests
     /// .testProbeInvestigatesWhetherCellFormulaCallbacksExistForTheFormulaBarsContent`).
     static let cellFormula: Int32 = 19
+
+    /// office-polish Bug 1 — `LOK_CALLBACK_DOCUMENT_SIZE_CHANGED` (`LibreOfficeKitEnums.h:275`).
+    /// Fires when an edit changes the document's own extent; the app needs it because `opened`
+    /// carries a size exactly once and nothing else ever revises it.
+    static let documentSizeChanged: Int32 = 13
     /// office-agent-tools T6 — LibreOfficeKitEnums.h:216 (LOK_CALLBACK_GRAPHIC_SELECTION). Payload
     /// `"x, y, width, height, angle, { optional JSON properties }"` (twips, angle in 100ths of a
     /// degree) — this bridge only ever needs the first four fields. Confirmed by
@@ -5345,6 +5350,8 @@ final class LOKBridge: OfficeDocumentBridge {
             event = OfficeDocumentEvent.parseCellCursor(payload)
         case LOKCallbackType.cellFormula:
             event = OfficeDocumentEvent.parseCellFormula(payload)
+        case LOKCallbackType.documentSizeChanged:
+            event = OfficeDocumentEvent.parseDocumentSizeChanged(payload)
         case LOKCallbackType.graphicSelection:
             // office-agent-tools T6 — internal state only, never an `OfficeDocumentEvent` (nothing
             // outside this bridge needs it, and Stage A's wire vocabulary is not the right place to

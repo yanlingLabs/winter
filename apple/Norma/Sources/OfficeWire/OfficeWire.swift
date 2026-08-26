@@ -1793,7 +1793,21 @@ public enum OfficeDocumentEvent: Equatable, Sendable {
     /// edit mode), so treating one as derived from the other would silently mix two independently
     /// timed LOK callbacks into one field.
     case cellFormula(String)
+    /// office-polish Bug 1 — `LOK_CALLBACK_DOCUMENT_SIZE_CHANGED` (type 13,
+    /// `LibreOfficeKitEnums.h:275`): the document's own extent AFTER an edit changed it. Payload
+    /// on the wire is `"<width>, <height>"` in twips; measured live against a real Writer document
+    /// (`12808, 48656`, exactly what a reopen of the grown file then reports as its `opened` size).
+    ///
+    /// **This is the only signal that a document GREW while a tab was showing it.** `opened`
+    /// carries a size exactly once, at open; before this case existed the engine fired type 13 and
+    /// the bridge dropped it, so `OfficeTileCanvasView` kept clamping scroll to the extent the
+    /// document had when it was opened. For a spreadsheet that is invisible (its scroll bound is
+    /// padded by two extra screens either way); for a Writer document, whose bound IS the captured
+    /// extent, everything past it is unreachable for the tab's whole lifetime.
+    case documentSizeChanged(OfficeDocumentSize)
+}
 
+extension OfficeDocumentEvent {
     /// This case's own fields, flattened into the SAME single-level JSON object
     /// `OfficeWireFrame.encodedLine()` builds for a `.documentEvent` frame — `kind` is the
     /// discriminant (named `kind`, not `type`, to not collide with the outer frame's own `type`
@@ -1835,6 +1849,9 @@ public enum OfficeDocumentEvent: Equatable, Sendable {
             }
         case .cellFormula(let text):
             return ["kind": "cellFormula", "text": text]
+        case .documentSizeChanged(let size):
+            return ["kind": "documentSizeChanged",
+                    "widthTwips": size.widthTwips, "heightTwips": size.heightTwips]
         }
     }
 
@@ -1925,6 +1942,15 @@ public enum OfficeDocumentEvent: Equatable, Sendable {
             // header on `OfficeDocumentEvent`).
             guard let text = object["text"] as? String else { return nil }
             return .cellFormula(text)
+        case "documentSizeChanged":
+            // Both fields required and both must be POSITIVE. A zero or negative extent is not a
+            // "smaller document" — it is a payload this decoder does not understand, and accepting
+            // one would drive `clampedOriginX/Y` to pin scrolling at the origin, i.e. turn a
+            // malformed frame into exactly the bug this case exists to fix.
+            guard let widthTwips = int64Value(object["widthTwips"]),
+                  let heightTwips = int64Value(object["heightTwips"]),
+                  widthTwips > 0, heightTwips > 0 else { return nil }
+            return .documentSizeChanged(OfficeDocumentSize(widthTwips: widthTwips, heightTwips: heightTwips))
         default:
             return nil
         }
@@ -1990,6 +2016,29 @@ public enum OfficeDocumentEvent: Equatable, Sendable {
     ///   live edit traffic DID cross-check this — real firings observed 6 fields, always with a
     ///   parseable `fields[4]`, never exercising the default. The default itself (garbage or a
     ///   missing 5th field) is still unexercised by real data.
+    /// office-polish Bug 1 — `LOK_CALLBACK_DOCUMENT_SIZE_CHANGED`'s raw payload. Transcribed from
+    /// a REAL firing, not from the header's prose: appending 20 paragraphs to
+    /// `Sushi_An_Introduction.docx` through the live helper produced exactly
+    ///
+    ///     [LOKBridge raw callback] docId=d0 type=13 payload=12808, 48656
+    ///
+    /// and reopening that same file then reported `widthTwips 12808, heightTwips 48656` as its
+    /// `opened` size — so the two numbers are width and height in twips, in that order, comma
+    /// separated with a space, the same shape `parseCellCursor` already handles for its own
+    /// callback.
+    ///
+    /// Rejects anything that is not two positive integers. `0` is refused rather than passed
+    /// through: LO emits a transient zero-size for a document mid-relayout, and a zero extent
+    /// reaching `clampedOriginX/Y` pins scrolling at the origin — the exact defect this whole path
+    /// exists to remove, reintroduced by trusting a payload we do not understand.
+    static func parseDocumentSizeChanged(_ payload: String) -> OfficeDocumentEvent? {
+        let fields = payload.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        guard fields.count == 2,
+              let widthTwips = Int64(fields[0]), let heightTwips = Int64(fields[1]),
+              widthTwips > 0, heightTwips > 0 else { return nil }
+        return .documentSizeChanged(OfficeDocumentSize(widthTwips: widthTwips, heightTwips: heightTwips))
+    }
+
     static func parseInvalidateTiles(_ payload: String) -> OfficeDocumentEvent? {
         let trimmed = payload.trimmingCharacters(in: .whitespaces)
         let fields = trimmed.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }

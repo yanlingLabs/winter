@@ -90,7 +90,8 @@ final class OfficeCursorStore {
         case .cellFormula(let text):
             state.cellFormulaText = text
             state.cellFormulaPart = activePart
-        case .opened, .openFailed, .invalidated, .modifiedChanged, .closed, .autosaved:
+        case .opened, .openFailed, .invalidated, .modifiedChanged, .closed, .autosaved,
+             .documentSizeChanged:
             return // not this store's concern — no signal, no mutation
         }
         states[docId] = state

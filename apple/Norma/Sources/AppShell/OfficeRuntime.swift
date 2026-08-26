@@ -582,6 +582,10 @@ enum OfficeRuntimeEvent: Equatable {
     /// level up for tile pushes, moved down into the reducer here because `documents` IS the
     /// reducer's own state).
     case modifiedStatusChanged(docId: String, modified: Bool)
+    /// office-polish Bug 1 — LOK told us the document's own extent changed (an agent append grew
+    /// it, a delete shrank it). The ONLY revision `DocumentEntry.sizeTwips` ever gets after
+    /// `opened`, and the input `OfficeTileCanvasView` clamps its scrolling against.
+    case documentSizeChanged(docId: String, sizeTwips: OfficeDocumentSize)
 
     // MARK: office-plumbing Task 8 — the world changing underneath an open document
 
@@ -1155,6 +1159,24 @@ enum OfficeRuntimeReducer {
             next.documentBanners[path] = message
             return (next, [.emitBanner(reason: message)])
 
+        case .documentSizeChanged(let docId, let sizeTwips):
+            // The size a document reports at `opened` is a SNAPSHOT, and before this arm existed it
+            // was the only one there ever was: `OfficeTileCanvasView` clamps scrolling against
+            // `effectiveExtentTwips`, which for a text document IS this value, so a document that
+            // grew under an open tab could not be scrolled into its new content — ever, for that
+            // tab's whole lifetime. Measured on the user's own file: 32532 twips at open, 48656
+            // after twenty appended paragraphs, with nothing in between telling anybody.
+            //
+            // No `dirty`/`activePart`/part-count changes ride along: LOK fires this callback for a
+            // pure re-layout too, and a size revision is not evidence about any of them.
+            guard state.phase == .ready,
+                  let path = state.documents.first(where: { $0.value.docId == docId })?.key,
+                  var entry = next.documents[path], entry.sizeTwips != sizeTwips else {
+                return (next, [])
+            }
+            entry.sizeTwips = sizeTwips
+            next.documents[path] = entry
+            return (next, [])
         case .modifiedStatusChanged(let docId, let modified):
             guard state.phase == .ready,
                   let path = state.documents.first(where: { $0.value.docId == docId })?.key else {
@@ -3299,6 +3321,8 @@ final class OfficeRuntime: ObservableObject {
             cursorStore.apply(docId: docId, event: event, activePart: activePart)
         case .autosaved(let ext, let isODFFallback):
             perform(dispatch(.autosaved(docId: docId, ext: ext, isODFFallback: isODFFallback)))
+        case .documentSizeChanged(let sizeTwips):
+            perform(dispatch(.documentSizeChanged(docId: docId, sizeTwips: sizeTwips)))
         case .opened, .openFailed, .invalidated, .closed:
             return
         }

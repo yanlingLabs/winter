@@ -679,6 +679,27 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost, NSTextInputC
     /// ther a reload nor this method ever recreates the view.
     func syncDocumentIdentity(docId newDocId: String, sizeTwips newSizeTwips: OfficeDocumentSize, activePart: Int) {
         guard newDocId != docId else {
+            // office-polish Bug 1 — a SAME-DOCUMENT size revision, which this guard used to swallow
+            // whole. `LOK_CALLBACK_DOCUMENT_SIZE_CHANGED` now reaches `DocumentEntry.sizeTwips`, and
+            // it arrives with the docId UNCHANGED (the document grew; it was not reloaded), so
+            // without this arm the canvas would keep clamping scrolling to the extent the document
+            // had when it opened — the whole point of wiring that callback.
+            //
+            // Deliberately NOT the reload path below: nothing here clears tiles (every painted tile
+            // is still valid — growth appends content, it does not move what is already laid out)
+            // and nothing resets `scrollOrigin` (the user is reading; their position must survive).
+            // Only the three things a new extent actually invalidates run: the scroll clamp, the
+            // subscription (whose own skip-check is bounded by this same extent), and residency
+            // eligibility (`officeResidencyEligibleTileCount` is a function of `sizeTwips`).
+            if newSizeTwips != sizeTwips {
+                sizeTwips = newSizeTwips
+                scrollOrigin = CGPoint(x: clampedOriginX(scrollOrigin.x), y: clampedOriginY(scrollOrigin.y))
+                relayoutVisibleTiles()
+                performSubscribe()
+                lastResidencyEvaluation = nil
+                prefetchGeneration += 1
+                evaluateResidencyIfNeeded()
+            }
             setActivePart(activePart) // the pre-Task-8 drift re-assert, unchanged
             return
         }
