@@ -2412,6 +2412,123 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         _ = host.teardownAllOfficeRuntimesAndStopHelper()
     }
 
+    // MARK: - office-instant-save Job 1: the CLEAN-tab close, with no drain at its call site
+
+    /// **The clean-tab `×` route's own mechanism proof — the half `testDirtyCloseSheetSaveSequence
+    /// RepeatedlyThroughTheRealHelperNeverKillsTheSharedProcess` (immediately above) structurally
+    /// cannot see.** That drill calls `runtime.drainUntilClean(docPath)` explicitly, because the
+    /// sequence it reproduces (`ShellSessionHost.resolveDirtyDocumentTabClose`'s Save choice) does.
+    /// This one deliberately does **not** — because the route it reproduces does not either.
+    ///
+    /// `ShellSessionHost.requestCloseTab`'s CLEAN `.document` leg (`:1500-1502`) goes straight to
+    /// `closePanelTab`, whose office arm calls `officeRuntime.close(path)` inline (`:1714`) with no
+    /// barrier of any kind between the save that just made the tab clean and the close. A save is
+    /// exactly what makes a dirty tab clean, so "⌘S, then click the `×`" reaches that leg by hand,
+    /// and the re-review measured that timing killing the shared helper 2 of 3 times
+    /// (`.superpowers/research/office-live-edit-rereview.md` Q3(c)). Because
+    /// `OfficeHelperRequestQueue` is ONE app-wide FIFO, a death here takes every other open office
+    /// document with it.
+    ///
+    /// So the fix cannot live at a call site: it lives inside `close(_:)`'s own `.helperClose`
+    /// performer, which is the single imperative site any real close reaches. This drill is what
+    /// pins that — it saves and closes with **nothing** in between, five times on ONE helper (same
+    /// reasoning as the drill above: the bug is that closing one document kills the process every
+    /// OTHER document shares, so the proof has to be that the SAME helper survives repeatedly), and
+    /// asserts the barrier is a real bounded round trip rather than a stall.
+    ///
+    /// **RED/GREEN, measured not narrated** — full counts in
+    /// `.superpowers/research/office-close-race-report.md`. Red arm: empty out
+    /// `OfficeRuntime.awaitCloseBarrier`'s body (leaving the test hook), rebuild, rerun. Control arm:
+    /// replace that body with an unconditional 20 s sleep — the `<10 s` bound below must go red, which
+    /// is what proves this drill discriminates "the barrier does real, bounded work" from "everything
+    /// simply waits."
+    func testCleanCloseImmediatelyAfterASaveRepeatedlyThroughTheRealHelperNeverKillsTheSharedProcess() async throws {
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent()
+            .appendingPathComponent("NormaOfficeHelper")
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
+                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                        + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
+        let vendorRoot = Self.vendorProductSetRoot
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
+                      "LibreOffice vendor tree not present at \(vendorRoot.path) — run "
+                        + "`bun run libreoffice:fetch` from the repo root.")
+        let fixturePath = Self.fixturesRoot.appendingPathComponent("gate.odt").path
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: fixturePath), "gate.odt fixture missing")
+
+        let stateDir = makeScratchDirectory()
+        let directory = SessionDirectory(lister: { [] })
+        let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        host.makeOfficeHelperSupervisor = {
+            OfficeHelperSupervisor(configuration: OfficeHelperSupervisor.Configuration(
+                helperExecutableURL: helperURL,
+                socketDirectory: stateDir,
+                extraArguments: ["--lok-root", vendorRoot.path, "--sandbox-profile", Self.sandboxProfilePath.path]))
+        }
+        let runtime = host.officeRuntime(for: "S1")
+
+        let scratchDir = makeScratchDirectory()
+        let docPath = scratchDir.appendingPathComponent("clean-close-loop.odt").path
+        try Data(contentsOf: URL(fileURLWithPath: fixturePath)).write(to: URL(fileURLWithPath: docPath))
+
+        let iterations = 5
+        for lap in 1...iterations {
+            runtime.open(docPath)
+            let settled = await waitUntil(timeout: 90) {
+                runtime.stateSnapshot.documents[docPath] != nil || runtime.stateSnapshot.phase == .failed
+            }
+            XCTAssertTrue(settled, "lap \(lap): never settled — phase: \(runtime.stateSnapshot.phase)")
+            guard let doc = runtime.stateSnapshot.documents[docPath] else {
+                return XCTFail("lap \(lap): open failed — "
+                               + "\(runtime.stateSnapshot.openFailures[docPath] ?? "no reason recorded")")
+            }
+            guard let client = host.officeHelperSupervisor?.client else {
+                return XCTFail("lap \(lap): no live client to drive the real edit door through")
+            }
+            try await postRealEdit(client: client, docId: doc.docId, marker: "T4EDIT")
+            let becameDirty = await waitUntil(timeout: 15) { runtime.stateSnapshot.documents[docPath]?.dirty == true }
+            XCTAssertTrue(becameDirty, "lap \(lap): the real edit never marked the document dirty")
+
+            let outcome = await runtime.saveAndAwaitOutcome(docPath)
+            XCTAssertEqual(outcome, .saved, "lap \(lap): expected a clean save")
+
+            // **Nothing between the save and the close.** No `drainUntilClean`, no wait on `dirty`,
+            // no sleep — exactly what `closePanelTab`'s office arm does after a ⌘S has left the tab
+            // clean. The barrier under test is the one INSIDE `close`.
+            let closeIssuedAt = Date()
+            runtime.close(docPath)
+            XCTAssertNil(runtime.stateSnapshot.documents[docPath],
+                         "lap \(lap): close must still be synchronous in the reducer's own state — "
+                         + "the barrier defers the HELPER request, never the state transition")
+            // Deterministic, and not decoration: without this the liveness check below could run
+            // before `driver.close` had even been issued, which would make the whole drill vacuous.
+            await runtime.awaitPendingCloseBarriersForTesting()
+            let barrierElapsed = Date().timeIntervalSince(closeIssuedAt)
+            XCTAssertLessThan(barrierElapsed, 10.0, "lap \(lap): the close barrier must be a real "
+                              + "bounded round trip, not a stall — this is the control arm that "
+                              + "keeps 'the fix works' distinguishable from 'everything waits'")
+
+            guard let helperPID = host.officeHelperSupervisor?.process?.processIdentifier else {
+                return XCTFail("lap \(lap): supervisor has no live process left to check")
+            }
+            XCTAssertTrue(isProcessAlive(helperPID), "lap \(lap): the shared helper died on a plain "
+                          + "`runtime.close` taken straight after a save — the clean-tab `×` route")
+        }
+
+        // Same final-liveness reasoning as the dirty-close drill above: `isProcessAlive` proves a PID
+        // exists, a completed fresh open proves the process can still do something. Also the only
+        // thing that can reveal a LAST close that was itself lethal.
+        runtime.open(docPath)
+        let reopened = await waitUntil(timeout: 90) {
+            runtime.stateSnapshot.documents[docPath] != nil || runtime.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(reopened, "the helper survived every close but could not complete one more "
+                      + "open — phase: \(runtime.stateSnapshot.phase)")
+        XCTAssertNotNil(runtime.stateSnapshot.documents[docPath], "final liveness reopen must "
+                        + "succeed: \(runtime.stateSnapshot.openFailures[docPath] ?? "no reason recorded")")
+
+        _ = host.teardownAllOfficeRuntimesAndStopHelper()
+    }
+
     // MARK: - The r4 vendor re-cut: .docx is a read-WRITE format again, end to end
 
     /// **The docx drill the read-only demotion existed in place of.** Whole-branch review I2 held
