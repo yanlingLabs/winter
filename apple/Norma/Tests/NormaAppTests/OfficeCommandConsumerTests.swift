@@ -388,7 +388,9 @@ final class OfficeCommandConsumerTests: XCTestCase {
             postKey: { _, _, _, _, _ in }, postMouse: { _, _, _, _, _, _, _, _ in },
             postExtTextInput: { _, _, _, _ in },
             clipboardCopy: { _, _ in nil }, clipboardCut: { _, _ in nil }, clipboardPaste: { _, _, _ in },
-            undo: { _ in }, redo: { _ in },
+            undo: { _, _ in }, redo: { _, _ in },
+            // office-live-edit R3 — see the sibling stubs: `nil` means one action, never zero.
+            undoDepth: { _ in nil },
             sheetsInfo: sheetsInfo, sheetsRead: sheetsRead,
             sheetsSet: sheetsSet, sheetsResize: sheetsResize, sheetsManageSheet: sheetsManageSheet,
             sheetsFormat: sheetsFormat,

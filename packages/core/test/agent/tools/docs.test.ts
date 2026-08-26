@@ -104,14 +104,24 @@ describe("registration", () => {
   // The tool description is a shipped artifact this arc has already caught contradicting the code
   // once (T5's Minor-5: a description that was not merely untested but FALSE). These three claims
   // are the ones a model will act on and the ones the code below actually enforces.
-  test("the description states the three facts the code enforces — undo is REFUSED, literal find, no first-only replace", () => {
+  test("the description states the three facts the code enforces — a human's ⌘Z undoes the whole call, literal find, no first-only replace", () => {
     const h = makeHarness();
     const description = h.registry.specFor("docs", WORKDIR, "code")?.description ?? "";
-    // Ruling 4's user-facing half, CORRECTED by T7's own live drill: LOK refuses a cross-view undo
-    // outside repair mode (`docundo.cxx:456-472`), so a human's ⌘Z cannot take back a docs edit and
-    // silently does nothing. The description must say that, not the ruling's original "shared" text.
-    expect(description).toContain("NO WAY TO UNDO IT");
-    expect(description).toContain("⌘Z will simply do nothing");
+    // Ruling 4's user-facing half, CORRECTED TWICE and worth reading in order. T7's live drill
+    // falsified the ruling's original "the human's ⌘Z gets it back" (LOK refuses a cross-view undo
+    // OUTSIDE REPAIR MODE — `docundo.cxx:456-472`), and the description was rewritten to say ⌘Z did
+    // nothing. office-live-edit R3 then dispatched ⌘Z WITH `Repair`, which is precisely the escape
+    // those five words named, so the original conclusion is true again — but for a mechanism nobody
+    // had built at the time, not because T7 was wrong.
+    //
+    // Two claims are asserted, not one, and the second is the load-bearing one: a description that
+    // said only "a human can undo" would be satisfied by per-action undo, where taking back a
+    // 200-cell write costs 200 presses. The GRANULARITY is what the ledger delivers and what a
+    // model needs to know before deciding how to split its work across calls.
+    expect(description).toContain("cannot undo from here");
+    expect(description).toContain("takes back your whole tool call");
+    // And the fact that must NOT come back: the old claim, now false.
+    expect(description).not.toContain("⌘Z will simply do nothing");
     // Ruling 1: literal, case-sensitive.
     expect(description).toContain("LITERAL and CASE-SENSITIVE");
     // The v1 narrowing, stated where a model will read it rather than discovered by refusal.
@@ -506,5 +516,91 @@ describe("outcomes", () => {
     expect(result.isError).toBe(false);
     expect(result.output).toContain("interrupted");
     expect(h.recorded).toEqual([]);
+  });
+});
+
+
+// ================================================================================================
+// office-live-edit R2 — append's `texts`: several paragraphs in one call
+// ================================================================================================
+
+describe("append texts[]", () => {
+  test("several paragraphs ride ONE dispatch, joined with newlines into the existing text field", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "append", path: DOC, texts: ["one", "two", "three"] });
+    expect(result.isError).toBe(false);
+    // ONE dispatch, not three. This is the whole point: one wire request keeps the write deadline's
+    // counted worst case intact, and it is one `paste`, so it is ONE engine undo action.
+    expect(h.recorded).toHaveLength(1);
+    expect(h.recorded[0]).toEqual({
+      sessionId: SID, action: "office.docs.append",
+      args: { path: DOC, text: "one\ntwo\nthree" },
+      deadlineMs: OFFICE_DEADLINES_MS["office.docs.append"],
+    });
+    // And `texts` itself must never reach the wire — the app decodes `text`, and an unknown key
+    // would be silently ignored there rather than refused.
+    expect(Object.keys(h.recorded[0]?.args ?? {})).toEqual(["path", "text"]);
+  });
+
+  test("one-paragraph `text` is completely unchanged by the new operand", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "append", path: DOC, text: "solo" });
+    expect(result.isError).toBe(false);
+    expect(h.recorded[0]?.args).toEqual({ path: DOC, text: "solo" });
+  });
+
+  test("text AND texts together REFUSES — it never picks one", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "append", path: DOC, text: "a", texts: ["b", "c"] });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("not both");
+    // Nothing dispatched: an ambiguous call must not reach the user's file at all.
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("neither text nor texts REFUSES", async () => {
+    const h = makeHarness();
+    const result = await h.run({ verb: "append", path: DOC });
+    expect(result.isError).toBe(true);
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("`texts` on a verb that does not take it REFUSES rather than being dropped", async () => {
+    // The load-bearing arm. Silently ignoring it would append nothing and report ok — or, on
+    // `insert`, add the FIRST paragraph and silently discard the rest. Both are the silent-wrong-
+    // answer class that `all: false` and append's own `at` are already kept in the schema to refuse.
+    for (const verb of ["insert", "replace", "read", "info"] as const) {
+      const h = makeHarness();
+      const result = await h.run({
+        verb, path: DOC, texts: ["a", "b"],
+        ...(verb === "replace" ? { find: "x", replaceWith: "y" } : {}),
+        ...(verb === "insert" ? { text: "t" } : {}),
+      } as never);
+      expect(result.isError, `${verb} must refuse a present texts`).toBe(true);
+      expect(result.output).toContain("only append");
+      expect(h.recorded, `${verb} must not dispatch`).toEqual([]);
+    }
+  });
+
+  test("the AGGREGATE length is bounded, and the refusal names the real numbers", async () => {
+    const h = makeHarness();
+    // 5 × 1500 = 7500 joined — each element is legal on its own, the total is not. This is exactly
+    // the composition the per-element and array-length caps do NOT bound between them.
+    const result = await h.run({ verb: "append", path: DOC, texts: Array(5).fill("x".repeat(1500)) });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("over the 4000");
+    expect(result.output).toContain("5 paragraphs");
+    expect(h.recorded).toEqual([]);
+  });
+
+  test("an over-long array and a wrong-typed element are both refused by the schema", async () => {
+    const tooMany = await makeHarness().run({ verb: "append", path: DOC, texts: Array(51).fill("x") });
+    expect(tooMany.isError).toBe(true);
+    const wrongType = await makeHarness().run({ verb: "append", path: DOC, texts: [1, 2] } as never);
+    expect(wrongType.isError).toBe(true);
+    // An EMPTY array is refused too — it would otherwise join to "" and dispatch an empty append,
+    // which the app refuses with a less specific message after a full round trip.
+    const empty = await makeHarness().run({ verb: "append", path: DOC, texts: [] });
+    expect(empty.isError).toBe(true);
   });
 });

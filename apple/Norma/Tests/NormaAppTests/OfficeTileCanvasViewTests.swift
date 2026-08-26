@@ -328,6 +328,13 @@ final class OfficeTileCanvasViewTests: XCTestCase {
         // shape as `ShellSessionHostTests.OfficeDriverRecorder`/`PanelDocumentTabTests
         // .DocumentOfficeDriverRecorder` and this codebase's wider precedent.
         private let lock = NSLock()
+        /// office-live-edit R1 — how many times the debounced auto-save actually reached the driver.
+        /// A COUNT, not a bool: the whole claim of a debounce is "N edits produced ONE save", and a
+        /// bool cannot tell one save from five.
+        private var _saveCalls: [String] = []
+        var saveCalls: [String] {
+            lock.lock(); defer { lock.unlock() }; return _saveCalls
+        }
         private var _subscribeCalls: [(docId: String, part: Int, zoomPPT: Int, viewportTwips: OfficeTwipsRect)] = []
         var subscribeCalls: [(docId: String, part: Int, zoomPPT: Int, viewportTwips: OfficeTwipsRect)] {
             lock.lock(); defer { lock.unlock() }; return _subscribeCalls
@@ -360,6 +367,21 @@ final class OfficeTileCanvasViewTests: XCTestCase {
         var clipboardPasteCalls: [(docId: String, part: Int, text: String)] {
             lock.lock(); defer { lock.unlock() }; return _clipboardPasteCalls
         }
+        /// office-live-edit R3 — the REPAIR FLAG is recorded alongside the docId, because
+        /// "⌘Z dispatched an undo" and "⌘Z dispatched an undo that can cross views" are different
+        /// claims, and only the second one is what requirement 3 delivers. A recorder that kept
+        /// only the docId would go green against the pre-R3 behaviour it exists to distinguish.
+        private var _undoRepairFlags: [Bool] = []
+        var undoRepairFlags: [Bool] {
+            lock.lock(); defer { lock.unlock() }; return _undoRepairFlags
+        }
+        private var _redoRepairFlags: [Bool] = []
+        var redoRepairFlags: [Bool] {
+            lock.lock(); defer { lock.unlock() }; return _redoRepairFlags
+        }
+        /// What the fake depth query answers. `nil` (the default) means "cannot answer", which every
+        /// caller degrades to ONE action — the pre-R3 granularity these tests were written against.
+        var undoDepthAnswer: (undo: Int, redo: Int)?
         private var _undoCalls: [String] = []
         var undoCalls: [String] {
             lock.lock(); defer { lock.unlock() }; return _undoCalls
@@ -392,7 +414,10 @@ final class OfficeTileCanvasViewTests: XCTestCase {
                     type: documentType, parts: 1,
                     sizeTwips: OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)) },
                 close: { _ in },
-                save: { _, _ in "/tmp/officetilecanvasviewtests-unused-save" },
+                save: { [weak self] docId, _ in
+                    self?.lock.lock(); self?._saveCalls.append(docId); self?.lock.unlock()
+                    return "/tmp/officetilecanvasviewtests-unused-save"
+                },
                 // crash-fix round 1 (Family B): same fire-and-forget-outlives-the-test mechanism as
                 // `BrokerOfficeDriverRecorder` (broker-crash-investigation.md §2) — this recorder is
                 // one of the "sibling recorders" the investigation names, reached by the same
@@ -429,14 +454,19 @@ final class OfficeTileCanvasViewTests: XCTestCase {
                     guard let self else { return }
                     self.lock.lock(); self._clipboardPasteCalls.append((docId, part, text)); self.lock.unlock()
                 },
-                undo: { [weak self] docId in
+                undo: { [weak self] docId, repair in
                     guard let self else { return }
-                    self.lock.lock(); self._undoCalls.append(docId); self.lock.unlock()
+                    self.lock.lock()
+                    self._undoCalls.append(docId); self._undoRepairFlags.append(repair)
+                    self.lock.unlock()
                 },
-                redo: { [weak self] docId in
+                redo: { [weak self] docId, repair in
                     guard let self else { return }
-                    self.lock.lock(); self._redoCalls.append(docId); self.lock.unlock()
+                    self.lock.lock()
+                    self._redoCalls.append(docId); self._redoRepairFlags.append(repair)
+                    self.lock.unlock()
                 },
+                undoDepth: { [weak self] _ in self?.undoDepthAnswer },
                 sheetsInfo: { _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
                 sheetsRead: { _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
                 sheetsSet: { _, _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
@@ -941,8 +971,12 @@ final class OfficeTileCanvasViewTests: XCTestCase {
                 clipboardCopy: { _, _ in nil },
                 clipboardCut: { _, _ in nil },
                 clipboardPaste: { _, _, _ in },
-                undo: { _ in },
-                redo: { _ in },
+                undo: { _, _ in },
+                redo: { _, _ in },
+                // office-live-edit R3 — `nil` = "this stub cannot answer", which every caller reads as
+                // "fall back to ONE action", i.e. exactly the pre-R3 granularity these tests were written
+                // against. Never 0: a zero would mean "undo nothing".
+                undoDepth: { _ in nil },
                 sheetsInfo: { _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
                 sheetsRead: { _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
                 sheetsSet: { _, _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
@@ -2073,6 +2107,176 @@ final class OfficeTileCanvasViewTests: XCTestCase {
         await runtime.drainInputChainForTesting()
         XCTAssertEqual(recorder.undoCalls.count, 1)
         XCTAssertEqual(recorder.redoCalls.count, 1)
+        // office-live-edit R3 — the depth query answers `nil` here (the recorder's default), which
+        // is the "engine cannot tell me" path. It must degrade to exactly ONE action, never zero:
+        // the counts above are the assertion that it does.
+        view.unmount()
+    }
+
+    // MARK: - office-live-edit R1 — instant save, debounced and coalesced
+
+    /// **The claim, and the only assertion shape that can carry it: N edits produce ONE save.**
+    ///
+    /// A bool ("did it save?") would pass against a save-per-keystroke implementation, which is the
+    /// exact thing this design exists to avoid — one save is a full container rewrite holding the
+    /// app-wide FIFO. So the recorder counts, and this asserts the count.
+    func testABurstOfTypingProducesExactlyOneSaveNotOnePerKeystroke() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        runtime.autoSaveEnabled = true
+        runtime.autoSaveDebounceInterval = 0.05
+        // The REAL docId the runtime minted — not a literal. A hardcoded "doc-1" reaches no
+        // document, `dirty` stays false, and the test then measures the clean-document path while
+        // claiming to measure coalescing.
+        let docId = runtime.stateSnapshot.documents[gatePath]?.docId ?? ""
+        XCTAssertFalse(docId.isEmpty, "setup: the fixture must be open before this drives edits")
+        runtime.handle(documentEvent: .modifiedChanged(true), docId: docId)
+        XCTAssertEqual(runtime.stateSnapshot.documents[gatePath]?.dirty, true,
+                       "setup: the document must really be dirty, or this measures the clean path")
+
+        for code in 0..<12 {
+            runtime.postKeyEvent(path: gatePath, type: .keyInput, charCode: 65 + code, keyCode: 512 + code)
+        }
+        await runtime.drainInputChainForTesting()
+        let saved = await waitUntil { recorder.saveCalls.count >= 1 }
+        XCTAssertTrue(saved, "twelve keystrokes must eventually produce a save")
+        // Let any second save that a non-coalescing implementation would fire arrive before counting.
+        try? await Task.sleep(nanoseconds: 400_000_000)
+        XCTAssertEqual(recorder.saveCalls.count, 1,
+                       "twelve keystrokes, ONE save — a count above one means the burst was not "
+                         + "coalesced and every keystroke is paying a full document rewrite")
+    }
+
+    /// **The control arm.** Same door, same interval, but the document is CLEAN — so the debounce
+    /// must fire and then decline to save. Without this, an implementation that simply never saved
+    /// would be indistinguishable from one that coalesces correctly, and an implementation that
+    /// saved unconditionally would look correct in the test above.
+    func testACleanDocumentNeverSavesEvenWhenTheDebounceFires() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        runtime.autoSaveEnabled = true
+        runtime.autoSaveDebounceInterval = 0.05
+        // No `.modifiedChanged(true)` — `dirty` stays false.
+        runtime.postKeyEvent(path: gatePath, type: .keyInput, charCode: 65, keyCode: 512)
+        await runtime.drainInputChainForTesting()
+        try? await Task.sleep(nanoseconds: 400_000_000)
+        XCTAssertEqual(recorder.saveCalls.count, 0,
+                       "an unmodified document must cost NOTHING — not even a helper request. This "
+                         + "is what keeps an idle document off the shared FIFO entirely")
+    }
+
+    /// Two separate edit bursts, separated by more than the interval, are two saves — the debounce
+    /// coalesces a burst, it does not swallow later work. The complement of the coalescing test:
+    /// together they pin "exactly as many saves as there were quiet periods".
+    func testTwoSeparatedBurstsProduceTwoSaves() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        runtime.autoSaveEnabled = true
+        runtime.autoSaveDebounceInterval = 0.05
+        let docId = runtime.stateSnapshot.documents[gatePath]?.docId ?? ""
+        XCTAssertFalse(docId.isEmpty, "setup: the fixture must be open")
+        runtime.handle(documentEvent: .modifiedChanged(true), docId: docId)
+
+        runtime.postKeyEvent(path: gatePath, type: .keyInput, charCode: 65, keyCode: 512)
+        await runtime.drainInputChainForTesting()
+        let first = await waitUntil { recorder.saveCalls.count >= 1 }
+        XCTAssertTrue(first, "the first burst must save")
+
+        // The save cleared LOK's ModifiedStatus in production; re-dirty for the second burst.
+        runtime.handle(documentEvent: .modifiedChanged(true), docId: docId)
+        runtime.postKeyEvent(path: gatePath, type: .keyInput, charCode: 66, keyCode: 513)
+        await runtime.drainInputChainForTesting()
+        let second = await waitUntil { recorder.saveCalls.count >= 2 }
+        XCTAssertTrue(second, "a later, separate burst must save again — a debounce that coalesced "
+                        + "across quiet periods would lose the second edit until something else saved")
+    }
+
+    /// Undo is an EDIT, and must re-arm the save like any other. Without this the document could be
+    /// left on disk in a state the user had already taken back — which is worse than not saving at
+    /// all, because it looks saved.
+    func testUndoReArmsTheDebouncedSave() async {
+        let (runtime, _) = await makeOpenedRuntime()
+        runtime.autoSaveEnabled = true
+        runtime.autoSaveDebounceInterval = 5.0    // long, so the arming is observable before it fires
+        XCTAssertFalse(runtime.autoSaveIsArmedForTesting(path: gatePath))
+        runtime.postUndo(path: gatePath)
+        XCTAssertTrue(runtime.autoSaveIsArmedForTesting(path: gatePath),
+                      "⌘Z changes the document, so it must arm the save exactly as typing does")
+    }
+
+    /// **office-live-edit R3 — ⌘Z must dispatch with `Repair: true`.** Without it LOK refuses any
+    /// undo whose top action belongs to another view, which is what made a human's ⌘Z silently dead
+    /// after an agent edit. The recorder captures the FLAG, not just the call, because "an undo was
+    /// dispatched" and "an undo that can cross views was dispatched" are different claims and only
+    /// the second is what requirement 3 delivers — a test asserting only the call count would pass
+    /// against the pre-R3 behaviour it exists to distinguish.
+    func testUndoAndRedoDispatchWithRepairSoTheyCanCrossViews() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.undo(nil)
+        view.redo(nil)
+        await runtime.drainInputChainForTesting()
+        XCTAssertEqual(recorder.undoRepairFlags, [true],
+                       "⌘Z must carry Repair — otherwise an agent edit makes it silently do nothing")
+        XCTAssertEqual(recorder.redoRepairFlags, [true],
+                       "and ⌘⇧Z must mirror it: a repair-undone action keeps its agent ViewShellId "
+                         + "on the redo stack, so a plain redo of it is refused")
+        view.unmount()
+    }
+
+    /// **The ledger, driven through the REAL ⌘Z door rather than as arithmetic.** With a depth query
+    /// that answers, and a recorded agent group of 3 actions sitting on top, ONE ⌘Z must issue
+    /// exactly THREE repair-undos — not one, and not four.
+    func testOneUndoPressIssuesOneDispatchPerActionInTheAgentsGroup() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        recorder.undoDepthAnswer = (undo: 4, redo: 0)
+        await runtime.noteAgentUndoGroup(path: gatePath, topDepth: 4, count: 3)
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.undo(nil)
+        await runtime.drainInputChainForTesting()
+        XCTAssertEqual(recorder.undoCalls.count, 3,
+                       "one press, one undo STEP, three engine actions")
+        XCTAssertEqual(recorder.undoRepairFlags, [true, true, true],
+                       "every one of them repaired — a group is only reachable at all under repair")
+        view.unmount()
+    }
+
+    /// The control arm for the test above: same door, same recorder, no recorded group — one press
+    /// must be ONE action. Without this, a `postUndo` that simply looped forever, or that always
+    /// used the last group it ever saw, would pass the test above and look correct.
+    func testOneUndoPressWithNoAgentGroupIssuesExactlyOneDispatch() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        recorder.undoDepthAnswer = (undo: 4, redo: 0)
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.undo(nil)
+        await runtime.drainInputChainForTesting()
+        XCTAssertEqual(recorder.undoCalls.count, 1,
+                       "a document the agent never wrote to keeps ⌘Z at one action per press")
+        view.unmount()
+    }
+
+    /// And the arm that pins the invariant end to end through the real door: the human has typed
+    /// since the agent's call, so the stack is deeper than the group's own depth and the group is
+    /// NOT on top. One press must take back the human's ONE action, never reach past it into the
+    /// agent's group.
+    func testOneUndoPressAfterAUserEditDoesNotReachIntoTheAgentsGroup() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        await runtime.noteAgentUndoGroup(path: gatePath, topDepth: 4, count: 3)
+        recorder.undoDepthAnswer = (undo: 5, redo: 0)   // the human typed one more action on top
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let sizeTwips = OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: sizeTwips, initialPart: 0, model: model)
+        view.undo(nil)
+        await runtime.drainInputChainForTesting()
+        XCTAssertEqual(recorder.undoCalls.count, 1,
+                       "the agent's group is no longer the top of the stack, so ⌘Z is one action")
         view.unmount()
     }
 

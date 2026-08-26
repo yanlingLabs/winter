@@ -1485,6 +1485,120 @@ enum OfficeRuntimeReducer {
 /// The lifecycle itself is NOT here — it is `OfficeRuntimeReducer`, pure and tested without a
 /// helper process. This half performs effects and relays what the shared helper (via its Driver)
 /// says.
+/// **office-live-edit R3 — "one tool call = one undo step", implemented as bracket-and-count.**
+///
+/// The obvious implementation, an engine-side undo GROUP, is not reachable: no `.uno:` grouping
+/// command exists at all, and the only reachable grouping API (`XUndoManager.enterUndoContext`)
+/// stamps `ViewShellId(-1)`, which makes the resulting group repair-only for **every** view
+/// including the user's own. So the grouping is done HERE: the app remembers how many engine undo
+/// actions one agent tool call created, and one ⌘Z issues exactly that many repair-undos.
+///
+/// 🔑 **The invariant that makes this safe is that the ENGINE'S OWN STACK DEPTH is the arbiter, not
+/// a guess about what happened in between.** A remembered group is only ever used when the engine
+/// still reports the stack at exactly the depth that group's top action sat at. That single check
+/// subsumes every "has the user edited since?" question without needing to observe user edits at
+/// all:
+/// - the user types → depth RISES above the group's `topDepth` → no match → ⌘Z takes back one
+///   action, exactly as it always did;
+/// - the user then undoes their own edit → depth falls back TO `topDepth` → the agent's group IS
+///   the top again, and matches → correct, and correct for the right reason;
+/// - anything truncates or clears the stack → depths no longer match → the group is pruned.
+///
+/// This is why the ledger never tries to detect a user edit. The research's own framing ("N must be
+/// tracked by Norma itself and invalidated the moment the user edits") is satisfied by construction
+/// rather than by a watcher that could miss an edit.
+///
+/// **A group is never allowed to mean "undo nothing".** `stepSize` floors at one action whenever
+/// there is anything at all on the stack: a ⌘Z that does nothing is indistinguishable, to the user,
+/// from a broken ⌘Z.
+///
+/// Pure value semantics, no LOK, no actor — every rule above is unit-tested directly.
+struct OfficeUndoLedger: Equatable {
+    /// One logical step: `count` engine actions whose topmost sits at stack depth `topDepth`.
+    struct Group: Equatable {
+        var topDepth: Int
+        var count: Int
+    }
+
+    /// Newest last. Groups the agent created that have not yet been undone.
+    private(set) var pendingUndo: [Group] = []
+    /// Newest last. Groups a ⌘Z took back, keyed by their depth on the REDO stack, so ⌘⇧Z can put
+    /// the whole group back. Without this a repair-undone group would be redone one action at a
+    /// time — and worse, the FIRST plain redo would be refused outright, because a repair-undone
+    /// action keeps its original agent `ViewShellId` on the redo stack.
+    private(set) var pendingRedo: [Group] = []
+
+    /// The agent's call finished: it left the undo stack `topDepth` deep, having added `count`
+    /// actions. `count == 0` records nothing — a tool call that changed nothing must not create an
+    /// undo step for the user to press ⌘Z through.
+    mutating func recordAgentEdit(topDepth: Int, count: Int) {
+        guard count > 0, topDepth >= count else { return }
+        // Anything recorded at or above this edit's own base cannot still be on the stack.
+        pendingUndo.removeAll { $0.topDepth > topDepth - count }
+        pendingUndo.append(Group(topDepth: topDepth, count: count))
+        // Any new action clears the engine's redo stack, so nothing we remembered about it holds.
+        pendingRedo.removeAll()
+    }
+
+    /// How many engine undo actions ONE ⌘Z should take back, given the stack's real depth right now.
+    /// Prunes as it goes, so the ledger cannot accumulate groups that no longer exist.
+    mutating func undoStepSize(undoDepth: Int) -> Int {
+        pendingUndo.removeAll { $0.topDepth > undoDepth }
+        guard undoDepth > 0 else { return 0 }
+        guard let top = pendingUndo.last, top.topDepth == undoDepth else { return 1 }
+        return max(1, min(top.count, undoDepth))
+    }
+
+    /// A ⌘Z of `count` actions just completed, leaving the stacks `undoDepth`/`redoDepth` deep.
+    ///
+    /// **The pop is keyed on the group's DEPTH as well as its size (review F-5).** Matching on size
+    /// alone wrongly popped a 1-action agent group whenever a ⌘Z took back the USER's own later
+    /// single edit — the fallback returns 1, `didUndo` then saw `top.count == 1`, and the group was
+    /// discarded without ever being used. No observable defect today, because the next ⌘Z falls back
+    /// to 1 action, which for a 1-action group is the identical outcome — but it is only latent
+    /// while that fallback stays 1, and "harmless because of a constant somewhere else" is exactly
+    /// the kind of coupling that stops being true silently. `undoDepth + count` is where the stack
+    /// stood before these actions came off, i.e. the group's own `topDepth` if this really was it.
+    mutating func didUndo(count: Int, undoDepth: Int, redoDepth: Int) {
+        if let top = pendingUndo.last, top.count == count, top.topDepth == undoDepth + count {
+            pendingUndo.removeLast()
+        }
+        pendingUndo.removeAll { $0.topDepth > undoDepth }
+        guard count > 0, redoDepth >= count else { return }
+        pendingRedo.removeAll { $0.topDepth > redoDepth - count }
+        pendingRedo.append(Group(topDepth: redoDepth, count: count))
+    }
+
+    /// The ⌘⇧Z mirror of `undoStepSize`.
+    mutating func redoStepSize(redoDepth: Int) -> Int {
+        pendingRedo.removeAll { $0.topDepth > redoDepth }
+        guard redoDepth > 0 else { return 0 }
+        guard let top = pendingRedo.last, top.topDepth == redoDepth else { return 1 }
+        return max(1, min(top.count, redoDepth))
+    }
+
+    /// A ⌘⇧Z of `count` actions just completed, leaving the stacks `undoDepth`/`redoDepth` deep —
+    /// the group goes back onto the undo side so a second ⌘Z takes it off whole again. Same
+    /// depth-keyed pop as `didUndo`, for the same reason.
+    mutating func didRedo(count: Int, undoDepth: Int, redoDepth: Int) {
+        if let top = pendingRedo.last, top.count == count, top.topDepth == redoDepth + count {
+            pendingRedo.removeLast()
+        }
+        pendingRedo.removeAll { $0.topDepth > redoDepth }
+        guard count > 0, undoDepth >= count else { return }
+        pendingUndo.removeAll { $0.topDepth > undoDepth - count }
+        pendingUndo.append(Group(topDepth: undoDepth, count: count))
+    }
+
+    /// The document went away (closed, reloaded from disk, replaced). Everything remembered about
+    /// its stack is meaningless — and a stale group is worse than none, because it would make one
+    /// ⌘Z take back MORE than the user asked for.
+    mutating func forgetEverything() {
+        pendingUndo.removeAll()
+        pendingRedo.removeAll()
+    }
+}
+
 @MainActor
 final class OfficeRuntime: ObservableObject {
 
@@ -1572,10 +1686,16 @@ final class OfficeRuntime: ObservableObject {
         var clipboardPaste: (_ docId: String, _ part: Int, _ text: String) async -> Void
         /// `.uno:Undo` against the document's own primary view. Fire-and-forget — see
         /// `OfficeWireFrame.undoOk`'s own header for why this never claims to have changed
-        /// anything, only that the command was dispatched.
-        var undo: (_ docId: String) async -> Void
+        /// anything, only that the command was dispatched. `repair` carries the slot's own
+        /// `Repair` argument, which is what lets this take back an AGENT-view edit.
+        var undo: (_ docId: String, _ repair: Bool) async -> Void
         /// `.uno:Redo`, same posture as `undo` above.
-        var redo: (_ docId: String) async -> Void
+        var redo: (_ docId: String, _ repair: Bool) async -> Void
+        /// office-live-edit R3 — the document's undo/redo stack depths
+        /// (`getCommandValues(".uno:UndoCount"/".uno:RedoCount")`). `nil` on ANY failure, and every
+        /// caller treats `nil` as "fall back to one action", never as "zero actions": a depth query
+        /// that degraded to 0 would produce a ⌘Z that does nothing while reporting success.
+        var undoDepth: (_ docId: String) async -> (undo: Int, redo: Int)?
         /// office-agent-tools T3 — read-only, no reducer/effect of its own (unlike `open`/`save`):
         /// there is nothing in `OfficeRuntimeState` for a sheet-info query to update, so
         /// `OfficeRuntime.sheetsInfo(docId:)` calls straight through to this closure and returns its
@@ -1700,6 +1820,11 @@ final class OfficeRuntime: ObservableObject {
     /// see that method's own header for the full reasoning. `@MainActor`-isolated (this whole class
     /// is), matching `OfficeHelperRequestQueue.tail`'s identical shape and identical reasoning.
     private var inputChainTail: Task<Void, Never> = Task {}
+
+    /// office-live-edit R3 — per-open-document undo grouping, keyed by the SAME path key
+    /// `documents` uses. Not `@Published` and deliberately not reducer state: nothing renders from
+    /// it, and it is written at ⌘Z frequency (constraint C7).
+    private var undoLedgers: [String: OfficeUndoLedger] = [:]
 
     /// Office Stage B Task 6 — where `postClipboardCopy`/`postClipboardCut` write their result.
     /// Injected, like `makeWatcher` above, rather than touching `NSPasteboard.general` directly in
@@ -1830,6 +1955,13 @@ final class OfficeRuntime: ObservableObject {
     /// to guard against one layer up).
     func sheetsInfo(docId: String) async throws -> (sheets: [OfficeSheetInfo], activeSheet: String) {
         try await driver.sheetsInfo(docId)
+    }
+
+    /// office-live-edit R3 — the document's undo/redo stack depths, by `docId` for the same reason
+    /// `sheetsInfo` above takes one. `nil` on any failure; callers fall back to one action, never to
+    /// zero.
+    func undoDepth(docId: String) async -> (undo: Int, redo: Int)? {
+        await driver.undoDepth(docId)
     }
 
     /// Same no-reducer posture as `sheetsInfo` above. `range` is already an A1 string, and `sheet` is
@@ -2201,6 +2333,7 @@ final class OfficeRuntime: ObservableObject {
     /// is the one sibling that does NOT gate — copying out is a pure read, not a mutation.
     func postKeyEvent(path: String, type: OfficeKeyEventType, charCode: Int, keyCode: Int) {
         guard let doc = state.documents[path], !officeDocumentIsReadOnlyFormat(path: path) else { return }
+        noteEditActivity(path: path)
         let docId = doc.docId
         let part = doc.activePart
         let previous = inputChainTail
@@ -2246,6 +2379,7 @@ final class OfficeRuntime: ObservableObject {
     /// exactly like an ordinary keystroke does, so it is gated on the identical terms.
     func postExtTextInput(path: String, type: OfficeExtTextInputType, text: String) {
         guard let doc = state.documents[path], !officeDocumentIsReadOnlyFormat(path: path) else { return }
+        noteEditActivity(path: path)
         let docId = doc.docId
         let part = doc.activePart
         let previous = inputChainTail
@@ -2286,6 +2420,7 @@ final class OfficeRuntime: ObservableObject {
     /// followed by a delete), the same reason it is not grouped with Copy's own un-gated posture.
     func postClipboardCut(path: String) {
         guard let doc = state.documents[path], !officeDocumentIsReadOnlyFormat(path: path) else { return }
+        noteEditActivity(path: path)
         let docId = doc.docId
         let part = doc.activePart
         let previous = inputChainTail
@@ -2308,6 +2443,7 @@ final class OfficeRuntime: ObservableObject {
     /// typing does.
     func postClipboardPaste(path: String, text: String) {
         guard let doc = state.documents[path], !officeDocumentIsReadOnlyFormat(path: path) else { return }
+        noteEditActivity(path: path)
         let docId = doc.docId
         let part = doc.activePart
         let previous = inputChainTail
@@ -2323,26 +2459,272 @@ final class OfficeRuntime: ObservableObject {
     /// with typing/paste/cut all gated too, a read-only-format document's own LOK-side undo stack
     /// never has anything mutating pushed onto it in the first place — but kept for the same
     /// consistency and defense-in-depth every OTHER mutation verb here gets.
+    ///
+    /// **office-live-edit R3 — this door now dispatches with `Repair: true`, and one press can take
+    /// back more than one engine action.** Two changes, both user-visible:
+    ///
+    /// 1. **⌘Z reverts the last thing that happened, regardless of who did it.** Without `Repair`,
+    ///    LOK refuses any undo whose top action belongs to another view, so an agent edit made ⌘Z
+    ///    silently dead (pinned live before this change, and re-measured beside the repair arm in
+    ///    `OfficeRuntimeLiveTests.testRepairArgumentLetsAPrimaryViewUndoTakeBackAnAgentViewEdit`).
+    ///    In **Calc** specifically this does not merely unblock a refusal — Calc's range-based
+    ///    independence escape means a plain ⌘Z after a DISJOINT agent edit today silently steps
+    ///    over it and undoes the user's OWN earlier edit instead. That is a wrong answer delivered
+    ///    quietly, and the user ruled to change it; the new behaviour is pinned by its own live drill.
+    /// 2. **One agent tool call collapses to one ⌘Z**, via `OfficeUndoLedger` — see its header for
+    ///    why the engine's own stack depth, not a watcher on user edits, is what keeps that safe.
+    ///
+    /// **The degradation is deliberately toward doing LESS, never toward doing nothing.** If the
+    /// depth query fails, this issues exactly one repair-undo: the granularity the user had before
+    /// this change, not a silent no-op.
     func postUndo(path: String) {
         guard let doc = state.documents[path], !officeDocumentIsReadOnlyFormat(path: path) else { return }
+        noteEditActivity(path: path)
         let docId = doc.docId
         let previous = inputChainTail
-        inputChainTail = Task { [driver] in
+        inputChainTail = Task { [driver, weak self] in
             _ = await previous.value
-            await driver.undo(docId)
+            guard let depths = await driver.undoDepth(docId) else {
+                NSLog("[OfficeRuntime] undo depth unavailable for \(docId) — falling back to a single repair-undo")
+                await driver.undo(docId, true)
+                return
+            }
+            let steps = await self?.planUndoStep(path: path, undoDepth: depths.undo) ?? min(1, depths.undo)
+            guard steps > 0 else { return }
+            for _ in 0..<steps { await driver.undo(docId, true) }
+            if let after = await driver.undoDepth(docId) {
+                await self?.noteUndoCompleted(path: path, count: steps, undoDepth: after.undo, redoDepth: after.redo)
+            }
         }
     }
 
-    /// `.uno:Redo`, same posture as `postUndo` above.
+    /// `.uno:Redo`, same posture as `postUndo` above — **including `Repair`, which is not symmetry
+    /// for its own sake.** An action undone under repair keeps its ORIGINAL (agent) `ViewShellId`
+    /// when it moves to the redo stack, so a plain ⌘⇧Z of it is refused by every app's redo gate.
+    /// A repair undo that was not mirrored here would make redo silently stop working the moment an
+    /// agent edit was taken back.
     func postRedo(path: String) {
         guard let doc = state.documents[path], !officeDocumentIsReadOnlyFormat(path: path) else { return }
+        noteEditActivity(path: path)
         let docId = doc.docId
         let previous = inputChainTail
-        inputChainTail = Task { [driver] in
+        inputChainTail = Task { [driver, weak self] in
             _ = await previous.value
-            await driver.redo(docId)
+            guard let depths = await driver.undoDepth(docId) else {
+                NSLog("[OfficeRuntime] undo depth unavailable for \(docId) — falling back to a single repair-redo")
+                await driver.redo(docId, true)
+                return
+            }
+            let steps = await self?.planRedoStep(path: path, redoDepth: depths.redo) ?? min(1, depths.redo)
+            guard steps > 0 else { return }
+            for _ in 0..<steps { await driver.redo(docId, true) }
+            if let after = await driver.undoDepth(docId) {
+                await self?.noteRedoCompleted(path: path, count: steps, undoDepth: after.undo, redoDepth: after.redo)
+            }
         }
     }
+
+    // MARK: office-live-edit R1 — instant save, debounced and coalesced
+
+    /// **The idle interval before an edited document saves itself.**
+    ///
+    /// "Instant save after every edit" cannot be literal, and the reason is structural rather than a
+    /// tuning preference: **one save is a full container rewrite** — the whole document re-rendered
+    /// inside the helper (ODF/OOXML are ZIP packages; `ZipPackage::commitChanges` writes a complete
+    /// new archive and copies it over the target), then a full-file copy, an `fsync` and a `rename`
+    /// in the user's own directory — and the helper leg holds the **one app-wide FIFO** every other
+    /// document and session queues behind. Per-keystroke saving would mean N complete rewrites of
+    /// the whole file to record N characters.
+    ///
+    /// So: **debounce, and coalesce.** A burst of typing arms one save, not one per keystroke.
+    ///
+    /// 900 ms is chosen against a measured floor, not guessed: `saveAndAwaitOutcome` on this repo's
+    /// office fixtures completes in the low hundreds of milliseconds (`OfficeSheetsCommandTests
+    /// .testLiveSaveWallClockIsWellInsideTheAutoSaveDebounceInterval` measures it and asserts the
+    /// relationship rather than a bare number). It is long enough that ordinary typing rhythm never
+    /// triggers a save mid-word, and short enough to read as immediate.
+    ///
+    /// ⚠️ **The cost curve for LARGE documents is UNMEASURED** — every fixture in this repo is under
+    /// 30 KB, and nothing here records a save of a multi-megabyte spreadsheet. Since the cost is
+    /// O(document size), a large document's save will exceed this interval. That is handled by
+    /// construction rather than by the number: `fireAutoSave` never starts a save while one is in
+    /// flight for the same path, it re-arms instead — so a document too slow to save in 900 ms
+    /// degrades to "saves as often as it can", never to overlapping saves.
+    static let autoSaveDebounceIntervalDefault: TimeInterval = 0.9
+
+    /// Injectable so tests can drive the machine without sleeping for real. Production never sets it.
+    var autoSaveDebounceInterval: TimeInterval = OfficeRuntime.autoSaveDebounceIntervalDefault
+
+    /// ⛔ **DEFAULT OFF. Two blockers were found; the first is FIXED, the second is why this is
+    /// still off. Both mechanisms below are MEASURED — the first round's were not, and that is the
+    /// most important thing on this page.**
+    ///
+    /// ### Round 1 — my stated mechanisms were wrong, and the decision was still right
+    /// Arming this lost the user's typed content in two live Calc drills. I named two candidates and
+    /// a review measured both and **falsified both**:
+    ///  - *"a save landing mid-cell-edit"* — **FALSE.** A save taken while a Calc cell is in edit
+    ///    mode CONTAINS the in-progress text; LOK serializes it.
+    ///  - *"two saves racing"* — **FALSE, twice.** Two back-to-back saves keep the text, and the
+    ///    debounced save lost it with **nothing racing it at all**.
+    ///
+    /// The real mechanism was **ordering**: `performSave` did not join `inputChainTail`, so a save
+    /// issued while key events were still queued serialized the PRE-EDIT document. Pre-existing on
+    /// `main`, reproduced at the base commit; instant-save only made it the ordinary path, because a
+    /// debounce arms at key ENQUEUE time, not delivery. **That is fixed** (see `performSave`), and
+    /// with it fixed the content loss is gone: both Calc drills pass with this armed.
+    ///
+    /// ### Round 2 — the blocker that is still standing: THE POST-SAVE CLOSE WINDOW (constraint C3)
+    /// With the ordering bug fixed and this armed, `testTypingOnSheetTwoLandsOnSheetTwoNotSheetOne
+    /// ThroughSaveAndReopen` fails **2 of 3 runs in isolation**, at the REOPEN, with the helper's own
+    /// `Unspecified Application Error` in the log — the documented signature of LOK calling libc
+    /// `exit()` from inside C++. **Disarmed, the same drill passes 3 of 3.** That is the whole A/B.
+    ///
+    /// This is not new behaviour, it is a known hazard made ordinary: closing a document too soon
+    /// after a save kills the SHARED helper, measured at ~4 times in 5, and because
+    /// `OfficeHelperRequestQueue` is one app-wide FIFO **it takes every other open document down with
+    /// it**. Two drains exist for exactly this, but neither covers a plain `runtime.close` — they sit
+    /// on the dirty-close sheet and on the broker's save-through. Saving on every idle keeps that
+    /// window open essentially all the time, which is precisely the risk the office research flagged
+    /// against instant save.
+    ///
+    /// ### What arming this needs, stated so nobody re-derives it
+    /// A close must not race a save this scheduler started: cancel a pending debounce **and await an
+    /// in-flight auto-save (or drain) before the close proceeds**. `close` is deliberately
+    /// synchronous and fire-and-forget today, so that is a real change to a live lifecycle path —
+    /// not a patch to make a test green, and not something to land after a review has reported.
+    ///
+    /// 🔑 **The lesson, and it is mine:** stopping on a reproducible loss cost nothing. Stating two
+    /// confident, unmeasured mechanisms nearly cost the next implementer a wrong fix on a live save
+    /// path — my own parking comment pointed at it. *A stated mechanism is a claim, and a claim needs
+    /// a measurement, even when the decision it supports is correct.* Round 2's mechanism above is
+    /// stated only because it was A/B'd, with the helper's own error text as the witness.
+    ///
+    /// Everything else stays and is recoverable: the machine, its unit tests (which arm it
+    /// explicitly), the forced-red evidence, and the measured 72-97 ms save cost.
+    var autoSaveEnabled: Bool = false
+
+    private var autoSaveTasks: [String: Task<Void, Never>] = [:]
+    private var autoSaveInFlight: Set<String> = []
+
+    /// **Called by every door that can CHANGE the document** — typing, IME, paste, cut, undo, redo —
+    /// plus a belt on LOK's own `ModifiedStatus` transition for anything that changes the document
+    /// by a route the app did not post itself.
+    ///
+    /// Why the input doors and not `ModifiedStatus` alone: **`STATE_CHANGED` is a TRANSITION.** On a
+    /// clean document the first keystroke fires `modified=true` and every subsequent keystroke fires
+    /// nothing at all, so a timer armed only on that signal would fire once, mid-burst, rather than
+    /// once the user stopped. The app's own input doors are the per-keystroke signal, and they are at
+    /// the right layer: they are what the app SENDS, so they cost nothing to observe.
+    ///
+    /// Deliberately NOT `postMouseEvent`: a click or drag only moves the caret or extends a
+    /// selection — it cannot mutate content on its own (that needs a key/IME/paste event, all of
+    /// which are here). Re-arming on mouse movement would postpone a save while the user was merely
+    /// looking around.
+    ///
+    /// Constraint C7 is respected by construction: none of this is reducer state, nothing renders
+    /// from it, and `dispatch` is never called at keystroke frequency on its account.
+    func noteEditActivity(path: String) {
+        guard autoSaveEnabled else { return }
+        guard !officeDocumentIsReadOnlyFormat(path: path) else { return }
+        autoSaveTasks[path]?.cancel()
+        let interval = autoSaveDebounceInterval
+        autoSaveTasks[path] = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(max(0, interval) * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            await self?.fireAutoSave(path: path)
+        }
+    }
+
+    /// The trailing edge. Three guards, and each is load-bearing for a different reason.
+    private func fireAutoSave(path: String) {
+        autoSaveTasks.removeValue(forKey: path)
+        // (1) Nothing to write. The engine has its own `DontSaveIfUnmodified` lever, but refusing
+        //     here is strictly better: it costs no helper request at all, so an idle document never
+        //     touches the shared FIFO. This is also what makes the agent's own writes free of
+        //     double-saving — the broker already saved, so `dirty` is false by the time this runs.
+        guard state.documents[path]?.dirty == true else { return }
+        // (2) NEVER overlap saves on one path. `OfficeRuntime.save` has no coalescing of its own by
+        //     deliberate design ("two ⌘S on one path are two independent saves"), and overlapping
+        //     saves are already a known cost to the file-watcher's self-attribution bookkeeping —
+        //     two saves' expected-write tokens interleaving is a tested EDGE case, and an
+        //     instant-save design must not make it the ordinary path. Re-arming rather than dropping
+        //     is what keeps a slow document saving as often as it can instead of not at all.
+        guard !autoSaveInFlight.contains(path) else {
+            noteEditActivity(path: path)
+            return
+        }
+        // (3) Through the ORDINARY save path — `saveAndAwaitOutcome`, which is `doc_saveAs` into the
+        //     fence plus an atomic place. Never `.uno:Save`: that route enters `GUIStoreModel`,
+        //     where two dialog sites have NO LibreOfficeKit guard and can be reached via the
+        //     SAVE→SAVEAS promotion, and a modal on the single dedicated LOK thread wedges EVERY
+        //     open office document until the app restarts. More saves means that path would be
+        //     travelled far more often, so the existing choice matters more here, not less.
+        autoSaveInFlight.insert(path)
+        Task { [weak self] in
+            _ = await self?.saveAndAwaitOutcome(path)
+            self?.autoSaveFinished(path: path)
+        }
+    }
+
+    private func autoSaveFinished(path: String) {
+        autoSaveInFlight.remove(path)
+    }
+
+    /// Test-only: is a debounced save currently armed for this path?
+    func autoSaveIsArmedForTesting(path: String) -> Bool { autoSaveTasks[path] != nil }
+
+    // MARK: office-live-edit R3 — the undo ledger's actor-side doors
+    //
+    // Kept OFF the reducer deliberately (constraint C7): these run at ⌘Z frequency and, more to the
+    // point, carry no `OfficeRuntimeState` meaning at all — nothing renders from them. `dispatch`
+    // reassigns the whole `@Published` state on every call, which is the same reason caret/selection
+    // events bypass it into `cursorStore`.
+
+    /// How many engine actions this ⌘Z should take back. Consults and prunes the ledger.
+    func planUndoStep(path: String, undoDepth: Int) -> Int {
+        var ledger = undoLedgers[path] ?? OfficeUndoLedger()
+        let steps = ledger.undoStepSize(undoDepth: undoDepth)
+        undoLedgers[path] = ledger
+        return steps
+    }
+
+    func noteUndoCompleted(path: String, count: Int, undoDepth: Int, redoDepth: Int) {
+        var ledger = undoLedgers[path] ?? OfficeUndoLedger()
+        ledger.didUndo(count: count, undoDepth: undoDepth, redoDepth: redoDepth)
+        undoLedgers[path] = ledger
+    }
+
+    func planRedoStep(path: String, redoDepth: Int) -> Int {
+        var ledger = undoLedgers[path] ?? OfficeUndoLedger()
+        let steps = ledger.redoStepSize(redoDepth: redoDepth)
+        undoLedgers[path] = ledger
+        return steps
+    }
+
+    func noteRedoCompleted(path: String, count: Int, undoDepth: Int, redoDepth: Int) {
+        var ledger = undoLedgers[path] ?? OfficeUndoLedger()
+        ledger.didRedo(count: count, undoDepth: undoDepth, redoDepth: redoDepth)
+        undoLedgers[path] = ledger
+    }
+
+    /// **The broker calls this after an agent tool call**, having bracketed the stack depth around
+    /// the whole edit closure. `count == 0` records nothing, so a call that changed the document in
+    /// no way leaves no ⌘Z step behind it.
+    func noteAgentUndoGroup(path: String, topDepth: Int, count: Int) {
+        var ledger = undoLedgers[path] ?? OfficeUndoLedger()
+        ledger.recordAgentEdit(topDepth: topDepth, count: count)
+        undoLedgers[path] = ledger
+        NSLog("[OfficeRuntime] agent edit on \(path): \(count) undo action(s), stack now \(topDepth) deep")
+    }
+
+    /// The document's identity changed underneath the ledger (closed, reloaded from disk). A stale
+    /// group is strictly worse than none: it would make one ⌘Z take back MORE than the user asked.
+    func forgetUndoLedger(path: String) {
+        undoLedgers.removeValue(forKey: path)
+    }
+
+    /// Test-only reader.
+    func undoLedgerSnapshot(path: String) -> OfficeUndoLedger? { undoLedgers[path] }
 
     /// Test-only: awaits the current tail of the input-ordering chain, so a test can know a
     /// `postKeyEvent`/`postMouseEvent`/`postExtTextInput`/`postClipboardCopy`/`postClipboardCut`/
@@ -2485,6 +2867,29 @@ final class OfficeRuntime: ObservableObject {
         switch event {
         case .modifiedChanged(let modified):
             perform(dispatch(.modifiedStatusChanged(docId: docId, modified: modified)))
+            // ⚠️ **office-live-edit R1 — there is deliberately NO auto-save belt on this transition,
+            // and the reason is a defect it actually caused rather than a preference.**
+            //
+            // An earlier revision armed the debounced save from here as well as from the app's own
+            // input doors, on the reasoning that it would catch "a document that became dirty by a
+            // route the app did not post". Enumerating those routes shows the reasoning was wrong:
+            //
+            //  1. **The AGENT is the main one, and it already saves.** `OfficeAgentBroker` rule 4
+            //     saves once per tool call, awaited, then drains. Arming from here schedules a
+            //     SECOND, redundant save for the same edit — and the `dirty` fast path does not
+            //     prevent it, because the debounce can fire while the broker's own save is still in
+            //     flight. That is an overlapping save on one path: precisely what `fireAutoSave`'s
+            //     never-overlap guard exists to prevent, reintroduced from outside where that guard
+            //     cannot see it. Measured, not theorised — it took six live tests red, several with
+            //     `office helper request timed out`, the signature of the post-save close window
+            //     killing the SHARED helper and taking every other open document with it.
+            //  2. **Raw wire clients** (this suite's own drills and the harness) are test surface,
+            //     not product.
+            //
+            // A human's edits — the whole point of instant save — all arrive through the app's own
+            // input doors, which is where `noteEditActivity` is called. Nothing a human does reaches
+            // LOK without passing one of them. So the belt covered no real case and cost real saves,
+            // and every extra save widens the window that measurably kills the helper ~4 times in 5.
         case .caretRect, .textSelection, .textSelectionStart, .textSelectionEnd, .cellCursor, .cellFormula:
             let activePart = state.documents.first(where: { $0.value.docId == docId })?.value.activePart ?? 0
             cursorStore.apply(docId: docId, event: event, activePart: activePart)
@@ -2498,8 +2903,37 @@ final class OfficeRuntime: ObservableObject {
     // MARK: The reducer, driven
 
     private func dispatch(_ event: OfficeRuntimeEvent) -> [OfficeRuntimeEffect] {
+        // office-live-edit R3 — **structural undo-ledger invalidation, at the ONE funnel every state
+        // transition goes through.** A remembered undo group describes ONE engine undo stack; the
+        // moment a path's document identity changes — closed, reloaded from disk, replaced after an
+        // external write — that stack is gone and the group describes nothing.
+        //
+        // The depth-arbiter check protects against almost everything, but NOT against this: a reload
+        // resets the stack to 0, the human then types back up to the same depth the old group was
+        // recorded at, the depths match, and one ⌘Z eats several of the human's OWN actions. That is
+        // the one way this design can take back MORE than the user asked for, so it is closed
+        // structurally here rather than by remembering to call `forgetUndoLedger` at each of the
+        // three-plus doors that can change a document's identity — three call sites each needing the
+        // identical guard is how the guard comes back missing from the fourth.
+        //
+        // Costs O(number of ledgers), not O(open documents): only paths that actually have a group
+        // are looked at, and that is zero for every document the agent has never written to.
+        //
+        // office-live-edit R1 rides the SAME funnel for the same reason: a debounced save armed for
+        // a document that has since closed or been replaced must not fire. `fireAutoSave` would
+        // decline it anyway (its `dirty` guard reads `state.documents[path]`, which is gone), so
+        // this is hygiene rather than a correctness fix — but it is the difference between a timer
+        // that is cancelled and one that merely finds nothing to do up to a second later, next to a
+        // close window that measurably kills the shared helper.
+        let watched = Set(undoLedgers.keys).union(autoSaveTasks.keys)
+        let watchedDocIds: [String: String?] = watched.isEmpty ? [:]
+            : watched.reduce(into: [:]) { $0[$1] = state.documents[$1]?.docId }
         let (next, effects) = OfficeRuntimeReducer.reduce(state, event)
         state = next
+        for (path, previousDocId) in watchedDocIds where next.documents[path]?.docId != previousDocId {
+            undoLedgers.removeValue(forKey: path)
+            autoSaveTasks.removeValue(forKey: path)?.cancel()
+        }
         return effects
     }
 
@@ -2806,8 +3240,54 @@ final class OfficeRuntime: ObservableObject {
     /// whole lifetime, the exact class of leak the `lok-profile-*` sweep in `LOKBridge` was written
     /// to close for a different directory).
     private func performSave(path: String, docId: String, part: Int, myGeneration: Int) {
+        // ⛔ **office-live-edit R1 fix round, C-1 — the save must JOIN THE INPUT CHAIN before it
+        // serializes anything.**
+        //
+        // Every input verb (`postKeyEvent`, `postExtTextInput`, paste, cut, undo, redo) is ordered on
+        // `inputChainTail`; saving was NOT. Two independent chains feeding one request queue means a
+        // save issued while key events are still queued **overtakes them**, and `doc_saveAs` then
+        // serializes the document as it was BEFORE those edits — writing the pre-edit file over the
+        // user's own path and reporting success, with no banner.
+        //
+        // It is a real gesture, not a synthetic race: type, press Return, press ⌘S. Measured live at
+        // the BASE commit as well as here, so it is pre-existing Stage B behaviour — but requirement
+        // 1's debounced save turned it from a narrow race into the ORDINARY path, because a debounce
+        // is armed when a key event is ENQUEUED, not when it is delivered. That is why it is fixed
+        // here rather than filed.
+        //
+        // **The tail is READ synchronously here on the actor, at the instant the save is issued —
+        // and, unlike every input door, it is NOT reassigned.** The doors do
+        // `let previous = inputChainTail; inputChainTail = Task { await previous.value; … }`, which
+        // both waits AND extends the chain, so each door orders itself behind its predecessors and
+        // ahead of its successors. A save must do only the first half: it reads the tail and leaves
+        // `inputChainTail` alone.
+        //
+        // That asymmetry is exactly what makes the fix correct, so it is worth stating rather than
+        // glossing as "the same shape". Because the save does not join the chain, it waits for
+        // precisely the edits that PRECEDED it and never for anything typed after — a user who keeps
+        // typing straight through a ⌘S does not stall their own save — and, equally, no later
+        // keystroke is made to queue behind a save, which would have put the whole save round trip
+        // into the typing latency of a document being actively edited.
+        //
+        // **Liveness, now that a save depends on the input chain — BOUNDED, and written down here
+        // because nothing else records it.** Every queued input verb resolves through
+        // `OfficeHelperClient`, whose `requestTimeout` is `configuration.handshakeTimeout`
+        // (`OfficeHelperSupervisor.swift:870`), defaulting to 30.0 s (`:611`) and enforced per reply
+        // by `connection.nextFrame(timeout:)` (`:106`) — so each queued request either completes or
+        // times out within that bound and the chain always drains. A save is therefore delayed by at
+        // most 30 s per input request already queued ahead of it — it is not, and cannot become, an
+        // unbounded wait. `testASaveWithNothingInFlightStillLandsPromptlyAndCompletely` is the
+        // control arm on the ordinary case, and it asserts a <10 s bound.
+        //
+        // No deadlock is possible, and both halves were checked: nothing built into the input chain
+        // awaits a save door, and this join happens BEFORE `driver.save` enters the app-wide
+        // `OfficeHelperRequestQueue` — every `queue.run` lives inside a Driver closure, so the join
+        // is strictly outside the FIFO and can never nest one `queue.run` inside another, which is
+        // the one thing that would wedge all office I/O permanently.
+        let inputChainAtSaveTime = inputChainTail
         Task { [weak self, driver] in
             guard let self else { return }
+            await inputChainAtSaveTime.value
             do {
                 let tempPath = try await driver.save(docId, part)
                 guard myGeneration == self.generation, self.state.documents[path]?.docId == docId else {

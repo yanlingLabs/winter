@@ -117,6 +117,20 @@ final class OfficeWireCodecTests: XCTestCase {
             .undoOk(seq: 59, docId: "doc-1"),
             .redo(seq: 60, docId: "doc-1"),
             .redoOk(seq: 61, docId: "doc-1"),
+            // office-live-edit R3 — the `repair` arm of undo/redo. BOTH polarities ride this
+            // round-trip: `repair: false` must encode to the SAME bytes the pre-repair frame did
+            // (the encoder omits the key), and `repair: true` must survive encode→decode. A
+            // round-trip that only carried `true` would pass even if the encoder had started
+            // emitting `"repair":false` on every frame.
+            .undo(seq: 158, docId: "doc-1", repair: true),
+            .undo(seq: 159, docId: "doc-1", repair: false),
+            .redo(seq: 160, docId: "doc-1", repair: true),
+            .redo(seq: 161, docId: "doc-1", repair: false),
+            .undoDepth(seq: 162, docId: "doc-1"),
+            // `0` is a real, expected answer (a pristine document) and must round-trip as one —
+            // this wire never uses 0 as an "unknown" sentinel; an unanswerable query is `.error`.
+            .undoDepthOk(seq: 163, docId: "doc-1", undoCount: 0, redoCount: 0),
+            .undoDepthOk(seq: 164, docId: "doc-1", undoCount: 12, redoCount: 4),
             .createView(seq: 62, docId: "doc-1"),
             .agentViewReady(seq: 63, docId: "doc-1", viewId: 2),
             .agentKeyEvent(seq: 64, docId: "doc-1", part: 0, type: .keyInput, charCode: 65, keyCode: 512),
@@ -245,6 +259,8 @@ final class OfficeWireCodecTests: XCTestCase {
             "clipboardCopyOk": #"{"type":"clipboardCopyOk","seq":1,"docId":"d","text":"x"}"#,
             "clipboardCutOk": #"{"type":"clipboardCutOk","seq":1,"docId":"d","text":"x"}"#,
             "clipboardPasteOk": #"{"type":"clipboardPasteOk","seq":1,"docId":"d"}"#,
+            "undoDepth": #"{"type":"undoDepth","seq":1,"docId":"d"}"#,
+            "undoDepthOk": #"{"type":"undoDepthOk","seq":1,"docId":"d","undoCount":3,"redoCount":0}"#,
             "undoOk": #"{"type":"undoOk","seq":1,"docId":"d"}"#,
             "redoOk": #"{"type":"redoOk","seq":1,"docId":"d"}"#,
             "agentViewReady": #"{"type":"agentViewReady","seq":1,"docId":"d","viewId":2}"#,

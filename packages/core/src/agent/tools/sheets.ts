@@ -431,7 +431,8 @@ export function registerSheetsTool(r: ToolRegistry, deps: SheetsToolDeps): void 
     description:
       "Read and edit a spreadsheet Norma has access to (.xlsx, .ods, .xlsm — any format the office "
       + "engine can open). Every write verb SAVES immediately — there is no separate save step, and "
-      + "no undo from here (the file changes right away; a human's ⌘Z in an open tab is unaffected). "
+      + "you cannot undo from here. A HUMAN can: if they have the file open in a tab, one press of "
+      + "⌘Z takes back your whole tool call, however many cells it changed, and ⌘⇧Z puts it back. "
       + "Pick a verb:\n"
       + "• info — path. Sheet names, each one's used range, and which sheet is active. Start here: "
       + "it also doubles as a check that the Mac app can actually open documents right now.\n"

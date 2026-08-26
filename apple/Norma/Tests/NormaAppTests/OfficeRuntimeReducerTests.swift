@@ -1840,8 +1840,12 @@ final class OfficeRuntimeWatcherTests: XCTestCase {
             clipboardCopy: { _, _ in nil },
             clipboardCut: { _, _ in nil },
             clipboardPaste: { _, _, _ in },
-            undo: { _ in },
-            redo: { _ in },
+            undo: { _, _ in },
+            redo: { _, _ in },
+            // office-live-edit R3 — `nil` = "this stub cannot answer", which every caller reads as
+            // "fall back to ONE action", i.e. exactly the pre-R3 granularity these tests were written
+            // against. Never 0: a zero would mean "undo nothing".
+            undoDepth: { _ in nil },
             sheetsInfo: { _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
             sheetsRead: { _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
             sheetsSet: { _, _, _, _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets not implemented") },
@@ -3386,4 +3390,155 @@ final class OfficeAutosaveManifestTests: XCTestCase {
         XCTAssertNotNil(OfficeRuntime.checkRecoveryCandidate(realPath: liveRealPath.path, autosaveDirectory: autosaveDir))
     }
 
+}
+
+// MARK: - office-live-edit R3 — OfficeUndoLedger
+//
+// The ledger is what makes "one tool call = one undo step" true. It is a pure value type on
+// purpose: every rule below is a claim about arithmetic over the engine's own reported stack depth,
+// with no LOK, no actor and no clock, so each one can be broken individually and watched go red.
+
+final class OfficeUndoLedgerTests: XCTestCase {
+
+    /// The baseline nobody should be able to regress silently: with nothing recorded, ⌘Z is exactly
+    /// what it always was — one engine action per press.
+    func testWithNothingRecordedOneUndoTakesBackOneAction() {
+        var ledger = OfficeUndoLedger()
+        XCTAssertEqual(ledger.undoStepSize(undoDepth: 5), 1)
+        XCTAssertEqual(ledger.undoStepSize(undoDepth: 1), 1)
+    }
+
+    /// And it never asks the engine to undo something that is not there.
+    func testAnEmptyStackAsksForNoUndoAtAll() {
+        var ledger = OfficeUndoLedger()
+        XCTAssertEqual(ledger.undoStepSize(undoDepth: 0), 0)
+        XCTAssertEqual(ledger.redoStepSize(redoDepth: 0), 0)
+    }
+
+    /// The whole point: an agent call that made 3 engine actions collapses to ONE ⌘Z.
+    func testAnAgentGroupCollapsesToOneUndoPress() {
+        var ledger = OfficeUndoLedger()
+        ledger.recordAgentEdit(topDepth: 4, count: 3)   // user had 1 action, agent added 3
+        XCTAssertEqual(ledger.undoStepSize(undoDepth: 4), 3)
+    }
+
+    /// 🔑 **The invariant.** The user typed after the agent's call, so the agent's group is no longer
+    /// the top of the stack — and ⌘Z must take back the USER's one action, not reach past it into
+    /// the agent's group. This is the assertion that would go red if the ledger ever trusted a
+    /// remembered count without checking the engine's depth against it.
+    func testAUserEditAfterAnAgentCallPutsCMDZBackToOneAction() {
+        var ledger = OfficeUndoLedger()
+        ledger.recordAgentEdit(topDepth: 4, count: 3)
+        XCTAssertEqual(ledger.undoStepSize(undoDepth: 5), 1,
+                       "the stack is deeper than the agent's group, so the group is not on top")
+    }
+
+    /// The other half of that invariant, and the reason it is stated as "depth is the arbiter"
+    /// rather than "invalidate on a user edit": once the user undoes their OWN edit, the agent's
+    /// group IS the top again, and the group must come back into play. An implementation that
+    /// invalidated on a user edit would get this wrong and would look correct while doing so.
+    func testUndoingTheUsersOwnEditReExposesTheAgentGroupUnderneath() {
+        var ledger = OfficeUndoLedger()
+        ledger.recordAgentEdit(topDepth: 4, count: 3)
+        XCTAssertEqual(ledger.undoStepSize(undoDepth: 5), 1)     // the user's own action
+        XCTAssertEqual(ledger.undoStepSize(undoDepth: 4), 3,     // now the agent's group is on top
+                       "the agent's group is on top again and one press must take all of it back")
+    }
+
+    /// Two agent calls come off one at a time, each whole, in reverse order.
+    func testTwoAgentGroupsComeOffOneAtATimeInReverseOrder() {
+        var ledger = OfficeUndoLedger()
+        ledger.recordAgentEdit(topDepth: 2, count: 2)
+        ledger.recordAgentEdit(topDepth: 5, count: 3)
+        XCTAssertEqual(ledger.undoStepSize(undoDepth: 5), 3)
+        ledger.didUndo(count: 3, undoDepth: 2, redoDepth: 3)
+        XCTAssertEqual(ledger.undoStepSize(undoDepth: 2), 2)
+    }
+
+    /// A tool call that changed nothing must not leave a ⌘Z step behind it. Otherwise a user
+    /// pressing ⌘Z after a no-op agent call would silently lose an edit of their own.
+    func testACallThatChangedNothingRecordsNoStep() {
+        var ledger = OfficeUndoLedger()
+        ledger.recordAgentEdit(topDepth: 3, count: 0)
+        XCTAssertTrue(ledger.pendingUndo.isEmpty)
+        XCTAssertEqual(ledger.undoStepSize(undoDepth: 3), 1)
+    }
+
+    /// A group can never ask for more undos than the stack actually holds — that would send
+    /// dispatches into an empty stack and, with Repair on, is exactly how a ⌘Z could eat an edit
+    /// nobody asked it to.
+    func testAStepIsClampedToWhatTheStackActuallyHolds() {
+        var ledger = OfficeUndoLedger()
+        ledger.recordAgentEdit(topDepth: 3, count: 3)
+        XCTAssertEqual(ledger.undoStepSize(undoDepth: 3), 3)
+        // The stack shrank underneath us (a reload, a truncation): the group no longer describes it.
+        var other = OfficeUndoLedger()
+        other.recordAgentEdit(topDepth: 9, count: 4)
+        XCTAssertEqual(other.undoStepSize(undoDepth: 2), 1,
+                       "a group recorded above the stack's real depth is pruned, not clamped-and-used")
+    }
+
+    /// Redo is the mirror, and it matters: without it a repair-undone group would be redone one
+    /// action per press, so the user's ⌘⇧Z would not put back what their ⌘Z took away.
+    func testRedoPutsTheWholeGroupBackInOnePress() {
+        var ledger = OfficeUndoLedger()
+        ledger.recordAgentEdit(topDepth: 4, count: 3)
+        XCTAssertEqual(ledger.undoStepSize(undoDepth: 4), 3)
+        ledger.didUndo(count: 3, undoDepth: 1, redoDepth: 3)
+        XCTAssertEqual(ledger.redoStepSize(redoDepth: 3), 3)
+        ledger.didRedo(count: 3, undoDepth: 4, redoDepth: 0)
+        XCTAssertEqual(ledger.undoStepSize(undoDepth: 4), 3,
+                       "and back again — the group survives a full undo/redo round trip")
+    }
+
+    /// A new edit clears the engine's redo stack, so anything remembered about it is void.
+    func testANewAgentEditForgetsTheRedoSide() {
+        var ledger = OfficeUndoLedger()
+        ledger.recordAgentEdit(topDepth: 2, count: 2)
+        ledger.didUndo(count: 2, undoDepth: 0, redoDepth: 2)
+        XCTAssertFalse(ledger.pendingRedo.isEmpty)
+        ledger.recordAgentEdit(topDepth: 1, count: 1)
+        XCTAssertTrue(ledger.pendingRedo.isEmpty)
+    }
+
+    /// A stale redo group whose depth no longer matches is pruned rather than used — the same rule
+    /// as the undo side, asserted separately because they are separate code paths.
+    func testAStaleRedoGroupIsPrunedNotUsed() {
+        var ledger = OfficeUndoLedger()
+        ledger.recordAgentEdit(topDepth: 3, count: 3)
+        _ = ledger.undoStepSize(undoDepth: 3)
+        ledger.didUndo(count: 3, undoDepth: 0, redoDepth: 3)
+        XCTAssertEqual(ledger.redoStepSize(redoDepth: 1), 1,
+                       "the redo stack is shallower than the group — the group cannot be on top of it")
+    }
+
+    /// **Review F-5 — the pop is keyed on DEPTH as well as size.** A 1-action agent group must
+    /// survive a ⌘Z that took back the USER's own later single edit. Matching on size alone popped
+    /// it (the fallback returns 1, so `top.count == 1` matched) and silently discarded a group that
+    /// had never been used. The outcome was identical for a 1-action group, so nothing was
+    /// observably broken — which is exactly why it needs a test rather than a comment.
+    func testAOneActionAgentGroupSurvivesAnUndoOfTheUsersOwnLaterEdit() {
+        var ledger = OfficeUndoLedger()
+        ledger.recordAgentEdit(topDepth: 3, count: 1)   // the agent's single-action group at depth 3
+        // The user then types: depth 4. One ⌘Z takes back THEIR action, leaving depth 3.
+        XCTAssertEqual(ledger.undoStepSize(undoDepth: 4), 1)
+        ledger.didUndo(count: 1, undoDepth: 3, redoDepth: 1)
+        XCTAssertEqual(ledger.pendingUndo.count, 1,
+                       "the agent's group was NOT the thing undone — it must still be remembered")
+        XCTAssertEqual(ledger.pendingUndo.last?.topDepth, 3)
+        // And it is still usable: the next ⌘Z is now against the agent's group.
+        XCTAssertEqual(ledger.undoStepSize(undoDepth: 3), 1)
+    }
+
+    /// Closing or reloading the document must void everything: a stale group would make one ⌘Z take
+    /// back MORE than the user asked for, which is worse than taking back less.
+    func testForgettingVoidsBothSides() {
+        var ledger = OfficeUndoLedger()
+        ledger.recordAgentEdit(topDepth: 3, count: 3)
+        ledger.didUndo(count: 3, undoDepth: 0, redoDepth: 3)
+        ledger.forgetEverything()
+        XCTAssertTrue(ledger.pendingUndo.isEmpty)
+        XCTAssertTrue(ledger.pendingRedo.isEmpty)
+        XCTAssertEqual(ledger.undoStepSize(undoDepth: 3), 1)
+    }
 }

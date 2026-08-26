@@ -397,6 +397,13 @@ final class LOKBridge: OfficeDocumentBridge {
         /// Office Stage B Task 6 — `agentKeyEvent` requested for a docId `createAgentView` was
         /// never called for.
         case noAgentView(String)
+        /// office-live-edit R3 — `getCommandValues(".uno:UndoCount"/".uno:RedoCount")` did not
+        /// answer, or answered something this bridge will not read as a number. **Deliberately an
+        /// error rather than a 0 or a nil**: every caller of the depth query uses it to decide how
+        /// many repair-undos ONE ⌘Z should issue, and a silent 0 there is a ⌘Z that does nothing
+        /// while every layer reports success. `raw` carries whatever the engine did say, so the
+        /// failure is diagnosable instead of merely reported.
+        case undoDepthUnavailable(docId: String, command: String, raw: String?)
         /// office-agent-tools T3 re-review (Minor #4) — `createView()` returned LOK's own "no view"
         /// sentinel (`-1`, or the optional closure itself never fired) inside
         /// `ensureAgentViewOnDedicatedThread`. Thrown, never cached: the ORIGINAL code stored `-1`
@@ -550,6 +557,9 @@ final class LOKBridge: OfficeDocumentBridge {
             case .pasteFailed(let docId): return "paste() failed for docId: \(docId)"
             case .agentViewAlreadyExists(let docId): return "docId already has an agent view: \(docId)"
             case .noAgentView(let docId): return "docId has no agent view: \(docId)"
+            case .undoDepthUnavailable(let docId, let command, let raw):
+                return "the undo depth query \(command) did not answer for \(docId)"
+                     + (raw.map { " — the engine said: \($0)" } ?? " — the engine returned nothing at all")
             case .agentViewCreationFailed(let docId): return "createView() failed to mint an agent view for docId: \(docId)"
             case .notSpreadsheet(let docId, let kind):
                 let noun: String
@@ -1072,11 +1082,14 @@ final class LOKBridge: OfficeDocumentBridge {
     func clipboardPaste(docId: String, part: Int, text: String) throws {
         try thread.sync { try self.clipboardPasteOnDedicatedThread(docId: docId, part: part, text: text) }
     }
-    func undo(docId: String) throws {
-        try thread.sync { try self.undoOnDedicatedThread(docId: docId) }
+    func undo(docId: String, repair: Bool) throws {
+        try thread.sync { try self.undoOnDedicatedThread(docId: docId, repair: repair) }
     }
-    func redo(docId: String) throws {
-        try thread.sync { try self.redoOnDedicatedThread(docId: docId) }
+    func redo(docId: String, repair: Bool) throws {
+        try thread.sync { try self.redoOnDedicatedThread(docId: docId, repair: repair) }
+    }
+    func undoDepth(docId: String) throws -> (undo: Int, redo: Int) {
+        try thread.sync { try self.undoDepthOnDedicatedThread(docId: docId) }
     }
     func createAgentView(docId: String) throws -> Int32 {
         try thread.sync { try self.createAgentViewOnDedicatedThread(docId: docId) }
@@ -1996,21 +2009,117 @@ final class LOKBridge: OfficeDocumentBridge {
     /// bigger surface than "wire Undo/Redo" asks for, and the drill's own save+reopen PLACEMENT
     /// assertions already answer the characterization question without it (they can distinguish
     /// isolated / shared-LIFO / no-op / multi-revert outcomes directly from what landed on disk).
-    private func undoOnDedicatedThread(docId: String) throws {
+    /// **`repair` (office-live-edit R3).** LOK gates undo PER VIEW: every app refuses, in LOK mode,
+    /// an undo whose top action belongs to a different view — Writer `sw/…/docundo.cxx:458-470`,
+    /// Impress `sd/…/viewshel.cxx:1385-1393`, Calc `sc/…/tabvwshb.cxx:778` (Calc additionally has a
+    /// range-based independence escape at `sc/…/undobase.cxx:649-715` that SKIPS the foreign action
+    /// and undoes an older own-view one instead — which is why turning repair ON changes Calc's
+    /// existing behaviour rather than merely unblocking it). The slot takes
+    /// `SfxBoolItem Repair SID_REPAIRPACKAGE` (`sfx2/sdi/sfx.sdi:4719-4720`) and every app's
+    /// Execute handler reads it and skips its own gate.
+    ///
+    /// The argument's JSON encoding is **not guessed** — it is the SAME `{"type":"boolean","value":
+    /// "<t/f>"}` shape `sheetsFormat` already dispatches `.uno:Bold` with through this very helper
+    /// (`postUnoCommandOnDedicatedThread`), i.e. a shape already proven against the SHIPPED engine
+    /// rather than only at the source pin. The `value` is a STRING because the receiving mapper
+    /// reads it as one (`comphelper/…/sequenceashashmap.cxx:312,319-320`,
+    /// `rtl_str_toBoolean(aValueStr)`).
+    ///
+    /// `repair: false` is byte-identical to this function's pre-repair body — the literal
+    /// `postUnoCommand(handle, cmd, nil, false)`, not "the args helper with an empty dict". That
+    /// matters: an empty `{}` argument string is a DIFFERENT call from a null one, and every pinned
+    /// characterization in this suite was measured against the null one.
+    private func undoOnDedicatedThread(docId: String, repair: Bool) throws {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
         doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
-        ".uno:Undo".withCString { commandPtr in
-            doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, nil, false)
+        guard repair else {
+            ".uno:Undo".withCString { commandPtr in
+                doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, nil, false)
+            }
+            return
         }
+        postUnoCommandOnDedicatedThread(doc, ".uno:Undo",
+                                        ["Repair": ["type": "boolean", "value": "true"]])
     }
 
-    /// `.uno:Redo`, same posture as `undoOnDedicatedThread` above.
-    private func redoOnDedicatedThread(docId: String) throws {
+    /// `.uno:Redo`, same posture as `undoOnDedicatedThread` above — `repair` included, and it is
+    /// load-bearing rather than symmetric-for-tidiness: an action undone under repair keeps its
+    /// ORIGINAL `ViewShellId` on the redo stack, so a plain redo of it is refused by the redo gates
+    /// (`sw/…/docundo.cxx:523`, `sc/…/tabvwshb.cxx:778` `bIsUndo == false`, `sd/…/viewshel.cxx:1455`).
+    private func redoOnDedicatedThread(docId: String, repair: Bool) throws {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
         doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
-        ".uno:Redo".withCString { commandPtr in
-            doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, nil, false)
+        guard repair else {
+            ".uno:Redo".withCString { commandPtr in
+                doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, nil, false)
+            }
+            return
         }
+        postUnoCommandOnDedicatedThread(doc, ".uno:Redo",
+                                        ["Repair": ["type": "boolean", "value": "true"]])
+    }
+
+    /// **office-live-edit R3 — how many actions are on this document's undo and redo stacks.**
+    ///
+    /// `.uno:UndoCount` / `.uno:RedoCount` are `doc_getCommandValues` commands, NOT dispatches and
+    /// NOT `STATE_CHANGED` notifications. That distinction is the whole reason this door exists:
+    /// the engine research swept the slot/state layer and concluded "no dispatch-reachable stack
+    /// introspection" — correctly, for the layer it looked at. `getCommandValues` has its own
+    /// separate, hardcoded command table, and these two live in it. **Verified in the SHIPPED
+    /// binary before a line of this was written**, not inferred from the source pin: both literals
+    /// sit in `libmergedlo.dylib`'s literal pool immediately after `doc_getCommandValues` and
+    /// among `.uno:ViewRowColumnHeaders` / `.uno:CellCursor` / `.uno:AcceptTrackedChanges`, the
+    /// rest of that table. The live probe is what turns that from evidence into proof.
+    ///
+    /// Same `getCommandValues` mechanics `cellCursorOnDedicatedThread` already uses: a `char*` this
+    /// side must `free`, holding a JSON envelope whose `commandValues` field carries the answer.
+    ///
+    /// The undo stack is **per DOCUMENT, shared by every view** (Calc `ScDocument::mpUndoManager`;
+    /// Writer's `sw::UndoManager` on the doc; Impress's on the doc shell) — the per-view rule is a
+    /// FILTER on that one stack, never a partition of it. So this count is a document-level fact
+    /// and the `setView` prefix below is this file's standing discipline, not a claim that the
+    /// answer is view-dependent.
+    ///
+    /// **Throws rather than returning nil on an unanswerable query.** A depth query that silently
+    /// answered 0 would make "the agent's call added no undo steps" indistinguishable from "this
+    /// engine cannot tell me" — and the bracket-and-count design above it would then quietly do
+    /// nothing while reporting success. That is exactly the guard-degrades-silently class.
+    private func undoDepthOnDedicatedThread(docId: String) throws -> (undo: Int, redo: Int) {
+        guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
+        func count(_ command: String) throws -> Int {
+            guard let cString = command.withCString({ commandPtr in
+                doc.handle.pointee.pClass.pointee.getCommandValues?(doc.handle, commandPtr)
+            }) else { throw SaveError.undoDepthUnavailable(docId: docId, command: command, raw: nil) }
+            defer { free(cString) }
+            let raw = String(cString: cString).trimmingCharacters(in: .whitespacesAndNewlines)
+            // **The payload shape was MEASURED, not assumed** (office-live-edit R3's first probe
+            // run): unlike `.uno:CellCursor`, which answers with a
+            // `{"commandName":…,"commandValues":…}` envelope, `.uno:UndoCount` answers with a BARE
+            // DECIMAL SCALAR — the observed reply on a pristine document was the two bytes `0`.
+            // The first version of this parser required the envelope and therefore threw on a
+            // perfectly good answer; that failure is the only reason the real shape is known here
+            // rather than guessed. The envelope branch is kept as a fallback (a future engine could
+            // wrap it) but the scalar is the shipped shape.
+            if let value = Int(raw) {
+                guard value >= 0 else {
+                    throw SaveError.undoDepthUnavailable(docId: docId, command: command, raw: raw)
+                }
+                return value
+            }
+            if let data = raw.data(using: .utf8),
+               let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+                if let text = object["commandValues"] as? String, let value = Int(text), value >= 0 { return value }
+                if let number = object["commandValues"] as? NSNumber,
+                   CFGetTypeID(number) != CFBooleanGetTypeID(), number.intValue >= 0 { return number.intValue }
+            }
+            // An empty string is what an UNSUPPORTED getCommandValues command returns, and it must
+            // NOT be read as "zero actions": that is the difference between "this engine cannot
+            // tell me" and "there is nothing to undo", and collapsing them is what would make a ⌘Z
+            // silently do nothing while every layer above reports success.
+            throw SaveError.undoDepthUnavailable(docId: docId, command: command, raw: raw)
+        }
+        return (undo: try count(".uno:UndoCount"), redo: try count(".uno:RedoCount"))
     }
 
     /// `createView()`, LOK's own C signature (`int (*)(LibreOfficeKitDocument*)`) — confirmed

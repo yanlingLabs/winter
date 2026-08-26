@@ -99,12 +99,35 @@ export const OFFICE_WRITE_ACTIONS = OFFICE_COMMAND_ACTIONS.filter(
  *     own edit request (again not yet built, again R-bounded by the same client): **3 requests**,
  *     open + edit + save, not one.
  *
- * **§A's totals: H + 2R for reads, H + 3R for writes**, plus a flat ~4.5s margin for
+ *  4. **office-live-edit R3 — a WRITE on an ADOPTED document makes a FOURTH request.** Delivering
+ *     "one tool call = one undo step" means the broker brackets the engine's undo-stack depth around
+ *     the whole edit closure (`OfficeAgentBroker.runOnce`), which is two more R-bounded requests
+ *     (`OfficeRuntime.Driver.undoDepth`) — one before the edit, one after. **This is a deliberate,
+ *     argued change to the number below, not a quiet bump**, and the argument is:
+ *       - The bracket is **gated on `adopted`**, i.e. it runs only when the document is already open
+ *         in the human's own tab. On the NOT-adopted path rule 2's `defer` closes the document at the
+ *         end of the call, so its undo stack dies with it and there is nothing for a later ⌘Z to
+ *         reach — recording a group there would be pure cost for an unreachable benefit. That path
+ *         therefore still costs exactly **3 requests** and is unchanged.
+ *       - The adopted path costs **4**: adopt (no wire request of its own — the document is already
+ *         open), depth, edit, depth, save. Note it does NOT pay `open`, so the fourth request
+ *         replaces a cost the counted worst case already assumed.
+ *       - The worst case must nonetheless assume the maximum, because H (a cold helper) and adoption
+ *         are independent: **H + 4R**.
+ *       - **This same constant also covers requirement 2's batch**, which rides ONE edit request
+ *         however many operations it carries (the `sheets.set` 200-cell precedent) — so the batch
+ *         surface does not need a number of its own and does not move this one again.
+ *
+ * **§A's totals: H + 2R for reads, H + 4R for writes**, plus a flat ~4.5s margin for
  * emit/socket/fan-out/scheduling/encode overhead (the category `BROWSER_WAIT_MAX_TIMEOUT_MS` reserves
  * headroom for, in `browser.ts` — explicitly NOT file I/O; §B below is a different category entirely):
  *
  *   read:  90 500 + 2×30 000 = 150 500 ms  → **155 000 ms** (155s)
- *   write: 90 500 + 3×30 000 = 180 500 ms  → **185 000 ms** (185s)
+ *   write: 90 500 + 4×30 000 = 210 500 ms  → **215 000 ms** (215s)
+ *
+ * (The write line read `H + 3R = 180 500 → 185 000` until office-live-edit R3; item 4 above is the
+ * whole of the argument for moving it, and `office-commands.test.ts`'s margin band moved with it.
+ * The margin is the SAME 4.5s — the change is in the counted term, not in the padding.)
  *
  * ## §B — what sits OUTSIDE every term above, named rather than estimated
  *
@@ -191,7 +214,7 @@ export const OFFICE_READ_DEADLINE_MS = 155_000;
 // Same caveat as OFFICE_READ_DEADLINE_MS above: a practical bound, not a proof — §B's uncounted legs
 // (stageDocument, placeAtomically, the shared OfficeHelperRequestQueue) can outlast it. The retry
 // discipline this demands belongs to the broker/write-verb tasks, not to this constant.
-export const OFFICE_WRITE_DEADLINE_MS = 185_000;
+export const OFFICE_WRITE_DEADLINE_MS = 215_000;
 
 function deadlinesFor<A extends readonly OfficeCommandAction[]>(
   actions: A, ms: number,

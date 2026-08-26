@@ -1048,6 +1048,23 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost, NSTextInputC
     /// transcript already saw `.uno:Undo` in that cascade, task-2-report.md) — named here as a
     /// disclosed follow-up, not built, matching this task's own scope (`undo(_:)`/`redo(_:)` must
     /// WORK; a precise enabled/disabled reflection of LOK's own stack state is a later refinement).
+    ///
+    /// ⚠️ **office-live-edit R3 — always-enabled is not merely the lazy option here, it is the SAFE
+    /// side of a real hazard, and the STATE_CHANGED follow-up named above is the UNSAFE one.** Over
+    /// LOK, `.uno:Undo`'s state is flattened to two values by `UndoRedoPayload`
+    /// (`sfx2/source/control/unoctitm.cxx:985-993`): "another view owns the top action" and "there
+    /// is nothing to undo" both arrive as the single string `.uno:Undo=disabled`. So greying ⌘Z out
+    /// on that signal would grey it out **exactly when the agent has just edited** — making every
+    /// agent edit look like it killed undo, at the precise moment ⌘Z became the thing the user most
+    /// needs. Since R3 makes ⌘Z genuinely able to take those actions back, wiring the follow-up as
+    /// originally described would be a regression, not a refinement.
+    ///
+    /// The correct positive signal now exists and is synchronous: `.uno:UndoCount > 0` via
+    /// `getCommandValues` (`LOKBridge.undoDepthOnDedicatedThread`), which answers the real question
+    /// with no notification to wait for and no flattening. Driving enablement from a cached read of
+    /// it is the RESTATED follow-up — deliberately not built here, because it needs a staleness
+    /// story (`validateMenuItem` is synchronous; the depth query is a wire round trip) and an
+    /// always-enabled ⌘Z that works is strictly better than a sometimes-wrong disabled one.
     /// **Review fix round 1 (I-3) — the Copy/Cut gate now also accepts a live Calc cell cursor.**
     /// `selectionRectsTwips` alone missed a real, common state: a Calc cell selected by a plain
     /// click (no drag) never populates `TEXT_SELECTION` at all — T5's own probe found Calc's own

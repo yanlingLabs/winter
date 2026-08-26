@@ -366,9 +366,45 @@ final class OfficeAgentBroker {
             }
         }
 
+        // ── office-live-edit R3 — THE BRACKET. "One tool call = one undo step" is implemented by
+        // measuring the engine's undo-stack depth on either side of the WHOLE edit closure and
+        // remembering the difference, so a later ⌘Z can take back exactly that many actions in one
+        // press. Read BEFORE `action`, never derived from how many edits the closure intended to
+        // make: a verb's op count is not its undo-action count (four typed characters measured as
+        // ONE action; a `paste` is one; a structural `.uno:` dispatch is its own number), and
+        // counting ops would be the arc's own right-conclusion-wrong-supporting-fact shape.
+        //
+        // A `nil` depth (an engine that cannot answer) records NOTHING rather than guessing — which
+        // leaves ⌘Z at its pre-existing one-action-per-press granularity for that call. Degrading to
+        // less, never to a wrong number.
+        //
+        // ⚠️ **GATED ON `adopted`, and that gate is load-bearing twice over.** (1) Correctness: a
+        // NOT-adopted document is closed by rule 2's `defer` at the end of this call, so its undo
+        // stack dies with it and no later ⌘Z can ever reach the group — recording one would be cost
+        // for an unreachable benefit. (2) Budget: these are two real R-bounded requests through the
+        // app-wide FIFO, so an ungated bracket would put the counted worst case at H+5R on a path
+        // whose deadline assumes fewer. With the gate the not-adopted path stays at 3 requests and
+        // the adopted path is 4 (it pays no `open`). `office-commands.ts` §A item 4 carries the
+        // argued deadline move that pays for it.
+        //
+        // ⚠️ **DISCLOSED RACE, bounded and accepted for v1.** The bracket spans several FIFO
+        // requests, so a human keystroke landing between the two reads inflates the count, and one
+        // ⌘Z would then also take back typing the human did while the agent was writing. It is
+        // bounded (⌘⇧Z puts it back, whole), it needs the human to be typing into the very document
+        // the agent is mid-write on, and the alternative — holding the FIFO across the whole edit —
+        // is a worse trade. Named here rather than left for a reviewer to find.
+        let depthBefore = access == .write && adopted ? await runtime.undoDepth(docId: docId) : nil
+
         let result = try await action(runtime, docId, adopted)
 
         guard access == .write else { return result }
+
+        if let before = depthBefore, let after = await runtime.undoDepth(docId: docId) {
+            // Only a RISE is a group. A fall (or no change) means the closure undid, cleared or
+            // otherwise did not add to the stack, and there is nothing for one ⌘Z to collapse.
+            runtime.noteAgentUndoGroup(path: resolvedPath, topDepth: after.undo,
+                                       count: max(0, after.undo - before.undo))
+        }
 
         // Rule 4 — save-through, and the outcome is AWAITED for real (`saveAndAwaitOutcome`, not the
         // fire-and-forget `save`) — Stage B's own C1 lesson, restated for an agent caller instead of

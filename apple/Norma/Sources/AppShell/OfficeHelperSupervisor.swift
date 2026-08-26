@@ -265,9 +265,14 @@ final class OfficeHelperClient {
 
     /// `.uno:Undo` against the document's own primary view. Answers once the command was
     /// DISPATCHED, never a claim it changed anything — see `OfficeWireFrame.undoOk`'s own header.
-    func undo(docId: String) async throws {
+    ///
+    /// `repair: true` adds the slot's `Repair` argument, which is what lets an undo issued from the
+    /// PRIMARY view take back an edit made through the AGENT view. Defaults `false` so every
+    /// pre-existing caller is unchanged; see `OfficeWireFrame.undo`'s own header for the citation
+    /// chain and for why a repair undo must be paired with a repair REDO.
+    func undo(docId: String, repair: Bool = false) async throws {
         let seq = seqAllocator.nextSeq()
-        try await connection.send(.undo(seq: seq, docId: docId))
+        try await connection.send(.undo(seq: seq, docId: docId, repair: repair))
         let reply = try await expectReply(seq: seq)
         switch reply {
         case .undoOk: return
@@ -276,12 +281,25 @@ final class OfficeHelperClient {
         }
     }
 
-    func redo(docId: String) async throws {
+    func redo(docId: String, repair: Bool = false) async throws {
         let seq = seqAllocator.nextSeq()
-        try await connection.send(.redo(seq: seq, docId: docId))
+        try await connection.send(.redo(seq: seq, docId: docId, repair: repair))
         let reply = try await expectReply(seq: seq)
         switch reply {
         case .redoOk: return
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    /// office-live-edit R3 — the document's undo/redo stack depths. A real answer about state, not
+    /// an ack: an engine that cannot answer arrives here as `.error` and THROWS, never as a zero.
+    func undoDepth(docId: String) async throws -> (undo: Int, redo: Int) {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.undoDepth(seq: seq, docId: docId))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .undoDepthOk(_, _, let undoCount, let redoCount): return (undo: undoCount, redo: redoCount)
         case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
         default: throw OfficeHelperClientError.unexpectedReply(reply)
         }

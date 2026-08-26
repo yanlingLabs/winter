@@ -4048,6 +4048,446 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         _ = host.teardownAllOfficeRuntimesAndStopHelper()
     }
 
+    /// ⛔ **office-live-edit R1 fix round — C-1: a save must not overtake the typing it is meant to
+    /// persist.**
+    ///
+    /// `OfficeRuntime.save` dispatches `.saveRequested` straight into `performSave`, while every
+    /// input verb goes through the SEPARATE `inputChainTail` chain. The two chains feed one request
+    /// queue independently, so a save issued while key events are still waiting on the input chain
+    /// **overtakes them and serializes the document as it was BEFORE them** — writing the pre-edit
+    /// file over the user's own path and reporting success, with no banner.
+    ///
+    /// **This is a REAL user gesture, not a synthetic one:** type into a cell, press Return, press
+    /// ⌘S. The whole window is the input chain's delivery latency, and a human easily beats it.
+    /// `dirty` stays `true` (LOK still holds the text) so the next save heals it — permanent loss
+    /// needs a crash after the ⌘S, or the user acting on the file in between.
+    ///
+    /// **The reason this drill does NOT drain the input chain is the entire point.** Every other
+    /// typing drill in this file calls `drainInputChainForTesting()` before saving, which is exactly
+    /// why none of them ever caught this: draining is what a correct save must do FOR ITSELF, and
+    /// doing it in the test hid the bug for the whole of Stage B. This drill deliberately behaves
+    /// like the user does.
+    ///
+    /// Pre-existing on `main` — it reproduces at the base commit — but requirement 1's debounced
+    /// save made it the ORDINARY path rather than a narrow race, because the debounce is armed at
+    /// key ENQUEUE time, not delivery time. That is why it is fixed here.
+    func testASaveIssuedWhileTypingIsStillInFlightPersistsTheTypingNotThePreEditDocument() async throws {
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
+                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR")
+        let vendorRoot = Self.vendorProductSetRoot
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
+                      "LibreOffice vendor tree not present at \(vendorRoot.path)")
+        let fixturePath = Self.fixturesRoot.appendingPathComponent("gate.ods").path
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: fixturePath), "gate.ods fixture missing")
+
+        let stateDir = makeScratchDirectory()
+        let directory = SessionDirectory(lister: { [] })
+        let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        host.makeOfficeHelperSupervisor = {
+            OfficeHelperSupervisor(configuration: OfficeHelperSupervisor.Configuration(
+                helperExecutableURL: helperURL,
+                socketDirectory: stateDir,
+                extraArguments: ["--lok-root", vendorRoot.path, "--sandbox-profile", Self.sandboxProfilePath.path]))
+        }
+        let runtime = host.officeRuntime(for: "S1")
+        let scratchDir = makeScratchDirectory()
+        let docPath = scratchDir.appendingPathComponent("save-ordering-drill.ods").path
+        try Data(contentsOf: URL(fileURLWithPath: fixturePath)).write(to: URL(fileURLWithPath: docPath))
+
+        runtime.open(docPath)
+        let settled = await waitUntil(timeout: 90) {
+            runtime.stateSnapshot.documents[docPath] != nil || runtime.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(settled, "never settled — phase: \(runtime.stateSnapshot.phase)")
+        guard let doc = runtime.stateSnapshot.documents[docPath] else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("did not open: \(runtime.stateSnapshot.openFailures[docPath] ?? "no reason")")
+        }
+
+        let model = PanelDocumentTabModel(tabId: "save-ordering", path: docPath)
+        let view = OfficeTileCanvasView(runtime: runtime, path: docPath, docId: doc.docId,
+                                        sizeTwips: doc.sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 512, height: 512)
+        view.mount()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 512, height: 512),
+                              styleMask: [.borderless], backing: .buffered, defer: true)
+        window.contentView = view
+
+        let clickPoint = view.convert(NSPoint(x: 10, y: 10), to: nil)
+        func mouse(_ type: NSEvent.EventType) -> NSEvent {
+            try! XCTUnwrap(NSEvent.mouseEvent(with: type, location: clickPoint, modifierFlags: [],
+                                              timestamp: 0, windowNumber: window.windowNumber, context: nil,
+                                              eventNumber: 0, clickCount: 1, pressure: 1))
+        }
+        func key(_ type: NSEvent.EventType, _ characters: String, _ keyCode: UInt16) -> NSEvent {
+            try! XCTUnwrap(NSEvent.keyEvent(with: type, location: .zero, modifierFlags: [], timestamp: 0,
+                                            windowNumber: window.windowNumber, context: nil,
+                                            characters: characters, charactersIgnoringModifiers: characters,
+                                            isARepeat: false, keyCode: keyCode))
+        }
+        view.mouseDown(with: mouse(.leftMouseDown))
+        view.mouseUp(with: mouse(.leftMouseUp))
+
+        let marker = "T4EDIT"
+        let physicalKeyCodes: [Character: UInt16] = ["T": 17, "4": 21, "E": 14, "D": 2, "I": 34]
+        for character in marker {
+            let code = try XCTUnwrap(physicalKeyCodes[character])
+            view.keyDown(with: key(.keyDown, String(character), code))
+            view.keyUp(with: key(.keyUp, String(character), code))
+        }
+        view.keyDown(with: key(.keyDown, "\r", 36))    // Return commits the cell edit
+        view.keyUp(with: key(.keyUp, "\r", 36))
+
+        // ⛔ **NO `drainInputChainForTesting()` HERE.** The save is issued the instant the last key
+        // event is ENQUEUED, which is exactly what a user pressing ⌘S does. Adding a drain here
+        // would test the fix's own precondition instead of the fix.
+        let beforeStat = officeFileStat(atPath: docPath)
+        runtime.save(docPath)
+        let landed = await waitUntil(timeout: 30) { officeFileStat(atPath: docPath) != beforeStat }
+        XCTAssertTrue(landed, "the save never landed on disk at all")
+
+        let content = try readODFContentXML(atPath: docPath)
+        XCTAssertTrue(content.contains(marker),
+                      "the SAVED file must contain the text the user had just typed. Missing means "
+                        + "the save overtook the input chain and serialized the PRE-EDIT document "
+                        + "onto the user's own path — while reporting success, with no banner. "
+                        + "Saved body: \(strippedODFBodyText(content))")
+        // The untouched NEIGHBOURING cell, not A1. Typing straight after a click REPLACES the
+        // clicked cell's content (ordinary spreadsheet UX — `typeOneCharacterOnPrimaryView`'s own
+        // header says so), so `gate.ods`'s A1 seed "NORMA GATE" is legitimately gone here; asserting
+        // it survived would be asserting the gesture did NOT work. A2 is what proves this was a save
+        // of the SAME document with one cell changed, rather than some other document entirely.
+        //
+        // Worth recording, because the two arms discriminate perfectly: UNFIXED, this drill failed on
+        // the marker being ABSENT while the A1 seed was still PRESENT — the literal signature of the
+        // pre-edit document being written. FIXED, the marker is present and the A1 seed is gone,
+        // which is the post-edit document. Nothing else produces that flip.
+        XCTAssertTrue(content.contains("office stage A embed probe"),
+                      "and the fixture's own UNTOUCHED cell must survive — this must be a save of "
+                        + "the same document with one cell changed, never a different document")
+
+        _ = host.teardownAllOfficeRuntimesAndStopHelper()
+    }
+
+    /// **The control arm for the drill above.** The fix makes `performSave` join `inputChainTail`
+    /// before it serializes; the failure mode of a fix like that is a save that waits for something
+    /// that never finishes, or waits on the wrong thing. This proves a save with NOTHING in flight
+    /// still lands promptly and completely — so the join cannot have been implemented as an
+    /// unconditional stall.
+    ///
+    /// It also pins the ordering claim from the other side: the marker is typed AND drained BEFORE
+    /// the save is issued, so the save has nothing to wait for and must behave exactly as it always
+    /// did.
+    func testASaveWithNothingInFlightStillLandsPromptlyAndCompletely() async throws {
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path), "helper not built")
+        let vendorRoot = Self.vendorProductSetRoot
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
+                      "LibreOffice vendor tree not present")
+        let fixturePath = Self.fixturesRoot.appendingPathComponent("gate.ods").path
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: fixturePath), "gate.ods fixture missing")
+
+        let stateDir = makeScratchDirectory()
+        let directory = SessionDirectory(lister: { [] })
+        let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        host.makeOfficeHelperSupervisor = {
+            OfficeHelperSupervisor(configuration: OfficeHelperSupervisor.Configuration(
+                helperExecutableURL: helperURL,
+                socketDirectory: stateDir,
+                extraArguments: ["--lok-root", vendorRoot.path, "--sandbox-profile", Self.sandboxProfilePath.path]))
+        }
+        let runtime = host.officeRuntime(for: "S1")
+        let scratchDir = makeScratchDirectory()
+        let docPath = scratchDir.appendingPathComponent("save-ordering-control.ods").path
+        try Data(contentsOf: URL(fileURLWithPath: fixturePath)).write(to: URL(fileURLWithPath: docPath))
+
+        runtime.open(docPath)
+        let settled = await waitUntil(timeout: 90) {
+            runtime.stateSnapshot.documents[docPath] != nil || runtime.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(settled)
+        guard let doc = runtime.stateSnapshot.documents[docPath],
+              let client = host.officeHelperSupervisor?.client else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("did not open")
+        }
+
+        try await client.postMouse(docId: doc.docId, part: 0, type: .buttonDown, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await client.postMouse(docId: doc.docId, part: 0, type: .buttonUp, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await postRawUppercaseMarker(client: client, docId: doc.docId, marker: "AAAA")
+        // Everything is already delivered — this save has an EMPTY input chain to join.
+        await runtime.drainInputChainForTesting()
+
+        let started = Date()
+        let beforeStat = officeFileStat(atPath: docPath)
+        runtime.save(docPath)
+        let landed = await waitUntil(timeout: 30) { officeFileStat(atPath: docPath) != beforeStat }
+        let elapsed = Date().timeIntervalSince(started)
+        XCTAssertTrue(landed, "a save with nothing in flight must still land — if this hangs, the "
+                        + "input-chain join was implemented as an unconditional wait")
+        XCTAssertLessThan(elapsed, 10.0, "and it must land PROMPTLY: joining an already-finished "
+                            + "chain costs nothing. \(elapsed)s means the join is waiting on "
+                            + "something that is not the input chain")
+        let content = try readODFContentXML(atPath: docPath)
+        XCTAssertTrue(content.contains("AAAA"), "the control arm's own edit must be saved too")
+
+        _ = host.teardownAllOfficeRuntimesAndStopHelper()
+    }
+
+    /// **office-live-edit STEP 0 — LT-1, the drill the whole of requirement 3 rests on.**
+    ///
+    /// The engine research (`.superpowers/research/office-undo-save-engine.md`, Q1/Q2) establishes
+    /// at LibreOffice `11482c8f71bc76ed6260bc03b1576a52a788ab4f` that `.uno:Undo` takes a
+    /// `SfxBoolItem Repair SID_REPAIRPACKAGE` argument which skips the per-view undo gate in all
+    /// three apps, and that `doc_postUnoCommand`'s JSON mapper turns
+    /// `{"Repair":{"type":"boolean","value":"true"}}` into that item. But that research's own H1
+    /// records — with live `dladdr` evidence already in this repo's vendored `LibreOfficeKit.h` —
+    /// that **the shipped engine's LOK ABI does not match the pin**. So the mechanism is read, not
+    /// proven, until it runs HERE against the real helper.
+    ///
+    /// **The before-picture is a pinned no-op.** `testTwoLOKViewsOnOneDocumentCharacterizesCrossViewUndo`
+    /// above, and `OfficeHarness.performTwoViewUndoCharacterization18()`, both assert that after
+    /// "edit via A, edit via B(agent view), undo via A" **both edits survive** — cross-view undo is
+    /// REFUSED. This drill must FLIP that, and only by adding `Repair`.
+    ///
+    /// **Why the control arm is inside this test rather than delegated to the pinned one.** The
+    /// pinned test runs in its own process state, on its own fixture copy, with its own freshly
+    /// booted helper. If repair were to appear to work here while the pinned test still passed
+    /// there, the two runs would not be comparable — the only sound comparison is a plain undo and
+    /// a repair undo **against the same document, in the same run, with the same two views**. So
+    /// arm 1 dispatches a NON-repair undo and asserts the pinned REFUSED/NO-OP outcome; arm 2 then
+    /// dispatches repair undos against that same document. If arm 1 ever stops refusing, arm 2's
+    /// result means nothing and this test says so rather than reporting a flip it did not cause.
+    ///
+    /// **Why arm 2 is a bounded LADDER, not a single undo.** LOK's real undo granularity for typed
+    /// text is not established anywhere in this repo — the existing ladder drill bounds undos by
+    /// marker length and its own header explicitly refuses to be cited as one-undo-per-character.
+    /// Asserting "one repair undo removes BBBB" would therefore be a test that could go red for a
+    /// reason that has nothing to do with repair. The ladder is bounded at `bMarker.count` (4) and
+    /// asserts, at every rung, that **A's edit is still there** — which is the LIFO claim repair
+    /// actually makes (B's actions all sit above A's on the one shared per-document stack), and
+    /// which would catch the one alternative worth catching: a repair undo that pops indiscriminately.
+    func testRepairArgumentLetsAPrimaryViewUndoTakeBackAnAgentViewEdit() async throws {
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
+                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                        + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
+        let vendorRoot = Self.vendorProductSetRoot
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
+                      "LibreOffice vendor tree not present at \(vendorRoot.path) — run "
+                        + "`bun run libreoffice:fetch` from the repo root.")
+        let fixturePath = Self.fixturesRoot.appendingPathComponent("gate.odt").path
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: fixturePath), "gate.odt fixture missing")
+
+        let stateDir = makeScratchDirectory()
+        let directory = SessionDirectory(lister: { [] })
+        let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        host.makeOfficeHelperSupervisor = {
+            OfficeHelperSupervisor(configuration: OfficeHelperSupervisor.Configuration(
+                helperExecutableURL: helperURL,
+                socketDirectory: stateDir,
+                extraArguments: ["--lok-root", vendorRoot.path, "--sandbox-profile", Self.sandboxProfilePath.path]))
+        }
+        let runtime = host.officeRuntime(for: "S1")
+
+        let scratchDir = makeScratchDirectory()
+        let docPath = scratchDir.appendingPathComponent("repair-undo-drill.odt").path
+        try Data(contentsOf: URL(fileURLWithPath: fixturePath)).write(to: URL(fileURLWithPath: docPath))
+
+        runtime.open(docPath)
+        let settled = await waitUntil(timeout: 90) {
+            runtime.stateSnapshot.documents[docPath] != nil || runtime.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(settled, "never settled — phase: \(runtime.stateSnapshot.phase)")
+        guard let doc = runtime.stateSnapshot.documents[docPath] else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("did not open: \(runtime.stateSnapshot.openFailures[docPath] ?? "no reason recorded")")
+        }
+        guard let client = host.officeHelperSupervisor?.client else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("no live client to drive this drill through")
+        }
+
+        /// Save and read the document's own body back off disk. Every rung of this drill judges on
+        /// the SAVED BYTES, never on a wire ack — `undoOk` acks the dispatch, not the effect.
+        func saveAndReadBody(_ label: String) async -> String? {
+            let before = officeFileStat(atPath: docPath)
+            runtime.save(docPath)
+            let landed = await waitUntil(timeout: 30) { officeFileStat(atPath: docPath) != before }
+            guard landed else {
+                XCTFail("\(label): the save never landed on disk — a silent timeout here reads back "
+                        + "STALE bytes, which for an undo drill is indistinguishable from 'the undo "
+                        + "did nothing', the exact outcome this drill exists to tell apart")
+                return nil
+            }
+            guard let xml = try? readODFContentXML(atPath: docPath) else {
+                XCTFail("\(label): could not read content.xml back")
+                return nil
+            }
+            return strippedODFBodyText(xml)
+        }
+
+        let viewIdB = try await client.createAgentView(docId: doc.docId)
+        XCTAssertGreaterThanOrEqual(viewIdB, 0, "a real LOK view id — the -1 no-view sentinel would "
+                                    + "mean createView itself silently failed and the whole drill "
+                                    + "would then be measuring a ONE-view document")
+
+        // Edit via A (the primary view) — proven on disk before B ever touches the document.
+        try await client.postMouse(docId: doc.docId, part: 0, type: .buttonDown, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await client.postMouse(docId: doc.docId, part: 0, type: .buttonUp, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await postRawUppercaseMarker(client: client, docId: doc.docId, marker: "AAAA")
+        guard let bodyAfterA = await saveAndReadBody("after A's edit") else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper(); return
+        }
+        XCTAssertTrue(bodyAfterA.contains("AAAA"), "view A's own edit must land before B edits — got: \"\(bodyAfterA)\"")
+
+        // Edit via B (the AGENT view) — the edit a human's ⌘Z cannot reach today.
+        for character in "BBBB" {
+            let keyCode = rawUppercaseLetterKeyCode(character)
+            let charCode = Int(character.asciiValue!)
+            try await client.agentKeyEvent(docId: doc.docId, part: 0, type: .keyInput, charCode: charCode, keyCode: keyCode)
+            try await client.agentKeyEvent(docId: doc.docId, part: 0, type: .keyUp, charCode: charCode, keyCode: keyCode)
+        }
+        guard let bodyAfterB = await saveAndReadBody("after B's edit") else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper(); return
+        }
+        XCTAssertTrue(bodyAfterB.contains("AAAA"), "A's edit must survive B's — got: \"\(bodyAfterB)\"")
+        XCTAssertTrue(bodyAfterB.contains("BBBB"), "B's edit must LAND, proven off disk, before any "
+                      + "undo runs — got: \"\(bodyAfterB)\"")
+
+        // ── ARM 1, THE CONTROL: a plain, non-repair undo from the primary view.
+        // This is the pinned REFUSED/NO-OP characterization, re-measured in THIS run so that arm 2's
+        // outcome is a comparison rather than a claim about two different runs. It is also what
+        // makes arm 2 non-vacuous: without it, a repair undo that "worked" could not be told apart
+        // from a document where cross-view undo had started working on its own.
+        try await client.undo(docId: doc.docId)
+        guard let bodyAfterPlainUndo = await saveAndReadBody("after the PLAIN undo") else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper(); return
+        }
+        NSLog("[LT-1] body after PLAIN undo: \"\(bodyAfterPlainUndo)\"")
+        XCTAssertTrue(bodyAfterPlainUndo.contains("AAAA") && bodyAfterPlainUndo.contains("BBBB"),
+                      "CONTROL ARM: a NON-repair undo from the primary view must still be the "
+                      + "pinned REFUSED/NO-OP — both markers intact. If this fails, cross-view undo "
+                      + "changed underneath us and arm 2 below proves NOTHING about Repair — got: "
+                      + "\"\(bodyAfterPlainUndo)\"")
+
+        // ── ARM 2, THE DRILL: the same door, the same view, plus `Repair: true`.
+        var body = bodyAfterPlainUndo
+        var rungs = 0
+        var aSurvivedEveryRung = true
+        while body.contains("BBBB"), rungs < 4 {
+            try await client.undo(docId: doc.docId, repair: true)
+            rungs += 1
+            guard let next = await saveAndReadBody("after repair undo #\(rungs)") else {
+                _ = host.teardownAllOfficeRuntimesAndStopHelper(); return
+            }
+            body = next
+            NSLog("[LT-1] body after repair undo #\(rungs): \"\(body)\"")
+            if !body.contains("AAAA") { aSurvivedEveryRung = false }
+        }
+
+        XCTAssertFalse(body.contains("BBBB"),
+                       "LT-1 NEGATIVE: `Repair: true` did NOT take back the agent view's edit after "
+                       + "\(rungs) undo(s) — the mechanism is UNESTABLISHED on the shipped engine "
+                       + "(engine research H1: the shipped LOK ABI does not match the source pin). "
+                       + "Requirement 3 cannot be built on it. Body: \"\(body)\"")
+        XCTAssertTrue(aSurvivedEveryRung,
+                      "repair undo is strict LIFO over ONE shared per-document stack, so B's "
+                      + "actions (all made after A's) must come off first and A's edit must still "
+                      + "be present at the rung where B's disappears. It was not — which would mean "
+                      + "either the two views' typing merged into one undo action or repair pops "
+                      + "indiscriminately, and BOTH change requirement 3's design. Body: \"\(body)\"")
+        NSLog("[LT-1] RESULT: repair undo removed the agent view's edit in \(rungs) rung(s); "
+              + "A's edit survived every rung = \(aSurvivedEveryRung)")
+
+        _ = host.teardownAllOfficeRuntimesAndStopHelper()
+    }
+
+    /// **office-live-edit R3 PROBE — is the undo stack's DEPTH readable at all?**
+    ///
+    /// Requirement 3's "one tool call = one undo step" cannot be delivered by undo GROUPING: no
+    /// `.uno:` grouping command exists, and the only reachable grouping API stamps
+    /// `ViewShellId(-1)`, which makes the group repair-only for EVERY view including the user's.
+    /// The alternative is bracket-and-count — measure the depth before and after the agent's call,
+    /// remember K, and have one ⌘Z issue K repair-undos. That design is worthless unless the depth
+    /// is actually readable, so this probe settles it BEFORE anything is built on it.
+    ///
+    /// It is a MEASUREMENT, not just an availability check: it reads the depth at four points and
+    /// asserts the DELTAS, because "the query answered" and "the query answered something true"
+    /// are different claims and only the second one is usable. A query that always returned the
+    /// same constant would satisfy the first and fail here.
+    func testUndoStackDepthIsReadableAndTracksRealEdits() async throws {
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
+                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                        + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
+        let vendorRoot = Self.vendorProductSetRoot
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
+                      "LibreOffice vendor tree not present at \(vendorRoot.path) — run "
+                        + "`bun run libreoffice:fetch` from the repo root.")
+        let fixturePath = Self.fixturesRoot.appendingPathComponent("gate.odt").path
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: fixturePath), "gate.odt fixture missing")
+
+        let stateDir = makeScratchDirectory()
+        let directory = SessionDirectory(lister: { [] })
+        let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        host.makeOfficeHelperSupervisor = {
+            OfficeHelperSupervisor(configuration: OfficeHelperSupervisor.Configuration(
+                helperExecutableURL: helperURL,
+                socketDirectory: stateDir,
+                extraArguments: ["--lok-root", vendorRoot.path, "--sandbox-profile", Self.sandboxProfilePath.path]))
+        }
+        let runtime = host.officeRuntime(for: "S1")
+        let scratchDir = makeScratchDirectory()
+        let docPath = scratchDir.appendingPathComponent("undo-depth-probe.odt").path
+        try Data(contentsOf: URL(fileURLWithPath: fixturePath)).write(to: URL(fileURLWithPath: docPath))
+
+        runtime.open(docPath)
+        let settled = await waitUntil(timeout: 90) {
+            runtime.stateSnapshot.documents[docPath] != nil || runtime.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(settled, "never settled — phase: \(runtime.stateSnapshot.phase)")
+        guard let doc = runtime.stateSnapshot.documents[docPath],
+              let client = host.officeHelperSupervisor?.client else {
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+            return XCTFail("did not open: \(runtime.stateSnapshot.openFailures[docPath] ?? "no reason recorded")")
+        }
+
+        // 1 — a freshly opened, never-edited document.
+        let pristine = try await client.undoDepth(docId: doc.docId)
+        NSLog("[undoDepth probe] pristine: undo=\(pristine.undo) redo=\(pristine.redo)")
+        XCTAssertEqual(pristine.undo, 0, "a freshly opened document has nothing to undo")
+        XCTAssertEqual(pristine.redo, 0, "a freshly opened document has nothing to redo")
+
+        // 2 — after a real edit through the primary view.
+        try await client.postMouse(docId: doc.docId, part: 0, type: .buttonDown, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await client.postMouse(docId: doc.docId, part: 0, type: .buttonUp, xTwips: 100, yTwips: 100, count: 1, buttons: 1, modifiers: 0)
+        try await postRawUppercaseMarker(client: client, docId: doc.docId, marker: "AAAA")
+        let afterEdit = try await client.undoDepth(docId: doc.docId)
+        NSLog("[undoDepth probe] after a 4-char primary-view edit: undo=\(afterEdit.undo) redo=\(afterEdit.redo)")
+        XCTAssertGreaterThan(afterEdit.undo, pristine.undo,
+                             "the depth query must RISE after a real edit. If it does not, it is "
+                             + "answering a constant, and bracket-and-count cannot be built on it")
+
+        // 3 — after an undo: undo depth falls, redo depth rises. This is the arm that proves the
+        // query tracks the stacks rather than counting edits ever made.
+        try await client.undo(docId: doc.docId)
+        let afterUndo = try await client.undoDepth(docId: doc.docId)
+        NSLog("[undoDepth probe] after one undo: undo=\(afterUndo.undo) redo=\(afterUndo.redo)")
+        XCTAssertLessThan(afterUndo.undo, afterEdit.undo, "an undo must LOWER the undo depth")
+        XCTAssertGreaterThan(afterUndo.redo, afterEdit.redo, "an undo must RAISE the redo depth")
+
+        // 4 — and back again on redo, so neither direction is a one-way artefact.
+        try await client.redo(docId: doc.docId)
+        let afterRedo = try await client.undoDepth(docId: doc.docId)
+        NSLog("[undoDepth probe] after one redo: undo=\(afterRedo.undo) redo=\(afterRedo.redo)")
+        XCTAssertEqual(afterRedo.undo, afterEdit.undo, "redo must restore the undo depth")
+        XCTAssertEqual(afterRedo.redo, afterEdit.redo, "redo must restore the redo depth")
+
+        _ = host.teardownAllOfficeRuntimesAndStopHelper()
+    }
+
     /// Office Stage B Task 6, fix round 1 (I-2) — **the discriminator the coordinator's review
     /// demanded.** The two-view drill above observed `(aSurvived: true, bSurvived: true)` after
     /// "edit A, edit B, undo via A" and read it as REFUSED/NO-OP — LO declining to undo a foreign

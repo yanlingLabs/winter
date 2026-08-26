@@ -41,7 +41,23 @@ final class OfficeSheetsCommandTests: XCTestCase {
 
     private var scratchDirs: [URL] = []
 
+    /// **Every live host this suite creates, torn down in `tearDown` — the STRUCTURAL fix for a
+    /// measured helper leak.**
+    ///
+    /// This suite built 27 live hosts and called `teardownAllOfficeRuntimesAndStopHelper()` in only
+    /// 2 of them, leaving **22 `NormaOfficeHelper` processes resident** after a full run. That is
+    /// real debt, not tidiness: leaked helpers hold the shared socket directory and CPU, and they
+    /// are a documented source of spurious reds for whoever runs the suite next (the same class that
+    /// already produced a 69-helper leak elsewhere in this suite).
+    ///
+    /// Registered HERE, in the one factory every test goes through, rather than as 25 more
+    /// end-of-test calls — a per-test cleanup that must be remembered is one that will be forgotten
+    /// by the next test added, which is exactly how this got to 27-versus-2.
+    private var liveHosts: [ShellSessionHost] = []
+
     override func tearDown() {
+        for host in liveHosts { _ = host.teardownAllOfficeRuntimesAndStopHelper() }
+        liveHosts = []
         for dir in scratchDirs { try? FileManager.default.removeItem(at: dir) }
         scratchDirs = []
         super.tearDown()
@@ -98,6 +114,7 @@ final class OfficeSheetsCommandTests: XCTestCase {
                 extraArguments: ["--lok-root", Self.vendorProductSetRoot.path,
                                  "--sandbox-profile", Self.sandboxProfilePath.path]))
         }
+        liveHosts.append(host)
         return host
     }
 
@@ -200,6 +217,214 @@ final class OfficeSheetsCommandTests: XCTestCase {
         try await type(client: client, docId: docId, character: "+", appKitKeyCode: 24, shift: true)
         try await type(client: client, docId: docId, character: "1", appKitKeyCode: 18)
         try await pressReturn(client: client, docId: docId)
+    }
+
+    // MARK: - office-live-edit R1 — what a save actually costs
+
+    /// **The measurement the debounce interval is chosen against.** Nothing in this repo recorded
+    /// how long one office save actually takes, and the engine research names that number as "the
+    /// whole feasibility question" for instant save — a save is a full container rewrite (the whole
+    /// document re-rendered inside the helper, then a full-file copy, an `fsync` and a `rename`),
+    /// and it holds the one app-wide FIFO while it runs.
+    ///
+    /// **This asserts a RELATIONSHIP, not a stopwatch number.** A test that pinned "a save takes
+    /// under 250 ms" would be a machine-speed flake with no design meaning. What must hold for the
+    /// debounce to be coherent is that a save on an ordinary document finishes comfortably inside
+    /// the idle interval — otherwise every burst would still be saving when the next one armed, and
+    /// the design would silently degrade to the re-arm path on every edit. The measured number is
+    /// PRINTED so a human can see the real cost and revisit the interval on evidence.
+    ///
+    /// ⚠️ Scope, stated rather than implied: every office fixture in this repo is under 30 KB, so
+    /// this measures the FLOOR. The cost is O(document size) and the curve for a multi-megabyte
+    /// document is unmeasured — which is exactly why `fireAutoSave` never overlaps saves and re-arms
+    /// instead, so a document too slow for the interval degrades to "as often as it can".
+    func testLiveSaveWallClockIsWellInsideTheAutoSaveDebounceInterval() async throws {
+        try requireLiveEngine()
+        let path = try makeWritableCopy(of: "gate.ods", as: "save-cost.ods")
+        let stateDir = makeScratchDirectory()
+        let host = makeLiveHost(stateDir: stateDir,
+                                dirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)])
+        await host.directory.refresh()
+        let runtime = host.officeRuntime(for: "S1")
+        runtime.open(path)
+        let opened = await waitUntilLive { runtime.stateSnapshot.documents[path] != nil || runtime.stateSnapshot.phase == .failed }
+        XCTAssertTrue(opened, "setup: the fixture must open cleanly")
+        let doc = try XCTUnwrap(runtime.stateSnapshot.documents[path])
+        let client = try XCTUnwrap(host.officeHelperSupervisor?.client)
+
+        var elapsed: [TimeInterval] = []
+        for round in 0..<3 {
+            // A REAL edit before each save. Measuring a save of an unmodified document would time
+            // the `DontSaveIfUnmodified` fast path, not a save — the arc's own vacuous-drill shape.
+            try await typeOneCharacterOnPrimaryView(client: client, docId: doc.docId)
+            XCTAssertEqual(runtime.stateSnapshot.documents[path]?.dirty, true,
+                           "round \(round): the edit must really have dirtied the document, or this "
+                             + "times the unmodified fast path instead of a save")
+            let started = Date()
+            let outcome = await runtime.saveAndAwaitOutcome(path)
+            elapsed.append(Date().timeIntervalSince(started))
+            guard case .saved = outcome else {
+                return XCTFail("round \(round): the save must succeed to be worth timing: \(outcome)")
+            }
+        }
+
+        let worst = elapsed.max() ?? 0
+        let best = elapsed.min() ?? 0
+        print(String(format: "[save cost] gate.ods, 3 rounds: %@ — best %.3fs, worst %.3fs, debounce %.3fs",
+                     elapsed.map { String(format: "%.3fs", $0) }.joined(separator: ", "),
+                     best, worst, OfficeRuntime.autoSaveDebounceIntervalDefault))
+
+        // ⚠️ **Asserted on the BEST round, not the worst — and that is a correction, with evidence.**
+        // This first asserted `worst < interval`, which is a stopwatch number wearing a
+        // relationship's clothes: it passed in isolation and went RED inside the full suite. Measured
+        // both ways on the same build — in isolation, three rounds of 0.089/0.074/0.073s and
+        // 0.088/0.073/0.073s; inside the full suite, 1.090/0.134/0.617s. The slow rounds are the
+        // suite's own contention on the ONE app-wide helper FIFO, which the shipped app does not
+        // share with a hundred other office tests.
+        //
+        // The design question this test exists to answer is whether a save is INHERENTLY fast enough
+        // for a sub-second idle interval, and the best round answers exactly that while being immune
+        // to whatever else is running. It is still a real bound, not a vacuous one: a save that
+        // needed even a third of the interval AT BEST would fail here, and that would genuinely
+        // invalidate the 900 ms choice. The whole distribution is printed either way, so a human
+        // reading a CI log sees the real cost rather than the assertion's summary.
+        XCTAssertLessThan(best, OfficeRuntime.autoSaveDebounceIntervalDefault / 3,
+                          "a save on an ordinary document must be COMFORTABLY inside the idle "
+                            + "interval at best, or the 900 ms debounce is not a coherent choice. "
+                            + "Best of \(elapsed.count) rounds: \(best)s")
+
+        _ = host.teardownAllOfficeRuntimesAndStopHelper()
+    }
+
+    // MARK: - office-live-edit R3 — Calc's ⌘Z behaviour change, pinned
+
+    /// **⛔ THE CALC DRILL. This pins a DELIBERATE CHANGE to behaviour the user already had, which
+    /// the user ruled for explicitly.**
+    ///
+    /// Calc is the one app where a plain ⌘Z after an agent edit did not simply fail. Its undo
+    /// manager has a **range-based independence escape** (`ScUndoManager::IsViewUndoActionIndependent`,
+    /// `sc/source/ui/undo/undobase.cxx:649-715`): with an agent action on top of the shared stack,
+    /// if that action's `ScRange` does not intersect the range of this view's own most recent
+    /// action, Calc **skips the agent's action and undoes the user's own earlier one instead**
+    /// (`sc/…/tabvwshb.cxx:798-803`, then `ScUndoRedoContext::SetUndoOffset`).
+    ///
+    /// So the old behaviour was not "⌘Z is blocked" — it was **"⌘Z silently does something other
+    /// than what the user asked"**: they press undo expecting the last change back, and get their
+    /// own older edit reverted while the agent's change stays. Silently wrong is worse than refused,
+    /// and the ruling is that ⌘Z reverts the last thing that happened regardless of who did it.
+    ///
+    /// **This drill pins three things at once, and each would be a separate defect:**
+    /// 1. the behaviour flip itself — the agent's cells come back, the user's cell does NOT;
+    /// 2. **the multi-action collapse end to end** — `sheets.set` writes THREE cells, each its own
+    ///    engine undo action, and ONE ⌘Z takes back all three. This is the only live coverage of
+    ///    the bracket→ledger→multi-dispatch path with a K greater than one;
+    /// 3. that the ranges are genuinely DISJOINT (the user in `A1`, the agent in `C3:E3`), which is
+    ///    precisely the condition that triggered the old silent-skip. A drill using overlapping
+    ///    ranges would pass without ever exercising the behaviour that changed.
+    func testLiveCalcUndoNowRevertsTheAgentsEditInsteadOfSilentlySkippingIt() async throws {
+        try requireLiveEngine()
+        let path = try makeWritableCopy(of: "gate.ods", as: "calc-repair-undo.ods")
+        let stateDir = makeScratchDirectory()
+        let host = makeLiveHost(stateDir: stateDir,
+                                dirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)])
+        await host.directory.refresh()
+        let runtime = host.officeRuntime(for: "S1")
+
+        // ADOPTED: the human has the document open in their own tab. That is the only path the
+        // bracket runs on (see `OfficeAgentBroker.runOnce` — a broker-opened document is closed at
+        // the end of the call, so its undo stack dies with it and no ⌘Z could ever reach it).
+        runtime.open(path)
+        let opened = await waitUntilLive { runtime.stateSnapshot.documents[path] != nil || runtime.stateSnapshot.phase == .failed }
+        XCTAssertTrue(opened, "setup: the fixture must open cleanly")
+        let doc = try XCTUnwrap(runtime.stateSnapshot.documents[path])
+        let client = try XCTUnwrap(host.officeHelperSupervisor?.client)
+
+        // ── The human's own edit, on the PRIMARY view: "Z" into A1, committed with Return.
+        try await typeOneCharacterOnPrimaryView(client: client, docId: doc.docId)
+        let afterUserEdit = await send(command("office.sheets.read",
+                                               args: ["path": path, "sheet": "Sheet1", "range": "A1:A1"],
+                                               sessionId: "S1", commandId: "pcmd-calc-read-user"), through: host)
+        XCTAssertTrue(afterUserEdit.ok, "\(afterUserEdit)")
+        XCTAssertTrue(try XCTUnwrap(afterUserEdit.result).contains("Z"),
+                      "setup: the human's own edit must land in A1 before the agent writes: \(afterUserEdit)")
+
+        // ── The human saves. **Required, and incidentally load-bearing evidence.**
+        //
+        // Required: broker rule 3 refuses every agent write to a document left dirty in a human's
+        // tab, so without this the agent's write below is refused and the drill measures nothing.
+        // (That refusal is correct and stays — this drill's job is the undo semantics, not rule 3.)
+        //
+        // 🔑 Evidence: **this save is what proves, live, that saving does NOT destroy undo history.**
+        // The engine research could only establish that as a bounded negative read from source ("no
+        // undo-clear was found on the SID_SAVEDOC path… a strong negative rather than an exhaustive
+        // proof"), and it is the single biggest risk to requirements 1 and 3 coexisting: if a save
+        // truncated the stack, an instant-save-after-every-edit design would silently destroy ⌘Z.
+        // The final assertion below — that the human's pre-save edit is still on the stack and comes
+        // back — is that proof, measured rather than argued.
+        runtime.save(path)
+        let saved = await waitUntilLive { runtime.stateSnapshot.documents[path]?.dirty == false }
+        XCTAssertTrue(saved, "setup: the human's own save must land, or rule 3 refuses the agent's write")
+
+        // ── The agent's edit, THREE cells, in a range DISJOINT from A1 — the exact shape that used
+        // to make Calc silently step over it.
+        let agentWrite = await send(command("office.sheets.set",
+                                            args: ["path": path, "sheet": "Sheet1", "range": "C3:E3",
+                                                   "values": [["AGENTX", "AGENTY", "AGENTZ"]]],
+                                            sessionId: "S1", commandId: "pcmd-calc-agent-set"), through: host)
+        XCTAssertTrue(agentWrite.ok, "the agent's write must succeed: \(agentWrite)")
+
+        let afterAgent = await send(command("office.sheets.read",
+                                            args: ["path": path, "sheet": "Sheet1", "range": "C3:E3"],
+                                            sessionId: "S1", commandId: "pcmd-calc-read-agent"), through: host)
+        XCTAssertTrue(afterAgent.ok, "\(afterAgent)")
+        let agentText = try XCTUnwrap(afterAgent.result)
+        for marker in ["AGENTX", "AGENTY", "AGENTZ"] {
+            XCTAssertTrue(agentText.contains(marker),
+                          "setup: all three agent cells must land before undo runs: \(agentText)")
+        }
+
+        // ── ONE ⌘Z. The literal user-facing door.
+        runtime.postUndo(path: path)
+        await runtime.drainInputChainForTesting()
+
+        let afterUndo = await send(command("office.sheets.read",
+                                           args: ["path": path, "sheet": "Sheet1", "range": "A1:E3"],
+                                           sessionId: "S1", commandId: "pcmd-calc-read-undone"), through: host)
+        XCTAssertTrue(afterUndo.ok, "\(afterUndo)")
+        let undone = try XCTUnwrap(afterUndo.result)
+        print("[calc repair-undo drill] after one ⌘Z:\n\(undone)")
+
+        for marker in ["AGENTX", "AGENTY", "AGENTZ"] {
+            XCTAssertFalse(undone.contains(marker),
+                           "ONE ⌘Z must take back the agent's WHOLE write — \(marker) is still "
+                             + "there, so either Repair was dropped (Calc silently skipped to the "
+                             + "human's own edit, the old behaviour) or the ledger collapsed the "
+                             + "three cells to fewer than three undo actions: \(undone)")
+        }
+        XCTAssertTrue(undone.contains("Z"),
+                      "and the HUMAN's own edit in A1 must survive — repair-undo is strict LIFO over "
+                        + "one shared stack, so the agent's actions come off first and the human's "
+                        + "earlier edit is untouched. Losing it here would mean one ⌘Z took back "
+                        + "more than the user asked for: \(undone)")
+
+        // ── The save/undo-coexistence proof, made explicit rather than left implicit above: the
+        // human's edit was SAVED before the agent ever wrote, and it is still undoable now. A
+        // second ⌘Z must take it back, restoring the fixture's own original A1. If saving truncated
+        // the undo stack, this is where that would show — and it is exactly the risk that decides
+        // whether requirement 1 (save after every edit) can coexist with requirement 3 at all.
+        runtime.postUndo(path: path)
+        await runtime.drainInputChainForTesting()
+        let afterSecondUndo = await send(command("office.sheets.read",
+                                                 args: ["path": path, "sheet": "Sheet1", "range": "A1:A1"],
+                                                 sessionId: "S1", commandId: "pcmd-calc-read-undone-2"), through: host)
+        XCTAssertTrue(afterSecondUndo.ok, "\(afterSecondUndo)")
+        let restored = try XCTUnwrap(afterSecondUndo.result)
+        XCTAssertTrue(restored.contains("NORMA GATE"),
+                      "a SAVED edit must still be undoable — the fixture's original A1 must come "
+                        + "back. If it does not, saving truncated the undo stack, and instant-save "
+                        + "would be silently destroying the user's ⌘Z history: \(restored)")
+
+        _ = host.teardownAllOfficeRuntimesAndStopHelper()
     }
 
     // MARK: - Live drills

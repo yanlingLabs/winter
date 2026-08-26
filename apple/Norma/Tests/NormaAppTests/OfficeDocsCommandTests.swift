@@ -41,7 +41,16 @@ final class OfficeDocsCommandTests: XCTestCase {
 
     private var scratchDirs: [URL] = []
 
+    /// Every live host this suite creates, torn down in `tearDown` — the same structural fix, and
+    /// the same measured leak, as `OfficeSheetsCommandTests`. Before it, a full run of this suite
+    /// left **16 `NormaOfficeHelper` processes resident**; after it, zero. Registered in the ONE
+    /// factory every test goes through rather than as an end-of-test call per test, because a
+    /// cleanup that has to be remembered is one the next test added will forget.
+    private var liveHosts: [ShellSessionHost] = []
+
     override func tearDown() {
+        for host in liveHosts { _ = host.teardownAllOfficeRuntimesAndStopHelper() }
+        liveHosts = []
         for dir in scratchDirs { try? FileManager.default.removeItem(at: dir) }
         scratchDirs = []
         super.tearDown()
@@ -88,6 +97,7 @@ final class OfficeDocsCommandTests: XCTestCase {
                 extraArguments: ["--lok-root", Self.vendorProductSetRoot.path,
                                  "--sandbox-profile", Self.sandboxProfilePath.path]))
         }
+        liveHosts.append(host)
         return host
     }
 
@@ -473,7 +483,7 @@ final class OfficeDocsCommandTests: XCTestCase {
     /// ⟹ **A human's ⌘Z cannot take back a `docs` edit, and does nothing at all when they try.** The
     /// tool description says exactly that, in those words, instead of ruling 4's "shared" framing.
     /// This test pins the real behaviour so a later reader does not "fix" the description back.
-    func testLiveAHumanUndoOnTheirOwnViewCannotTakeBackAnAgentEditAndSilentlyDoesNothing() async throws {
+    func testLiveAHumanUndoTakesBackAWholeAgentEditInOnePress() async throws {
         let (path, host, runtime) = try await openLive("two-page.odt")
         let appended = "UNDOMARKER one two three four"
         let result = await send(command("office.docs.append", args: ["path": path, "text": appended],
@@ -483,17 +493,22 @@ final class OfficeDocsCommandTests: XCTestCase {
         // The USER-FACING undo door — literally what ⌘Z dispatches (`OfficeRuntime.postUndo`), on
         // the PRIMARY view, which is the whole point: the agent wrote on its own second view.
         //
-        // ⚠️ **Disclosed weakness: this test has no positive control of its own.** Its assertions are
-        // that the text SURVIVES, so a `postUndo` that silently did nothing at all — a broken door,
-        // not a refused one — would pass it just the same. The positive control exists, but in
-        // another suite: the Office Harness's `18.undoLadderThenRedo`
-        // (`OfficeHarnessScript.swift:159`) drives this same `postUndo` door and proves it DOES
-        // remove a marker typed on the primary view, confirmed on disk, with redo restoring it; and
-        // `18.twoViewUndoCharacterization` (`:161`) independently pins the cross-view case as
-        // refused/no-op. Together those make "the door works, and it declines THIS action" the
-        // supported reading rather than "the door is dead". Recorded here rather than left for a
-        // reader to assume — adding a same-suite positive control would mean typing on the primary
-        // view through `postKey`, which is Stage B surface this task does not otherwise touch.
+        // ⚠️ **THIS TEST WAS INVERTED BY office-live-edit R3, and the inversion is the deliverable.**
+        // It used to be called `…CannotTakeBackAnAgentEditAndSilentlyDoesNothing` and asserted that
+        // `UNDOMARKER` SURVIVED — a true and pinned characterization of the engine's per-view undo
+        // gate, and a genuinely bad experience: the human's ⌘Z did nothing, silently. `postUndo` now
+        // dispatches with `Repair: true`, so the user's ruling holds — **⌘Z reverts the last thing
+        // that happened, regardless of who did it.**
+        //
+        // Its old disclosed weakness is gone too, and by construction rather than by assertion: this
+        // test's claim is now that the text DISAPPEARS, so a `postUndo` that silently did nothing —
+        // the exact failure the old shape could not distinguish from success — fails it. It is
+        // therefore its own positive control, and it is the end-to-end proof that the repair flag
+        // survives every hop from ⌘Z's door to LOK: `postUndo` → the input chain → the driver → the
+        // app-wide FIFO → the wire → the helper → `postUnoCommand`.
+        //
+        // It also exercises the LEDGER end to end: `docs.append` is one `paste`, so one press must
+        // take the whole appended paragraph back, not one character of it.
         runtime.postUndo(path: path)
 
         // A settle, deliberately NOT a poll on the assertion's own condition. Polling "has UNDOMARKER
@@ -507,13 +522,86 @@ final class OfficeDocsCommandTests: XCTestCase {
                                        commandId: "pcmd_undo_read"), through: host)
         XCTAssertTrue(after.ok, "\(after)")
         let text = after.result ?? ""
-        XCTAssertTrue(text.contains("UNDOMARKER"),
-                      "LOK refuses a cross-view undo outside repair mode — the agent's edit must still "
-                        + "be there after the human's own ⌘Z (docundo.cxx:456-472): \(text)")
-        XCTAssertTrue(text.contains("all 4 paragraphs"),
-                      "and the paragraph the agent added must still be there too: \(text)")
-        XCTAssertFalse(runtime.stateSnapshot.documents[path]?.dirty ?? true,
-                       "a refused undo must not even mark the document modified — nothing happened at all")
+        XCTAssertFalse(text.contains("UNDOMARKER"),
+                       "the human's own ⌘Z must take back the agent's edit — `postUndo` dispatches "
+                         + "`Repair: true`, which skips LOK's per-view undo gate "
+                         + "(sw/…/docundo.cxx:458-470). Still present means the repair flag was "
+                         + "dropped somewhere between this door and `postUnoCommand`: \(text)")
+        XCTAssertTrue(text.contains("all 3 paragraphs") || !text.contains("all 4 paragraphs"),
+                      "and the document must be back to its pre-agent shape, not merely missing the "
+                        + "marker text: \(text)")
+        // **What "one press" is proven against: the SAVED BYTES on disk, not a flag.**
+        //
+        // The save is issued EXPLICITLY, because `autoSaveEnabled` ships **OFF** (see its own header
+        // for the post-save close-window blocker that keeps it parked). Waiting for the document to
+        // go clean is therefore waiting for THIS save to have landed, and reading `content.xml` back
+        // afterwards proves the undo both happened AND was persisted — strictly stronger than
+        // asserting `dirty`, and what makes this test its own positive control: a `postUndo` that
+        // silently did nothing (the pre-R3 behaviour this test was INVERTED from) leaves UNDOMARKER
+        // in those bytes and fails here.
+        //
+        // Deliberately written to hold either way: if instant-save is ever armed, the debounce will
+        // already have saved and this call is harmless, and the assertions below are unchanged.
+        runtime.save(path)
+        let settledClean = await waitUntilLive { runtime.stateSnapshot.documents[path]?.dirty == false }
+        XCTAssertTrue(settledClean, "the post-undo save must land the undone state on disk")
+        let savedXML = try readODFEntry(atPath: path, entry: "content.xml")
+        XCTAssertFalse(savedXML.contains("UNDOMARKER"),
+                       "the SAVED bytes must no longer carry the agent's text: the human's ⌘Z took "
+                         + "it back and instant-save persisted that. Still present means either the "
+                         + "undo did nothing or the save did")
+    }
+
+    // MARK: - office-live-edit R2 — how many paragraphs one paste actually makes
+
+    /// **PROBE, and the decision it settles.** Requirement 2 wants several edits in one tool call.
+    /// For `docs.append` the cheapest possible shape is for the DAEMON to join N paragraphs with
+    /// `\n` and send the existing single-`text` wire frame: that would be one wire request, one
+    /// `paste`, ONE undo action, and the existing exact-text verification — with no new wire field,
+    /// no new app decoder, and no change to the deadline budget.
+    ///
+    /// That shape is only legitimate if a `\n` inside a pasted payload becomes a REAL PARAGRAPH
+    /// BREAK. `docs.ts`'s own `replaceWith` note says the engine inserts `\n` "as literal
+    /// characters, not as a paragraph break" — **but that note is about `replace`, which goes
+    /// through `.uno:ExecuteSearch`, an entirely different mechanism from `insert`/`append`'s
+    /// `paste` of `text/plain`.** Carrying that claim across mechanisms is exactly the
+    /// right-conclusion-wrong-supporting-fact shape this arc keeps producing, so it is measured here
+    /// instead.
+    ///
+    /// The assertion is on the PARAGRAPH NUMBERING `read` returns, not on the characters: a literal
+    /// `\n` inside one paragraph and a real paragraph break are indistinguishable in a raw text
+    /// dump, and only the numbering tells them apart.
+    func testLiveOnePasteWithNewlinesBecomesSeveralRealParagraphs() async throws {
+        let (path, host, _) = try await openLive("two-page.odt", as: "paste-paragraphs.odt")
+
+        let before = await send(command("office.docs.info", args: ["path": path], sessionId: "S1",
+                                        commandId: "pcmd_pp_info_before"), through: host)
+        XCTAssertTrue(before.ok, "\(before)")
+        let beforeText = try XCTUnwrap(before.result)
+
+        let result = await send(command("office.docs.append",
+                                        args: ["path": path, "text": "ALPHAPARA\nBETAPARA\nGAMMAPARA"],
+                                        sessionId: "S1", commandId: "pcmd_pp_append"), through: host)
+        XCTAssertTrue(result.ok, "the append itself must succeed: \(result)")
+
+        let after = await send(command("office.docs.read", args: ["path": path], sessionId: "S1",
+                                       commandId: "pcmd_pp_read"), through: host)
+        XCTAssertTrue(after.ok, "\(after)")
+        let text = try XCTUnwrap(after.result)
+        print("[paste-paragraph probe] info before: \(beforeText)\n--- read after ---\n\(text)")
+
+        // Each marker must be numbered as its OWN paragraph. If `\n` pasted as a literal character,
+        // all three land inside ONE numbered paragraph and these three assertions cannot all hold.
+        let numbered = text.split(separator: "\n").filter { line in
+            ["ALPHAPARA", "BETAPARA", "GAMMAPARA"].contains { line.contains($0) }
+        }
+        XCTAssertEqual(numbered.count, 3,
+                       "three markers must occupy three separately numbered paragraphs — if they "
+                         + "share one, `\\n` pasted as a literal character and the daemon-side join "
+                         + "design for requirement 2 is INVALID: \(text)")
+        for marker in ["ALPHAPARA", "BETAPARA", "GAMMAPARA"] {
+            XCTAssertTrue(text.contains(marker), "\(marker) must survive the paste: \(text)")
+        }
     }
 
     // MARK: - The Word carve-out: .docx is written exactly like .odt

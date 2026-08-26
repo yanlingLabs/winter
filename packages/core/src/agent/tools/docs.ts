@@ -57,14 +57,24 @@ import { officeTimeoutMessage, officeResolvedPathWithinFence } from "./sheets";
  *    `createAgentView` + `setView` architecture carries over unchanged and an agent edit does not
  *    move the user's caret. The ruling's second half — "the undo stack is SHARED across views, so an
  *    agent edit lands in the user's own ⌘Z stack" — is structurally true (`sw::UndoManager` hangs off
- *    `SwDoc`, not off `SwView`) but its USER-FACING conclusion is **false, and was falsified live**
- *    (T7, `OfficeDocsCommandTests
- *    .testLiveAHumanUndoOnTheirOwnViewCannotTakeBackAnAgentEditAndSilentlyDoesNothing`): in LOK mode
- *    and outside repair mode, `sw::UndoManager::GetLastUndoInfo`
+ *    `SwDoc`, not off `SwView`), and **as of office-live-edit R3 its user-facing conclusion is true
+ *    as well.**
+ *
+ *    The history is worth keeping, because it is why the fix looks the way it does. T7 falsified the
+ *    conclusion live: in LOK mode and OUTSIDE REPAIR MODE, `sw::UndoManager::GetLastUndoInfo`
  *    (`sw/source/core/undo/docundo.cxx:456-472`) REFUSES an undo whose top action belongs to another
  *    view, and its one escape hatch (`IsViewUndoActionIndependent`, `:367-430`) requires both actions
- *    to be `SwUndoId::TYPING` — a `PASTE_CLIPBOARD` never qualifies. So a human's ⌘Z cannot take back
- *    a `docs` edit and silently does nothing. The description below says exactly that.
+ *    to be `SwUndoId::TYPING` — a `PASTE_CLIPBOARD` never qualifies. So a human's ⌘Z could not take
+ *    back a `docs` edit, and silently did nothing.
+ *
+ *    **The five words doing the work in that sentence are "outside repair mode."** R3 dispatches ⌘Z
+ *    with the slot's own `Repair` argument (`sfx2/sdi/sfx.sdi:4719-4720`), which skips that gate in
+ *    all three apps — proven live against the SHIPPED engine, beside a non-repair control arm in the
+ *    same run, in `OfficeRuntimeLiveTests.testRepairArgumentLetsAPrimaryViewUndoTakeBackAnAgentViewEdit`.
+ *    The T7 test above still exists and still runs; it was INVERTED and renamed
+ *    (`testLiveAHumanUndoTakesBackAWholeAgentEditInOnePress`), and inverted it is its own positive
+ *    control — its claim is now that the text disappears, so a ⌘Z that silently did nothing fails it.
+ *    Ruling 4's "named follow-up, deliberately not attempted in v1" is therefore DELIVERED.
  *
  * ## Two deliberate v1 narrowings, surfaced rather than smuggled
  *
@@ -153,8 +163,48 @@ const DocsArgs = z.object({
    *  accepted in v1; see this file's own header for the engine reason. */
   all: z.boolean().optional(),
   /** `insert`/`append` ONLY — the text to add. Capped under the 8 KiB args ceiling; a longer body
-   *  should be added in more than one call, which is also better for the shared undo stack. */
+   *  should be added in more than one call.
+   *
+   *  ⚠️ **The "also better for the shared undo stack" half of this note was REMOVED in
+   *  office-live-edit R3, because its premise inverted.** It argued that more calls give the human
+   *  finer undo granularity. One tool call is now exactly ONE undo step (bracket-and-count —
+   *  `OfficeUndoLedger`), so splitting a body across N calls now costs the human N presses of ⌘Z to
+   *  take back one logical edit. Splitting is still right for the byte cap; it is no longer an undo
+   *  argument, and it pointed the other way. */
   text: z.string().min(1).max(4000).optional(),
+  /** `append` ONLY (office-live-edit R2) — **several paragraphs in ONE call.** Mutually exclusive
+   *  with `text`; passing both refuses rather than picking one.
+   *
+   *  **Why this is not a new wire shape.** The daemon joins these with `\n` and sends the SAME
+   *  single-`text` frame the one-paragraph form already sends, because `append` is implemented as a
+   *  single `paste` of `text/plain` and a pasted `\n` is a real paragraph break — **measured, not
+   *  assumed** (`OfficeDocsCommandTests.testLiveOnePasteWithNewlinesBecomesSeveralRealParagraphs`:
+   *  a 3-paragraph document plus a 3-marker payload read back as 6 separately numbered paragraphs).
+   *  That measurement mattered because `replaceWith`'s note two operands up says the engine inserts
+   *  `\n` "as literal characters, not as a paragraph break" — TRUE for `replace`, which goes through
+   *  `.uno:ExecuteSearch`, and carrying it across to `paste` without checking would have been this
+   *  arc's own right-conclusion-wrong-supporting-fact shape.
+   *
+   *  Four consequences, all of them why this shape was chosen over an array on the wire:
+   *  one helper request (so the write deadline is untouched), ONE `paste`, ONE engine undo action —
+   *  so one ⌘Z takes the whole batch back — and the existing verification is unchanged and is
+   *  strictly stronger than a per-op ledger: the helper compares the WHOLE resulting document text
+   *  against the exact text it predicted, so a batch that lands wrong fails loudly rather than
+   *  reporting which ops it believes it did.
+   *
+   *  ⚠️ **The honest limit of that, review F-6.** "Strictly stronger" is true of the RESULT
+   *  CONTRACT — a partial paste can never be reported as success. It is not true of the DOCUMENT: a
+   *  failed verification throws before the broker's save, so an ADOPTED document is left holding the
+   *  partial paste, dirty and unsaved, while the agent is told the call failed. That is pre-existing
+   *  for single-`text` append; `texts` widens the blast radius from one paragraph to up to 50.
+   *  Disclosed in the tool description rather than fixed here, because the fix is a rollback path
+   *  the engine does not offer.
+   *
+   *  Bounds are doubled deliberately: `.max(50)` elements AND a joined-length check in the ladder
+   *  against the same 4 000-character ceiling `text` itself carries, because 50 × 2 000 would
+   *  otherwise be 100 000 characters aimed at an 8 KiB wire cap whose overflow is an opaque schema
+   *  error rather than a useful refusal. */
+  texts: z.array(z.string().min(1).max(2000)).min(1).max(50).optional(),
   /** `insert` ONLY — "start" or "end" of the document. Omitted means "end". `append` ignores it (it
    *  is always the end, by definition) and refuses it rather than accepting a value it would not
    *  honour. */
@@ -260,10 +310,11 @@ export function registerDocsTool(r: ToolRegistry, deps: DocsToolDeps): void {
     name: "docs",
     description:
       "Read and edit a text document Norma has access to (.odt, .docx — any format the office engine "
-      + "can open). Every write verb SAVES immediately — there is no separate save step, and there is "
-      + "NO WAY TO UNDO IT: neither from here, nor by a human pressing ⌘Z in an open tab (the office "
-      + "engine only lets a view undo edits made by that same view, and Norma edits on its own). "
-      + "Their ⌘Z will simply do nothing. Treat every write as permanent, and read before you write. "
+      + "can open). Every write verb SAVES immediately — there is no separate save step, and you "
+      + "cannot undo from here. A HUMAN can: if they have the document open in a tab, one press of "
+      + "⌘Z takes back your whole tool call, however many edits it made, and ⌘⇧Z puts it back. So a "
+      + "write is recoverable BY THEM, not by you — you still cannot reverse your own edit, so read "
+      + "before you write. "
       + "Pick a verb:\n"
       + "• info — path. Page, paragraph and character counts. Start here: it also doubles as a check "
       + "that the Mac app can actually open documents right now. The page count comes from the "
@@ -284,7 +335,10 @@ export function registerDocsTool(r: ToolRegistry, deps: DocsToolDeps): void {
       + "approximated — make `find` specific enough to match only what you mean.\n"
       + "• insert — path, text, optional at (\"start\" or \"end\"; omitted means the end). Puts "
       + "exactly that text at that position and adds nothing else — no new paragraph, no spacing.\n"
-      + "• append — path, text. Adds the text at the end as a NEW paragraph. This is the one to use "
+      + "• append — path, and either text (one paragraph) or texts (an ARRAY of paragraphs, added "
+      + "in order, up to 50 and 4000 characters in total). Prefer texts when you have several "
+      + "paragraphs to add: it is one call instead of several, it costs the user one ⌘Z instead of "
+      + "one per paragraph, and it is faster. Adds them at the end as NEW paragraphs. This is the one to use "
       + "for \"add a section/sentence to the end\"; insert at:\"end\" continues the last paragraph "
       + "instead.\n"
       + "Every path must be inside this session's own working directories — an office read/write "
@@ -294,6 +348,11 @@ export function registerDocsTool(r: ToolRegistry, deps: DocsToolDeps): void {
       + "own refusal tells you if that's the problem.\n"
       + "A document a human has open with UNSAVED changes refuses every write, naming the tab — save "
       + "or discard those edits first.\n"
+      + "If insert or append reports that it could not verify what it wrote, the text may still be "
+      + "sitting in the document unsaved — nothing was saved, but if a human had that file open, "
+      + "their tab is now holding an edit they did not ask for, and every later write to it is "
+      + "refused until they save or discard it. Re-read before doing anything else. With texts this "
+      + "covers all the paragraphs in the call, not one.\n"
       + "**A timeout means the outcome is UNKNOWN, never that a write failed to happen** — the app "
       + "may have completed it and lost the race home. Re-read the document before ever retrying a "
       + "write verb. insert/append are the dangerous ones to resend: they ADD text, so a blind retry "
@@ -334,9 +393,37 @@ export function registerDocsTool(r: ToolRegistry, deps: DocsToolDeps): void {
             + "specific enough to match only the occurrence you mean.");
         }
       }
+      // `texts` is an APPEND-only operand, and a present one on any other verb REFUSES rather than
+      // being ignored. Ignoring it would silently drop every paragraph after the first — the exact
+      // silent-wrong-answer shape `all: false` and `append`'s own `at` are already kept in the schema
+      // to prevent.
+      if (a.texts !== undefined && a.verb !== "append") {
+        throw new Error(`docs ${a.verb} has no \`texts\` — only append takes several paragraphs at `
+          + "once. Use verb:\"append\" with texts:[...], or send one `text`.");
+      }
       if (a.verb === "insert" || a.verb === "append") {
-        if (a.text === undefined) {
-          throw new Error(`docs ${a.verb} needs a \`text\` — what to add to the document.`);
+        if (a.text === undefined && a.texts === undefined) {
+          throw new Error(`docs ${a.verb} needs a \`text\` — what to add to the document`
+            + (a.verb === "append" ? ", or `texts` for several paragraphs at once." : "."));
+        }
+        if (a.text !== undefined && a.texts !== undefined) {
+          throw new Error(`docs ${a.verb} takes \`text\` OR \`texts\`, not both — passing both leaves `
+            + "it ambiguous which one you meant to add, and guessing would put text into the user's "
+            + "saved file that they never asked for. Send one of them.");
+        }
+      }
+      if (a.texts !== undefined) {
+        // The AGGREGATE bound. The per-element `.max(2000)` and the `.max(50)` array length do not
+        // compose to anything safe on their own (50 × 2 000 = 100 000 characters against an 8 KiB
+        // wire cap), and the wire cap's own refusal is a field-level zod `.refine` whose message
+        // names neither the tool, the verb, nor which paragraph was too long. Refusing here is
+        // cheap, specific and actionable — the same reason `sheets.set` checks its cell count before
+        // dispatch rather than letting the cap produce an opaque schema error.
+        const joinedLength = a.texts.join("\n").length;
+        if (joinedLength > 4000) {
+          throw new Error(`docs append's \`texts\` total ${joinedLength} characters, over the 4000 `
+            + `limit one call can carry (${a.texts.length} paragraphs, joined). Send them in more `
+            + "than one call — each call is still one undo step for the human.");
         }
       }
       if (a.verb === "append" && a.at !== undefined) {
@@ -389,7 +476,12 @@ export function registerDocsTool(r: ToolRegistry, deps: DocsToolDeps): void {
         if (a.at !== undefined) fields.at = a.at;
         args = officeCommandArgs(resolvedPath, fields);
       } else {
-        args = officeCommandArgs(resolvedPath, { text: a.text! });
+        // append. `texts` never reaches the wire as an array — it is joined into the SAME `text`
+        // field the one-paragraph form sends, so the app-side decoder, the helper and the
+        // verification are all byte-identically the proven path. Conditional construction as
+        // everywhere else: exactly one of the two is defined by the time this runs.
+        args = officeCommandArgs(resolvedPath,
+                                 { text: a.texts !== undefined ? a.texts.join("\n") : a.text! });
       }
 
       const deadlineMs = OFFICE_DEADLINES_MS[action];

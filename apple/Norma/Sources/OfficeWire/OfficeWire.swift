@@ -188,9 +188,30 @@ public enum OfficeWireFrame: Equatable, Sendable {
     /// process-global "active frame," never a part-scoped call — and the brief's own words for
     /// this door are "view-scoped (setView prefix)"; `setPart` was never asked for and is not
     /// added speculatively.
-    case undo(seq: UInt64, docId: String)
-    /// `.uno:Redo`, same posture as `undo` above.
-    case redo(seq: UInt64, docId: String)
+    ///
+    /// **`repair`** rides the slot's own `SfxBoolItem Repair SID_REPAIRPACKAGE` argument
+    /// (`sfx2/sdi/sfx.sdi:4719-4720`, Redo's twin at `:3590-3591`). Its ONLY job is to skip the
+    /// per-view refusal every app applies in LOK mode — Writer `basesh.cxx:649-664`, Impress
+    /// `viewshel.cxx:1376-1394`, Calc `tabvwshb.cxx:746,773-778` — so an undo dispatched from THIS
+    /// document's primary view can take back an edit made through the AGENT view. Defaults `false`,
+    /// which is byte-for-byte the pre-repair frame (the encoder omits the key entirely, and the
+    /// decoder reads an absent key as `false`), so every existing caller and every pinned wire
+    /// fixture is unchanged by its addition.
+    case undo(seq: UInt64, docId: String, repair: Bool = false)
+    /// `.uno:Redo`, same posture as `undo` above — **including `repair`, which is not optional in
+    /// practice**: a repair-undone action keeps its ORIGINAL `ViewShellId` when it moves to the redo
+    /// stack, so the redo gates (`sw/…/docundo.cxx:523`, `sc/…/tabvwshb.cxx:778` with
+    /// `bIsUndo == false`, `sd/…/viewshel.cxx:1455`) refuse a plain redo of it from any other view.
+    /// A repair undo MUST be paired with a repair redo or ⌘⇧Z silently stops working right after an
+    /// agent edit is taken back.
+    case redo(seq: UInt64, docId: String, repair: Bool = false)
+    /// **office-live-edit R3 — how deep this document's undo and redo stacks are.**
+    /// `getCommandValues(".uno:UndoCount"/".uno:RedoCount")`, a synchronous query, NOT a dispatch
+    /// and NOT a state notification. It exists so one ⌘Z can undo exactly the N actions ONE agent
+    /// tool call created — the count is bracketed around the call, helper-side, and rides home in
+    /// the reply. See `LOKBridge.undoDepthOnDedicatedThread` for why this is reachable at all when
+    /// the slot/state layer has no stack introspection.
+    case undoDepth(seq: UInt64, docId: String)
     /// The two-writer groundwork: mints a SECOND LOK view for `docId` on demand (`createView()`),
     /// for a future AI collaborator's own edits — never used by the app today (the brief's own
     /// words), only by the live characterization drill (`OfficeRuntimeLiveTests`). Refused
@@ -488,6 +509,10 @@ public enum OfficeWireFrame: Equatable, Sendable {
     case undoOk(seq: UInt64, docId: String)
     /// Office Stage B Task 6 — answers `redo`, same posture as `undoOk`.
     case redoOk(seq: UInt64, docId: String)
+    /// office-live-edit R3 — answers `undoDepth`. Unlike `undoOk` this IS a real answer about the
+    /// document's state, not an ack of a dispatch: a query that could not be answered comes back
+    /// as `.error`, never as a zero.
+    case undoDepthOk(seq: UInt64, docId: String, undoCount: Int, redoCount: Int)
     /// Office Stage B Task 6 — answers a successful `createView`: `viewId` is `createView()`'s OWN
     /// return value (never re-derived via `getView()`, which becomes ambiguous the instant a
     /// second view exists — see `LOKBridge.createAgentViewOnDedicatedThread`'s own header). The
@@ -658,7 +683,7 @@ public enum OfficeWireFrame: Equatable, Sendable {
     public static let wireTypes: [String] = [
         "hello", "ping", "open", "close", "save", "keyEvent", "mouseEvent", "extTextInputEvent",
         // Office Stage B Task 6 — clipboard, undo/redo, the second ("agent") view.
-        "clipboardCopy", "clipboardCut", "clipboardPaste", "undo", "redo", "createView", "agentKeyEvent",
+        "clipboardCopy", "clipboardCut", "clipboardPaste", "undo", "redo", "undoDepth", "createView", "agentKeyEvent",
         "subscribeTiles", "unsubscribe", "tileRequest",
         // office-agent-tools T3 — sheets info/read.
         "sheetsInfo", "sheetsRead",
@@ -672,7 +697,7 @@ public enum OfficeWireFrame: Equatable, Sendable {
         "docsInfo", "docsRead", "docsReplace", "docsInsert",
         "helloOk", "refused", "pong", "opened", "openFailed", "closed", "saved", "saveFailed",
         "keyEventOk", "mouseEventOk", "extTextInputEventOk",
-        "clipboardCopyOk", "clipboardCutOk", "clipboardPasteOk", "undoOk", "redoOk",
+        "clipboardCopyOk", "clipboardCutOk", "clipboardPasteOk", "undoOk", "redoOk", "undoDepthOk",
         "agentViewReady", "agentKeyEventOk",
         "error", "documentEvent",
         "subscribed", "unsubscribed", "tileRequestAccepted", "tile", "tileFailed", "invalidated",
@@ -698,6 +723,7 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .clipboardPaste: return "clipboardPaste"
         case .undo: return "undo"
         case .redo: return "redo"
+        case .undoDepth: return "undoDepth"
         case .createView: return "createView"
         case .agentKeyEvent: return "agentKeyEvent"
         case .subscribeTiles: return "subscribeTiles"
@@ -733,6 +759,7 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .clipboardPasteOk: return "clipboardPasteOk"
         case .undoOk: return "undoOk"
         case .redoOk: return "redoOk"
+        case .undoDepthOk: return "undoDepthOk"
         case .agentViewReady: return "agentViewReady"
         case .agentKeyEventOk: return "agentKeyEventOk"
         case .error: return "error"
@@ -773,8 +800,9 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .clipboardCopy(let seq, _, _): return seq
         case .clipboardCut(let seq, _, _): return seq
         case .clipboardPaste(let seq, _, _, _): return seq
-        case .undo(let seq, _): return seq
-        case .redo(let seq, _): return seq
+        case .undo(let seq, _, _): return seq
+        case .redo(let seq, _, _): return seq
+        case .undoDepth(let seq, _): return seq
         case .createView(let seq, _): return seq
         case .agentKeyEvent(let seq, _, _, _, _, _): return seq
         case .subscribeTiles(let seq, _, _, _, _): return seq
@@ -810,6 +838,7 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .clipboardPasteOk(let seq, _): return seq
         case .undoOk(let seq, _): return seq
         case .redoOk(let seq, _): return seq
+        case .undoDepthOk(let seq, _, _, _): return seq
         case .agentViewReady(let seq, _, _): return seq
         case .agentKeyEventOk(let seq, _): return seq
         case .error(let seq, _): return seq
@@ -885,8 +914,18 @@ public enum OfficeWireFrame: Equatable, Sendable {
             payload["docId"] = docId
             payload["part"] = part
             payload["text"] = text
-        case .undo(_, let docId), .redo(_, let docId), .createView(_, let docId):
+        case .createView(_, let docId), .undoDepth(_, let docId):
             payload["docId"] = docId
+        case .undoDepthOk(_, let docId, let undoCount, let redoCount):
+            payload["docId"] = docId
+            payload["undoCount"] = undoCount
+            payload["redoCount"] = redoCount
+        case .undo(_, let docId, let repair), .redo(_, let docId, let repair):
+            payload["docId"] = docId
+            // Emitted ONLY when true. An always-present `"repair":false` would change the bytes of
+            // every undo frame this bridge has ever sent and red the pinned wire fixtures for no
+            // behavioural gain — the decoder already reads an absent key as `false`.
+            if repair { payload["repair"] = true }
         case .agentKeyEvent(_, let docId, let part, let type, let charCode, let keyCode):
             payload["docId"] = docId
             payload["part"] = part
@@ -2169,17 +2208,34 @@ public enum OfficeWireCodec {
             guard let docId = object["docId"] as? String else {
                 return .rejected(seq: seq, reason: "malformed")
             }
-            return .frame(.undo(seq: seq, docId: docId))
+            // ABSENT means `false` — the pre-repair frame shape, which every pinned fixture and
+            // every shipped caller still emits. A PRESENT-but-wrong-typed `repair` is NOT silently
+            // read as absent: it is malformed, and refused. Reading `"true"` (a string) as `false`
+            // would be this arc's own silent-wrong-answer class on the one operand that decides
+            // whether an undo may cross views — and a repair undo that quietly declines to cross is
+            // indistinguishable, at every layer above, from an undo that had nothing to do.
+            guard let undoRepair = decodedRepairFlag(object) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.undo(seq: seq, docId: docId, repair: undoRepair))
         case "redo":
             guard let docId = object["docId"] as? String else {
                 return .rejected(seq: seq, reason: "malformed")
             }
-            return .frame(.redo(seq: seq, docId: docId))
+            guard let redoRepair = decodedRepairFlag(object) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.redo(seq: seq, docId: docId, repair: redoRepair))
         case "createView":
             guard let docId = object["docId"] as? String else {
                 return .rejected(seq: seq, reason: "malformed")
             }
             return .frame(.createView(seq: seq, docId: docId))
+        case "undoDepth":
+            guard let docId = object["docId"] as? String else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.undoDepth(seq: seq, docId: docId))
         case "agentKeyEvent":
             guard let docId = object["docId"] as? String, let part = intValue(object["part"]),
                   let typeRaw = intValue(object["eventType"]), let type = OfficeKeyEventType(rawValue: typeRaw),
@@ -2212,6 +2268,15 @@ public enum OfficeWireCodec {
                 return .rejected(seq: seq, reason: "malformed")
             }
             return .frame(.redoOk(seq: seq, docId: docId))
+        case "undoDepthOk":
+            // `intValue` (not `as? Int`) for the same NSNumber-boolean reason every other numeric
+            // field on this wire uses it: `true` satisfies a bare `as? Int`.
+            guard let docId = object["docId"] as? String,
+                  let undoCount = intValue(object["undoCount"]),
+                  let redoCount = intValue(object["redoCount"]), undoCount >= 0, redoCount >= 0 else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.undoDepthOk(seq: seq, docId: docId, undoCount: undoCount, redoCount: redoCount))
         case "agentViewReady":
             guard let docId = object["docId"] as? String, let viewId = intValue(object["viewId"]) else {
                 return .rejected(seq: seq, reason: "malformed")
@@ -2609,6 +2674,27 @@ func int64Value(_ value: Any?) -> Int64? {
 func doubleValue(_ value: Any?) -> Double? {
     guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
     return number as? Double
+}
+
+/// The `repair` flag on `undo`/`redo`, decoded with the SAME NSNumber discipline `intValue` uses,
+/// pointed the other way: a real JSON boolean is exactly an `NSNumber` whose CoreFoundation type id
+/// IS `CFBooleanGetTypeID()`. Without that check `"repair": 1` — a NUMBER — would satisfy a plain
+/// `as? Bool` and silently arm cross-view undo, which is the same trap `intValue` exists to close
+/// from the other side (`true` satisfying `as? Int`).
+///
+/// Three-way on purpose, and the three are NOT interchangeable:
+/// - key ABSENT → `false`. The pre-repair frame shape; every shipped caller and every pinned wire
+///   fixture still emits it, and they must keep decoding to the identical frame.
+/// - key present and a real boolean → that value.
+/// - key present and ANYTHING else → `nil`, which the caller turns into `.rejected(reason:
+///   "malformed")`. Deliberately NOT folded into the absent case: a caller that meant `"true"` and
+///   got a plain non-repair undo would see the wire's own success reply and a document that did not
+///   change — this bridge cannot tell those apart afterwards (`undoOk` acks the DISPATCH, never the
+///   effect), so the only place the mistake is still visible is here.
+func decodedRepairFlag(_ object: [String: Any]) -> Bool? {
+    guard let raw = object["repair"] else { return false }
+    guard let number = raw as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
+    return number.boolValue
 }
 
 /// Mints strictly increasing `seq` values for one connection's OUTBOUND frames, starting at 1
