@@ -2675,9 +2675,16 @@ final class LOKBridge: OfficeDocumentBridge {
             for turn in 1...Self.formulaRestoreSettleTurns {
                 if readSelectionTextOnDedicatedThread(doc) != formulaModeText {
                     if dispatches > 1 || turn > 1 {
+                        // "on the agent view's own observable", not "landed", deliberately. This
+                        // check reads `getTextSelection` on the AGENT view; tiles paint from
+                        // whichever view `getAlternativeViewForPaint` resolves, and the two have
+                        // been MEASURED to disagree — a run that logged this line still painted
+                        // formula source. A log line that says more than the check proves is this
+                        // project's own "description contradicting the code" defect, in stderr.
                         FileHandle.standardError.write(Data((
-                            "[LOKBridge sheets] formula-display restore landed after \(dispatches) "
-                                + "dispatch(es), \(turn) settle turn(s)\n").utf8))
+                            "[LOKBridge sheets] formula display restored on the agent view's own "
+                                + "observable after \(dispatches) dispatch(es), \(turn) settle "
+                                + "turn(s) — the PAINT path is not covered by this check\n").utf8))
                     }
                     return
                 }
@@ -2687,7 +2694,8 @@ final class LOKBridge: OfficeDocumentBridge {
         // LOUD, never silent: as far as this bridge can observe, the document is STILL in Show
         // Formulas mode. A silent return here would be exactly the defect class this fix removes.
         FileHandle.standardError.write(Data((
-            "[LOKBridge sheets] formula-display restore did NOT land after \(Self.formulaRestoreRounds) "
+            "[LOKBridge sheets] formula display was NOT restored on the agent view's own observable "
+                + "after \(Self.formulaRestoreRounds) "
                 + "dispatch(es) x \(Self.formulaRestoreSettleTurns) settle turn(s) — this document may "
                 + "still be in Show Formulas mode\n").utf8))
     }
