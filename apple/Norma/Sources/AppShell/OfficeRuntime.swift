@@ -2975,7 +2975,15 @@ final class OfficeRuntime: ObservableObject {
     /// hard way: **a CRITERION is a claim too.** The drill this was parked against passed, and the
     /// pass meant nothing; only probing what it actually did revealed that.
     ///
-    var autoSaveEnabled: Bool = true
+    /// ⚠️ DISARMED 2026-08-26 on live user feedback: with this on, typing in a document produced a
+    /// visible repaint storm — "the whole page kept refreshing over and over". Mechanism is the one
+    /// the research flagged and the controller under-weighted: a save is a FULL CONTAINER REWRITE
+    /// plus a LOK re-render, so a save-per-idle rebuilds the rendered page under the user's cursor.
+    /// The three blockers this feature was parked for were all real and all fixed; this is a FOURTH,
+    /// and it is a design problem, not a bug — seamless autosave needs an incremental save or a
+    /// repaint that does not discard the rendered page, not a shorter debounce (which only makes the
+    /// flashing less frequent, not absent).
+    var autoSaveEnabled: Bool = false
 
     private var autoSaveTasks: [String: Task<Void, Never>] = [:]
     private var autoSaveInFlight: Set<String> = []
