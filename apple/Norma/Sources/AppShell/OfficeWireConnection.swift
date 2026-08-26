@@ -267,6 +267,13 @@ final class OfficeWireConnection: @unchecked Sendable {
             // starve for its full timeout). That cannot happen with a correct allocator, so it is a
             // programming error, not a runtime condition: log loudly and resume the OLD waiter with
             // `nil` rather than leaving it hanging. Never silently.
+            // Disclosed gap, seen and reasoned about rather than missed: this releases the lock to
+            // resume the orphan and re-acquires it below WITHOUT re-scanning `frameQueue` or
+            // re-checking `streamClosed` in between, so a stream that closed in that window costs
+            // the new waiter its full timeout instead of an immediate `nil`. Left as is because the
+            // branch is unreachable — reaching it requires the (now lock-guarded) allocator to mint
+            // a duplicate seq — and because it is the loudest path in this file: the NSLog below is
+            // a bug report, not a runtime condition.
             if let orphan = seqWaiters.removeValue(forKey: seq) {
                 lock.unlock()
                 NSLog("[OfficeWireConnection] two concurrent waits on seq %llu — the seq allocator "
