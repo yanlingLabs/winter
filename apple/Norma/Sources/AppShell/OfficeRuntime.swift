@@ -2835,9 +2835,47 @@ final class OfficeRuntime: ObservableObject {
     /// Injectable so tests can drive the machine without sleeping for real. Production never sets it.
     var autoSaveDebounceInterval: TimeInterval = OfficeRuntime.autoSaveDebounceIntervalDefault
 
-    /// ⛔ **STILL DEFAULT OFF — but for a THIRD blocker, found only by the office harness, and
-    /// nothing like the first two. Rounds 1 and 2 are both genuinely CLOSED.** Every mechanism on
-    /// this page is MEASURED; round 1's were not, and that is still the most important thing here.
+    /// ✅ **ARMED — office-finish, after round 4 closed the last blocker.** This shipped OFF through
+    /// three rounds; the history below is kept in full, in order, because it is the record of what
+    /// each round measured and what each got wrong. Every mechanism on this page is MEASURED; round
+    /// 1's were not, and that is still the most important thing here.
+    ///
+    /// ### Round 4 (office-finish) — the harness blocker is CLOSED, and it was a real defect
+    ///
+    /// Round 3 parked this because arming collapsed the office harness (76/103 in 442 s, against
+    /// 102/103 in ~155 s), and correctly refused to write that off as "the harness's problem". It
+    /// was not. The defect was real, one layer below both: `OfficeWireConnection` supported ONE
+    /// outstanding wait, and `OfficeHelperClient.expectReply` threw `.unexpectedReply` on a seq
+    /// mismatch — **consuming and discarding the frame**. Since that frame is another request's
+    /// answer, one interleave both failed the request that received it AND starved the request that
+    /// was owed it, permanently. Instant save merely made a second writer exist for the first time.
+    ///
+    /// **The fix is the demultiplexer** (`OfficeWireConnection.nextFrame(seq:timeout:)` plus a
+    /// lock-guarded `OfficeWireSeqAllocator`, since a demux keyed on a seq two racing callers could
+    /// both mint would misroute SILENTLY). Red/green/control, hermetic, in
+    /// `OfficeSupervisorTests`: GREEN 2/2; RED (`expectReply` reverted, one variable) 2/2 fail with
+    /// the harness's own signature; CONTROL (skip-the-mismatched-frame instead of demultiplexing)
+    /// 2/2 fail — it loses the frame AND does not fix the concurrent case.
+    ///
+    /// **The three gates arming is taken on, all re-measured on the shipping build:**
+    ///  - the testifying drill `testAnArmedInstantSaveFollowedImmediatelyByAClose…` — **3/3 pass**,
+    ///    on top of round 3's 9/9-vs-3/3;
+    ///  - the **office harness, ARMED: 103/103 four times** (149–150 s), i.e. better than the base
+    ///    commit's own 102/103 — measured four times because the original failure was a cascade and
+    ///    one clean run would prove little;
+    ///  - the **full Swift suite: 3086/3087**. The single failure is
+    ///    `OfficeSlidesCommandTests.testLiveSetTextTitleOnlyAndBodyOnly…`, which is the documented
+    ///    rotating isolation-clean live drill (the base commit scores 3082/**1** on this machine with
+    ///    the same shape). **Arming is provably inert for it**: `autoSaveEnabled` gates exactly one
+    ///    entry point, `noteEditActivity`, whose only callers are the six input doors in this file,
+    ///    and that test posts no input at all — it drives `set_text` through the broker. It passes
+    ///    **5/5 in isolation** on the same armed binary.
+    ///
+    /// ⛔ **What is still true and must stay true:** instant save makes the app an UNPROMPTED writer
+    /// to the wire. Round 3's warning was right; what changed is that the wire can now cope with a
+    /// second writer instead of the invariant being held by convention at 29 call sites. Any NEW
+    /// surface that assumes the app only speaks when spoken to is still a hazard — the difference is
+    /// that it would now have to bypass `expectReply` to become one.
     ///
     /// **Rounds 1 and 2 are done** — the ordering bug (round 1) was fixed in `performSave`, and the
     /// post-save close window (round 2) is fixed by `awaitCloseBarrier`. In counts
@@ -2849,7 +2887,7 @@ final class OfficeRuntime: ObservableObject {
     ///  - armed office-adjacent suites **358/0**, armed FULL Swift suite **3084/0** — cleaner than
     ///    the base commit `69c9c230` scored on the same machine in the same session (3082/**1**).
     ///
-    /// ### Round 3's blocker — ARMING DESYNCHRONIZES THE OFFICE HARNESS'S WIRE
+    /// ### Round 3's blocker — ARMING DESYNCHRONIZED THE OFFICE HARNESS'S WIRE (CLOSED in round 4)
     /// The Swift suites are all green armed. The **office harness is not**, and it is the surface
     /// that catches this because it is the one that talks to `OfficeHelperClient` DIRECTLY:
     ///
@@ -2876,7 +2914,10 @@ final class OfficeRuntime: ObservableObject {
     /// required gate red, and the reason is that instant save makes the app an UNPROMPTED writer to
     /// the wire for the first time. Any surface that assumed the app only speaks when spoken to now
     /// has a second writer. The harness is one such surface; the sweep for others is the work, and it
-    /// has not been done. **Do not flip this without doing it.**
+    /// has not been done. **Do not flip this without doing it.** — *round 4 did it: the app-side
+    /// enumeration is re-verified in `.superpowers/research/office-finish-report.md` (29 client
+    /// sites, every one inside `queue.run`, counted not eyeballed), and the wire itself no longer
+    /// depends on that enumeration staying true.*
     ///
     /// ### Round 1 — my stated mechanisms were wrong, and the decision was still right
     /// Arming this lost the user's typed content in two live Calc drills. I named two candidates and

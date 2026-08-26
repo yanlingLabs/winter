@@ -393,9 +393,11 @@ final class OfficeCommandConsumerTests: XCTestCase {
             undoDepth: { _ in nil },
             sheetsInfo: sheetsInfo, sheetsRead: sheetsRead,
             sheetsSet: sheetsSet, sheetsResize: sheetsResize, sheetsManageSheet: sheetsManageSheet,
+            sheetsManageSheetBatch: { _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: sheets batch not implemented") },
             sheetsFormat: sheetsFormat,
             slidesInfo: slidesInfo, slidesRead: slidesRead, slidesSetText: slidesSetText,
             slidesManagePage: slidesManagePage,
+            slidesManagePageBatch: { _, _ in throw OfficeHelperClientError.serverError(reason: "fake driver: slides batch not implemented") },
             docsInfo: docsInfo, docsRead: docsRead, docsReplace: docsReplace, docsInsert: docsInsert,
             stateDirectory: FileManager.default.temporaryDirectory)
         let runtime = OfficeRuntime(sessionId: "s1", driver: driver)

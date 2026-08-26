@@ -117,9 +117,9 @@ struct OfficeCommandConsumer {
              "office.sheets.delete_rows", "office.sheets.delete_cols":
             Task { await handleSheetsResize(command) }
         case "office.sheets.batch":
-            await handleSheetsBatch(command)
+            Task { await handleSheetsBatch(command) }
         case "office.slides.batch":
-            await handleSlidesBatch(command)
+            Task { await handleSlidesBatch(command) }
         case "office.sheets.add_sheet", "office.sheets.delete_sheet", "office.sheets.rename_sheet":
             Task { await handleSheetsManageSheet(command) }
         case "office.sheets.format":
@@ -514,8 +514,8 @@ struct OfficeCommandConsumer {
         }
         let ops: [OfficeSheetsManageSheetOperation]
         switch Self.decodeSheetsOps(command.args) {
-        case .success(let decoded): ops = decoded
-        case .failure(let refusal):
+        case .ok(let decoded): ops = decoded
+        case .refuse(let refusal):
             return sendResult(command.sessionId, command.commandId, false, refusal, nil)
         }
         guard let broker = officeAgentBroker(command.sessionId) else {
@@ -550,8 +550,8 @@ struct OfficeCommandConsumer {
         }
         let ops: [OfficeSlidesManagePageOperation]
         switch Self.decodeSlidesOps(command.args) {
-        case .success(let decoded): ops = decoded
-        case .failure(let refusal):
+        case .ok(let decoded): ops = decoded
+        case .refuse(let refusal):
             return sendResult(command.sessionId, command.commandId, false, refusal, nil)
         }
         guard let broker = officeAgentBroker(command.sessionId) else {
@@ -1649,10 +1649,10 @@ struct OfficeCommandConsumer {
     ///  * an ABSENT operand is omitted from the constructed operation entirely, never carried
     ///    through as a null.
     private static func decodeSheetsOps(_ args: [String: SessionEvent.JSONValue]?)
-        -> Result<[OfficeSheetsManageSheetOperation], String> {
+        -> OfficeBatchDecode<[OfficeSheetsManageSheetOperation]> {
         return decodeOpsArray(args) { index, element in
             guard case .string(let opRaw)? = element["op"] else {
-                return .failure("operation \(index) needs an `op` of \"add_sheet\", \"delete_sheet\" or \"rename_sheet\".")
+                return .refuse("operation \(index) needs an `op` of \"add_sheet\", \"delete_sheet\" or \"rename_sheet\".")
             }
             let op: OfficeSheetsManageSheetOp
             switch opRaw {
@@ -1660,37 +1660,37 @@ struct OfficeCommandConsumer {
             case "delete_sheet": op = .delete
             case "rename_sheet": op = .rename
             default:
-                return .failure("operation \(index) has an unknown `op` \"\(opRaw)\" — use \"add_sheet\", "
+                return .refuse("operation \(index) has an unknown `op` \"\(opRaw)\" — use \"add_sheet\", "
                                 + "\"delete_sheet\" or \"rename_sheet\".")
             }
             guard case .string(let name)? = element["name"], !name.isEmpty,
                   name.count <= officeSheetNameMaxLength else {
-                return .failure("operation \(index) needs a `name` — a non-empty string of at most "
+                return .refuse("operation \(index) needs a `name` — a non-empty string of at most "
                                 + "\(officeSheetNameMaxLength) characters.")
             }
             var newName: String?
             if op == .rename {
                 guard case .string(let raw)? = element["newName"], !raw.isEmpty,
                       raw.count <= officeSheetNameMaxLength else {
-                    return .failure("operation \(index) is a rename_sheet and needs a `newName` — a non-empty "
+                    return .refuse("operation \(index) is a rename_sheet and needs a `newName` — a non-empty "
                                     + "string of at most \(officeSheetNameMaxLength) characters.")
                 }
                 newName = raw
             } else if element["newName"] != nil, !isNull(element["newName"]) {
-                return .failure("operation \(index) is a \(opRaw) and must not carry `newName` — only "
+                return .refuse("operation \(index) is a \(opRaw) and must not carry `newName` — only "
                                 + "rename_sheet uses it.")
             }
-            return .success(OfficeSheetsManageSheetOperation(op: op, name: name, newName: newName))
+            return .ok(OfficeSheetsManageSheetOperation(op: op, name: name, newName: newName))
         }
     }
 
     /// office-finish Job 2 — the slides counterpart. Same rules, same index-naming refusals; see
     /// `decodeSheetsOps` above for the enumeration warning that governs both.
     private static func decodeSlidesOps(_ args: [String: SessionEvent.JSONValue]?)
-        -> Result<[OfficeSlidesManagePageOperation], String> {
+        -> OfficeBatchDecode<[OfficeSlidesManagePageOperation]> {
         return decodeOpsArray(args) { index, element in
             guard case .string(let opRaw)? = element["op"] else {
-                return .failure("operation \(index) needs an `op` of \"add_slide\", \"delete_slide\" or \"reorder\".")
+                return .refuse("operation \(index) needs an `op` of \"add_slide\", \"delete_slide\" or \"reorder\".")
             }
             let op: OfficeSlidesManagePageOp
             switch opRaw {
@@ -1698,7 +1698,7 @@ struct OfficeCommandConsumer {
             case "delete_slide": op = .delete
             case "reorder": op = .reorder
             default:
-                return .failure("operation \(index) has an unknown `op` \"\(opRaw)\" — use \"add_slide\", "
+                return .refuse("operation \(index) has an unknown `op` \"\(opRaw)\" — use \"add_slide\", "
                                 + "\"delete_slide\" or \"reorder\".")
             }
             // Every one of these is present-then-refuse: a key that is there but not a whole number in
@@ -1709,7 +1709,7 @@ struct OfficeCommandConsumer {
             for (key, sink) in [("slide", 0), ("at", 1), ("to", 2)] {
                 guard isPresentElement(element, key) else { continue }
                 guard let value = oneBasedElementIndex(element, key) else {
-                    return .failure("operation \(index)'s `\(key)` must be a whole slide number from 1 to "
+                    return .refuse("operation \(index)'s `\(key)` must be a whole slide number from 1 to "
                                     + "\(officeSlideMaxIndex).")
                 }
                 if sink == 0 { slide = value } else if sink == 1 { at = value } else { to = value }
@@ -1718,30 +1718,30 @@ struct OfficeCommandConsumer {
             if isPresentElement(element, "layout") {
                 guard case .string(let raw)? = element["layout"],
                       let parsed = OfficeSlidesLayoutPreset(rawValue: raw) else {
-                    return .failure("operation \(index)'s `layout` is not one of the layouts add_slide accepts.")
+                    return .refuse("operation \(index)'s `layout` is not one of the layouts add_slide accepts.")
                 }
                 layout = parsed
             }
             switch op {
             case .add:
                 guard slide == nil, to == nil else {
-                    return .failure("operation \(index) is an add_slide — it takes `at` and `layout`, never "
+                    return .refuse("operation \(index) is an add_slide — it takes `at` and `layout`, never "
                                     + "`slide` or `to`.")
                 }
-                return .success(OfficeSlidesManagePageOperation(op: .add, slide: nil, at: at.map { $0 - 1 },
+                return .ok(OfficeSlidesManagePageOperation(op: .add, slide: nil, at: at.map { $0 - 1 },
                                                                 to: nil, layout: layout))
             case .delete:
                 guard let slide, at == nil, to == nil, layout == nil else {
-                    return .failure("operation \(index) is a delete_slide — it needs `slide` and takes nothing else.")
+                    return .refuse("operation \(index) is a delete_slide — it needs `slide` and takes nothing else.")
                 }
-                return .success(OfficeSlidesManagePageOperation(op: .delete, slide: slide - 1, at: nil,
+                return .ok(OfficeSlidesManagePageOperation(op: .delete, slide: slide - 1, at: nil,
                                                                 to: nil, layout: nil))
             case .reorder:
                 guard let slide, let to, at == nil, layout == nil else {
-                    return .failure("operation \(index) is a reorder — it needs `slide` and `to`, and takes "
+                    return .refuse("operation \(index) is a reorder — it needs `slide` and `to`, and takes "
                                     + "nothing else.")
                 }
-                return .success(OfficeSlidesManagePageOperation(op: .reorder, slide: slide - 1, at: nil,
+                return .ok(OfficeSlidesManagePageOperation(op: .reorder, slide: slide - 1, at: nil,
                                                                 to: to - 1, layout: nil))
             }
         }
@@ -1753,31 +1753,31 @@ struct OfficeCommandConsumer {
     /// something other than what was asked.
     private static func decodeOpsArray<T>(
         _ args: [String: SessionEvent.JSONValue]?,
-        _ element: (Int, [String: SessionEvent.JSONValue]) -> Result<T, String>
-    ) -> Result<[T], String> {
+        _ element: (Int, [String: SessionEvent.JSONValue]) -> OfficeBatchDecode<T>
+    ) -> OfficeBatchDecode<[T]> {
         guard case .array(let raw)? = args?["ops"] else {
-            return .failure("this office batch verb needs `ops` — a list of operations to apply in order.")
+            return .refuse("this office batch verb needs `ops` — a list of operations to apply in order.")
         }
         guard !raw.isEmpty else {
-            return .failure("`ops` is empty — a batch with no operations would change nothing.")
+            return .refuse("`ops` is empty — a batch with no operations would change nothing.")
         }
         guard raw.count <= OfficeWireBatchLimits.maxOperationsPerBatch else {
-            return .failure("`ops` has \(raw.count) operations — at most "
+            return .refuse("`ops` has \(raw.count) operations — at most "
                             + "\(OfficeWireBatchLimits.maxOperationsPerBatch) fit in one call. Split it.")
         }
         var out: [T] = []
         out.reserveCapacity(raw.count)
         for (offset, entry) in raw.enumerated() {
             guard case .object(let object) = entry else {
-                return .failure("operation \(offset + 1) is not an object — every entry in `ops` must be "
+                return .refuse("operation \(offset + 1) is not an object — every entry in `ops` must be "
                                 + "an object with an `op`.")
             }
             switch element(offset + 1, object) {
-            case .success(let decoded): out.append(decoded)
-            case .failure(let reason): return .failure(reason)
+            case .ok(let decoded): out.append(decoded)
+            case .refuse(let reason): return .refuse(reason)
             }
         }
-        return .success(out)
+        return .ok(out)
     }
 
     private static func isNull(_ value: SessionEvent.JSONValue?) -> Bool {
@@ -1966,4 +1966,16 @@ struct OfficeCommandConsumer {
 /// partial-progress arm at all), so composing it anywhere later would only move the same work.
 struct OfficeBatchPartialFailure: Error {
     let message: String
+}
+
+/// office-finish Job 2 — a decoded batch, or the refusal explaining why it was rejected.
+///
+/// A purpose-built two-case enum rather than `Result<T, String>`: `String` does not conform to
+/// `Error`, and making a refusal into an `Error` just to reuse `Result` would push it toward being
+/// THROWN, which is exactly wrong here. These refusals are answered synchronously through
+/// `sendResult(ok: false, …)` **before the broker is ever entered** — nothing is opened, nothing is
+/// dirtied, and no document lifecycle is touched by a malformed batch.
+enum OfficeBatchDecode<T> {
+    case ok(T)
+    case refuse(String)
 }
