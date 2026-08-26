@@ -2016,29 +2016,6 @@ extension OfficeDocumentEvent {
     ///   live edit traffic DID cross-check this — real firings observed 6 fields, always with a
     ///   parseable `fields[4]`, never exercising the default. The default itself (garbage or a
     ///   missing 5th field) is still unexercised by real data.
-    /// office-polish Bug 1 — `LOK_CALLBACK_DOCUMENT_SIZE_CHANGED`'s raw payload. Transcribed from
-    /// a REAL firing, not from the header's prose: appending 20 paragraphs to
-    /// `Sushi_An_Introduction.docx` through the live helper produced exactly
-    ///
-    ///     [LOKBridge raw callback] docId=d0 type=13 payload=12808, 48656
-    ///
-    /// and reopening that same file then reported `widthTwips 12808, heightTwips 48656` as its
-    /// `opened` size — so the two numbers are width and height in twips, in that order, comma
-    /// separated with a space, the same shape `parseCellCursor` already handles for its own
-    /// callback.
-    ///
-    /// Rejects anything that is not two positive integers. `0` is refused rather than passed
-    /// through: LO emits a transient zero-size for a document mid-relayout, and a zero extent
-    /// reaching `clampedOriginX/Y` pins scrolling at the origin — the exact defect this whole path
-    /// exists to remove, reintroduced by trusting a payload we do not understand.
-    static func parseDocumentSizeChanged(_ payload: String) -> OfficeDocumentEvent? {
-        let fields = payload.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
-        guard fields.count == 2,
-              let widthTwips = Int64(fields[0]), let heightTwips = Int64(fields[1]),
-              widthTwips > 0, heightTwips > 0 else { return nil }
-        return .documentSizeChanged(OfficeDocumentSize(widthTwips: widthTwips, heightTwips: heightTwips))
-    }
-
     static func parseInvalidateTiles(_ payload: String) -> OfficeDocumentEvent? {
         let trimmed = payload.trimmingCharacters(in: .whitespaces)
         let fields = trimmed.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
@@ -2061,6 +2038,29 @@ extension OfficeDocumentEvent {
         // fix-round update is what makes a NON-empty rect actually honor it.
         let part = fields.count >= 5 ? (Int(fields[4]) ?? 0) : 0
         return .invalidated(rectsTwips: [OfficeTwipsRect(x: x, y: y, width: width, height: height)], part: part)
+    }
+
+    /// office-polish Bug 1 — `LOK_CALLBACK_DOCUMENT_SIZE_CHANGED`'s raw payload. Transcribed from
+    /// a REAL firing, not from the header's prose: appending 20 paragraphs to
+    /// `Sushi_An_Introduction.docx` through the live helper produced exactly
+    ///
+    ///     [LOKBridge raw callback] docId=d0 type=13 payload=12808, 48656
+    ///
+    /// and reopening that same file then reported `widthTwips 12808, heightTwips 48656` as its
+    /// `opened` size — so the two numbers are width and height in twips, in that order, comma
+    /// separated with a space, the same shape `parseCellCursor` already handles for its own
+    /// callback.
+    ///
+    /// Rejects anything that is not two positive integers. `0` is refused rather than passed
+    /// through: LO emits a transient zero-size for a document mid-relayout, and a zero extent
+    /// reaching `clampedOriginX/Y` pins scrolling at the origin — the exact defect this whole path
+    /// exists to remove, reintroduced by trusting a payload we do not understand.
+    static func parseDocumentSizeChanged(_ payload: String) -> OfficeDocumentEvent? {
+        let fields = payload.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        guard fields.count == 2,
+              let widthTwips = Int64(fields[0]), let heightTwips = Int64(fields[1]),
+              widthTwips > 0, heightTwips > 0 else { return nil }
+        return .documentSizeChanged(OfficeDocumentSize(widthTwips: widthTwips, heightTwips: heightTwips))
     }
 
     /// Parses `LOK_CALLBACK_STATE_CHANGED`'s raw payload. That callback fires for many `.uno:*`

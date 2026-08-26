@@ -704,6 +704,16 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost, NSTextInputC
             // prefetch heuristic that re-evaluates on the next part/zoom change. So the arm does
             // exactly one thing — re-clamp how far this canvas may scroll — and touches LOK not at
             // all.
+            // office-polish review, Minor 7 — the SHRINK direction, disclosed rather than fixed. A
+            // document that got SMALLER re-clamps correctly (the scroll bound follows it down), and
+            // `relayoutVisibleTiles` drops any layer now outside the viewport, but nothing here asks
+            // for fresh pixels: a tile still inside the viewport whose CONTENT was deleted keeps
+            // showing its cached copy until something else re-subscribes (any scroll or zoom tick,
+            // or the LOK invalidation a content deletion fires in its own right — `INVALIDATE_TILES`
+            // is a separate callback from `DOCUMENT_SIZE_CHANGED` and is already wired). Fixing it
+            // HERE would mean re-subscribing from this arm, which is exactly what
+            // `verify:office-agent` caught as a mid-verb `setPart` — so the correct place for it, if
+            // it ever proves reachable in practice, is the invalidation path, not this one.
             if newSizeTwips != sizeTwips {
                 sizeTwips = newSizeTwips
                 scrollOrigin = CGPoint(x: clampedOriginX(scrollOrigin.x), y: clampedOriginY(scrollOrigin.y))

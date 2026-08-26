@@ -2506,14 +2506,14 @@ final class OfficeTileCanvasViewTests: XCTestCase {
         XCTAssertEqual(clampedToGrown, 1533.0, accuracy: 1.0,
                        "the grown extent must be reachable: twipsToPixels(48656, 1000)/2 - 900")
         XCTAssertGreaterThan(clampedToGrown, clampedToStale + 800,
-                             "a full page (806 pt, measured) of the document was unreachable before")
+                             "a full page (806.0 pt, measured) of the document was unreachable before")
 
         view.unmount()
     }
 
     /// **The user's own case, and the reason this reads as "scrolling doesn't work" rather than
     /// "the last page is missing".** Their `docs info` answered "1 page, 17 paragraphs" at open —
-    /// one measured page is 16124 twips (48656 - 32532), 806.2 pt — so in a 900 pt canvas the
+    /// one measured page is 16124 twips (48656 - 32532), 806.0 pt — so in a 900 pt canvas the
     /// clamp is EXACTLY ZERO and the canvas does not move at all, while the document is by then
     /// two pages long.
     func testAOnePageOpenTimeExtentPinsAWriterCanvasAtTheOriginUntilTheSizeIsRevised() async {
@@ -2527,7 +2527,7 @@ final class OfficeTileCanvasViewTests: XCTestCase {
 
         view.applyScrollDelta(dx: 0, dy: -4000)
         XCTAssertEqual(view.scrollOriginForTesting.y, 0,
-                       "806.2 pt of document in a 900 pt canvas: nothing to scroll, and the second "
+                       "806.0 pt of document in a 900 pt canvas: nothing to scroll, and the second "
                        + "page is unreachable")
 
         view.syncDocumentIdentity(docId: "doc-1",
@@ -2557,9 +2557,15 @@ final class OfficeTileCanvasViewTests: XCTestCase {
         view.mount()
 
         view.applyScrollDelta(dx: 0, dy: -4000)
-        XCTAssertGreaterThan(view.scrollOriginForTesting.y, 900,
-                             "a sheet with the SAME stale extent still scrolls, by its own margin — "
-                             + "sizePoints/2 + bounds.height = 806.2/2 + 900")
+        // Worked through, because an earlier version of this comment asserted `> 900` while quoting
+        // a total (1303.1) that was neither the assertion's bound nor the real value:
+        //   effectiveExtent = 16124 + pixelsToTwips(2 screens x 900 pt x 2 scale) = 16124 + 36000
+        //                   = 52124 twips
+        //   twipsToPixels(52124, 1000) = 5212 px -> 2606.0 pt
+        //   maxOrigin = 2606.0 - 900 = 1706.0
+        XCTAssertEqual(view.scrollOriginForTesting.y, 1706.0, accuracy: 1.0,
+                       "a sheet with the SAME stale extent still scrolls, by its own two-screen "
+                       + "margin — and scrolls FURTHER than the whole document is tall")
 
         view.unmount()
     }
