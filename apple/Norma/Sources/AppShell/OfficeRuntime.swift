@@ -2703,20 +2703,48 @@ final class OfficeRuntime: ObservableObject {
     /// Injectable so tests can drive the machine without sleeping for real. Production never sets it.
     var autoSaveDebounceInterval: TimeInterval = OfficeRuntime.autoSaveDebounceIntervalDefault
 
-    /// ✅ **DEFAULT ON, as of office-instant-save. Two blockers were found and BOTH are now fixed;
-    /// every mechanism below is MEASURED — round 1's were not, and that is still the most important
-    /// thing on this page.** The history is kept in full, because what it records is how each of the
-    /// two decisions was reached, and the second one was nearly reached wrongly.
+    /// ⛔ **STILL DEFAULT OFF — but for a THIRD blocker, found only by the office harness, and
+    /// nothing like the first two. Rounds 1 and 2 are both genuinely CLOSED.** Every mechanism on
+    /// this page is MEASURED; round 1's were not, and that is still the most important thing here.
     ///
-    /// **What arming rests on, in counts** (`.superpowers/research/office-close-race-report.md`):
-    ///  - the close-race fix itself: `testCleanCloseImmediatelyAfterASave…` **6/6 green vs 3/3 red**,
-    ///    with a control arm that reds a 20 s stall at the `< 10 s` bound;
-    ///  - the feature under its own drill: `testAnArmedInstantSaveFollowedImmediatelyByAClose…`
-    ///    **9/9 green vs 3/3 red**, 45 armed auto-save-then-close laps;
-    ///  - the flipped default's blast radius: office-adjacent suites **358/0 armed**, and the FULL
-    ///    Swift suite **3084/0 armed** — taken on the same machine on which the base commit
-    ///    `69c9c230` itself scored 3082/**1** (an unrelated `OfficeSlidesCommandTests` live drill,
-    ///    isolation-clean), so the armed run is not merely as good as the baseline, it is cleaner.
+    /// **Rounds 1 and 2 are done** — the ordering bug (round 1) was fixed in `performSave`, and the
+    /// post-save close window (round 2) is fixed by `awaitCloseBarrier`. In counts
+    /// (`.superpowers/research/office-close-race-report.md`):
+    ///  - `testCleanCloseImmediatelyAfterASave…` **6/6 green vs 3/3 red**, control arm reds a 20 s
+    ///    stall at the `< 10 s` bound;
+    ///  - `testAnArmedInstantSaveFollowedImmediatelyByAClose…` **9/9 green vs 3/3 red**, 45 armed
+    ///    auto-save-then-close laps;
+    ///  - armed office-adjacent suites **358/0**, armed FULL Swift suite **3084/0** — cleaner than
+    ///    the base commit `69c9c230` scored on the same machine in the same session (3082/**1**).
+    ///
+    /// ### Round 3's blocker — ARMING DESYNCHRONIZES THE OFFICE HARNESS'S WIRE
+    /// The Swift suites are all green armed. The **office harness is not**, and it is the surface
+    /// that catches this because it is the one that talks to `OfficeHelperClient` DIRECTLY:
+    ///
+    /// | build (same machine, same session, `NORMA_OFFICE_HARNESS_DIR=/tmp/…`) | harness |
+    /// |---|---|
+    /// | base `69c9c230` | **102 / 103**, 155 s (only `[22.clickCell]`, a budget flake) |
+    /// | this branch, **disarmed** | **101 / 103**, 180 s (`[14.freshTile]` + `[22.clickCell]`, both budget flakes) |
+    /// | this branch, **ARMED** | **76 / 103**, 442 s |
+    ///
+    /// So the close barrier is **not** the cause — disarmed, this branch matches the base. Arming is.
+    /// **The mechanism, read off the failure rather than guessed:** the harness's first armed failure
+    /// is `[18.twoViewMintAndEditBoth] … office helper sent an unexpected reply: saved(seq: 133,
+    /// docId: "099DF20B…")` where an `agentKeyEventOk` was expected — a `saved` frame for a
+    /// **DIFFERENT document**, i.e. an auto-save this scheduler issued, landing in the middle of the
+    /// harness's own raw request. `OfficeHelperClient.expectReply` does not demultiplex (it takes
+    /// `connection.nextFrame` and checks `reply.seq`), so ONE interleave desynchronizes the frame
+    /// stream permanently: every later step times out, which is the whole 76-vs-101 gap and the 442 s
+    /// vs 180 s.
+    ///
+    /// **Why this is not simply "the harness's problem", and what arming needs next.** In PRODUCTION
+    /// every request goes through the single `OfficeHelperRequestQueue`, so nothing there can
+    /// interleave — that argument is probably right, and it is exactly the kind of unmeasured
+    /// mechanism this page exists to warn about. What is measured is only this: arming turns a
+    /// required gate red, and the reason is that instant save makes the app an UNPROMPTED writer to
+    /// the wire for the first time. Any surface that assumed the app only speaks when spoken to now
+    /// has a second writer. The harness is one such surface; the sweep for others is the work, and it
+    /// has not been done. **Do not flip this without doing it.**
     ///
     /// ### Round 1 — my stated mechanisms were wrong, and the decision was still right
     /// Arming this lost the user's typed content in two live Calc drills. I named two candidates and
@@ -2774,7 +2802,7 @@ final class OfficeRuntime: ObservableObject {
     /// hard way: **a CRITERION is a claim too.** The drill this was parked against passed, and the
     /// pass meant nothing; only probing what it actually did revealed that.
     ///
-    var autoSaveEnabled: Bool = true
+    var autoSaveEnabled: Bool = false
 
     private var autoSaveTasks: [String: Task<Void, Never>] = [:]
     private var autoSaveInFlight: Set<String> = []
