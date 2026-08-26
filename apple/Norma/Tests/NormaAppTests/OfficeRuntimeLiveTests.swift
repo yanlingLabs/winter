@@ -2592,6 +2592,16 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         let docPath = scratchDir.appendingPathComponent("instant-save-close.ods").path
         try Data(contentsOf: URL(fileURLWithPath: fixturePath)).write(to: URL(fileURLWithPath: docPath))
 
+        // The close is taken from INSIDE the auto-save's own completion, so it lands at the exact
+        // instant the save resolved rather than one poll later.
+        final class CloseBox { var closedAt: Date? }
+        let box = CloseBox()
+        runtime.onAutoSaveFinishedForTesting = { [weak runtime] savedPath in
+            guard savedPath == docPath, box.closedAt == nil else { return }
+            box.closedAt = Date()
+            runtime?.close(savedPath)
+        }
+
         let iterations = 5
         for lap in 1...iterations {
             runtime.open(docPath)
@@ -2633,19 +2643,23 @@ final class OfficeRuntimeLiveTests: XCTestCase {
             let becameDirty = await waitUntil(timeout: 15) { runtime.stateSnapshot.documents[docPath]?.dirty == true }
             XCTAssertTrue(becameDirty, "lap \(lap): the real edit never marked the document dirty")
 
-            // **Nothing calls `save` in this drill.** If the file changes, instant save changed it.
-            let autoSaved = await waitUntil(timeout: 30) { officeFileStat(atPath: docPath) != beforeStat }
-            XCTAssertTrue(autoSaved, "lap \(lap): instant save never wrote the file on its own — this "
-                          + "drill is INERT rather than passing if this fails, because nothing else "
-                          + "here can write it")
-
-            // The lethal timing: close on top of the save that just landed.
-            let closeIssuedAt = Date()
-            runtime.close(docPath)
+            // **The lethal timing, taken with ZERO latency.** A first version of this drill polled
+            // the file's own stat every 20 ms and closed when it changed; with the close barrier
+            // REMOVED that version still passed 3 of 3, because the window is narrower than one
+            // poll. `onAutoSaveFinishedForTesting` fires synchronously at the instant the
+            // auto-save's `saveAndAwaitOutcome` resolves, which is exactly where the clean-close
+            // drill takes its close. See that property's own doc.
+            let closedAt = await waitUntil(timeout: 30) { box.closedAt != nil }
+            XCTAssertTrue(closedAt, "lap \(lap): instant save never completed a save of its own — "
+                          + "this drill is INERT rather than passing if this fails, because nothing "
+                          + "else here calls any save door at all")
+            XCTAssertNotEqual(officeFileStat(atPath: docPath), beforeStat,
+                              "lap \(lap): instant save resolved but nothing reached the real path")
             await runtime.awaitPendingCloseBarriersForTesting()
-            XCTAssertLessThan(Date().timeIntervalSince(closeIssuedAt), 10.0,
+            XCTAssertLessThan(Date().timeIntervalSince(box.closedAt ?? Date()), 10.0,
                               "lap \(lap): the close barrier must stay a bounded round trip even with "
                               + "instant save armed — the control arm, same as the clean-close drill")
+            box.closedAt = nil
 
             guard let helperPID = host.officeHelperSupervisor?.process?.processIdentifier else {
                 return XCTFail("lap \(lap): supervisor has no live process left to check")

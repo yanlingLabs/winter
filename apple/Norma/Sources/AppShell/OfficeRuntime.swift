@@ -2816,7 +2816,20 @@ final class OfficeRuntime: ObservableObject {
 
     private func autoSaveFinished(path: String) {
         autoSaveInFlight.remove(path)
+        onAutoSaveFinishedForTesting?(path)
     }
+
+    /// Test-only, and production never sets it (same posture as `autoSaveDebounceInterval` just
+    /// above). Fires SYNCHRONOUSLY at the instant an auto-save's own `saveAndAwaitOutcome` resolves
+    /// — i.e. the exact `.saved` moment, with no polling latency in between.
+    ///
+    /// It exists because that latency turned out to matter: a first version of
+    /// `OfficeRuntimeLiveTests.testAnArmedInstantSaveFollowedImmediatelyByAClose…` took the close
+    /// after a 20 ms `waitUntil` poll on the file's own stat, and with the close barrier REMOVED it
+    /// still passed 3 of 3 — the window is narrower than one poll. A drill that cannot reach the
+    /// window cannot testify about it either way, so this hook is what lets one close at the timing
+    /// the clean-close drill closes at.
+    var onAutoSaveFinishedForTesting: ((String) -> Void)?
 
     /// Test-only: is a debounced save currently armed for this path?
     func autoSaveIsArmedForTesting(path: String) -> Bool { autoSaveTasks[path] != nil }
