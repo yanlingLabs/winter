@@ -2721,42 +2721,65 @@ final class OfficeRuntime: ObservableObject {
     /// debounce arms at key ENQUEUE time, not delivery. **That is fixed** (see `performSave`), and
     /// with it fixed the content loss is gone: both Calc drills pass with this armed.
     ///
-    /// ### Round 2 — the blocker that is still standing: THE POST-SAVE CLOSE WINDOW (constraint C3)
+    /// ### Round 2 — the blocker that WAS standing: THE POST-SAVE CLOSE WINDOW (constraint C3)
     /// With the ordering bug fixed and this armed, `testTypingOnSheetTwoLandsOnSheetTwoNotSheetOne
-    /// ThroughSaveAndReopen` fails **2 of 3 runs in isolation**, at the REOPEN, with the helper's own
-    /// `Unspecified Application Error` in the log — the documented signature of LOK calling libc
-    /// `exit()` from inside C++. **Disarmed, the same drill passes 3 of 3.** That is the whole A/B.
+    /// ThroughSaveAndReopen` was recorded failing 2 of 3 runs in isolation, at the REOPEN, with the
+    /// helper's own `Unspecified Application Error` — the documented signature of LOK calling libc
+    /// `exit()` from inside C++. Closing a document too soon after a save kills the SHARED helper,
+    /// and because `OfficeHelperRequestQueue` is one app-wide FIFO it takes every other open document
+    /// with it. Saving on every idle keeps that window open essentially all the time.
     ///
-    /// This is not new behaviour, it is a known hazard made ordinary: closing a document too soon
-    /// after a save kills the SHARED helper, measured at ~4 times in 5, and because
-    /// `OfficeHelperRequestQueue` is one app-wide FIFO **it takes every other open document down with
-    /// it**. Two drains exist for exactly this, but neither covers a plain `runtime.close` — they sit
-    /// on the dirty-close sheet and on the broker's save-through. Saving on every idle keeps that
-    /// window open essentially all the time, which is precisely the risk the office research flagged
-    /// against instant save.
+    /// ### Round 3 (office-instant-save) — that blocker is CLOSED, and the criterion it was measured
+    /// with turned out to be BLIND. Both measured.
     ///
-    /// ### What arming this needs, stated so nobody re-derives it
-    /// A close must not race a save this scheduler started: cancel a pending debounce **and await an
-    /// in-flight auto-save (or drain) before the close proceeds**. `close` is deliberately
-    /// synchronous and fire-and-forget today, so that is a real change to a live lifecycle path —
-    /// not a patch to make a test green, and not something to land after a review has reported.
+    /// **The fix.** `close(_:)` now cancels this path's pending debounce, and `.helperClose`'s own
+    /// performer holds `driver.close` behind `awaitCloseBarrier` — which awaits this docId's
+    /// in-flight saves and then one real helper round trip, under one 15 s bound. It sits at the ONE
+    /// site every real close funnels through, so it covers the clean-tab `\u{d7}` (which had no barrier
+    /// at all), the dirty-close sheet, and the broker alike. Counts:
+    /// `testCleanCloseImmediatelyAfterASaveRepeatedlyThroughTheRealHelperNeverKillsTheSharedProcess`
+    /// **6/6 green vs 3/3 red** (one `Unspecified Application Error` per red run), control arm
+    /// discriminating.
     ///
-    /// 🔑 **The lesson, and it is mine:** stopping on a reproducible loss cost nothing. Stating two
+    /// \u{26d4} **The criterion above cannot be used again — it does not exercise this feature.** Probed
+    /// on this machine, armed, that drill issues **zero** auto-saves in 8 runs: it completes inside
+    /// the 0.9 s debounce, so `fireAutoSave` never runs, and it passes armed for the same reason it
+    /// passes disarmed. It is blind **pre-fix too** (armed + the whole close fix neutered: 3/3 pass,
+    /// 0 auto-saves), so this is not something the fix caused. The recorded 2-of-3 was presumably
+    /// taken on a slower run where the debounce did elapse — which is exactly why a timing-dependent
+    /// drill must not be a gate. **Do not re-derive a decision from it in either direction.**
+    ///
+    /// **The standing pin is `testAnArmedInstantSaveFollowedImmediatelyByAClose
+    /// NeverKillsTheSharedHelper`.** It arms its own runtime instance, keeps production's 0.9 s
+    /// interval, drives the real input doors, calls no save door at all, and closes from inside the
+    /// auto-save's own completion. **9/9 green, 45 armed auto-save-then-close laps, vs 3/3 red with
+    /// the barrier removed.** Its own header records why the close must be taken there and not one
+    /// 20 ms poll later (polled, it passed 3/3 even with the barrier gone — it could not testify).
+    ///
+    /// \u{1f511} **The lesson, and it is mine:** stopping on a reproducible loss cost nothing. Stating two
     /// confident, unmeasured mechanisms nearly cost the next implementer a wrong fix on a live save
-    /// path — my own parking comment pointed at it. *A stated mechanism is a claim, and a claim needs
-    /// a measurement, even when the decision it supports is correct.* Round 2's mechanism above is
-    /// stated only because it was A/B'd, with the helper's own error text as the witness.
+    /// path \u{2014} my own parking comment pointed at it. *A stated mechanism is a claim, and a claim needs
+    /// a measurement, even when the decision it supports is correct.* Round 3 adds the corollary the
+    /// hard way: **a CRITERION is a claim too.** The drill this was parked against passed, and the
+    /// pass meant nothing; only probing what it actually did revealed that.
     ///
-    /// Everything else stays and is recoverable: the machine, its unit tests (which arm it
-    /// explicitly), the forced-red evidence, and the measured 72-97 ms save cost.
     var autoSaveEnabled: Bool = false
 
     private var autoSaveTasks: [String: Task<Void, Never>] = [:]
     private var autoSaveInFlight: Set<String> = []
 
-    /// **Called by every door that can CHANGE the document** — typing, IME, paste, cut, undo, redo —
-    /// plus a belt on LOK's own `ModifiedStatus` transition for anything that changes the document
-    /// by a route the app did not post itself.
+    /// **Called by every door that can CHANGE the document, and by NOTHING else** — typing, IME,
+    /// paste, cut, undo, redo. All six live in this file; there is no other caller.
+    ///
+    /// ⛔ **This paragraph used to end "plus a belt on LOK's own `ModifiedStatus` transition for
+    /// anything that changes the document by a route the app did not post itself." That belt does
+    /// not exist** — it was deliberately removed, and `handleHelperEvent`'s own `.modifiedStatus`
+    /// case states at length why ("the belt covered no real case and cost real saves"). The sentence
+    /// survived the removal, and it is not a harmless leftover: a live drill written against it
+    /// (driving input through `OfficeHelperClient.postKey` directly, which bypasses this file) was
+    /// **inert in 5 of 5 laps** — armed, with a 0.3 s debounce and a 30 s wait, instant save never
+    /// wrote the file once, because nothing had armed it. **A test that means to exercise instant
+    /// save must drive `OfficeRuntime`'s own input doors; a raw wire client will not arm anything.**
     ///
     /// Why the input doors and not `ModifiedStatus` alone: **`STATE_CHANGED` is a TRANSITION.** On a
     /// clean document the first keystroke fires `modified=true` and every subsequent keystroke fires
