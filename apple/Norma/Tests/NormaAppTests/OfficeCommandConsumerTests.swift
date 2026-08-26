@@ -93,8 +93,8 @@ final class OfficeCommandConsumerTests: XCTestCase {
     /// All 22 verbs `OFFICE_COMMAND_ACTIONS` (events.ts) names as of T1 — hand-spelled here rather
     /// than imported, since there is deliberately NO Swift mirror of that list to import FROM (this
     /// file's own header, and `OfficeCommandConsumer.swift`'s). If the TS list drifts from this one,
-    /// `office-commands.test.ts`'s own count assertion (11 sheets + 6 slides + 5 docs = 22) is the
-    /// tripwire that catches it on the TS side; this array exists only to drive the SAME 22 through
+    /// `office-commands.test.ts`'s own count assertion (12 sheets + 7 slides + 5 docs = 24) is the
+    /// tripwire that catches it on the TS side; this array exists only to drive these 22 through
     /// the Swift consumer in one test, not to be a second source of truth.
     static let allOfficeVerbsAsOfT1 = [
         "office.sheets.info", "office.sheets.read", "office.sheets.set",
@@ -111,7 +111,7 @@ final class OfficeCommandConsumerTests: XCTestCase {
     /// T3 gave `sheets.info`/`.read` real (async) behaviour; T4 gave `sheets.set`/`.insert_rows`/
     /// `.insert_cols`/`.delete_rows`/`.delete_cols`/`.add_sheet`/`.delete_sheet`/`.rename_sheet` the
     /// same; T5 adds `sheets.format`; T6 adds every `slides` verb (`info`/`read`/`set_text`/
-    /// `add_slide`/`delete_slide`/`reorder`) — 17 of the 22 verbs are real now, leaving 5 STILL on
+    /// `add_slide`/`delete_slide`/`reorder`) — 17 of the 22 verbs were real at T6, leaving 5 STILL on
     /// T1's own synchronous refusal shell (every `docs` verb — Stage C's last remaining stage's own
     /// job). Every pre-existing test below that needs "an office verb that still answers
     /// synchronously with the not-implemented refusal, for ANY verb" picks from this list rather than
@@ -243,7 +243,7 @@ final class OfficeCommandConsumerTests: XCTestCase {
     }
 
     /// A verb this file cannot even parse into (kind, verb) — still answered, never a crash. Nothing
-    /// TODAY sends this (the daemon only ever emits `office.<kind>.<verb>`, all 22 well-formed), but
+    /// TODAY sends this (the daemon only ever emits `office.<kind>.<verb>`, all 24 well-formed), but
     /// `action` decodes as a plain `String` with no shape guarantee (`SessionEvent.swift`), so this
     /// file must not assume its own parser succeeds — the same posture
     /// `testUnknownPanelCommandVerbStillDecodes` (NormaProtocol) takes for the wire layer beneath it.

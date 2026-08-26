@@ -36,7 +36,7 @@ export type OfficeCommandAction = (typeof OFFICE_COMMAND_ACTIONS)[number];
  *  wrongly gated as a write merely over-asks for approval, never under-asks. But "wrongly classified,
  *  safely" is still wrong, and Task 4 needs this partition to be RIGHT, not merely safe-by-default.
  *  So the true ground truth is no longer this filter — it is
- *  `office-commands.test.ts`'s literal, hand-spelled `EXPECTED_SIDE` table, naming all 22 verbs one
+ *  `office-commands.test.ts`'s literal, hand-spelled `EXPECTED_SIDE` table, naming all 24 verbs one
  *  by one. This filter is what Task 4 actually reads at runtime (kept exactly as it was, per that
  *  review's own instruction: "keep the fail-safe default"); the hand-spelled table is what PROVES
  *  the filter's output is correct, not merely internally consistent with itself. */
@@ -225,9 +225,9 @@ function deadlinesFor<A extends readonly OfficeCommandAction[]>(
 }
 
 /** Every `OFFICE_COMMAND_ACTIONS` value maps to exactly one of the two deadlines above. Composed
- *  from the two partitioned arrays rather than hand-typed as 22 literal entries — `browser.ts`'s own
+ *  from the two partitioned arrays rather than hand-typed as 24 literal entries — `browser.ts`'s own
  *  `BROWSER_DEADLINES_MS` hand-types nine because each of those nine has an INDEPENDENTLY reasoned
- *  number; these 22 do not, they have exactly two, so hand-typing here would be twenty duplicate
+ *  number; these 24 do not, they have exactly two, so hand-typing here would be twenty-two duplicate
  *  lines with nothing left to say that the read/write split above hasn't already said.
  *  `office-commands.test.ts` carries the EXACT-EQUALITY tripwire against `OFFICE_COMMAND_ACTIONS` —
  *  the task brief's own words, "the identical exact-equality tripwire" the browser suite has. */
@@ -350,8 +350,10 @@ export function officeSlidesBatchArgs(
  * producer of one). The same two-layer arrangement every numeric office operand already uses.
  *
  * The number is a TIME bound, not a taste: a batch is ONE wire request, so all N operations share
- * one 30 s `requestTimeout`. See `.superpowers/research/office-finish-report.md` for the measured
- * per-operation cost this is set from.
+ * one 30 s `requestTimeout`. Measured: a full 20-operation `sheets batch` through the real helper on
+ * a real workbook costs 4.57 s for the whole call (open + 20 operations + save + atomic place) —
+ * `OfficeSheetsCommandTests.testLiveSheetsBatchOfTwentyOperationsAppliesThemAllWellInsideOne
+ * RequestTimeout` asserts that bound, it does not merely print it.
  */
 export const OFFICE_BATCH_MAX_OPS = 20;
 

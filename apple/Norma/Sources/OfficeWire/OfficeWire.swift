@@ -1361,8 +1361,13 @@ public enum OfficeSheetsResizeOp: String, Equatable, Sendable {
 ///   operations (see `sheetsManageSheetBatch`'s own header for why it must be), so the whole batch
 ///   lives inside ONE `requestTimeout` — 30 s (`OfficeHelperSupervisor.Configuration
 ///   .handshakeTimeout`, reused as `requestTimeout`). N is therefore capped so that N × the measured
-///   per-operation cost stays far below 30 s, not merely under it. See
-///   `.superpowers/research/office-finish-report.md` for the measurement this number is set from.
+///   per-operation cost stays far below 30 s, not merely under it. **Measured, not guessed**: a
+///   full 20-operation `sheets batch` through the real helper on a real workbook costs **4.57 s for
+///   the WHOLE call** — open, 20 operations, save, and the atomic place — i.e. under a sixth of the
+///   one timeout the batch has to live inside, with the per-operation share a fraction of that
+///   again. The drill is
+///   `OfficeSheetsCommandTests.testLiveSheetsBatchOfTwentyOperationsAppliesThemAllWellInsideOne
+///   RequestTimeout`, and it asserts the bound rather than only printing it.
 /// * The BYTE bound is the daemon's, not this file's: `PANEL_COMMAND_ARGS_MAX_JSON_BYTES` (8 KiB,
 ///   `packages/protocol/src/events.ts`) caps the serialized `args`, and the tool refuses over-size
 ///   batches with a specific message BEFORE dispatch rather than letting the wire's own `.refine`

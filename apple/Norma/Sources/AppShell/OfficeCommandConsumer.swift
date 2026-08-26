@@ -45,7 +45,8 @@ import NormaProtocol
 /// growth on the TS producer's side needs no Swift change — B2's own growth from one verb to nine
 /// already proved this ("this type deliberately did not have to change for it", that file's own
 /// comment). `isOfficeAction` below tests a PREFIX, not a membership list, for the identical reason:
-/// the wire ships 22 verbs today (`OFFICE_COMMAND_ACTIONS`, events.ts), and a later task that gives
+/// the wire ships 24 verbs today (`OFFICE_COMMAND_ACTIONS`, events.ts — 22 through Stage C, plus
+/// office-finish's two `batch` verbs), and a later task that gives
 /// one of them real behaviour needs only a new `case` in this file's `handle` switch — never a change
 /// to what COUNTS as an office action, and never a Swift protocol-type change either. T3's own two new
 /// verbs proved this AGAIN: no `packages/protocol` change, no NormaProtocol/NormaKit change — see the
