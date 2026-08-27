@@ -141,6 +141,10 @@ struct OfficeCommandConsumer {
             Task { await handleDocsReplace(command) }
         case "office.docs.insert", "office.docs.append":
             Task { await handleDocsInsert(command) }
+        case "office.docs.format":
+            Task { await handleDocsFormat(command) }
+        case "office.slides.format":
+            Task { await handleSlidesFormat(command) }
         default:
             sendResult(command.sessionId, command.commandId, false,
                        Self.refusal(for: command.action), nil)
@@ -1545,6 +1549,74 @@ struct OfficeCommandConsumer {
         "`numberFormat` must be one of "
             + OfficeSheetsNumberFormatPreset.allCases.map { "`\($0.rawValue)`" }.joined(separator: ", ") + "."
     }
+    // MARK: - office-format: operand decoders and refusals
+
+    private static func optionalDocsAlign(_ args: [String: SessionEvent.JSONValue]?) -> OfficeDocsAlign? {
+        guard case .string(let raw)? = args?["align"] else { return nil }
+        return OfficeDocsAlign(rawValue: raw)
+    }
+    private static func optionalDocsLineSpacing(_ args: [String: SessionEvent.JSONValue]?) -> OfficeDocsLineSpacing? {
+        guard case .string(let raw)? = args?["lineSpacing"] else { return nil }
+        return OfficeDocsLineSpacing(rawValue: raw)
+    }
+    /// **`OfficeSlidesLineSpacing`, deliberately not `OfficeDocsLineSpacing`.** The slides set has
+    /// three members; `1.15` is absent because Impress binds no such slot. Decoding a slide's
+    /// spacing through the docs enum would accept `1.15` and then silently no-op.
+    private static func optionalSlidesLineSpacing(_ args: [String: SessionEvent.JSONValue]?) -> OfficeSlidesLineSpacing? {
+        guard case .string(let raw)? = args?["lineSpacing"] else { return nil }
+        return OfficeSlidesLineSpacing(rawValue: raw)
+    }
+    private static func optionalDocsStyle(_ args: [String: SessionEvent.JSONValue]?) -> OfficeDocsParagraphStyle? {
+        guard case .string(let raw)? = args?["style"] else { return nil }
+        return OfficeDocsParagraphStyle(rawValue: raw)
+    }
+
+    /// Names the legal set — the same posture every other closed-enum refusal in this file takes. A
+    /// caller that sent `centre` needs to learn `center` exists, not merely that it was wrong.
+    private static func invalidDocsOperandRefusal(_ key: String) -> String {
+        let members: [String]
+        switch key {
+        case "align": members = OfficeDocsAlign.allCases.map(\.rawValue)
+        case "lineSpacing": members = OfficeDocsLineSpacing.allCases.map(\.rawValue)
+        case "style": members = OfficeDocsParagraphStyle.allCases.map(\.rawValue)
+        default:
+            // The three booleans. **Their refusal spells out the consequence** rather than just the
+            // type, because the engine's behaviour here is genuinely surprising: the underlying slot
+            // never rejects a bad value, it coerces it — so a `"true"` STRING would not fail, it
+            // would turn the attribute OFF while reporting success.
+            return "`\(key)` must be true or false (a boolean, not a string) — a quoted \"true\" would "
+                + "be read by the office engine as false and would turn \(key) OFF. Nothing was changed."
+        }
+        return "`\(key)` must be one of " + members.map { "`\($0)`" }.joined(separator: ", ") + "."
+    }
+    private static let invalidDocsFindRefusal =
+        "`docs format`'s `find` must be a non-empty string — the literal text to format. Leave it out "
+        + "entirely to format the whole document."
+    private static let multilineFormatFindRefusal =
+        "`docs format`'s `find` cannot contain a line break — the office engine's search never matches "
+        + "across a paragraph boundary, so it would silently find nothing. Format one paragraph's "
+        + "worth of text at a time."
+    private static let requiredDocsFormatAttributeRefusal =
+        "`docs format` needs at least one of `bold`, `italic`, `underline`, `align`, `lineSpacing`, "
+        + "`style` — it has nothing to do otherwise. Nothing was changed."
+    private static let requiredSlidesFormatAttributeRefusal =
+        "`slides format` needs at least one of `bold`, `italic`, `underline`, `align`, `lineSpacing` — "
+        + "it has nothing to do otherwise. Nothing was changed."
+    private static let requiredPlaceholderRefusal =
+        "`slides format` needs a `placeholder` — either `title` or `body`. Slides have no other "
+        + "addressable text."
+    /// `1.15` gets its own sentence because it is a LEGAL value on `docs` and simply does not exist
+    /// on a slide — the engine binds no such slot for Impress. A model that just used it on a
+    /// document needs the reason, not a generic list.
+    private static let slidesLineSpacing115Refusal =
+        "`slides format` has no `1.15` line spacing — LibreOffice's presentation editor only offers "
+        + "`single`, `1.5` and `double`. (`docs format` does have `1.15`; this is a real difference "
+        + "between the two editors, not a Norma limitation.)"
+    private static let slidesStyleUnsupportedRefusal =
+        "`slides format` has no `style` — paragraph styles like `heading1` are a text-document "
+        + "feature. A presentation's own \"styles\" are outline levels, which are a different thing "
+        + "and are not exposed here. Use `bold`/`italic`/`underline`/`align`/`lineSpacing` instead."
+
     private static func optionalAlign(_ args: [String: SessionEvent.JSONValue]?) -> OfficeSheetsAlign? {
         guard case .string(let raw)? = args?["align"] else { return nil }
         return OfficeSheetsAlign(rawValue: raw)
@@ -1869,6 +1941,243 @@ struct OfficeCommandConsumer {
         return "set \(applied.joined(separator: ", ")) on \(sheet)!\(range) in \(name) and saved. "
             + "Norma posts formatting to LibreOffice without reading it back, so this reports what was "
             + "requested, not a confirmed result — re-read the range if you need to be sure."
+    }
+
+    // MARK: - office-format: the two formatting verbs
+
+    /// `office.docs.format` — paragraph/character attributes over the whole document, or over every
+    /// literal occurrence of `find`.
+    ///
+    /// **Every closed enum answers a PRESENT-but-undecodable value with a refusal that names the
+    /// legal set, before any of them is read.** This is the third ruling on that shape in this arc:
+    /// an enum that collapses a wrong value to `nil` is indistinguishable from "absent", so paired
+    /// with any other attribute it SUCCEEDS, reports the others, and drops the one the caller asked
+    /// for — the model is told its request worked and it did not happen. Checked for every key up
+    /// front so the refusal names the operand actually got wrong, not whichever decodes first.
+    private func handleDocsFormat(_ command: SessionEvent.PanelCommand) async {
+        guard let path = Self.requiredPath(command.args) else {
+            return sendResult(command.sessionId, command.commandId, false, Self.requiredPathRefusal, nil)
+        }
+        // **Every optional operand, not just the enums.** A decoder that collapses a wrong-typed
+        // value to `nil` makes it indistinguishable from ABSENT, and paired with a valid attribute
+        // the at-least-one guard below is satisfied: the call SUCCEEDS, applies the valid one, and
+        // silently drops the one the caller got wrong. Third occurrence of that shape in this arc —
+        // and the first version of THIS function reproduced it, covering the enums and leaving the
+        // three booleans out (caught red by
+        // `testLiveDocsFormatRefusesAMistypedBoldEvenWhenPairedWithAValidAttribute`, which returned
+        // ok with "set align ... Confirmed" while bold vanished).
+        //
+        // Checked for every key BEFORE any of them is read, so the refusal names the operand the
+        // caller actually got wrong rather than whichever one happens to decode first.
+        for key in ["align", "lineSpacing", "style", "bold", "italic", "underline"]
+        where Self.isPresent(command.args, key) {
+            let decoded: Bool
+            switch key {
+            case "align": decoded = Self.optionalDocsAlign(command.args) != nil
+            case "lineSpacing": decoded = Self.optionalDocsLineSpacing(command.args) != nil
+            case "style": decoded = Self.optionalDocsStyle(command.args) != nil
+            default: decoded = Self.optionalBool(command.args, key) != nil
+            }
+            guard decoded else {
+                return sendResult(command.sessionId, command.commandId, false,
+                                  Self.invalidDocsOperandRefusal(key), nil)
+            }
+        }
+        // `find` present but not a string, or empty, is a REFUSAL — never silently "the whole
+        // document". The difference between those two readings is one paragraph versus every
+        // paragraph in the user's saved file.
+        var find: String?
+        if Self.isPresent(command.args, "find") {
+            guard case .string(let raw)? = command.args?["find"], !raw.isEmpty else {
+                return sendResult(command.sessionId, command.commandId, false, Self.invalidDocsFindRefusal, nil)
+            }
+            guard raw.rangeOfCharacter(from: Self.docsLineBreaks) == nil else {
+                return sendResult(command.sessionId, command.commandId, false, Self.multilineFormatFindRefusal, nil)
+            }
+            find = raw
+        }
+        let align = Self.optionalDocsAlign(command.args)
+        let lineSpacing = Self.optionalDocsLineSpacing(command.args)
+        let style = Self.optionalDocsStyle(command.args)
+        let bold = Self.optionalBool(command.args, "bold")
+        let italic = Self.optionalBool(command.args, "italic")
+        let underline = Self.optionalBool(command.args, "underline")
+        guard align != nil || lineSpacing != nil || style != nil
+                || bold != nil || italic != nil || underline != nil else {
+            return sendResult(command.sessionId, command.commandId, false, Self.requiredDocsFormatAttributeRefusal, nil)
+        }
+        guard let broker = officeAgentBroker(command.sessionId) else {
+            return sendResult(command.sessionId, command.commandId, false, Self.hostGoneRefusal, nil)
+        }
+        do {
+            let resultText = try await broker.perform(
+                sessionId: command.sessionId, path: path, access: .write, requestId: command.commandId
+            ) { runtime, docId, _ in
+                let outcome = try await runtime.docsFormat(docId: docId, find: find, align: align,
+                                                            lineSpacing: lineSpacing, bold: bold, italic: italic,
+                                                            underline: underline, style: style)
+                return Self.formatDocsFormat(path: path, find: find, applied: outcome.applied,
+                                             verified: outcome.verified, verifyAvailable: outcome.verifyAvailable,
+                                             occurrences: outcome.occurrences)
+            }
+            let (ok, text) = Self.capped(resultText)
+            sendResult(command.sessionId, command.commandId, ok, text, nil)
+        } catch {
+            sendResult(command.sessionId, command.commandId, false, Self.message(for: error), nil)
+        }
+    }
+
+    /// `office.slides.format` — the same attributes on ONE slide's title or body placeholder.
+    ///
+    /// **`slide` is the numeric operand in the class that has aborted this app twice.** `Int(Double)`
+    /// TRAPS outside `Int`'s range and a trap takes Norma.app down with every open document's unsaved
+    /// edits; `sheets insert_rows at:1e30` and `slides read slide:1e30` were both measured as
+    /// SIGTRAPs. `oneBasedIndex` bounds it on arrival — and it is bounded HERE as well as in
+    /// `slides.ts` because the daemon is not the only possible producer of a `panel_command`.
+    private func handleSlidesFormat(_ command: SessionEvent.PanelCommand) async {
+        guard let path = Self.requiredPath(command.args) else {
+            return sendResult(command.sessionId, command.commandId, false, Self.requiredPathRefusal, nil)
+        }
+        guard let slide = Self.oneBasedIndex(command.args, "slide") else {
+            return sendResult(command.sessionId, command.commandId, false, Self.requiredSlideRefusal, nil)
+        }
+        guard let placeholderRaw = Self.optionalString(command.args, "placeholder"),
+              let placeholder = OfficeSlidesPlaceholder(rawValue: placeholderRaw) else {
+            return sendResult(command.sessionId, command.commandId, false, Self.requiredPlaceholderRefusal, nil)
+        }
+        // Same rule as `handleDocsFormat`, and for the same reason — see its own comment.
+        for key in ["align", "lineSpacing", "bold", "italic", "underline"]
+        where Self.isPresent(command.args, key) {
+            let decoded: Bool
+            switch key {
+            case "align": decoded = Self.optionalDocsAlign(command.args) != nil
+            case "lineSpacing": decoded = Self.optionalSlidesLineSpacing(command.args) != nil
+            default: decoded = Self.optionalBool(command.args, key) != nil
+            }
+            guard decoded else {
+                // `lineSpacing: "1.15"` gets its OWN sentence rather than the generic one: it is a
+                // legal value on `docs` and simply does not exist on a slide, and a model that just
+                // used it successfully on a document needs to be told WHY, not merely that it is
+                // wrong. Impress binds no `SID_ATTR_PARA_LINESPACE_115` slot at all.
+                if key == "lineSpacing",
+                   Self.optionalString(command.args, "lineSpacing") == OfficeSlidesLineSpacing.unavailableOnSlides {
+                    return sendResult(command.sessionId, command.commandId, false,
+                                      Self.slidesLineSpacing115Refusal, nil)
+                }
+                return sendResult(command.sessionId, command.commandId, false,
+                                  Self.invalidDocsOperandRefusal(key), nil)
+            }
+        }
+        // `style` is not a slides operand at all — Impress's own SID_STYLE_APPLY is presentation
+        // OUTLINE LEVELS, a different feature wearing the same name. Refused rather than ignored:
+        // ignoring it would report success for a request that did nothing.
+        if Self.isPresent(command.args, "style") {
+            return sendResult(command.sessionId, command.commandId, false, Self.slidesStyleUnsupportedRefusal, nil)
+        }
+        let align = Self.optionalDocsAlign(command.args)
+        let lineSpacing = Self.optionalSlidesLineSpacing(command.args)
+        let bold = Self.optionalBool(command.args, "bold")
+        let italic = Self.optionalBool(command.args, "italic")
+        let underline = Self.optionalBool(command.args, "underline")
+        guard align != nil || lineSpacing != nil || bold != nil || italic != nil || underline != nil else {
+            return sendResult(command.sessionId, command.commandId, false,
+                              Self.requiredSlidesFormatAttributeRefusal, nil)
+        }
+        guard let broker = officeAgentBroker(command.sessionId) else {
+            return sendResult(command.sessionId, command.commandId, false, Self.hostGoneRefusal, nil)
+        }
+        do {
+            let resultText = try await broker.perform(
+                sessionId: command.sessionId, path: path, access: .write, requestId: command.commandId
+            ) { runtime, docId, _ in
+                // 0-based on the wire, 1-based to the model — the same conversion every other slides
+                // verb performs at exactly this seam.
+                let applied = try await runtime.slidesFormat(docId: docId, slide: slide - 1,
+                                                              placeholder: placeholder, align: align,
+                                                              lineSpacing: lineSpacing, bold: bold,
+                                                              italic: italic, underline: underline)
+                return Self.formatSlidesFormat(path: path, slide: slide, placeholder: placeholder, applied: applied)
+            }
+            let (ok, text) = Self.capped(resultText)
+            sendResult(command.sessionId, command.commandId, ok, text, nil)
+        } catch {
+            sendResult(command.sessionId, command.commandId, false, Self.message(for: error), nil)
+        }
+    }
+
+    // MARK: - office-format: result formatting
+
+    /// **The sentence a model reads, and it must not overclaim.** Three distinguishable states, and
+    /// collapsing them is exactly the overclaim this arc keeps shipping:
+    ///  - some attributes CONFIRMED by re-reading the formatted range back out of the engine — the
+    ///    house standard, and more than `sheets format` can offer;
+    ///  - dispatched but NOT confirmed, because the read-back itself was unavailable — the outcome is
+    ///    UNKNOWN, and the sentence says "could not check", never "failed";
+    ///  - dispatched, read-back available, and an attribute did NOT show up — reported as not
+    ///    confirmed, so the model can re-read rather than trust it.
+    private static func formatDocsFormat(path: String, find: String?, applied: [String], verified: [String],
+                                         verifyAvailable: Bool, occurrences: Int) -> String {
+        let name = (path as NSString).lastPathComponent
+        let target = find.map { "\(occurrences) occurrence\(occurrences == 1 ? "" : "s") of \"\(brief($0))\"" }
+            ?? "the whole document"
+        var sentence = "set \(applied.joined(separator: ", ")) on \(target) in \(name) and saved."
+        if !verifyAvailable {
+            sentence += " Norma could not read the formatting back afterwards, so this reports what was "
+                + "requested rather than a confirmed result — the change may well have landed; re-read "
+                + "the document if you need to be sure."
+        } else {
+            let unconfirmed = applied.filter { !verified.contains($0) }
+            if verified.isEmpty {
+                sentence += " Norma read the text back afterwards and could not confirm any of it — "
+                    + "re-read the document before relying on this."
+            } else {
+                // **The claim is EXISTENTIAL and the sentence says so.** The check asks whether the
+                // attribute appears in the re-read range, which over N matched occurrences means
+                // "at least one of them" — never "all N". Saying a bare "Confirmed" for a format
+                // that reached 1 of 3 occurrences would be a false universal claim, so the count is
+                // named whenever there is more than one occurrence to be wrong about.
+                // **Every path is hedged, including — especially — the whole-document one.**
+                // The first version gated the hedge on `find != nil && occurrences > 1`, which got
+                // it exactly backwards: `find` is optional, so `{verb:"format", bold:true}` selects
+                // the WHOLE DOCUMENT, and that broadest possible operation was the one making the
+                // unqualified claim. The check is existential over whatever was selected, so the
+                // wider the selection the weaker the guarantee, never the stronger.
+                let scope: String
+                if find == nil {
+                    scope = "somewhere in the document (Norma checks that the formatting is present "
+                        + "in what it re-read, not that it reached every paragraph)"
+                } else if occurrences > 1 {
+                    scope = "in at least one of the \(occurrences) occurrences (Norma cannot check "
+                        + "each one separately)"
+                } else {
+                    scope = "in the text it re-read"
+                }
+                sentence += " Confirmed \(verified.joined(separator: ", ")) \(scope)."
+                if !unconfirmed.isEmpty {
+                    sentence += " \(unconfirmed.joined(separator: ", ")) could not be confirmed the "
+                        + "same way (some attributes leave no readable trace, so this is not the "
+                        + "same as failure)."
+                }
+            }
+        }
+        return sentence
+    }
+
+    /// Slides say **posted**, never applied — and the reason is structural, not caution: Impress's
+    /// clipboard transferable registers no RTF flavour, so there is no read-back to check against on
+    /// this side at all. Also discloses the whole-shape effect alignment has here, which Writer has
+    /// no analogue for.
+    private static func formatSlidesFormat(path: String, slide: Int, placeholder: OfficeSlidesPlaceholder,
+                                           applied: [String]) -> String {
+        let name = (path as NSString).lastPathComponent
+        var sentence = "set \(applied.joined(separator: ", ")) on slide \(slide)'s \(placeholder.rawValue) "
+            + "in \(name) and saved. Norma cannot read formatting back out of a presentation, so this "
+            + "reports what was requested, not a confirmed result — reopen the slide if you need to be sure."
+        if applied.contains("align") {
+            sentence += " Note that aligning a placeholder's text also re-anchors the text box itself, "
+                + "which is a whole-shape change."
+        }
+        return sentence
     }
 
     // MARK: - office-agent-tools T6: slides result formatting

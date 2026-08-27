@@ -454,6 +454,77 @@ public enum OfficeWireFrame: Equatable, Sendable {
     /// here.
     case docsInsert(seq: UInt64, docId: String, text: String, atStart: Bool, asNewParagraph: Bool)
 
+    /// office-format — applies paragraph and character formatting to a Writer document.
+    ///
+    /// **`find` IS the addressing model, and it is the only honest one.** `nil` means the WHOLE
+    /// document (`.uno:SelectAll`, already this bridge's own `docsRead` mechanism); a non-nil `find`
+    /// is a LITERAL search string selected with `.uno:ExecuteSearch` in FIND mode — a FIND selects
+    /// without replacing, reusing the payload `docsReplace` already hardened. There is no paragraph
+    /// index, and there cannot be one: LOK exposes no paragraph addressing for Writer at all
+    /// (`setTextSelection` takes TWIPS and the only coordinate source is PAGE rectangles), which is
+    /// why `docsRead`'s own paragraph `range` is a slice WE take of text we already hold rather than
+    /// a range the engine was asked for. That asymmetry is stated in `docs.ts`'s description, with
+    /// the honest workaround: pass the paragraph's own text as `find`.
+    ///
+    /// **Every attribute OPTIONAL and independent — `nil` is "leave alone", never "reset"** — the
+    /// same contract `sheetsFormat` states in full. At least one non-nil is guaranteed by
+    /// `OfficeCommandConsumer`, not re-checked here (this file's established precedent).
+    ///
+    /// **The two argument-free attributes are argument-free BY DESIGN, and that is why they are in
+    /// v1.** `align` and `lineSpacing` map to dedicated slots (`.uno:LeftPara`/`CenterPara`/
+    /// `RightPara`/`JustifyPara`, `.uno:SpacePara1`/`SpacePara115`/`SpacePara15`/`SpacePara2`) whose
+    /// Execute handlers read only the SLOT ID — no argument to get wrong, `Toggle = FALSE` so no
+    /// flip, no dialog, no null dereference. Their free-form siblings `.uno:ParaAdjust` and
+    /// `.uno:LineSpacing` are BANNED: both are silent no-ops on absent or malformed arguments.
+    ///
+    /// **`bold`/`italic`/`underline` are the dangerous ones and carry a mandatory guard.** Their
+    /// slots are `Toggle = TRUE`, and a dispatch whose arguments fail to produce ANY item is
+    /// indistinguishable from a dispatch with no arguments — so a misnamed or mistyped argument does
+    /// not fail, it FLIPS against current state. Worse, `SvxWeightItem::PutValue` never rejects a
+    /// value: `Any2Bool` coerces anything non-boolean to `false`, so one wrong `"type"` tag silently
+    /// UN-bolds while every layer reports success. The payload is therefore built with an explicit
+    /// `"type":"boolean"` and the string value `"true"`/`"false"` — the exact shape
+    /// `sheetsFormatOnDedicatedThread` already ships and live-proved, never a native JSON boolean
+    /// this bridge has not verified the parser accepts.
+    ///
+    /// **`style` is a closed enum of PROGRAMMATIC names, pre-validated against the engine's own
+    /// catalogue.** An unknown style name is a SILENT no-op (`SwDocShell::ExecStyleSheet` swallows
+    /// `getByName`'s exception and appends nothing), so pre-validation via
+    /// `getCommandValues(".uno:StyleApply")` is what converts that into a loud refusal. The set is
+    /// the engine's own: LOK hardcodes exactly these seven at the head of Writer's style dropdown,
+    /// plus `Standard` for "back to body" — measured present in a real document's catalogue, in
+    /// programmatic form, which is what makes the `Style` + `FamilyName` pair locale-safe.
+    case docsFormat(seq: UInt64, docId: String, find: String?, align: OfficeDocsAlign?,
+                    lineSpacing: OfficeDocsLineSpacing?, bold: Bool?, italic: Bool?, underline: Bool?,
+                    style: OfficeDocsParagraphStyle?)
+
+    /// office-format — the slides half. Same attributes, a DIFFERENT selection model and a
+    /// deliberately smaller `lineSpacing` set.
+    ///
+    /// **Selection reuses the shipped, live-proven Tab-cycle -> F2 -> `.uno:SelectAll` mechanism**
+    /// (`LOKBridge.selectSlidePlaceholderOnDedicatedThread` + the edit-mode dance
+    /// `readSelectedShapeTextOnDedicatedThread` performs). No second mechanism is invented: T6's own
+    /// deletion-red run proved that inside text-edit mode `.uno:SelectAll` selects the SHAPE'S TEXT
+    /// rather than all shapes, which is stronger evidence than the source trace would have been.
+    ///
+    /// **`lineSpacing` has THREE values here, not four, and the asymmetry is real rather than an
+    /// oversight.** Impress's `drtxtob.sdi` binds `SID_ATTR_PARA_LINESPACE_10`/`_15`/`_20` and does
+    /// NOT bind `_115` — so `1.15` exists on Writer and does not exist on a slide. A shared enum
+    /// would let a model ask for something the engine cannot do; hence `OfficeSlidesLineSpacing` is
+    /// its own type rather than a reuse of `OfficeDocsLineSpacing`.
+    ///
+    /// **`align` MUST be dispatched with no arguments here** — not merely "may be". Impress's
+    /// args-present adjust arm dereferences the outliner view (`pOLV->GetSelection()`) without the
+    /// null guard its no-args sibling has, so an argument-carrying alignment dispatched outside
+    /// text-edit mode is a null dereference. The argument-free form is both the safe one and the one
+    /// this design already wanted.
+    ///
+    /// **`style` is absent from this case on purpose.** Impress's `SID_STYLE_APPLY` is presentation
+    /// outline levels, not Writer's paragraph styles — a different feature wearing the same name.
+    case slidesFormat(seq: UInt64, docId: String, slide: Int, placeholder: OfficeSlidesPlaceholder,
+                      align: OfficeDocsAlign?, lineSpacing: OfficeSlidesLineSpacing?,
+                      bold: Bool?, italic: Bool?, underline: Bool?)
+
     // MARK: Responses (helper -> client)
 
     /// `hello` succeeded: `token` matched. `lokVersion` is now (Task 3) the REAL
@@ -717,6 +788,30 @@ public enum OfficeWireFrame: Equatable, Sendable {
     /// Answers a successful `docsInsert`: the document's paragraph count AFTER the insert — the same
     /// "smallest useful truth, not merely ok" posture `slidesManagePageOk` has.
     case docsInsertOk(seq: UInt64, docId: String, paragraphs: Int)
+    /// office-format — answers a successful `docsFormat`.
+    ///
+    /// **Three fields, because "it worked" is three different claims here and collapsing them would
+    /// be the overclaim this arc keeps shipping.**
+    ///  - `applied` — which attribute NAMES were DISPATCHED, in a fixed order. This is the "posted"
+    ///    half: the same honest-not-a-claim-of-effect posture `sheetsFormatOk.applied`,
+    ///    `keyEventOk` and `undoOk` already hold to.
+    ///  - `verified` — which of those were CONFIRMED by re-selecting the same range and re-reading
+    ///    it as RTF. This is a genuine verify-by-re-read, and it is more than `sheetsFormat` has.
+    ///  - `verifyAvailable` — whether the read-back could be performed AT ALL. `false` means the
+    ///    RTF came back null, i.e. **the outcome is unknown, NOT that the write failed** — the write
+    ///    may well have landed. `verified` is empty in that case and must not be read as a negative.
+    ///    Distinguishing this from "verified nothing" is the whole reason the flag exists.
+    ///
+    /// `occurrences` is how many times `find` appears in the document text, counted BY US over the
+    /// text we just read (the engine's own match count is collapsed to a bool before it can reach
+    /// LOK — the same finding that made `docsReplace` count in our own code). It is 0 for a
+    /// whole-document format, where the concept does not apply.
+    case docsFormatOk(seq: UInt64, docId: String, applied: [String], verified: [String],
+                      verifyAvailable: Bool, occurrences: Int)
+    /// office-format — answers a successful `slidesFormat`. `applied` only: Impress registers no RTF
+    /// flavour on its transferable, so there is no read-back to verify against and this verb says
+    /// "posted", never "applied". Stated in `slides.ts`'s own description rather than implied.
+    case slidesFormatOk(seq: UInt64, docId: String, applied: [String])
 
     /// The wire vocabulary, in frame-declaration order. A test walks this list the same way
     /// `EditorBridgeInbound.wireTypes`'s own test does — one fixture per name, decode, assert the
@@ -737,6 +832,8 @@ public enum OfficeWireFrame: Equatable, Sendable {
         "sheetsSet", "sheetsResize", "sheetsManageSheet", "sheetsManageSheetBatch",
         // office-agent-tools T5 — sheets format.
         "sheetsFormat",
+        "docsFormat",
+        "slidesFormat",
         // office-agent-tools T6 — slides.
         "slidesInfo", "slidesRead", "slidesSetText", "slidesManagePage", "slidesManagePageBatch",
         // office-agent-tools T7 — docs.
@@ -750,6 +847,8 @@ public enum OfficeWireFrame: Equatable, Sendable {
         "sheetsInfoOk", "sheetsReadOk",
         "sheetsSetOk", "sheetsResizeOk", "sheetsManageSheetOk", "sheetsManageSheetBatchOk",
         "sheetsFormatOk",
+        "docsFormatOk",
+        "slidesFormatOk",
         "slidesInfoOk", "slidesReadOk", "slidesSetTextOk", "slidesManagePageOk", "slidesManagePageBatchOk",
         "docsInfoOk", "docsReadOk", "docsReplaceOk", "docsInsertOk",
     ]
@@ -782,6 +881,8 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .sheetsManageSheet: return "sheetsManageSheet"
         case .sheetsManageSheetBatch: return "sheetsManageSheetBatch"
         case .sheetsFormat: return "sheetsFormat"
+        case .docsFormat: return "docsFormat"
+        case .slidesFormat: return "slidesFormat"
         case .slidesInfo: return "slidesInfo"
         case .slidesRead: return "slidesRead"
         case .slidesSetText: return "slidesSetText"
@@ -825,6 +926,8 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .sheetsManageSheetOk: return "sheetsManageSheetOk"
         case .sheetsManageSheetBatchOk: return "sheetsManageSheetBatchOk"
         case .sheetsFormatOk: return "sheetsFormatOk"
+        case .docsFormatOk: return "docsFormatOk"
+        case .slidesFormatOk: return "slidesFormatOk"
         case .slidesInfoOk: return "slidesInfoOk"
         case .slidesReadOk: return "slidesReadOk"
         case .slidesSetTextOk: return "slidesSetTextOk"
@@ -865,6 +968,8 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .sheetsManageSheet(let seq, _, _, _, _): return seq
         case .sheetsManageSheetBatch(let seq, _, _): return seq
         case .sheetsFormat(let seq, _, _, _, _, _, _, _, _, _): return seq
+        case .docsFormat(let seq, _, _, _, _, _, _, _, _): return seq
+        case .slidesFormat(let seq, _, _, _, _, _, _, _, _): return seq
         case .slidesInfo(let seq, _): return seq
         case .slidesRead(let seq, _, _): return seq
         case .slidesSetText(let seq, _, _, _, _): return seq
@@ -908,6 +1013,8 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .sheetsManageSheetOk(let seq, _, _): return seq
         case .sheetsManageSheetBatchOk(let seq, _, _, _, _): return seq
         case .sheetsFormatOk(let seq, _, _): return seq
+        case .docsFormatOk(let seq, _, _, _, _, _): return seq
+        case .slidesFormatOk(let seq, _, _): return seq
         case .slidesInfoOk(let seq, _, _): return seq
         case .slidesReadOk(let seq, _, _, _): return seq
         case .slidesSetTextOk(let seq, _, _): return seq
@@ -1089,6 +1196,37 @@ public enum OfficeWireFrame: Equatable, Sendable {
             payload["applied"] = applied
             if let failure { payload["failure"] = failure }
         case .sheetsFormatOk(_, let docId, let applied):
+            payload["docId"] = docId
+            payload["applied"] = applied
+        case .docsFormat(_, let docId, let find, let align, let lineSpacing, let bold, let italic,
+                         let underline, let style):
+            payload["docId"] = docId
+            // Each key written only when its operand is present — the absent-key contract is what
+            // "nil means leave alone" IS on this wire, and JSON has no other way to say it.
+            if let find { payload["find"] = find }
+            if let align { payload["align"] = align.rawValue }
+            if let lineSpacing { payload["lineSpacing"] = lineSpacing.rawValue }
+            if let bold { payload["bold"] = bold }
+            if let italic { payload["italic"] = italic }
+            if let underline { payload["underline"] = underline }
+            if let style { payload["style"] = style.rawValue }
+        case .slidesFormat(_, let docId, let slide, let placeholder, let align, let lineSpacing,
+                           let bold, let italic, let underline):
+            payload["docId"] = docId
+            payload["slide"] = slide
+            payload["placeholder"] = placeholder.rawValue
+            if let align { payload["align"] = align.rawValue }
+            if let lineSpacing { payload["lineSpacing"] = lineSpacing.rawValue }
+            if let bold { payload["bold"] = bold }
+            if let italic { payload["italic"] = italic }
+            if let underline { payload["underline"] = underline }
+        case .docsFormatOk(_, let docId, let applied, let verified, let verifyAvailable, let occurrences):
+            payload["docId"] = docId
+            payload["applied"] = applied
+            payload["verified"] = verified
+            payload["verifyAvailable"] = verifyAvailable
+            payload["occurrences"] = occurrences
+        case .slidesFormatOk(_, let docId, let applied):
             payload["docId"] = docId
             payload["applied"] = applied
         case .slidesInfo(_, let docId):
@@ -1528,6 +1666,102 @@ public enum OfficeSheetsNumberFormatPreset: String, Equatable, Sendable, CaseIte
     case percent
     case currency
     case date
+}
+
+// MARK: - office-format — the formatting wire's own strict enums
+
+/// `docsFormat`/`slidesFormat`'s paragraph alignment. Four values on BOTH apps — unlike
+/// `lineSpacing` below, this one really is symmetric: Writer binds `SID_ATTR_PARA_ADJUST_LEFT`/
+/// `_RIGHT`/`_CENTER`/`_BLOCK` and Impress's `TextObjectBar` handles the same four slot ids.
+///
+/// Separate from `OfficeSheetsAlign` (which has three values and no `justify`) deliberately: Calc
+/// cells have no justified alignment, and a shared type would let a `sheets` caller ask for one.
+public enum OfficeDocsAlign: String, Equatable, Sendable, CaseIterable {
+    case left
+    case center
+    case right
+    case justify
+}
+
+/// `docsFormat`'s line spacing — **FOUR presets, and the set is handed to us by the engine rather
+/// than chosen.** Writer's `_textsh.sdi` binds exactly `SID_ATTR_PARA_LINESPACE_10`/`_115`/`_15`/
+/// `_20`, whose handler arms set `ePropL` to 100/115/150/200. That IS the preset set, the same
+/// grounding `AutoLayout`'s values gave `slides` and the five presets gave `sheets` — never a
+/// free-form number, whose failure modes would land in the user's saved file.
+public enum OfficeDocsLineSpacing: String, Equatable, Sendable, CaseIterable {
+    case single = "single"
+    case onePointOneFive = "1.15"
+    case onePointFive = "1.5"
+    case double = "double"
+}
+
+/// `slidesFormat`'s line spacing — **THREE presets. The missing one is `1.15`, and it is missing
+/// because Impress does not have it**: `sd/sdi/drtxtob.sdi` binds `SID_ATTR_PARA_LINESPACE_10`,
+/// `_15` and `_20`, and no `_115`.
+///
+/// **This is a separate type rather than a subset of `OfficeDocsLineSpacing` on purpose.** Sharing
+/// one enum across both apps would let a model ask a slide for a spacing the engine cannot apply,
+/// and the failure would be a silent no-op — the shape this arc has shipped repeatedly. Making the
+/// asymmetry a TYPE means the compiler carries it instead of a comment.
+public enum OfficeSlidesLineSpacing: String, Equatable, Sendable, CaseIterable {
+    case single = "single"
+    case onePointFive = "1.5"
+    case double = "double"
+
+    /// The Writer-side spelling this value corresponds to — used only to phrase a refusal that
+    /// tells a caller asking for `1.15` on a slide WHY it cannot have it.
+    public static let unavailableOnSlides = "1.15"
+}
+
+/// `docsFormat`'s paragraph style — a CLOSED enum whose members are the engine's own.
+///
+/// LOK hardcodes exactly seven names at the head of Writer's paragraph-style dropdown
+/// (`getComponentStyles`); `Standard` is added for "clear back to body". Every one was measured
+/// present in a real document's `getCommandValues(".uno:StyleApply")` catalogue, in PROGRAMMATIC
+/// form — which is the property that makes the `Style` + `FamilyName` argument pair locale-safe,
+/// and the reason `programmaticName` below is not simply `rawValue`.
+///
+/// ⚠️ **`default` maps to `"Standard"`, NOT to "Default Paragraph Style".** The latter is the
+/// DISPLAY name; sending it hits the swallowed `getByName` exception and silently does nothing —
+/// the exact trap the pre-validation exists to catch.
+public enum OfficeDocsParagraphStyle: String, Equatable, Sendable, CaseIterable {
+    case standard = "default"
+    case textBody = "textBody"
+    case title
+    case subtitle
+    case quotation
+    case heading1
+    case heading2
+    case heading3
+
+    /// The name the ENGINE knows this style by. Never `rawValue`: the wire spells these in the
+    /// tool's own vocabulary (`heading1`), the engine spells them its way (`Heading 1`), and
+    /// conflating the two is how a style silently fails to apply.
+    public var programmaticName: String {
+        switch self {
+        case .standard: return "Standard"
+        case .textBody: return "Text body"
+        case .title: return "Title"
+        case .subtitle: return "Subtitle"
+        case .quotation: return "Quotations"
+        case .heading1: return "Heading 1"
+        case .heading2: return "Heading 2"
+        case .heading3: return "Heading 3"
+        }
+    }
+}
+
+/// `slidesFormat`'s target placeholder. The same two a slide's `read`/`set_text` already address,
+/// and the same Tab-order caveat applies: Tab order is z-order, so on a hand-reordered slide the
+/// first Tab need not be the title. That is pre-existing risk `set_text` already carries, not a new
+/// one — and the type-27 position verification is its mitigation on both.
+public enum OfficeSlidesPlaceholder: String, Equatable, Sendable, CaseIterable {
+    case title
+    case body
+
+    /// How many Tab presses reach this placeholder from a fresh Escape — the SAME mapping
+    /// `LOKBridge`'s own read/write paths use (title = 1, body = 2), never a second one.
+    public var tabCount: Int { self == .title ? 1 : 2 }
 }
 
 // MARK: - office-agent-tools T6 — the slides wire's own strict enums
@@ -2763,6 +2997,98 @@ public enum OfficeWireCodec {
             return .frame(.sheetsFormat(seq: seq, docId: docId, sheet: sheet, range: range,
                                         columnSpan: columnSpan, bold: bold, italic: italic,
                                         numberFormat: numberFormat, align: align, width: width))
+        case "docsFormat":
+            guard let docId = object["docId"] as? String else { return .rejected(seq: seq, reason: "malformed") }
+            // `find` present-but-not-a-string is malformed, never silently "whole document" — that
+            // difference is the whole blast radius of this verb (one paragraph vs every paragraph).
+            let find = object["find"] as? String
+            guard object["find"] == nil || find != nil else { return .rejected(seq: seq, reason: "malformed") }
+            let bold = object["bold"] as? Bool
+            guard object["bold"] == nil || bold != nil else { return .rejected(seq: seq, reason: "malformed") }
+            let italic = object["italic"] as? Bool
+            guard object["italic"] == nil || italic != nil else { return .rejected(seq: seq, reason: "malformed") }
+            let underline = object["underline"] as? Bool
+            guard object["underline"] == nil || underline != nil else { return .rejected(seq: seq, reason: "malformed") }
+            // Every closed enum: a key PRESENT but unrecognized is malformed, distinct from the key
+            // being ABSENT (a legitimate nil = this attribute untouched). Same strict-enum discipline
+            // `sheetsFormat`'s own `numberFormat` decode already carries — and the reason it matters
+            // more here is that a collapsed-to-nil enum reports success while silently dropping the
+            // attribute the caller asked for.
+            let align: OfficeDocsAlign?
+            if let raw = object["align"] as? String {
+                guard let parsed = OfficeDocsAlign(rawValue: raw) else { return .rejected(seq: seq, reason: "malformed") }
+                align = parsed
+            } else {
+                guard object["align"] == nil else { return .rejected(seq: seq, reason: "malformed") }
+                align = nil
+            }
+            let lineSpacing: OfficeDocsLineSpacing?
+            if let raw = object["lineSpacing"] as? String {
+                guard let parsed = OfficeDocsLineSpacing(rawValue: raw) else { return .rejected(seq: seq, reason: "malformed") }
+                lineSpacing = parsed
+            } else {
+                guard object["lineSpacing"] == nil else { return .rejected(seq: seq, reason: "malformed") }
+                lineSpacing = nil
+            }
+            let style: OfficeDocsParagraphStyle?
+            if let raw = object["style"] as? String {
+                guard let parsed = OfficeDocsParagraphStyle(rawValue: raw) else { return .rejected(seq: seq, reason: "malformed") }
+                style = parsed
+            } else {
+                guard object["style"] == nil else { return .rejected(seq: seq, reason: "malformed") }
+                style = nil
+            }
+            return .frame(.docsFormat(seq: seq, docId: docId, find: find, align: align,
+                                      lineSpacing: lineSpacing, bold: bold, italic: italic,
+                                      underline: underline, style: style))
+        case "slidesFormat":
+            guard let docId = object["docId"] as? String, let slide = intValue(object["slide"]), slide >= 0,
+                  let placeholderRaw = object["placeholder"] as? String,
+                  let placeholder = OfficeSlidesPlaceholder(rawValue: placeholderRaw) else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            let sBold = object["bold"] as? Bool
+            guard object["bold"] == nil || sBold != nil else { return .rejected(seq: seq, reason: "malformed") }
+            let sItalic = object["italic"] as? Bool
+            guard object["italic"] == nil || sItalic != nil else { return .rejected(seq: seq, reason: "malformed") }
+            let sUnderline = object["underline"] as? Bool
+            guard object["underline"] == nil || sUnderline != nil else { return .rejected(seq: seq, reason: "malformed") }
+            let sAlign: OfficeDocsAlign?
+            if let raw = object["align"] as? String {
+                guard let parsed = OfficeDocsAlign(rawValue: raw) else { return .rejected(seq: seq, reason: "malformed") }
+                sAlign = parsed
+            } else {
+                guard object["align"] == nil else { return .rejected(seq: seq, reason: "malformed") }
+                sAlign = nil
+            }
+            // `OfficeSlidesLineSpacing`, NOT `OfficeDocsLineSpacing` — so `"1.15"` on a slide is
+            // REJECTED here rather than silently dropped. Impress does not bind that slot; a shared
+            // enum would have let it through and no-op'd.
+            let sLineSpacing: OfficeSlidesLineSpacing?
+            if let raw = object["lineSpacing"] as? String {
+                guard let parsed = OfficeSlidesLineSpacing(rawValue: raw) else { return .rejected(seq: seq, reason: "malformed") }
+                sLineSpacing = parsed
+            } else {
+                guard object["lineSpacing"] == nil else { return .rejected(seq: seq, reason: "malformed") }
+                sLineSpacing = nil
+            }
+            return .frame(.slidesFormat(seq: seq, docId: docId, slide: slide, placeholder: placeholder,
+                                        align: sAlign, lineSpacing: sLineSpacing, bold: sBold,
+                                        italic: sItalic, underline: sUnderline))
+        case "docsFormatOk":
+            guard let docId = object["docId"] as? String, let applied = object["applied"] as? [String],
+                  let verified = object["verified"] as? [String],
+                  let verifyAvailable = object["verifyAvailable"] as? Bool,
+                  let occurrences = intValue(object["occurrences"]), occurrences >= 0 else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.docsFormatOk(seq: seq, docId: docId, applied: applied, verified: verified,
+                                        verifyAvailable: verifyAvailable, occurrences: occurrences))
+        case "slidesFormatOk":
+            guard let docId = object["docId"] as? String, let applied = object["applied"] as? [String] else {
+                return .rejected(seq: seq, reason: "malformed")
+            }
+            return .frame(.slidesFormatOk(seq: seq, docId: docId, applied: applied))
         case "sheetsSetOk":
             guard let docId = object["docId"] as? String, let cellsWritten = intValue(object["cellsWritten"]) else {
                 return .rejected(seq: seq, reason: "malformed")

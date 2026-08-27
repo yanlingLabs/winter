@@ -451,6 +451,39 @@ final class OfficeHelperClient {
         }
     }
 
+    // MARK: - office-format: the two formatting verbs
+
+    func docsFormat(docId: String, find: String?, align: OfficeDocsAlign?, lineSpacing: OfficeDocsLineSpacing?,
+                    bold: Bool?, italic: Bool?, underline: Bool?, style: OfficeDocsParagraphStyle?)
+        async throws -> (applied: [String], verified: [String], verifyAvailable: Bool, occurrences: Int) {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.docsFormat(seq: seq, docId: docId, find: find, align: align,
+                                              lineSpacing: lineSpacing, bold: bold, italic: italic,
+                                              underline: underline, style: style))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .docsFormatOk(_, _, let applied, let verified, let verifyAvailable, let occurrences):
+            return (applied, verified, verifyAvailable, occurrences)
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
+    func slidesFormat(docId: String, slide: Int, placeholder: OfficeSlidesPlaceholder, align: OfficeDocsAlign?,
+                      lineSpacing: OfficeSlidesLineSpacing?, bold: Bool?, italic: Bool?,
+                      underline: Bool?) async throws -> [String] {
+        let seq = seqAllocator.nextSeq()
+        try await connection.send(.slidesFormat(seq: seq, docId: docId, slide: slide, placeholder: placeholder,
+                                                align: align, lineSpacing: lineSpacing, bold: bold,
+                                                italic: italic, underline: underline))
+        let reply = try await expectReply(seq: seq)
+        switch reply {
+        case .slidesFormatOk(_, _, let applied): return applied
+        case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
+        default: throw OfficeHelperClientError.unexpectedReply(reply)
+        }
+    }
+
     // MARK: - office-agent-tools T6: slides
 
     func slidesInfo(docId: String) async throws -> [OfficeSlideInfo] {

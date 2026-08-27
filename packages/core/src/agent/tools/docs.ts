@@ -131,8 +131,39 @@ import { officeTimeoutMessage, officeResolvedPathWithinFence } from "./sheets";
  *  independently on both ends. */
 const DocsInsertAt = z.enum(["start", "end"]);
 
+/** `format`'s paragraph alignment — a CLOSED four-value enum, and the safest verbs in this whole
+ *  arc. `.uno:LeftPara`/`CenterPara`/`RightPara`/`JustifyPara` are argument-free BY DESIGN: their
+ *  Execute handlers read only the SLOT ID, so there is no argument to get wrong, no toggle to flip,
+ *  no dialog and no null dereference. The free-form sibling `.uno:ParaAdjust` is a silent no-op on
+ *  a malformed argument and is banned by name in the bridge. Raw values MUST match the Swift side's
+ *  `OfficeDocsAlign` byte-for-byte. */
+const DocsAlign = z.enum(["left", "center", "right", "justify"]);
+
+/** `format`'s line spacing — **the engine ships exactly these four and that IS the enum.** Writer
+ *  binds `SID_ATTR_PARA_LINESPACE_10`/`_115`/`_15`/`_20`, whose handlers set 100/115/150/200. The
+ *  same grounding `numberFormat`'s five presets and `slides`' 16 layouts already have: a closed
+ *  preset set rather than a free-form number, because a free-form mini-language's failure modes
+ *  land in the user's saved file.
+ *
+ *  ⚠️ **`slides format` has only THREE of these — no `1.15`.** LibreOffice's presentation editor
+ *  binds no such slot. That asymmetry is real, is enforced by a separate enum on the Swift side,
+ *  and is stated in `slides`' own description. */
+const DocsLineSpacing = z.enum(["single", "1.15", "1.5", "double"]);
+
+/** `format`'s paragraph style — a CLOSED enum whose members are the ENGINE'S OWN. LibreOffice
+ *  hardcodes exactly seven names at the head of Writer's style dropdown; `default` (the engine's
+ *  `Standard`) is added for "clear back to body text". All eight were measured present in a real
+ *  document's own style catalogue.
+ *
+ *  An unknown style name is a SILENT no-op in the engine — the exception is swallowed and nothing
+ *  reaches Norma — which is why the app pre-validates against that catalogue before dispatching and
+ *  refuses loudly instead. */
+const DocsParagraphStyle = z.enum([
+  "default", "textBody", "title", "subtitle", "quotation", "heading1", "heading2", "heading3",
+]);
+
 const DocsArgs = z.object({
-  verb: z.enum(["info", "read", "replace", "insert", "append"]),
+  verb: z.enum(["info", "read", "replace", "insert", "append", "format"]),
   /** Absolute (or resolved against the session's primary working directory if relative) — spec §2's
    *  own table. Required for EVERY verb; a missing path is malformed, never defaulted. */
   path: z.string().min(1).max(4096),
@@ -145,7 +176,16 @@ const DocsArgs = z.object({
    *  past the last paragraph clamps to it (asking for "2 to 100" of a 5-paragraph document is an
    *  ordinary way to say "from 2 to the end"). Same ceiling, same reason, as `fromParagraph`. */
   toParagraph: z.number().int().positive().max(1_000_000).optional(),
-  /** `replace` ONLY — the LITERAL text to find. Case-sensitive, never a regex or wildcard (ruling 1).
+  /** `replace` and `format` — the LITERAL text to find. Case-sensitive, never a regex or wildcard
+   *  (ruling 1).
+   *
+   *  **On `format` it is OPTIONAL and omitting it means the WHOLE document**, where on `replace` it
+   *  is required. It is also `format`'s ONLY range addressing, and the asymmetry with `read` is
+   *  real rather than an oversight: `read` takes a paragraph range because its paragraphs are a
+   *  slice WE take of text we already hold, while formatting needs a real SELECTION inside the
+   *  engine — and the engine has no paragraph door at all (its only coordinate-based selection
+   *  takes twips, and the only coordinates it exposes are whole-PAGE rectangles). The honest
+   *  workaround is stated in the description: pass the paragraph's own text as `find`.
    *  Must not contain a line break: the engine's search never matches across a paragraph boundary, so
    *  a multi-line `find` would silently match nothing while our own count over `\n`-joined text
    *  happily would — a guaranteed divergence, i.e. a guaranteed trip of ruling 1's own tripwire, on
@@ -209,6 +249,23 @@ const DocsArgs = z.object({
    *  is always the end, by definition) and refuses it rather than accepting a value it would not
    *  honour. */
   at: DocsInsertAt.optional(),
+  /** `format` ONLY. */
+  align: DocsAlign.optional(),
+  /** `format` ONLY. */
+  lineSpacing: DocsLineSpacing.optional(),
+  /** `format` ONLY. */
+  style: DocsParagraphStyle.optional(),
+  /** `format` ONLY — true sets, false clears, absent leaves alone. **All three are genuinely
+   *  three-valued and MUST stay booleans on the wire**: the underlying engine slots toggle when
+   *  their argument is missing or mistyped, and the item never rejects a bad value — it coerces it
+   *  to `false`. So a non-boolean here would not fail, it would silently turn the attribute OFF
+   *  while reporting success. zod refusing anything but a boolean is the first of the two layers
+   *  that prevent that; the app-side construction of an explicit typed payload is the second. */
+  bold: z.boolean().optional(),
+  /** `format` ONLY — see `bold`. */
+  italic: z.boolean().optional(),
+  /** `format` ONLY — see `bold`. */
+  underline: z.boolean().optional(),
 });
 type DocsArgs = z.infer<typeof DocsArgs>;
 
@@ -341,6 +398,25 @@ export function registerDocsTool(r: ToolRegistry, deps: DocsToolDeps): void {
       + "one per paragraph, and it is faster. Adds them at the end as NEW paragraphs. This is the one to use "
       + "for \"add a section/sentence to the end\"; insert at:\"end\" continues the last paragraph "
       + "instead.\n"
+      + "• format — path, optional find, and at least one of bold/italic/underline (true or false), "
+      + "align (left/center/right/justify), lineSpacing (single/1.15/1.5/double) or style "
+      + "(default/textBody/title/subtitle/quotation/heading1/heading2/heading3). Omit find to format "
+      + "the WHOLE document; pass find to format every occurrence of that literal text.\n"
+      + "  IMPORTANT — format does NOT take paragraph numbers, even though read does. The office "
+      + "engine has no way to select \"paragraph 4\"; it can only select the whole document or "
+      + "text it finds by matching. To format one paragraph, read it first and pass that "
+      + "paragraph's own text as find. That fails loudly (0 matches) if the text has moved, which a "
+      + "stale paragraph number would not — it would silently format the wrong paragraph.\n"
+      + "  align, lineSpacing and style are PARAGRAPH properties: they affect every whole paragraph "
+      + "your find touches, not just the matched words. bold/italic/underline affect exactly the "
+      + "matched text, and they survive a style applied afterwards — the two are independent, so you "
+      + "can set them in either order.\n"
+      + "  format checks its own work where it can: it re-reads the formatted text back out of the "
+      + "document and tells you what it could confirm. Two things that check does NOT mean. When it "
+      + "says it could not confirm something, that means it could not CHECK — not that it failed. "
+      + "And when you format several occurrences at once, a confirmation means the attribute is "
+      + "there in AT LEAST ONE of them, not that every one was reached — Norma cannot check them "
+      + "individually. Re-read if it matters.\n"
       + "Every path must be inside this session's own working directories — an office read/write "
       + "COPIES the file and parses it with LibreOffice, so it is not an ordinary file read/write and "
       + "the usual unrestricted-reads rule does not cover it.\n"
@@ -430,6 +506,60 @@ export function registerDocsTool(r: ToolRegistry, deps: DocsToolDeps): void {
         throw new Error("docs append always adds at the end — it has no `at`. Use verb:\"insert\" "
           + "with at:\"start\" to put text at the beginning instead.");
       }
+      // `format`'s own operands. A present one on any verb that does not take it REFUSES rather
+      // than being ignored — the same rule `texts` and `at` already follow. Ignoring a formatting
+      // operand on, say, `replace` would tell the model its formatting request succeeded when
+      // nothing of the sort was sent.
+      //
+      // ⚠️ **The exemption is PER-KEY, not per-verb, and this table covers EVERY optional operand
+      // — not just the formatting ones.** Two rounds of review found two different shapes here:
+      //
+      //  1. A per-VERB exemption let `{verb:"replace", find, replaceWith, bold:true}` pass zod and
+      //     drop `bold` on the way to the wire, reporting success. (`find` really is shared with
+      //     `replace`; the six formatting attributes are not.)
+      //  2. Restricting the table to formatting keys still left the READ operands loose, and one of
+      //     those shapes is worse than dropping: `{verb:"format", fromParagraph:2, toParagraph:3,
+      //     bold:true}` was dispatched as **whole-document bold**. Not ignored — silently WIDENED.
+      //     The model asks for two paragraphs and the user's entire document is bolded, reported as
+      //     success. An unrecognised scope operand must never fall back to "everything".
+      //
+      // So the table is now exhaustive over the schema's optional keys, and the loop is the single
+      // place that decides which verb may carry what. `path`/`verb` are required and excluded by
+      // construction. The earlier, more specific checks above (`texts` on non-append, `at` on
+      // append, `replaceWith` on format, `all:false`) still run first and keep their better-worded
+      // refusals; this is the backstop that makes the set CLOSED rather than a list of the mistakes
+      // someone happened to think of.
+      const OPERAND_VERBS: Record<string, ReadonlyArray<DocsArgs["verb"]>> = {
+        fromParagraph: ["read"], toParagraph: ["read"],
+        find: ["format", "replace"], replaceWith: ["replace"], all: ["replace"],
+        text: ["insert", "append"], texts: ["append"], at: ["insert"],
+        align: ["format"], lineSpacing: ["format"], style: ["format"],
+        bold: ["format"], italic: ["format"], underline: ["format"],
+      };
+      for (const [key, allowedVerbs] of Object.entries(OPERAND_VERBS)) {
+        if (a[key as keyof DocsArgs] === undefined) continue;
+        if (allowedVerbs.includes(a.verb)) continue;
+        const takenBy = allowedVerbs.map((v) => `\`${v}\``).join(" or ");
+        throw new Error(`docs ${a.verb} has no \`${key}\` — that operand belongs to ${takenBy}. `
+          + "Nothing was changed. (Norma refuses an operand it cannot honour rather than ignoring "
+          + "it, because ignoring one would report success for something it did not do.)");
+      }
+      if (a.verb === "format") {
+        if (a.align === undefined && a.lineSpacing === undefined && a.style === undefined
+            && a.bold === undefined && a.italic === undefined && a.underline === undefined) {
+          throw new Error("docs format needs at least one of `bold`, `italic`, `underline`, `align`, "
+            + "`lineSpacing`, `style` — it has nothing to do otherwise. Nothing was changed.");
+        }
+        if (a.find !== undefined && (a.find.includes("\n") || a.find.includes("\r"))) {
+          throw new Error("docs format's `find` cannot contain a line break — the office engine's "
+            + "search never matches across a paragraph boundary, so it would silently find nothing. "
+            + "Format one paragraph's worth of text at a time.");
+        }
+        if (a.replaceWith !== undefined) {
+          throw new Error("docs format does not replace text — it only changes how text LOOKS. Drop "
+            + "`replaceWith`, or use verb:\"replace\" if you meant to change the words.");
+        }
+      }
       if (a.verb === "read" && a.fromParagraph !== undefined && a.toParagraph !== undefined
           && a.fromParagraph > a.toParagraph) {
         throw new Error(`docs read's \`fromParagraph\` (${a.fromParagraph}) is after \`toParagraph\` `
@@ -474,6 +604,18 @@ export function registerDocsTool(r: ToolRegistry, deps: DocsToolDeps): void {
       } else if (a.verb === "insert") {
         const fields: Record<string, string | number> = { text: a.text! };
         if (a.at !== undefined) fields.at = a.at;
+        args = officeCommandArgs(resolvedPath, fields);
+      } else if (a.verb === "format") {
+        // Conditional construction, one key at a time — the same discipline `sheets format` and
+        // `slides set_text` use, and it is what the absent-means-untouched contract IS on this wire.
+        const fields: Record<string, string | number | boolean> = {};
+        if (a.find !== undefined) fields.find = a.find;
+        if (a.align !== undefined) fields.align = a.align;
+        if (a.lineSpacing !== undefined) fields.lineSpacing = a.lineSpacing;
+        if (a.style !== undefined) fields.style = a.style;
+        if (a.bold !== undefined) fields.bold = a.bold;
+        if (a.italic !== undefined) fields.italic = a.italic;
+        if (a.underline !== undefined) fields.underline = a.underline;
         args = officeCommandArgs(resolvedPath, fields);
       } else {
         // append. `texts` never reaches the wire as an array — it is joined into the SAME `text`

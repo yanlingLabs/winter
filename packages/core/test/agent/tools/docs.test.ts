@@ -80,11 +80,12 @@ describe("registration", () => {
   // Mirrors sheets/slides' own tripwire: the verb enum pinned literally through the SAME
   // z.toJSONSchema path a real model sees, so a new verb fails here before it ships silently
   // inheriting an unaudited gate classification.
-  test("the verb enum is exactly the 5 verbs this task ships", () => {
+  test("the verb enum is exactly the 6 verbs shipped (5 from T7 + office-format's format)", () => {
     const h = makeHarness();
     const spec = h.registry.specFor("docs", WORKDIR, "code");
     const parameters = spec?.parameters as { properties?: { verb?: { enum?: string[] } } } | undefined;
-    expect(parameters?.properties?.verb?.enum).toEqual(["info", "read", "replace", "insert", "append"]);
+    expect(parameters?.properties?.verb?.enum)
+      .toEqual(["info", "read", "replace", "insert", "append", "format"]);
   });
 
   test("`at` is a closed enum — start/end only, so a free-form position can never reach the app", () => {
@@ -126,6 +127,101 @@ describe("registration", () => {
     expect(description).toContain("LITERAL and CASE-SENSITIVE");
     // The v1 narrowing, stated where a model will read it rather than discovered by refusal.
     expect(description).toContain("no way to replace only the FIRST occurrence");
+  });
+});
+
+// ================================================================================================
+// office-format review F-1 — the vanishing-operand class, fourth occurrence
+// ================================================================================================
+
+describe("format operands never vanish onto another verb", () => {
+  // **This is the pin for a defect that shipped and was caught in review.** The operand-refusal loop
+  // originally exempted the whole `replace` VERB rather than the single shared key `find`, so a
+  // formatting attribute sent alongside a replace passed zod, was dropped on the way to the wire,
+  // and the call reported success. The model asked for bold and was told it worked.
+  //
+  // Asserted as a REFUSAL and as NOTHING DISPATCHED, because either one alone is weak: a refusal
+  // without the dispatch check would not prove the file was left alone, and a dispatch check without
+  // the refusal would pass for a call that silently did nothing.
+  for (const key of ["bold", "italic", "underline", "align", "lineSpacing", "style"] as const) {
+    const value = ["bold", "italic", "underline"].includes(key) ? true
+      : key === "align" ? "center" : key === "lineSpacing" ? "double" : "heading1";
+    test(`docs replace refuses a \`${key}\` instead of dropping it`, async () => {
+      const h = makeHarness();
+      const result = await h.run({
+        verb: "replace", path: "/repo/a.odt", find: "x", replaceWith: "y", [key]: value,
+      });
+      expect(result.isError).toBe(true);
+      expect(result.output).toContain(`has no \`${key}\``);
+      // The load-bearing half: nothing reached the wire. A refusal alone would not prove the
+      // user's file was left alone, and a dispatch check alone would pass for a silent no-op.
+      expect(h.recorded).toHaveLength(0);
+    });
+  }
+
+  // ⭐ **The WIDENING shape, and it is worse than every dropping shape above.**
+  //
+  // `{verb:"format", fromParagraph:2, toParagraph:3, bold:true}` used to pass zod, lose both
+  // paragraph operands on the way to the wire, and dispatch as **whole-document bold**. Not an
+  // ignored operand — a silently ENLARGED one: the model asks for two paragraphs and the user's
+  // entire document is bolded, reported as success. The blast radius of the mistake is bigger than
+  // the request that caused it, which is the one direction an operand bug must never fail in.
+  //
+  // Asserted with `recorded` empty, because the whole defect was about what reached the wire.
+  test("docs format refuses paragraph operands instead of silently formatting the WHOLE document", async () => {
+    const h = makeHarness();
+    const result = await h.run({
+      verb: "format", path: "/repo/a.odt", fromParagraph: 2, toParagraph: 3, bold: true,
+    });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("has no `fromParagraph`");
+    expect(h.recorded).toHaveLength(0);
+  });
+
+  // The rest of the shapes the same sweep found — every optional operand on a verb that cannot
+  // honour it. Table-driven so the pin is exhaustive by construction rather than by whoever
+  // remembered which combinations to try.
+  const WRONG_VERB_SHAPES: Array<{ verb: string; key: string; value: unknown; base: Record<string, unknown> }> = [
+    { verb: "format", key: "at", value: "start", base: { bold: true } },
+    { verb: "format", key: "text", value: "x", base: { bold: true } },
+    { verb: "format", key: "texts", value: ["x"], base: { bold: true } },
+    { verb: "format", key: "all", value: true, base: { bold: true } },
+    { verb: "format", key: "toParagraph", value: 3, base: { bold: true } },
+    { verb: "replace", key: "fromParagraph", value: 2, base: { find: "a", replaceWith: "b" } },
+    { verb: "replace", key: "toParagraph", value: 3, base: { find: "a", replaceWith: "b" } },
+    { verb: "replace", key: "at", value: "start", base: { find: "a", replaceWith: "b" } },
+    { verb: "replace", key: "text", value: "x", base: { find: "a", replaceWith: "b" } },
+    { verb: "read", key: "bold", value: true, base: {} },
+    { verb: "insert", key: "find", value: "a", base: { text: "x" } },
+    { verb: "append", key: "style", value: "title", base: { text: "x" } },
+  ];
+  for (const shape of WRONG_VERB_SHAPES) {
+    test(`docs ${shape.verb} refuses a \`${shape.key}\` it cannot honour`, async () => {
+      const h = makeHarness();
+      const result = await h.run({
+        verb: shape.verb, path: "/repo/a.odt", ...shape.base, [shape.key]: shape.value,
+      });
+      expect(result.isError).toBe(true);
+      expect(h.recorded).toHaveLength(0);
+    });
+  }
+
+  // The other half of the per-key rule, and the reason it is per-KEY: `find` is genuinely shared
+  // with `replace` and must still work there. A fix that refused `find` on `replace` would break the
+  // verb it was protecting.
+  test("`find` is still accepted on replace — the exemption is per-key, not a blanket ban", async () => {
+    const h = makeHarness();
+    await h.run({ verb: "replace", path: "/repo/a.odt", find: "x", replaceWith: "y" });
+    expect(h.recorded).toHaveLength(1);
+    expect(h.recorded[0]!.args).toMatchObject({ find: "x", replaceWith: "y" });
+  });
+
+  // And `find` is accepted on `format`, where it is the scope operand.
+  test("`find` is accepted on format, where it selects what to format", async () => {
+    const h = makeHarness();
+    await h.run({ verb: "format", path: "/repo/a.odt", find: "x", bold: true });
+    expect(h.recorded).toHaveLength(1);
+    expect(h.recorded[0]!.args).toMatchObject({ find: "x", bold: true });
   });
 });
 

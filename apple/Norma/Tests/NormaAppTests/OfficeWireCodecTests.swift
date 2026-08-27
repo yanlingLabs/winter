@@ -299,6 +299,13 @@ final class OfficeWireCodecTests: XCTestCase {
             // office-agent-tools T5 — sheets format.
             "sheetsFormat": #"{"type":"sheetsFormat","seq":1,"docId":"d","sheet":"Sheet1","range":"A1:C10","bold":true}"#,
             "sheetsFormatOk": #"{"type":"sheetsFormatOk","seq":1,"docId":"d","applied":["bold"]}"#,
+            // office-format — docs/slides format. `docsFormat`'s `find` is deliberately ABSENT here:
+            // that is the whole-document scope, the shape a fixture should pin because it is the one
+            // where an over-eager decode would silently widen the blast radius.
+            "docsFormat": #"{"type":"docsFormat","seq":1,"docId":"d","bold":true,"align":"center"}"#,
+            "docsFormatOk": #"{"type":"docsFormatOk","seq":1,"docId":"d","applied":["bold"],"verified":["bold"],"verifyAvailable":true,"occurrences":0}"#,
+            "slidesFormat": #"{"type":"slidesFormat","seq":1,"docId":"d","slide":0,"placeholder":"title","bold":true}"#,
+            "slidesFormatOk": #"{"type":"slidesFormatOk","seq":1,"docId":"d","applied":["bold"]}"#,
             // office-agent-tools T6 — slides.
             "slidesInfo": #"{"type":"slidesInfo","seq":1,"docId":"d"}"#,
             "slidesRead": #"{"type":"slidesRead","seq":1,"docId":"d","slide":0}"#,

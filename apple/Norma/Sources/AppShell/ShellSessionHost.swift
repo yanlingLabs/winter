@@ -1280,6 +1280,30 @@ final class ShellSessionHost: ObservableObject {
                                                         asNewParagraph: asNewParagraph)
                 }
             },
+            // office-format — the two formatting closures. Same `queue.run` routing, same
+            // throws-all-the-way-back posture, and note they must be wired HERE: the Driver's own
+            // defaults throw, so a missing wiring is a loud runtime failure rather than a silent
+            // success (see those fields' own header in OfficeRuntime.swift).
+            docsFormat: { [weak supervisor] docId, find, align, lineSpacing, bold, italic, underline, style in
+                try await queue.run {
+                    guard let client = supervisor?.client else {
+                        throw OfficeHelperClientError.serverError(reason: "helper not connected")
+                    }
+                    return try await client.docsFormat(docId: docId, find: find, align: align,
+                                                        lineSpacing: lineSpacing, bold: bold, italic: italic,
+                                                        underline: underline, style: style)
+                }
+            },
+            slidesFormat: { [weak supervisor] docId, slide, placeholder, align, lineSpacing, bold, italic, underline in
+                try await queue.run {
+                    guard let client = supervisor?.client else {
+                        throw OfficeHelperClientError.serverError(reason: "helper not connected")
+                    }
+                    return try await client.slidesFormat(docId: docId, slide: slide, placeholder: placeholder,
+                                                          align: align, lineSpacing: lineSpacing, bold: bold,
+                                                          italic: italic, underline: underline)
+                }
+            },
             // Office Stage B Task 2b — the LIVE supervisor's own configured directory, never
             // `OfficeHelperSupervisor.Configuration.defaultStateDirectory()` read fresh: every live
             // test overrides `socketDirectory` with a scratch dir precisely so its own helper's

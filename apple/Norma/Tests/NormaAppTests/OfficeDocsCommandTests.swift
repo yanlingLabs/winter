@@ -648,6 +648,450 @@ final class OfficeDocsCommandTests: XCTestCase {
         XCTAssertTrue(documentXML.contains("NORMA GATEWAY"), "the saved .docx must carry the replacement")
     }
 
+
+    // MARK: - office-format: docs format
+    //
+    // **The evidence rule for every drill below: the assertion is on the SAVED FILE'S BYTES, and the
+    // fixture is PRISTINE with respect to what is asserted.** `format-target.odt` carries no bold,
+    // no italic, no underline, no explicit alignment and no non-default style, so "the saved
+    // content.xml now contains a bold run" cannot also be true of the untouched file. That is the
+    // arc's #1 defect class (four separate occurrences), and it is why a new fixture exists rather
+    // than reusing `two-page.odt`, whose first paragraph is already styled.
+
+    /// Counts BOLD TEXT RUNS in a saved ODF file's own bytes.
+    ///
+    /// Two hops, because ODF never marks the text itself: automatic text styles carry
+    /// `fo:font-weight="bold"`, and `text:span` elements reference them by name. Counting the
+    /// ATTRIBUTE alone would be wrong in both directions — one style can be referenced by many spans,
+    /// and a declared-but-unused style would count as formatting that is not there.
+    private func boldRuns(inSavedFileAt path: String) throws -> [String] {
+        let xml = try readODFEntry(atPath: path, entry: "content.xml")
+        let ns = xml as NSString
+        let whole = NSRange(location: 0, length: ns.length)
+
+        // Which automatic styles declare bold — collected for BOTH families in one pass, because
+        // which family carries it is not a fact this helper gets to assume (see below).
+        var boldStyleNames = Set<String>()
+        let styleBlock = try NSRegularExpression(
+            pattern: "<style:style\\b[^>]*style:name=\"([^\"]+)\"[^>]*>(.*?)</style:style>",
+            options: [.dotMatchesLineSeparators])
+        for match in styleBlock.matches(in: xml, range: whole) {
+            let name = ns.substring(with: match.range(at: 1))
+            let body = ns.substring(with: match.range(at: 2))
+            // `fo:font-weight="normal"` is an EXPLICIT clear, not bold — matching on the attribute
+            // name alone would count a cleared paragraph as bold.
+            if body.contains("fo:font-weight=\"bold\"") { boldStyleNames.insert(name) }
+        }
+
+        // **ODF carries bold on TWO different things, and this helper was wrong about that once.**
+        // A format scoped to matched words produces `<text:span text:style-name="T1">` referencing a
+        // bold TEXT style. A format over whole paragraphs produces no span at all — the paragraph
+        // itself gets a bold PARAGRAPH style (`<text:p text:style-name="P1">`). A span-only scan
+        // therefore reports ZERO bold on a correctly whole-document-bolded file, which is what the
+        // first version of this helper did: two drills failed while the product was right, and
+        // "fixing" the product to satisfy them would have broken working code.
+        var runs: [String] = []
+        let spanBlock = try NSRegularExpression(
+            pattern: "<text:span\\s+text:style-name=\"([^\"]+)\"[^>]*>(.*?)</text:span>",
+            options: [.dotMatchesLineSeparators])
+        for match in spanBlock.matches(in: xml, range: whole) {
+            guard boldStyleNames.contains(ns.substring(with: match.range(at: 1))) else { continue }
+            runs.append(Self.strippingTags(ns.substring(with: match.range(at: 2))))
+        }
+        let paraBlock = try NSRegularExpression(
+            pattern: "<text:p\\s+text:style-name=\"([^\"]+)\"[^>]*>(.*?)</text:p>",
+            options: [.dotMatchesLineSeparators])
+        for match in paraBlock.matches(in: xml, range: whole) {
+            guard boldStyleNames.contains(ns.substring(with: match.range(at: 1))) else { continue }
+            let text = Self.strippingTags(ns.substring(with: match.range(at: 2)))
+            if !text.isEmpty { runs.append(text) }
+        }
+
+        // **A self-check on the INSTRUMENT**, kept because this helper has now been wrong twice in
+        // the direction that matters — both times reporting NO bold on a file that had it. If the
+        // saved bytes declare a bold weight anywhere and this scan found no carrier for it, the
+        // helper is broken, not the product, and every assertion built on it is worthless.
+        if xml.contains("fo:font-weight=\"bold\"") && runs.isEmpty {
+            XCTFail("boldRuns is broken: content.xml declares fo:font-weight=\"bold\" but the scan "
+                    + "found no bold text. Fix the helper before trusting any assertion that uses it.")
+        }
+        return runs
+    }
+
+    /// Strips XML tags, leaving the text content.
+    private static func strippingTags(_ fragment: String) -> String {
+        fragment.replacingOccurrences(of: "<[^>]*>", with: "", options: [.regularExpression])
+    }
+
+    /// **The baseline that makes every other bold assertion below meaningful**, and it is a real
+    /// assertion rather than a comment: the fixture, as shipped, has NO bold anywhere. If this ever
+    /// goes green for the wrong reason — a fixture edit that adds a bold run — every drill that
+    /// asserts "bold is now present" would start passing by construction.
+    func testLiveDocsFormatFixtureIsPristineSoTheBoldAssertionsMeanSomething() async throws {
+        let (path, _, _) = try await openLive("format-target.odt")
+        XCTAssertEqual(try boldRuns(inSavedFileAt: path), [],
+                       "format-target.odt must ship with no bold runs at all")
+    }
+
+    /// ⭐ **LT-1, the highest-value live test in the research's own list: does a `find`-scoped format
+    /// reach EVERY occurrence, or only the first?**
+    ///
+    /// The research could not answer it from source — whether `SwWrtShell::SetAttrSet` applies across
+    /// every cursor in a FIND_ALL's multi-range ring was untraceable at its budget — and the tool
+    /// description cannot be written honestly until it is answered. The fixture holds the literal in
+    /// three separate paragraphs, so the saved bytes distinguish the two answers directly: three bold
+    /// runs means every occurrence, one means the first only.
+    ///
+    /// The assertion also checks WHICH text is bold, not merely how many runs there are: a format
+    /// that bolded whole paragraphs rather than the matched words would produce the right COUNT and
+    /// the wrong result.
+    func testLiveDocsFormatWithFindBoldsTheMatchedTextAndTheSavedBytesShowHowManyOccurrencesItReached() async throws {
+        let (path, host, _) = try await openLive("format-target.odt")
+        XCTAssertEqual(try boldRuns(inSavedFileAt: path), [], "setup: the fixture must start with no bold")
+
+        let result = await send(command("office.docs.format",
+                                        args: ["path": path, "find": "MARKER", "bold": true],
+                                        sessionId: "S1", commandId: "pcmd_fmt_find"), through: host)
+        XCTAssertTrue(result.ok, "\(result)")
+
+        let runs = try boldRuns(inSavedFileAt: path)
+        XCTAssertFalse(runs.isEmpty, "the saved file must contain at least one bold run: \(result.result ?? "")")
+        for run in runs {
+            XCTAssertEqual(run, "MARKER",
+                           "only the matched text may be bold — a bold run of \"\(run)\" means the "
+                               + "format reached more than what `find` matched")
+        }
+        // The measured answer, recorded as an assertion so a future engine change that silently
+        // narrows or widens the scope fails here instead of shipping.
+        XCTAssertEqual(runs.count, 3,
+                       "a find-scoped format must reach every occurrence of the literal (found \(runs.count))")
+        XCTAssertTrue(result.result?.contains("3 occurrences") == true,
+                      "the result must tell the model how many occurrences it reached: \(result.result ?? "")")
+    }
+
+    /// The whole-document scope, and the half of `bold` that a "does it apply bold" test never
+    /// covers: `bold: false` must CLEAR bold, not toggle it back on.
+    ///
+    /// **This is the drill that would catch the H1/H3 hazard class in production.** Those slots
+    /// toggle when their argument fails to produce an item, so an implementation whose payload is
+    /// subtly wrong passes a bold-it-on test (the toggle happens to flip the right way from a plain
+    /// document) and fails this one.
+    func testLiveDocsFormatBoldFalseClearsBoldRatherThanTogglingItBackOn() async throws {
+        let (path, host, _) = try await openLive("format-target.odt")
+        let on = await send(command("office.docs.format", args: ["path": path, "bold": true],
+                                    sessionId: "S1", commandId: "pcmd_fmt_on"), through: host)
+        XCTAssertTrue(on.ok, "\(on)")
+        XCTAssertFalse(try boldRuns(inSavedFileAt: path).isEmpty, "setup: bold:true must produce bold")
+
+        let off = await send(command("office.docs.format", args: ["path": path, "bold": false],
+                                     sessionId: "S1", commandId: "pcmd_fmt_off"), through: host)
+        XCTAssertTrue(off.ok, "\(off)")
+        XCTAssertEqual(try boldRuns(inSavedFileAt: path), [],
+                       "bold:false must CLEAR bold, not toggle it — a toggle would leave it on here")
+    }
+
+    /// `find` that matches nothing REFUSES, and the document is untouched.
+    ///
+    /// Refusing matters more than it looks: a formatting command dispatched with no selection is not
+    /// a no-op — it applies at the caret or arms a mode — so "no match" had to become a refusal
+    /// before dispatch rather than a dispatch that happens to do little.
+    func testLiveDocsFormatRefusesAFindThatMatchesNothingAndChangesNothing() async throws {
+        let (path, host, _) = try await openLive("format-target.odt")
+        let before = try readODFEntry(atPath: path, entry: "content.xml")
+        let result = await send(command("office.docs.format",
+                                        args: ["path": path, "find": "NOT-IN-THIS-DOCUMENT", "bold": true],
+                                        sessionId: "S1", commandId: "pcmd_fmt_nomatch"), through: host)
+        XCTAssertFalse(result.ok, "a find that matches nothing must refuse: \(result)")
+        XCTAssertTrue(result.result?.contains("does not appear") == true,
+                      "the refusal must say the text is not there: \(result.result ?? "")")
+        XCTAssertEqual(try readODFEntry(atPath: path, entry: "content.xml"), before,
+                       "a refused format must leave the document byte-identical")
+        XCTAssertEqual(try boldRuns(inSavedFileAt: path), [], "and no bold may have been applied")
+    }
+
+    /// Does the saved file actually carry this character attribute? Two carriers, same as
+    /// `boldRuns`: an automatic text style referenced by a `text:span`, or a paragraph style.
+    private func savedFileHas(_ odfProperty: String, _ value: String, atPath path: String) throws -> Bool {
+        let xml = try readODFEntry(atPath: path, entry: "content.xml")
+        return xml.contains("\(odfProperty)=\"\(value)\"")
+    }
+
+    /// ⭐ **The verification drill, rewritten to be FALSIFIABLE — the old one could not fail.**
+    ///
+    /// It asserted `text.contains("Confirmed") || text.contains("could not")`, and every branch of
+    /// the result sentence emits one of those. Review proved it passed under a forced red *while the
+    /// verification was actively lying*. A drill that names the verification story and asserts
+    /// nothing about it is worse than no drill: it reads like coverage.
+    ///
+    /// The replacement cross-checks the SENTENCE against the SAVED BYTES, which is the only thing
+    /// that can catch a verification that manufactures agreement: **if the sentence claims an
+    /// attribute was confirmed, the file must actually carry it.** Run for `italic`, which is the
+    /// attribute the stylesheet leak confirmed unconditionally on every Writer document.
+    func testLiveDocsFormatNeverClaimsToHaveConfirmedSomethingTheSavedBytesDoNotShow() async throws {
+        let (path, host, _) = try await openLive("format-target.odt")
+        let result = await send(command("office.docs.format",
+                                        args: ["path": path, "find": "MARKER", "italic": true],
+                                        sessionId: "S1", commandId: "pcmd_verify_italic"), through: host)
+        XCTAssertTrue(result.ok, "\(result)")
+        let text = result.result ?? ""
+        let italicInFile = try savedFileHas("fo:font-style", "italic", atPath: path)
+
+        if text.contains("Confirmed italic") {
+            XCTAssertTrue(italicInFile,
+                          "the sentence claims italic was confirmed, so the saved bytes MUST carry "
+                              + "fo:font-style=\"italic\". If they do not, the verification is "
+                              + "reading something other than the formatted text. Sentence: \(text)")
+        }
+        // And the positive direction, so this drill also fails if verification silently stops
+        // working: italic really did land here, so it must be reported as confirmed.
+        XCTAssertTrue(italicInFile, "setup: italic must actually reach the saved bytes")
+        XCTAssertTrue(text.contains("Confirmed italic"),
+                      "italic landed in the file, so the verb must confirm it: \(text)")
+    }
+
+    /// ⭐ **The drill that actually catches the stylesheet leak — third attempt, and the first one
+    /// that can fail.**
+    ///
+    /// The two previous versions were empirically vacuous, and the reason is worth stating because
+    /// it is not obvious: `verified` and `applied` only ever contain attributes that were
+    /// REQUESTED. So any assertion of the form "bold must not be reported when bold was not asked
+    /// for" cannot fail — bold is unreachable on that path regardless of what the check does.
+    /// Review proved both earlier versions passed with `officeRtfBody` forced to the identity, i.e.
+    /// with both Criticals restored.
+    ///
+    /// **The shape that IS sensitive: request the attribute, and pick the value the leak gets
+    /// wrong.** `italic: false` on a document with no italic is *correct* to confirm — the check
+    /// asks `requested == present`, and `false == false` holds. But an unscoped scan sees the stock
+    /// `caption` style's `\i` in the stylesheet, computes `present = true`, and `false == true`
+    /// fails — so the verb declines to confirm and the sentence changes. One requested attribute,
+    /// one document, and the leak flips the answer.
+    ///
+    /// **Forced red, run:** with `officeRtfBody` replaced by `return rtf`, this test fails on the
+    /// "Confirmed italic" assertion, reporting the "could not confirm any of it" sentence instead.
+    /// Reverted byte-identical, green.
+    func testLiveDocsFormatConfirmsItalicIsOffWhichAnUnscopedScanCouldNotDo() async throws {
+        let (path, host, _) = try await openLive("format-target.odt")
+        // The fixture has no italic, and that is the whole premise — asserted, so the drill cannot
+        // quietly stop testing anything if the fixture changes.
+        XCTAssertFalse(try savedFileHas("fo:font-style", "italic", atPath: path),
+                       "setup: format-target.odt must ship with no italic anywhere")
+
+        let result = await send(command("office.docs.format",
+                                        args: ["path": path, "find": "MARKER", "italic": false],
+                                        sessionId: "S1", commandId: "pcmd_italic_off"), through: host)
+        XCTAssertTrue(result.ok, "\(result)")
+        let text = result.result ?? ""
+
+        // Still no italic in the file — turning off what was never on is a legitimate no-op.
+        XCTAssertFalse(try savedFileHas("fo:font-style", "italic", atPath: path),
+                       "italic:false must not somehow ADD italic")
+        // And the verb must be able to say so. Under the stylesheet leak it cannot: the document's
+        // own caption style makes `present` true, the comparison fails, and this goes red.
+        XCTAssertTrue(text.contains("Confirmed italic"),
+                      "italic is genuinely absent and italic:false was requested, so the verb must "
+                          + "confirm it. Reading 'could not confirm' here means the check is seeing "
+                          + "the document's STYLE TABLE rather than the selected text: \(text)")
+    }
+
+    /// **F-4 made honest.** The check is existential over the matched occurrences, so a multi-match
+    /// format must say so rather than claiming bare confirmation.
+    func testLiveDocsFormatSaysAtLeastOneOfNRatherThanClaimingItCheckedEveryOccurrence() async throws {
+        let (path, host, _) = try await openLive("format-target.odt")
+        let result = await send(command("office.docs.format",
+                                        args: ["path": path, "find": "MARKER", "bold": true],
+                                        sessionId: "S1", commandId: "pcmd_existential"), through: host)
+        XCTAssertTrue(result.ok, "\(result)")
+        let text = result.result ?? ""
+        XCTAssertTrue(text.contains("at least one of the 3 occurrences"),
+                      "a 3-occurrence format must state that confirmation is existential, not "
+                          + "universal — it cannot check each occurrence separately: \(text)")
+    }
+
+    /// A mistyped `bold` is REFUSED, on every arm, rather than coerced.
+    ///
+    /// **This is the guard whose absence is a silent wrong answer written into the user's document.**
+    /// `SvxWeightItem::PutValue` never rejects a value — `Any2Bool` coerces anything non-boolean to
+    /// `false` — so a `"true"` STRING reaching the engine would UN-BOLD the selection while every
+    /// layer reported success. The refusal must therefore happen before the engine sees it, and it
+    /// must happen for a string, a number and an array alike.
+    func testLiveDocsFormatRefusesAMistypedBoldOnEveryArmInsteadOfSilentlyClearingIt() async throws {
+        let (path, host, _) = try await openLive("format-target.odt")
+        // Start from BOLD, so a coerced-to-false value would be visible as a real change rather than
+        // a no-op — the inverted-assertion trap this drill exists to avoid.
+        let on = await send(command("office.docs.format", args: ["path": path, "bold": true],
+                                    sessionId: "S1", commandId: "pcmd_mt_setup"), through: host)
+        XCTAssertTrue(on.ok, "\(on)")
+        let boldedRuns = try boldRuns(inSavedFileAt: path)
+        XCTAssertFalse(boldedRuns.isEmpty, "setup: the document must be bold before the mistyped attempts")
+
+        let mistyped: [(String, Any)] = [
+            ("string", "true"), ("number", 1), ("array", ["true"]), ("object", ["value": "true"]),
+        ]
+        for (index, (label, value)) in mistyped.enumerated() {
+            let result = await send(command("office.docs.format",
+                                            args: ["path": path, "bold": value],
+                                            sessionId: "S1", commandId: "pcmd_mt_\(index)"), through: host)
+            XCTAssertFalse(result.ok, "a \(label) `bold` must be refused, never coerced: \(result)")
+            XCTAssertEqual(try boldRuns(inSavedFileAt: path), boldedRuns,
+                           "a refused \(label) `bold` must leave the document's bold exactly as it was — "
+                               + "a coerced value would silently CLEAR it")
+        }
+    }
+
+    /// ⭐ **The toggle-hazard regression test, and the reason the payload shape is not cosmetic.**
+    ///
+    /// `.uno:Bold` is a `Toggle = TRUE` slot, and the dispatcher makes "my arguments were wrong" and
+    /// "I sent no arguments" the SAME state — so an argument that fails to produce an item does not
+    /// fail, it FLIPS against current state. On top of that `SvxWeightItem::PutValue` never rejects a
+    /// value: `Any2Bool` coerces anything non-boolean to `false`.
+    ///
+    /// Both hazards are INVISIBLE against a plain document — a toggle flips it to bold, which is what
+    /// was asked for, and so does a correct absolute set. They are only visible starting from
+    /// ALREADY-BOLD text, which is exactly what `format-bolded.odt` is. Setting bold to true on
+    /// already-bold text must be a no-op; a toggle un-bolds it and a coerced `false` un-bolds it.
+    ///
+    /// **FORCED-RED, run 2026-08-27 against this exact drill** (recorded here rather than in a report
+    /// nobody reads beside the code): with `docsFormatOnDedicatedThread`'s payload changed from
+    /// `"type":"boolean"` to `"type":"string"` — one tag, the H3 mistype — and nothing else touched,
+    /// this test FAILED with "MUST still be bold ... found 0 bold runs", i.e. the saved bytes came
+    /// back with the bold GONE while the verb reported success. Reverted (byte-identical, `git diff`
+    /// empty), rebuilt, green. So the guard is load-bearing and this drill genuinely detects its
+    /// absence.
+    ///
+    /// **The same red run independently proved the RTF read-back is load-bearing rather than
+    /// decorative.** With the mistyped payload, `format`'s own sentence changed to "Norma read the
+    /// text back afterwards and could not confirm any of it — re-read the document before relying on
+    /// this." The verification correctly declined to confirm a change that had not happened, on a
+    /// call every other layer reported as a success.
+    func testLiveDocsFormatSettingBoldOnAlreadyBoldTextLeavesItBoldRatherThanTogglingItOff() async throws {
+        let (path, host, _) = try await openLive("format-bolded.odt")
+        let boldBefore = try boldRuns(inSavedFileAt: path)
+        XCTAssertFalse(boldBefore.isEmpty,
+                       "setup: format-bolded.odt must ship ALREADY BOLD, or this drill cannot see a toggle")
+
+        let result = await send(command("office.docs.format", args: ["path": path, "bold": true],
+                                        sessionId: "S1", commandId: "pcmd_idem_bold"), through: host)
+        XCTAssertTrue(result.ok, "\(result)")
+
+        let boldAfter = try boldRuns(inSavedFileAt: path)
+        XCTAssertFalse(boldAfter.isEmpty,
+                       "text that was bold MUST still be bold after setting bold:true — found "
+                           + "\(boldAfter.count) bold runs. An empty result here means the dispatch "
+                           + "TOGGLED (or coerced its argument to false) instead of setting an "
+                           + "absolute state, which is a silent wrong answer in the user's document.")
+    }
+
+    /// ⭐ **The drill that catches the silent-drop shape — a mistyped operand PAIRED with a valid
+    /// one.** This is the third occurrence of this exact defect in this arc, and it is why the drill
+    /// exists in this form rather than testing a mistyped operand on its own.
+    ///
+    /// A decoder that collapses a wrong-typed value to `nil` makes it indistinguishable from ABSENT.
+    /// On its own that is caught by the at-least-one-attribute guard, which is why a lone-operand
+    /// test passes and proves nothing. Paired with a valid attribute the guard is satisfied, the call
+    /// SUCCEEDS, the valid attribute is applied and reported — and the mistyped one is silently
+    /// dropped. The model asked for bold, was told the call worked, and the document has no bold.
+    ///
+    /// **This drill was written RED against the code as first implemented and it failed**: the
+    /// enum operands had the `isPresent`-then-refuse treatment and the three BOOLEANS did not, so
+    /// `align:"center", bold:"true"` returned ok with `align` applied. The fix extends the same
+    /// check to every optional operand.
+    func testLiveDocsFormatRefusesAMistypedBoldEvenWhenPairedWithAValidAttribute() async throws {
+        let (path, host, _) = try await openLive("format-target.odt")
+        let before = try readODFEntry(atPath: path, entry: "content.xml")
+
+        let result = await send(command("office.docs.format",
+                                        args: ["path": path, "align": "center", "bold": "true"],
+                                        sessionId: "S1", commandId: "pcmd_pair_mistyped"), through: host)
+        XCTAssertFalse(result.ok,
+                       "a mistyped `bold` must refuse even when another attribute is valid — otherwise "
+                           + "the call succeeds, applies the valid one, and silently drops the one the "
+                           + "caller got wrong: \(result)")
+        XCTAssertTrue((result.result ?? "").contains("bold"),
+                      "the refusal must name the operand that was wrong: \(result.result ?? "")")
+        XCTAssertEqual(try readODFEntry(atPath: path, entry: "content.xml"), before,
+                       "nothing may be applied when any named operand is malformed")
+    }
+
+    /// **Does applying a paragraph style destroy direct character formatting?**
+    ///
+    /// This drill exists because the tool description and the bridge both ASSERTED that it does
+    /// ("style replaces direct character formatting, so apply it before bold, not after"), and
+    /// nothing in the research supports it — §3.7 covers `StyleApply`'s argument mechanics and H5
+    /// covers AutoUpdate; neither says a paragraph style clears direct character formatting. An
+    /// unverified mechanism claim in model-facing text is the exact failure class this arc keeps
+    /// shipping, so it gets measured rather than reasoned about.
+    ///
+    /// Whatever the answer, this test pins it: bold one run by `find`, then apply a paragraph style
+    /// over the same run, and read the saved bytes.
+    func testLiveDocsFormatMeasuresWhetherAStyleDestroysDirectCharacterFormatting() async throws {
+        let (path, host, _) = try await openLive("format-target.odt")
+        let bolded = await send(command("office.docs.format",
+                                        args: ["path": path, "find": "MARKER", "bold": true],
+                                        sessionId: "S1", commandId: "pcmd_sty_bold"), through: host)
+        XCTAssertTrue(bolded.ok, "\(bolded)")
+        XCTAssertEqual(try boldRuns(inSavedFileAt: path).count, 3, "setup: all three runs must be bold")
+
+        let styled = await send(command("office.docs.format",
+                                        args: ["path": path, "find": "MARKER", "style": "heading2"],
+                                        sessionId: "S1", commandId: "pcmd_sty_style"), through: host)
+        XCTAssertTrue(styled.ok, "\(styled)")
+
+        let after = try boldRuns(inSavedFileAt: path)
+        // The MEASURED answer, asserted so the description can cite it and so a future engine change
+        // that alters it fails here rather than silently making the description wrong.
+        //
+        // **Asserted on CONTENT as well as count (review F-8).** `boldRuns` counts paragraph-style
+        // carriers as well as span carriers, so a count-only assertion would also be satisfied by
+        // three whole PARAGRAPHS going bold — a different outcome entirely, and one that would still
+        // let the description's claim be wrong.
+        XCTAssertEqual(after.count, 3,
+                       "direct character formatting SURVIVES a paragraph style being applied over it "
+                           + "(found \(after.count) bold runs). If this ever fails, the tool "
+                           + "description's ordering advice must change with it.")
+        for run in after {
+            XCTAssertEqual(run, "MARKER",
+                           "and it must still be the MATCHED WORD that is bold, not the whole "
+                               + "paragraph: found a bold run of \"\(run)\"")
+        }
+    }
+
+    /// Alignment and line spacing, the two argument-free attributes, land in the saved bytes.
+    /// Asserted against the pristine fixture, which declares neither.
+    func testLiveDocsFormatAlignAndLineSpacingReachTheSavedParagraphProperties() async throws {
+        let (path, host, _) = try await openLive("format-target.odt")
+        let before = try readODFEntry(atPath: path, entry: "content.xml")
+        XCTAssertFalse(before.contains("fo:text-align"), "setup: the fixture must declare no alignment")
+
+        let result = await send(command("office.docs.format",
+                                        args: ["path": path, "align": "center", "lineSpacing": "double"],
+                                        sessionId: "S1", commandId: "pcmd_fmt_para"), through: host)
+        XCTAssertTrue(result.ok, "\(result)")
+        let after = try readODFEntry(atPath: path, entry: "content.xml")
+        XCTAssertTrue(after.contains("fo:text-align=\"center\""),
+                      "centering must reach the saved paragraph properties")
+        XCTAssertTrue(after.contains("fo:line-height=\"200%\""),
+                      "double spacing must reach the saved paragraph properties: proportional 200%")
+        XCTAssertNotEqual(after, before, "the saved bytes must actually differ from the pristine file")
+    }
+
+    /// `style` applies and reaches the saved bytes.
+    ///
+    /// ⚠️ **Renamed after review (F-7): the old name promised a pre-validation arm this body does not
+    /// have.** Pre-validation against the engine's catalogue does run in the bridge, but it is not
+    /// reachable through the tool — the `style` enum carries only names measured present in that
+    /// catalogue — so there is nothing for a drill here to exercise. Naming an arm a test does not
+    /// have is how a suite comes to read as covering more than it does.
+    func testLiveDocsFormatAppliesAHeadingStyleToTheMatchedParagraph() async throws {
+        let (path, host, _) = try await openLive("format-target.odt")
+        let result = await send(command("office.docs.format",
+                                        args: ["path": path, "find": "Alpha MARKER one", "style": "heading1"],
+                                        sessionId: "S1", commandId: "pcmd_fmt_style"), through: host)
+        XCTAssertTrue(result.ok, "\(result)")
+        let after = try readODFEntry(atPath: path, entry: "content.xml")
+        XCTAssertTrue(after.contains("Heading_20_1") || after.contains("Heading 1"),
+                      "the heading style must reach the saved bytes")
+    }
+
     // MARK: - Helpers
 
     private func readODFEntry(atPath path: String, entry: String) throws -> String {

@@ -1769,6 +1769,28 @@ final class OfficeRuntime: ObservableObject {
         var docsReplace: (_ docId: String, _ find: String, _ replaceWith: String) async throws -> Int
         var docsInsert: (_ docId: String, _ text: String, _ atStart: Bool,
                          _ asNewParagraph: Bool) async throws -> Int
+        /// office-format — the two formatting closures.
+        ///
+        /// **Both carry a DEFAULT that throws, unlike every sibling above, and the default is the
+        /// point rather than a convenience.** Every existing field is required, so adding two more
+        /// required ones would have meant editing eight test files that build a `Driver` by hand —
+        /// and the mechanical way to do that is to paste a closure that returns something plausible,
+        /// which is how a test double starts quietly answering for a path it never exercised. A
+        /// default that THROWS means an unwired driver fails loudly, naming itself, and a double
+        /// only opts in when it actually means to.
+        var docsFormat: (_ docId: String, _ find: String?, _ align: OfficeDocsAlign?,
+                         _ lineSpacing: OfficeDocsLineSpacing?, _ bold: Bool?, _ italic: Bool?,
+                         _ underline: Bool?, _ style: OfficeDocsParagraphStyle?)
+            async throws -> (applied: [String], verified: [String], verifyAvailable: Bool, occurrences: Int)
+            = { _, _, _, _, _, _, _, _ in
+                throw OfficeHelperClientError.serverError(reason: "docsFormat is not wired on this driver")
+            }
+        var slidesFormat: (_ docId: String, _ slide: Int, _ placeholder: OfficeSlidesPlaceholder,
+                           _ align: OfficeDocsAlign?, _ lineSpacing: OfficeSlidesLineSpacing?,
+                           _ bold: Bool?, _ italic: Bool?, _ underline: Bool?) async throws -> [String]
+            = { _, _, _, _, _, _, _, _ in
+                throw OfficeHelperClientError.serverError(reason: "slidesFormat is not wired on this driver")
+            }
         /// **Office Stage B Task 2b — the shared helper's own `--state-path`.** A plain stored
         /// value, unlike every sibling above: it is a FACT about the shared supervisor's
         /// configuration (`OfficeHelperSupervisor.statePath`, exposing `Configuration
@@ -2103,6 +2125,23 @@ final class OfficeRuntime: ObservableObject {
     }
     func docsInsert(docId: String, text: String, atStart: Bool, asNewParagraph: Bool) async throws -> Int {
         try await driver.docsInsert(docId, text, atStart, asNewParagraph)
+    }
+
+    // MARK: - office-format: the two formatting verbs — same no-reducer, throws-through posture
+
+    /// **This is the SAME function a human-facing formatting UI will call.** Nothing about it is
+    /// agent-shaped: it takes structured operands and returns structured truth (what was dispatched,
+    /// what was confirmed, whether confirmation was even possible). The sentence a model reads is
+    /// composed one layer up in `OfficeCommandConsumer`, exactly as `sheetsFormat` already splits it.
+    func docsFormat(docId: String, find: String?, align: OfficeDocsAlign?, lineSpacing: OfficeDocsLineSpacing?,
+                    bold: Bool?, italic: Bool?, underline: Bool?, style: OfficeDocsParagraphStyle?)
+        async throws -> (applied: [String], verified: [String], verifyAvailable: Bool, occurrences: Int) {
+        try await driver.docsFormat(docId, find, align, lineSpacing, bold, italic, underline, style)
+    }
+    func slidesFormat(docId: String, slide: Int, placeholder: OfficeSlidesPlaceholder, align: OfficeDocsAlign?,
+                      lineSpacing: OfficeSlidesLineSpacing?, bold: Bool?, italic: Bool?,
+                      underline: Bool?) async throws -> [String] {
+        try await driver.slidesFormat(docId, slide, placeholder, align, lineSpacing, bold, italic, underline)
     }
 
     /// One `saveAndAwaitOutcome` caller, still waiting. Kept per PATH (a table, not a single slot) —

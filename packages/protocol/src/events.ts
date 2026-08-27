@@ -659,8 +659,8 @@ export const BROWSER_COMMAND_ACTIONS = [
  *
  *   - `sheets` (12): info, read, set, insert_rows, insert_cols, delete_rows, delete_cols, add_sheet,
  *     delete_sheet, rename_sheet, format, batch
- *   - `slides` (7): info, read, set_text, add_slide, delete_slide, reorder, batch
- *   - `docs` (5): info, read, replace, insert, append
+ *   - `slides` (8): info, read, set_text, add_slide, delete_slide, reorder, format, batch
+ *   - `docs` (6): info, read, replace, insert, append, format
  *
  *  Every kind's `info`/`read` are the read half — `info` doubles as the drivability probe, spec §1 —
  *  everything else writes and saves immediately (spec §3 step 4). `OFFICE_DEADLINES_MS` sizes the
@@ -674,9 +674,10 @@ export const OFFICE_COMMAND_ACTIONS = [
   "office.sheets.batch",
   "office.slides.info", "office.slides.read", "office.slides.set_text",
   "office.slides.add_slide", "office.slides.delete_slide", "office.slides.reorder",
+  "office.slides.format",
   "office.slides.batch",
   "office.docs.info", "office.docs.read", "office.docs.replace",
-  "office.docs.insert", "office.docs.append",
+  "office.docs.insert", "office.docs.append", "office.docs.format",
 ] as const;
 
 /** The WIRE's whole verb enum for `panel_command.action` — every verb of every tool family that
