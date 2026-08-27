@@ -554,6 +554,33 @@ final class LOKBridge: OfficeDocumentBridge {
         /// texts themselves — a document body has no business in an error string, and the wire caps
         /// would refuse it) plus a short, already-composed description of what was attempted.
         case docsVerificationFailed(docId: String, what: String, expectedLength: Int, actualLength: Int)
+        /// office-format — `docs format`'s `style` named a paragraph style this document's own
+        /// catalogue does not contain. Refused BEFORE any dispatch, because the alternative is a
+        /// SILENT no-op: `SwDocShell::ExecStyleSheet`'s `getByName` throws on an unknown name, the
+        /// `catch` swallows it, no item is appended and the apply is skipped with nothing reaching
+        /// LOK. Carries both spellings — the tool's own (`heading1`) and the engine's
+        /// (`Heading 1`) — because a mismatch between them is the likeliest cause.
+        case docsStyleUnavailable(docId: String, style: String, programmatic: String)
+        /// office-format — `docs format`'s `find` matched NOTHING, so there is nothing to format.
+        /// Refused rather than dispatched: a formatting command sent with no selection is not a
+        /// no-op, it applies at the caret or arms a mode, and either way the caller would be told
+        /// its request succeeded. The count is ours (the engine's is unreachable), so this is a real
+        /// answer about the document, not a guess.
+        case docsFormatNoMatch(docId: String, find: String)
+        /// office-format — the selection could not be CONFIRMED before dispatching. Distinct from
+        /// `.docsFormatNoMatch`: there the text genuinely is not in the document; here the search or
+        /// select-all was dispatched and no selection could be read back afterwards, so the outcome
+        /// of formatting would be unknowable. **Nothing was dispatched** — this throws before the
+        /// first attribute command — so the document is unchanged, which is why the wording says so.
+        /// The failure this closes was OBSERVED, not imagined: the research probe dispatched
+        /// `.uno:Bold` into a document whose search had not landed, and every layer reported success
+        /// over untouched bytes.
+        case docsFormatSelectionFailed(docId: String, what: String)
+        /// office-format — `slides format` reached the named placeholder and it holds NO text.
+        /// `.uno:SelectAll` inside an empty shape selects nothing, so every attribute command would
+        /// be a no-op this bridge cannot distinguish from success. Refused for the same reason
+        /// `delete_slide` refuses the last slide.
+        case slidePlaceholderEmpty(docId: String, slide: Int, field: String)
         var description: String {
             switch self {
             case .docNotOpen(let docId): return "save requested for a docId that is not open: \(docId)"
@@ -631,6 +658,18 @@ final class LOKBridge: OfficeDocumentBridge {
                 return "no slide \(slide + 1) in \(docId) — this presentation has \(slideCount) slide\(slideCount == 1 ? "" : "s")"
             case .lastSlide(let docId):
                 return "\(docId) has only one slide left — a presentation needs at least one; refusing to delete it"
+            case .docsStyleUnavailable(let docId, let style, let programmatic):
+                return "\(docId): this document has no paragraph style \"\(programmatic)\" (asked for "
+                    + "`\(style)`), so applying it would silently do nothing. Nothing was changed."
+            case .docsFormatNoMatch(let docId, let find):
+                return "\(docId): \"\(find)\" does not appear in this document, so there is nothing to "
+                    + "format. Nothing was changed."
+            case .docsFormatSelectionFailed(let docId, let what):
+                return "\(docId): could not select \(what) to format it. Nothing was dispatched and the "
+                    + "document is unchanged — try again."
+            case .slidePlaceholderEmpty(let docId, let slide, let field):
+                return "\(docId): slide \(slide + 1)'s \(field) placeholder is empty, so there is no text "
+                    + "to format. Add text first. Nothing was changed."
             case .slidePlaceholderNotFound(let docId, let slide, let field):
                 // Trailing period deliberate, unlike this file's other descriptions (fix round 1,
                 // review F-0): `handleSlidesSetText` concatenates this directly with a lifecycle
@@ -1269,6 +1308,422 @@ final class LOKBridge: OfficeDocumentBridge {
     func docsInsert(docId: String, text: String, atStart: Bool, asNewParagraph: Bool) throws -> Int {
         try thread.sync { try self.docsInsertOnDedicatedThread(docId: docId, text: text, atStart: atStart,
                                                                asNewParagraph: asNewParagraph) }
+    }
+
+    func docsFormat(docId: String, find: String?, align: OfficeDocsAlign?, lineSpacing: OfficeDocsLineSpacing?,
+                    bold: Bool?, italic: Bool?, underline: Bool?, style: OfficeDocsParagraphStyle?)
+        throws -> (applied: [String], verified: [String], verifyAvailable: Bool, occurrences: Int) {
+        try thread.sync {
+            try self.docsFormatOnDedicatedThread(docId: docId, find: find, align: align, lineSpacing: lineSpacing,
+                                                 bold: bold, italic: italic, underline: underline, style: style)
+        }
+    }
+    func slidesFormat(docId: String, slide: Int, placeholder: OfficeSlidesPlaceholder, align: OfficeDocsAlign?,
+                      lineSpacing: OfficeSlidesLineSpacing?, bold: Bool?, italic: Bool?,
+                      underline: Bool?) throws -> [String] {
+        try thread.sync {
+            try self.slidesFormatOnDedicatedThread(docId: docId, slide: slide, placeholder: placeholder,
+                                                   align: align, lineSpacing: lineSpacing, bold: bold,
+                                                   italic: italic, underline: underline)
+        }
+    }
+
+
+    // MARK: - office-format: docs / slides formatting
+
+    /// **The RTF read-back — this bridge's ONE attribute verification, and the only one LOK offers.**
+    ///
+    /// `getCommandValues` has no attribute read-back at all: its whole vocabulary was read at the pin
+    /// and both of its gates are closed to formatting (Writer's `supportsCommand` is nine names, none
+    /// of them formatting; `SfxLokHelper::supportsCommand` is literally `{ u"Signature" }`). The two
+    /// entries that LOOK like read-backs — `.uno:CharFontName`, `.uno:StyleApply` — are CATALOGUES
+    /// (the font list, the style list), not state. So `sheets format`'s "no post-write verification"
+    /// residual was never a `sheets` accident; it is the shape of the whole LOK attribute surface.
+    ///
+    /// The one real door is this one, and it was MEASURED open rather than inferred
+    /// (`spikes/office-format-probe`, findings in `.superpowers/research/office-format-report.md` §1):
+    /// `SwTransferable` registers RTF unconditionally, and `getFromTransferable` allow-lists nothing,
+    /// so `getTextSelection("text/rtf")` returns the selection serialized WITH its character and
+    /// paragraph attributes. Three measurements make it a verification rather than a document-wide
+    /// smell test: with no selection it returns null (so it is not unconditional), after a FIND it
+    /// contains the matched text and NOT the text outside it (so it is scoped to the selection), and
+    /// the same document answers bold-present for a bold range and bold-ABSENT for a plain one (so it
+    /// tracks the SELECTION's formatting, not the document's).
+    ///
+    /// ⚠️ **`nil` means CANNOT VERIFY, never "the write failed."** ~1 run in 20 returns null, and in
+    /// every observed null the plain-text read was null too — i.e. it is the SELECTION that failed to
+    /// land, not RTF. Callers must treat `nil` the way `docsReplaceOnDedicatedThread` already treats
+    /// an absent engine result: *no cross-check available*, never manufactured into a negative.
+    ///
+    /// The pump-retry budget mirrors `docsReadTextOnDedicatedThread`'s own, for the same
+    /// deferred-dispatch reason.
+    private func docsSelectionRtfOnDedicatedThread(_ doc: OpenDocument, viewId: Int32) -> String? {
+        for attempt in 0..<Self.docsRtfReadAttempts {
+            if attempt > 0 { pumpDedicatedThreadForPendingDispatch(doc, viewId: viewId, part: 0) }
+            if let cString = "text/rtf".withCString({ mimePtr in
+                doc.handle.pointee.pClass.pointee.getTextSelection?(doc.handle, mimePtr, nil)
+            }) {
+                defer { free(cString) }
+                let text = String(cString: cString)
+                if !text.isEmpty { return text }
+            }
+        }
+        return nil
+    }
+    private static let docsRtfReadAttempts = 6
+
+    /// Is `word` present in `rtf` as a REAL control word — and, if it takes a numeric parameter, is
+    /// that parameter non-zero?
+    ///
+    /// **This is deliberately not `rtf.contains("\\b")`, and the difference is the whole value of the
+    /// check.** RTF control-word syntax is a backslash, ASCII letters, then an optional signed
+    /// integer, terminated by any non-alphanumeric — so a bare substring test for `\b` also matches
+    /// `\bin`, `\brdrs`, `\bullet` and `\blue`, and would report BOLD on a document containing none.
+    /// That is the vacuous-drill shape this arc keeps producing. The rule enforced here is: the
+    /// character after `word` must not be a letter.
+    ///
+    /// A trailing `0` is the OFF form (`\b0`, `\i0`), so it does not count as present. `\ulnone` —
+    /// underline's own off switch — is excluded for free by the not-a-letter rule, since `n` is a
+    /// letter; that property is load-bearing, not incidental, and must survive any edit here.
+    static func officeRtfHasControlWord(_ rtf: String, _ word: String) -> Bool {
+        let needle = "\\" + word
+        var searchStart = rtf.startIndex
+        while let found = rtf.range(of: needle, range: searchStart..<rtf.endIndex) {
+            searchStart = found.upperBound
+            guard found.upperBound < rtf.endIndex else { return true } // ends the payload: a bare word
+            let next = rtf[found.upperBound]
+            if next.isLetter { continue }        // \bin, \brdrs, \ulnone — a DIFFERENT control word
+            if next == "0" {
+                // The OFF form — but only when the parameter really is zero, so `\b0` is off while
+                // `\b01` (a leading-zero 1) is not mistaken for it.
+                let afterZero = rtf.index(after: found.upperBound)
+                if afterZero >= rtf.endIndex || !rtf[afterZero].isNumber { continue }
+            }
+            return true
+        }
+        return false
+    }
+
+    /// The style catalogue, as PRE-FLIGHT VALIDATION — the one genuinely useful thing
+    /// `getCommandValues` offers a formatting verb.
+    ///
+    /// An unknown style name is a SILENT no-op: `SwDocShell::ExecStyleSheet`'s `getByName` throws,
+    /// the `catch` swallows it, no item is appended, and the whole apply is skipped with nothing
+    /// reaching LOK. Asking the catalogue first turns that into a refusal BEFORE anything is
+    /// dispatched. **Pre-flight validation is not verification** — it proves the request was
+    /// well-formed, not that it landed — and the tool description says so.
+    ///
+    /// Returns `nil` when the catalogue itself is unavailable, which is NOT treated as "the style is
+    /// bad": the caller proceeds, because refusing a legitimate style because a diagnostic was
+    /// unreachable would be a worse failure than the silent no-op this guards.
+    private func docsParagraphStyleCatalogueOnDedicatedThread(_ doc: OpenDocument) -> Set<String>? {
+        guard let cString = ".uno:StyleApply".withCString({ commandPtr in
+            doc.handle.pointee.pClass.pointee.getCommandValues?(doc.handle, commandPtr)
+        }) else { return nil }
+        defer { free(cString) }
+        guard let data = String(cString: cString).data(using: .utf8),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let values = root["commandValues"] as? [String: Any],
+              let paragraph = values["ParagraphStyles"] as? [String] else { return nil }
+        return Set(paragraph)
+    }
+
+    /// office-format — `docs format`. Applies paragraph/character attributes over the whole document
+    /// (`find == nil`) or over every literal occurrence of `find`.
+    ///
+    /// **Selection is verified BEFORE anything is dispatched, and that guard is load-bearing rather
+    /// than defensive.** The probe that researched this verb produced exactly the failure it
+    /// prevents: a search that did not land, followed by a `.uno:Bold` dispatched into a document
+    /// with nothing selected — every layer reported success and the saved bytes were untouched. In
+    /// production the same state is reachable whenever the FIND misses, so a selection that cannot be
+    /// confirmed is a THROW naming what was searched for, never a dispatch.
+    ///
+    /// **Dispatch order is fixed** (`style`, `align`, `lineSpacing`, then the three character
+    /// attributes) so `applied` reads the same way twice for the same request. `style` runs FIRST on
+    /// purpose: applying a paragraph style resets direct character formatting, so a style applied
+    /// after `bold` would silently undo it.
+    ///
+    /// ⚠️ **The `bold`/`italic`/`underline` payload shape is not cosmetic and must not be
+    /// "cleaned up".** These three slots are `Toggle = TRUE`, and the dispatcher makes "my arguments
+    /// were wrong" and "I sent no arguments" the SAME state — so a misnamed or mistyped argument does
+    /// not fail, it FLIPS against current state. Worse, `SvxWeightItem::PutValue` never rejects a
+    /// value (`Any2Bool` coerces anything non-boolean to `false`), so one wrong `"type"` tag silently
+    /// UN-bolds while reporting success. The explicit `"type":"boolean"` with the STRING value
+    /// `"true"`/`"false"` is the shape `sheetsFormatOnDedicatedThread` already live-proved; a native
+    /// JSON boolean is NOT verified to work through this parser and must not be substituted.
+    ///
+    /// Returns what was dispatched, what the RTF read-back CONFIRMED, whether that read-back was
+    /// available at all, and how many occurrences of `find` the document text contains (counted by
+    /// us — the engine's own match count is collapsed to a bool before it can reach LOK).
+    private func docsFormatOnDedicatedThread(docId: String, find: String?, align: OfficeDocsAlign?,
+                                             lineSpacing: OfficeDocsLineSpacing?, bold: Bool?, italic: Bool?,
+                                             underline: Bool?, style: OfficeDocsParagraphStyle?)
+        throws -> (applied: [String], verified: [String], verifyAvailable: Bool, occurrences: Int) {
+        guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        guard doc.kind == .text else { throw SaveError.notTextDocument(docId: docId, kind: doc.kind) }
+
+        let agentViewId = try ensureAgentViewOnDedicatedThread(docId: docId)
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
+        // NO setPart — for a text document `setPart` is `GotoPage`, a caret move, not a scoping call
+        // (research L6; the same reason `docsReadTextOnDedicatedThread` omits it).
+
+        // Pre-flight: the style must exist in the engine's own catalogue, or the apply is a silent
+        // no-op. Catalogue unavailable => proceed (see the helper's own header).
+        if let style, let catalogue = docsParagraphStyleCatalogueOnDedicatedThread(doc),
+           !catalogue.contains(style.programmaticName) {
+            throw SaveError.docsStyleUnavailable(docId: docId, style: style.rawValue,
+                                                 programmatic: style.programmaticName)
+        }
+
+        // The occurrence count is OURS, over the text we just read — the same ruling `docsReplace`
+        // ships under, for the same reason (the engine's `nFound` is collapsed to a bool at
+        // `viewsrch.cxx:395` and cannot be serialized). It also gives the no-match refusal below its
+        // number.
+        var occurrences = 0
+        if let find {
+            let before = try docsReadTextOnDedicatedThread(doc, docId: docId)
+            occurrences = Self.docsCountOccurrences(in: before, of: find)
+            guard occurrences > 0 else {
+                throw SaveError.docsFormatNoMatch(docId: docId, find: Self.docsBrief(find))
+            }
+        }
+
+        // Select, then PROVE the selection exists before dispatching anything.
+        try docsSelectForFormatOnDedicatedThread(doc, docId: docId, viewId: agentViewId, find: find)
+
+        var applied: [String] = []
+        if let style {
+            // The `Style` + `FamilyName` PAIR, never `Template` alone: the pair does a
+            // programmatic-name -> DisplayName conversion inside the engine, which is what makes it
+            // locale-independent. `Template` takes the DISPLAY name and would break under any other
+            // UI language.
+            postUnoCommandOnDedicatedThread(doc, ".uno:StyleApply", [
+                "Style": ["type": "string", "value": style.programmaticName],
+                "FamilyName": ["type": "string", "value": "ParagraphStyles"],
+            ], notifyWhenFinished: true)
+            applied.append("style")
+        }
+        if let align {
+            // Argument-free BY DESIGN. These four dedicated slots read only the SLOT ID, so there is
+            // nothing to get wrong; their free-form sibling `.uno:ParaAdjust` is a silent no-op on a
+            // malformed argument and is banned.
+            postUnoCommandOnDedicatedThread(doc, Self.officeDocsAlignCommand(align), [:], notifyWhenFinished: true)
+            applied.append("align")
+        }
+        if let lineSpacing {
+            postUnoCommandOnDedicatedThread(doc, Self.officeDocsLineSpacingCommand(lineSpacing), [:],
+                                            notifyWhenFinished: true)
+            applied.append("lineSpacing")
+        }
+        for (name, value) in [("bold", bold), ("italic", italic), ("underline", underline)] {
+            guard let value else { continue }
+            postUnoCommandOnDedicatedThread(doc, Self.officeDocsCharacterCommand(name),
+                                            [Self.officeDocsCharacterArgument(name):
+                                                ["type": "boolean", "value": value ? "true" : "false"]],
+                                            notifyWhenFinished: true)
+            applied.append(name)
+        }
+        pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: 0)
+
+        // VERIFY — re-select the same range and re-read it as RTF. Re-selecting rather than trusting
+        // the selection to have survived the dispatches: several of these commands move or collapse
+        // the cursor, and verifying against whatever happens to be selected afterwards would be a
+        // check that cannot fail for the right reason.
+        var verified: [String] = []
+        var verifyAvailable = false
+        if (try? docsSelectForFormatOnDedicatedThread(doc, docId: docId, viewId: agentViewId, find: find)) != nil,
+           let rtf = docsSelectionRtfOnDedicatedThread(doc, viewId: agentViewId) {
+            verifyAvailable = true
+            if let bold, bold == Self.officeRtfHasControlWord(rtf, "b") { verified.append("bold") }
+            if let italic, italic == Self.officeRtfHasControlWord(rtf, "i") { verified.append("italic") }
+            if let underline, underline == Self.officeRtfHasControlWord(rtf, "ul") { verified.append("underline") }
+            if let align, Self.officeRtfHasControlWord(rtf, Self.officeDocsAlignRtfToken(align)) {
+                verified.append("align")
+            }
+        }
+
+        // Leave no live selection behind on the agent view: `paste` REPLACES the current selection,
+        // so a `format` followed by an `insert` could otherwise paste over everything this call just
+        // selected.
+        doc.handle.pointee.pClass.pointee.resetSelection?(doc.handle)
+        return (applied, verified, verifyAvailable, occurrences)
+    }
+
+    /// Selects what `docsFormat` is about to format, and THROWS if the selection cannot be confirmed.
+    /// `find == nil` is the whole document (`.uno:SelectAll`); otherwise a FIND_ALL, which leaves
+    /// every match selected without replacing anything.
+    private func docsSelectForFormatOnDedicatedThread(_ doc: OpenDocument, docId: String, viewId: Int32,
+                                                      find: String?) throws {
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, viewId)
+        if let find {
+            postUnoCommandOnDedicatedThread(
+                doc, ".uno:ExecuteSearch",
+                Self.docsSearchArguments(find: find, replaceWith: "",
+                                         command: Self.officeSearchCommandFindAll),
+                notifyWhenFinished: true)
+        } else {
+            postUnoCommandOnDedicatedThread(doc, ".uno:SelectAll", [:], notifyWhenFinished: true)
+        }
+        guard docsSelectionRtfOnDedicatedThread(doc, viewId: viewId) != nil else {
+            throw SaveError.docsFormatSelectionFailed(docId: docId,
+                                                      what: find.map { "\"\(Self.docsBrief($0))\"" } ?? "the document")
+        }
+    }
+
+    /// Our own literal, case-sensitive occurrence count — the same one `docsReplace` uses, for the
+    /// same reason: the engine computes a real count and throws it away before it can reach LOK.
+    private static func docsCountOccurrences(in haystack: String, of needle: String) -> Int {
+        guard !needle.isEmpty else { return 0 }
+        var count = 0
+        var searchStart = haystack.startIndex
+        while let found = haystack.range(of: needle, options: [.literal], range: searchStart..<haystack.endIndex) {
+            count += 1
+            searchStart = found.upperBound
+        }
+        return count
+    }
+
+    /// The four dedicated alignment slots. **Never `.uno:ParaAdjust`** — its handler is
+    /// `if (pArgs && …SET…)` and its else path puts an EMPTY item set, i.e. a silent no-op.
+    private static func officeDocsAlignCommand(_ align: OfficeDocsAlign) -> String {
+        switch align {
+        case .left: return ".uno:LeftPara"
+        case .center: return ".uno:CenterPara"
+        case .right: return ".uno:RightPara"
+        case .justify: return ".uno:JustifyPara"
+        }
+    }
+    /// RTF's paragraph-alignment control words, for the read-back check.
+    private static func officeDocsAlignRtfToken(_ align: OfficeDocsAlign) -> String {
+        switch align {
+        case .left: return "ql"
+        case .center: return "qc"
+        case .right: return "qr"
+        case .justify: return "qj"
+        }
+    }
+    /// The four engine-shipped line-spacing presets. **Never `.uno:LineSpacing`** — same
+    /// silent-no-op shape as `.uno:ParaAdjust`.
+    private static func officeDocsLineSpacingCommand(_ spacing: OfficeDocsLineSpacing) -> String {
+        switch spacing {
+        case .single: return ".uno:SpacePara1"
+        case .onePointOneFive: return ".uno:SpacePara115"
+        case .onePointFive: return ".uno:SpacePara15"
+        case .double: return ".uno:SpacePara2"
+        }
+    }
+    /// **Never `.uno:UnderlineSingle`/`UnderlineDouble`/`UnderlineNone`** — those are bound to
+    /// `SwTextShell::ExecCharAttr`, which IGNORES the argument entirely and unconditionally toggles.
+    /// A "set underline" verb built on them would flip it off half the time.
+    private static func officeDocsCharacterCommand(_ name: String) -> String {
+        switch name {
+        case "bold": return ".uno:Bold"
+        case "italic": return ".uno:Italic"
+        default: return ".uno:Underline"
+        }
+    }
+    /// The argument NAME must equal the slot's own `aUnoName`, or `TransformParameters` puts nothing
+    /// and the dispatch falls into the toggle path — the whole H1 hazard in one string.
+    private static func officeDocsCharacterArgument(_ name: String) -> String {
+        switch name {
+        case "bold": return "Bold"
+        case "italic": return "Italic"
+        default: return "Underline"
+        }
+    }
+
+    /// office-format — `slides format`. Reuses the shipped, live-proven placeholder selection
+    /// (Escape -> N x Tab, each verified against a fresh type-27 firing -> F2 -> `.uno:SelectAll`),
+    /// never a second mechanism.
+    ///
+    /// **Refuses an EMPTY placeholder rather than reporting a no-op as success.** An
+    /// `IsEmptyPresObj()` shape gives `.uno:SelectAll` nothing to select, and formatting nothing is
+    /// indistinguishable from formatting something through this bridge — the same reason
+    /// `delete_slide` refuses the last slide.
+    ///
+    /// **`align` is dispatched with NO arguments, and that is a safety requirement, not a style
+    /// choice.** Impress's args-present adjust arm dereferences `pOLV` (the outliner view) without
+    /// the null guard its no-args sibling has, so an argument-carrying alignment outside text-edit
+    /// mode is a null dereference. Note also that alignment here re-anchors the SHAPE, not just the
+    /// paragraph — disclosed in `slides.ts`'s description.
+    ///
+    /// Says "posted", never "applied": `SdTransferable` registers no RTF flavour, so there is no
+    /// read-back to verify against on this side.
+    private func slidesFormatOnDedicatedThread(docId: String, slide: Int, placeholder: OfficeSlidesPlaceholder,
+                                               align: OfficeDocsAlign?, lineSpacing: OfficeSlidesLineSpacing?,
+                                               bold: Bool?, italic: Bool?, underline: Bool?) throws -> [String] {
+        guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
+        guard doc.kind == .presentation else { throw SaveError.notPresentation(docId: docId, kind: doc.kind) }
+        let partCount = Int(doc.handle.pointee.pClass.pointee.getParts?(doc.handle) ?? 0)
+        guard slide >= 0, slide < partCount else {
+            throw SaveError.slideNotFound(docId: docId, slide: slide, slideCount: partCount)
+        }
+        let agentViewId = try ensureAgentViewOnDedicatedThread(docId: docId)
+        doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
+
+        guard try selectSlidePlaceholderOnDedicatedThread(docId: docId, slide: slide,
+                                                          tabCount: placeholder.tabCount) != nil else {
+            throw SaveError.slidePlaceholderNotFound(docId: docId, slide: slide, field: placeholder.rawValue)
+        }
+        // Enter text-edit mode and select the shape's TEXT, then dispatch INSIDE that same edit-mode
+        // session — the shape `writeSelectedShapeTextOnDedicatedThread` already proves.
+        //
+        // ⚠️ **Deliberately NOT `readSelectedShapeTextOnDedicatedThread`, even though it performs the
+        // identical F2 + SelectAll dance and would have read the emptiness check for free.** That
+        // function presses Escape before returning, which leaves edit mode and drops the selection —
+        // so every attribute dispatched after it would have landed with nothing selected, and this
+        // bridge cannot tell that apart from success. The emptiness check therefore happens here,
+        // between the SelectAll and the dispatches, without ever leaving edit mode.
+        doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyInput.rawValue), 0, Int32(SlidesKeyCode.f2))
+        doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyUp.rawValue), 0, Int32(SlidesKeyCode.f2))
+        pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: slide)
+        postUnoCommandOnDedicatedThread(doc, ".uno:SelectAll", [:], notifyWhenFinished: true)
+        pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: slide)
+
+        // An EMPTY placeholder gives `.uno:SelectAll` nothing to select, so every command below
+        // would be a no-op indistinguishable from success. Escape back out before refusing, so the
+        // agent view is not left parked in edit mode.
+        let selected = readSelectionTextOnDedicatedThread(doc)
+        guard !selected.isEmpty else {
+            doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyInput.rawValue), 0, Int32(SlidesKeyCode.escape))
+            doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyUp.rawValue), 0, Int32(SlidesKeyCode.escape))
+            throw SaveError.slidePlaceholderEmpty(docId: docId, slide: slide, field: placeholder.rawValue)
+        }
+
+        var applied: [String] = []
+        if let align {
+            postUnoCommandOnDedicatedThread(doc, Self.officeDocsAlignCommand(align), [:], notifyWhenFinished: true)
+            applied.append("align")
+        }
+        if let lineSpacing {
+            postUnoCommandOnDedicatedThread(doc, Self.officeSlidesLineSpacingCommand(lineSpacing), [:],
+                                            notifyWhenFinished: true)
+            applied.append("lineSpacing")
+        }
+        for (name, value) in [("bold", bold), ("italic", italic), ("underline", underline)] {
+            guard let value else { continue }
+            postUnoCommandOnDedicatedThread(doc, Self.officeDocsCharacterCommand(name),
+                                            [Self.officeDocsCharacterArgument(name):
+                                                ["type": "boolean", "value": value ? "true" : "false"]],
+                                            notifyWhenFinished: true)
+            applied.append(name)
+        }
+        pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: slide)
+        // Leave text-edit mode, exactly as the write path does.
+        doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyInput.rawValue), 0, Int32(SlidesKeyCode.escape))
+        doc.handle.pointee.pClass.pointee.postKeyEvent?(doc.handle, Int32(OfficeKeyEventType.keyUp.rawValue), 0, Int32(SlidesKeyCode.escape))
+        pumpDedicatedThreadForPendingDispatch(doc, viewId: agentViewId, part: slide)
+        return applied
+    }
+
+    /// Impress's THREE line-spacing slots. `1.15` is absent because `drtxtob.sdi` does not bind
+    /// `SID_ATTR_PARA_LINESPACE_115` — the asymmetry `OfficeSlidesLineSpacing` exists to carry.
+    private static func officeSlidesLineSpacingCommand(_ spacing: OfficeSlidesLineSpacing) -> String {
+        switch spacing {
+        case .single: return ".uno:SpacePara1"
+        case .onePointFive: return ".uno:SpacePara15"
+        case .double: return ".uno:SpacePara2"
+        }
     }
 
     // MARK: - Office Stage B Task 10 — the CFB release blocker
@@ -5318,15 +5773,23 @@ final class LOKBridge: OfficeDocumentBridge {
     /// `Locale` is deliberately NOT sent: `FUNC_Search` overwrites it unconditionally
     /// (`viewsrch.cxx:861`). `SearchItem.Selection` is not a settable member at all (research §2.6),
     /// which is one reason v1 offers no scoped replace.
-    private static func docsSearchArguments(find: String, replaceWith: String) -> [String: Any] {
+    private static func docsSearchArguments(find: String, replaceWith: String,
+                                            command: Int = officeSearchCommandReplaceAll) -> [String: Any] {
         [
             "SearchItem.SearchString": ["type": "string", "value": find],
             "SearchItem.ReplaceString": ["type": "string", "value": replaceWith],
             // SvxSearchCmd: FIND = 0, FIND_ALL = 1, REPLACE = 2, REPLACE_ALL = 3
-            // (`include/svl/srchitem.hxx:36-42`). v1 only ever sends REPLACE_ALL — see
+            // (`include/svl/srchitem.hxx:36-42`). `replace` only ever sends REPLACE_ALL — see
             // `docsReplaceOnDedicatedThread`'s own header for why REPLACE (2) is NOT "replace the
-            // first occurrence".
-            "SearchItem.Command": ["type": "long", "value": 3],
+            // first occurrence". office-format adds ONE other caller, `docsFormat`, which sends
+            // FIND_ALL: a FIND selects WITHOUT replacing, which is exactly the selection primitive a
+            // formatting verb needs, and reusing this builder means it inherits the two corrections
+            // this payload already paid for (C2: `TransliterateFlags: 0`, `AlgorithmType2` as
+            // `{"short", 1}`) instead of opening a second door onto the same landmine — a
+            // PARTIALLY-populated `SearchItem` is a release-build null dereference, and
+            // `s_pSrchItem` is a process-global static shared across every Writer document, so a
+            // half-built payload silently searches with the PREVIOUS search's strings.
+            "SearchItem.Command": ["type": "long", "value": command],
             "SearchItem.Backward": ["type": "boolean", "value": false],
             "SearchItem.Pattern": ["type": "boolean", "value": false],
             "SearchItem.Content": ["type": "boolean", "value": false],
@@ -5430,6 +5893,12 @@ final class LOKBridge: OfficeDocumentBridge {
     /// reader whether it is still adequate. Running OUT of budget is not a failure: the cross-check
     /// is simply unavailable for that call and the re-read verification still runs.
     private static let docsUnoResultAttempts = 6
+
+    /// `SvxSearchCmd`, `include/svl/srchitem.hxx:36-42` — named rather than spelled as bare integers
+    /// at the call sites, because 1 and 3 differ by "selects the matches" versus "rewrites the
+    /// document" and a transposition would be silent.
+    private static let officeSearchCommandFindAll = 1
+    private static let officeSearchCommandReplaceAll = 3
 
     /// How much of a caller-supplied string an error may quote — mirrors
     /// `OfficeCommandConsumer.brief`'s own purpose on the other side of the wire. A document's own

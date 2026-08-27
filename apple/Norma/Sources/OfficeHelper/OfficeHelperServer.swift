@@ -298,6 +298,20 @@ public protocol OfficeDocumentBridge: AnyObject {
     /// paragraph first. Returns the paragraph count AFTER the insert. Throws when the document read
     /// back afterwards is not the text the insert should have produced.
     func docsInsert(docId: String, text: String, atStart: Bool, asNewParagraph: Bool) throws -> Int
+
+    /// office-format — applies paragraph/character attributes to the whole document (`find == nil`)
+    /// or to every literal occurrence of `find`. Returns what was DISPATCHED, what the RTF read-back
+    /// CONFIRMED, whether that read-back was available at all, and how many occurrences of `find` the
+    /// document holds. `verifyAvailable == false` means the outcome is UNKNOWN, never that the write
+    /// failed — see `LOKBridge.docsSelectionRtfOnDedicatedThread`'s own header.
+    func docsFormat(docId: String, find: String?, align: OfficeDocsAlign?, lineSpacing: OfficeDocsLineSpacing?,
+                    bold: Bool?, italic: Bool?, underline: Bool?, style: OfficeDocsParagraphStyle?)
+        throws -> (applied: [String], verified: [String], verifyAvailable: Bool, occurrences: Int)
+    /// office-format — the slides half. `slide` is 0-based. Returns which attribute names were
+    /// dispatched; there is no read-back on this side, so the answer is "posted", never "applied".
+    func slidesFormat(docId: String, slide: Int, placeholder: OfficeSlidesPlaceholder, align: OfficeDocsAlign?,
+                      lineSpacing: OfficeSlidesLineSpacing?, bold: Bool?, italic: Bool?,
+                      underline: Bool?) throws -> [String]
 }
 
 /// office-finish Job 2 — the default batch implementations: apply the single-op method N times, in
@@ -746,6 +760,47 @@ public final class FakeOfficeDocumentBridge: OfficeDocumentBridge {
         }
         fakeDocsText = fakeDocsText.replacingOccurrences(of: find, with: replaceWith, options: [.literal])
         return count
+    }
+    /// office-format — wire-level dispatch only, the same posture every stub above holds: a
+    /// deterministic echo of what was named, never a real format. `verifyAvailable` is reported
+    /// `false` because this bridge has no LOK and therefore genuinely cannot verify — reporting
+    /// `true` with an empty `verified` would be the fake claiming a capability it does not have.
+    public func docsFormat(docId: String, find: String?, align: OfficeDocsAlign?,
+                           lineSpacing: OfficeDocsLineSpacing?, bold: Bool?, italic: Bool?,
+                           underline: Bool?, style: OfficeDocsParagraphStyle?)
+        throws -> (applied: [String], verified: [String], verifyAvailable: Bool, occurrences: Int) {
+        lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
+        guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
+        var applied: [String] = []
+        if style != nil { applied.append("style") }
+        if align != nil { applied.append("align") }
+        if lineSpacing != nil { applied.append("lineSpacing") }
+        if bold != nil { applied.append("bold") }
+        if italic != nil { applied.append("italic") }
+        if underline != nil { applied.append("underline") }
+        var occurrences = 0
+        if let find, !find.isEmpty {
+            var searchStart = fakeDocsText.startIndex
+            while let found = fakeDocsText.range(of: find, options: [.literal],
+                                                 range: searchStart..<fakeDocsText.endIndex) {
+                occurrences += 1
+                searchStart = found.upperBound
+            }
+        }
+        return (applied, [], false, occurrences)
+    }
+    public func slidesFormat(docId: String, slide: Int, placeholder: OfficeSlidesPlaceholder,
+                             align: OfficeDocsAlign?, lineSpacing: OfficeSlidesLineSpacing?,
+                             bold: Bool?, italic: Bool?, underline: Bool?) throws -> [String] {
+        lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
+        guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
+        var applied: [String] = []
+        if align != nil { applied.append("align") }
+        if lineSpacing != nil { applied.append("lineSpacing") }
+        if bold != nil { applied.append("bold") }
+        if italic != nil { applied.append("italic") }
+        if underline != nil { applied.append("underline") }
+        return applied
     }
     public func docsInsert(docId: String, text: String, atStart: Bool, asNewParagraph: Bool) throws -> Int {
         lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
@@ -1671,6 +1726,36 @@ public final class OfficeHelperServer {
                                                                columnSpan: columnSpan, bold: bold, italic: italic,
                                                                numberFormat: numberFormat, align: align, width: width)
                 writeReply(.sheetsFormatOk(seq: seq, docId: docId, applied: applied), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.docsFormat(let seq, let docId, let find, let align, let lineSpacing, let bold,
+                                let italic, let underline, let style)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                let outcome = try documentBridge.docsFormat(docId: docId, find: find, align: align,
+                                                            lineSpacing: lineSpacing, bold: bold, italic: italic,
+                                                            underline: underline, style: style)
+                writeReply(.docsFormatOk(seq: seq, docId: docId, applied: outcome.applied,
+                                         verified: outcome.verified, verifyAvailable: outcome.verifyAvailable,
+                                         occurrences: outcome.occurrences), writer: writer)
+            } catch {
+                writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
+            }
+        case .frame(.slidesFormat(let seq, let docId, let slide, let placeholder, let align,
+                                  let lineSpacing, let bold, let italic, let underline)):
+            guard stateQueue.sync(execute: { docOwner[docId] }) != nil else {
+                writeReply(.error(seq: seq, reason: "docNotOpen"), writer: writer)
+                return
+            }
+            do {
+                let applied = try documentBridge.slidesFormat(docId: docId, slide: slide, placeholder: placeholder,
+                                                               align: align, lineSpacing: lineSpacing, bold: bold,
+                                                               italic: italic, underline: underline)
+                writeReply(.slidesFormatOk(seq: seq, docId: docId, applied: applied), writer: writer)
             } catch {
                 writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
             }
