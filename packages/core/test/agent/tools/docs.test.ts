@@ -80,11 +80,12 @@ describe("registration", () => {
   // Mirrors sheets/slides' own tripwire: the verb enum pinned literally through the SAME
   // z.toJSONSchema path a real model sees, so a new verb fails here before it ships silently
   // inheriting an unaudited gate classification.
-  test("the verb enum is exactly the 5 verbs this task ships", () => {
+  test("the verb enum is exactly the 6 verbs shipped (5 from T7 + office-format's format)", () => {
     const h = makeHarness();
     const spec = h.registry.specFor("docs", WORKDIR, "code");
     const parameters = spec?.parameters as { properties?: { verb?: { enum?: string[] } } } | undefined;
-    expect(parameters?.properties?.verb?.enum).toEqual(["info", "read", "replace", "insert", "append"]);
+    expect(parameters?.properties?.verb?.enum)
+      .toEqual(["info", "read", "replace", "insert", "append", "format"]);
   });
 
   test("`at` is a closed enum — start/end only, so a free-form position can never reach the app", () => {

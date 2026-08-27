@@ -134,8 +134,31 @@ const SlidesLayoutPreset = z.enum([
 ]);
 export type SlidesLayoutPreset = z.infer<typeof SlidesLayoutPreset>;
 
+/** `format`'s alignment — the same four values `docs format` takes, and the same argument-free,
+ *  zero-hazard dedicated slots underneath.
+ *
+ *  ⚠️ **On a slide, aligning a placeholder's text also RE-ANCHORS the text box itself.** That is a
+ *  whole-shape effect Writer has no analogue for; it is disclosed in the description and in the
+ *  verb's own result sentence, not smuggled. */
+const SlidesAlign = z.enum(["left", "center", "right", "justify"]);
+
+/** `format`'s line spacing — **THREE values, not the four `docs format` offers. `1.15` is missing
+ *  because LibreOffice's presentation editor does not have it**: it binds slots for single, 1.5 and
+ *  double and none for 1.15.
+ *
+ *  This is a SEPARATE enum from `docs.ts`'s deliberately, all the way down through the Swift wire.
+ *  A shared four-value enum would let a model ask a slide for a spacing the engine cannot apply, and
+ *  the failure would be a silent no-op — the exact shape this arc keeps shipping. Refused here, and
+ *  refused again app-side with a sentence that explains it is a real difference between the two
+ *  editors rather than a Norma limitation. */
+const SlidesLineSpacing = z.enum(["single", "1.5", "double"]);
+
+/** Which of a slide's two addressable text areas to format — the same pair `read`/`set_text`
+ *  already address, with the same Tab-order caveat those verbs carry. */
+const SlidesPlaceholder = z.enum(["title", "body"]);
+
 const SlidesArgs = z.object({
-  verb: z.enum(["info", "read", "set_text", "add_slide", "delete_slide", "reorder", "batch"]),
+  verb: z.enum(["info", "read", "set_text", "add_slide", "delete_slide", "reorder", "batch", "format"]),
   /** Absolute (or resolved against the session's primary working directory if relative) — spec §2's
    *  own table. Required for EVERY verb; a missing path is malformed, never defaulted — matches
    *  `sheets.ts`'s identical wire-strictness rule for the same operand. */
@@ -154,6 +177,23 @@ const SlidesArgs = z.object({
    *  immediate and specific. 10,000 is far past any real deck and keeps every downstream
    *  `slide`/`at`/`to` arithmetic total. */
   slide: z.number().int().positive().max(10_000).optional(),
+  /** `format` ONLY — which text area to format. Required for `format`; there is no default, because
+   *  guessing between a slide's title and its body would put formatting somewhere the caller did not
+   *  ask for. */
+  placeholder: SlidesPlaceholder.optional(),
+  /** `format` ONLY. */
+  align: SlidesAlign.optional(),
+  /** `format` ONLY. */
+  lineSpacing: SlidesLineSpacing.optional(),
+  /** `format` ONLY — true sets, false clears, absent leaves alone. **Must stay a boolean on the
+   *  wire**: the underlying engine slots toggle when their argument is missing or mistyped, and the
+   *  item never rejects a bad value — it coerces it to `false`. A non-boolean would therefore not
+   *  fail, it would silently turn the attribute OFF while reporting success. */
+  bold: z.boolean().optional(),
+  /** `format` ONLY — see `bold`. */
+  italic: z.boolean().optional(),
+  /** `format` ONLY — see `bold`. */
+  underline: z.boolean().optional(),
   /** `set_text` ONLY — the new title placeholder text. Same absent-means-untouched contract `sheets
    *  format`'s attributes already established: naming only `title` leaves `body` exactly as it was,
    *  and vice versa — at least one of the two must be present (checked below; naming neither would do
@@ -368,6 +408,14 @@ export function registerSlidesTool(r: ToolRegistry, deps: SlidesToolDeps): void 
       + "document a human already has open — a real, visible side effect on that tab (mirrors "
       + "sheets' own rename_sheet residual; each of these three verbs' own mechanism moves the "
       + "primary view's current slide to do its work, not merely reorder's).\n"
+      + "• format — path, slide, placeholder (\"title\" or \"body\"), and at least one of bold/italic/underline (true or false), align (left/center/right/justify) or lineSpacing (single/1.5/double). Formats ALL of that placeholder's text — there is no way to format part of it.\n"
+      + "  Two differences from docs format, both real limits of the presentation editor "
+      + "rather than Norma: there is no 1.15 line spacing (only single, 1.5, double), and "
+      + "there are no paragraph styles like heading1. Also, aligning a placeholder "
+      + "re-anchors the whole text box, not just the text inside it.\n"
+      + "  Unlike docs format, this cannot read the formatting back to check it — a "
+      + "presentation gives Norma no way to do that — so it reports what it asked for. "
+      + "Reopen the slide if you need to be sure.\n"
       + "Every path must be inside this session's own working directories — an office read/write "
       + "COPIES the file and parses it with LibreOffice, so it is not an ordinary file read/write and "
       + "the usual unrestricted-reads rule does not cover it.\n"
@@ -389,7 +437,7 @@ export function registerSlidesTool(r: ToolRegistry, deps: SlidesToolDeps): void 
     async run(a: SlidesArgs, ctx) {
       const sessionId = ctx.sessionId;
       const action = `office.slides.${a.verb}` as OfficeCommandAction;
-      const slideVerbs = new Set(["read", "set_text", "delete_slide", "reorder"]);
+      const slideVerbs = new Set(["read", "set_text", "delete_slide", "reorder", "format"]);
 
       // Rung 1 — operands, per verb. Missing -> malformed, never defaulted (sheets.ts's own
       // wire-strictness rule, carried here unchanged).
@@ -437,6 +485,31 @@ export function registerSlidesTool(r: ToolRegistry, deps: SlidesToolDeps): void 
                 + "and nothing else.");
             }
           }
+        }
+      }
+      // `format`'s operands are `format`-only, and a present one on another verb REFUSES rather
+      // than being silently dropped — the same rule every other per-verb operand in this arc
+      // follows. Dropping one would tell the model a formatting request succeeded when nothing of
+      // the sort was sent.
+      const formatOnlyKeys = ["placeholder", "align", "lineSpacing", "bold", "italic", "underline"] as const;
+      if (a.verb !== "format") {
+        for (const key of formatOnlyKeys) {
+          if (a[key] !== undefined) {
+            throw new Error(`slides ${a.verb} has no \`${key}\` — that is a \`format\` operand. `
+              + `Use verb:"format" to change how a slide's text looks.`);
+          }
+        }
+      }
+      if (a.verb === "format") {
+        if (a.placeholder === undefined) {
+          throw new Error("slides format needs a `placeholder` — either \"title\" or \"body\". A slide "
+            + "has no other addressable text, and guessing between the two would format something you "
+            + "did not ask for.");
+        }
+        if (a.align === undefined && a.lineSpacing === undefined
+            && a.bold === undefined && a.italic === undefined && a.underline === undefined) {
+          throw new Error("slides format needs at least one of `bold`, `italic`, `underline`, "
+            + "`align`, `lineSpacing` — it has nothing to do otherwise. Nothing was changed.");
         }
       }
       if (a.verb === "reorder") {
@@ -488,6 +561,17 @@ export function registerSlidesTool(r: ToolRegistry, deps: SlidesToolDeps): void 
         if (tooLarge) throw new Error(`slides batch: ${tooLarge}`);
       } else if (a.verb === "reorder") {
         args = officeCommandArgs(resolvedPath, { slide: a.slide!, to: a.to! });
+      } else if (a.verb === "format") {
+        // Conditional construction, one key at a time — the absent-means-untouched contract.
+        const fields: Record<string, string | number | boolean> = {
+          slide: a.slide!, placeholder: a.placeholder!,
+        };
+        if (a.align !== undefined) fields.align = a.align;
+        if (a.lineSpacing !== undefined) fields.lineSpacing = a.lineSpacing;
+        if (a.bold !== undefined) fields.bold = a.bold;
+        if (a.italic !== undefined) fields.italic = a.italic;
+        if (a.underline !== undefined) fields.underline = a.underline;
+        args = officeCommandArgs(resolvedPath, fields);
       } else {
         args = officeCommandArgs(resolvedPath);
       }
