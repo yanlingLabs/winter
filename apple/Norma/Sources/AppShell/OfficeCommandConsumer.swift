@@ -235,14 +235,29 @@ struct OfficeCommandConsumer {
             return sendResult(command.sessionId, command.commandId, false, Self.hostGoneRefusal, nil)
         }
         do {
+            // `OfficeAgentBroker.perform`'s closure can only hand back one `String`, and the warning
+            // must survive `capped` separately from the body — so it comes out beside the result
+            // rather than inside it. A reference box, not a sentinel inside the text: nothing then
+            // has to guarantee the marker cannot occur in real cell content.
+            let warningBox = SheetsReadWarning()
             let resultText = try await broker.perform(
                 sessionId: command.sessionId, path: path, access: .read, requestId: command.commandId
             ) { runtime, docId, adopted in
-                let rows = try await runtime.sheetsRead(docId: docId, sheet: sheet, range: rangeString, formulas: formulas)
-                return Self.formatSheetsRead(sheet: sheet, range: rangeString, formulas: formulas, rows: rows)
+                let read = try await runtime.sheetsRead(docId: docId, sheet: sheet, range: rangeString, formulas: formulas)
+                let formatted = Self.formatSheetsRead(sheet: sheet, range: rangeString, formulas: formulas,
+                                                      rows: read.rows,
+                                                      displayRestoreVerified: read.displayRestoreVerified)
+                warningBox.text = formatted.warning
+                return formatted.body
             }
-            let (ok, text) = Self.capped(resultText)
-            sendResult(command.sessionId, command.commandId, ok, text, nil)
+            // Cap the BODY, then re-attach the warning — never the other way round. `capped` replaces
+            // its whole input with a refusal sentence when the grid is over the wire limit, so a
+            // warning concatenated BEFORE this point is destroyed on exactly the path that needed it
+            // most (office-polish blind check, Important). `reserving:` holds back room for the
+            // warning so the composed result still lands inside the same wire limit the belt enforces.
+            let warning = warningBox.text
+            let (ok, cappedBody) = Self.capped(resultText, reserving: PanelURLPolicy.wireLength(warning))
+            sendResult(command.sessionId, command.commandId, ok, cappedBody + warning, nil)
         } catch {
             sendResult(command.sessionId, command.commandId, false, Self.message(for: error), nil)
         }
@@ -1589,11 +1604,39 @@ struct OfficeCommandConsumer {
     /// row-major, with no reshaping this file could get wrong. An empty `rows` (the sheet had nothing
     /// in the requested range) still gets an honest header line, never a bare empty string a caller
     /// could mistake for a dropped result.
-    private static func formatSheetsRead(sheet: String, range: String, formulas: Bool, rows: [[String]]) -> String {
+    /// office-polish final check, Critical — `displayRestoreVerified` is the ONE thing this
+    /// formatter says that is not about the cells. A `formulas: true` read flips Calc's
+    /// document-wide Show Formulas mode on and back; when the helper could not CONFIRM it put the
+    /// mode back (see `LOKBridge.restoreFormulaDisplayOnDedicatedThread`), every LATER read of this
+    /// document may answer formula SOURCE where a value was asked for. Being handed source as if it
+    /// were a value, silently, is the whole defect — so the model is told, in the reply itself,
+    /// rather than in a log nobody reads. The line is appended, never substituted for the data: the
+    /// rows this read returned are still correct, and suppressing them would trade one wrong answer
+    /// for another.
+    ///
+    /// **Returned as two pieces, and that split is the fix for a real defect** (office-polish blind
+    /// check, Important). The warning used to be concatenated here, and `capped()` runs AFTER this
+    /// function at the call site — so an OVERSIZED unverified read had its whole string, warning
+    /// included, replaced by the refusal sentence: the one path where the model most needed telling
+    /// was the one path where it was told nothing at all. Handing the caller the body and the
+    /// warning separately lets it cap the BODY and then append the warning, so the refusal carries
+    /// it too. The existing over-cap test pinned this path with `verified: true`, which is exactly
+    /// why the interaction survived two rounds — a test that covers the path but not the case.
+    ///
+    /// The warning fires whenever the restore was not VERIFIED, which includes documents that have
+    /// no formulas anywhere for the probe to see. On such a document its literal claim cannot come
+    /// true (a workbook with no formulas cannot return formula source), so the warning errs toward
+    /// noise, never toward silence — the correct direction for a check that cannot see.
+    private static func formatSheetsRead(sheet: String, range: String, formulas: Bool, rows: [[String]],
+                                         displayRestoreVerified: Bool) -> (body: String, warning: String) {
         let header = "\(sheet)!\(range) (\(formulas ? "formulas" : "values")):"
-        guard !rows.isEmpty else { return "\(header) (nothing in this range)" }
+        let warning = displayRestoreVerified ? "" : "\n(Norma could not confirm it restored this "
+            + "workbook's Show Formulas display mode after this read. These rows are correct, but a "
+            + "later read of this workbook may return formula source where a value is expected — "
+            + "reopen the file if a value ever comes back looking like \"=A1*2\".)"
+        guard !rows.isEmpty else { return ("\(header) (nothing in this range)", warning) }
         let grid = rows.map { row in row.map(quotedIfNeededForTSV).joined(separator: "\t") }.joined(separator: "\n")
-        return "\(header)\n\(grid)"
+        return ("\(header)\n\(grid)", warning)
     }
 
     /// office-agent-tools T3 review (I3) — the wire-side half of the fix.
@@ -1880,7 +1923,20 @@ struct OfficeCommandConsumer {
     /// as `ok: true` with swapped-in prose (that would tell the daemon a successful read produced this
     /// sentence as its own real content). Refuses rather than truncates: a silently clipped grid would
     /// be indistinguishable from a complete one to whatever reads this file's own result text.
-    private static func capped(_ text: String) -> (ok: Bool, text: String) {
+    /// Carries `formatSheetsRead`'s warning out of the broker's closure alongside the body it must
+    /// be capped independently of. `@unchecked Sendable` is honest rather than lax: it is written
+    /// exactly once, inside the closure, and read only after that closure has been awaited to
+    /// completion — there is no concurrent access to protect against.
+    private final class SheetsReadWarning: @unchecked Sendable {
+        var text = ""
+    }
+
+    /// `reserving` — office-polish blind check, Important. Room held back for text the CALLER will
+    /// append after this returns (today: the unverified-display-mode warning), so that capping the
+    /// body and then re-attaching the warning still lands inside the same wire limit this belt
+    /// exists to enforce. `0`, the default, leaves every other call site byte-identical.
+    private static func capped(_ text: String, reserving reserved: Int = 0) -> (ok: Bool, text: String) {
+        let sheetsResultMaxLength = Self.sheetsResultMaxLength - max(0, reserved)
         guard PanelURLPolicy.wireLength(text) > sheetsResultMaxLength else { return (true, text) }
         // Wording is deliberately family-neutral (T7): this belt is shared by `sheets`, `slides`
         // and `docs`, and the original text named only `sheets`' own operands ("a smaller range or

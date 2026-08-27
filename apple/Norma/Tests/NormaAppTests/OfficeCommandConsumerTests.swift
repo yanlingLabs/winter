@@ -313,7 +313,7 @@ final class OfficeCommandConsumerTests: XCTestCase {
         sheetsInfo: @escaping (String) async throws -> (sheets: [OfficeSheetInfo], activeSheet: String) = { _ in
             throw OfficeHelperClientError.serverError(reason: "sheetsInfo not stubbed for this test")
         },
-        sheetsRead: @escaping (String, String, String, Bool) async throws -> [[String]] = { _, _, _, _ in
+        sheetsRead: @escaping (String, String, String, Bool) async throws -> (rows: [[String]], displayRestoreVerified: Bool) = { _, _, _, _ in
             throw OfficeHelperClientError.serverError(reason: "sheetsRead not stubbed for this test")
         },
         // office-agent-tools T4 — same "explicit stub per test, throw if unstubbed" shape as
@@ -454,7 +454,7 @@ final class OfficeCommandConsumerTests: XCTestCase {
 
     func testSheetsReadRefusesAMalformedRangeWithoutTouchingTheBroker() async {
         var driverCalled = false
-        let world = makeSheetsWorld(sheetsRead: { _, _, _, _ in driverCalled = true; return [] })
+        let world = makeSheetsWorld(sheetsRead: { _, _, _, _ in driverCalled = true; return ([], true) })
         world.consumer.handle(command("office.sheets.read",
                                        args: ["path": "/tmp/a.xlsx", "sheet": "Sheet1", "range": "not-a-range"]))
         await waitUntil { !self.sent.isEmpty }
@@ -469,7 +469,7 @@ final class OfficeCommandConsumerTests: XCTestCase {
     /// range test proves it: the driver would throw if it were ever asked.
     func testSheetsReadRefusesAnOversizedRangeWithoutTouchingTheBroker() async {
         var driverCalled = false
-        let world = makeSheetsWorld(sheetsRead: { _, _, _, _ in driverCalled = true; return [] })
+        let world = makeSheetsWorld(sheetsRead: { _, _, _, _ in driverCalled = true; return ([], true) })
         let tooManyRows = officeReadRangeMaxCells + 1
         world.consumer.handle(command("office.sheets.read",
                                        args: ["path": "/tmp/a.xlsx", "sheet": "Sheet1", "range": "A1:A\(tooManyRows)"]))
@@ -592,7 +592,7 @@ final class OfficeCommandConsumerTests: XCTestCase {
                 XCTAssertEqual(sheet, "Sheet1")
                 XCTAssertEqual(range, "A1:B2")
                 XCTAssertFalse(formulas)
-                return [["42", "Hello"], ["1", ""]]
+                return ([["42", "Hello"], ["1", ""]], true)
             })
         world.consumer.handle(command("office.sheets.read",
                                        args: ["path": path, "sheet": "Sheet1", "range": "A1:B2"]))
@@ -610,7 +610,7 @@ final class OfficeCommandConsumerTests: XCTestCase {
             workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
             sheetsRead: { _, _, _, formulas in
                 XCTAssertTrue(formulas)
-                return [["=SUM(A1:A2)"]]
+                return ([["=SUM(A1:A2)"]], true)
             })
         world.consumer.handle(command("office.sheets.read",
                                        args: ["path": path, "sheet": "Sheet1", "range": "A1",
@@ -620,6 +620,73 @@ final class OfficeCommandConsumerTests: XCTestCase {
         let result = sent.first?.result ?? ""
         XCTAssertTrue(result.contains("=SUM(A1:A2)"), result)
         XCTAssertTrue(result.contains("formulas"), result)
+    }
+
+    /// office-polish blind check, Important — **the case the over-cap test never covered.** The
+    /// existing oversized-result test pins that path with a VERIFIED read, so it never noticed that
+    /// `capped` replaces its whole input with a refusal sentence: an oversized read whose display
+    /// mode was left unverified used to be answered with `ok:false`, no rows, and no warning — the
+    /// one path where the model most needed telling was the one path where it was told nothing.
+    /// A test that covers the path but not the case, which is the shape that let two earlier
+    /// attempts through, so this is the case rather than another instance of the path.
+    func testAnOversizedUnverifiedReadStillCarriesTheWarningWithItsRefusal() async {
+        let path = makeScratchFile()
+        let hugeRow = (0..<5_000).map { "cell-\($0)-" + String(repeating: "x", count: 20) }
+        let world = makeSheetsWorld(
+            workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+            sheetsRead: { _, _, _, _ in ([hugeRow], false) })
+        world.consumer.handle(command("office.sheets.read",
+                                       args: ["path": path, "sheet": "Sheet1", "range": "A1:A1",
+                                              "formulas": true]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, false, "an oversized answer is still refused")
+        let result = sent.first?.result ?? ""
+        XCTAssertTrue(result.contains("past the"), "the refusal itself must survive: \(result)")
+        XCTAssertTrue(result.contains("could not confirm"),
+                      "the refusal must CARRY the unverified-display-mode warning: \(result)")
+        XCTAssertLessThanOrEqual(PanelURLPolicy.wireLength(result), PanelCommandConsumer.resultMaxLength,
+                                 "warning included, the composed result must still fit the wire cap")
+    }
+
+    /// office-polish final check, Critical — **the unverified verdict has to reach the MODEL**, not
+    /// just a log. A `formulas: true` read flips Calc's document-wide Show Formulas mode and can
+    /// fail to put it back; on a document whose formulas sit below the probe's cap the helper cannot
+    /// even tell whether it did. Being handed formula SOURCE as if it were a value, silently, is the
+    /// defect — so the reply itself says so and a model can re-read.
+    func testAnUnverifiedFormulaDisplayRestoreWarnsInTheReplyTheModelReceives() async {
+        let path = makeScratchFile()
+        let world = makeSheetsWorld(
+            workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+            sheetsRead: { _, _, _, _ in ([["=B5*$B$2"]], false) })
+        world.consumer.handle(command("office.sheets.read",
+                                       args: ["path": path, "sheet": "Sheet1", "range": "C5",
+                                              "formulas": true]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, true, "the rows are still correct — this is a warning, not a failure")
+        let result = sent.first?.result ?? ""
+        XCTAssertTrue(result.contains("=B5*$B$2"), "the data must still be there: \(result)")
+        XCTAssertTrue(result.contains("could not confirm"),
+                      "an unverified display-mode restore must be stated in the reply: \(result)")
+        XCTAssertTrue(result.contains("Show Formulas"), result)
+    }
+
+    /// The control arm, and it is the whole reason the test above means anything: the SAME read with
+    /// a verified restore must carry NO warning. Without this, a formatter that appended the
+    /// sentence unconditionally would pass the test above and train every model to distrust every
+    /// read.
+    func testAVerifiedFormulaDisplayRestoreAddsNoWarningAtAll() async {
+        let path = makeScratchFile()
+        let world = makeSheetsWorld(
+            workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+            sheetsRead: { _, _, _, _ in ([["=B5*$B$2"]], true) })
+        world.consumer.handle(command("office.sheets.read",
+                                       args: ["path": path, "sheet": "Sheet1", "range": "C5",
+                                              "formulas": true]))
+        await waitUntil { !self.sent.isEmpty }
+        let result = sent.first?.result ?? ""
+        XCTAssertTrue(result.contains("=B5*$B$2"), result)
+        XCTAssertFalse(result.contains("could not confirm"),
+                       "a verified restore must say nothing: \(result)")
     }
 
     /// A sheet-not-found refusal reaches the agent as clean, composed-by-LOKBridge house voice, never
@@ -651,7 +718,7 @@ final class OfficeCommandConsumerTests: XCTestCase {
         let hugeRow = (0..<5_000).map { "cell-\($0)-" + String(repeating: "x", count: 20) }
         let world = makeSheetsWorld(
             workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
-            sheetsRead: { _, _, _, _ in [hugeRow] })
+            sheetsRead: { _, _, _, _ in ([hugeRow], true) })
         world.consumer.handle(command("office.sheets.read",
                                        args: ["path": path, "sheet": "Sheet1", "range": "A1:A1"]))
         await waitUntil { !self.sent.isEmpty }

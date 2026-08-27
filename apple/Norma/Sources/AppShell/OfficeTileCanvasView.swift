@@ -679,6 +679,46 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost, NSTextInputC
     /// ther a reload nor this method ever recreates the view.
     func syncDocumentIdentity(docId newDocId: String, sizeTwips newSizeTwips: OfficeDocumentSize, activePart: Int) {
         guard newDocId != docId else {
+            // office-polish Bug 1 — a SAME-DOCUMENT size revision, which this guard used to swallow
+            // whole. `LOK_CALLBACK_DOCUMENT_SIZE_CHANGED` now reaches `DocumentEntry.sizeTwips`, and
+            // it arrives with the docId UNCHANGED (the document grew; it was not reloaded), so
+            // without this arm the canvas would keep clamping scrolling to the extent the document
+            // had when it opened — the whole point of wiring that callback.
+            //
+            // Deliberately NOT the reload path below: nothing here clears tiles (every painted tile
+            // is still valid — growth appends content, it does not move what is already laid out)
+            // and nothing resets `scrollOrigin` (the user is reading; their position must survive).
+            //
+            // **And deliberately NO `performSubscribe()`/`evaluateResidencyIfNeeded()` either —
+            // that version was written, MEASURED, and reverted.** A size revision arrives while the
+            // AGENT is mid-verb (it is an agent write that changed the size in the first place), and
+            // both of those issue fresh `subscribeTiles` traffic onto the helper's single dedicated
+            // LOK thread. `subscribeTiles` asserts a part, so for a presentation it lands a `setPart`
+            // in the middle of a verb's own verify-by-re-read — and every Impress page verb verifies
+            // that way because the engine gives no other signal. `bun run verify:office-agent` went
+            // from PASS 8/8 to `slides.add_slide` FILE-FAIL in 4 runs out of 4 with those two calls
+            // present, and back to PASS 8/8 without them (`docs.replace` also failed 1 of those 4).
+            //
+            // Nothing is lost: a new extent only matters once the user scrolls into it, and
+            // scrolling issues its own `scheduleThrottledSubscribe()` on every tick. Residency is a
+            // prefetch heuristic that re-evaluates on the next part/zoom change. So the arm does
+            // exactly one thing — re-clamp how far this canvas may scroll — and touches LOK not at
+            // all.
+            // office-polish review, Minor 7 — the SHRINK direction, disclosed rather than fixed. A
+            // document that got SMALLER re-clamps correctly (the scroll bound follows it down), and
+            // `relayoutVisibleTiles` drops any layer now outside the viewport, but nothing here asks
+            // for fresh pixels: a tile still inside the viewport whose CONTENT was deleted keeps
+            // showing its cached copy until something else re-subscribes (any scroll or zoom tick,
+            // or the LOK invalidation a content deletion fires in its own right — `INVALIDATE_TILES`
+            // is a separate callback from `DOCUMENT_SIZE_CHANGED` and is already wired). Fixing it
+            // HERE would mean re-subscribing from this arm, which is exactly what
+            // `verify:office-agent` caught as a mid-verb `setPart` — so the correct place for it, if
+            // it ever proves reachable in practice, is the invalidation path, not this one.
+            if newSizeTwips != sizeTwips {
+                sizeTwips = newSizeTwips
+                scrollOrigin = CGPoint(x: clampedOriginX(scrollOrigin.x), y: clampedOriginY(scrollOrigin.y))
+                relayoutVisibleTiles()
+            }
             setActivePart(activePart) // the pre-Task-8 drift re-assert, unchanged
             return
         }

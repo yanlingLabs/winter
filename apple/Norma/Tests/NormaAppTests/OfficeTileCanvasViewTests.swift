@@ -2460,4 +2460,113 @@ final class OfficeTileCanvasViewTests: XCTestCase {
 
         view.unmount()
     }
+
+    // MARK: - office-polish Bug 1 — a document that GREW under an open tab
+
+    /// Every twips number below is MEASURED, not chosen: opening the user's own
+    /// `Sushi_An_Introduction.docx` through the real compiled `NormaOfficeHelper` against the real
+    /// vendored LibreOffice reports `heightTwips 32532`; appending twenty paragraphs and reopening
+    /// the saved result reports `48656`. `TileMath.twipsToPixels(_:zoomPPT: 1000)` is
+    /// `round(twips * 1000 / 10_000)`, i.e. twips/10, and `officeFixedDeviceScale` is 2, so those
+    /// two extents are 1626.5 pt and 2433.0 pt of scrollable document.
+    private static let measuredStaleHeightTwips: Int64 = 32_532
+    private static let measuredGrownHeightTwips: Int64 = 48_656
+
+    /// **The bug, at the canvas.** Before `LOK_CALLBACK_DOCUMENT_SIZE_CHANGED` was wired, the only
+    /// `sizeTwips` a tab ever had was the one captured at open, and `syncDocumentIdentity` threw
+    /// away any revision that did not also change the docId. So a Writer document that grew under
+    /// an open tab could not be scrolled into its new content, ever.
+    ///
+    /// Asserted on the SCROLL POSITION the real `applyScrollDelta` path produces — the same
+    /// accumulate-and-clamp a trackpad tick drives — not on any intermediate the fix happens to
+    /// touch.
+    func testAGrownDocumentSizeExtendsHowFarTheCanvasCanActuallyScroll() async {
+        let (runtime, _) = await makeOpenedRuntime(documentType: .text)
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let stale = OfficeDocumentSize(widthTwips: 12_808, heightTwips: Self.measuredStaleHeightTwips)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: stale, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 600, height: 900) // an ordinary panel height
+        view.mount()
+
+        // 1626.5 pt of document in a 900 pt canvas = 726.5 pt of reach. Ask for far more than that.
+        view.applyScrollDelta(dx: 0, dy: -4000)
+        let clampedToStale = view.scrollOriginForTesting.y
+        XCTAssertEqual(clampedToStale, 726.5, accuracy: 1.0,
+                       "setup: with the OPEN-TIME extent the canvas stops 726.5 pt down — "
+                       + "twipsToPixels(32532, 1000)/2 - 900")
+
+        // The document grew. Same docId: it was edited, not reloaded.
+        view.syncDocumentIdentity(docId: "doc-1",
+                                  sizeTwips: OfficeDocumentSize(widthTwips: 12_808,
+                                                                heightTwips: Self.measuredGrownHeightTwips),
+                                  activePart: 0)
+        view.applyScrollDelta(dx: 0, dy: -4000)
+        let clampedToGrown = view.scrollOriginForTesting.y
+        XCTAssertEqual(clampedToGrown, 1533.0, accuracy: 1.0,
+                       "the grown extent must be reachable: twipsToPixels(48656, 1000)/2 - 900")
+        XCTAssertGreaterThan(clampedToGrown, clampedToStale + 800,
+                             "a full page (806.0 pt, measured) of the document was unreachable before")
+
+        view.unmount()
+    }
+
+    /// **The user's own case, and the reason this reads as "scrolling doesn't work" rather than
+    /// "the last page is missing".** Their `docs info` answered "1 page, 17 paragraphs" at open —
+    /// one measured page is 16124 twips (48656 - 32532), 806.0 pt — so in a 900 pt canvas the
+    /// clamp is EXACTLY ZERO and the canvas does not move at all, while the document is by then
+    /// two pages long.
+    func testAOnePageOpenTimeExtentPinsAWriterCanvasAtTheOriginUntilTheSizeIsRevised() async {
+        let (runtime, _) = await makeOpenedRuntime(documentType: .text)
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let onePage = OfficeDocumentSize(widthTwips: 12_808, heightTwips: 16_124)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: onePage, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 600, height: 900)
+        view.mount()
+
+        view.applyScrollDelta(dx: 0, dy: -4000)
+        XCTAssertEqual(view.scrollOriginForTesting.y, 0,
+                       "806.0 pt of document in a 900 pt canvas: nothing to scroll, and the second "
+                       + "page is unreachable")
+
+        view.syncDocumentIdentity(docId: "doc-1",
+                                  sizeTwips: OfficeDocumentSize(widthTwips: 12_808, heightTwips: 32_532),
+                                  activePart: 0)
+        view.applyScrollDelta(dx: 0, dy: -4000)
+        XCTAssertEqual(view.scrollOriginForTesting.y, 726.5, accuracy: 1.0,
+                       "with the real two-page extent the canvas scrolls again")
+
+        view.unmount()
+    }
+
+    /// **The control arm, and it is the reason the user said "at least in docs".** The identical
+    /// stale extent on a SPREADSHEET scrolls fine without any size revision at all: `effectiveExtent
+    /// Twips` pads a sheet by `infiniteGridExtraScreens` (2) screens on each axis, which works out
+    /// to a vertical `maxOrigin` of `sizePoints/2 + bounds.height` — positive for any bounds, so a
+    /// stale extent is invisible there. Without this arm the two tests above would look like they
+    /// were measuring "the canvas clamps", which is true of every document type and proves nothing
+    /// about the defect.
+    func testTheSameStaleExtentDoesNotStopASpreadsheetScrollingAtAll() async {
+        let (runtime, _) = await makeOpenedRuntime(documentType: .spreadsheet)
+        let model = PanelDocumentTabModel(tabId: "t1", path: gatePath)
+        let onePage = OfficeDocumentSize(widthTwips: 12_808, heightTwips: 16_124)
+        let view = OfficeTileCanvasView(runtime: runtime, path: gatePath, docId: "doc-1",
+                                        sizeTwips: onePage, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 600, height: 900)
+        view.mount()
+
+        view.applyScrollDelta(dx: 0, dy: -4000)
+        // Worked through, because an earlier version of this comment asserted `> 900` while quoting
+        // a total (1303.1) that was neither the assertion's bound nor the real value:
+        //   effectiveExtent = 16124 + pixelsToTwips(2 screens x 900 pt x 2 scale) = 16124 + 36000
+        //                   = 52124 twips
+        //   twipsToPixels(52124, 1000) = 5212 px -> 2606.0 pt
+        //   maxOrigin = 2606.0 - 900 = 1706.0
+        XCTAssertEqual(view.scrollOriginForTesting.y, 1706.0, accuracy: 1.0,
+                       "a sheet with the SAME stale extent still scrolls, by its own two-screen "
+                       + "margin — and scrolls FURTHER than the whole document is tall")
+
+        view.unmount()
+    }
 }

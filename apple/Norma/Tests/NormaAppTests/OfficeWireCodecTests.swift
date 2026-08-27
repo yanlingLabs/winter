@@ -156,8 +156,10 @@ final class OfficeWireCodecTests: XCTestCase {
             .sheetsReadOk(seq: 72, docId: "doc-1", rows: [
                 ["42", "Hello", ""],       // "" — a genuinely empty cell, never an absent element
                 ["1", "=SUM(A1:B1)", "3"],
-            ]),
-            .sheetsReadOk(seq: 73, docId: "doc-1", rows: []), // a range whose sheet turned out to have nothing there
+            ], displayRestoreVerified: true),
+            // office-polish final check — BOTH values of `displayRestoreVerified` in this list, so
+            // the round-trip covers the flag rather than only its default.
+            .sheetsReadOk(seq: 73, docId: "doc-1", rows: [], displayRestoreVerified: false), // a range whose sheet turned out to have nothing there
             // office-agent-tools T5 — sheets format. Every optional field gets a nil AND a non-nil
             // sample somewhere in this list, including the columnSpan<->width pairing.
             .sheetsFormat(seq: 74, docId: "doc-1", sheet: "Sheet1", range: "A1:C10", columnSpan: nil,
@@ -396,7 +398,7 @@ final class OfficeWireCodecTests: XCTestCase {
         XCTAssertEqual(OfficeWireFrame.sheetsInfo(seq: 146, docId: "d").seq, 146)
         XCTAssertEqual(OfficeWireFrame.sheetsRead(seq: 147, docId: "d", sheet: "Sheet1", range: "A1", formulas: false).seq, 147)
         XCTAssertEqual(OfficeWireFrame.sheetsInfoOk(seq: 148, docId: "d", sheets: [], activeSheet: "Sheet1").seq, 148)
-        XCTAssertEqual(OfficeWireFrame.sheetsReadOk(seq: 149, docId: "d", rows: []).seq, 149)
+        XCTAssertEqual(OfficeWireFrame.sheetsReadOk(seq: 149, docId: "d", rows: [], displayRestoreVerified: true).seq, 149)
         XCTAssertEqual(OfficeWireFrame.sheetsFormat(seq: 150, docId: "d", sheet: "Sheet1", range: "A1",
                                                      columnSpan: nil, bold: true, italic: nil,
                                                      numberFormat: nil, align: nil, width: nil).seq, 150)

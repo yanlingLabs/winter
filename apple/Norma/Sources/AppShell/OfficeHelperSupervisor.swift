@@ -367,12 +367,12 @@ final class OfficeHelperClient {
 
     /// `range` is already an A1 string ("A1:C10") — see `OfficeWireFrame.sheetsRead`'s own header for
     /// why this client never builds it from column/row integers itself.
-    func sheetsRead(docId: String, sheet: String, range: String, formulas: Bool) async throws -> [[String]] {
+    func sheetsRead(docId: String, sheet: String, range: String, formulas: Bool) async throws -> (rows: [[String]], displayRestoreVerified: Bool) {
         let seq = seqAllocator.nextSeq()
         try await connection.send(.sheetsRead(seq: seq, docId: docId, sheet: sheet, range: range, formulas: formulas))
         let reply = try await expectReply(seq: seq)
         switch reply {
-        case .sheetsReadOk(_, _, let rows): return rows
+        case .sheetsReadOk(_, _, let rows, let displayRestoreVerified): return (rows, displayRestoreVerified)
         case .error(_, let reason): throw OfficeHelperClientError.serverError(reason: reason)
         default: throw OfficeHelperClientError.unexpectedReply(reply)
         }

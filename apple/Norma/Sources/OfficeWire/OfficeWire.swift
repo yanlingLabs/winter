@@ -628,7 +628,12 @@ public enum OfficeWireFrame: Equatable, Sendable {
     /// `(endRow-startRow+1)` rows of `(endColumn-startColumn+1)` strings each — a wholly empty cell is
     /// `""`, never an absent element, so a caller can index this by the SAME 0-based offsets it sent
     /// without re-deriving the range's own shape from the reply.
-    case sheetsReadOk(seq: UInt64, docId: String, rows: [[String]])
+    /// `displayRestoreVerified` — office-polish final check, Critical. `false` means a
+    /// `formulas: true` read could not confirm it put Calc's document-wide Show Formulas mode back,
+    /// so this document's LATER reads may answer formula source where a value was asked for. Wire
+    /// default is `true` (absent key ⟹ verified) so an older peer's frame still decodes; the only
+    /// producer that omits it is one that predates the check.
+    case sheetsReadOk(seq: UInt64, docId: String, rows: [[String]], displayRestoreVerified: Bool)
 
     // MARK: office-agent-tools T4 — sheets write replies
 
@@ -897,7 +902,7 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .tileFailed(let seq, _, _, _): return seq
         case .invalidated(let seq, _, _): return seq
         case .sheetsInfoOk(let seq, _, _, _): return seq
-        case .sheetsReadOk(let seq, _, _): return seq
+        case .sheetsReadOk(let seq, _, _, _): return seq
         case .sheetsSetOk(let seq, _, _): return seq
         case .sheetsResizeOk(let seq, _, _, _): return seq
         case .sheetsManageSheetOk(let seq, _, _): return seq
@@ -1033,9 +1038,10 @@ public enum OfficeWireFrame: Equatable, Sendable {
             payload["docId"] = docId
             payload["sheets"] = sheets.map { $0.jsonObject() }
             payload["activeSheet"] = activeSheet
-        case .sheetsReadOk(_, let docId, let rows):
+        case .sheetsReadOk(_, let docId, let rows, let displayRestoreVerified):
             payload["docId"] = docId
             payload["rows"] = rows
+            payload["displayRestoreVerified"] = displayRestoreVerified
         case .sheetsSet(_, let docId, let sheet, let range, let cellAddresses, let cellValues):
             payload["docId"] = docId
             payload["sheet"] = sheet
@@ -1793,7 +1799,21 @@ public enum OfficeDocumentEvent: Equatable, Sendable {
     /// edit mode), so treating one as derived from the other would silently mix two independently
     /// timed LOK callbacks into one field.
     case cellFormula(String)
+    /// office-polish Bug 1 — `LOK_CALLBACK_DOCUMENT_SIZE_CHANGED` (type 13,
+    /// `LibreOfficeKitEnums.h:275`): the document's own extent AFTER an edit changed it. Payload
+    /// on the wire is `"<width>, <height>"` in twips; measured live against a real Writer document
+    /// (`12808, 48656`, exactly what a reopen of the grown file then reports as its `opened` size).
+    ///
+    /// **This is the only signal that a document GREW while a tab was showing it.** `opened`
+    /// carries a size exactly once, at open; before this case existed the engine fired type 13 and
+    /// the bridge dropped it, so `OfficeTileCanvasView` kept clamping scroll to the extent the
+    /// document had when it was opened. For a spreadsheet that is invisible (its scroll bound is
+    /// padded by two extra screens either way); for a Writer document, whose bound IS the captured
+    /// extent, everything past it is unreachable for the tab's whole lifetime.
+    case documentSizeChanged(OfficeDocumentSize)
+}
 
+extension OfficeDocumentEvent {
     /// This case's own fields, flattened into the SAME single-level JSON object
     /// `OfficeWireFrame.encodedLine()` builds for a `.documentEvent` frame — `kind` is the
     /// discriminant (named `kind`, not `type`, to not collide with the outer frame's own `type`
@@ -1835,6 +1855,9 @@ public enum OfficeDocumentEvent: Equatable, Sendable {
             }
         case .cellFormula(let text):
             return ["kind": "cellFormula", "text": text]
+        case .documentSizeChanged(let size):
+            return ["kind": "documentSizeChanged",
+                    "widthTwips": size.widthTwips, "heightTwips": size.heightTwips]
         }
     }
 
@@ -1925,6 +1948,15 @@ public enum OfficeDocumentEvent: Equatable, Sendable {
             // header on `OfficeDocumentEvent`).
             guard let text = object["text"] as? String else { return nil }
             return .cellFormula(text)
+        case "documentSizeChanged":
+            // Both fields required and both must be POSITIVE. A zero or negative extent is not a
+            // "smaller document" — it is a payload this decoder does not understand, and accepting
+            // one would drive `clampedOriginX/Y` to pin scrolling at the origin, i.e. turn a
+            // malformed frame into exactly the bug this case exists to fix.
+            guard let widthTwips = int64Value(object["widthTwips"]),
+                  let heightTwips = int64Value(object["heightTwips"]),
+                  widthTwips > 0, heightTwips > 0 else { return nil }
+            return .documentSizeChanged(OfficeDocumentSize(widthTwips: widthTwips, heightTwips: heightTwips))
         default:
             return nil
         }
@@ -2012,6 +2044,29 @@ public enum OfficeDocumentEvent: Equatable, Sendable {
         // fix-round update is what makes a NON-empty rect actually honor it.
         let part = fields.count >= 5 ? (Int(fields[4]) ?? 0) : 0
         return .invalidated(rectsTwips: [OfficeTwipsRect(x: x, y: y, width: width, height: height)], part: part)
+    }
+
+    /// office-polish Bug 1 — `LOK_CALLBACK_DOCUMENT_SIZE_CHANGED`'s raw payload. Transcribed from
+    /// a REAL firing, not from the header's prose: appending 20 paragraphs to
+    /// `Sushi_An_Introduction.docx` through the live helper produced exactly
+    ///
+    ///     [LOKBridge raw callback] docId=d0 type=13 payload=12808, 48656
+    ///
+    /// and reopening that same file then reported `widthTwips 12808, heightTwips 48656` as its
+    /// `opened` size — so the two numbers are width and height in twips, in that order, comma
+    /// separated with a space, the same shape `parseCellCursor` already handles for its own
+    /// callback.
+    ///
+    /// Rejects anything that is not two positive integers. `0` is refused rather than passed
+    /// through: LO emits a transient zero-size for a document mid-relayout, and a zero extent
+    /// reaching `clampedOriginX/Y` pins scrolling at the origin — the exact defect this whole path
+    /// exists to remove, reintroduced by trusting a payload we do not understand.
+    static func parseDocumentSizeChanged(_ payload: String) -> OfficeDocumentEvent? {
+        let fields = payload.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        guard fields.count == 2,
+              let widthTwips = Int64(fields[0]), let heightTwips = Int64(fields[1]),
+              widthTwips > 0, heightTwips > 0 else { return nil }
+        return .documentSizeChanged(OfficeDocumentSize(widthTwips: widthTwips, heightTwips: heightTwips))
     }
 
     /// Parses `LOK_CALLBACK_STATE_CHANGED`'s raw payload. That callback fires for many `.uno:*`
@@ -2630,7 +2685,13 @@ public enum OfficeWireCodec {
                   let rows = OfficeWireFrame.decodeRows(object["rows"]) else {
                 return .rejected(seq: seq, reason: "malformed")
             }
-            return .frame(.sheetsReadOk(seq: seq, docId: docId, rows: rows))
+            // ABSENT defaults to `true` (verified), deliberately, and it is the one field on this
+            // frame that may be absent: the only producer that omits it is one older than the check
+            // itself, and inventing "unverified" for every such frame would attach a warning to
+            // reads that never had a problem. A producer that HAS the check always sends it.
+            let displayRestoreVerified = (object["displayRestoreVerified"] as? Bool) ?? true
+            return .frame(.sheetsReadOk(seq: seq, docId: docId, rows: rows,
+                                        displayRestoreVerified: displayRestoreVerified))
         case "sheetsSet":
             guard let docId = object["docId"] as? String, let sheet = object["sheet"] as? String,
                   let range = object["range"] as? String,
