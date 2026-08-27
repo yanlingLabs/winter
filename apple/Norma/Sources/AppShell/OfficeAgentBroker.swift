@@ -547,8 +547,10 @@ final class OfficeAgentBroker {
     /// ⚠️ **Checked BEFORE the dirty guard, and that ordering is load-bearing rather than tidy.**
     /// "Conflicted but CLEAN" is a reachable state: `.modifiedStatusChanged(modified: false)` —
     /// the user pressing ⌘Z back to clean — leaves `documentConflicts[path]` standing (verified by
-    /// reading that arm; only `.saveSucceeded`, `.conflictReloadRequested`,
-    /// `.conflictKeepMineRequested` and the close/teardown arms remove it). With the conflict test
+    /// reading that arm, and by enumerating the six that DO clear one: `.opened`, `.closeRequested`,
+    /// `.saveSucceeded`, `.reloadFailed`, and the banner's own two answers
+    /// `.conflictReloadRequested`/`.conflictKeepMineRequested`. None of them is an undo). With the
+    /// conflict test
     /// *after* the dirty guard, a write on such a document returns early here, `action` dirties it,
     /// and **rule 4's own unconditional save-through then resolves the conflict anyway** — the
     /// identical defect through the back door. Ordering it first costs one dictionary read.

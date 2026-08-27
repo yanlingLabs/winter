@@ -1039,8 +1039,9 @@ final class OfficeAgentBrokerTests: XCTestCase {
     ///
     /// "Conflicted but CLEAN" is reachable: the user edits, the file changes underneath, the banner
     /// goes up — and then they press ⌘Z back to clean. `.modifiedStatusChanged(modified: false)`
-    /// does NOT clear `documentConflicts` (only `.saveSucceeded`, the two conflict-answer events and
-    /// the close/teardown arms do), so the banner is still standing over a clean document.
+    /// does NOT clear `documentConflicts` — the six arms that do are `.opened`, `.closeRequested`,
+    /// `.saveSucceeded`, `.reloadFailed` and the banner's own two answers, none of them an undo — so
+    /// the banner is still standing over a clean document.
     ///
     /// Put the conflict check AFTER the pre-save's dirty guard — which is where it reads most
     /// naturally, and where the review's own suggested patch put it — and this document returns
