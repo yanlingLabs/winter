@@ -5737,4 +5737,428 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         view.unmount()
         _ = host.teardownAllOfficeRuntimesAndStopHelper()
     }
+
+    // MARK: - office-typing — WHICH WAY DOES BACKSPACE DELETE?
+
+    /// The user's report: *"deleting is working backwards"*. This is the drill that says what
+    /// "backwards" means, in a real Writer document, through the REAL production input path — a
+    /// genuine `NSEvent` for the physical Backspace key handed to `OfficeTileCanvasView.keyDown`,
+    /// which is where `OfficeInputCodes` actually gets consulted.
+    ///
+    /// **Everything here is measured, never inferred.** The marker is read back out of the SAVED
+    /// `content.xml` bytes BEFORE the delete as well as after, so the "after" string is compared
+    /// against a real observed "before" rather than against what this test hoped typing would do —
+    /// a typing step that silently inserted nothing would otherwise make any after-assertion
+    /// meaningless.
+    ///
+    /// Geometry of the drill: the marker `ABCDE` is typed at the very start of `two-page.odt`'s
+    /// first paragraph (`NORMA GATE`), then Left twice puts the caret between `C` and `D`. One
+    /// Backspace has exactly two possible outcomes and they are different strings:
+    ///
+    /// - deletes BEFORE the caret (correct, `KEY_BACKSPACE`): `ABDENORMA GATE`
+    /// - deletes AFTER the caret  (the bug, `KEY_DELETE`):    `ABCENORMA GATE`
+    ///
+    /// so the destination IS the direction here — no ordering ambiguity to hide in.
+    /// `testForwardDeleteThroughTheRealCanvasStillRemovesTheCharacterAfterTheCaret` is the control
+    /// arm: it drives the SEPARATE fn+Delete key down the same path and requires the OTHER string,
+    /// so a fix that simply made every delete go left would fail there.
+    func testBackspaceThroughTheRealCanvasRemovesTheCharacterBeforeTheCaret() async throws {
+        try await runDeleteDirectionDrill(
+            deleteKeyCharacters: "\u{7F}", deleteKeyCode: 51, name: "backspace-direction",
+            expectedBody: "ABDENORMA GATE",
+            wrongBody: "ABCENORMA GATE",
+            explanation: "Backspace (AppKit keyCode 51) must delete the character BEFORE the caret. "
+                + "Getting the forward-delete string instead means this key reached LOK as "
+                + "com.sun.star.awt.Key::DELETE (1286) rather than ::BACKSPACE (1283)")
+    }
+
+    /// **The control arm.** fn+Delete (AppKit keyCode 117, `NSDeleteFunctionKey` = `U+F728`) is a
+    /// genuinely different physical key and it really is supposed to delete FORWARD. Requiring the
+    /// opposite string from the drill above is what makes that drill a direction test rather than a
+    /// "something got deleted" test, and it is the arm that would catch a fix that mapped both keys
+    /// to backspace.
+    func testForwardDeleteThroughTheRealCanvasStillRemovesTheCharacterAfterTheCaret() async throws {
+        try await runDeleteDirectionDrill(
+            deleteKeyCharacters: "\u{F728}", deleteKeyCode: 117, name: "forward-delete-direction",
+            expectedBody: "ABCENORMA GATE",
+            wrongBody: "ABDENORMA GATE",
+            explanation: "fn+Delete (AppKit keyCode 117) must delete the character AFTER the caret")
+    }
+
+    private func runDeleteDirectionDrill(deleteKeyCharacters: String, deleteKeyCode: UInt16,
+                                         name: String, expectedBody: String, wrongBody: String,
+                                         explanation: String) async throws {
+        let live = try await openWriterCanvasForTypingDrill(name: name)
+        defer { live.view.unmount(); _ = live.host.teardownAllOfficeRuntimesAndStopHelper() }
+
+        // Type the marker at the very start of the body, then PROVE it landed by reading the saved
+        // bytes — the non-vacuity step, and the "before" half of the comparison.
+        live.type("ABCDE")
+        await live.runtime.drainInputChainForTesting()
+        let typed = await liveSaveAndReadBody(live)
+        XCTAssertEqual(typed, "ABCDE" + Self.twoPageBody,
+                       "setup: the five typed characters must land, in order, at the very start of "
+                        + "the body before any delete is attempted — got: \(typed)")
+
+        // Left, Left: the caret lands between C and D.
+        live.press(characters: "\u{F702}", keyCode: 123)
+        live.press(characters: "\u{F702}", keyCode: 123)
+        // The one keystroke this whole drill is about.
+        live.press(characters: deleteKeyCharacters, keyCode: deleteKeyCode)
+        await live.runtime.drainInputChainForTesting()
+
+        let after = await liveSaveAndReadBody(live)
+        XCTAssertEqual(after, expectedBody + Self.twoPageBodyTail, "\(explanation). got: \(after)")
+        XCTAssertNotEqual(after, wrongBody + Self.twoPageBodyTail,
+                          "this is the OTHER direction's exact string — the drill discriminates")
+    }
+
+    /// **The sequence assertion, not merely the destination.** A run of Backspaces must walk the
+    /// caret LEFT one character at a time; the caret rectangle LOK pushes back
+    /// (`OfficeCursorStore`) is sampled after every single keystroke, so a run that reached the
+    /// right final text by the wrong intermediate route still fails here. Under the forward-delete
+    /// bug the caret does not move at all, so the recorded x sequence is constant and the
+    /// strictly-decreasing assertion prints the real numbers it saw.
+    func testARunOfBackspacesWalksTheCaretLeftOneCharacterPerKeystroke() async throws {
+        let live = try await openWriterCanvasForTypingDrill(name: "backspace-caret-walk")
+        defer { live.view.unmount(); _ = live.host.teardownAllOfficeRuntimesAndStopHelper() }
+
+        live.type("ABCDE")
+        await live.runtime.drainInputChainForTesting()
+        let typed = await liveSaveAndReadBody(live)
+        XCTAssertEqual(typed, "ABCDE" + Self.twoPageBody, "setup: the marker must land first — got: \(typed)")
+
+        live.press(characters: "\u{F702}", keyCode: 123)
+        live.press(characters: "\u{F702}", keyCode: 123)
+        await live.runtime.drainInputChainForTesting()
+        let settledStart = await waitUntil(timeout: 20) {
+            live.runtime.cursorStore.state(docId: live.docId).caretRectTwips != nil
+        }
+        XCTAssertTrue(settledStart, "no caret rectangle ever arrived — this drill cannot testify "
+                      + "about caret movement without one")
+        var samples: [Int64] = [try XCTUnwrap(live.runtime.cursorStore.state(docId: live.docId).caretRectTwips).x]
+
+        for step in 1...3 {
+            let previous = samples[samples.count - 1]
+            live.press(characters: "\u{7F}", keyCode: 51)
+            await live.runtime.drainInputChainForTesting()
+            // Bounded settle. A caret that never moves is a legitimate observation, not a timeout
+            // failure — it is recorded and the assertion below is what fails on it.
+            _ = await waitUntil(timeout: 6) {
+                live.runtime.cursorStore.state(docId: live.docId).caretRectTwips?.x != previous
+            }
+            let rect = try XCTUnwrap(live.runtime.cursorStore.state(docId: live.docId).caretRectTwips,
+                                     "the caret rectangle disappeared at step \(step)")
+            samples.append(rect.x)
+        }
+
+        for step in 1...3 {
+            XCTAssertLessThan(samples[step], samples[step - 1],
+                              "Backspace #\(step) must move the caret LEFT. Caret x after each "
+                                + "keystroke: \(samples) — a constant run means the key deleted "
+                                + "forward and left the caret where it was")
+        }
+
+        let after = await liveSaveAndReadBody(live)
+        XCTAssertEqual(after, "DE" + Self.twoPageBody,
+                       "three Backspaces from between C and D must remove C, B and A in that order "
+                        + "— got: \(after)")
+    }
+
+    /// **Characterisation, not a direction test.** With a live SELECTION, Backspace and Delete are
+    /// the same gesture in every editor — both remove the selection — so this arm is expected to
+    /// pass identically before and after any fix. It is here to answer the report's own question
+    /// ("does it happen for selections too?") with a measurement rather than an argument, and it
+    /// doubles as a second control arm: a fix that broke selection deletion would show up here.
+    func testBackspaceOverATextSelectionRemovesTheSelectionInEitherDirection() async throws {
+        let live = try await openWriterCanvasForTypingDrill(name: "backspace-selection")
+        defer { live.view.unmount(); _ = live.host.teardownAllOfficeRuntimesAndStopHelper() }
+
+        live.type("ABCDE")
+        await live.runtime.drainInputChainForTesting()
+        let typed = await liveSaveAndReadBody(live)
+        XCTAssertEqual(typed, "ABCDE" + Self.twoPageBody, "setup: the marker must land — got: \(typed)")
+
+        // Shift+Left, Shift+Left — selects "DE" backwards from the caret.
+        live.press(characters: "\u{F702}", keyCode: 123, modifiers: .shift)
+        live.press(characters: "\u{F702}", keyCode: 123, modifiers: .shift)
+        live.press(characters: "\u{7F}", keyCode: 51)
+        await live.runtime.drainInputChainForTesting()
+
+        let after = await liveSaveAndReadBody(live)
+        XCTAssertEqual(after, "ABC" + Self.twoPageBody,
+                       "a Backspace over a selection removes exactly the selection — got: \(after)")
+    }
+
+    /// **The arm that explains what the user actually felt.** Correcting a typo you just made means
+    /// pressing Backspace with nothing to your right. If Backspace is really reaching LOK as the
+    /// FORWARD delete code, that press has nothing to act on and the document does not even become
+    /// dirty — Backspace does not delete the wrong character, it does nothing at all.
+    ///
+    /// The position is not assumed. The drill navigates to the document end and then PROVES it is
+    /// there with a real fn+Delete that must be a no-op; only then does it press Backspace. So the
+    /// negative half of this test cannot pass merely because no key reached LOK.
+    func testBackspaceAtTheVeryEndOfTheDocumentStillRemovesTheLastCharacter() async throws {
+        let live = try await openWriterCanvasForTypingDrill(name: "backspace-at-end")
+        defer { live.view.unmount(); _ = live.host.teardownAllOfficeRuntimesAndStopHelper() }
+
+        live.type("ABCDE")
+        await live.runtime.drainInputChainForTesting()
+        let typed = await liveSaveAndReadBody(live)
+        XCTAssertEqual(typed, "ABCDE" + Self.twoPageBody, "setup: the marker must land — got: \(typed)")
+        XCTAssertEqual(live.runtime.stateSnapshot.documents[live.path]?.dirty, false,
+                       "setup: the save must have cleared dirty, or the dirty assertions below "
+                        + "cannot mean anything")
+
+        // Setup only, and deliberately NOT through the canvas: Cmd is `keyDown`'s own app-chrome
+        // gate, so a Cmd+End can never reach LOK through the view. `KEY_END | KEY_MOD1` posted at
+        // the runtime door is the same wire value LO's own "to document end" accelerator carries.
+        live.runtime.postKeyEvent(path: live.path, type: .keyInput, charCode: 0, keyCode: 1029 | 0x2000)
+        live.runtime.postKeyEvent(path: live.path, type: .keyUp, charCode: 0, keyCode: 1029 | 0x2000)
+        await live.runtime.drainInputChainForTesting()
+
+        // The position proof: a forward delete at the true document end has nothing after it.
+        live.press(characters: "\u{F728}", keyCode: 117)
+        await live.runtime.drainInputChainForTesting()
+        let forwardDidSomething = await waitUntil(timeout: 4) {
+            live.runtime.stateSnapshot.documents[live.path]?.dirty == true
+        }
+        XCTAssertFalse(forwardDidSomething,
+                       "setup: the caret is not at the document end — a forward delete found "
+                        + "something to remove, so the Backspace assertion below would be testing "
+                        + "the wrong position")
+
+        live.press(characters: "\u{7F}", keyCode: 51)
+        await live.runtime.drainInputChainForTesting()
+        let backspaceDidSomething = await waitUntil(timeout: 10) {
+            live.runtime.stateSnapshot.documents[live.path]?.dirty == true
+        }
+        XCTAssertTrue(backspaceDidSomething,
+                      "Backspace at the document end must remove the last character. The document "
+                        + "never even became dirty, which is what a forward-delete code does when "
+                        + "there is nothing to its right: the key did nothing at all")
+
+        let after = await liveSaveAndReadBody(live)
+        XCTAssertEqual(after, "ABCDE" + Self.twoPageBody.dropLast(),
+                       "the last character of the body must be the one that went — got: \(after)")
+    }
+
+    // MARK: - office-typing — HOW MUCH OF THE PAGE REPAINTS PER KEYSTROKE
+
+    /// The user's other report: *"the page keeps refreshing as i write"*. This drill measures the
+    /// thing that would look like that — how many currently-laid-out tiles lose their pixels on a
+    /// keystroke, and for how long they stay blank before fresh ones arrive.
+    ///
+    /// **Why blanking happens at all**: `OfficeTileStore.invalidate` EVICTS an invalidated tile's
+    /// pixels ("their pixels are stale; the canvas returns to the placeholder tone until a fresh
+    /// paint arrives" — its own header), and `OfficeTileCanvasView.handleTilesArrived` then sets
+    /// `tileLayer.contents = nil` + the placeholder background for every evicted visible key before
+    /// asynchronously asking for replacements. So the blank IS the repaint, by design.
+    ///
+    /// **The save arm is the only genuinely new ingredient.** Before `office-live-ux`, no save ever
+    /// fired on its own while a human typed (`autoSaveEnabled` was `false` in production, gating the
+    /// only path to `fireAutoSave`). `periodicSaveTick` now reaches it on a 120 s dirty-gated
+    /// backstop, and a save is a whole-container rewrite on the helper's ONE dedicated LOK thread —
+    /// every tile paint queues behind it. This drill types the same way twice, once with a save
+    /// forced into the middle, and prints both blank windows so the difference is a number.
+    ///
+    /// This is an INSTRUMENT, not a threshold test: the only hard assertions are non-vacuity (the
+    /// blanking mechanism really did fire, so the numbers are about something) and a very generous
+    /// ceiling that would only trip on a hang.
+    func testMeasureHowMuchOfTheCanvasBlanksPerKeystrokeWithAndWithoutASaveInFlight() async throws {
+        let live = try await openWriterCanvasForTypingDrill(name: "repaint-census")
+        defer { live.view.unmount(); _ = live.host.teardownAllOfficeRuntimesAndStopHelper() }
+
+        // Every key this 512x512 viewport can have laid out at zoom 1000 — probed, not assumed.
+        let candidateKeys = (0..<4).flatMap { x in (0..<4).map { y in TileKey(part: 0, zoomPPT: 1000, tileX: x, tileY: y) } }
+        func laidOutKeys() -> [TileKey] { candidateKeys.filter { live.view.tileLayerForTesting($0) != nil } }
+        func blankCount(_ keys: [TileKey]) -> Int {
+            keys.filter { live.runtime.tileStore.tile(docId: live.docId, key: $0) == nil }.count
+        }
+
+        let settledBaseline = await waitUntil(timeout: 30) { blankCount(laidOutKeys()) == 0 && !laidOutKeys().isEmpty }
+        XCTAssertTrue(settledBaseline, "baseline: every laid-out tile must have pixels before the "
+                      + "census starts, or 'went blank' means nothing")
+        let tracked = laidOutKeys()
+        NSLog("[office-typing] census tracks %d laid-out tiles", tracked.count)
+
+        /// One keystroke, then poll until nothing laid out is blank again. Returns the peak number
+        /// of blank tiles seen and how long the blank lasted.
+        func typeOneAndMeasure(_ character: Character, keyCode: UInt16,
+                               forceSaveTick: Bool) async -> (peakBlank: Int, milliseconds: Int) {
+            live.press(characters: String(character), keyCode: keyCode)
+            if forceSaveTick { live.runtime.periodicSaveTickForTesting() }
+            let started = Date()
+            var peak = 0
+            while Date().timeIntervalSince(started) < 30 {
+                let blank = blankCount(tracked)
+                peak = max(peak, blank)
+                if blank == 0 && peak > 0 { break }
+                if blank == 0 && Date().timeIntervalSince(started) > 1.5 { break } // nothing ever blanked
+                try? await Task.sleep(nanoseconds: 5_000_000)
+            }
+            return (peak, Int(Date().timeIntervalSince(started) * 1000))
+        }
+
+        // Arm 1 — plain typing, no save anywhere near it.
+        var plain: [(Int, Int)] = []
+        for character in "ABCDEA" {
+            plain.append(await typeOneAndMeasure(character, keyCode: ["A": 0, "B": 11, "C": 8, "D": 2, "E": 14][character]!,
+                                                 forceSaveTick: false))
+        }
+        // Arm 2 — the same keystrokes, each one immediately followed by the 120 s backstop's own
+        // tick. `periodicSaveTickForTesting` is the production `periodicSaveTick`, not a stand-in.
+        var withSave: [(Int, Int)] = []
+        for character in "BCDEAB" {
+            withSave.append(await typeOneAndMeasure(character, keyCode: ["A": 0, "B": 11, "C": 8, "D": 2, "E": 14][character]!,
+                                                    forceSaveTick: true))
+        }
+
+        NSLog("[office-typing] PLAIN     peakBlank/ms per keystroke: %@",
+              plain.map { "\($0.0)/\($0.1)" }.joined(separator: " "))
+        NSLog("[office-typing] WITH SAVE peakBlank/ms per keystroke: %@",
+              withSave.map { "\($0.0)/\($0.1)" }.joined(separator: " "))
+
+        XCTAssertGreaterThan(plain.map(\.0).max() ?? 0, 0,
+                             "non-vacuity: not one keystroke blanked a single laid-out tile, so this "
+                              + "instrument measured nothing and its numbers cannot be reported")
+        XCTAssertLessThan(plain.map(\.1).max() ?? 0, 30_000, "a keystroke's repaint must not hang")
+        XCTAssertLessThan(withSave.map(\.1).max() ?? 0, 30_000, "a keystroke's repaint must not hang under a save")
+    }
+
+    // MARK: office-typing — the drill's own scaffolding
+
+    /// `two-page.odt`'s body text as `strippedODFBodyText` renders it — the three paragraphs
+    /// concatenated with no separator. Re-derived from the fixture's own bytes, not assumed:
+    /// `unzip -p two-page.odt content.xml | sed 's/<[^>]*>/|/g'` -> `NORMA GATE`,
+    /// `office stage A embed probe`, `NORMA PAGE TWO`.
+    private static let twoPageBody = "NORMA GATEoffice stage A embed probeNORMA PAGE TWO"
+    /// The same body minus the `NORMA GATE` prefix each delete-direction expectation re-states.
+    private static let twoPageBodyTail = "office stage A embed probeNORMA PAGE TWO"
+
+    private struct LiveTypingDrill {
+        let host: ShellSessionHost
+        let runtime: OfficeRuntime
+        let view: OfficeTileCanvasView
+        let window: NSWindow
+        let path: String
+        let docId: String
+
+        @MainActor
+        func press(characters: String, keyCode: UInt16, modifiers: NSEvent.ModifierFlags = []) {
+            guard let down = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: modifiers,
+                                              timestamp: 0, windowNumber: window.windowNumber,
+                                              context: nil, characters: characters,
+                                              charactersIgnoringModifiers: characters,
+                                              isARepeat: false, keyCode: keyCode),
+                  let up = NSEvent.keyEvent(with: .keyUp, location: .zero, modifierFlags: modifiers,
+                                            timestamp: 0, windowNumber: window.windowNumber,
+                                            context: nil, characters: characters,
+                                            charactersIgnoringModifiers: characters,
+                                            isARepeat: false, keyCode: keyCode) else {
+                return XCTFail("NSEvent.keyEvent refused to build a \(keyCode) event")
+            }
+            view.keyDown(with: down)
+            view.keyUp(with: up)
+        }
+
+        /// Physical AppKit keyCodes for the marker's own letters, from `OfficeInputCodes`' own
+        /// table read in the other direction (A=0, B=11, C=8, D=2, E=14). Uppercase, so
+        /// `.shift` rides along exactly as it would for a real user holding Shift.
+        @MainActor
+        func type(_ marker: String) {
+            let codes: [Character: UInt16] = ["A": 0, "B": 11, "C": 8, "D": 2, "E": 14]
+            for character in marker {
+                guard let code = codes[character] else {
+                    return XCTFail("no test-local keyCode for \(character)")
+                }
+                press(characters: String(character), keyCode: code)
+            }
+        }
+    }
+
+    /// Opens a fresh copy of `two-page.odt` behind a REAL `OfficeTileCanvasView` in a real (never
+    /// ordered-front) window, waits for the first tile, and clicks once at the top-left of the body
+    /// so LOK's own caret is at the document start. Every ingredient is the production one; only
+    /// the `NSEvent`s are synthetic, and `NSEvent.keyEvent`/`.mouseEvent` are genuine AppKit
+    /// factories.
+    private func openWriterCanvasForTypingDrill(name: String) async throws -> LiveTypingDrill {
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent()
+            .appendingPathComponent("NormaOfficeHelper")
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
+                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR")
+        let vendorRoot = Self.vendorProductSetRoot
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
+                      "LibreOffice vendor tree not present at \(vendorRoot.path)")
+        let fixturePath = Self.fixturesRoot.appendingPathComponent("two-page.odt").path
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: fixturePath), "two-page.odt fixture missing")
+
+        let stateDir = makeScratchDirectory()
+        let directory = SessionDirectory(lister: { [] })
+        let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        host.makeOfficeHelperSupervisor = {
+            OfficeHelperSupervisor(configuration: OfficeHelperSupervisor.Configuration(
+                helperExecutableURL: helperURL,
+                socketDirectory: stateDir,
+                extraArguments: ["--lok-root", vendorRoot.path,
+                                 "--sandbox-profile", Self.sandboxProfilePath.path]))
+        }
+        let runtime = host.officeRuntime(for: "S1")
+
+        let scratchDir = makeScratchDirectory()
+        let docPath = scratchDir.appendingPathComponent("\(name).odt").path
+        try Data(contentsOf: URL(fileURLWithPath: fixturePath)).write(to: URL(fileURLWithPath: docPath))
+
+        runtime.open(docPath)
+        let settled = await waitUntil(timeout: 90) {
+            runtime.stateSnapshot.documents[docPath] != nil || runtime.stateSnapshot.phase == .failed
+        }
+        XCTAssertTrue(settled, "never settled — phase: \(runtime.stateSnapshot.phase)")
+        let doc = try XCTUnwrap(runtime.stateSnapshot.documents[docPath],
+                                "did not open: \(runtime.stateSnapshot.openFailures[docPath] ?? "no reason")")
+
+        let model = PanelDocumentTabModel(tabId: name, path: docPath)
+        let view = OfficeTileCanvasView(runtime: runtime, path: docPath, docId: doc.docId,
+                                        sizeTwips: doc.sizeTwips, initialPart: 0, model: model)
+        view.frame = NSRect(x: 0, y: 0, width: 512, height: 512)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 512, height: 512),
+                              styleMask: [.borderless], backing: .buffered, defer: true)
+        window.contentView = view
+        view.mount()
+
+        let originKey = TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0)
+        let baseline = await waitUntil(timeout: 30) { runtime.tileStore.tile(docId: doc.docId, key: originKey) != nil }
+        XCTAssertTrue(baseline, "the drill's own baseline tile never arrived")
+
+        // One real click at the top-left of the body — the same gesture `postRealEdit` uses at the
+        // wire level, here through the canvas view's own `mouseDown`/`mouseUp` overrides.
+        let clickPoint = NSPoint(x: 10, y: 10)
+        let windowClickPoint = view.convert(clickPoint, to: nil)
+        func mouse(_ type: NSEvent.EventType) -> NSEvent? {
+            NSEvent.mouseEvent(with: type, location: windowClickPoint, modifierFlags: [], timestamp: 0,
+                               windowNumber: window.windowNumber, context: nil, eventNumber: 0,
+                               clickCount: 1, pressure: 1)
+        }
+        view.mouseDown(with: try XCTUnwrap(mouse(.leftMouseDown)))
+        view.mouseUp(with: try XCTUnwrap(mouse(.leftMouseUp)))
+        await runtime.drainInputChainForTesting()
+
+        return LiveTypingDrill(host: host, runtime: runtime, view: view, window: window,
+                               path: docPath, docId: doc.docId)
+    }
+
+    /// Saves through the real save door and reads the body text out of the SAVED `content.xml`
+    /// bytes — the standard every other drill in this file holds itself to.
+    private func liveSaveAndReadBody(_ live: LiveTypingDrill) async -> String {
+        let outcome = await live.runtime.saveAndAwaitOutcome(live.path)
+        XCTAssertEqual(outcome, .saved, "the drill's own save must land — got \(outcome)")
+        // `dirty` is cleared by LOK's own ModifiedStatus callback arriving back over the wire, not
+        // by the save's reply — measured, not assumed: a first version of the document-end drill
+        // read `dirty` immediately after `.saved` and saw `true`. Any drill that uses `dirty` as
+        // evidence needs the flag to have actually settled first.
+        let cleared = await waitUntil(timeout: 20) { live.runtime.stateSnapshot.documents[live.path]?.dirty == false }
+        XCTAssertTrue(cleared, "the saved document never cleared its dirty flag")
+        do { return strippedODFBodyText(try readODFContentXML(atPath: live.path)) }
+        catch { XCTFail("could not read the saved content.xml: \(error)"); return "" }
+    }
 }
