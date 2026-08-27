@@ -522,9 +522,54 @@ final class OfficeAgentBroker {
     /// `adopted == false` returns immediately: a document this call just opened cannot be dirty
     /// (LOK loaded it a moment ago), which is the same reasoning rule 3's own adopted-only gate
     /// carried.
+    ///
+    /// ## ⛔ A DOCUMENT IN CONFLICT IS NEVER SAVED HERE — fix round, review CRITICAL-1
+    ///
+    /// A conflict means the file on disk ALSO changed outside Norma while this tab held it
+    /// (`OfficeRuntimeReducer`'s `.externalChangeDetected`/`.externalDeleted` arms, both gated on
+    /// `doc.dirty`). Saving it discards somebody else's write — **and this pre-save is the one
+    /// caller for which nobody asked and nobody is watching.** It is worse than a plain overwrite
+    /// because it is SELF-ERASING: `.saveSucceeded` unconditionally clears `documentConflicts`
+    /// (`OfficeRuntime.swift`'s reducer arm, documented there as "pressing ⌘S with a banner up IS
+    /// the 'mine wins' answer" — true of a HUMAN's ⌘S, false of a save the user never asked for),
+    /// so the banner that would have told them deletes itself in the same operation. **No third
+    /// party is needed to reach it**: the agent's own `git checkout`, or a script regenerating an
+    /// xlsx, raises the conflict, and its own next `sheets.read` destroyed it in the same turn.
+    ///
+    /// The asymmetry is the SAME one the failed-save arm below already uses, for the same reason:
+    ///
+    /// * **read → skip the save and proceed.** By the read argument above, a read serves the
+    ///   runtime's in-memory state and is never wrong because a save did not happen. Refusing it
+    ///   would remove a capability and protect nothing.
+    /// * **write → refuse, naming the conflict.** This is precisely what rule 3 was ratified to
+    ///   protect, with a second party's bytes added to the stake.
+    ///
+    /// ⚠️ **Checked BEFORE the dirty guard, and that ordering is load-bearing rather than tidy.**
+    /// "Conflicted but CLEAN" is a reachable state: `.modifiedStatusChanged(modified: false)` —
+    /// the user pressing ⌘Z back to clean — leaves `documentConflicts[path]` standing (verified by
+    /// reading that arm; only `.saveSucceeded`, `.conflictReloadRequested`,
+    /// `.conflictKeepMineRequested` and the close/teardown arms remove it). With the conflict test
+    /// *after* the dirty guard, a write on such a document returns early here, `action` dirties it,
+    /// and **rule 4's own unconditional save-through then resolves the conflict anyway** — the
+    /// identical defect through the back door. Ordering it first costs one dictionary read.
+    ///
+    /// **Deliberate widening, stated:** that clean-but-conflicted write was *allowed* at
+    /// `f4b9e923` (rule 3 gated on dirty, so it never fired). It is refused now. The refusal is
+    /// what the conflict banner is for, and the cure is one click the user already has.
+    ///
+    /// **A distinct error case, not `.documentDirty` with a new reason string.** `.documentDirty`'s
+    /// own doc and its rendered sentence both promise a save was TRIED and failed ("Norma couldn't
+    /// save them first … Save or discard the tab's edits, then try again"). Nothing is tried here,
+    /// and "Save" is the one instruction that would complete the loss. Reusing that case would be
+    /// this arc's own description-contradicting-the-code shape, planted inside the fix for it.
     private static func preSaveAdoptedDocument(_ runtime: OfficeRuntime, path: String,
                                                access: Access, adopted: Bool) async throws {
-        guard adopted, officeDocumentIsDirty(state: runtime.stateSnapshot, path: path) else { return }
+        guard adopted else { return }
+        if runtime.stateSnapshot.documentConflicts[path] != nil {
+            guard access == .write else { return }
+            throw OfficeAgentBrokerError.documentConflicted(path: path)
+        }
+        guard officeDocumentIsDirty(state: runtime.stateSnapshot, path: path) else { return }
         switch await runtime.saveAndAwaitOutcome(path) {
         case .saved:
             await drainDirty(runtime, path: path)
@@ -832,6 +877,13 @@ enum OfficeAgentBrokerError: Error, Equatable {
     /// said "it's dirty" would read as "wait and retry", which is exactly the wrong instruction now
     /// that a save is always attempted first.
     case documentDirty(path: String, saveAttemptFailure: String)
+    /// Fix round, review CRITICAL-1 — a WRITE to a document whose file also changed on disk while a
+    /// tab held it. **Deliberately NOT `.documentDirty` with a new reason string**: that case's own
+    /// doc and sentence both promise a save was attempted and failed, and no save is attempted here.
+    /// Its advice ("Save or discard the tab's edits, then try again") is also the wrong instruction
+    /// for a conflict — a save is exactly what would complete the loss. See
+    /// `preSaveAdoptedDocument`'s own header for the full argument.
+    case documentConflicted(path: String)
     /// Rule 1's "otherwise" branch failing. `reason` is ALREADY a mapped house-voice sentence
     /// (`OfficeRuntimeState.openFailures`/`.failureReason` are never raw LOK text — Stage B T9's own
     /// error table guarantees that at the source) — this case never re-maps it, only carries it.
@@ -864,6 +916,14 @@ enum OfficeAgentBrokerError: Error, Equatable {
             return "\(name) has unsaved changes in an open tab and Norma couldn't save them first "
                 + "(\(saveAttemptFailure)) — so it will not overwrite them. Save or discard the "
                 + "tab's edits, then try again."
+        case .documentConflicted(let path):
+            let name = (path as NSString).lastPathComponent
+            // Names the SECOND party, and never says "save" — a save here is what would complete
+            // the loss, so the only honest instruction is the banner's own two answers.
+            return "\(name) changed on disk outside Norma while it was open in a tab, so there are "
+                + "two versions of it and Norma will not pick one. The tab is showing a conflict "
+                + "banner: the human has to answer it (keep their version, or reload the file from "
+                + "disk) before this can be written to."
         case .openFailed(let path, let reason):
             return "Couldn't open \((path as NSString).lastPathComponent): \(reason)"
         case .saveFailed(let path, let reason):

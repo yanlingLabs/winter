@@ -2715,7 +2715,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// was written against is deleted, and the unprompted save is now the 120 s background backstop
     /// (`periodicSaveTick`). Everything that made the drill discriminating is unchanged and is why
     /// it was ported rather than dropped: the save is still unprompted, still goes through
-    /// `fireAutoSave`'s own three guards, still resolves into `onAutoSaveFinishedForTesting`, and the
+    /// `fireAutoSave`'s own guards, still resolves into `onAutoSaveFinishedForTesting`, and the
     /// close is still taken from inside that hook.
     ///
     /// The 9/9-green-vs-3/3-red, 45-lap counts in

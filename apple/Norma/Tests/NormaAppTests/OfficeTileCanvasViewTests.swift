@@ -2209,6 +2209,71 @@ final class OfficeTileCanvasViewTests: XCTestCase {
                         + "this arm the assertion above passes against a runtime that never saves")
     }
 
+    /// ⛔ **Fix round, review CRITICAL-2 — the backstop must never resolve a conflict.** A document
+    /// whose file ALSO changed on disk while it was dirty is a genuine two-version question, and
+    /// this timer is the ONE save point with no user and no agent behind it: it would answer that
+    /// question in the user's absence, destroy the other party's bytes, and — because
+    /// `.saveSucceeded` unconditionally clears `documentConflicts` — delete the banner about them
+    /// on the way past. Within 120 s of walking away to think about it.
+    ///
+    /// **This test is built against its own most likely failure mode, which is passing for the
+    /// wrong reason.** Two ways it could be vacuous, both closed in-test:
+    ///
+    ///  1. *Guard 2 declining instead of guard 0.* `autoSaveInFlight` holds the path for the whole
+    ///     duration of a save, so a second tick taken too soon is refused by the never-overlap
+    ///     guard and the assertion would hold with guard 0 deleted. So the control-arm save is
+    ///     awaited to COMPLETION through `onAutoSaveFinishedForTesting` before the conflict is
+    ///     raised — the same hook the live close drill uses, and for the same reason.
+    ///  2. *No conflict ever actually raised.* `officeDiskChange` can answer `.ours` for a write it
+    ///     recognises as the runtime's own, in which case nothing is raised and "no second save"
+    ///     would be trivially true. So the conflict is asserted STANDING, and asserted still
+    ///     standing at the end — the banner surviving is the user-visible half of the stake.
+    ///
+    /// The control arm is the first tick: a runtime whose backstop declined EVERYTHING would
+    /// satisfy the refusal perfectly and fail that.
+    func testTheBackstopTickNeverSavesADocumentInConflict() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let docId = runtime.stateSnapshot.documents[gatePath]?.docId ?? ""
+        XCTAssertFalse(docId.isEmpty, "setup: the fixture must be open before this ticks")
+        runtime.handle(documentEvent: .modifiedChanged(true), docId: docId)
+        XCTAssertEqual(runtime.stateSnapshot.documents[gatePath]?.dirty, true, "setup: must be dirty")
+
+        // ── CONTROL ARM: with no conflict standing, a tick DOES save. Awaited to completion, not
+        //    merely to "reached the driver" — see this test's own header, hazard 1.
+        var finishedSaves = 0
+        runtime.onAutoSaveFinishedForTesting = { _ in finishedSaves += 1 }
+        runtime.periodicSaveTickForTesting()
+        let firstSaved = await waitUntil(timeout: 5) { recorder.saveCalls.count == 1 && finishedSaves == 1 }
+        XCTAssertTrue(firstSaved, "an unconflicted dirty document must save on a tick — saw "
+                      + "\(recorder.saveCalls.count) save(s), \(finishedSaves) finished")
+
+        // This recorder's `save` hands back a temp path that does not exist, so the place FAILS and
+        // `saveFailedPendingSave` holds `dirty` true — which is what leaves a document for the
+        // conflict below to be raised on. Asserted rather than assumed: a clean document silently
+        // RELOADS on an external change instead of conflicting, and this test would then be
+        // measuring the reload path while claiming to measure the conflict one.
+        XCTAssertEqual(runtime.stateSnapshot.documents[gatePath]?.dirty, true,
+                       "setup: still dirty after the control-arm save, or no conflict can be raised")
+
+        try? Data("external bytes landed while this document was still dirty".utf8)
+            .write(to: URL(fileURLWithPath: gatePath))
+        runtime.fileChangedOnDisk(gatePath)
+        let conflicted = await waitUntil(timeout: 5) {
+            runtime.stateSnapshot.documentConflicts[gatePath] != nil
+        }
+        XCTAssertTrue(conflicted, "setup: no conflict was raised, so the assertion below would be "
+                      + "trivially true — see this test's own header, hazard 2")
+
+        runtime.periodicSaveTickForTesting()
+        try? await Task.sleep(nanoseconds: 400_000_000)
+        XCTAssertEqual(recorder.saveCalls.count, 1,
+                       "a conflicted document must NOT be saved by the unprompted backstop — the "
+                         + "external write is not this timer's to discard, and `.saveSucceeded` "
+                         + "would erase the banner about it in the same operation")
+        XCTAssertNotNil(runtime.stateSnapshot.documentConflicts[gatePath],
+                        "…and the banner must still be standing for the user to answer")
+    }
+
     /// **office-live-edit R3 — ⌘Z must dispatch with `Repair: true`.** Without it LOK refuses any
     /// undo whose top action belongs to another view, which is what made a human's ⌘Z silently dead
     /// after an agent edit. The recorder captures the FLAG, not just the call, because "an undo was

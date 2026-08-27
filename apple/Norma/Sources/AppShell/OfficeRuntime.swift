@@ -2930,10 +2930,13 @@ final class OfficeRuntime: ObservableObject {
     ///  - the **full Swift suite: 3086/3087**. The single failure is
     ///    `OfficeSlidesCommandTests.testLiveSetTextTitleOnlyAndBodyOnly…`, which is the documented
     ///    rotating isolation-clean live drill (the base commit scores 3082/**1** on this machine with
-    ///    the same shape). **Arming is provably inert for it**: `autoSaveEnabled` gates exactly one
-    ///    entry point, `noteEditActivity`, whose only callers are the six input doors in this file,
-    ///    and that test posts no input at all — it drives `set_text` through the broker. It passes
-    ///    **5/5 in isolation** on the same armed binary.
+    ///    the same shape). **Arming was provably inert for it**: `autoSaveEnabled` gated exactly one
+    ///    entry point, `noteEditActivity`, whose only callers were the six input doors in this file,
+    ///    and that test posts no input at all — it drives `set_text` through the broker. It passed
+    ///    **5/5 in isolation** on the same armed binary. (Past tense throughout: office-live-ux
+    ///    DELETED both symbols along with the debounce. This paragraph is a record of a measurement
+    ///    taken on a build that had them, not a claim about this tree — commit `170ddcdb` swept for
+    ///    exactly this present-tense-about-a-deleted-symbol shape and missed this one.)
     ///
     /// ⛔ **What is still true and must stay true:** instant save makes the app an UNPROMPTED writer
     /// to the wire. Round 3's warning was right; what changed is that the wire can now cope with a
@@ -3056,7 +3059,7 @@ final class OfficeRuntime: ObservableObject {
     /// agent-engagement gate instead — same six lines, opposite direction.
     ///
     /// What SURVIVES the deletion, and why each piece is still here:
-    ///  * `fireAutoSave`'s three guards — they are the correct guards for ANY unprompted save, and
+    ///  * `fireAutoSave`'s guards — they are the correct guards for ANY unprompted save, and
     ///    the periodic tick below is one;
     ///  * `autoSaveInFlight` + `onAutoSaveFinishedForTesting` — the close drill
     ///    (`OfficeRuntimeLiveTests.testAnArmedInstantSaveFollowedImmediatelyByAClose…`, 9/9 green vs
@@ -3130,6 +3133,15 @@ final class OfficeRuntime: ObservableObject {
     /// document the agent is not touching, and block typing on it. The next turn start wipes it, and
     /// it can never race a legitimate mark: the broker only ever marks while a turn is already
     /// running, i.e. strictly after this edge has passed.
+    ///
+    /// ⚠️ **The price, named rather than left to be found (fix round, review MINOR-1): both edges
+    /// also drop a LIVE mark.** Hop away from a session mid-turn and back — the detach pushes
+    /// `false` (clearing), the re-attach pushes `true` (clearing again) — and the turn is still
+    /// running with the agent possibly still mid-verb, but the document is now unmarked, so the
+    /// overlay does not come back and typing is re-enabled until the agent's next verb re-marks it.
+    /// That is the deliberate cost of making a STUCK overlay impossible, and it degrades in the
+    /// safe direction: a missing cover, never a wedged one. A cover that could stick would also be
+    /// a keyboard that could stay dead.
     func setSessionTurnRunning(_ running: Bool) {
         guard running != sessionTurnRunning else { return }
         sessionTurnRunning = running
@@ -3196,12 +3208,35 @@ final class OfficeRuntime: ObservableObject {
     /// Test-only: run one tick synchronously, without waiting for the timer.
     func periodicSaveTickForTesting() { periodicSaveTick() }
 
-    /// **The one unprompted save, and its three guards.** Reached only from `periodicSaveTick`
+    /// **The one unprompted save, and its four guards.** Reached only from `periodicSaveTick`
     /// now; every OTHER save point in Job 2's five is an explicit `saveAndAwaitOutcome` at the door
     /// that triggered it, because those callers need the OUTCOME and this one does not.
     ///
-    /// Each guard is load-bearing for a different reason, and all three predate this task.
+    /// Each guard is load-bearing for a different reason. Guards 1-3 predate this task; guard 0 is
+    /// the fix round's, and the reason it is new is that this function only became REACHABLE in
+    /// production on this branch — see its own comment.
     private func fireAutoSave(path: String) {
+        // (0) ⛔ **NEVER resolve a conflict unprompted** — fix round, review CRITICAL-2.
+        //
+        //     A conflict means the file on disk ALSO changed outside Norma while this tab held it
+        //     (`.externalChangeDetected`/`.externalDeleted`, both gated on `doc.dirty`). Saving it
+        //     discards the other party's bytes — and `.saveSucceeded` unconditionally clears
+        //     `documentConflicts`, so the banner about them deletes itself in the same operation.
+        //     A user who raised a conflict and walked away to think about it would come back, at
+        //     most two minutes later, to a tab that looks completely normal and a file that no
+        //     longer holds what the other writer put there.
+        //
+        //     ⚠️ **This is not pre-existing exposure — this branch is what armed it.** Before
+        //     office-live-ux, `fireAutoSave` was reachable only from the idle debounce and the
+        //     debounce was disarmed (`autoSaveEnabled == false`), so guard 1 never ran in
+        //     production at all. `periodicSaveTick` reaches it now. That makes this the ONLY save
+        //     point of the five with no user and no agent action behind it, which is exactly why
+        //     it is the one that must refuse hardest: every other door has somebody to tell.
+        //
+        //     A conflicted document simply stays dirty until the banner is answered. That is what
+        //     the banner is for, and `.conflictKeepMineRequested`/`.conflictReloadRequested` are
+        //     the two doors that legitimately end it.
+        guard state.documentConflicts[path] == nil else { return }
         // (1) Nothing to write. The engine has its own `DontSaveIfUnmodified` lever, but refusing
         //     here is strictly better: it costs no helper request at all, so an idle document never
         //     touches the shared FIFO. This is also what makes the agent's own writes free of
