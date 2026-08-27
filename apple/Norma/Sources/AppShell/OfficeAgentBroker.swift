@@ -238,13 +238,6 @@ final class OfficeAgentBroker {
             runtime = existing
             docId = entry.docId
             adopted = true
-            // Rule 3 — dirty refusal, write-only, adopted-only. A document THIS call opens fresh a
-            // few lines below can never be dirty yet (LOK just loaded it) — the check only makes
-            // sense, and only runs, on a document someone else already has open. Reads proceed
-            // regardless: they read the in-memory state, which is what the user's own tab shows.
-            if access == .write, officeDocumentIsDirty(state: existing.stateSnapshot, path: resolvedPath) {
-                throw OfficeAgentBrokerError.documentDirty(path: resolvedPath)
-            }
         } else if let existing = existingRuntime,
                   existing.stateSnapshot.opensInFlight.contains(resolvedPath)
                     || existing.stateSnapshot.pendingOpens.contains(resolvedPath) {
@@ -325,6 +318,31 @@ final class OfficeAgentBroker {
             docId = try await awaitOpen(opened, path: resolvedPath)
             adopted = false
         }
+
+        // ── office-live-ux Job 3 — MARK THE TAB, before anything else touches the document.
+        //
+        // Gated on `adopted` because that is exactly "a tab already has this open": a document THIS
+        // call opened has no tab behind it and nothing to cover. Marked for a READ as well as a
+        // write — the user's spec is that the overlay appears "as soon as Norma reads the document
+        // open in that tab", so the user does not edit underneath a read the agent is about to act
+        // on. Both adopted branches above reach here (the `documents[resolvedPath]` hit and the
+        // in-flight-join), which is the whole set of ways `adopted` becomes true.
+        //
+        // Marked BEFORE the pre-save below, deliberately: a save is a full container rewrite plus a
+        // LOK re-render, i.e. a visible repaint, and putting the overlay up first is what puts that
+        // repaint behind a surface the user is already being told not to type into.
+        //
+        // Never unmarked here. `OfficeRuntime` clears engagement on the turn's own edges — see
+        // `OfficeRuntime.setSessionTurnRunning` for why a derived conjunction, not a matched pair of
+        // mark/unmark events, is what makes a stuck overlay impossible.
+        if adopted { runtime.noteAgentEngaged(path: resolvedPath) }
+
+        // ── office-live-ux Job 2, save point 1 (before an agent edit) and save point 5 (before an
+        // agent read). **THIS REPLACES RULE 3'S REFUSAL, AND THAT IS A DELIBERATE CHANGE TO A
+        // RATIFIED RULE — see `preSaveAdoptedDocument`'s own header for the argument and for what
+        // still refuses.**
+        try await OfficeAgentBroker.preSaveAdoptedDocument(runtime, path: resolvedPath,
+                                                           access: access, adopted: adopted)
 
         // Rule 2 — close only what you opened. Runs on EVERY exit from here down (action throws,
         // save fails, or plain success) because `defer` does not distinguish — which is exactly
@@ -442,6 +460,75 @@ final class OfficeAgentBroker {
             }
             throw OfficeAgentBrokerError.saveFailed(path: resolvedPath, reason:
                 "there was no open document to save.")
+        }
+    }
+
+    /// office-live-ux Job 2, save points **1 (before an agent edit)** and **5 (before an agent
+    /// read)** — and the place where a ratified rule changed.
+    ///
+    /// ## What rule 3 used to be, and what it is now
+    ///
+    /// **Was:** a write to a document the user holds DIRTY was refused outright
+    /// (`OfficeAgentBrokerError.documentDirty`), full stop. The rule protected the user's unsaved
+    /// edits by declining to write over them, and it is listed as rule 3 in this type's own header.
+    ///
+    /// **Is:** the user's edits are SAVED first, and the agent then proceeds against a document
+    /// whose on-disk state matches what the user can see. If the pre-save FAILS, the refusal fires
+    /// exactly as before — because the thing rule 3 protected (unsaved user edits, about to be
+    /// written over) is still true in precisely that case and in no other.
+    ///
+    /// **Why this is better and not merely different.** Rule 3's refusal was a dead end from the
+    /// agent's side: the only cure was for a human to press ⌘S, and the agent could not ask for one
+    /// mid-turn. The user's own ruling for this task is Xcode's model — commit on actions, and an
+    /// agent about to edit is an action. Saving first makes the refusal rare instead of routine
+    /// without making it weaker: it still fires whenever the document is genuinely dirty at the
+    /// moment the agent would write, which after this change means "dirty AND unsavable".
+    ///
+    /// **What did NOT change:** the fence (rule 5), the read-only-format refusal, close-only-what-
+    /// you-opened (rule 2), and rule 4's save-through afterwards. A read-only format never gets here
+    /// with `access == .write` — the pre-check above throws first — and can never be dirty anyway.
+    ///
+    /// ## Reads and writes differ on what a FAILED pre-save means, and the asymmetry is the point
+    ///
+    /// * **write** → throw. The agent is about to overwrite edits it could not preserve. The thrown
+    ///   sentence NAMES the attempted save, so a retry is not a walk into an identical wall with no
+    ///   new information — the previous refusal said only "it's dirty", which reads as "wait and try
+    ///   again" and would have been wrong here.
+    /// * **read** → proceed. A read serves the runtime's IN-MEMORY state, which already contains the
+    ///   user's unsaved edits — so a read is never wrong because a save failed, and refusing one
+    ///   would remove a capability for no protection at all. The pre-save on a read exists to keep
+    ///   disk in step with what the agent is about to report, not to make the read correct.
+    ///
+    /// ## Ordering, and why the drain is here too
+    ///
+    /// `saveAndAwaitOutcome` then `drainDirty`, the same pair rule 4 runs afterwards and for the
+    /// same measured reason: `.saved` resolves when `placeAtomically` lands, which is EARLIER than
+    /// LOK's own `ModifiedStatus=false`, and the gap is where a close kills the shared helper. This
+    /// call is followed immediately by `action` (which puts more work on the same FIFO) and, on the
+    /// not-adopted path, eventually by rule 2's close — so leaving the gap open here would widen the
+    /// exact window `awaitCloseBarrier` and both drains exist for.
+    ///
+    /// Sequential awaits at the BROKER level, never nested inside another `queue.run` — constraint
+    /// C1's "a nested call deadlocks all office I/O permanently". Rule 4 already has this shape.
+    ///
+    /// `adopted == false` returns immediately: a document this call just opened cannot be dirty
+    /// (LOK loaded it a moment ago), which is the same reasoning rule 3's own adopted-only gate
+    /// carried.
+    private static func preSaveAdoptedDocument(_ runtime: OfficeRuntime, path: String,
+                                               access: Access, adopted: Bool) async throws {
+        guard adopted, officeDocumentIsDirty(state: runtime.stateSnapshot, path: path) else { return }
+        switch await runtime.saveAndAwaitOutcome(path) {
+        case .saved:
+            await drainDirty(runtime, path: path)
+        case .failed(let reason):
+            guard access == .write else { return }
+            throw OfficeAgentBrokerError.documentDirty(path: path, saveAttemptFailure: reason)
+        case .noModel:
+            // The document went away between the dirty read above and this call — nothing to save
+            // and nothing left to protect. A write proceeding here will fail rule 4 on its own terms
+            // a moment later with a truthful sentence; inventing a dirty refusal for a document that
+            // no longer exists would be the less honest of the two.
+            return
         }
     }
 
@@ -731,8 +818,12 @@ enum OfficeAgentBrokerError: Error, Equatable {
     /// fires on a read verb outside the fence exactly as it does on a write — see
     /// `officeAgentResolvedPathWithinFence`'s own header for the ruling this states.
     case outOfFence(path: String)
-    /// Rule 3.
-    case documentDirty(path: String)
+    /// Rule 3, as office-live-ux Job 2 left it: no longer "the document is dirty" but "the
+    /// document is dirty AND could not be saved first". `saveAttemptFailure` is the pre-save's own
+    /// already-mapped reason, carried so the sentence can say what was tried — a refusal that only
+    /// said "it's dirty" would read as "wait and retry", which is exactly the wrong instruction now
+    /// that a save is always attempted first.
+    case documentDirty(path: String, saveAttemptFailure: String)
     /// Rule 1's "otherwise" branch failing. `reason` is ALREADY a mapped house-voice sentence
     /// (`OfficeRuntimeState.openFailures`/`.failureReason` are never raw LOK text — Stage B T9's own
     /// error table guarantees that at the source) — this case never re-maps it, only carries it.
@@ -756,10 +847,15 @@ enum OfficeAgentBrokerError: Error, Equatable {
         case .outOfFence(let path):
             return "path is outside the allowed directories: \(path). Norma's office tools are "
                 + "limited to the session's working directories."
-        case .documentDirty(let path):
+        case .documentDirty(let path, let saveAttemptFailure):
             let name = (path as NSString).lastPathComponent
-            return "\(name) has unsaved changes in an open tab — the agent will not overwrite them. "
-                + "Save or discard the tab's edits first."
+            // Names the ATTEMPT, not just the state. Norma now saves an open tab's edits before
+            // writing to it, so reaching this refusal means that save was tried and failed — and a
+            // sentence that said only "it has unsaved changes" would read as "wait and retry",
+            // which is the one instruction that cannot help here.
+            return "\(name) has unsaved changes in an open tab and Norma couldn't save them first "
+                + "(\(saveAttemptFailure)) — so it will not overwrite them. Save or discard the "
+                + "tab's edits, then try again."
         case .openFailed(let path, let reason):
             return "Couldn't open \((path as NSString).lastPathComponent): \(reason)"
         case .saveFailed(let path, let reason):
