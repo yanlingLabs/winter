@@ -319,31 +319,6 @@ final class OfficeAgentBroker {
             adopted = false
         }
 
-        // ── office-live-ux Job 3 — MARK THE TAB, before anything else touches the document.
-        //
-        // Gated on `adopted` because that is exactly "a tab already has this open": a document THIS
-        // call opened has no tab behind it and nothing to cover. Marked for a READ as well as a
-        // write — the user's spec is that the overlay appears "as soon as Norma reads the document
-        // open in that tab", so the user does not edit underneath a read the agent is about to act
-        // on. Both adopted branches above reach here (the `documents[resolvedPath]` hit and the
-        // in-flight-join), which is the whole set of ways `adopted` becomes true.
-        //
-        // Marked BEFORE the pre-save below, deliberately: a save is a full container rewrite plus a
-        // LOK re-render, i.e. a visible repaint, and putting the overlay up first is what puts that
-        // repaint behind a surface the user is already being told not to type into.
-        //
-        // Never unmarked here. `OfficeRuntime` clears engagement on the turn's own edges — see
-        // `OfficeRuntime.setSessionTurnRunning` for why a derived conjunction, not a matched pair of
-        // mark/unmark events, is what makes a stuck overlay impossible.
-        if adopted { runtime.noteAgentEngaged(path: resolvedPath) }
-
-        // ── office-live-ux Job 2, save point 1 (before an agent edit) and save point 5 (before an
-        // agent read). **THIS REPLACES RULE 3'S REFUSAL, AND THAT IS A DELIBERATE CHANGE TO A
-        // RATIFIED RULE — see `preSaveAdoptedDocument`'s own header for the argument and for what
-        // still refuses.**
-        try await OfficeAgentBroker.preSaveAdoptedDocument(runtime, path: resolvedPath,
-                                                           access: access, adopted: adopted)
-
         // Rule 2 — close only what you opened. Runs on EVERY exit from here down (action throws,
         // save fails, or plain success) because `defer` does not distinguish — which is exactly
         // right: whatever happened, a document this call opened must not be left dangling open with
@@ -383,6 +358,39 @@ final class OfficeAgentBroker {
                 runtime.close(resolvedPath)
             }
         }
+
+        // ⚠️ **AFTER rule 2's `defer`, and the placement is deliberate rather than incidental.**
+        // A `defer` does nothing until the function exits, so moving these two below it changes no
+        // ordering of actual work — but it does mean the pre-save's `throw` unwinds through an
+        // ALREADY-INSTALLED defer. Today that is belt (the pre-save only throws when `adopted`, and
+        // the defer is a no-op when `adopted`), but the trap it removes is real and quiet: anything
+        // that later makes this leg throw on a NOT-adopted path would otherwise leak the document
+        // this call had just opened, with no close anywhere.
+        // ── office-live-ux Job 3 — MARK THE TAB, before anything else touches the document.
+        //
+        // Gated on `adopted` because that is exactly "a tab already has this open": a document THIS
+        // call opened has no tab behind it and nothing to cover. Marked for a READ as well as a
+        // write — the user's spec is that the overlay appears "as soon as Norma reads the document
+        // open in that tab", so the user does not edit underneath a read the agent is about to act
+        // on. Both adopted branches above reach here (the `documents[resolvedPath]` hit and the
+        // in-flight-join), which is the whole set of ways `adopted` becomes true.
+        //
+        // Marked BEFORE the pre-save below, deliberately: a save is a full container rewrite plus a
+        // LOK re-render, i.e. a visible repaint, and putting the overlay up first is what puts that
+        // repaint behind a surface the user is already being told not to type into.
+        //
+        // Never unmarked here. `OfficeRuntime` clears engagement on the turn's own edges — see
+        // `OfficeRuntime.setSessionTurnRunning` for why a derived conjunction, not a matched pair of
+        // mark/unmark events, is what makes a stuck overlay impossible.
+        if adopted { runtime.noteAgentEngaged(path: resolvedPath) }
+
+        // ── office-live-ux Job 2, save point 1 (before an agent edit) and save point 5 (before an
+        // agent read). **THIS REPLACES RULE 3'S REFUSAL, AND THAT IS A DELIBERATE CHANGE TO A
+        // RATIFIED RULE — see `preSaveAdoptedDocument`'s own header for the argument and for what
+        // still refuses.**
+        try await OfficeAgentBroker.preSaveAdoptedDocument(runtime, path: resolvedPath,
+                                                           access: access, adopted: adopted)
+
 
         // ── office-live-edit R3 — THE BRACKET. "One tool call = one undo step" is implemented by
         // measuring the engine's undo-stack depth on either side of the WHOLE edit closure and
