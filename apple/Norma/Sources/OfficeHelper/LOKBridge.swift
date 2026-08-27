@@ -2286,6 +2286,7 @@ final class LOKBridge: OfficeDocumentBridge {
     /// the user's caret. Nothing is lost — a text document has exactly one part here, so there is no
     /// stale-part window for it to be in.
     private func saveAsOnDedicatedThread(docId: String, seq: UInt64, part: Int) throws -> String {
+        let measureT0 = DispatchTime.now()
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
         doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
         if doc.kind != .text {
@@ -2306,6 +2307,7 @@ final class LOKBridge: OfficeDocumentBridge {
                 doc.handle.pointee.pClass.pointee.saveAs?(doc.handle, urlPtr, formatPtr, nil) != 0
             }
         }
+        let saveAsFinished = DispatchTime.now()
         guard succeeded else {
             let reason: String
             if let errCStr = kit.pointee.pClass.pointee.getError?(kit) {
@@ -2333,6 +2335,21 @@ final class LOKBridge: OfficeDocumentBridge {
         ".uno:Save".withCString { commandPtr in
             doc.handle.pointee.pClass.pointee.postUnoCommand?(doc.handle, commandPtr, nil, false)
         }
+        // office-responsive Job 1 — the per-save LOK-thread occupancy trace. Unconditional, one
+        // line per real save, matching `handleCallback`'s own always-on raw-callback trace: a save
+        // is the single longest job this thread ever runs and it blocks EVERY keystroke and tile
+        // paint behind it, so how long it took is exactly the number anybody debugging "typing
+        // feels laggy" needs. Two numbers, not one, because they behave completely differently —
+        // `saveAs` is the real container store (O(document content)); `.uno:Save` is the modified-
+        // flag follow-up, MEASURED at 0.3-0.8 ms across every document size tested and never
+        // touching the staged file's bytes, i.e. genuinely a flag flip and not a second store.
+        let unoSaveFinished = DispatchTime.now()
+        let saveAsMs = Double(saveAsFinished.uptimeNanoseconds - measureT0.uptimeNanoseconds) / 1e6
+        let unoSaveMs = Double(unoSaveFinished.uptimeNanoseconds - saveAsFinished.uptimeNanoseconds) / 1e6
+        let renderedBytes = ((try? FileManager.default.attributesOfItem(atPath: destination.path))?[.size] as? Int) ?? -1
+        FileHandle.standardError.write(Data(
+            ("[LOKBridge save] docId=\(docId) saveAsMs=\(String(format: "%.1f", saveAsMs)) "
+             + "unoSaveMs=\(String(format: "%.1f", unoSaveMs)) renderedBytes=\(renderedBytes)\n").utf8))
         return destination.path
     }
 
@@ -2383,6 +2400,17 @@ final class LOKBridge: OfficeDocumentBridge {
     /// argument. Returning `nil` here (not throwing) is deliberate: skipping is the CORRECT outcome,
     /// not a failure — see the protocol requirement's own header.
     private func saveAsSidecarOnDedicatedThread(docId: String, isStillArmed: () -> Bool) throws -> (ext: String, isODFFallback: Bool)? {
+        // office-responsive Job 1 — the same LOK-thread occupancy trace `saveAsOnDedicatedThread`
+        // now carries, for the same reason: this fire is a FULL container store on the SAME single
+        // thread, at a 60 s cadence while a document stays dirty, so it stalls typing exactly like a
+        // backstop save does. It is pre-existing (Stage B Task 7) and it is why the thumbnail fix
+        // below is worth more than the backstop alone would justify — it makes BOTH cheaper.
+        let measureT0 = DispatchTime.now()
+        defer {
+            let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds - measureT0.uptimeNanoseconds) / 1e6
+            FileHandle.standardError.write(Data(
+                "[LOKBridge sidecar] docId=\(docId) totalMs=\(String(format: "%.1f", elapsedMs))\n".utf8))
+        }
         guard isStillArmed() else { return nil }
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
         doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
@@ -6385,6 +6413,50 @@ final class LOKBridge: OfficeDocumentBridge {
     /// it in on boot, the same file it would otherwise create itself on first run (verified: a
     /// normal boot's own `user/registrymodifications.xcu` already carries other `Misc`-group
     /// entries in this exact shape, e.g. `FirstRun`).
+    /// **office-responsive Job 1 — the SECOND item, and it is a performance fix with a disclosed
+    /// cost.** `/org.openoffice.Office.Common/Save/Document/GenerateThumbnail` (default `true`,
+    /// confirmed against the vendored tree's own `Resources/registry/main.xcd`, whose enclosing
+    /// group stack really is `Save` -> `Document`, resolved programmatically rather than assumed).
+    ///
+    /// **What it buys, MEASURED on this tree, not argued.** A save is `doc_saveAs` on the ONE
+    /// dedicated LOK thread, and every keystroke and tile paint queues behind it. Across four
+    /// document sizes the steady-state `saveAs` cost fits
+    /// **`53.4 ms + 0.258 ms per KB of content.xml`** (least squares over 21 samples, R² 0.99988) —
+    /// and that 53.4 ms floor is almost entirely `SfxObjectShell::GenerateAndStoreThumbnail`
+    /// rendering a page image. Turning it off:
+    ///
+    /// | fixture (content.xml) | thumbnail on | thumbnail off | saved |
+    /// |---|---|---|---|
+    /// | `two-page.odt` (4 118 B) | 52.3 ms mean | **12.1 ms** | 40.2 ms (**4.33x**) |
+    /// | 1 563 008 B | 446.9 ms mean | 392.5 ms | 54.4 ms (1.14x) |
+    ///
+    /// — i.e. a ~40-54 ms CONSTANT, which is nearly the whole cost of an ordinary document's save
+    /// and a shrinking fraction of a very large one's. The mechanism is pinned rather than inferred:
+    /// the rendered container went from 9 entries carrying `Thumbnails/thumbnail.png` to 8 without
+    /// it, and typing latency with NO save running was unchanged in the same runs (the control).
+    ///
+    /// **It fixes the 60 s helper autosave too, which is the bigger win.** `saveAsSidecar` is the
+    /// same full store on the same thread at twice the backstop's frequency, and it is pre-existing
+    /// (Stage B Task 7). A lever that only reached the 120 s backstop would have left two thirds of
+    /// these stalls in place. This one is global, so it reaches both.
+    ///
+    /// ⚠️ **The cost, stated plainly: every ODF document Norma writes now has no embedded preview
+    /// thumbnail.** Consumers that read `Thumbnails/thumbnail.png` — LibreOffice's own Start Center
+    /// and file dialogs, some Linux file managers — will show a generic icon for a Norma-saved
+    /// document until something else re-saves it. Nothing about the document's CONTENT changes.
+    ///
+    /// **Why it is global rather than scoped to the unprompted saves that actually need it.**
+    /// `SfxObjectShell::PreDoSaveAs_Impl` does honour a PER-SAVE `SID_NO_THUMBNAIL` media-descriptor
+    /// item (`sfx2/source/doc/objstor.cxx:3197`, read at the pinned LO commit `11482c8f`) — but
+    /// `doc_saveAs` cannot reach it: its `pFilterOptions` parser special-cases exactly
+    /// `TakeOwnership`, `NoFileSync`, `FromTemplate`, `Watermark=`, `FullSheetPreview=`, `Password=`,
+    /// `PasswordToModify=` and `PDFVer=`, and puts everything else into `FilterOptions`, which the
+    /// FILTER reads, not the object shell (`desktop/source/lib/init.cxx:3814-3843`, same commit).
+    /// So the config item is the only lever the C API leaves reachable, and it is all-or-nothing.
+    ///
+    /// **`NoFileSync` was identified and DECLINED**, not overlooked: `doc_saveAs` does support it,
+    /// but it trades durability of the user's own save for single-digit milliseconds against a
+    /// 12 ms floor. Not a trade worth making for a file the user believes is written.
     private static func disableDocumentLockFile(profileDir: URL) throws {
         let userDir = profileDir.appendingPathComponent("user", isDirectory: true)
         try FileManager.default.createDirectory(at: userDir, withIntermediateDirectories: true)
@@ -6392,6 +6464,7 @@ final class LOKBridge: OfficeDocumentBridge {
         <?xml version="1.0" encoding="UTF-8"?>
         <oor:items xmlns:oor="http://openoffice.org/2001/registry" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
         <item oor:path="/org.openoffice.Office.Common/Misc"><prop oor:name="UseDocumentOOoLockFile" oor:op="fuse"><value>false</value></prop></item>
+        <item oor:path="/org.openoffice.Office.Common/Save/Document"><prop oor:name="GenerateThumbnail" oor:op="fuse"><value>false</value></prop></item>
         </oor:items>
         """
         try xcu.write(
