@@ -366,6 +366,19 @@ int main(int argc, char **argv) {
         printf("VIEW: switched back to primary (0)\n");
     }
 
+    /* office-authoring — the CANDIDATE CURE for the InsertGraphic race, tested rather than assumed.
+       Correction C3's mechanism: `bNotifyWhenFinished:true` only forces `SfxCallMode::SYNCHRON` if
+       a `DispatchResultListener` is constructed, and that happens only when
+       `mpCallbackFlushHandlers.count(nView)` is non-zero — i.e. only when THE VIEW THE DISPATCH
+       RESOLVES TO has a registered callback. Every agent verb asserts the agent view, and
+       `createAgentView` never registers one, so every agent dispatch is async. Registering here —
+       AFTER the setView above, so it binds to the agent view rather than the primary one the
+       existing OFP_CALLBACK knob covers — is the direct test of whether that restores synchrony. */
+    if (getenv("OFP_CALLBACK_AGENT")) {
+        doc->pClass->registerCallback(doc, probe_callback, NULL);
+        printf("CALLBACK: registered on the CURRENT (agent) view\n");
+    }
+
     int rc = 0;
 
     if (strcmp(op, "rtf") == 0) {
