@@ -21,13 +21,38 @@ import AppKit
 /// numbering itself is right; the LOK-specific *destination* codes (`KEY_A` = `512`, not `0`) come
 /// from the LOK/UNO source below, which `cuKeyCode` has no reason to know about.
 ///
-/// - **`baseCode` table**: a direct Swift port of `ImplMapKeyCode` (`vcl/osx/salframeview.mm`,
-///   `LibreOffice/core` master) — the exact table VCL's own macOS backend uses to map `[NSEvent
-///   keyCode]` (AppKit's PHYSICAL, layout-independent scancode) to `com::sun::star::awt::Key`
-///   constants. This is not "a" mapping, it is THE mapping — the same code path native LibreOffice
-///   on macOS itself runs for real keyboard input, transcribed rather than imported for the same
-///   reason `LOKBridge.swift`'s own enum transcriptions exist (no C++ UNO headers in this plain-C
-///   bridging context).
+/// - **`baseCode` table**: a Swift port of `ImplMapKeyCode` (`vcl/osx/salframeview.mm`,
+///   `LibreOffice/core` master) — the table VCL's own macOS backend uses to map `[NSEvent keyCode]`
+///   (AppKit's PHYSICAL, layout-independent scancode) to `com::sun::star::awt::Key` constants,
+///   transcribed rather than imported for the same reason `LOKBridge.swift`'s own enum
+///   transcriptions exist (no C++ UNO headers in this plain-C bridging context).
+///
+///   ⚠️ **`ImplMapKeyCode` is LO's own FALLBACK, not its primary — and reading it as "THE mapping"
+///   shipped a real bug.** `salframeview.mm` carries TWO key maps, and the one that decides what a
+///   non-text key actually DOES is `ImplMapCharCode`, keyed by the key's produced CHARACTER:
+///
+///   ```objc
+///   -(BOOL)sendSingleCharacter: (NSEvent *)pEvent
+///   {
+///       unichar keyChar = [pUnmodifiedString characterAtIndex: 0];
+///       sal_uInt16 nKeyCode = ImplMapCharCode( keyChar );
+///       if (nKeyCode == 0)
+///       {
+///           sal_uInt16 nOtherKeyCode = [pEvent keyCode];
+///           nKeyCode = ImplMapKeyCode(nOtherKeyCode);   // <- only when the CHARACTER maps to nothing
+///       }
+///   ```
+///
+///   Every key this table's consumers care about agrees between the two routes EXCEPT Backspace:
+///   `ImplMapCharCode`'s row `0x7F` is `KEY_BACKSPACE` (upstream annotates exactly this — "the
+///   mapping 0x7f should by rights be KEY_DELETE however if you press "backspace" 0x7f is
+///   reported whereas for "delete" 0xf728 gets reported"), while `ImplMapKeyCode`'s row 51 says
+///   `KEY_DELETE`. LO reaches the first and never the second, so row 51 below carries
+///   `Key.backspace`; see its own comment. Every OTHER non-text key was re-checked against
+///   `ImplMapCharCode`/`aFunctionKeyCodeMap` when that fix was made — Return (`0x0D`), Tab
+///   (`0x09`), Escape (`0x1B`), the four arrows, Home/End/PageUp/PageDown and fn+Delete all give
+///   the identical code by either route, with the `0xF700`-relative indices computed from the real
+///   `NSEvent` constants rather than recalled.
 /// - **`Key` constant values** (`512` for `A`, `1280` for `RETURN`, ...): `offapi/com/sun/star/awt/
 ///   Key.idl`, fetched and read verbatim (`const short NAME = value;` lines, not the doc-generator's
 ///   own summary page, which was cross-checked and agreed).
@@ -212,7 +237,19 @@ enum OfficeInputCodes {
         31: Key.rightCurlyBracket, 32: Key.u, 33: Key.bracketLeft, 34: Key.i, 35: Key.p,
         36: Key.returnKey, 37: Key.l, 38: Key.j, 39: Key.quoteRight, 40: Key.k,
         41: Key.semicolon, 43: Key.comma, 44: Key.divide, 45: Key.n, 46: Key.m,
-        47: Key.point, 48: Key.tab, 49: Key.space, 50: Key.quoteLeft, 51: Key.delete,
+        47: Key.point, 48: Key.tab, 49: Key.space, 50: Key.quoteLeft,
+        // ⚠️ **The ONE deliberate departure from `ImplMapKeyCode`'s literal contents, and the whole
+        // reason this table's header now cites TWO upstream functions instead of one.** Row 51 in
+        // `ImplMapKeyCode` really does say `KEY_DELETE` — but that table is only LO's own FALLBACK
+        // (`sendSingleCharacter:` consults `ImplMapCharCode` FIRST and only falls through when it
+        // answers 0), and for the Backspace key `ImplMapCharCode` never answers 0: the key reports
+        // `0x7F`, whose row is `KEY_BACKSPACE`. So real LibreOffice on macOS sends `KEY_BACKSPACE`
+        // for this key and never reaches `ImplMapKeyCode` at all. Transcribing row 51 literally is
+        // what made Backspace delete FORWARD in a Norma office tab — measured, not deduced:
+        // `OfficeRuntimeLiveTests.testBackspaceThroughTheRealCanvasRemovesTheCharacterBeforeTheCaret`
+        // and its caret-walk sibling, whose caret x sat at `[2431, 2431, 2431, 2431]` across three
+        // presses. `Key.backspace` is what LO itself sends, so it is what goes here.
+        51: Key.backspace,
         53: Key.escape, 57: Key.capsLock,
         64: Key.f17, 65: Key.decimal, 67: Key.multiply, 69: Key.add,
         75: Key.divide, 76: Key.returnKey, 78: Key.subtract, 79: Key.f18, 80: Key.f19,
@@ -220,7 +257,14 @@ enum OfficeInputCodes {
         96: Key.f5, 97: Key.f6, 98: Key.f7, 99: Key.f3, 100: Key.f8, 101: Key.f9,
         103: Key.f11, 105: Key.f13, 106: Key.f16, 107: Key.f14, 109: Key.f10, 111: Key.f12,
         113: Key.f15, 114: Key.help, 115: Key.home, 116: Key.pageUp,
-        117: Key.delete, // forward-delete (fn+Delete) — a SECOND physical key, same LOK code as 51
+        // Forward-delete (fn+Delete, or a full keyboard's own Del). UNCHANGED by the row-51 fix
+        // above, and correct by BOTH upstream routes: `ImplMapCharCode` maps this key's own
+        // character (`NSDeleteFunctionKey` = `0xF728`, computed, not recalled) through
+        // `aFunctionKeyCodeMap[0x28]` = `KEY_DELETE`, which is the same answer `ImplMapKeyCode`'s
+        // row 117 gives. The two delete keys are now DISTINCT on the wire, as they are in every
+        // Mac editor — pinned live by
+        // `OfficeRuntimeLiveTests.testForwardDeleteThroughTheRealCanvasStillRemovesTheCharacterAfterTheCaret`.
+        117: Key.delete,
         118: Key.f4, 119: Key.end, 120: Key.f2, 121: Key.pageDown, 122: Key.f1,
         123: Key.left, 124: Key.right, 125: Key.down, 126: Key.up,
     ]
