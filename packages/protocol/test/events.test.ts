@@ -533,10 +533,16 @@ describe("panel_command (B2 T2)", () => {
     }
     // Not a hand-typed number: computed from the two family constants this test also imports, so a
     // verb added to either family without being composed into the union fails here rather than
-    // silently changing what "every verb parses" means. 9 browser + 22 office today.
+    // silently changing what "every verb parses" means. 9 browser + 26 office today.
     expect(PANEL_COMMAND_ACTIONS).toHaveLength(BROWSER_COMMAND_ACTIONS.length + OFFICE_COMMAND_ACTIONS.length);
     expect(BROWSER_COMMAND_ACTIONS).toHaveLength(9);
-    expect(OFFICE_COMMAND_ACTIONS).toHaveLength(22);
+    // ⚠️ **This literal had ROTTED, and that is worth a line.** It still read 22 when the real count
+    // was 24: office-finish's two `batch` verbs were added without moving it, so this test has been
+    // RED on `main` ever since — a count tripwire nobody was reading is not a tripwire. Corrected to
+    // 26 here (24 + office-format's two `format` verbs) as part of the change that touches this list.
+    // If you are adding an office verb and this fails, move the number deliberately; do not delete
+    // the assertion.
+    expect(OFFICE_COMMAND_ACTIONS).toHaveLength(26);
   });
 
   test("an unknown verb is refused", () => {

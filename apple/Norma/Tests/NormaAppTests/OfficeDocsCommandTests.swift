@@ -930,6 +930,39 @@ final class OfficeDocsCommandTests: XCTestCase {
                        "nothing may be applied when any named operand is malformed")
     }
 
+    /// **Does applying a paragraph style destroy direct character formatting?**
+    ///
+    /// This drill exists because the tool description and the bridge both ASSERTED that it does
+    /// ("style replaces direct character formatting, so apply it before bold, not after"), and
+    /// nothing in the research supports it — §3.7 covers `StyleApply`'s argument mechanics and H5
+    /// covers AutoUpdate; neither says a paragraph style clears direct character formatting. An
+    /// unverified mechanism claim in model-facing text is the exact failure class this arc keeps
+    /// shipping, so it gets measured rather than reasoned about.
+    ///
+    /// Whatever the answer, this test pins it: bold one run by `find`, then apply a paragraph style
+    /// over the same run, and read the saved bytes.
+    func testLiveDocsFormatMeasuresWhetherAStyleDestroysDirectCharacterFormatting() async throws {
+        let (path, host, _) = try await openLive("format-target.odt")
+        let bolded = await send(command("office.docs.format",
+                                        args: ["path": path, "find": "MARKER", "bold": true],
+                                        sessionId: "S1", commandId: "pcmd_sty_bold"), through: host)
+        XCTAssertTrue(bolded.ok, "\(bolded)")
+        XCTAssertEqual(try boldRuns(inSavedFileAt: path).count, 3, "setup: all three runs must be bold")
+
+        let styled = await send(command("office.docs.format",
+                                        args: ["path": path, "find": "MARKER", "style": "heading2"],
+                                        sessionId: "S1", commandId: "pcmd_sty_style"), through: host)
+        XCTAssertTrue(styled.ok, "\(styled)")
+
+        let after = try boldRuns(inSavedFileAt: path)
+        // The MEASURED answer, asserted so the description can cite it and so a future engine change
+        // that alters it fails here rather than silently making the description wrong.
+        XCTAssertEqual(after.count, 3,
+                       "direct character formatting SURVIVES a paragraph style being applied over it "
+                           + "(found \(after.count) bold runs). If this ever fails, the tool "
+                           + "description's ordering advice must change with it.")
+    }
+
     /// Alignment and line spacing, the two argument-free attributes, land in the saved bytes.
     /// Asserted against the pristine fixture, which declares neither.
     func testLiveDocsFormatAlignAndLineSpacingReachTheSavedParagraphProperties() async throws {

@@ -1439,9 +1439,17 @@ final class LOKBridge: OfficeDocumentBridge {
     /// confirmed is a THROW naming what was searched for, never a dispatch.
     ///
     /// **Dispatch order is fixed** (`style`, `align`, `lineSpacing`, then the three character
-    /// attributes) so `applied` reads the same way twice for the same request. `style` runs FIRST on
-    /// purpose: applying a paragraph style resets direct character formatting, so a style applied
-    /// after `bold` would silently undo it.
+    /// attributes) so `applied` reads the same way twice for the same request.
+    ///
+    /// ⚠️ **The order is NOT load-bearing, and an earlier version of this comment claimed it was.**
+    /// It said `style` must run first because applying a paragraph style "resets direct character
+    /// formatting, so a style applied after `bold` would silently undo it." Nothing in the research
+    /// supports that — §3.7 covers `StyleApply`'s argument mechanics, H5 covers AutoUpdate, and
+    /// neither says a paragraph style clears direct character formatting — and it is FALSE, measured:
+    /// `testLiveDocsFormatMeasuresWhetherAStyleDestroysDirectCharacterFormatting` bolds three runs,
+    /// applies `heading2` over the same runs, and all three are STILL BOLD in the saved bytes. The
+    /// order stays (a stable `applied` list is worth something on its own); the invented mechanism
+    /// does not, and the tool description was corrected with it.
     ///
     /// ⚠️ **The `bold`/`italic`/`underline` payload shape is not cosmetic and must not be
     /// "cleaned up".** These three slots are `Toggle = TRUE`, and the dispatcher makes "my arguments
