@@ -809,20 +809,81 @@ final class OfficeDocsCommandTests: XCTestCase {
         XCTAssertEqual(try boldRuns(inSavedFileAt: path), [], "and no bold may have been applied")
     }
 
-    /// The verification story, asserted on the SENTENCE the model reads — because that sentence is
-    /// the whole product of the RTF read-back, and an "applied" claim the engine will not underwrite
-    /// is exactly the overclaim this arc keeps shipping.
-    func testLiveDocsFormatReportsWhatItCouldConfirmRatherThanAssertingSuccess() async throws {
+    /// Does the saved file actually carry this character attribute? Two carriers, same as
+    /// `boldRuns`: an automatic text style referenced by a `text:span`, or a paragraph style.
+    private func savedFileHas(_ odfProperty: String, _ value: String, atPath path: String) throws -> Bool {
+        let xml = try readODFEntry(atPath: path, entry: "content.xml")
+        return xml.contains("\(odfProperty)=\"\(value)\"")
+    }
+
+    /// ⭐ **The verification drill, rewritten to be FALSIFIABLE — the old one could not fail.**
+    ///
+    /// It asserted `text.contains("Confirmed") || text.contains("could not")`, and every branch of
+    /// the result sentence emits one of those. Review proved it passed under a forced red *while the
+    /// verification was actively lying*. A drill that names the verification story and asserts
+    /// nothing about it is worse than no drill: it reads like coverage.
+    ///
+    /// The replacement cross-checks the SENTENCE against the SAVED BYTES, which is the only thing
+    /// that can catch a verification that manufactures agreement: **if the sentence claims an
+    /// attribute was confirmed, the file must actually carry it.** Run for `italic`, which is the
+    /// attribute the stylesheet leak confirmed unconditionally on every Writer document.
+    func testLiveDocsFormatNeverClaimsToHaveConfirmedSomethingTheSavedBytesDoNotShow() async throws {
         let (path, host, _) = try await openLive("format-target.odt")
-        let result = await send(command("office.docs.format", args: ["path": path, "find": "MARKER", "bold": true],
-                                        sessionId: "S1", commandId: "pcmd_fmt_verify"), through: host)
+        let result = await send(command("office.docs.format",
+                                        args: ["path": path, "find": "MARKER", "italic": true],
+                                        sessionId: "S1", commandId: "pcmd_verify_italic"), through: host)
         XCTAssertTrue(result.ok, "\(result)")
         let text = result.result ?? ""
-        // Either it confirmed, or it said it could not check. It may never simply assert success.
-        XCTAssertTrue(text.contains("Confirmed") || text.contains("could not"),
-                      "format must say what it could confirm, or that it could not check: \(text)")
-        XCTAssertFalse(text.contains("could not be confirmed") && text.contains("failed"),
-                       "an unconfirmed attribute must never be reported as a failure: \(text)")
+        let italicInFile = try savedFileHas("fo:font-style", "italic", atPath: path)
+
+        if text.contains("Confirmed italic") {
+            XCTAssertTrue(italicInFile,
+                          "the sentence claims italic was confirmed, so the saved bytes MUST carry "
+                              + "fo:font-style=\"italic\". If they do not, the verification is "
+                              + "reading something other than the formatted text. Sentence: \(text)")
+        }
+        // And the positive direction, so this drill also fails if verification silently stops
+        // working: italic really did land here, so it must be reported as confirmed.
+        XCTAssertTrue(italicInFile, "setup: italic must actually reach the saved bytes")
+        XCTAssertTrue(text.contains("Confirmed italic"),
+                      "italic landed in the file, so the verb must confirm it: \(text)")
+    }
+
+    /// The same cross-check for the attribute the review proved was falsely confirmed on documents
+    /// carrying a bold NAMED PARAGRAPH STYLE. `format-bolded.odt` is exactly that shape — its bold
+    /// lives on a paragraph style — so a whole-string check confirms `bold` here no matter what.
+    /// Formatting a *different* attribute must therefore never report bold as confirmed.
+    func testLiveDocsFormatDoesNotConfirmBoldFromTheDocumentsOwnStyleTableWhenBoldWasNotAsked() async throws {
+        let (path, host, _) = try await openLive("format-bolded.odt")
+        let result = await send(command("office.docs.format",
+                                        args: ["path": path, "find": "MARKER", "italic": true],
+                                        sessionId: "S1", commandId: "pcmd_verify_noleak"), through: host)
+        XCTAssertTrue(result.ok, "\(result)")
+        let text = result.result ?? ""
+        // ⚠️ Asserted on the CLAIM PHRASES, not on the bare word "bold" — the fixture is called
+        // `format-bolded.odt`, so a substring test for "bold" matches the FILENAME the sentence
+        // quotes and fails against correct output. The first version of this drill did exactly that:
+        // a check blind to its own construction, caught on the first live run.
+        XCTAssertFalse(text.contains("Confirmed bold"),
+                       "bold was never requested, so it must never be reported as confirmed — the "
+                           + "document's own bold paragraph style must not leak into the "
+                           + "verification: \(text)")
+        XCTAssertFalse(text.contains("set bold"),
+                       "bold was never requested, so it must not appear as applied: \(text)")
+    }
+
+    /// **F-4 made honest.** The check is existential over the matched occurrences, so a multi-match
+    /// format must say so rather than claiming bare confirmation.
+    func testLiveDocsFormatSaysAtLeastOneOfNRatherThanClaimingItCheckedEveryOccurrence() async throws {
+        let (path, host, _) = try await openLive("format-target.odt")
+        let result = await send(command("office.docs.format",
+                                        args: ["path": path, "find": "MARKER", "bold": true],
+                                        sessionId: "S1", commandId: "pcmd_existential"), through: host)
+        XCTAssertTrue(result.ok, "\(result)")
+        let text = result.result ?? ""
+        XCTAssertTrue(text.contains("at least one of the 3 occurrences"),
+                      "a 3-occurrence format must state that confirmation is existential, not "
+                          + "universal — it cannot check each occurrence separately: \(text)")
     }
 
     /// A mistyped `bold` is REFUSED, on every arm, rather than coerced.
@@ -957,10 +1018,20 @@ final class OfficeDocsCommandTests: XCTestCase {
         let after = try boldRuns(inSavedFileAt: path)
         // The MEASURED answer, asserted so the description can cite it and so a future engine change
         // that alters it fails here rather than silently making the description wrong.
+        //
+        // **Asserted on CONTENT as well as count (review F-8).** `boldRuns` counts paragraph-style
+        // carriers as well as span carriers, so a count-only assertion would also be satisfied by
+        // three whole PARAGRAPHS going bold — a different outcome entirely, and one that would still
+        // let the description's claim be wrong.
         XCTAssertEqual(after.count, 3,
                        "direct character formatting SURVIVES a paragraph style being applied over it "
                            + "(found \(after.count) bold runs). If this ever fails, the tool "
                            + "description's ordering advice must change with it.")
+        for run in after {
+            XCTAssertEqual(run, "MARKER",
+                           "and it must still be the MATCHED WORD that is bold, not the whole "
+                               + "paragraph: found a bold run of \"\(run)\"")
+        }
     }
 
     /// Alignment and line spacing, the two argument-free attributes, land in the saved bytes.
@@ -982,10 +1053,14 @@ final class OfficeDocsCommandTests: XCTestCase {
         XCTAssertNotEqual(after, before, "the saved bytes must actually differ from the pristine file")
     }
 
-    /// `style` applies, and an unknown style is refused BEFORE dispatch rather than silently doing
-    /// nothing (the engine swallows its own `getByName` exception, so without pre-validation an
-    /// unknown name is a success-reporting no-op).
-    func testLiveDocsFormatAppliesAHeadingStyleAndPreValidatesAgainstTheEnginesOwnCatalogue() async throws {
+    /// `style` applies and reaches the saved bytes.
+    ///
+    /// ⚠️ **Renamed after review (F-7): the old name promised a pre-validation arm this body does not
+    /// have.** Pre-validation against the engine's catalogue does run in the bridge, but it is not
+    /// reachable through the tool — the `style` enum carries only names measured present in that
+    /// catalogue — so there is nothing for a drill here to exercise. Naming an arm a test does not
+    /// have is how a suite comes to read as covering more than it does.
+    func testLiveDocsFormatAppliesAHeadingStyleToTheMatchedParagraph() async throws {
         let (path, host, _) = try await openLive("format-target.odt")
         let result = await send(command("office.docs.format",
                                         args: ["path": path, "find": "Alpha MARKER one", "style": "heading1"],

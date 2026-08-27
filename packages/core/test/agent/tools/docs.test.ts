@@ -131,6 +131,54 @@ describe("registration", () => {
 });
 
 // ================================================================================================
+// office-format review F-1 — the vanishing-operand class, fourth occurrence
+// ================================================================================================
+
+describe("format operands never vanish onto another verb", () => {
+  // **This is the pin for a defect that shipped and was caught in review.** The operand-refusal loop
+  // originally exempted the whole `replace` VERB rather than the single shared key `find`, so a
+  // formatting attribute sent alongside a replace passed zod, was dropped on the way to the wire,
+  // and the call reported success. The model asked for bold and was told it worked.
+  //
+  // Asserted as a REFUSAL and as NOTHING DISPATCHED, because either one alone is weak: a refusal
+  // without the dispatch check would not prove the file was left alone, and a dispatch check without
+  // the refusal would pass for a call that silently did nothing.
+  for (const key of ["bold", "italic", "underline", "align", "lineSpacing", "style"] as const) {
+    const value = ["bold", "italic", "underline"].includes(key) ? true
+      : key === "align" ? "center" : key === "lineSpacing" ? "double" : "heading1";
+    test(`docs replace refuses a \`${key}\` instead of dropping it`, async () => {
+      const h = makeHarness();
+      const result = await h.run({
+        verb: "replace", path: "/repo/a.odt", find: "x", replaceWith: "y", [key]: value,
+      });
+      expect(result.isError).toBe(true);
+      expect(result.output).toContain(`has no \`${key}\``);
+      // The load-bearing half: nothing reached the wire. A refusal alone would not prove the
+      // user's file was left alone, and a dispatch check alone would pass for a silent no-op.
+      expect(h.recorded).toHaveLength(0);
+    });
+  }
+
+  // The other half of the per-key rule, and the reason it is per-KEY: `find` is genuinely shared
+  // with `replace` and must still work there. A fix that refused `find` on `replace` would break the
+  // verb it was protecting.
+  test("`find` is still accepted on replace — the exemption is per-key, not a blanket ban", async () => {
+    const h = makeHarness();
+    await h.run({ verb: "replace", path: "/repo/a.odt", find: "x", replaceWith: "y" });
+    expect(h.recorded).toHaveLength(1);
+    expect(h.recorded[0]!.args).toMatchObject({ find: "x", replaceWith: "y" });
+  });
+
+  // And `find` is accepted on `format`, where it is the scope operand.
+  test("`find` is accepted on format, where it selects what to format", async () => {
+    const h = makeHarness();
+    await h.run({ verb: "format", path: "/repo/a.odt", find: "x", bold: true });
+    expect(h.recorded).toHaveLength(1);
+    expect(h.recorded[0]!.args).toMatchObject({ find: "x", bold: true });
+  });
+});
+
+// ================================================================================================
 // info
 // ================================================================================================
 

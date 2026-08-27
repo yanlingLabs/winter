@@ -1372,38 +1372,6 @@ final class LOKBridge: OfficeDocumentBridge {
     }
     private static let docsRtfReadAttempts = 6
 
-    /// Is `word` present in `rtf` as a REAL control word — and, if it takes a numeric parameter, is
-    /// that parameter non-zero?
-    ///
-    /// **This is deliberately not `rtf.contains("\\b")`, and the difference is the whole value of the
-    /// check.** RTF control-word syntax is a backslash, ASCII letters, then an optional signed
-    /// integer, terminated by any non-alphanumeric — so a bare substring test for `\b` also matches
-    /// `\bin`, `\brdrs`, `\bullet` and `\blue`, and would report BOLD on a document containing none.
-    /// That is the vacuous-drill shape this arc keeps producing. The rule enforced here is: the
-    /// character after `word` must not be a letter.
-    ///
-    /// A trailing `0` is the OFF form (`\b0`, `\i0`), so it does not count as present. `\ulnone` —
-    /// underline's own off switch — is excluded for free by the not-a-letter rule, since `n` is a
-    /// letter; that property is load-bearing, not incidental, and must survive any edit here.
-    static func officeRtfHasControlWord(_ rtf: String, _ word: String) -> Bool {
-        let needle = "\\" + word
-        var searchStart = rtf.startIndex
-        while let found = rtf.range(of: needle, range: searchStart..<rtf.endIndex) {
-            searchStart = found.upperBound
-            guard found.upperBound < rtf.endIndex else { return true } // ends the payload: a bare word
-            let next = rtf[found.upperBound]
-            if next.isLetter { continue }        // \bin, \brdrs, \ulnone — a DIFFERENT control word
-            if next == "0" {
-                // The OFF form — but only when the parameter really is zero, so `\b0` is off while
-                // `\b01` (a leading-zero 1) is not mistaken for it.
-                let afterZero = rtf.index(after: found.upperBound)
-                if afterZero >= rtf.endIndex || !rtf[afterZero].isNumber { continue }
-            }
-            return true
-        }
-        return false
-    }
-
     /// The style catalogue, as PRE-FLIGHT VALIDATION — the one genuinely useful thing
     /// `getCommandValues` offers a formatting verb.
     ///
@@ -1463,6 +1431,15 @@ final class LOKBridge: OfficeDocumentBridge {
     /// Returns what was dispatched, what the RTF read-back CONFIRMED, whether that read-back was
     /// available at all, and how many occurrences of `find` the document text contains (counted by
     /// us — the engine's own match count is collapsed to a bool before it can reach LOK).
+    ///
+    /// ⚠️ **`verified` is EXISTENTIAL over the formatted range, never universal, and the sentence
+    /// the model reads must say so.** The selection is a FIND_ALL over all N matches at once, and
+    /// the check asks only whether the control word appears in the serialized body — so a `true`
+    /// means *at least one* of the N ranges carries the attribute, not all N. Measured: a document
+    /// with three matches of which exactly one is bold reports the attribute present whichever one
+    /// it is, and RTF additionally MERGES adjacent runs, so per-occurrence attribution is partly
+    /// destroyed by the serializer before this code ever sees it. Answering "all N" honestly would
+    /// need a per-run parse of the body; v1 narrows the CLAIM instead of overstating the check.
     private func docsFormatOnDedicatedThread(docId: String, find: String?, align: OfficeDocsAlign?,
                                              lineSpacing: OfficeDocsLineSpacing?, bold: Bool?, italic: Bool?,
                                              underline: Bool?, style: OfficeDocsParagraphStyle?)
@@ -1542,10 +1519,15 @@ final class LOKBridge: OfficeDocumentBridge {
         if (try? docsSelectForFormatOnDedicatedThread(doc, docId: docId, viewId: agentViewId, find: find)) != nil,
            let rtf = docsSelectionRtfOnDedicatedThread(doc, viewId: agentViewId) {
             verifyAvailable = true
-            if let bold, bold == Self.officeRtfHasControlWord(rtf, "b") { verified.append("bold") }
-            if let italic, italic == Self.officeRtfHasControlWord(rtf, "i") { verified.append("italic") }
-            if let underline, underline == Self.officeRtfHasControlWord(rtf, "ul") { verified.append("underline") }
-            if let align, Self.officeRtfHasControlWord(rtf, Self.officeDocsAlignRtfToken(align)) {
+            // **BODY ONLY.** Scanning the whole RTF reads the document's own style table and
+            // confirms attributes that were never applied — see `OfficeRtfScope.officeRtfBody`'s header for the two
+            // measured failures that produced. This one call is the difference between a
+            // verification and a machine for manufacturing agreement.
+            let body = OfficeRtfScope.officeRtfBody(rtf)
+            if let bold, bold == OfficeRtfScope.officeRtfHasControlWord(body, "b") { verified.append("bold") }
+            if let italic, italic == OfficeRtfScope.officeRtfHasControlWord(body, "i") { verified.append("italic") }
+            if let underline, underline == OfficeRtfScope.officeRtfHasControlWord(body, "ul") { verified.append("underline") }
+            if let align, OfficeRtfScope.officeRtfHasControlWord(body, Self.officeDocsAlignRtfToken(align)) {
                 verified.append("align")
             }
         }

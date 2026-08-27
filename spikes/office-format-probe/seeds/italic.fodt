@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The TRUE-POSITIVE arm for italic, and it is as load-bearing as the leak arms: body-scoping must
+     not trade a false positive for a false negative. Real italic on an automatic character style,
+     inline in the body — where a scoped check must still find it. -->
+<office:document xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+    xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0"
+    xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"
+    xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0"
+    office:version="1.3"
+    office:mimetype="application/vnd.oasis.opendocument.text">
+  <office:automatic-styles>
+    <style:style style:name="RealItalic" style:family="text">
+      <style:text-properties fo:font-style="italic"/>
+    </style:style>
+    <style:style style:name="RealUnder" style:family="text">
+      <style:text-properties style:text-underline-style="solid" style:text-underline-width="auto"/>
+    </style:style>
+  </office:automatic-styles>
+  <office:body>
+    <office:text>
+      <text:p>lead <text:span text:style-name="RealItalic">ITALICWORD</text:span> tail</text:p>
+      <text:p>lead <text:span text:style-name="RealUnder">UNDERWORD</text:span> tail</text:p>
+    </office:text>
+  </office:body>
+</office:document>

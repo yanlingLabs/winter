@@ -2130,12 +2130,22 @@ struct OfficeCommandConsumer {
             if verified.isEmpty {
                 sentence += " Norma read the text back afterwards and could not confirm any of it — "
                     + "re-read the document before relying on this."
-            } else if unconfirmed.isEmpty {
-                sentence += " Confirmed by reading the formatting back out of the document."
             } else {
-                sentence += " Confirmed \(verified.joined(separator: ", ")) by reading it back; "
-                    + "\(unconfirmed.joined(separator: ", ")) could not be confirmed the same way "
-                    + "(some attributes leave no readable trace, so this is not the same as failure)."
+                // **The claim is EXISTENTIAL and the sentence says so.** The check asks whether the
+                // attribute appears in the re-read range, which over N matched occurrences means
+                // "at least one of them" — never "all N". Saying a bare "Confirmed" for a format
+                // that reached 1 of 3 occurrences would be a false universal claim, so the count is
+                // named whenever there is more than one occurrence to be wrong about.
+                let scope = (find != nil && occurrences > 1)
+                    ? "in at least one of the \(occurrences) occurrences (Norma cannot check each one "
+                        + "separately)"
+                    : "in the text it re-read"
+                sentence += " Confirmed \(verified.joined(separator: ", ")) \(scope)."
+                if !unconfirmed.isEmpty {
+                    sentence += " \(unconfirmed.joined(separator: ", ")) could not be confirmed the "
+                        + "same way (some attributes leave no readable trace, so this is not the "
+                        + "same as failure)."
+                }
             }
         }
         return sentence

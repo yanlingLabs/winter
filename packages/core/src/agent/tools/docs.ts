@@ -411,9 +411,12 @@ export function registerDocsTool(r: ToolRegistry, deps: DocsToolDeps): void {
       + "your find touches, not just the matched words. bold/italic/underline affect exactly the "
       + "matched text, and they survive a style applied afterwards — the two are independent, so you "
       + "can set them in either order.\n"
-      + "  format checks its own work where it can: it re-reads the formatting back out of the "
-      + "document and tells you what it could confirm. When it says it could not confirm something, "
-      + "that means it could not CHECK — not that it failed. Re-read if it matters.\n"
+      + "  format checks its own work where it can: it re-reads the formatted text back out of the "
+      + "document and tells you what it could confirm. Two things that check does NOT mean. When it "
+      + "says it could not confirm something, that means it could not CHECK — not that it failed. "
+      + "And when you format several occurrences at once, a confirmation means the attribute is "
+      + "there in AT LEAST ONE of them, not that every one was reached — Norma cannot check them "
+      + "individually. Re-read if it matters.\n"
       + "Every path must be inside this session's own working directories — an office read/write "
       + "COPIES the file and parses it with LibreOffice, so it is not an ordinary file read/write and "
       + "the usual unrestricted-reads rule does not cover it.\n"
@@ -503,18 +506,27 @@ export function registerDocsTool(r: ToolRegistry, deps: DocsToolDeps): void {
         throw new Error("docs append always adds at the end — it has no `at`. Use verb:\"insert\" "
           + "with at:\"start\" to put text at the beginning instead.");
       }
-      // `format`'s own operands. Every one of them is a `format`-only key, and a present one on any
-      // OTHER verb REFUSES rather than being ignored — the same rule `texts` and `at` already follow
-      // here. Ignoring a formatting operand on, say, `replace` would tell the model its formatting
-      // request succeeded when nothing of the sort was sent.
-      const formatOnlyKeys = ["find", "align", "lineSpacing", "style", "bold", "italic", "underline"] as const;
-      if (a.verb !== "format" && a.verb !== "replace") {
-        for (const key of formatOnlyKeys) {
-          if (a[key] !== undefined) {
-            throw new Error(`docs ${a.verb} has no \`${key}\` — that is a \`format\` operand. `
-              + `Use verb:"format" to change how text looks.`);
-          }
-        }
+      // `format`'s own operands. A present one on any verb that does not take it REFUSES rather
+      // than being ignored — the same rule `texts` and `at` already follow. Ignoring a formatting
+      // operand on, say, `replace` would tell the model its formatting request succeeded when
+      // nothing of the sort was sent.
+      //
+      // ⚠️ **The exemption is PER-KEY, not per-verb, and getting that wrong was the fourth
+      // occurrence of the vanishing-operand class in this arc.** `find` is genuinely shared with
+      // `replace`; the six formatting attributes are not. An earlier version exempted the whole
+      // `replace` VERB from this loop, so `{verb:"replace", find, replaceWith, bold:true}` passed
+      // zod, dropped `bold` on the way to the wire, and reported success — pinned 3/3 in review.
+      // Each key now names the verbs that may carry it.
+      const FORMAT_OPERAND_VERBS: Record<string, ReadonlyArray<DocsArgs["verb"]>> = {
+        find: ["format", "replace"],
+        align: ["format"], lineSpacing: ["format"], style: ["format"],
+        bold: ["format"], italic: ["format"], underline: ["format"],
+      };
+      for (const [key, allowedVerbs] of Object.entries(FORMAT_OPERAND_VERBS)) {
+        if (a[key as keyof DocsArgs] === undefined) continue;
+        if (allowedVerbs.includes(a.verb)) continue;
+        throw new Error(`docs ${a.verb} has no \`${key}\` — that is a \`format\` operand. `
+          + `Use verb:"format" to change how text looks.`);
       }
       if (a.verb === "format") {
         if (a.align === undefined && a.lineSpacing === undefined && a.style === undefined

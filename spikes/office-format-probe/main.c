@@ -70,6 +70,8 @@
 #define KEY_TAB_ 0x502
 #define KEY_F2_ 0x50D
 #define KEY_ESCAPE_ 0x501
+/* SvxSearchCmd, include/svl/srchitem.hxx:36-42 — FIND=0, FIND_ALL=1. */
+#define officeSearchCommandFindAllC 1
 
 /* No-op sink — see the registration site. Prints nothing by default (a real LOK document emits
    hundreds of callbacks); set OFP_TRACE to see the raw types. */
@@ -314,6 +316,13 @@ int main(int argc, char **argv) {
             if (!rtf) {
                 printf("%s_RTF_NULL\n", names[v]);
             } else {
+                /* Raw dump, so the containment check can be developed and validated OFFLINE against
+                   real engine output instead of guessed at. OFP_RTF_OUT names the file. */
+                const char *dumpPath = getenv("OFP_RTF_OUT");
+                if (dumpPath) {
+                    FILE *f = fopen(dumpPath, "wb");
+                    if (f) { fwrite(rtf, 1, strlen(rtf), f); fclose(f); printf("%s_RTF_DUMP: %s\n", names[v], dumpPath); }
+                }
                 printf("%s_RTF_LEN: %zu\n", names[v], strlen(rtf));
                 printf("%s_RTF_HEAD: %.300s\n", names[v], rtf);
                 int on = 0, off = 0;
@@ -349,7 +358,12 @@ int main(int argc, char **argv) {
            `argv[5]` is the literal to FIND; `argv[6]` a string that must NOT appear if the RTF is
            really scoped to the match. */
         if (argc < 7) { fprintf(stderr, "rtf-scope needs <findLiteral> <outsideMarker>\n"); return 2; }
-        uno(doc, ".uno:ExecuteSearch", search_args(argv[5], 0 /* FIND — selects without replacing */));
+        /* F-5: the SEARCH COMMAND is now an argument, defaulting to FIND_ALL(1) — the command the
+           bridge actually dispatches. The original arms used FIND(0) and therefore measured a
+           different path than production. */
+        int scopeCmd = argc > 7 ? atoi(argv[7]) : officeSearchCommandFindAllC;
+        printf("FIND_SEARCH_CMD: %d\n", scopeCmd);
+        uno(doc, ".uno:ExecuteSearch", search_args(argv[5], scopeCmd));
         pump(doc, 0);
         char *plain = doc->pClass->getTextSelection(doc, "text/plain;charset=utf-8", NULL);
         int at = 1;
@@ -376,6 +390,11 @@ int main(int argc, char **argv) {
         printf("FIND_RTF_ATTEMPTS: %d\n", rat);
         if (!rtf) { printf("FIND_RTF_NULL\n"); }
         else {
+            const char *dumpPath = getenv("OFP_RTF_OUT");
+            if (dumpPath) {
+                FILE *f = fopen(dumpPath, "wb");
+                if (f) { fwrite(rtf, 1, strlen(rtf), f); fclose(f); printf("FIND_RTF_DUMP: %s\n", dumpPath); }
+            }
             printf("FIND_RTF_LEN: %zu\n", strlen(rtf));
             printf("FIND_RTF_HAS_NEEDLE: %d\n", strstr(rtf, argv[5]) ? 1 : 0);
             printf("FIND_RTF_HAS_OUTSIDE: %d\n", strstr(rtf, argv[6]) ? 1 : 0);
