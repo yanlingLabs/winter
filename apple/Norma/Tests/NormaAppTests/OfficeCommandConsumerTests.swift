@@ -622,6 +622,32 @@ final class OfficeCommandConsumerTests: XCTestCase {
         XCTAssertTrue(result.contains("formulas"), result)
     }
 
+    /// office-polish blind check, Important — **the case the over-cap test never covered.** The
+    /// existing oversized-result test pins that path with a VERIFIED read, so it never noticed that
+    /// `capped` replaces its whole input with a refusal sentence: an oversized read whose display
+    /// mode was left unverified used to be answered with `ok:false`, no rows, and no warning — the
+    /// one path where the model most needed telling was the one path where it was told nothing.
+    /// A test that covers the path but not the case, which is the shape that let two earlier
+    /// attempts through, so this is the case rather than another instance of the path.
+    func testAnOversizedUnverifiedReadStillCarriesTheWarningWithItsRefusal() async {
+        let path = makeScratchFile()
+        let hugeRow = (0..<5_000).map { "cell-\($0)-" + String(repeating: "x", count: 20) }
+        let world = makeSheetsWorld(
+            workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
+            sheetsRead: { _, _, _, _ in ([hugeRow], false) })
+        world.consumer.handle(command("office.sheets.read",
+                                       args: ["path": path, "sheet": "Sheet1", "range": "A1:A1",
+                                              "formulas": true]))
+        await waitUntil { !self.sent.isEmpty }
+        XCTAssertEqual(sent.first?.ok, false, "an oversized answer is still refused")
+        let result = sent.first?.result ?? ""
+        XCTAssertTrue(result.contains("past the"), "the refusal itself must survive: \(result)")
+        XCTAssertTrue(result.contains("could not confirm"),
+                      "the refusal must CARRY the unverified-display-mode warning: \(result)")
+        XCTAssertLessThanOrEqual(PanelURLPolicy.wireLength(result), PanelCommandConsumer.resultMaxLength,
+                                 "warning included, the composed result must still fit the wire cap")
+    }
+
     /// office-polish final check, Critical — **the unverified verdict has to reach the MODEL**, not
     /// just a log. A `formulas: true` read flips Calc's document-wide Show Formulas mode and can
     /// fail to put it back; on a document whose formulas sit below the probe's cap the helper cannot

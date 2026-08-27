@@ -2944,6 +2944,14 @@ final class LOKBridge: OfficeDocumentBridge {
     /// `false` and is set `true` exactly where this bridge knows it could not check. It reaches the
     /// model, through `sheetsReadOk`, because a model handed formula SOURCE as if it were a value is
     /// the actual defect — a model told "unverified" can simply read again.
+    ///
+    /// **What "verified" strictly means, since the word promises more than the check delivers**
+    /// (office-polish blind check, Minor): the probe compares against the state this read ENTERED
+    /// on, not against values mode. If some earlier read had already left the document in Show
+    /// Formulas, "verified" means "put back the way I found it", not "showing values". That is the
+    /// correct semantic for a restore and it is empirically unreachable — a read can only leave that
+    /// state behind by failing, and a failure now reports `unverified` and warns — but the word
+    /// alone does not say so, which is why this paragraph does.
     final class FormulaRestoreOutcome {
         var unverified = false
     }
