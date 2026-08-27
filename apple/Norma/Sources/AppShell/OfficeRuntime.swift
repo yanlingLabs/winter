@@ -1965,6 +1965,14 @@ final class OfficeRuntime: ObservableObject {
     /// there, exactly as a debounced one was.
     func close(_ path: String) {
         agentEngagedPaths.remove(path)
+        // office-authoring — drop any create permission this path still holds. `openAndDispatch` is
+        // the normal consumer, but it only runs when the reducer actually emits `.helperOpen`; if
+        // something else opened this path first (a tab racing the broker's own snapshot read), the
+        // request is dropped by the reducer and the entry would otherwise outlive it. A STALE entry
+        // is not inert: it would let a LATER, ordinary open of a since-deleted file silently mint a
+        // blank document in place of the user's missing one. Bounded here to the document's own
+        // session, and again at teardown below.
+        createOnOpenPaths.remove(path)
         perform(dispatch(.closeRequested(path: path)))
     }
 
@@ -4726,6 +4734,9 @@ final class OfficeRuntime: ObservableObject {
         periodicSaveTask?.cancel()
         periodicSaveTask = nil
         agentEngagedPaths.removeAll()
+        // office-authoring — same reasoning as `close`'s own removal: a create permission must never
+        // outlive the runtime that was asked for it.
+        createOnOpenPaths.removeAll()
         // Office Stage B Task 2 — the save-suppression bag goes with everything else this runtime
         // holds; mirrors `EditorRuntime`'s own teardown treatment of its identical bag.
         pendingExpectedWrites.removeAll()
