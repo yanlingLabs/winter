@@ -33,13 +33,21 @@ final class OfficeInputCodesTests: XCTestCase {
 
     /// AppKit keyCode 51 is physically labeled "delete" (backspace) on every Mac keyboard; 117 is
     /// the SEPARATE forward-delete key (fn+Delete on a laptop, or a dedicated Del key on a full
-    /// keyboard) — LO's own table maps BOTH to the identical `KEY_DELETE` (`ImplMapKeyCode`'s own
-    /// two distinct rows, both value `51`/`0x33` = `KEY_DELETE`), so this is a real, source-verified
-    /// fact about LOK's own vocabulary (it has one "delete" concept, not two), not an oversight in
-    /// this table.
-    func testBothBackspaceAndForwardDeleteMapToTheSameKeyDelete() {
-        XCTAssertEqual(OfficeInputCodes.baseCode(appKitKeyCode: 51), 1286, "backspace/delete")
-        XCTAssertEqual(OfficeInputCodes.baseCode(appKitKeyCode: 117), 1286, "forward-delete")
+    /// keyboard). **They are two different keys and they must reach LOK as two different codes.**
+    ///
+    /// This assertion used to say both were `1286`, citing "`ImplMapKeyCode`'s own two distinct
+    /// rows, both value `51`/`0x33` = `KEY_DELETE`" — which reads the array INDEX (`0x33` is 51,
+    /// the macOS scancode for Backspace) as if it were the value, and pinned a real shipped defect:
+    /// Backspace forward-deleted in every office tab. The correct source is `ImplMapCharCode`, the
+    /// table LO consults FIRST (`sendSingleCharacter:` falls through to `ImplMapKeyCode` only when
+    /// the character maps to 0), whose row `0x7F` — what the Backspace key actually reports — is
+    /// `KEY_BACKSPACE`. Values re-derived from `Key.idl`: `BACKSPACE = 1283`, `DELETE = 1286`.
+    func testBackspaceAndForwardDeleteMapToTheirOwnDistinctLOKCodes() {
+        XCTAssertEqual(OfficeInputCodes.baseCode(appKitKeyCode: 51), 1283, "backspace -> KEY_BACKSPACE")
+        XCTAssertEqual(OfficeInputCodes.baseCode(appKitKeyCode: 117), 1286, "fn+Delete -> KEY_DELETE")
+        XCTAssertNotEqual(OfficeInputCodes.baseCode(appKitKeyCode: 51),
+                          OfficeInputCodes.baseCode(appKitKeyCode: 117),
+                          "the two physical delete keys must never collapse to one wire code again")
     }
 
     // MARK: - Letters and digits (independently re-typed from Key.idl, not copied from the table)
