@@ -6161,4 +6161,99 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         do { return strippedODFBodyText(try readODFContentXML(atPath: live.path)) }
         catch { XCTFail("could not read the saved content.xml: \(error)"); return "" }
     }
+
+    // MARK: - office-authoring Job 1: create-on-missing, across all three document kinds
+
+    /// ⭐ The CROSS-KIND proof: `createIfMissing` mints the right kind of document for a Writer, a
+    /// Calc and an Impress extension, and the saved bytes really are that format.
+    ///
+    /// **Deliberately at the RUNTIME level, not through an agent verb.** The consumer-level drills
+    /// (`OfficeDocsCommandTests`) already prove create-then-write end to end for Writer. Extending
+    /// those to slides and sheets would have meant driving `slides add_slide` / `sheets set`, which
+    /// are `.uno:` dispatches on the agent view — and those land non-deterministically for a reason
+    /// that has nothing to do with this feature (the pre-existing agent-view dispatch race, written
+    /// up in `.superpowers/research/office-authoring-report.md` §4-5). A drill that flaked for
+    /// THAT reason would say nothing about creation, and would poison the suite. Opening and saving
+    /// touch no `.uno:` command at all, so this isolates exactly the mechanism under test.
+    ///
+    /// Three assertions per kind, each failing differently:
+    ///   1. the document OPENS — the factory URL resolved and `saveAs` wrote something loadable;
+    ///   2. LOK reports the EXPECTED KIND — a factory that silently produced a Writer document for
+    ///      `.xlsx` would still have saved cleanly under that name, and only this catches it;
+    ///   3. the saved package contains the format's OWN marker entry — `word/`, `xl/` or `ppt/` —
+    ///      which is a property of the bytes, not of what the engine reported about them.
+    func testCreateIfMissingMintsTheRightKindForWriterCalcAndImpress() async throws {
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
+                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR")
+        let vendorRoot = Self.vendorProductSetRoot
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
+                      "LibreOffice vendor tree not present at \(vendorRoot.path)")
+
+        // (extension, the kind LOK must report, the entry only that package format has)
+        let cases: [(ext: String, kind: OfficeDocumentKind, marker: String)] = [
+            ("docx", .text, "word/document.xml"),
+            ("xlsx", .spreadsheet, "xl/workbook.xml"),
+            ("pptx", .presentation, "ppt/presentation.xml"),
+        ]
+
+        for (ext, expectedKind, marker) in cases {
+            let stateDir = makeScratchDirectory()
+            let directory = SessionDirectory(lister: { [] })
+            let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+            host.makeOfficeHelperSupervisor = {
+                OfficeHelperSupervisor(configuration: OfficeHelperSupervisor.Configuration(
+                    helperExecutableURL: helperURL,
+                    socketDirectory: stateDir,
+                    extraArguments: ["--lok-root", vendorRoot.path,
+                                     "--sandbox-profile", Self.sandboxProfilePath.path]))
+            }
+            let runtime = host.officeRuntime(for: "S1")
+            let path = makeScratchDirectory().appendingPathComponent("created.\(ext)").path
+            XCTAssertFalse(FileManager.default.fileExists(atPath: path),
+                           "control: created.\(ext) must not exist before the open")
+
+            runtime.open(path, createIfMissing: true)
+            let settled = await waitUntil(timeout: 90) {
+                runtime.stateSnapshot.documents[path] != nil || runtime.stateSnapshot.phase == .failed
+            }
+            XCTAssertTrue(settled, ".\(ext): the created document never settled — phase: \(runtime.stateSnapshot.phase)")
+            guard let doc = runtime.stateSnapshot.documents[path] else {
+                _ = host.teardownAllOfficeRuntimesAndStopHelper()
+                XCTFail(".\(ext): create+open failed: \(runtime.stateSnapshot.openFailures[path] ?? "no reason recorded")")
+                continue
+            }
+            XCTAssertEqual(doc.type, expectedKind,
+                           ".\(ext) must be created as a \(expectedKind.rawValue), not a \(doc.type.rawValue)")
+
+            // The blank document reaches the user's real path through the ORDINARY save path —
+            // helper renders into its jail, the app places it atomically — untouched by this work.
+            runtime.save(path)
+            let landed = await waitUntil(timeout: 60) { FileManager.default.fileExists(atPath: path) }
+            XCTAssertTrue(landed, ".\(ext): the created document never landed on disk")
+
+            let entries = Self.zipEntryNames(atPath: path)
+            XCTAssertTrue(entries.contains(marker),
+                          ".\(ext)'s saved bytes must be a real \(ext) package (looking for \(marker)); "
+                            + "got: \(entries.prefix(12).joined(separator: ", "))")
+            _ = host.teardownAllOfficeRuntimesAndStopHelper()
+        }
+    }
+
+    /// Every entry name in a zip package, read with `/usr/bin/unzip -Z1` — a property of the BYTES,
+    /// independent of the file's extension or of anything the engine reported about it.
+    private static func zipEntryNames(atPath path: String) -> [String] {
+        let unzip = Process()
+        unzip.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+        unzip.arguments = ["-Z1", path]
+        let pipe = Pipe()
+        unzip.standardOutput = pipe
+        unzip.standardError = Pipe()
+        do { try unzip.run() } catch { return [] }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        unzip.waitUntilExit()
+        return (String(data: data, encoding: .utf8) ?? "")
+            .split(separator: "\n").map(String.init)
+    }
+
 }
