@@ -71,6 +71,14 @@
 #define KEY_F2_ 0x50D
 #define KEY_ESCAPE_ 0x501
 
+/* No-op sink — see the registration site. Prints nothing by default (a real LOK document emits
+   hundreds of callbacks); set OFP_TRACE to see the raw types. */
+static void probe_callback(int nType, const char *pPayload, void *pData) {
+    (void)pData;
+    if (getenv("OFP_TRACE"))
+        fprintf(stderr, "[cb] type=%d payload=%.120s\n", nType, pPayload ? pPayload : "");
+}
+
 static char *file_url(const char *plain_path) {
     size_t len = strlen(plain_path);
     char *url = malloc(len + 8);
@@ -245,6 +253,16 @@ int main(int argc, char **argv) {
     int doctype = doc->pClass->getDocumentType(doc);
     printf("DOCTYPE: %d\n", doctype);
     bool is_impress = (doctype == LOK_DOCTYPE_PRESENTATION_);
+
+    /* A no-op callback on the document. LOK builds its per-view `CallbackFlushHandler` machinery
+       only when a callback is registered, and a good deal of dispatch completion queues through it
+       — so a bench with no callback is not merely missing diagnostics, it may be missing the pump
+       that completes an attribute dispatch. Registered before the agent view is minted so the
+       handler exists for both views. */
+    if (getenv("OFP_CALLBACK")) {
+        doc->pClass->registerCallback(doc, probe_callback, NULL);
+        printf("CALLBACK: registered\n");
+    }
 
     /* The AGENT VIEW. Every agent-facing verb in LOKBridge runs on a second view created with
        createView + setView, so the user's own caret and selection are untouched (docs ruling 4:
