@@ -210,7 +210,7 @@ final class ComposerChromeTests: XCTestCase {
     func testTheCardDerivesItsChromeFromItsOwnMode() {
         for mode in SessionMode.allCases {
             let card = NormaComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(mode),
-                                         policy: nil, model: wiredModel())
+                                         policy: nil, model: wiredModel(), stop: nil)
             XCTAssertEqual(card.chrome.mode, mode,
                            "the card rendered \(card.chrome.mode)'s composer for a \(mode) session")
         }
@@ -227,7 +227,7 @@ final class ComposerChromeTests: XCTestCase {
         let card = NormaComposerCard(text: .constant("hi"), onSubmit: {},
                                      mode: .constant(.chat), modeIsSelectable: false,
                                      policy: wiredPolicy("bypass"), model: wiredModel(),
-                                     stripEdge: .above)
+                                     stripEdge: .above, stop: nil)
         XCTAssertNil(card.chrome.makeStrip())
     }
 
@@ -237,7 +237,7 @@ final class ComposerChromeTests: XCTestCase {
         let card = NormaComposerCard(text: .constant("hi"), onSubmit: {},
                                      mode: .constant(.code), modeIsSelectable: false,
                                      policy: wiredPolicy("ask"), model: wiredModel(),
-                                     stripEdge: .above)
+                                     stripEdge: .above, stop: nil)
         XCTAssertEqual(String(describing: type(of: card.chrome)), "CodeComposerChrome")
     }
 
@@ -447,7 +447,7 @@ final class ComposerChromeTests: XCTestCase {
     func testTheCardsChipOffersTiersOnlyOnTheModeThatMaySelectThem() {
         for mode in SessionMode.allCases {
             let card = NormaComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(mode),
-                                         policy: nil, model: wiredModel(model: "srv-a"))
+                                         policy: nil, model: wiredModel(model: "srv-a"), stop: nil)
             XCTAssertEqual(card.modelRow.tiers, mode == .code ? ["ultra"] : [],
                            "\(mode)'s chip offered tiers \(card.modelRow.tiers)")
         }
@@ -460,7 +460,7 @@ final class ComposerChromeTests: XCTestCase {
     func testEveryModeIncludingDispatchStillOffersTheCataloguesModelsAndWireEfforts() {
         for mode in SessionMode.allCases {
             let card = NormaComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(mode),
-                                         policy: nil, model: wiredModel(model: "srv-b"))
+                                         policy: nil, model: wiredModel(model: "srv-b"), stop: nil)
             XCTAssertEqual(card.modelRow.options, ["srv-a", "srv-b"], "\(mode) must still offer the models")
             XCTAssertEqual(card.modelRow.wire, ["high", "max"],
                            "\(mode) must still offer the WIRE efforts — they are model-scoped, never mode-scoped")
@@ -473,11 +473,11 @@ final class ComposerChromeTests: XCTestCase {
     /// Absent a pick, `effortPickerOptions`' own fallback to the catalogue's default model applies.
     func testTheChipsWireEffortsFollowTheModelInForce() {
         let held = NormaComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(.chat),
-                                     policy: nil, model: wiredModel(model: "srv-b"))
+                                     policy: nil, model: wiredModel(model: "srv-b"), stop: nil)
         XCTAssertEqual(held.modelRow.wire, ["high", "max"], "the HELD model's levels, not the default's")
 
         let unpicked = NormaComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(.chat),
-                                         policy: nil, model: wiredModel(model: nil))
+                                         policy: nil, model: wiredModel(model: nil), stop: nil)
         XCTAssertEqual(unpicked.modelRow.wire, ["none", "low", "high"],
                        "no pick ⇒ the daemon's live default model decides the levels")
     }
@@ -488,12 +488,12 @@ final class ComposerChromeTests: XCTestCase {
     /// effort invisible everywhere on the page.
     func testTheChipNamesTheModelInForceAndTheEffortBesideIt() {
         let unset = NormaComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(.chat),
-                                      policy: nil, model: wiredModel()).modelRow
+                                      policy: nil, model: wiredModel(), stop: nil).modelRow
         XCTAssertEqual(unset.chipTitle, newChatModelPlaceholder)
         XCTAssertEqual(unset.chipTitle, "Default model", "…which is the text this slot already rendered")
 
         let picked = NormaComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(.chat),
-                                       policy: nil, model: wiredModel(model: "srv-b", effort: "high")).modelRow
+                                       policy: nil, model: wiredModel(model: "srv-b", effort: "high"), stop: nil).modelRow
         XCTAssertEqual(picked.chipTitle, "srv-b · high")
         XCTAssertTrue(picked.help.contains("srv-b"))
         XCTAssertTrue(picked.help.contains("high"))
@@ -504,12 +504,12 @@ final class ComposerChromeTests: XCTestCase {
     /// effort are separate affordances; a model change in flight must never disable the effort rows).
     func testAModelOrEffortChangeInFlightIsVisibleOnTheChip() {
         let modelBusy = NormaComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(.code),
-                                          policy: nil, model: wiredModel(modelInFlight: true)).modelRow
+                                          policy: nil, model: wiredModel(modelInFlight: true), stop: nil).modelRow
         XCTAssertTrue(modelBusy.modelChangeInFlight)
         XCTAssertFalse(modelBusy.effortChangeInFlight, "…and only that half")
 
         let effortBusy = NormaComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(.code),
-                                           policy: nil, model: wiredModel(effortInFlight: true)).modelRow
+                                           policy: nil, model: wiredModel(effortInFlight: true), stop: nil).modelRow
         XCTAssertTrue(effortBusy.effortChangeInFlight)
         XCTAssertFalse(effortBusy.modelChangeInFlight)
     }
@@ -591,7 +591,7 @@ final class ComposerChromeTests: XCTestCase {
     func testNeitherModeTheNewChatPageOffersCanHoldATier() {
         for mode in newChatModeOptions {
             let card = NormaComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(mode),
-                                         policy: nil, model: wiredModel(model: "srv-a"))
+                                         policy: nil, model: wiredModel(model: "srv-a"), stop: nil)
             XCTAssertEqual(card.modelRow.tiers, [],
                            "\(mode) is one of the new-chat page's two modes — a tier held there fails the create")
         }

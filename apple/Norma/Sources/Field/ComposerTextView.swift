@@ -70,6 +70,28 @@ struct ComposerTextView: NSViewRepresentable {
     /// `onFocusKey` above.
     var onTypingRefocus: (() -> Void)?
 
+    /// office-live-ux Job 1: **Esc in the composer**, the CLI's own stop gesture. Returns `true`
+    /// when it CONSUMED the key (a turn was running and has been interrupted); `false` leaves the
+    /// key to AppKit untouched.
+    ///
+    /// **Why `keyDown`, not `doCommand(by:)`.** `NSTextView` routes Escape through the key-binding
+    /// manager, where it is bound to `complete:` (autocompletion) rather than to
+    /// `cancelOperation:` — so a `doCommand` arm would be guessing at which selector arrives.
+    /// `keyDown` sees the raw `keyCode == 53` before `interpretKeyEvents(_:)` translates anything,
+    /// which is the one place the answer does not depend on a binding table.
+    ///
+    /// **Why a per-view closure and not a window-level `NSEvent` monitor** (which is what
+    /// `DetachedWindowController.installEscMonitor` uses): a local monitor fires AHEAD of
+    /// first-responder dispatch — `cardKeyAction`'s own header records that as a measured fact —
+    /// so a shell-window monitor would take Esc away from `SidebarSearchPalette`, whose
+    /// `.onKeyPress(.escape)` (`SidebarSearchPalette.swift:152`) is the palette's only dismissal.
+    /// Hanging it off the composer's own responder scopes it to "the composer has focus", which is
+    /// exactly what the requirement asks for and leaves every other Esc consumer alone.
+    ///
+    /// `nil` (the default) means this surface offers no Esc contract, so every pre-existing call
+    /// site — the orb field, the detached window, the new-chat page — is byte-identical.
+    var onEscape: (() -> Bool)?
+
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
     }
@@ -120,6 +142,7 @@ struct ComposerTextView: NSViewRepresentable {
         textView.onSubmit = onSubmit
         textView.onFocusKey = onFocusKey
         textView.onTypingRefocus = onTypingRefocus
+        textView.onEscape = onEscape
 
         let scrollView = NSScrollView()
         scrollView.hasVerticalScroller = false
@@ -149,6 +172,11 @@ struct ComposerTextView: NSViewRepresentable {
         textView.onSubmit = onSubmit
         textView.onFocusKey = onFocusKey
         textView.onTypingRefocus = onTypingRefocus
+        // office-live-ux Job 1: re-assigned on EVERY update, exactly like the three above it. The
+        // closure captures `adapter.turnRunning` freshly at CALL time (it asks the host, it does
+        // not hold a Bool), but the closure OBJECT still has to be refreshed here or a card rebuilt
+        // against a new attachment would keep interrupting the previous session.
+        textView.onEscape = onEscape
         // Keep the live view in step if the size changes across an update — otherwise the font
         // would be whatever `makeNSView` happened to set the first time this view was built.
         if textView.font?.pointSize != fontSize {
@@ -260,6 +288,21 @@ final class CommandTextView: NSTextView {
     var onSubmit: (() -> Void)?
     var onFocusKey: ((FieldFocusKey, _ caretAtFirstLine: Bool, _ caretAtLastLine: Bool) -> Bool)?
     var onTypingRefocus: (() -> Void)?
+    /// office-live-ux Job 1 — see `ComposerTextView.onEscape` for why this hangs off `keyDown`
+    /// rather than off `doCommand(by:)` or a window-level monitor.
+    var onEscape: (() -> Bool)?
+
+    /// The ONE key this view intercepts before `interpretKeyEvents(_:)` — Escape (`keyCode == 53`).
+    ///
+    /// Unhandled (no closure wired, or the closure answers `false` because no turn is running) the
+    /// event goes to `super` **verbatim**, so Escape keeps whatever meaning AppKit already gave it.
+    /// That asymmetry is the contract, not an optimisation: consuming Escape on an idle session
+    /// would silently remove a gesture from every surface that hosts this composer, in exchange for
+    /// nothing.
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 53, onEscape?() == true { return }
+        super.keyDown(with: event)
+    }
 
     override func doCommand(by selector: Selector) {
         let first = caretAtFirstLine(of: string, caretLocation: selectedRange().location)

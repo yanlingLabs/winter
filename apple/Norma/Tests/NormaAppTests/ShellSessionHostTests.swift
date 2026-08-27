@@ -5732,3 +5732,82 @@ final class ShellSessionHostTests: XCTestCase {
         try? FileManager.default.removeItem(atPath: unknownPath)
     }
 }
+
+// MARK: - office-live-ux Job 1: the stop door's WIRING
+
+/// The seam every value-level test in `ComposerStopButtonTests` is structurally blind to.
+///
+/// That file drives the whole path from a `FieldStateAdapter` to the rendered send/stop button — but
+/// every one of its tests sets `adapter.onInterrupt` itself. `ShellSessionHost.wire(adapter:feed:)`
+/// is the ONLY thing that sets it in production, so deleting that one line leaves every test in that
+/// file green and the entire feature dead: no stop button, and Esc back to meaning nothing.
+///
+/// An EXTENSION of `ShellSessionHostTests` rather than a class of its own, deliberately: that type's
+/// `makeHost` is what installs the inert `makeOfficeRuntime` override, and without that override a
+/// host in a bare XCTest process spawns a real `NormaOfficeHelper` subprocess (see that helper's own
+/// comment). A private member is reachable from an extension of the same type in the same file, so
+/// reusing the vetted harness costs nothing and duplicating it would have cost a real hazard.
+@MainActor
+extension ShellSessionHostTests {
+
+    /// Attaching wires `onInterrupt`, and firing it while a turn runs puts a real `session.interrupt`
+    /// for the ATTACHED session on the wire.
+    ///
+    /// Three assertions, and each is there because the other two do not cover it:
+    ///  * `onInterrupt != nil` — the wiring exists. Alone, it passes against a no-op closure.
+    ///  * an IDLE session sends nothing — `interruptAttachedTurn`'s belt guard. Alone, it passes
+    ///    against a closure wired to nothing at all, which is the whole failure this class exists
+    ///    for; it is the CONTROL ARM for the assertion below.
+    ///  * a RUNNING session sends `session.interrupt` with the attached sessionId — the real thing.
+    func testAttachingWiresTheAdaptersInterruptAndItReachesTheWire() async {
+        let rows = [SessionSummary(sessionId: "S1", title: nil, createdAt: 1, scope: "global",
+                                   cwd: nil, mode: "code")]
+        let (host, factory) = makeHost(rows: rows)
+        defer { host.deselect() }
+        await host.directory.refresh()
+        host.setShellVisible(true)
+        host.select("S1")
+
+        let deadline = Date().addingTimeInterval(3)
+        while factory.made.isEmpty && Date() < deadline { try? await Task.sleep(nanoseconds: 20_000_000) }
+        let t = factory.made[0]
+        await waitUntilSent(t, 1)
+        let hello = feedLineJSON(t.sent[0])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(hello["id"] as! Int),"result":{"ok":true}}"#)
+        await waitUntilSent(t, 2)
+        let attach = feedLineJSON(t.sent[1])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(attach["id"] as! Int),"result":{"ok":true,"lastSeq":0}}"#)
+
+        let adapter = host.attachment?.adapter
+        XCTAssertNotNil(adapter, "the select must have attached")
+        XCTAssertNotNil(adapter?.onInterrupt, "attaching must wire the stop door — nothing else does")
+
+        // Counted by METHOD, never by total line count: the host fires its own `sync.config` on
+        // connect, so a `t.sent.count` baseline drifts under this test on its own. (Written after
+        // exactly that made the control arm below report a false positive.)
+        func interruptCalls() -> [[String: Any]] {
+            t.sent.map { feedLineJSON($0) }.filter { $0["method"] as? String == "session.interrupt" }
+        }
+
+        // CONTROL ARM: idle sends nothing. `interruptAttachedTurn`'s belt guard reads the same
+        // `turnRunning` the button's gate does. Without this arm, the assertion below passes just as
+        // well against a door that interrupts unconditionally.
+        adapter?.onInterrupt?()
+        try? await Task.sleep(nanoseconds: 250_000_000)
+        XCTAssertEqual(interruptCalls().count, 0,
+                       "an idle session must not send an interrupt; sent: \(t.sent)")
+
+        host.attachment?.session.applyForTesting { $0.turnRunning = true }
+        adapter?.onInterrupt?()
+        let deadline2 = Date().addingTimeInterval(3)
+        while interruptCalls().isEmpty && Date() < deadline2 {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        let calls = interruptCalls()
+        XCTAssertEqual(calls.count, 1,
+                       "exactly one session.interrupt; methods sent: "
+                       + "\(t.sent.compactMap { feedLineJSON($0)["method"] as? String })")
+        XCTAssertEqual((calls.first?["params"] as? [String: Any])?["sessionId"] as? String, "S1",
+                       "…for the ATTACHED session, read fresh at call time")
+    }
+}

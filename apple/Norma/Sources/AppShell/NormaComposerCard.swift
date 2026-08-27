@@ -6,6 +6,66 @@ import NormaKit
 // when the composer's slot is holding an ask instead of a draft.
 import NormaProtocol
 
+// MARK: - office-live-ux Job 1: stopping the turn from the composer
+
+/// What a surface hands the composer so it can STOP a running turn — the direct counterpart of
+/// `ComposerPolicyControl`/`ComposerModelControl`, one slot further out.
+///
+/// Deliberately a value carrying the LIVE flag and the action together, rather than two independent
+/// parameters: the whole requirement is that the send/stop button and Esc agree about whether a turn
+/// is up, and one value read twice in one render is the only shape where "agree" is not something a
+/// test has to check.
+///
+/// `isRunning` is *not* cached anywhere. The one surface that wires this (`WindowContentView`
+/// .composerCard`) fills it from `FieldStateAdapter.turnRunning`, which is a computed read of
+/// `SessionModel.state.turnRunning` — and the adapter re-publishes the session's own
+/// `objectWillChange` (`FieldStateAdapter.init`), so the card re-renders on the turn boundary.
+struct ComposerStopControl {
+    /// Whether the attached session has a turn running RIGHT NOW.
+    let isRunning: Bool
+    /// Interrupt it. Called by the stop button's click AND by Esc in the text field.
+    let onStop: () -> Void
+}
+
+/// What the composer's trailing button IS at this instant. PURE, table-tested
+/// (`ComposerStopButtonTests`), because the precedence below is a decision and not an accident.
+enum ComposerSendButtonRole: Equatable {
+    case send
+    case stop
+    /// Send is unavailable. The payload is `sendBlockedReason` verbatim — empty means
+    /// "self-explanatory" (an empty draft).
+    case blocked(String)
+}
+
+/// PURE: **running beats blocked.**
+///
+/// That ordering is the one real choice here and it is worth stating, because the obvious ordering
+/// is wrong: today an empty draft renders the `waveform` placeholder, and an empty draft is the
+/// ordinary state while you watch a turn run. Checking `sendBlockedReason` first would mean the stop
+/// button appears only if you happen to have typed something — i.e. exactly never, in the case the
+/// user asked for. So a running turn claims the slot regardless of the draft.
+///
+/// What that costs, stated rather than hidden: while a turn runs, the button no longer offers
+/// *send*. Enter still does — `ShellSessionHost.submit(_:)` routes a submit during a running turn to
+/// `session.steer`, and nothing in this change touches that path. The click affordance for steering
+/// is what is traded for the stop affordance, which is what the requirement asked for.
+func composerSendButtonRole(isRunning: Bool, sendBlockedReason: String?) -> ComposerSendButtonRole {
+    if isRunning { return .stop }
+    if let reason = sendBlockedReason { return .blocked(reason) }
+    return .send
+}
+
+/// PURE: what Esc in the composer should do. `nil` means "not ours — hand it back to AppKit
+/// untouched", which is the contract `CommandTextView.keyDown` implements by falling through to
+/// `super`.
+///
+/// Separate from `composerSendButtonRole` in NAME only — both read the same `isRunning`, and
+/// `ComposerStopButtonTests` pins that they agree on every input pair, which is the assertion the
+/// requirement actually asks for.
+func composerEscapeInterrupts(isRunning: Bool, canStop: Bool) -> Bool {
+    isRunning && canStop
+}
+
 // MARK: - The shared composer shell
 
 /// Which edge the per-mode strip emerges from.
@@ -263,6 +323,26 @@ struct NormaComposerCard: View {
     /// (an empty draft); a non-empty string is shown on hover.
     var sendBlockedReason: String?
 
+    /// office-live-ux Job 1 — **the stop affordance**, or `nil` for a surface that offers none.
+    ///
+    /// **ONE value feeds BOTH of Job 1's surfaces, and that is the point of it being one value.**
+    /// The requirement is that the stop button and Esc "cannot disagree"; they cannot, because
+    /// neither holds its own copy of anything — `sendButton` derives its role from `stop?.isRunning`
+    /// and `composerBox` derives the Esc closure from the same optional, in the same render. There
+    /// is no second flag to fall out of step with the first.
+    ///
+    /// `nil` is the gate, and it is what keeps the new-chat page (which builds this same card,
+    /// `NewChatPage.swift:531-556`) untouched: no session there to stop, so no stop button and Esc
+    /// keeps its AppKit meaning. Optional for the same reason `FieldStateAdapter.onSetActivity` is —
+    /// a non-optional closure with a no-op default grows a button on every surface whose click does
+    /// nothing.
+    ///
+    /// **`let`, deliberately, exactly like `policy` above** — an optional `var` gets an implicit
+    /// `nil` in the synthesized memberwise initializer and is therefore silently omittable at every
+    /// call site, and a silently-omitted stop button is invisible in every value-level test. `let`
+    /// makes the compiler ask each surface the question.
+    let stop: ComposerStopControl?
+
     @State private var isHovered = false
 
     /// The chrome THIS card renders, derived from its own inputs.
@@ -331,7 +411,17 @@ struct NormaComposerCard: View {
                     ComposerTextView(
                         text: $text,
                         onSubmit: onSubmit,
-                        usesAdaptiveColors: true
+                        usesAdaptiveColors: true,
+                        // office-live-ux Job 1 — Esc, derived from the SAME `stop` value the send
+                        // button's role is derived from. `composerEscapeInterrupts` is checked
+                        // rather than `stop != nil` alone so an idle session hands Esc back to
+                        // AppKit untouched (`CommandTextView.keyDown`'s own contract).
+                        onEscape: { [stop] in
+                            guard composerEscapeInterrupts(isRunning: stop?.isRunning ?? false,
+                                                           canStop: stop != nil) else { return false }
+                            stop?.onStop()
+                            return true
+                        }
                     )
                     // The component has no placeholder parameter, so this is an overlay that steps
                     // aside the moment there is text. Non-hit-testing, or it would eat the click
@@ -469,9 +559,18 @@ struct NormaComposerCard: View {
         .padding(.vertical, 13)
     }
 
+    /// office-live-ux Job 1: the trailing slot is now send / **stop** / blocked, decided by
+    /// `composerSendButtonRole` — one pure function, so the precedence is assertable without
+    /// rendering anything.
+    var sendButtonRole: ComposerSendButtonRole {
+        composerSendButtonRole(isRunning: stop?.isRunning ?? false,
+                               sendBlockedReason: sendBlockedReason)
+    }
+
     private var sendButton: some View {
         Group {
-            if sendBlockedReason == nil {
+            switch sendButtonRole {
+            case .send:
                 Button(action: onSubmit) {
                     Image(systemName: "arrow.up")
                         .font(Typography.body(.semibold))
@@ -486,14 +585,34 @@ struct NormaComposerCard: View {
                 .buttonStyle(.plain)
                 .help("Send")
                 .accessibilityLabel("Send")
-            } else {
+            case .stop:
+                // The SAME footprint and the same filled slot as send — the button does not move or
+                // resize when a turn starts, only its glyph and its verb change. `stop.fill` inside
+                // the accent square is the macOS-native stop shape (`NormaFieldView`'s own "⏹
+                // stopped" caption already speaks it) rather than a second, differently-coloured
+                // control appearing beside the first.
+                Button(action: { stop?.onStop() }) {
+                    Image(systemName: "stop.fill")
+                        .font(Typography.body(.semibold))
+                        .foregroundStyle(Theme.canvas)
+                        .frame(width: newChatSendButtonSize, height: newChatSendButtonSize)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(Theme.accent)
+                        )
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Stop (Esc)")
+                .accessibilityLabel("Stop")
+            case .blocked(let reason):
                 Image(systemName: "waveform")
                     .font(Typography.bodyLarge(.medium))
                     .foregroundStyle(Theme.textMuted)
                     .frame(width: newChatSendButtonSize, height: newChatSendButtonSize)
-                    .help(sendBlockedReason!.isEmpty ? "Type a message to send" : sendBlockedReason!)
-                    .accessibilityLabel(sendBlockedReason!.isEmpty
-                                        ? "Send — type a message first" : sendBlockedReason!)
+                    .help(reason.isEmpty ? "Type a message to send" : reason)
+                    .accessibilityLabel(reason.isEmpty
+                                        ? "Send — type a message first" : reason)
             }
         }
     }

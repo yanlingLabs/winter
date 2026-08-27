@@ -3284,6 +3284,39 @@ final class ShellSessionHost: ObservableObject {
         // (`FieldStateAdapter.onSetActivity` is optional and nil elsewhere), so the shell is the
         // one surface that grows the verb this task — every pre-existing window is untouched.
         adapter.onSetActivity = { [weak self] target in self?.applyActivity(target) }
+        // office-live-ux Job 1: the shell is the surface that grows a stop affordance — wiring this
+        // is what makes the composer's stop button exist and its Esc mean anything at all
+        // (`FieldStateAdapter.onInterrupt` is optional and nil everywhere else, so no pre-existing
+        // window changes). Both surfaces come through this one closure.
+        adapter.onInterrupt = { [weak self] in self?.interruptAttachedTurn() }
+    }
+
+    /// office-live-ux Job 1 — **stop the attached session's running turn.** The composer's stop
+    /// button and Esc-in-the-composer both land here, and this is the only door either has.
+    ///
+    /// The same shape as `interruptFromRoster(_:)` above and as `DetachedWindowController`'s Esc
+    /// branch: `session.interrupt`, verbatim the kit's own wrapper, `try?` because the daemon has no
+    /// refusal vocabulary here (it just answers `wasRunning`). Unlike the roster's, it does NOT
+    /// refresh the directory — the attached session's own live feed already reports the turn ending,
+    /// and the roster's refresh exists only because a roster row has no feed behind it.
+    ///
+    /// **`attachedSessionId` is read FRESH at call time**, the house rule every closure in `wire`
+    /// follows: a hop between the click and this call must re-target rather than interrupt the
+    /// session the user just left.
+    ///
+    /// **The `turnRunning` guard is a BELT, not the gate.** The gate is
+    /// `WindowContentView.composerStopControl`, which is what decides the button is a stop button
+    /// and what decides Esc is ours; both read `FieldStateAdapter.turnRunning`, i.e. the same
+    /// `SessionModel.state.turnRunning` this line reads. It is kept because the two reads happen at
+    /// different instants (render vs. click) and an interrupt fired at an idle session, while
+    /// harmless on the wire, would be a lie in the log.
+    func interruptAttachedTurn() {
+        guard let live = attachment, let sid = attachedSessionId,
+              live.session.state.turnRunning else { return }
+        let client = live.feed.client
+        Task { @MainActor in
+            _ = try? await client.interrupt(sessionId: sid)
+        }
     }
 
     /// Mirrors `DetachedWindowController.submit` — steer a running turn, else send; the draft is
