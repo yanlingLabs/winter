@@ -4079,7 +4079,7 @@ final class ShellSessionHostTests: XCTestCase {
                 startHelper: { [unowned self] in
                     self.lock.lock(); self._startHelperCalls += 1; self.lock.unlock()
                 },
-                open: { [unowned self] docId, path in
+                open: { [unowned self] docId, path, _ in
                     self.lock.lock(); self._openCalls.append((docId, path)); self.lock.unlock()
                     self.lock.lock()
                     let shouldSuspend = self.nextOpenSuspended

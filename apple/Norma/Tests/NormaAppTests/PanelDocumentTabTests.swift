@@ -603,7 +603,7 @@ final class PanelDocumentTabTests: XCTestCase {
             OfficeRuntime.Driver(
                 helperState: { [unowned self] in self.state },
                 startHelper: { },
-                open: { [unowned self] docId, path in
+                open: { [unowned self] docId, path, _ in
                     self.lock.lock(); self._openCalls.append((docId, path)); self.lock.unlock()
                     return self.openMetadata[path] ?? self.defaultMetadata
                 },

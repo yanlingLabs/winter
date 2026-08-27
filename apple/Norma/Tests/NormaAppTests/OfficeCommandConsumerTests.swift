@@ -389,7 +389,7 @@ final class OfficeCommandConsumerTests: XCTestCase {
     ) -> (consumer: OfficeCommandConsumer, runtime: OfficeRuntime) {
         let driver = OfficeRuntime.Driver(
             helperState: { .ready }, startHelper: { },
-            open: { _, _ in OfficeDocumentMetadata(
+            open: { _, _, _ in OfficeDocumentMetadata(
                 type: .spreadsheet, parts: 1, sizeTwips: OfficeDocumentSize(widthTwips: 100, heightTwips: 100)) },
             close: { _ in },
             save: save,

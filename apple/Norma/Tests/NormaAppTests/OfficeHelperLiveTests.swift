@@ -1602,7 +1602,7 @@ final class OfficeHelperLiveTests: XCTestCase {
         try await connectionA.open()
         try await connectionA.send(.hello(seq: 1, role: .app, token: token))
         guard case .helloOk = await connectionA.nextFrame(timeout: 10.0) else { return XCTFail("A hello failed") }
-        try await connectionA.send(.open(seq: 2, docId: docId, path: stagedPath))
+        try await connectionA.send(.open(seq: 2, docId: docId, path: stagedPath, createIfMissing: false))
         guard case .opened = await connectionA.nextFrame(timeout: 10.0) else { return XCTFail("A open failed") }
         try await connectionA.send(.subscribeTiles(seq: 3, docId: docId, part: 0, zoomPPT: zoomPPT, viewportTwips: viewport))
         guard case .subscribed = await connectionA.nextFrame(timeout: 10.0) else { return XCTFail("A subscribe failed") }

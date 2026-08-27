@@ -410,7 +410,7 @@ final class OfficeTileCanvasViewTests: XCTestCase {
         var driver: OfficeRuntime.Driver {
             OfficeRuntime.Driver(
                 helperState: { .ready }, startHelper: { },
-                open: { [documentType] docId, _ in OfficeDocumentMetadata(
+                open: { [documentType] docId, _, _ in OfficeDocumentMetadata(
                     type: documentType, parts: 1,
                     sizeTwips: OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)) },
                 close: { _ in },
@@ -947,7 +947,7 @@ final class OfficeTileCanvasViewTests: XCTestCase {
         var driver: OfficeRuntime.Driver {
             OfficeRuntime.Driver(
                 helperState: { .ready }, startHelper: { },
-                open: { docId, _ in OfficeDocumentMetadata(type: .spreadsheet, parts: 4,
+                open: { docId, _, _ in OfficeDocumentMetadata(type: .spreadsheet, parts: 4,
                                                             sizeTwips: OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000)) },
                 close: { _ in },
                 save: { _, _ in "/tmp/officetilecanvasviewtests-unused-save" },

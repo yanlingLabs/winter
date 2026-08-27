@@ -33,7 +33,11 @@ public protocol OfficeDocumentBridge: AnyObject {
     /// `OfficeHelperServer` translates a thrown error into `openFailed` and keeps serving —
     /// the helper surviving a bad document is the whole point of this being a thrown Swift error,
     /// not a fatal one.
-    func open(docId: String, path: String) throws -> OfficeDocumentMetadata
+    ///
+    /// **office-authoring — `createIfMissing`.** True means: if nothing exists at `path`, mint a
+    /// blank document of the kind `path`'s own extension implies and save it there BEFORE opening
+    /// it. False (every pre-existing caller) means a missing `path` is an open failure, unchanged.
+    func open(docId: String, path: String, createIfMissing: Bool) throws -> OfficeDocumentMetadata
 
     /// Destroys `docId`'s handle, if any is tracked. A no-op (not an error) for an untracked
     /// `docId` — matches `close`'s wire-level idempotence (`OfficeHelperServer` itself is the
@@ -423,7 +427,7 @@ public final class FakeOfficeDocumentBridge: OfficeDocumentBridge {
     public init(statePath: URL = FileManager.default.temporaryDirectory) {
         self.statePath = statePath
     }
-    public func open(docId: String, path: String) throws -> OfficeDocumentMetadata {
+    public func open(docId: String, path: String, createIfMissing: Bool) throws -> OfficeDocumentMetadata {
         lock.lock(); caches[docId] = TileCache(capacity: 32); lock.unlock()
         return OfficeDocumentMetadata(type: .other, parts: 1, sizeTwips: OfficeDocumentSize(widthTwips: 0, heightTwips: 0))
     }
@@ -1422,7 +1426,7 @@ public final class OfficeHelperServer {
         switch OfficeWireCodec.decodeInbound(line) {
         case .frame(.ping(let seq)):
             writeReply(.pong(seq: seq), writer: writer)
-        case .frame(.open(let seq, let docId, let path)):
+        case .frame(.open(let seq, let docId, let path, let createIfMissing)):
             // Task 3: open is REAL now. Double-open ruling (this task's own carry, decided here):
             // a second `open` of an already-tracked `docId` is `error{alreadyOpen}`, checked and
             // answered WITHOUT ever calling the bridge — real LOK document handles are not
@@ -1438,7 +1442,8 @@ public final class OfficeHelperServer {
             do {
                 // Never called while holding stateQueue (the bridge-call invariant above) — this
                 // line runs on the connection's own thread with no lock held at all.
-                let metadata = try documentBridge.open(docId: docId, path: path)
+                let metadata = try documentBridge.open(docId: docId, path: path,
+                                                       createIfMissing: createIfMissing)
                 stateQueue.sync {
                     docOwner[docId] = DocEntry(opener: writer)
                     writer.ownedDocIds.insert(docId)

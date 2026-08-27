@@ -1108,4 +1108,191 @@ final class OfficeDocsCommandTests: XCTestCase {
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         return try XCTUnwrap(String(data: data, encoding: .utf8), "\(entry) was not valid UTF-8")
     }
+
+    // MARK: - office-authoring Job 1: a write to a path that does not exist creates the document
+
+    /// A live host over an EMPTY working directory — the create drills need a fenced directory with
+    /// nothing in it, where `openLive` needs an existing fixture to copy.
+    private func liveHostOverAnEmptyDirectory() throws -> (dir: URL, host: ShellSessionHost) {
+        try requireLiveEngine()
+        let workdir = makeScratchDirectory()
+        let host = makeLiveHost(stateDir: makeScratchDirectory(),
+                                dirs: [SessionDirEntry(path: workdir.path, locked: true)])
+        return (workdir, host)
+    }
+
+    /// ⭐ The headline: `docs append` to a path with NOTHING on it produces a real `.docx`.
+    ///
+    /// **Judged on the saved bytes, and on three independent things about them**, because each one
+    /// fails differently: the file EXISTS (the create ran at all), it is a real OOXML package whose
+    /// `word/document.xml` can be unzipped (it is a document, not a zero-byte placeholder or a
+    /// half-written temp), and that XML carries the text that was appended (the create and the edit
+    /// composed — a create that discarded the write would still pass the first two).
+    ///
+    /// The control is the assertion that the file was ABSENT first: without it this test would pass
+    /// against a fixture someone left in the scratch directory.
+    func testLiveWritingToAMissingPathCreatesARealDocxCarryingWhatWasWritten() async throws {
+        let (workdir, host) = try liveHostOverAnEmptyDirectory()
+        await host.directory.refresh()
+        let path = workdir.appendingPathComponent("brand-new.docx").path
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path),
+                       "control: the file must NOT exist before the write")
+
+        let result = await send(command("office.docs.append",
+                                        args: ["path": path, "text": "NORMA CREATED THIS PARAGRAPH"],
+                                        sessionId: "S1", commandId: "pcmd_create_append"), through: host)
+        XCTAssertTrue(result.ok, "the write must succeed and create the document: \(result)")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: path),
+                      "the document must be on disk at the path that was written to")
+        let documentXML = try readODFEntry(atPath: path, entry: "word/document.xml")
+        XCTAssertTrue(documentXML.contains("NORMA CREATED THIS PARAGRAPH"),
+                      "the created document's own saved bytes must carry the appended text")
+    }
+
+    /// The same, for `.odt` — the OTHER text format, and a different factory→filter pairing
+    /// (`private:factory/swriter` → `odt` rather than → `docx`). One format passing proves the
+    /// mechanism; two prove the extension is actually being consulted rather than a docx being
+    /// written under whatever name was asked for.
+    func testLiveWritingToAMissingOdtPathCreatesARealOdtNotADocxUnderAnOdtName() async throws {
+        let (workdir, host) = try liveHostOverAnEmptyDirectory()
+        await host.directory.refresh()
+        let path = workdir.appendingPathComponent("brand-new.odt").path
+        let result = await send(command("office.docs.append",
+                                        args: ["path": path, "text": "NORMA ODT PARAGRAPH"],
+                                        sessionId: "S1", commandId: "pcmd_create_odt"), through: host)
+        XCTAssertTrue(result.ok, "\(result)")
+        // ODF's own entry name, which an OOXML package does not have — so this assertion fails if
+        // the engine wrote a .docx and merely named it .odt.
+        let contentXML = try readODFEntry(atPath: path, entry: "content.xml")
+        XCTAssertTrue(contentXML.contains("NORMA ODT PARAGRAPH"),
+                      "the created .odt's own content.xml must carry the text: \(contentXML.prefix(0))")
+    }
+
+    /// Parent directories are created, matching `write`'s own contract
+    /// (`packages/core/src/agent/tools/fs-write.ts`: "Write a file (creates parent directories)").
+    func testLiveWritingIntoAMissingSubdirectoryCreatesTheParentsToo() async throws {
+        let (workdir, host) = try liveHostOverAnEmptyDirectory()
+        await host.directory.refresh()
+        let path = workdir.appendingPathComponent("reports/2026/q3.docx").path
+        XCTAssertFalse(FileManager.default.fileExists(atPath: workdir.appendingPathComponent("reports").path),
+                       "control: the parent directory must not exist yet")
+        let result = await send(command("office.docs.append",
+                                        args: ["path": path, "text": "NESTED"],
+                                        sessionId: "S1", commandId: "pcmd_create_nested"), through: host)
+        XCTAssertTrue(result.ok, "\(result)")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: path),
+                      "the document must exist inside the directories that had to be created for it")
+    }
+
+    /// ⛔ A READ still fails on a missing path — the ruling is that a WRITE creates, not that every
+    /// verb conjures a document. And it must create NOTHING while failing.
+    func testLiveReadingAMissingPathRefusesByNameAndCreatesNothing() async throws {
+        let (workdir, host) = try liveHostOverAnEmptyDirectory()
+        await host.directory.refresh()
+        let path = workdir.appendingPathComponent("not-there.docx").path
+        for (action, commandId) in [("office.docs.info", "pcmd_missing_info"),
+                                    ("office.docs.read", "pcmd_missing_read")] {
+            let result = await send(command(action, args: ["path": path], sessionId: "S1",
+                                            commandId: commandId), through: host)
+            XCTAssertFalse(result.ok, "\(action) on a missing path must refuse: \(result)")
+            XCTAssertTrue((result.result ?? "").contains("doesn't exist"),
+                          "the refusal must say the document isn't there: \(result)")
+            XCTAssertFalse(FileManager.default.fileExists(atPath: path),
+                           "\(action) must not have created anything")
+        }
+    }
+
+    /// ⛔ The kind gate, and the half that matters most: a refused mismatch must leave **no file
+    /// behind**. Creating first and letting the engine's own kind guard catch it afterwards would
+    /// strand a spreadsheet the user never asked for in their working directory.
+    func testLiveCreatingThroughTheWrongToolRefusesAndLeavesNoFileBehind() async throws {
+        let (workdir, host) = try liveHostOverAnEmptyDirectory()
+        await host.directory.refresh()
+        let path = workdir.appendingPathComponent("wrong-tool.xlsx").path
+        let result = await send(command("office.docs.append",
+                                        args: ["path": path, "text": "SHOULD NEVER LAND"],
+                                        sessionId: "S1", commandId: "pcmd_wrong_kind"), through: host)
+        XCTAssertFalse(result.ok, "`docs` must not create a spreadsheet: \(result)")
+        XCTAssertTrue((result.result ?? "").contains("sheets"),
+                      "the refusal must name the tool that DOES handle it: \(result)")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path),
+                       "nothing may be created for a refused kind mismatch")
+    }
+
+    /// ⛔ An extension no office format owns is refused, and creates nothing.
+    func testLiveCreatingAnUnsupportedExtensionRefusesAndLeavesNoFileBehind() async throws {
+        let (workdir, host) = try liveHostOverAnEmptyDirectory()
+        await host.directory.refresh()
+        let path = workdir.appendingPathComponent("notes.rtf").path
+        let result = await send(command("office.docs.append",
+                                        args: ["path": path, "text": "NOPE"],
+                                        sessionId: "S1", commandId: "pcmd_bad_ext"), through: host)
+        XCTAssertFalse(result.ok, ".rtf is not a creatable office format: \(result)")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path), "nothing may be created")
+    }
+
+    /// ⛔ The fence still wins on a path that does not exist. This is the one that would matter most
+    /// if it broke: create-on-missing must not become a way to write outside the working
+    /// directories, and a missing leaf is exactly the shape a naive fence gets wrong.
+    func testLiveCreatingOutsideTheWorkingDirectoriesIsRefusedByTheFence() async throws {
+        let (workdir, host) = try liveHostOverAnEmptyDirectory()
+        await host.directory.refresh()
+        let outside = makeScratchDirectory().appendingPathComponent("escaped.docx").path
+        XCTAssertFalse(outside.hasPrefix(workdir.path), "control: the target really is outside the fence")
+        let result = await send(command("office.docs.append",
+                                        args: ["path": outside, "text": "ESCAPED"],
+                                        sessionId: "S1", commandId: "pcmd_fence_create"), through: host)
+        XCTAssertFalse(result.ok, "an out-of-fence create must be refused: \(result)")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: outside),
+                       "nothing may be created outside the working directories")
+    }
+
+
+    /// ⛔ **IMPORTANT-1 (review): a MISSPELLED path must not create a blank document and report
+    /// success as though the document had always been there.**
+    ///
+    /// The scenario is the one an agent actually produces: it means `report.docx`, types
+    /// `reprot.docx`, and calls `replace`. Create-on-write mints the file, rule 4 saves it
+    /// unconditionally, and a zero-match replace is `ok: true` — so the agent is told the document
+    /// exists and simply lacks the string, and the user gets a stray empty file they never asked
+    /// for. **Before create-on-write this failed loudly**, so the convenience feature turned a
+    /// useful error into a silent wrong answer.
+    ///
+    /// The fix is not to refuse — a write to a missing path creating it IS the ruling — it is that
+    /// the answer must SAY SO. This drill pins the saying-so, on the verb whose own result sentence
+    /// is most misleading when it does not.
+    func testLiveAWriteThatCreatesTheDocumentSaysSoInsteadOfImplyingItAlreadyExisted() async throws {
+        let (workdir, host) = try liveHostOverAnEmptyDirectory()
+        await host.directory.refresh()
+        // The misspelling, spelled out: the agent meant `report.docx`.
+        let path = workdir.appendingPathComponent("reprot.docx").path
+        let result = await send(command("office.docs.replace",
+                                        args: ["path": path, "find": "foo", "replaceWith": "bar"],
+                                        sessionId: "S1", commandId: "pcmd_typo_replace"), through: host)
+        let text = result.result ?? ""
+        // The file really is created — that is the ruling, and this drill is not arguing with it.
+        XCTAssertTrue(FileManager.default.fileExists(atPath: path),
+                      "setup: create-on-write really does mint the file — this drill is about what "
+                        + "the ANSWER says, not about refusing: \(result)")
+        // The whole point: the answer must disclose it.
+        XCTAssertTrue(text.lowercased().contains("created") || text.lowercased().contains("did not exist"),
+                      "a verb that CREATED the document must say so — otherwise a typo'd path reads "
+                        + "as \"the document exists and lacks your text\" and leaves a stray file "
+                        + "behind: \(result)")
+    }
+
+    /// The other half of the same contract, and the control that stops the fix from becoming a lie
+    /// in the opposite direction: a write to a document that ALREADY EXISTS must NOT claim to have
+    /// created anything.
+    func testLiveAWriteToAnExistingDocumentDoesNotClaimToHaveCreatedIt() async throws {
+        let (path, host, _) = try await openLive("two-page.odt", as: "already-here.odt")
+        let result = await send(command("office.docs.replace",
+                                        args: ["path": path, "find": "NORMA GATE", "replaceWith": "NORMA GATEWAY"],
+                                        sessionId: "S1", commandId: "pcmd_existing_replace"), through: host)
+        XCTAssertTrue(result.ok, "\(result)")
+        let text = (result.result ?? "").lowercased()
+        XCTAssertFalse(text.contains("created") || text.contains("did not exist"),
+                       "an existing document must not be reported as created: \(result)")
+    }
+
 }

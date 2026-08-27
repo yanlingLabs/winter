@@ -26,7 +26,13 @@ final class OfficeWireCodecTests: XCTestCase {
             .hello(seq: 1, role: .app, token: "tok-app"),
             .hello(seq: 2, role: .agent, token: "tok-agent"),
             .ping(seq: 3),
-            .open(seq: 4, docId: "doc-1", path: "/tmp/a spaced name.docx"),
+            .open(seq: 4, docId: "doc-1", path: "/tmp/a spaced name.docx", createIfMissing: false),
+            // office-authoring — BOTH values of `createIfMissing`, deliberately. A single sample
+            // pinned at `false` would round-trip identically whether the field were carried or
+            // silently defaulted by the decoder's own `?? false`, which is exactly the drift this
+            // table exists to catch — the same reasoning `save`'s own non-zero `part` sample above
+            // already records.
+            .open(seq: 33, docId: "doc-1", path: "/tmp/brand new.docx", createIfMissing: true),
             .close(seq: 5, docId: "doc-1"),
             // Office Stage B Task 2 — the save round trip.
             // Fix round 4 (NEW-2) — a NON-ZERO part, deliberately: a `save` sample pinned at
@@ -357,7 +363,7 @@ final class OfficeWireCodecTests: XCTestCase {
         let size = OfficeDocumentSize(widthTwips: 1, heightTwips: 1)
         XCTAssertEqual(OfficeWireFrame.hello(seq: 100, role: .app, token: "t").seq, 100)
         XCTAssertEqual(OfficeWireFrame.ping(seq: 101).seq, 101)
-        XCTAssertEqual(OfficeWireFrame.open(seq: 102, docId: "d", path: "/p").seq, 102)
+        XCTAssertEqual(OfficeWireFrame.open(seq: 102, docId: "d", path: "/p", createIfMissing: false).seq, 102)
         XCTAssertEqual(OfficeWireFrame.close(seq: 103, docId: "d").seq, 103)
         XCTAssertEqual(OfficeWireFrame.save(seq: 121, docId: "d", part: 1).seq, 121)
         XCTAssertEqual(OfficeWireFrame.saved(seq: 122, docId: "d", tempPath: "/p").seq, 122)
@@ -996,6 +1002,45 @@ final class OfficeWireCodecTests: XCTestCase {
                 return XCTFail("a legal batch frame must decode: \(line)")
             }
         }
+    }
+
+
+    /// office-authoring review — **an `open` frame with NO `createIfMissing` key decodes as
+    /// `false`.**
+    ///
+    /// The round-trip table above cannot pin this: it only ever decodes frames this codec itself
+    /// encoded, and the encoder always emits the key. What is being pinned is the DEFAULT a frame
+    /// from anywhere else gets, and the direction matters more than the value — absent-as-`false`
+    /// is exactly the pre-office-authoring behaviour (a missing document fails the open), whereas
+    /// absent-as-`true` would let a frame that never mentioned creation mint documents.
+    ///
+    /// Contrast `save`'s own `part`, which is REQUIRED and rejects a frame that omits it (pinned by
+    /// `testKeyEventAndMouseEventMissingPartIsMalformed` in this file): that field is required precisely because BOTH of its
+    /// defaults are wrong. This one has a right default, so leniency here is the safe choice rather
+    /// than a lenient one — and that is a claim worth a test rather than a comment.
+    func testOpenFrameWithoutCreateIfMissingDecodesAsFalse() throws {
+        let line = #"{"type":"open","seq":7,"docId":"d","path":"/tmp/x.docx"}"#
+        guard case .frame(let frame) = OfficeWireCodec.decodeInbound(line) else {
+            return XCTFail("an `open` frame with no createIfMissing must decode, not be rejected")
+        }
+        guard case .open(let seq, let docId, let path, let createIfMissing) = frame else {
+            return XCTFail("expected an .open frame, got \(frame)")
+        }
+        XCTAssertEqual(seq, 7)
+        XCTAssertEqual(docId, "d")
+        XCTAssertEqual(path, "/tmp/x.docx")
+        XCTAssertFalse(createIfMissing,
+                       "an absent createIfMissing must default to FALSE — the pre-existing "
+                         + "behaviour. Defaulting to true would let a frame that never asked for a "
+                         + "document to be created mint one.")
+
+        // The control: the same frame that DOES say true must still decode as true, so the
+        // assertion above is pinning a default rather than a decoder that ignores the field.
+        let explicit = #"{"type":"open","seq":8,"docId":"d","path":"/tmp/x.docx","createIfMissing":true}"#
+        guard case .frame(.open(_, _, _, let explicitFlag)) = OfficeWireCodec.decodeInbound(explicit) else {
+            return XCTFail("the explicit-true frame must decode")
+        }
+        XCTAssertTrue(explicitFlag, "an explicit createIfMissing:true must survive decoding")
     }
 
 }

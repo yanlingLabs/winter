@@ -54,6 +54,18 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <limits.h>
+#include <unistd.h>
+#include <sys/types.h>
+
+/* office-authoring Job 1 — macOS's PRIVATE sandboxing API, declared by hand exactly as
+   `Sources/OfficeHelper/Support/OfficeHelperBridge.h` declares it (same signatures, same
+   fixed-arity `sandbox_check` form and the same ABI argument that file records). Not in the public
+   SDK: <sandbox.h> exposes only the deprecated `sandbox_init` gated to SANDBOX_NAMED, which cannot
+   take a custom SBPL text profile. */
+int sandbox_init_with_parameters(const char *profile, uint64_t flags, const char *const parameters[], char **errorbuf);
+void sandbox_free_error(char *errorbuf);
+int sandbox_check(pid_t pid, const char *operation, int type);
 
 /* LibreOfficeKitEnums.h is not plain-C-safe as vendored (two static-inline helpers use
    static_cast<>/nullptr with no __cplusplus guard) — the same finding
@@ -122,7 +134,28 @@ static void count_bold_tokens(const char *rtf, int *on_count, int *off_count) {
    retry loop) — so nothing downstream may assume a dispatch has taken effect without one. */
 static void pump(LibreOfficeKitDocument *doc, int part) {
     static unsigned char buf[64 * 64 * 4];
-    doc->pClass->paintPartTile(doc, buf, part, 0, 64, 64, 0, 0, 3000, 3000);
+    /* office-authoring — OFP_PUMPS lets a caller pump more than once. A `.uno:` dispatch on the
+       agent view is asynchronous and has no completion callback (correction C3), so "one pump was
+       not enough" and "the command did nothing" are different diagnoses that a single-pump bench
+       cannot tell apart. Default stays 1, so every pre-existing op is byte-identical. */
+    const char *n = getenv("OFP_PUMPS");
+    int pumps = n ? atoi(n) : 1;
+    if (pumps < 1) pumps = 1;
+    for (int i = 0; i < pumps; i++)
+        doc->pClass->paintPartTile(doc, buf, part, 0, 64, 64, 0, 0, 3000, 3000);
+}
+
+/* `getCommandValues(".uno:UndoCount")` -> a bare decimal scalar (office-formatting research §6.5:
+   `getUndoOrRedoCount`, init.cxx, handled BEFORE the supportsCommand gate so it is reachable for
+   every document type). -1 means "this engine could not tell me", which a caller must never read as
+   "zero actions" — the difference between those two is the whole point of the check. */
+static int undo_count(LibreOfficeKitDocument *doc) {
+    char *raw = doc->pClass->getCommandValues(doc, ".uno:UndoCount");
+    if (!raw) return -1;
+    int value = -1;
+    if (raw[0] >= '0' && raw[0] <= '9') value = atoi(raw);
+    free(raw);
+    return value;
 }
 
 static void uno(LibreOfficeKitDocument *doc, const char *cmd, const char *args) {
@@ -238,8 +271,70 @@ int main(int argc, char **argv) {
     const char *doc_path = argv[3];
     const char *op = argv[4];
 
+    /* office-authoring Job 1 — THE SEATBELT ARM.
+     *
+     * This project has twice shipped an engine path that worked everywhere except inside the
+     * helper's seatbelt (the missing `libmswordlo.dylib` and `libsal_textenclo.dylib` cases), so a
+     * mechanism proven only by an UNSANDBOXED probe has not been proven for production at all.
+     *
+     * This replicates `Sources/OfficeHelper/main.swift`'s own boot sequence EXACTLY — same
+     * `sandbox_init_with_parameters(profileText, 0, params)` call, same profile text read from the
+     * checked-in `office-helper.sb`, the same two parameters (`STATE_PATH`, `TMPDIR`) in the same
+     * order, applied BEFORE `lok_init_2` — and then makes the same `sandbox_check` self-assertion
+     * the helper makes, so a profile that silently failed to apply can never be mistaken for one
+     * that applied and permitted everything. That last point is the whole reason the check is here:
+     * without it this arm would be blind to its own failure mode (an unapplied sandbox looks
+     * identical to a permissive one — every op simply passes).
+     *
+     * Opt-in via OFP_SANDBOX_PROFILE + OFP_SANDBOX_STATE so every pre-existing op keeps its
+     * current, unsandboxed behaviour untouched and the two arms are directly comparable. */
+    const char *sb_profile_path = getenv("OFP_SANDBOX_PROFILE");
+    const char *sb_state_path = getenv("OFP_SANDBOX_STATE");
+    if (sb_profile_path && sb_state_path) {
+        FILE *pf = fopen(sb_profile_path, "rb");
+        if (!pf) { printf("RESULT: FAIL sandbox profile unreadable: %s\n", sb_profile_path); return 1; }
+        fseek(pf, 0, SEEK_END); long plen = ftell(pf); fseek(pf, 0, SEEK_SET);
+        char *ptext = malloc((size_t)plen + 1);
+        if (fread(ptext, 1, (size_t)plen, pf) != (size_t)plen) {
+            printf("RESULT: FAIL sandbox profile short read\n"); return 1;
+        }
+        ptext[plen] = '\0';
+        fclose(pf);
+        const char *tmpdir = getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp";
+        /* main.swift canonicalizes both values before substitution (the profile's own header:
+           the kernel checks REAL paths, so a symlinked value makes every `(subpath (param ...))`
+           rule match nothing). `realpath` is that same canonicalization. */
+        char state_real[PATH_MAX], tmp_real[PATH_MAX];
+        if (!realpath(sb_state_path, state_real)) snprintf(state_real, sizeof state_real, "%s", sb_state_path);
+        if (!realpath(tmpdir, tmp_real)) snprintf(tmp_real, sizeof tmp_real, "%s", tmpdir);
+        const char *params[] = { "STATE_PATH", state_real, "TMPDIR", tmp_real, NULL };
+        char *sberr = NULL;
+        int sbrc = sandbox_init_with_parameters(ptext, 0, params, &sberr);
+        if (sbrc != 0) {
+            printf("RESULT: FAIL sandbox_init_with_parameters rc=%d: %s\n",
+                   sbrc, sberr ? sberr : "(no error string)");
+            if (sberr) sandbox_free_error(sberr);
+            return 1;
+        }
+        /* The helper's own self-assertion, verbatim in intent: refuse to report anything at all
+           unless the process is GENUINELY sandboxed. Without this, "sandboxed run passed" would be
+           unfalsifiable. */
+        if (sandbox_check(getpid(), NULL, 0) == 0) {
+            printf("RESULT: FAIL sandbox_init reported success but sandbox_check says unsandboxed\n");
+            return 1;
+        }
+        printf("SANDBOX: applied (STATE_PATH=%s)\n", state_real);
+    } else {
+        printf("SANDBOX: none\n");
+    }
+
     char *profile_url = file_url(profile_dir);
-    char *doc_url = file_url(doc_path);
+    /* office-authoring Job 1 — a `private:` URL must reach `documentLoad` VERBATIM. `file_url`
+       would turn `private:factory/swriter` into `file://private:factory/swriter`, which is a
+       perfectly well-formed file URL naming a path that does not exist — i.e. the probe would
+       report "documentLoad failed" and I would have measured my own string concatenation rather
+       than the engine. Any argument with a scheme LO already understands is passed through. */
+    char *doc_url = (strncmp(doc_path, "private:", 8) == 0) ? strdup(doc_path) : file_url(doc_path);
 
     LibreOfficeKit *kit = lok_init_2(install_path, profile_url);
     if (!kit) { printf("RESULT: FAIL lok_init_2 returned NULL\n"); return 1; }
@@ -273,6 +368,29 @@ int main(int argc, char **argv) {
     int agent_view = doc->pClass->createView(doc);
     doc->pClass->setView(doc, agent_view);
     printf("AGENT_VIEW: %d\n", agent_view);
+
+    /* office-authoring — isolate "the verb does not work" from "the verb does not work ON THE
+       AGENT VIEW". Correction C3 (docs-lok-research) established that `doc_postUnoCommand`
+       resolves `nView` via `SfxLokHelper::getViewId`, which `setView` has moved to the front of
+       the shell list — so a dispatch always lands on the agent view, which registers no callback.
+       OFP_PRIMARY_VIEW=1 puts the probe back on the primary view as the control arm. */
+    if (getenv("OFP_PRIMARY_VIEW")) {
+        doc->pClass->setView(doc, 0);
+        printf("VIEW: switched back to primary (0)\n");
+    }
+
+    /* office-authoring — the CANDIDATE CURE for the InsertGraphic race, tested rather than assumed.
+       Correction C3's mechanism: `bNotifyWhenFinished:true` only forces `SfxCallMode::SYNCHRON` if
+       a `DispatchResultListener` is constructed, and that happens only when
+       `mpCallbackFlushHandlers.count(nView)` is non-zero — i.e. only when THE VIEW THE DISPATCH
+       RESOLVES TO has a registered callback. Every agent verb asserts the agent view, and
+       `createAgentView` never registers one, so every agent dispatch is async. Registering here —
+       AFTER the setView above, so it binds to the agent view rather than the primary one the
+       existing OFP_CALLBACK knob covers — is the direct test of whether that restores synchrony. */
+    if (getenv("OFP_CALLBACK_AGENT")) {
+        doc->pClass->registerCallback(doc, probe_callback, NULL);
+        printf("CALLBACK: registered on the CURRENT (agent) view\n");
+    }
 
     int rc = 0;
 
@@ -545,6 +663,137 @@ int main(int argc, char **argv) {
         key(doc, KEY_ESCAPE_);
         pump(doc, 0);
         rc = save_as(doc, argv[6], "odp");
+
+    /* office-authoring Job 1 — "a write to a path that does not exist creates the document".
+       Load whatever `doc_path` names (in practice `private:factory/swriter|scalc|simpress`) and
+       `saveAs` it to argv[5] with the bare-extension format token argv[6]. `save_as` already
+       prints SAVED/SAVE_FAIL, and the DOCTYPE line above is what proves the factory URL produced
+       the KIND asked for rather than some default — a create that silently produced a Writer doc
+       for `scalc` would still "save fine" to a .xlsx name and be wrong. */
+    } else if (strcmp(op, "create") == 0) {
+        if (argc < 7) { fprintf(stderr, "create needs <out_path> <format_ext>\n"); return 2; }
+        rc = save_as(doc, argv[5], argv[6]);
+
+    /* office-authoring Job 2 — `.uno:InsertGraphic`.
+     *
+     * Slot: `svx/sdi/svx.sdi:4928-4929`
+     *   SfxVoidItem InsertGraphic SID_INSERT_GRAPHIC
+     *   (SfxStringItem FileName    SID_INSERT_GRAPHIC,
+     *    SfxStringItem FilterName  FN_PARAM_FILTER,
+     *    SfxBoolItem   AsLink      FN_PARAM_1,
+     *    SfxStringItem Style       FN_PARAM_2)
+     * All SIMPLE items, so bare argument names (no dotted member path).
+     *
+     * `AsLink` is deliberately NEVER sent. Both engines gate a BLOCKING `SvxLinkWarningDialog`
+     * `.run()` on it being true (`sd/source/ui/func/fuinsert.cxx:202-207`,
+     * `sw/source/uibase/uiview/view2.cxx:544-553`) — the wedge class. Omitted, both default to
+     * false and that branch is unreachable.
+     *
+     * The three arms are the point:
+     *   insert-graphic          correct args      — does it land?
+     *   insert-graphic-noargs   `{}`              — THE HAZARD. Impress's else-branch
+     *                                              (`fuinsert.cxx:151-162`) constructs an
+     *                                              `SvxOpenGraphicDialog` and calls the BLOCKING
+     *                                              `.Execute()`, with no headless guard. Writer's
+     *                                              (`view2.cxx:420`) IS guarded by
+     *                                              `!Application::IsHeadlessModeEnabled()`.
+     *   insert-graphic-badarg   `FileNam`         — per FMT §0, a wrong argument name and NO
+     *                                              arguments are the same state by the time the
+     *                                              Execute handler runs, so this must behave
+     *                                              identically to -noargs. If it does not, that
+     *                                              premise is wrong and everything built on it
+     *                                              needs re-deriving.
+     * Run the two hazard arms under an external timeout — a wedge is a hang, and the whole
+     * question is whether it hangs. */
+    /* office-authoring — THE CONTAINED CURE for the insert race, as an experiment.
+     *
+     * The race is "saveAs runs before the async dispatch has executed." The global fix (registering
+     * a callback on the agent view, which makes dispatches SYNCHRON) works but regresses Impress.
+     * This is the other shape: dispatch ONCE, then WAIT for it to land before saving.
+     *
+     * ⚠️ It is a WAIT, not a retry. Re-dispatching `.uno:InsertGraphic` on a late-landing first
+     * attempt would insert the image TWICE — the non-idempotent-write hazard this repo already
+     * carries as a hard rule for timed-out office writes. Nothing here re-dispatches.
+     *
+     * The signal is `getCommandValues(".uno:UndoCount")`, which the formatting research established
+     * returns a bare decimal scalar and is reachable for every document type. A +1 delta proves a
+     * mutation was RECORDED — it cannot say what was recorded, which is why the saved-bytes check
+     * still decides. */
+    } else if (strcmp(op, "insert-graphic-wait") == 0) {
+        if (argc < 8) { fprintf(stderr, "needs <image_path> <out_path> <format_ext>\n"); return 2; }
+        char *img_url = file_url(argv[5]);
+        char args[2048];
+        snprintf(args, sizeof args, "{\"FileName\":{\"type\":\"string\",\"value\":\"%s\"}}", img_url);
+        int before = undo_count(doc);
+        printf("UNDOCOUNT_BEFORE: %d\n", before);
+        uno(doc, ".uno:InsertGraphic", args);
+        int landed = 0, i;
+        for (i = 0; i < 40; i++) {
+            pump(doc, 0);
+            int now = undo_count(doc);
+            if (before >= 0 && now > before) { landed = 1; break; }
+        }
+        printf("UNDOCOUNT_AFTER: %d  waited=%d  landed=%d\n", undo_count(doc), i, landed);
+        free(img_url);
+        rc = save_as(doc, argv[6], argv[7]);
+
+    } else if (strcmp(op, "insert-graphic") == 0 || strcmp(op, "insert-graphic-badarg") == 0) {
+        if (argc < 8) { fprintf(stderr, "needs <image_path> <out_path> <format_ext>\n"); return 2; }
+        char *img_url = file_url(argv[5]);
+        char args[2048];
+        snprintf(args, sizeof args, "{\"%s\":{\"type\":\"string\",\"value\":\"%s\"}}",
+                 strcmp(op, "insert-graphic-badarg") == 0 ? "FileNam" : "FileName", img_url);
+        printf("DISPATCH: .uno:InsertGraphic %s\n", args);
+        uno(doc, ".uno:InsertGraphic", args);
+        printf("RETURNED: postUnoCommand\n");
+        pump(doc, 0);
+        printf("PUMPED\n");
+        free(img_url);
+        rc = save_as(doc, argv[6], argv[7]);
+
+    } else if (strcmp(op, "insert-graphic-noargs") == 0) {
+        if (argc < 7) { fprintf(stderr, "needs <out_path> <format_ext>\n"); return 2; }
+        printf("DISPATCH: .uno:InsertGraphic {}\n");
+        uno(doc, ".uno:InsertGraphic", "{}");
+        printf("RETURNED: postUnoCommand\n");
+        pump(doc, 0);
+        printf("PUMPED\n");
+        rc = save_as(doc, argv[5], argv[6]);
+
+    /* office-authoring Job 3 — `.uno:InsertTable`, Writer only.
+     *
+     * Slot: `sw/sdi/swriter.sdi:3749-3750`
+     *   SfxUInt16Item InsertTable FN_INSERT_TABLE
+     *   (SfxStringItem TableName FN_INSERT_TABLE, SfxUInt16Item Columns SID_ATTR_TABLE_COLUMN,
+     *    SfxUInt16Item Rows SID_ATTR_TABLE_ROW, SfxInt32Item Flags FN_PARAM_1,
+     *    SfxStringItem AutoFormat FN_PARAM_2)
+     *
+     * Handler `sw/source/uibase/shells/basesh.cxx:3237` gates the args branch on
+     * `pArgs->Count() >= 2` — at least TWO items — and falls back to a dialog at :3282 when
+     * either count is zero. That fallback uses `weld::DialogController::runAsync` (:3288), which
+     * per FMT's own wedge discriminator (`.run()` = wedge, async = survivable) is NOT the wedge
+     * class — measured here rather than trusted. */
+    } else if (strcmp(op, "insert-table") == 0) {
+        if (argc < 9) { fprintf(stderr, "needs <cols> <rows> <out_path> <format_ext>\n"); return 2; }
+        char args[1024];
+        snprintf(args, sizeof args,
+                 "{\"Columns\":{\"type\":\"unsigned short\",\"value\":%s},"
+                 "\"Rows\":{\"type\":\"unsigned short\",\"value\":%s}}", argv[5], argv[6]);
+        printf("DISPATCH: .uno:InsertTable %s\n", args);
+        uno(doc, ".uno:InsertTable", args);
+        printf("RETURNED: postUnoCommand\n");
+        pump(doc, 0);
+        printf("PUMPED\n");
+        rc = save_as(doc, argv[7], argv[8]);
+
+    } else if (strcmp(op, "insert-table-noargs") == 0) {
+        if (argc < 7) { fprintf(stderr, "needs <out_path> <format_ext>\n"); return 2; }
+        printf("DISPATCH: .uno:InsertTable {}\n");
+        uno(doc, ".uno:InsertTable", "{}");
+        printf("RETURNED: postUnoCommand\n");
+        pump(doc, 0);
+        printf("PUMPED\n");
+        rc = save_as(doc, argv[5], argv[6]);
 
     } else {
         printf("RESULT: FAIL unknown op %s\n", op);

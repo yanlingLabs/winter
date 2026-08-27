@@ -138,9 +138,14 @@ final class OfficeHelperClient {
     /// any other protocol-level refusal; a genuine `openFailed` (garbage document, bad path)
     /// surfaces as the distinct `.openFailed` case so a caller can discriminate "this document is
     /// bad" from "something is wrong with the request itself" without string-matching.
-    func open(docId: String, path: String) async throws -> OfficeDocumentMetadata {
+    ///
+    /// **office-authoring — `createIfMissing`** defaults to `false`, so every pre-existing caller
+    /// keeps the pre-existing behaviour (a missing document is an open failure) without being
+    /// edited. Only the create-on-write path passes `true`.
+    func open(docId: String, path: String, createIfMissing: Bool = false) async throws -> OfficeDocumentMetadata {
         let seq = seqAllocator.nextSeq()
-        try await connection.send(.open(seq: seq, docId: docId, path: path))
+        try await connection.send(.open(seq: seq, docId: docId, path: path,
+                                        createIfMissing: createIfMissing))
         let reply = try await expectReply(seq: seq)
         switch reply {
         case .opened(_, _, let type, let parts, let sizeTwips):

@@ -62,7 +62,21 @@ public enum OfficeWireFrame: Equatable, Sendable {
     /// for the reasoning (a silent re-load would leak or double-own a real LOK document handle;
     /// `close` first is the honest way to reload). `path` is a plain filesystem path, converted to
     /// a `file://` URL internally — the caller never constructs the URL itself.
-    case open(seq: UInt64, docId: String, path: String)
+    ///
+    /// **office-authoring — `createIfMissing`.** When true AND nothing exists at `path`, the helper
+    /// mints a BLANK document of the kind `path`'s own extension implies
+    /// (`private:factory/swriter|scalc|simpress`), saves it to `path`, and then opens that — so an
+    /// agent write to a path that does not exist creates the document, exactly as the `write` tool
+    /// does for an ordinary file. False (the default everywhere else) keeps the pre-existing
+    /// behaviour: a missing document is an open FAILURE.
+    ///
+    /// **It is an explicit flag rather than "the staged file happens to be absent", deliberately.**
+    /// `path` here is always the STAGED path inside the helper's own jail, which the app populates
+    /// with `stageDocument` before sending this frame. A staged file that is absent when it should
+    /// be present means a staging bug — today that fails loudly, and inferring "absent ⟹ the caller
+    /// must have wanted a new document" would silently turn that bug into a blank document handed
+    /// back to the user in place of their real one. The caller has to say so.
+    case open(seq: UInt64, docId: String, path: String, createIfMissing: Bool)
     /// Stop tracking a document — destroys its LOK handle for real (Task 3). Idempotent (unlike
     /// `open` above): closing an untracked `docId` still acks `closed` rather than erroring —
     /// there is no unsafe double-destruction risk here (a `docId` either has a live handle to
@@ -944,7 +958,7 @@ public enum OfficeWireFrame: Equatable, Sendable {
         switch self {
         case .hello(let seq, _, _): return seq
         case .ping(let seq): return seq
-        case .open(let seq, _, _): return seq
+        case .open(let seq, _, _, _): return seq
         case .close(let seq, _): return seq
         case .save(let seq, _, _): return seq
         case .keyEvent(let seq, _, _, _, _, _): return seq
@@ -1038,9 +1052,13 @@ public enum OfficeWireFrame: Equatable, Sendable {
             payload["token"] = token
         case .ping, .pong:
             break
-        case .open(_, let docId, let path):
+        case .open(_, let docId, let path, let createIfMissing):
             payload["docId"] = docId
             payload["path"] = path
+            // Always emitted, never conditionally omitted: the decoder below treats a MISSING key
+            // as `false` for the pre-existing-sender reason stated there, so a sender that meant
+            // `true` and omitted the key would silently become a plain open. One key, always.
+            payload["createIfMissing"] = createIfMissing
         case .close(_, let docId), .closed(_, let docId):
             payload["docId"] = docId
         case .save(_, let docId, let part):
@@ -2621,7 +2639,13 @@ public enum OfficeWireCodec {
             guard let docId = object["docId"] as? String, let path = object["path"] as? String else {
                 return .rejected(seq: seq, reason: "malformed")
             }
-            return .frame(.open(seq: seq, docId: docId, path: path))
+            // ABSENT means `false`, and unlike `save`'s own required `part` that leniency is the
+            // SAFE direction here rather than a lenient one: absent-as-false yields exactly the
+            // pre-office-authoring behaviour (a missing document fails the open), whereas
+            // absent-as-true would let a malformed frame create documents. `save`'s `part` is
+            // required because BOTH of its defaults are wrong; this field has a right default.
+            let createIfMissing = (object["createIfMissing"] as? Bool) ?? false
+            return .frame(.open(seq: seq, docId: docId, path: path, createIfMissing: createIfMissing))
         case "close":
             guard let docId = object["docId"] as? String else {
                 return .rejected(seq: seq, reason: "malformed")

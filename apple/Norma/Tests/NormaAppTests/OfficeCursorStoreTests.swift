@@ -162,7 +162,7 @@ final class OfficeCursorStoreTests: XCTestCase {
                                                sizeTwips: OfficeDocumentSize(widthTwips: 100_000, heightTwips: 100_000))
         let driver = OfficeRuntime.Driver(
             helperState: { .ready }, startHelper: { },
-            open: { _, _ in metadata },
+            open: { _, _, _ in metadata },
             close: { _ in },
             save: { _, _ in "/tmp/office-cursor-store-unused-save" },
             subscribeTiles: { _, _, _, _ in [] },

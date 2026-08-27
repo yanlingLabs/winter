@@ -352,7 +352,16 @@ export function registerSlidesTool(r: ToolRegistry, deps: SlidesToolDeps): void 
     name: "slides",
     description:
       "Read and edit a presentation Norma has access to (.pptx, .odp — any format the office engine "
-      + "can open). Every write verb SAVES immediately — there is no separate save step, and you "
+      + "can open). "
+      + "**A write verb whose path does not exist CREATES the document** — there is no separate "
+      + "\"create\" or \"new\" verb, exactly as with the `write` tool for ordinary files. The kind "
+      + "comes from the EXTENSION, and it has to be one this tool handles (.pptx or .odp for a presentation); any missing "
+      + "parent directories are created too. Two things to know: a `read` or `info` on a path that "
+      + "does not exist still REFUSES (only writes create), and a create whose write then FAILS "
+      + "usually leaves no file behind at all rather than an empty one — but not always (a "
+      + "background save can land the empty document first), so check rather than assume. "
+      + "Whenever a verb does create the document, its answer says so explicitly. "
+      + "Every write verb SAVES immediately — there is no separate save step, and you "
       + "cannot undo from here. A HUMAN can: if they have the file open in a tab, one press of ⌘Z "
       + "takes back your whole tool call, and ⌘⇧Z puts it back. "
       + "Before EVERY verb — `read` and `info` included — if a human already has that file open in a tab, Norma first SAVES whatever unsaved edits their tab is holding. So a read is NOT read-only with respect to disk: it flushes the human's own work to the file before reporting on it. (Nothing to flush when this tool opens the file itself.) The one exception is a file that ALSO changed on disk outside Norma while that tab held it: there are then two versions and Norma will not pick between them, so a read SKIPS that save and still answers from the tab's live content, and a write is REFUSED until the human answers the conflict banner in their tab. "
