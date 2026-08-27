@@ -3168,7 +3168,14 @@ final class OfficeRuntime: ObservableObject {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
                 guard !Task.isCancelled else { return }
-                await self?.periodicSaveTick()
+                // **`guard let self ... else { return }`, not `await self?.tick()`.** The optional-chain
+                // form no-ops on a deallocated runtime but keeps LOOPING forever, once per interval,
+                // for the life of the process — `teardown()` is what cancels this, and a runtime that
+                // is released WITHOUT a teardown (which is every runtime a unit test builds and drops)
+                // would leave one such task behind each time. Exiting on a nil `self` costs nothing and
+                // makes the task's lifetime the runtime's.
+                guard let self else { return }
+                self.periodicSaveTick()
             }
         }
     }
