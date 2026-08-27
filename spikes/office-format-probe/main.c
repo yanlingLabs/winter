@@ -134,7 +134,15 @@ static void count_bold_tokens(const char *rtf, int *on_count, int *off_count) {
    retry loop) — so nothing downstream may assume a dispatch has taken effect without one. */
 static void pump(LibreOfficeKitDocument *doc, int part) {
     static unsigned char buf[64 * 64 * 4];
-    doc->pClass->paintPartTile(doc, buf, part, 0, 64, 64, 0, 0, 3000, 3000);
+    /* office-authoring — OFP_PUMPS lets a caller pump more than once. A `.uno:` dispatch on the
+       agent view is asynchronous and has no completion callback (correction C3), so "one pump was
+       not enough" and "the command did nothing" are different diagnoses that a single-pump bench
+       cannot tell apart. Default stays 1, so every pre-existing op is byte-identical. */
+    const char *n = getenv("OFP_PUMPS");
+    int pumps = n ? atoi(n) : 1;
+    if (pumps < 1) pumps = 1;
+    for (int i = 0; i < pumps; i++)
+        doc->pClass->paintPartTile(doc, buf, part, 0, 64, 64, 0, 0, 3000, 3000);
 }
 
 static void uno(LibreOfficeKitDocument *doc, const char *cmd, const char *args) {
@@ -347,6 +355,16 @@ int main(int argc, char **argv) {
     int agent_view = doc->pClass->createView(doc);
     doc->pClass->setView(doc, agent_view);
     printf("AGENT_VIEW: %d\n", agent_view);
+
+    /* office-authoring — isolate "the verb does not work" from "the verb does not work ON THE
+       AGENT VIEW". Correction C3 (docs-lok-research) established that `doc_postUnoCommand`
+       resolves `nView` via `SfxLokHelper::getViewId`, which `setView` has moved to the front of
+       the shell list — so a dispatch always lands on the agent view, which registers no callback.
+       OFP_PRIMARY_VIEW=1 puts the probe back on the primary view as the control arm. */
+    if (getenv("OFP_PRIMARY_VIEW")) {
+        doc->pClass->setView(doc, 0);
+        printf("VIEW: switched back to primary (0)\n");
+    }
 
     int rc = 0;
 
@@ -628,6 +646,95 @@ int main(int argc, char **argv) {
        for `scalc` would still "save fine" to a .xlsx name and be wrong. */
     } else if (strcmp(op, "create") == 0) {
         if (argc < 7) { fprintf(stderr, "create needs <out_path> <format_ext>\n"); return 2; }
+        rc = save_as(doc, argv[5], argv[6]);
+
+    /* office-authoring Job 2 — `.uno:InsertGraphic`.
+     *
+     * Slot: `svx/sdi/svx.sdi:4928-4929`
+     *   SfxVoidItem InsertGraphic SID_INSERT_GRAPHIC
+     *   (SfxStringItem FileName    SID_INSERT_GRAPHIC,
+     *    SfxStringItem FilterName  FN_PARAM_FILTER,
+     *    SfxBoolItem   AsLink      FN_PARAM_1,
+     *    SfxStringItem Style       FN_PARAM_2)
+     * All SIMPLE items, so bare argument names (no dotted member path).
+     *
+     * `AsLink` is deliberately NEVER sent. Both engines gate a BLOCKING `SvxLinkWarningDialog`
+     * `.run()` on it being true (`sd/source/ui/func/fuinsert.cxx:202-207`,
+     * `sw/source/uibase/uiview/view2.cxx:544-553`) — the wedge class. Omitted, both default to
+     * false and that branch is unreachable.
+     *
+     * The three arms are the point:
+     *   insert-graphic          correct args      — does it land?
+     *   insert-graphic-noargs   `{}`              — THE HAZARD. Impress's else-branch
+     *                                              (`fuinsert.cxx:151-162`) constructs an
+     *                                              `SvxOpenGraphicDialog` and calls the BLOCKING
+     *                                              `.Execute()`, with no headless guard. Writer's
+     *                                              (`view2.cxx:420`) IS guarded by
+     *                                              `!Application::IsHeadlessModeEnabled()`.
+     *   insert-graphic-badarg   `FileNam`         — per FMT §0, a wrong argument name and NO
+     *                                              arguments are the same state by the time the
+     *                                              Execute handler runs, so this must behave
+     *                                              identically to -noargs. If it does not, that
+     *                                              premise is wrong and everything built on it
+     *                                              needs re-deriving.
+     * Run the two hazard arms under an external timeout — a wedge is a hang, and the whole
+     * question is whether it hangs. */
+    } else if (strcmp(op, "insert-graphic") == 0 || strcmp(op, "insert-graphic-badarg") == 0) {
+        if (argc < 8) { fprintf(stderr, "needs <image_path> <out_path> <format_ext>\n"); return 2; }
+        char *img_url = file_url(argv[5]);
+        char args[2048];
+        snprintf(args, sizeof args, "{\"%s\":{\"type\":\"string\",\"value\":\"%s\"}}",
+                 strcmp(op, "insert-graphic-badarg") == 0 ? "FileNam" : "FileName", img_url);
+        printf("DISPATCH: .uno:InsertGraphic %s\n", args);
+        uno(doc, ".uno:InsertGraphic", args);
+        printf("RETURNED: postUnoCommand\n");
+        pump(doc, 0);
+        printf("PUMPED\n");
+        free(img_url);
+        rc = save_as(doc, argv[6], argv[7]);
+
+    } else if (strcmp(op, "insert-graphic-noargs") == 0) {
+        if (argc < 7) { fprintf(stderr, "needs <out_path> <format_ext>\n"); return 2; }
+        printf("DISPATCH: .uno:InsertGraphic {}\n");
+        uno(doc, ".uno:InsertGraphic", "{}");
+        printf("RETURNED: postUnoCommand\n");
+        pump(doc, 0);
+        printf("PUMPED\n");
+        rc = save_as(doc, argv[5], argv[6]);
+
+    /* office-authoring Job 3 — `.uno:InsertTable`, Writer only.
+     *
+     * Slot: `sw/sdi/swriter.sdi:3749-3750`
+     *   SfxUInt16Item InsertTable FN_INSERT_TABLE
+     *   (SfxStringItem TableName FN_INSERT_TABLE, SfxUInt16Item Columns SID_ATTR_TABLE_COLUMN,
+     *    SfxUInt16Item Rows SID_ATTR_TABLE_ROW, SfxInt32Item Flags FN_PARAM_1,
+     *    SfxStringItem AutoFormat FN_PARAM_2)
+     *
+     * Handler `sw/source/uibase/shells/basesh.cxx:3237` gates the args branch on
+     * `pArgs->Count() >= 2` — at least TWO items — and falls back to a dialog at :3282 when
+     * either count is zero. That fallback uses `weld::DialogController::runAsync` (:3288), which
+     * per FMT's own wedge discriminator (`.run()` = wedge, async = survivable) is NOT the wedge
+     * class — measured here rather than trusted. */
+    } else if (strcmp(op, "insert-table") == 0) {
+        if (argc < 9) { fprintf(stderr, "needs <cols> <rows> <out_path> <format_ext>\n"); return 2; }
+        char args[1024];
+        snprintf(args, sizeof args,
+                 "{\"Columns\":{\"type\":\"unsigned short\",\"value\":%s},"
+                 "\"Rows\":{\"type\":\"unsigned short\",\"value\":%s}}", argv[5], argv[6]);
+        printf("DISPATCH: .uno:InsertTable %s\n", args);
+        uno(doc, ".uno:InsertTable", args);
+        printf("RETURNED: postUnoCommand\n");
+        pump(doc, 0);
+        printf("PUMPED\n");
+        rc = save_as(doc, argv[7], argv[8]);
+
+    } else if (strcmp(op, "insert-table-noargs") == 0) {
+        if (argc < 7) { fprintf(stderr, "needs <out_path> <format_ext>\n"); return 2; }
+        printf("DISPATCH: .uno:InsertTable {}\n");
+        uno(doc, ".uno:InsertTable", "{}");
+        printf("RETURNED: postUnoCommand\n");
+        pump(doc, 0);
+        printf("PUMPED\n");
         rc = save_as(doc, argv[5], argv[6]);
 
     } else {
