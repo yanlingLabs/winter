@@ -54,6 +54,18 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <limits.h>
+#include <unistd.h>
+#include <sys/types.h>
+
+/* office-authoring Job 1 — macOS's PRIVATE sandboxing API, declared by hand exactly as
+   `Sources/OfficeHelper/Support/OfficeHelperBridge.h` declares it (same signatures, same
+   fixed-arity `sandbox_check` form and the same ABI argument that file records). Not in the public
+   SDK: <sandbox.h> exposes only the deprecated `sandbox_init` gated to SANDBOX_NAMED, which cannot
+   take a custom SBPL text profile. */
+int sandbox_init_with_parameters(const char *profile, uint64_t flags, const char *const parameters[], char **errorbuf);
+void sandbox_free_error(char *errorbuf);
+int sandbox_check(pid_t pid, const char *operation, int type);
 
 /* LibreOfficeKitEnums.h is not plain-C-safe as vendored (two static-inline helpers use
    static_cast<>/nullptr with no __cplusplus guard) — the same finding
@@ -238,8 +250,70 @@ int main(int argc, char **argv) {
     const char *doc_path = argv[3];
     const char *op = argv[4];
 
+    /* office-authoring Job 1 — THE SEATBELT ARM.
+     *
+     * This project has twice shipped an engine path that worked everywhere except inside the
+     * helper's seatbelt (the missing `libmswordlo.dylib` and `libsal_textenclo.dylib` cases), so a
+     * mechanism proven only by an UNSANDBOXED probe has not been proven for production at all.
+     *
+     * This replicates `Sources/OfficeHelper/main.swift`'s own boot sequence EXACTLY — same
+     * `sandbox_init_with_parameters(profileText, 0, params)` call, same profile text read from the
+     * checked-in `office-helper.sb`, the same two parameters (`STATE_PATH`, `TMPDIR`) in the same
+     * order, applied BEFORE `lok_init_2` — and then makes the same `sandbox_check` self-assertion
+     * the helper makes, so a profile that silently failed to apply can never be mistaken for one
+     * that applied and permitted everything. That last point is the whole reason the check is here:
+     * without it this arm would be blind to its own failure mode (an unapplied sandbox looks
+     * identical to a permissive one — every op simply passes).
+     *
+     * Opt-in via OFP_SANDBOX_PROFILE + OFP_SANDBOX_STATE so every pre-existing op keeps its
+     * current, unsandboxed behaviour untouched and the two arms are directly comparable. */
+    const char *sb_profile_path = getenv("OFP_SANDBOX_PROFILE");
+    const char *sb_state_path = getenv("OFP_SANDBOX_STATE");
+    if (sb_profile_path && sb_state_path) {
+        FILE *pf = fopen(sb_profile_path, "rb");
+        if (!pf) { printf("RESULT: FAIL sandbox profile unreadable: %s\n", sb_profile_path); return 1; }
+        fseek(pf, 0, SEEK_END); long plen = ftell(pf); fseek(pf, 0, SEEK_SET);
+        char *ptext = malloc((size_t)plen + 1);
+        if (fread(ptext, 1, (size_t)plen, pf) != (size_t)plen) {
+            printf("RESULT: FAIL sandbox profile short read\n"); return 1;
+        }
+        ptext[plen] = '\0';
+        fclose(pf);
+        const char *tmpdir = getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp";
+        /* main.swift canonicalizes both values before substitution (the profile's own header:
+           the kernel checks REAL paths, so a symlinked value makes every `(subpath (param ...))`
+           rule match nothing). `realpath` is that same canonicalization. */
+        char state_real[PATH_MAX], tmp_real[PATH_MAX];
+        if (!realpath(sb_state_path, state_real)) snprintf(state_real, sizeof state_real, "%s", sb_state_path);
+        if (!realpath(tmpdir, tmp_real)) snprintf(tmp_real, sizeof tmp_real, "%s", tmpdir);
+        const char *params[] = { "STATE_PATH", state_real, "TMPDIR", tmp_real, NULL };
+        char *sberr = NULL;
+        int sbrc = sandbox_init_with_parameters(ptext, 0, params, &sberr);
+        if (sbrc != 0) {
+            printf("RESULT: FAIL sandbox_init_with_parameters rc=%d: %s\n",
+                   sbrc, sberr ? sberr : "(no error string)");
+            if (sberr) sandbox_free_error(sberr);
+            return 1;
+        }
+        /* The helper's own self-assertion, verbatim in intent: refuse to report anything at all
+           unless the process is GENUINELY sandboxed. Without this, "sandboxed run passed" would be
+           unfalsifiable. */
+        if (sandbox_check(getpid(), NULL, 0) == 0) {
+            printf("RESULT: FAIL sandbox_init reported success but sandbox_check says unsandboxed\n");
+            return 1;
+        }
+        printf("SANDBOX: applied (STATE_PATH=%s)\n", state_real);
+    } else {
+        printf("SANDBOX: none\n");
+    }
+
     char *profile_url = file_url(profile_dir);
-    char *doc_url = file_url(doc_path);
+    /* office-authoring Job 1 — a `private:` URL must reach `documentLoad` VERBATIM. `file_url`
+       would turn `private:factory/swriter` into `file://private:factory/swriter`, which is a
+       perfectly well-formed file URL naming a path that does not exist — i.e. the probe would
+       report "documentLoad failed" and I would have measured my own string concatenation rather
+       than the engine. Any argument with a scheme LO already understands is passed through. */
+    char *doc_url = (strncmp(doc_path, "private:", 8) == 0) ? strdup(doc_path) : file_url(doc_path);
 
     LibreOfficeKit *kit = lok_init_2(install_path, profile_url);
     if (!kit) { printf("RESULT: FAIL lok_init_2 returned NULL\n"); return 1; }
@@ -545,6 +619,16 @@ int main(int argc, char **argv) {
         key(doc, KEY_ESCAPE_);
         pump(doc, 0);
         rc = save_as(doc, argv[6], "odp");
+
+    /* office-authoring Job 1 — "a write to a path that does not exist creates the document".
+       Load whatever `doc_path` names (in practice `private:factory/swriter|scalc|simpress`) and
+       `saveAs` it to argv[5] with the bare-extension format token argv[6]. `save_as` already
+       prints SAVED/SAVE_FAIL, and the DOCTYPE line above is what proves the factory URL produced
+       the KIND asked for rather than some default — a create that silently produced a Writer doc
+       for `scalc` would still "save fine" to a .xlsx name and be wrong. */
+    } else if (strcmp(op, "create") == 0) {
+        if (argc < 7) { fprintf(stderr, "create needs <out_path> <format_ext>\n"); return 2; }
+        rc = save_as(doc, argv[5], argv[6]);
 
     } else {
         printf("RESULT: FAIL unknown op %s\n", op);
