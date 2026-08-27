@@ -899,6 +899,37 @@ final class OfficeDocsCommandTests: XCTestCase {
                            + "absolute state, which is a silent wrong answer in the user's document.")
     }
 
+    /// ⭐ **The drill that catches the silent-drop shape — a mistyped operand PAIRED with a valid
+    /// one.** This is the third occurrence of this exact defect in this arc, and it is why the drill
+    /// exists in this form rather than testing a mistyped operand on its own.
+    ///
+    /// A decoder that collapses a wrong-typed value to `nil` makes it indistinguishable from ABSENT.
+    /// On its own that is caught by the at-least-one-attribute guard, which is why a lone-operand
+    /// test passes and proves nothing. Paired with a valid attribute the guard is satisfied, the call
+    /// SUCCEEDS, the valid attribute is applied and reported — and the mistyped one is silently
+    /// dropped. The model asked for bold, was told the call worked, and the document has no bold.
+    ///
+    /// **This drill was written RED against the code as first implemented and it failed**: the
+    /// enum operands had the `isPresent`-then-refuse treatment and the three BOOLEANS did not, so
+    /// `align:"center", bold:"true"` returned ok with `align` applied. The fix extends the same
+    /// check to every optional operand.
+    func testLiveDocsFormatRefusesAMistypedBoldEvenWhenPairedWithAValidAttribute() async throws {
+        let (path, host, _) = try await openLive("format-target.odt")
+        let before = try readODFEntry(atPath: path, entry: "content.xml")
+
+        let result = await send(command("office.docs.format",
+                                        args: ["path": path, "align": "center", "bold": "true"],
+                                        sessionId: "S1", commandId: "pcmd_pair_mistyped"), through: host)
+        XCTAssertFalse(result.ok,
+                       "a mistyped `bold` must refuse even when another attribute is valid — otherwise "
+                           + "the call succeeds, applies the valid one, and silently drops the one the "
+                           + "caller got wrong: \(result)")
+        XCTAssertTrue((result.result ?? "").contains("bold"),
+                      "the refusal must name the operand that was wrong: \(result.result ?? "")")
+        XCTAssertEqual(try readODFEntry(atPath: path, entry: "content.xml"), before,
+                       "nothing may be applied when any named operand is malformed")
+    }
+
     /// Alignment and line spacing, the two argument-free attributes, land in the saved bytes.
     /// Asserted against the pristine fixture, which declares neither.
     func testLiveDocsFormatAlignAndLineSpacingReachTheSavedParagraphProperties() async throws {

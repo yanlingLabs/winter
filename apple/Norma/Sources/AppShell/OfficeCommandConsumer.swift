@@ -1573,12 +1573,19 @@ struct OfficeCommandConsumer {
 
     /// Names the legal set — the same posture every other closed-enum refusal in this file takes. A
     /// caller that sent `centre` needs to learn `center` exists, not merely that it was wrong.
-    private static func invalidDocsEnumRefusal(_ key: String) -> String {
+    private static func invalidDocsOperandRefusal(_ key: String) -> String {
         let members: [String]
         switch key {
         case "align": members = OfficeDocsAlign.allCases.map(\.rawValue)
         case "lineSpacing": members = OfficeDocsLineSpacing.allCases.map(\.rawValue)
-        default: members = OfficeDocsParagraphStyle.allCases.map(\.rawValue)
+        case "style": members = OfficeDocsParagraphStyle.allCases.map(\.rawValue)
+        default:
+            // The three booleans. **Their refusal spells out the consequence** rather than just the
+            // type, because the engine's behaviour here is genuinely surprising: the underlying slot
+            // never rejects a bad value, it coerces it — so a `"true"` STRING would not fail, it
+            // would turn the attribute OFF while reporting success.
+            return "`\(key)` must be true or false (a boolean, not a string) — a quoted \"true\" would "
+                + "be read by the office engine as false and would turn \(key) OFF. Nothing was changed."
         }
         return "`\(key)` must be one of " + members.map { "`\($0)`" }.joined(separator: ", ") + "."
     }
@@ -1951,15 +1958,29 @@ struct OfficeCommandConsumer {
         guard let path = Self.requiredPath(command.args) else {
             return sendResult(command.sessionId, command.commandId, false, Self.requiredPathRefusal, nil)
         }
-        for key in ["align", "lineSpacing", "style"] where Self.isPresent(command.args, key) {
+        // **Every optional operand, not just the enums.** A decoder that collapses a wrong-typed
+        // value to `nil` makes it indistinguishable from ABSENT, and paired with a valid attribute
+        // the at-least-one guard below is satisfied: the call SUCCEEDS, applies the valid one, and
+        // silently drops the one the caller got wrong. Third occurrence of that shape in this arc —
+        // and the first version of THIS function reproduced it, covering the enums and leaving the
+        // three booleans out (caught red by
+        // `testLiveDocsFormatRefusesAMistypedBoldEvenWhenPairedWithAValidAttribute`, which returned
+        // ok with "set align ... Confirmed" while bold vanished).
+        //
+        // Checked for every key BEFORE any of them is read, so the refusal names the operand the
+        // caller actually got wrong rather than whichever one happens to decode first.
+        for key in ["align", "lineSpacing", "style", "bold", "italic", "underline"]
+        where Self.isPresent(command.args, key) {
             let decoded: Bool
             switch key {
             case "align": decoded = Self.optionalDocsAlign(command.args) != nil
             case "lineSpacing": decoded = Self.optionalDocsLineSpacing(command.args) != nil
-            default: decoded = Self.optionalDocsStyle(command.args) != nil
+            case "style": decoded = Self.optionalDocsStyle(command.args) != nil
+            default: decoded = Self.optionalBool(command.args, key) != nil
             }
             guard decoded else {
-                return sendResult(command.sessionId, command.commandId, false, Self.invalidDocsEnumRefusal(key), nil)
+                return sendResult(command.sessionId, command.commandId, false,
+                                  Self.invalidDocsOperandRefusal(key), nil)
             }
         }
         // `find` present but not a string, or empty, is a REFUSAL — never silently "the whole
@@ -2024,10 +2045,15 @@ struct OfficeCommandConsumer {
               let placeholder = OfficeSlidesPlaceholder(rawValue: placeholderRaw) else {
             return sendResult(command.sessionId, command.commandId, false, Self.requiredPlaceholderRefusal, nil)
         }
-        for key in ["align", "lineSpacing"] where Self.isPresent(command.args, key) {
-            let decoded = key == "align"
-                ? Self.optionalDocsAlign(command.args) != nil
-                : Self.optionalSlidesLineSpacing(command.args) != nil
+        // Same rule as `handleDocsFormat`, and for the same reason — see its own comment.
+        for key in ["align", "lineSpacing", "bold", "italic", "underline"]
+        where Self.isPresent(command.args, key) {
+            let decoded: Bool
+            switch key {
+            case "align": decoded = Self.optionalDocsAlign(command.args) != nil
+            case "lineSpacing": decoded = Self.optionalSlidesLineSpacing(command.args) != nil
+            default: decoded = Self.optionalBool(command.args, key) != nil
+            }
             guard decoded else {
                 // `lineSpacing: "1.15"` gets its OWN sentence rather than the generic one: it is a
                 // legal value on `docs` and simply does not exist on a slide, and a model that just
@@ -2038,7 +2064,8 @@ struct OfficeCommandConsumer {
                     return sendResult(command.sessionId, command.commandId, false,
                                       Self.slidesLineSpacing115Refusal, nil)
                 }
-                return sendResult(command.sessionId, command.commandId, false, Self.invalidDocsEnumRefusal(key), nil)
+                return sendResult(command.sessionId, command.commandId, false,
+                                  Self.invalidDocsOperandRefusal(key), nil)
             }
         }
         // `style` is not a slides operand at all — Impress's own SID_STYLE_APPLY is presentation
