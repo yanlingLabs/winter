@@ -996,6 +996,113 @@ final class OfficeSlidesCommandTests: XCTestCase {
         XCTAssertTrue(contentXML.contains("Norma T6 Slide Three"), "saved content.xml must still contain the surviving third slide's title")
     }
 
+
+    // MARK: - office-format: slides format
+
+    /// Spins up a live host with `three-slide.odp` open, the same shape every slides drill above
+    /// uses. Returned so a format drill can assert on the SAVED BYTES afterwards.
+    private func openLiveDeck() async throws -> (path: String, host: ShellSessionHost) {
+        try requireLiveEngine()
+        let path = try makeWritableCopy(of: "three-slide.odp")
+        let stateDir = makeScratchDirectory()
+        let host = makeLiveHost(stateDir: stateDir,
+                                dirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)])
+        await host.directory.refresh()
+        let runtime = host.officeRuntime(for: "S1")
+        runtime.open(path)
+        let opened = await waitUntilLive { runtime.stateSnapshot.documents[path] != nil || runtime.stateSnapshot.phase == .failed }
+        XCTAssertTrue(opened, "setup: three-slide.odp must open cleanly")
+        return (path, host)
+    }
+
+    /// Bold on a slide's title reaches the SAVED BYTES.
+    ///
+    /// The assertion is paired with a pristine check on the same file, because `three-slide.odp` is a
+    /// shared fixture rather than one built for this drill: if it already carried a bold weight, "the
+    /// saved bytes contain bold" would hold against the untouched file and prove nothing. That is the
+    /// arc's #1 defect class, and the pairing is what keeps this drill honest without needing a
+    /// fourth presentation fixture.
+    func testLiveSlidesFormatBoldReachesTheSavedBytesAndTheFixtureDidNotAlreadyHaveIt() async throws {
+        let (path, host) = try await openLiveDeck()
+        let before = try readODFEntry(atPath: path, entry: "content.xml")
+        XCTAssertFalse(before.contains("fo:font-weight=\"bold\""),
+                       "setup: three-slide.odp must not already carry bold, or this drill proves nothing")
+
+        let result = await send(command("office.slides.format",
+                                        args: ["path": path, "slide": 1, "placeholder": "title", "bold": true],
+                                        sessionId: "S1", commandId: "pcmd_sfmt_bold"), through: host)
+        XCTAssertTrue(result.ok, "\(result)")
+
+        let after = try readODFEntry(atPath: path, entry: "content.xml")
+        XCTAssertTrue(after.contains("fo:font-weight=\"bold\""),
+                      "bold must reach the saved presentation's own bytes")
+        XCTAssertNotEqual(after, before, "the saved bytes must actually differ from the pristine fixture")
+    }
+
+    /// **`slides format` must say POSTED, never applied** — and this asserts on the sentence, because
+    /// that sentence is the entire user-visible difference between the two sides of this feature.
+    /// Impress's clipboard transferable registers no RTF flavour, so unlike `docs format` there is no
+    /// read-back available here at all; claiming confirmation would be a claim the engine will not
+    /// underwrite.
+    func testLiveSlidesFormatSaysPostedRatherThanClaimingItConfirmedAnything() async throws {
+        let (path, host) = try await openLiveDeck()
+        let result = await send(command("office.slides.format",
+                                        args: ["path": path, "slide": 1, "placeholder": "title", "bold": true],
+                                        sessionId: "S1", commandId: "pcmd_sfmt_posted"), through: host)
+        XCTAssertTrue(result.ok, "\(result)")
+        let text = result.result ?? ""
+        XCTAssertTrue(text.contains("cannot read formatting back"),
+                      "slides format must disclose that it cannot verify: \(text)")
+        XCTAssertFalse(text.contains("Confirmed"),
+                       "slides format must never claim confirmation — there is no read-back: \(text)")
+    }
+
+    /// Alignment discloses its WHOLE-SHAPE effect. On a slide, aligning a placeholder's text also
+    /// re-anchors the text box itself — something Writer has no analogue for, and something a model
+    /// reasoning from `docs format`'s behaviour would not expect.
+    func testLiveSlidesFormatAlignDisclosesThatItAlsoReAnchorsTheShape() async throws {
+        let (path, host) = try await openLiveDeck()
+        let result = await send(command("office.slides.format",
+                                        args: ["path": path, "slide": 1, "placeholder": "title", "align": "center"],
+                                        sessionId: "S1", commandId: "pcmd_sfmt_align"), through: host)
+        XCTAssertTrue(result.ok, "\(result)")
+        XCTAssertTrue((result.result ?? "").contains("re-anchors"),
+                      "aligning a slide placeholder must disclose the whole-shape effect: \(result.result ?? "")")
+    }
+
+    /// ⭐ **The asymmetry, enforced rather than documented.** `1.15` is a legal `docs format` value
+    /// and does not exist on a slide — LibreOffice's presentation editor binds no such slot — so a
+    /// shared enum would have accepted it here and silently done nothing. This asserts the refusal
+    /// AND that the refusal explains itself, because a model that just used `1.15` successfully on a
+    /// document needs the reason, not a bare list.
+    func testLiveSlidesFormatRefusesTheOnePointOneFiveSpacingThatOnlyDocumentsHaveAndSaysWhy() async throws {
+        let (path, host) = try await openLiveDeck()
+        let before = try readODFEntry(atPath: path, entry: "content.xml")
+        let result = await send(command("office.slides.format",
+                                        args: ["path": path, "slide": 1, "placeholder": "title", "lineSpacing": "1.15"],
+                                        sessionId: "S1", commandId: "pcmd_sfmt_115"), through: host)
+        XCTAssertFalse(result.ok, "1.15 line spacing must be refused on a slide: \(result)")
+        let text = result.result ?? ""
+        XCTAssertTrue(text.contains("1.15"), "the refusal must name the value that was rejected: \(text)")
+        XCTAssertTrue(text.contains("docs format") || text.contains("difference between"),
+                      "the refusal must explain this is a real difference between the editors: \(text)")
+        XCTAssertEqual(try readODFEntry(atPath: path, entry: "content.xml"), before,
+                       "a refused format must leave the presentation byte-identical")
+    }
+
+    /// `style` is refused on slides, not ignored. Ignoring it would report success for a request that
+    /// did nothing — and a model reasoning from `docs format` will try `heading1` here.
+    func testLiveSlidesFormatRefusesAParagraphStyleRatherThanIgnoringIt() async throws {
+        let (path, host) = try await openLiveDeck()
+        let result = await send(command("office.slides.format",
+                                        args: ["path": path, "slide": 1, "placeholder": "title",
+                                               "style": "heading1", "bold": true],
+                                        sessionId: "S1", commandId: "pcmd_sfmt_style"), through: host)
+        XCTAssertFalse(result.ok, "a paragraph style must be refused on a slide, not silently dropped: \(result)")
+        XCTAssertTrue((result.result ?? "").contains("style"),
+                      "the refusal must name the operand: \(result.result ?? "")")
+    }
+
     /// `unzip -p` for a single entry inside a saved ODF (zip-based, same container format as OOXML)
     /// document — mirrors `OfficeSheetsCommandTests.readOOXMLEntry`'s own shape exactly (shell out to
     /// a well-understood system tool rather than reimplement zip reading), kept as a local copy per
