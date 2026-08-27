@@ -2701,11 +2701,12 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// to be BLIND to instant save — measured, not suspected.**
     ///
     /// `testTypingOnSheetTwoLandsOnSheetTwoNotSheetOneThroughSaveAndReopen` was the stated criterion
-    /// ("armed, it fails 2 of 3"). On this machine it does not discriminate at all: a probe in
-    /// `fireAutoSave` showed that armed, across 8 runs, it issues **zero** auto-saves — the whole
-    /// drill completes inside the 0.9 s production debounce, so `autoSaveEnabled` makes no observable
-    /// difference to it in EITHER direction. It passes armed for the same reason it passes disarmed.
-    /// Full counts: `.superpowers/research/office-close-race-report.md`.
+    /// ("armed, it fails 2 of 3"). On this machine it did not discriminate at all: a probe in
+    /// `fireAutoSave` showed that armed, across 8 runs, it issued **zero** auto-saves — the whole
+    /// drill completed inside the then-0.9 s debounce, so arming made no observable difference to it
+    /// in EITHER direction. It passed armed for the same reason it passed disarmed. Full counts:
+    /// `.superpowers/research/office-close-race-report.md`. (Past tense throughout: the debounce and
+    /// its flag were deleted at office-live-ux Job 2. The lesson survives the mechanism.)
     ///
     /// So this drill exists to ask the question that one cannot: it lets a real UNPROMPTED save land
     /// and closes the document on top of it, with **no explicit save anywhere in the drill at all**.
@@ -2715,10 +2716,14 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// (`periodicSaveTick`). Everything that made the drill discriminating is unchanged and is why
     /// it was ported rather than dropped: the save is still unprompted, still goes through
     /// `fireAutoSave`'s own three guards, still resolves into `onAutoSaveFinishedForTesting`, and the
-    /// close is still taken from inside that hook. It remains the standing evidence for
-    /// `awaitCloseBarrier` (9/9 green vs 3/3 red with the barrier's body emptied, 45 laps —
-    /// `.superpowers/research/office-close-race-report.md`), and re-measured on the ported mechanism
-    /// in `.superpowers/research/office-live-ux-report.md`.
+    /// close is still taken from inside that hook.
+    ///
+    /// The 9/9-green-vs-3/3-red, 45-lap counts in
+    /// `.superpowers/research/office-close-race-report.md` were taken on the DEBOUNCE, so they
+    /// certify `awaitCloseBarrier` against a mechanism that no longer exists. This drill's own
+    /// green/red on the PORTED mechanism is recorded in
+    /// `.superpowers/research/office-live-ux-report.md`; read that for what certifies the barrier
+    /// today.
     ///
     /// **`periodicSaveInterval` is shortened here, and unlike the debounce it replaced that is the
     /// RIGHT knob.** The old comment warned against shortening the debounce because it armed at key

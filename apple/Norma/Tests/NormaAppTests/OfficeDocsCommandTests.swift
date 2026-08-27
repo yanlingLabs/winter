@@ -532,18 +532,21 @@ final class OfficeDocsCommandTests: XCTestCase {
                         + "marker text: \(text)")
         // **What "one press" is proven against: the SAVED BYTES on disk, not a flag.**
         //
-        // The save is issued EXPLICITLY rather than relying on instant save. `autoSaveEnabled` now
-        // ships **ON** (office-finish armed it — see its own header for the four rounds), but this
-        // drill must not depend on that: it would then be timing-dependent on the 0.9 s debounce,
-        // which is exactly the defect that made round 3's arming criterion vacuous. Waiting for the document to
-        // go clean is therefore waiting for THIS save to have landed, and reading `content.xml` back
-        // afterwards proves the undo both happened AND was persisted — strictly stronger than
-        // asserting `dirty`, and what makes this test its own positive control: a `postUndo` that
-        // silently did nothing (the pre-R3 behaviour this test was INVERTED from) leaves UNDOMARKER
-        // in those bytes and fails here.
+        // The save is issued EXPLICITLY rather than relying on any unprompted one, and after
+        // office-live-ux Job 2 that is not merely belt: NOTHING arms a save off a keystroke any
+        // more (the idle debounce is deleted), and the background backstop that replaced it is
+        // 120 s — far longer than this drill runs. So this call is the ONLY thing that saves here.
         //
-        // Deliberately written to hold either way: if instant-save is ever armed, the debounce will
-        // already have saved and this call is harmless, and the assertions below are unchanged.
+        // Waiting for the document to go clean is therefore waiting for THIS save to have landed,
+        // and reading `content.xml` back afterwards proves the undo both happened AND was persisted
+        // — strictly stronger than asserting `dirty`, and what makes this test its own positive
+        // control: a `postUndo` that silently did nothing (the pre-R3 behaviour this test was
+        // INVERTED from) leaves UNDOMARKER in those bytes and fails here.
+        //
+        // (The comment this replaces said `autoSaveEnabled` "now ships ON" and reasoned about a
+        // 0.9 s debounce. Both were true when written and neither is true now — the symbol does not
+        // exist. Corrected rather than left, because a stale present-tense claim in a test is how
+        // this arc has repeatedly sent the next reader at the wrong mechanism.)
         runtime.save(path)
         let settledClean = await waitUntilLive { runtime.stateSnapshot.documents[path]?.dirty == false }
         XCTAssertTrue(settledClean, "the post-undo save must land the undone state on disk")
