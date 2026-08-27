@@ -2646,22 +2646,45 @@ extension OfficeTileCanvasViewTests {
                        "a turn running is not a reason to cover every open document")
     }
 
-    /// **The impossibility argument, driven rather than reasoned.** Nothing clears the mark here —
-    /// the turn simply ends — and the overlay goes away anyway, because visibility is DERIVED from
-    /// the conjunction rather than toggled by a matched pair of events.
+    /// **The impossibility argument, and it rests on TWO independent mechanisms — which is a
+    /// correction to how this test was first written.**
     ///
-    /// A design with an explicit hide event would pass every other test in this section and fail
-    /// this one the moment the hide were dropped, which is precisely the failure the spec names.
-    func testTheOverlayClearsWhenTheTurnEndsEvenIfNothingUnmarksTheDocument() async {
+    /// The design has a belt and braces, and either alone suffices:
+    ///  1. **the conjunction** — visibility is derived from live turn state, so the overlay cannot
+    ///     be shown without a turn behind it, whatever the office layer believes about engagement;
+    ///  2. **the both-edges clear** — `setSessionTurnRunning` wipes the marks on the way past.
+    ///
+    /// ⚠️ The first version of this test asserted only the second half while its NAME claimed the
+    /// first. Measured: with the conjunction deliberately broken (`agentIsWorking` reduced to
+    /// `agentEngagedPaths.contains`), it still passed — because the clear had already emptied the
+    /// set. It was the project's own description-contradicting-the-code shape, in the test written
+    /// to prevent it. The second half below is the fix, and it isolates the conjunction by marking
+    /// AFTER the turn has ended.
+    ///
+    /// That late mark is not a contrivance: `noteAgentEngaged` is called from the broker's own
+    /// `Task`, which can outlive the turn it belongs to — an Esc or a stop-button click ends the
+    /// turn while a broker call is still in flight, and its mark then lands on a runtime whose turn
+    /// is already over. Without the conjunction, that mark shows an overlay with nothing behind it
+    /// and blocks the user's typing until the NEXT turn happens to start.
+    func testTheOverlayClearsWhenTheTurnEndsAndCannotBeRelitByALateMark() async {
         let (runtime, _) = await makeOpenedRuntime()
         runtime.setSessionTurnRunning(true)
         runtime.noteAgentEngaged(path: gatePath)
         XCTAssertTrue(runtime.agentIsWorking(on: gatePath), "setup")
 
+        // Half 2 — the clear.
         runtime.setSessionTurnRunning(false)
-
         XCTAssertFalse(runtime.agentIsWorking(on: gatePath),
                        "the turn ending is sufficient on its own — no unmark call exists to be missed")
+        XCTAssertTrue(runtime.agentEngagedPaths.isEmpty, "…and the marks really are gone")
+
+        // Half 1 — the conjunction, isolated. A mark landing now, from a broker Task that outlived
+        // its turn, must not light anything.
+        runtime.noteAgentEngaged(path: gatePath)
+        XCTAssertFalse(runtime.agentIsWorking(on: gatePath),
+                       "a mark that lands AFTER the turn ended must show nothing — this is the half "
+                         + "the clear cannot cover, and the half that keeps a late broker Task from "
+                         + "wedging the user's keyboard")
     }
 
     /// **The BOTH-EDGES clear, which is the self-heal.** If a false edge is ever missed — a runtime
