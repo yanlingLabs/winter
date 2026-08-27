@@ -1052,8 +1052,120 @@ final class LOKBridge: OfficeDocumentBridge {
 
     // MARK: - OfficeDocumentBridge
 
-    func open(docId: String, path: String) throws -> OfficeDocumentMetadata {
-        try thread.sync { try self.openOnDedicatedThread(docId: docId, path: path) }
+    func open(docId: String, path: String, createIfMissing: Bool) throws -> OfficeDocumentMetadata {
+        try thread.sync {
+            // office-authoring — the create half runs on the SAME dedicated thread, inside the SAME
+            // `sync` block as the open it precedes. Two LOK calls that must not interleave with any
+            // other document's work (`LOKDedicatedThread`'s own contract), and a caller must never
+            // observe a state where the file was created but the open that follows it belongs to a
+            // different queued job.
+            if createIfMissing, !FileManager.default.fileExists(atPath: path) {
+                try self.createBlankDocumentOnDedicatedThread(path: path)
+            }
+            return try self.openOnDedicatedThread(docId: docId, path: path)
+        }
+    }
+
+    /// office-authoring Job 1 — mints a BLANK document at `path`, so that a write to a path that
+    /// does not exist creates the document (the user's own design call: no `create` verb; `write`'s
+    /// own description, `packages/core/src/agent/tools/fs-write.ts`, is the in-repo precedent —
+    /// "Write a file (creates parent directories). Overwrites if it exists.").
+    ///
+    /// ## The mechanism, measured before it was built
+    ///
+    /// LibreOffice mints new documents from `private:factory/<app>` URLs. That this reaches LOK at
+    /// all, and that it survives the helper's own seatbelt, was proven on
+    /// `spikes/office-format-probe` against the real vendored engine BEFORE any of this was
+    /// written — this project has twice shipped an engine path that worked everywhere except inside
+    /// the sandbox (the missing `libmswordlo.dylib` and `libsal_textenclo.dylib` cases), so an
+    /// unsandboxed proof would not have been a proof. All six factory × format pairs produced
+    /// genuinely-typed documents (`file(1)` on the saved bytes, plus a zip CRC check), and the
+    /// sandboxed arm carried its own control: the identical call writing OUTSIDE `STATE_PATH` was
+    /// refused by the seatbelt, which is what makes "it worked sandboxed" mean something rather
+    /// than being the artefact of a sandbox that never applied.
+    ///
+    /// ## Why the kind comes from the EXTENSION
+    ///
+    /// `path` is the staged path, and `OfficeRuntime.stagedPath(forDocId:realPath:docsDirectory:)`
+    /// preserves the real document's own extension — so the extension here IS the user's own
+    /// requested format, and `OfficeSaveFormat` is already this file's one mapping from it. An
+    /// extension outside those six throws rather than guessing a kind: `saveAs` would have no
+    /// filter for it anyway (that type's own header records that `documentLoad` opens far more
+    /// than it can WRITE), so guessing would produce a document that can never be saved.
+    ///
+    /// ## Two things this deliberately does NOT do
+    ///
+    /// - **It does not go through `openOnDedicatedThread`.** That function runs the CFB-magic gate
+    ///   and then `URL(fileURLWithPath: path).absoluteString`, which would turn
+    ///   `private:factory/swriter` into `file://private:factory/swriter` — a well-formed file URL
+    ///   naming a path that does not exist. The probe made exactly that mistake first and reported
+    ///   a `documentLoad` failure that was its own string concatenation, not the engine.
+    /// - **It does not leave the blank document open.** It destroys the handle immediately; the
+    ///   caller then opens `path` through the ordinary path, so everything downstream — the ABI
+    ///   tripwires, `initializeForRendering`, the callback registration, `OpenDocument`'s own
+    ///   bookkeeping — is byte-identically the proven path, with a real file underneath it.
+    ///
+    /// Writes only to `path`, which is always inside the helper's own `--state-path` jail (the
+    /// staged path); the app is what places the eventual save onto the user's real path. The
+    /// seatbelt's write fence is untouched by this and the jail never widens.
+    private func createBlankDocumentOnDedicatedThread(path: String) throws {
+        let ext = (path as NSString).pathExtension
+        guard let format = OfficeSaveFormat(pathExtension: ext) else {
+            throw LoadError.documentLoadFailed(
+                "Norma can't create a new \(ext.isEmpty ? "extensionless" : ".\(ext)") document — "
+                    + "it can only create .odt, .docx, .ods, .xlsx, .odp and .pptx files.")
+        }
+        // `getDocumentType()` on the loaded handle is checked below against what was asked for, so
+        // this mapping is verified at runtime rather than merely asserted here.
+        let factoryURL: String
+        let expectedKind: OfficeDocumentKind
+        switch format {
+        case .odt, .docx: factoryURL = "private:factory/swriter"; expectedKind = .text
+        case .ods, .xlsx: factoryURL = "private:factory/scalc"; expectedKind = .spreadsheet
+        case .odp, .pptx: factoryURL = "private:factory/simpress"; expectedKind = .presentation
+        }
+
+        guard let blank = kit.pointee.pClass.pointee.documentLoad?(kit, factoryURL) else {
+            let reason: String
+            if let errCStr = kit.pointee.pClass.pointee.getError?(kit) {
+                reason = String(cString: errCStr)
+                kit.pointee.pClass.pointee.freeError?(errCStr)
+            } else {
+                reason = "documentLoad failed (no error string available)"
+            }
+            throw LoadError.documentLoadFailed("couldn't create a new document: \(reason)")
+        }
+        // Destroyed on EVERY exit, success or throw — this handle is never handed to a caller and
+        // must not outlive this function. A leaked LOK document handle is not merely memory: it
+        // holds a component in the shared engine for the helper's whole remaining life.
+        defer { blank.pointee.pClass.pointee.destroy?(blank) }
+
+        // The kind check the extension mapping above cannot make on its own. A factory URL that
+        // silently produced the WRONG component type would still `saveAs` cleanly to the requested
+        // filename — a Writer document inside a file called `.xlsx` — and the mismatch would only
+        // surface later as a confusing tool refusal about the file's "real type". Cheap to check
+        // here, where the honest message is still available.
+        let actualKind = OfficeDocumentKind(
+            lokDocumentType: blank.pointee.pClass.pointee.getDocumentType?(blank) ?? -1)
+        guard actualKind == expectedKind else {
+            throw LoadError.documentLoadFailed(
+                "couldn't create a new .\(format.fileExtension) document: the office engine made a "
+                    + "\(actualKind.rawValue) instead of a \(expectedKind.rawValue).")
+        }
+
+        // Bare EXTENSION, never a filter name — `doc_saveAs` resolves the filter itself from the
+        // loaded component's own type. `OfficeSaveFormat.fileExtension`'s own header records the
+        // live-test-caught correction that established this.
+        let destination = URL(fileURLWithPath: path).absoluteString
+        let saved: Bool = destination.withCString { destPtr in
+            format.fileExtension.withCString { formatPtr in
+                (blank.pointee.pClass.pointee.saveAs?(blank, destPtr, formatPtr, nil) ?? 0) != 0
+            }
+        }
+        guard saved else {
+            throw LoadError.documentLoadFailed(
+                "couldn't write the new .\(format.fileExtension) document.")
+        }
     }
 
     func close(docId: String) {

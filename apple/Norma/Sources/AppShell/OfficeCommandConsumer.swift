@@ -107,6 +107,22 @@ struct OfficeCommandConsumer {
     /// site too, which T3 does not touch). Every OTHER action — T1's entire refusal surface — is
     /// UNCHANGED: answered here, synchronously, with the same structured refusal as before.
     func handle(_ command: SessionEvent.PanelCommand) {
+        // office-authoring — the CREATE gate, and it runs before ANY handler so that nothing is
+        // opened, staged, or minted for a request that was always going to be refused.
+        //
+        // A write to a path that does not exist now creates the document, and its kind comes from
+        // the extension. So `docs` asked to write a missing `.xlsx` would otherwise mint a Calc
+        // document and only then hit the existing kind guard — which lives in the helper and fires
+        // on the OPEN document — leaving a stray spreadsheet on the user's disk that they never
+        // asked for and that the refusal does not mention. Refusing here means nothing is created.
+        //
+        // Deliberately scoped to a path that does not exist: for a file that IS there, the
+        // authority on its kind is the ENGINE (`LOKBridge`'s own `is a text document` refusals read
+        // `getDocumentType()`), never the extension — a `.docx` holding a spreadsheet must still be
+        // refused as a spreadsheet, which only opening it can establish.
+        if let refusal = Self.createKindRefusal(for: command) {
+            return sendResult(command.sessionId, command.commandId, false, refusal, nil)
+        }
         switch command.action {
         case "office.sheets.info":
             Task { await handleSheetsInfo(command) }
@@ -1356,6 +1372,54 @@ struct OfficeCommandConsumer {
         + "\(officeResizeMaxCount)."
     private static let requiredNameRefusal = "this office verb needs a `name`."
     private static let requiredNewNameRefusal = "`sheets rename_sheet` needs a `newName`."
+
+    /// office-authoring — the create gate's own predicate. Returns a refusal when this command
+    /// would CREATE a document of a kind this tool cannot drive, and `nil` in every other case
+    /// (including every read, every existing file, and every command with no usable path — those
+    /// are the individual handlers' own business and are answered with their own wording).
+    ///
+    /// Extension-driven ON PURPOSE, and only reachable for a path with nothing on it: the extension
+    /// is the only thing that can be known about a document that does not exist yet, and it is also
+    /// exactly what the helper will use to pick the factory kind.
+    ///
+    /// The two arms it refuses are genuinely different:
+    ///   - a KNOWN office extension belonging to another tool (`docs` + `.xlsx`) — name both, the
+    ///     way the engine's own kind refusal does;
+    ///   - an extension outside the six writable formats — the helper would refuse this too, but
+    ///     only after a cold boot and an open, and its message would name the jail's staged copy
+    ///     rather than the user's own filename.
+    static func createKindRefusal(for command: SessionEvent.PanelCommand) -> String? {
+        // Reads never create, so they are never gated here — a read of a missing path is the
+        // broker's own `.documentNotFound`, which says something more useful than this could.
+        guard !(command.action.hasSuffix(".info") || command.action.hasSuffix(".read")) else { return nil }
+        guard let path = requiredPath(command.args) else { return nil }
+        guard let tool = command.action.split(separator: ".").dropFirst().first.map(String.init) else { return nil }
+        // Relative paths are resolved by the fence, which the broker runs; an existence check on an
+        // unresolved spelling would be meaningless, so leave those to the broker entirely.
+        guard path.hasPrefix("/"), !FileManager.default.fileExists(atPath: path) else { return nil }
+
+        let name = (path as NSString).lastPathComponent
+        let ext = (path as NSString).pathExtension.lowercased()
+        // The same six formats `OfficeSaveFormat` (helper-side) can write — hand-mirrored across the
+        // module boundary the way `officeReadWriteExtensions` already is, and for the same stated
+        // reason: the app target cannot import the helper's module. The helper re-checks
+        // independently, so a drift here can only ever cost a worse MESSAGE, never a wrong outcome.
+        let kindByExtension: [String: String] = [
+            "odt": "docs", "docx": "docs",
+            "ods": "sheets", "xlsx": "sheets",
+            "odp": "slides", "pptx": "slides",
+        ]
+        guard let owner = kindByExtension[ext] else {
+            return "Norma can't create \(name) — a new office document has to be one of "
+                + ".odt, .docx (text), .ods, .xlsx (spreadsheet), .odp or .pptx (presentation)."
+        }
+        guard owner != tool else { return nil }
+        let noun = ["docs": "text document", "sheets": "spreadsheet", "slides": "presentation"]
+        return "\(name) doesn't exist yet, and writing to it would create a "
+            + "\(noun[owner] ?? owner) — which the `\(owner)` tool handles, not `\(tool)`. "
+            + "Nothing was created. Use the `\(owner)` tool, or write to a "
+            + "\(noun[tool] ?? tool) filename instead."
+    }
 
     private static func requiredPath(_ args: [String: SessionEvent.JSONValue]?) -> String? {
         guard case .string(let raw)? = args?["path"], !raw.isEmpty else { return nil }

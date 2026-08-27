@@ -463,7 +463,7 @@ final class OfficeSupervisorTests: XCTestCase {
         addTeardownBlock { connectionA.close() }
         try await connectionA.send(.hello(seq: 1, role: .app, token: "t"))
         guard case .helloOk = await connectionA.nextFrame(timeout: 5.0) else { return XCTFail("A hello failed") }
-        try await connectionA.send(.open(seq: 2, docId: docId, path: "/tmp/whatever-\(docId)"))
+        try await connectionA.send(.open(seq: 2, docId: docId, path: "/tmp/whatever-\(docId)", createIfMissing: false))
         guard case .opened = await connectionA.nextFrame(timeout: 5.0) else { return XCTFail("A open failed") }
         try await connectionA.send(.subscribeTiles(seq: 3, docId: docId, part: 0, zoomPPT: 1000, viewportTwips: rect))
         guard case .subscribed = await connectionA.nextFrame(timeout: 5.0) else { return XCTFail("A subscribe failed") }

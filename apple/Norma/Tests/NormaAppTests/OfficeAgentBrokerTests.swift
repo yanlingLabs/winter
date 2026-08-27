@@ -122,8 +122,11 @@ final class OfficeAgentBrokerTests: XCTestCase {
             self.stateDirectory = stateDirectory
         }
 
-        private var _openCalls: [(docId: String, path: String)] = []
-        var openCalls: [(docId: String, path: String)] { lock.lock(); defer { lock.unlock() }; return _openCalls }
+        // office-authoring — `createIfMissing` is RECORDED, not discarded. It is the whole signal
+        // that distinguishes "the broker asked for a document to be created" from "the broker asked
+        // for one to be opened", and a fake that dropped it would let either behaviour pass.
+        private var _openCalls: [(docId: String, path: String, createIfMissing: Bool)] = []
+        var openCalls: [(docId: String, path: String, createIfMissing: Bool)] { lock.lock(); defer { lock.unlock() }; return _openCalls }
         private var _closeCalls: [String] = []
         var closeCalls: [String] { lock.lock(); defer { lock.unlock() }; return _closeCalls }
         private var _saveCalls: [String] = []
@@ -163,7 +166,7 @@ final class OfficeAgentBrokerTests: XCTestCase {
             OfficeRuntime.Driver(
                 helperState: { .ready },
                 startHelper: { },
-                open: { [weak self] docId, path in
+                open: { [weak self] docId, path, createIfMissing in
                     // crash-fix round 1 (Family B): `OfficeRuntime.perform` fires this Driver's
                     // calls as fire-and-forget `Task`s that routinely outlive the test (see
                     // broker-crash-investigation.md §2) — `[unowned self]` on a LOCAL recorder read
@@ -172,7 +175,7 @@ final class OfficeAgentBrokerTests: XCTestCase {
                     // which is the correct semantics for "the test that owned me is over."
                     guard let self else { throw CancellationError() }
                     if let gate = self.openGate { await gate() }
-                    self.lock.lock(); self._openCalls.append((docId, path)); self.lock.unlock()
+                    self.lock.lock(); self._openCalls.append((docId, path, createIfMissing)); self.lock.unlock()
                     return self.defaultMetadata
                 },
                 close: { [weak self] docId in

@@ -26,7 +26,13 @@ final class OfficeWireCodecTests: XCTestCase {
             .hello(seq: 1, role: .app, token: "tok-app"),
             .hello(seq: 2, role: .agent, token: "tok-agent"),
             .ping(seq: 3),
-            .open(seq: 4, docId: "doc-1", path: "/tmp/a spaced name.docx"),
+            .open(seq: 4, docId: "doc-1", path: "/tmp/a spaced name.docx", createIfMissing: false),
+            // office-authoring — BOTH values of `createIfMissing`, deliberately. A single sample
+            // pinned at `false` would round-trip identically whether the field were carried or
+            // silently defaulted by the decoder's own `?? false`, which is exactly the drift this
+            // table exists to catch — the same reasoning `save`'s own non-zero `part` sample above
+            // already records.
+            .open(seq: 33, docId: "doc-1", path: "/tmp/brand new.docx", createIfMissing: true),
             .close(seq: 5, docId: "doc-1"),
             // Office Stage B Task 2 — the save round trip.
             // Fix round 4 (NEW-2) — a NON-ZERO part, deliberately: a `save` sample pinned at
@@ -357,7 +363,7 @@ final class OfficeWireCodecTests: XCTestCase {
         let size = OfficeDocumentSize(widthTwips: 1, heightTwips: 1)
         XCTAssertEqual(OfficeWireFrame.hello(seq: 100, role: .app, token: "t").seq, 100)
         XCTAssertEqual(OfficeWireFrame.ping(seq: 101).seq, 101)
-        XCTAssertEqual(OfficeWireFrame.open(seq: 102, docId: "d", path: "/p").seq, 102)
+        XCTAssertEqual(OfficeWireFrame.open(seq: 102, docId: "d", path: "/p", createIfMissing: false).seq, 102)
         XCTAssertEqual(OfficeWireFrame.close(seq: 103, docId: "d").seq, 103)
         XCTAssertEqual(OfficeWireFrame.save(seq: 121, docId: "d", part: 1).seq, 121)
         XCTAssertEqual(OfficeWireFrame.saved(seq: 122, docId: "d", tempPath: "/p").seq, 122)

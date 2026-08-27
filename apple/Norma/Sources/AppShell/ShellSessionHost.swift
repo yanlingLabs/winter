@@ -998,12 +998,13 @@ final class ShellSessionHost: ObservableObject {
         return OfficeRuntime.Driver(
             helperState: { [weak supervisor] in supervisor?.state ?? .notStarted },
             startHelper: { [weak supervisor] in await supervisor?.start() },
-            open: { [weak supervisor] docId, path in
+            open: { [weak supervisor] docId, path, createIfMissing in
                 try await queue.run {
                     guard let client = supervisor?.client else {
                         throw OfficeHelperClientError.serverError(reason: "helper not connected")
                     }
-                    return try await client.open(docId: docId, path: path)
+                    return try await client.open(docId: docId, path: path,
+                                                 createIfMissing: createIfMissing)
                 }
             },
             close: { [weak supervisor] docId in

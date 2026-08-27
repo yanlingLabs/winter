@@ -636,7 +636,7 @@ final class AppLifecycleTests: XCTestCase {
     private func scratchOfficeDriver() -> OfficeRuntime.Driver {
         OfficeRuntime.Driver(
             helperState: { .ready }, startHelper: { },
-            open: { _, _ in OfficeDocumentMetadata(
+            open: { _, _, _ in OfficeDocumentMetadata(
                 type: .spreadsheet, parts: 1, sizeTwips: OfficeDocumentSize(widthTwips: 100, heightTwips: 100)) },
             close: { _ in }, save: { _, _ in "/tmp/live-dirty-gate-unused-save" },
             subscribeTiles: { _, _, _, _ in [] }, unsubscribeTiles: { _ in }, requestTiles: { _, _ in },

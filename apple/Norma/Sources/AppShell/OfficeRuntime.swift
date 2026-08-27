@@ -1648,7 +1648,13 @@ final class OfficeRuntime: ObservableObject {
         /// Routed through `ShellSessionHost`'s ONE `OfficeHelperRequestQueue` in production — see
         /// that type's own header for why a raw, un-serialized `client.open` is not safe to call
         /// from more than one place at a time on the shared connection.
-        var open: (_ docId: String, _ path: String) async throws -> OfficeDocumentMetadata
+        ///
+        /// **office-authoring — `createIfMissing`.** True mints a blank document at `path` first
+        /// (the kind coming from `path`'s own extension) so a write to a path that does not exist
+        /// creates the document. NOT defaulted here, unlike the supervisor's own method: this is a
+        /// stored closure, so a default would be invisible at every construction site and the
+        /// compiler would not force a new one to think about it.
+        var open: (_ docId: String, _ path: String, _ createIfMissing: Bool) async throws -> OfficeDocumentMetadata
         /// Never throws to the caller: a close is fire-and-forget everywhere this file uses it
         /// (optimistic removal in the reducer, teardown, the carry-6 compensating close) — there is
         /// nothing left to roll back to on failure, only something worth logging, which the
@@ -1919,13 +1925,29 @@ final class OfficeRuntime: ObservableObject {
     /// exactly like `EditorRuntime.close`/`.teardown`. Never sequence off this call returning —
     /// observe `state`/`stateSnapshot` instead (the same rule `EditorRuntime.openFile`'s own header
     /// states, for the identical reason: this returns before the helper has answered anything).
-    func open(_ path: String) {
+    ///
+    /// **office-authoring — `createIfMissing`.** When true and nothing exists at `path`, the open
+    /// MINTS a blank document there (kind from `path`'s own extension) instead of failing. The flag
+    /// rides `createOnOpenPaths` — a plain per-path set on this object, NOT reducer state — for the
+    /// same reason `agentEngagedPaths` is one: it is a fact about the CALLER's intent for the next
+    /// open, not part of the document state clients replay, and threading it through
+    /// `.openRequested` → `pendingOpens` → `.helperOpen` would put it in three places that all have
+    /// to agree for no gain. Consumed (and removed) by `openAndDispatch`.
+    func open(_ path: String, createIfMissing: Bool = false) {
         // office-live-ux Job 2 — arm the background backstop here, lazily and idempotently. A
         // runtime that was pre-warmed but never opened a document runs no timer at all; the second
         // and later opens re-use the first one's.
         startPeriodicSaveIfNeeded()
+        if createIfMissing { createOnOpenPaths.insert(path) }
         perform(dispatch(.openRequested(path: path)))
     }
+
+    /// office-authoring — paths whose NEXT open may mint the document if nothing is there. See
+    /// `open(_:createIfMissing:)`. Consumed by `openAndDispatch`, which removes the entry whether or
+    /// not it ended up creating anything: the permission is for ONE open, never standing. A stale
+    /// entry could otherwise turn a later, ordinary open of a since-deleted file into a silent
+    /// blank-document substitution for the user's own missing document.
+    private var createOnOpenPaths: Set<String> = []
 
     /// Close `path`'s open document. **Synchronous and fire-and-forget, exactly as before** — the
     /// reducer drops `documents[path]` in this same turn, so `stateSnapshot` reflects the close the
@@ -3784,6 +3806,18 @@ final class OfficeRuntime: ObservableObject {
         let docsDirectory = docsDirectory
         let autosaveDirectory = autosaveDirectory
         let copySource = stageFrom ?? path
+        // office-authoring — consumed HERE, on the @MainActor hop, before the Task below detaches:
+        // reading it inside the Task would race a second open of the same path. Removed
+        // unconditionally — the permission is for exactly this one open (see `createOnOpenPaths`).
+        //
+        // `stageFrom != nil` (a sidecar restore) can never create: that path HAS bytes to stage by
+        // construction, and a restore whose sidecar vanished must fail loudly rather than hand the
+        // user a blank document in place of the recovery they asked for.
+        let mayCreate = createOnOpenPaths.remove(path) != nil && stageFrom == nil
+        // Re-checked against the disk rather than trusting `mayCreate` alone, and the ORDER matters:
+        // a file that appeared between the broker's own check and this line must be STAGED, not
+        // overwritten with a blank document. `mayCreate` is permission, not instruction.
+        let createIfMissing = mayCreate && !FileManager.default.fileExists(atPath: copySource)
         Task { [weak self, driver] in
             guard let self else { return }
             do {
@@ -3794,10 +3828,18 @@ final class OfficeRuntime: ObservableObject {
                 // restore, the sidecar's own path) itself from here on. Off `@MainActor` — a real
                 // copy, mirrors `performSave`'s own `Task.detached` around `placeAtomically`
                 // exactly, for the identical reason (a large document must not stall the shell).
-                try await Task.detached(priority: .userInitiated) {
-                    try Self.stageDocument(realPath: copySource, stagedPath: stagedPath)
-                }.value
-                let metadata = try await driver.open(docId, stagedPath)
+                //
+                // **office-authoring** — nothing to stage when the document is being CREATED: there
+                // is no source file, and `stageDocument`'s own `copyfile` would fail `ENOENT`
+                // (which is precisely the error a write to a non-existent path used to produce).
+                // The helper mints the document directly at `stagedPath` instead — still inside its
+                // own jail, so the fence is untouched and never widens.
+                if !createIfMissing {
+                    try await Task.detached(priority: .userInitiated) {
+                        try Self.stageDocument(realPath: copySource, stagedPath: stagedPath)
+                    }.value
+                }
+                let metadata = try await driver.open(docId, stagedPath, createIfMissing)
                 guard myGeneration == self.generation else {
                     // Carry 6: teardown superseded this open while it was in flight. The document is
                     // now open on the shared helper with no owner left to close it — compensate
@@ -4276,6 +4318,17 @@ final class OfficeRuntime: ObservableObject {
         let sibling = directory.appendingPathComponent(
             ".\(destination.lastPathComponent).norma-save-\(UUID().uuidString)")
         do {
+            // office-authoring — the destination's PARENT may not exist yet. A write to a path that
+            // does not exist now creates the document, and `write`'s own contract (fs-write.ts:
+            // "Write a file (creates parent directories)") is the shape being matched: an agent
+            // asked to write `reports/2026/q3.docx` should not have to mkdir first. A no-op when the
+            // directory is already there (`withIntermediateDirectories: true` does not error on an
+            // existing directory), so the ordinary save path is untouched.
+            //
+            // Inside the `do` deliberately: a directory that cannot be created is a real save
+            // failure and belongs in the same `catch` as the copy, not thrown from a bare `try` that
+            // would bypass this function's own error wording.
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             try FileManager.default.copyItem(atPath: tempPath, toPath: sibling.path)
             // Flushed before the rename — same reasoning `writeAtomically` states at length: without
             // it the rename can reach the disk before the bytes do, and a power loss leaves the

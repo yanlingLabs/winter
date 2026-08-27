@@ -367,7 +367,15 @@ export function registerDocsTool(r: ToolRegistry, deps: DocsToolDeps): void {
     name: "docs",
     description:
       "Read and edit a text document Norma has access to (.odt, .docx — any format the office engine "
-      + "can open). Every write verb SAVES immediately — there is no separate save step, and you "
+      + "can open). "
+      + "**A write verb whose path does not exist CREATES the document** — there is no separate "
+      + "\"create\" or \"new\" verb, exactly as with the `write` tool for ordinary files. The kind "
+      + "comes from the EXTENSION, and it has to be one this tool handles (.odt or .docx for a text document); any missing "
+      + "parent directories are created too. Two things to know: a `read` or `info` on a path that "
+      + "does not exist still REFUSES (only writes create), and the new document only reaches disk "
+      + "if the write itself succeeds — a create whose write then fails leaves no file at all, "
+      + "rather than an empty one. "
+      + "Every write verb SAVES immediately — there is no separate save step, and you "
       + "cannot undo from here. A HUMAN can: if they have the document open in a tab, one press of "
       + "⌘Z takes back your whole tool call, however many edits it made, and ⌘⇧Z puts it back. So a "
       + "write is recoverable BY THEM, not by you — you still cannot reverse your own edit, so read "

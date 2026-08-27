@@ -1829,7 +1829,7 @@ final class OfficeRuntimeWatcherTests: XCTestCase {
         scratchDirs.append(stateDir)
         return OfficeRuntime.Driver(
             helperState: { .ready }, startHelper: { },
-            open: { _, _ in metadata },
+            open: { _, _, _ in metadata },
             close: { _ in },
             save: save,
             subscribeTiles: { _, _, _, _ in [] },

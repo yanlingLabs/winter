@@ -311,11 +311,27 @@ final class OfficeAgentBroker {
             docId = try await awaitOpen(existing, path: resolvedPath)
             adopted = true
         } else {
+            // office-authoring — the path exists nowhere yet.
+            //
+            // **Only on this branch, deliberately.** The two branches above ADOPTED a document that
+            // is already open in the engine; whether its bytes are still on disk at this instant is
+            // a different question and not one this check should answer (a user who deleted the file
+            // out from under their own open tab must still be able to read that tab, and a write
+            // will re-place it). This branch is the one that has nothing but a path.
+            let fileExists = FileManager.default.fileExists(atPath: resolvedPath)
+            // A READ still fails on a missing path — the user's ruling is that a WRITE creates, not
+            // that every verb conjures a document. Until now this failed inside `stageDocument` as
+            // `copyfile`'s bare ENOENT ("The document couldn't be staged: No such file or
+            // directory."), which names neither the file nor what to do about it.
+            if !fileExists, access == .read {
+                throw OfficeAgentBrokerError.documentNotFound(path: resolvedPath)
+            }
             guard let opened = host.runtime(sessionId) else {
                 throw OfficeAgentBrokerError.hostGone
             }
             runtime = opened
-            docId = try await awaitOpen(opened, path: resolvedPath)
+            docId = try await awaitOpen(opened, path: resolvedPath,
+                                        createIfMissing: !fileExists && access == .write)
             adopted = false
         }
 
@@ -723,8 +739,13 @@ final class OfficeAgentBroker {
     /// await that same permanently-hung task forever too. `phase == .idle` can only be a POST-call
     /// regression here (calling `open` synchronously advances `.idle`/`.failed` to `.starting` before
     /// this function ever subscribes), so seeing it again mid-wait is unambiguous.
-    private static func awaitOpen(_ runtime: OfficeRuntime, path: String) async throws -> String {
-        runtime.open(path)
+    ///
+    /// **office-authoring — `createIfMissing`** rides straight through to `OfficeRuntime.open`; the
+    /// two in-flight-join call sites above pass `false` by default, which is correct by
+    /// construction: a path someone else is ALREADY opening is not a path that needs creating.
+    private static func awaitOpen(_ runtime: OfficeRuntime, path: String,
+                                  createIfMissing: Bool = false) async throws -> String {
+        runtime.open(path, createIfMissing: createIfMissing)
         return try await withCheckedThrowingContinuation { continuation in
             var resolved = false
             var cancellable: AnyCancellable?
@@ -865,6 +886,11 @@ func officeAgentResolvedPathWithinFence(_ path: String, dirs: [SessionDirEntry]?
 /// eventually) surface `.message` verbatim, the same "never re-derive wording" posture
 /// `OfficeCommandConsumer`'s own refusal table already takes.
 enum OfficeAgentBrokerError: Error, Equatable {
+    /// office-authoring — a READ verb naming a path with nothing on it. Writes never reach this:
+    /// they create the document instead. Worded so the agent can tell "there is no such file" apart
+    /// from "the file is there and something went wrong with it", which the ENOENT this replaces
+    /// could not.
+    case documentNotFound(path: String)
     /// Rule 5. `.message`'s FIRST sentence mirrors `resolveWithinAny`'s own thrown message verbatim
     /// (`path is outside the allowed directories: <path>`) — the brief's own instruction ("the same
     /// language `write` uses") — and `path` here is the CALLER's original argument, exactly as TS's
@@ -906,6 +932,10 @@ enum OfficeAgentBrokerError: Error, Equatable {
 
     var message: String {
         switch self {
+        case .documentNotFound(let path):
+            return "\(path) doesn't exist. Reading needs a document that is already there — but any "
+                + "WRITE verb creates the file if it isn't, so if you meant to start a new document, "
+                + "write to it directly."
         case .outOfFence(let path):
             return "path is outside the allowed directories: \(path). Norma's office tools are "
                 + "limited to the session's working directories."
