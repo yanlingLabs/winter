@@ -856,6 +856,49 @@ final class OfficeDocsCommandTests: XCTestCase {
         }
     }
 
+    /// ⭐ **The toggle-hazard regression test, and the reason the payload shape is not cosmetic.**
+    ///
+    /// `.uno:Bold` is a `Toggle = TRUE` slot, and the dispatcher makes "my arguments were wrong" and
+    /// "I sent no arguments" the SAME state — so an argument that fails to produce an item does not
+    /// fail, it FLIPS against current state. On top of that `SvxWeightItem::PutValue` never rejects a
+    /// value: `Any2Bool` coerces anything non-boolean to `false`.
+    ///
+    /// Both hazards are INVISIBLE against a plain document — a toggle flips it to bold, which is what
+    /// was asked for, and so does a correct absolute set. They are only visible starting from
+    /// ALREADY-BOLD text, which is exactly what `format-bolded.odt` is. Setting bold to true on
+    /// already-bold text must be a no-op; a toggle un-bolds it and a coerced `false` un-bolds it.
+    ///
+    /// **FORCED-RED, run 2026-08-27 against this exact drill** (recorded here rather than in a report
+    /// nobody reads beside the code): with `docsFormatOnDedicatedThread`'s payload changed from
+    /// `"type":"boolean"` to `"type":"string"` — one tag, the H3 mistype — and nothing else touched,
+    /// this test FAILED with "MUST still be bold ... found 0 bold runs", i.e. the saved bytes came
+    /// back with the bold GONE while the verb reported success. Reverted (byte-identical, `git diff`
+    /// empty), rebuilt, green. So the guard is load-bearing and this drill genuinely detects its
+    /// absence.
+    ///
+    /// **The same red run independently proved the RTF read-back is load-bearing rather than
+    /// decorative.** With the mistyped payload, `format`'s own sentence changed to "Norma read the
+    /// text back afterwards and could not confirm any of it — re-read the document before relying on
+    /// this." The verification correctly declined to confirm a change that had not happened, on a
+    /// call every other layer reported as a success.
+    func testLiveDocsFormatSettingBoldOnAlreadyBoldTextLeavesItBoldRatherThanTogglingItOff() async throws {
+        let (path, host, _) = try await openLive("format-bolded.odt")
+        let boldBefore = try boldRuns(inSavedFileAt: path)
+        XCTAssertFalse(boldBefore.isEmpty,
+                       "setup: format-bolded.odt must ship ALREADY BOLD, or this drill cannot see a toggle")
+
+        let result = await send(command("office.docs.format", args: ["path": path, "bold": true],
+                                        sessionId: "S1", commandId: "pcmd_idem_bold"), through: host)
+        XCTAssertTrue(result.ok, "\(result)")
+
+        let boldAfter = try boldRuns(inSavedFileAt: path)
+        XCTAssertFalse(boldAfter.isEmpty,
+                       "text that was bold MUST still be bold after setting bold:true — found "
+                           + "\(boldAfter.count) bold runs. An empty result here means the dispatch "
+                           + "TOGGLED (or coerced its argument to false) instead of setting an "
+                           + "absolute state, which is a silent wrong answer in the user's document.")
+    }
+
     /// Alignment and line spacing, the two argument-free attributes, land in the saved bytes.
     /// Asserted against the pristine fixture, which declares neither.
     func testLiveDocsFormatAlignAndLineSpacingReachTheSavedParagraphProperties() async throws {
