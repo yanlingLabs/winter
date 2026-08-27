@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- office-format's own fixture. Deliberately PRISTINE with respect to everything the format
+     drills assert: no bold, no italic, no underline, no explicit alignment, no non-default
+     paragraph style anywhere. That is what makes "the saved bytes now contain bold" a real
+     assertion rather than one that also holds against the untouched file — the arc's #1 defect
+     class. The repeated literal appears in exactly THREE separate paragraphs, which is what LT-1
+     (does a find-scoped format reach every occurrence, or only the first?) reads. It is spelled
+     nowhere else in this file, including in this comment, so a raw grep of the saved bytes counts
+     body text and nothing else. -->
+<office:document xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+    xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0"
+    xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"
+    xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0"
+    office:version="1.3"
+    office:mimetype="application/vnd.oasis.opendocument.text">
+  <office:body>
+    <office:text>
+      <text:p>Alpha MARKER one</text:p>
+      <text:p>Beta MARKER two</text:p>
+      <text:p>Gamma MARKER three</text:p>
+      <text:p>Delta has no marker at all</text:p>
+    </office:text>
+  </office:body>
+</office:document>
