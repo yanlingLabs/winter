@@ -737,9 +737,15 @@ final class OfficeAgentBrokerTests: XCTestCase {
         }
     }
 
-    // MARK: - Rule 3: dirty refusal
+    // MARK: - Rule 3, as office-live-ux Job 2 left it: SAVE first, refuse only if that fails
 
-    func testRefusesAWriteOnADirtyAdoptedDocumentNamingTheTab() async throws {
+    /// **The rule change, pinned in the direction it changed.** A write to a dirty adopted document
+    /// used to refuse outright. It now saves the tab's edits first and proceeds.
+    ///
+    /// Three assertions, and the ORDER one is the point: without it, "a save happened and the action
+    /// ran" is satisfied by rule 4's own save-through afterwards, which was always there. Two saves
+    /// with the action between them is what says the FIRST one is new.
+    func testAWriteOnADirtyAdoptedDocumentSavesTheTabsEditsFirstAndThenProceeds() async throws {
         let scratch = makeScratchDirectory()
         let path = scratch.appendingPathComponent("dirty.xlsx").path
         writeDummyFile(at: path)
@@ -756,24 +762,117 @@ final class OfficeAgentBrokerTests: XCTestCase {
         let dirtied = await waitUntil { runtime.stateSnapshot.documents[path]?.dirty == true }
         XCTAssertTrue(dirtied, "setup: the document never became dirty")
 
+        // A real rendered temp per SAVE, not per test: `OfficeRuntime.performSave` DELETES the
+        // helper's temp render once it has placed it, so the pre-save consumes the first one and
+        // rule 4's own save-through needs a second. (Written after exactly that turned this test
+        // into a `saveFailed` while it claimed to be measuring the proceed path.)
+        func nameAFreshRender(_ docId: String) {
+            let rendered = FileManager.default.temporaryDirectory
+                .appendingPathComponent("rendered-\(UUID().uuidString).xlsx").path
+            try? Data("rendered bytes".utf8).write(to: URL(fileURLWithPath: rendered))
+            office.saveTempPaths[docId] = rendered
+        }
+        nameAFreshRender(docId)
+
+        var savesWhenTheActionRan = -1
+        let result = try await host.officeAgentBroker.perform(
+            sessionId: "S1", path: path, access: .write, requestId: UUID().uuidString
+        ) { _, docId, _ in
+            savesWhenTheActionRan = office.saveCalls.count
+            nameAFreshRender(docId)
+            return "wrote"
+        }
+
+        XCTAssertEqual(result, "wrote", "the write must proceed once the tab's edits are safe")
+        XCTAssertEqual(savesWhenTheActionRan, 1,
+                       "the tab's edits must be saved BEFORE the agent's action runs — saw "
+                       + "\(savesWhenTheActionRan) save(s) at that moment")
+        XCTAssertEqual(office.saveCalls.count, 2,
+                       "…and rule 4 still saves afterwards: pre-save + save-through, in that order")
+        XCTAssertEqual(office.closeCalls.count, 0, "an ADOPTED document is never closed by the broker")
+    }
+
+    /// **The refusal SURVIVES, exactly where it should: the pre-save failed.** This is the control
+    /// arm for the test above — without it, deleting rule 3 entirely would look identical, and
+    /// deleting rule 3 entirely is precisely the wrong reading of this change.
+    func testAWriteStillRefusesWhenTheTabsEditsCouldNotBeSavedFirst() async throws {
+        let scratch = makeScratchDirectory()
+        let path = scratch.appendingPathComponent("dirty-unsavable.xlsx").path
+        writeDummyFile(at: path)
+        let office = BrokerOfficeDriverRecorder()
+        let host = makeHost(office: office, dirs: [SessionDirEntry(path: scratch.path, locked: true)])
+        await host.directory.refresh()
+
+        let runtime = host.officeRuntime(for: "S1")
+        runtime.open(path)
+        let opened = await waitUntil { runtime.stateSnapshot.documents[path] != nil }
+        XCTAssertTrue(opened, "setup")
+        let docId = try XCTUnwrap(runtime.stateSnapshot.documents[path]?.docId)
+        office.saveFailures[docId] = "the disk said no"
+        runtime.handle(documentEvent: .modifiedChanged(true), docId: docId)
+        let dirtied = await waitUntil { runtime.stateSnapshot.documents[path]?.dirty == true }
+        XCTAssertTrue(dirtied, "setup: the document never became dirty")
+
         var actionRan = false
         do {
             _ = try await host.officeAgentBroker.perform(
                 sessionId: "S1", path: path, access: .write, requestId: UUID().uuidString
             ) { _, _, _ in actionRan = true; return "should not run" }
-            XCTFail("a write on a dirty adopted document must refuse")
+            XCTFail("a write must still refuse when the tab's edits could not be saved first")
         } catch let error as OfficeAgentBrokerError {
-            guard case .documentDirty(let refusedPath) = error else {
+            guard case .documentDirty(let refusedPath, let failure) = error else {
                 return XCTFail("expected .documentDirty, got \(error)")
             }
             XCTAssertEqual(refusedPath, path)
-            XCTAssertTrue(error.message.contains("dirty.xlsx"), "the refusal must name the tab: \(error.message)")
+            XCTAssertTrue(error.message.contains("dirty-unsavable.xlsx"),
+                          "the refusal must name the tab: \(error.message)")
+            // The sentence must say the save was TRIED. A refusal that only said "it has unsaved
+            // changes" reads as "wait and retry", which after this change is the one instruction
+            // that cannot help — the agent would walk into an identical wall with no new
+            // information.
+            XCTAssertEqual(failure, "the disk said no")
+            XCTAssertTrue(error.message.contains("the disk said no"),
+                          "the refusal must name why the save failed: \(error.message)")
         } catch {
             XCTFail("unexpected error: \(error)")
         }
         XCTAssertFalse(actionRan, "the write's own action must never run once refused")
-        XCTAssertEqual(office.saveCalls.count, 0, "a refused write must never reach save-through")
         XCTAssertEqual(office.closeCalls.count, 0, "a dirty-refused ADOPTED document must never be closed")
+    }
+
+    /// A CLEAN adopted document takes no pre-save at all — the second control arm, and the one that
+    /// keeps the pre-save from becoming "an extra save on every agent verb". Without it, an
+    /// implementation that saved unconditionally would pass both tests above.
+    func testACleanAdoptedDocumentTakesNoPreSaveAtAll() async throws {
+        let scratch = makeScratchDirectory()
+        let path = scratch.appendingPathComponent("clean.xlsx").path
+        writeDummyFile(at: path)
+        let office = BrokerOfficeDriverRecorder()
+        let host = makeHost(office: office, dirs: [SessionDirEntry(path: scratch.path, locked: true)])
+        await host.directory.refresh()
+
+        let runtime = host.officeRuntime(for: "S1")
+        runtime.open(path)
+        let opened = await waitUntil { runtime.stateSnapshot.documents[path] != nil }
+        XCTAssertTrue(opened, "setup")
+        XCTAssertNotEqual(runtime.stateSnapshot.documents[path]?.dirty, true, "setup: must start clean")
+
+        var savesWhenTheActionRan = -1
+        _ = try await host.officeAgentBroker.perform(
+            sessionId: "S1", path: path, access: .write, requestId: UUID().uuidString
+        ) { _, docId, _ in
+            // Rule 4's own save-through still has to succeed for this to reach its assertions —
+            // named inside the action, exactly as every other successful-write test here does.
+            let rendered = FileManager.default.temporaryDirectory
+                .appendingPathComponent("rendered-\(UUID().uuidString).xlsx").path
+            try? Data("rendered bytes".utf8).write(to: URL(fileURLWithPath: rendered))
+            office.saveTempPaths[docId] = rendered
+            savesWhenTheActionRan = office.saveCalls.count
+            return "wrote"
+        }
+
+        XCTAssertEqual(savesWhenTheActionRan, 0, "a clean document must take no pre-save")
+        XCTAssertEqual(office.saveCalls.count, 1, "only rule 4's save-through")
     }
 
     func testAllowsAReadOnADirtyAdoptedDocument() async throws {

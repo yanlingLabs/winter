@@ -4460,15 +4460,101 @@ final class ShellSessionHostTests: XCTestCase {
         try? FileManager.default.removeItem(atPath: path)
     }
 
-    /// The dirty sheet's Cancel: nothing closes, nothing saves, the tab and its document are untouched.
-    func testRequestCloseTabOnADirtyDocumentTabCancelChoiceLeavesEverythingOpen() async throws {
+    // MARK: - office-live-ux Job 2, save point 3: closing a document tab SAVES it
+
+    /// **The headline change, pinned in the direction it changed.** A dirty document tab used to
+    /// ask; it now saves and closes, and never asks.
+    ///
+    /// Three assertions, and each covers something the others do not:
+    ///  * the sheet is NEVER presented — the behaviour change itself;
+    ///  * the bytes reach the user's own path — a "close" that discarded would satisfy the first
+    ///    assertion perfectly, which is the failure worth being loud about;
+    ///  * the tab really closes — an implementation that saved and then stalled would satisfy both.
+    func testRequestCloseTabOnADirtyDocumentTabSavesItSilentlyAndNeverAsks() async throws {
         let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
         let (host, factory, mgmt) = await makeHostWithManagement(rows: rows)
         defer { host.deselect() }
         let office = officeFactory()
         host.makeOfficeRuntime = office.make
-        let (runtime, path, _) = try await makeDirtyDocumentTab(
-            host: host, factory: factory, sessionId: "S1", tabId: "t1", scratchPrefix: "cancel")
+        let (_, path, docId) = try await makeDirtyDocumentTab(
+            host: host, factory: factory, sessionId: "S1", tabId: "t1", scratchPrefix: "silentsave")
+        let renderedPath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rendered-\(UUID().uuidString).xlsx").path
+        try Data("saved on close".utf8).write(to: URL(fileURLWithPath: renderedPath))
+        office.recorder.saveTempPaths[docId] = renderedPath
+        var sheetsPresented = 0
+        host.presentDirtyCloseSheet = { _, _, _ in sheetsPresented += 1 }
+
+        host.requestCloseTab("t1")
+
+        await feedWaitUntil { mgmt.methods.contains("panel.closeTab") }
+        XCTAssertEqual(sheetsPresented, 0, "a dirty document tab must no longer ask on the way out")
+        XCTAssertEqual(try? String(contentsOfFile: path, encoding: .utf8), "saved on close",
+                       "…and the edits must actually have landed on the user's own path")
+        XCTAssertEqual(office.recorder.saveCalls.filter { $0 == docId }.count, 1, "exactly one save")
+        try? FileManager.default.removeItem(atPath: path)
+    }
+
+    /// **The silent path still waits for the drain**, which is the measured barrier against the
+    /// post-save close killing the shared helper. The RED for this is the same one the sheet path's
+    /// own drain test names: drop `drainUntilClean` from `saveThenCloseDocumentTab` and the first
+    /// assertion below fails immediately and deterministically.
+    func testTheSilentSaveOnCloseStillWaitsForTheDrainRoundTrip() async throws {
+        let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+        let (host, factory, mgmt) = await makeHostWithManagement(rows: rows)
+        defer { host.deselect() }
+        let office = officeFactory()
+        host.makeOfficeRuntime = office.make
+        let (runtime, path, docId) = try await makeDirtyDocumentTab(
+            host: host, factory: factory, sessionId: "S1", tabId: "t1", scratchPrefix: "silentdrain")
+        let renderedPath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rendered-\(UUID().uuidString).xlsx").path
+        try Data("rendered".utf8).write(to: URL(fileURLWithPath: renderedPath))
+        office.recorder.saveTempPaths[docId] = renderedPath
+        office.recorder.suspendClipboardCopy()
+        host.presentDirtyCloseSheet = { _, _, _ in XCTFail("the silent path must not ask") }
+
+        host.requestCloseTab("t1")
+
+        await officeWaitUntil(timeout: 8) { office.recorder.saveCalls.contains(docId) }
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertFalse(mgmt.methods.contains("panel.closeTab"),
+                       "the close must be withheld while the drain's round trip is still in flight")
+        XCTAssertNotNil(runtime.stateSnapshot.documents[path], "still open, mid-drain")
+
+        office.recorder.resumeClipboardCopy()
+
+        await feedWaitUntil { mgmt.methods.contains("panel.closeTab") }
+        try? FileManager.default.removeItem(atPath: path)
+    }
+
+    /// **The conflict carve-out.** A document whose file ALSO changed outside the app is not a
+    /// "commit on actions" case — saving it silently would discard somebody else's write with nobody
+    /// asked. So the sheet still fires there, unchanged, and this is the arm that keeps the silent
+    /// path from swallowing that question.
+    ///
+    /// The plain-dirty test above is its control arm: without that, "the sheet fires" would be
+    /// satisfied by a build where save-on-close was never implemented at all.
+    func testRequestCloseTabOnAConflictedDirtyDocumentTabAsksInsteadOfSavingSilently() async throws {
+        let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+        let (host, factory, mgmt) = await makeHostWithManagement(rows: rows)
+        defer { host.deselect() }
+        let office = officeFactory()
+        host.makeOfficeRuntime = office.make
+        let (runtime, path, docId) = try await makeDirtyDocumentTab(
+            host: host, factory: factory, sessionId: "S1", tabId: "t1", scratchPrefix: "silentconflict")
+        // A save that WOULD succeed, so the sheet below cannot be an accident of a failed save —
+        // the carve-out has to be what produces it.
+        let renderedPath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rendered-\(UUID().uuidString).xlsx").path
+        try Data("rendered".utf8).write(to: URL(fileURLWithPath: renderedPath))
+        office.recorder.saveTempPaths[docId] = renderedPath
+
+        try Data("external bytes landed while this document was still dirty".utf8)
+            .write(to: URL(fileURLWithPath: path))
+        runtime.fileChangedOnDisk(path)
+        await officeWaitUntil(timeout: 2) { runtime.stateSnapshot.documentConflicts[path] != nil }
+
         var presentedBasename: String?
         host.presentDirtyCloseSheet = { basename, _, respond in
             presentedBasename = basename
@@ -4477,6 +4563,42 @@ final class ShellSessionHostTests: XCTestCase {
 
         host.requestCloseTab("t1")
 
+        await officeWaitUntil(timeout: 5) { presentedBasename != nil }
+        XCTAssertEqual(presentedBasename, (path as NSString).lastPathComponent,
+                       "a conflicted document must still ask — a silent save there discards the "
+                         + "EXTERNAL write, which is not this feature's to discard")
+        XCTAssertTrue(office.recorder.saveCalls.filter { $0 == docId }.isEmpty,
+                      "…and it must ask BEFORE saving, not after")
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertFalse(mgmt.methods.contains("panel.closeTab"), "Cancel must never fire the RPC")
+        try? FileManager.default.removeItem(atPath: path)
+    }
+
+    /// The dirty sheet's Cancel: nothing closes and the tab and its document are untouched.
+    ///
+    /// ⚠️ **office-live-ux Job 2 changed how this sheet is REACHED, not what its answers do.** A
+    /// dirty document tab now saves silently on close; the sheet appears only when that save FAILS,
+    /// which is why this test now arms `saveFailures` in setup. Its own claim — Cancel means
+    /// nothing happens — is unchanged and is still the thing being pinned.
+    func testRequestCloseTabOnADirtyDocumentTabCancelChoiceLeavesEverythingOpen() async throws {
+        let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
+        let (host, factory, mgmt) = await makeHostWithManagement(rows: rows)
+        defer { host.deselect() }
+        let office = officeFactory()
+        host.makeOfficeRuntime = office.make
+        let (runtime, path, docId) = try await makeDirtyDocumentTab(
+            host: host, factory: factory, sessionId: "S1", tabId: "t1", scratchPrefix: "cancel")
+        // The sheet is now the FAILURE path — see this test's own doc.
+        office.recorder.saveFailures[docId] = "disk full"
+        var presentedBasename: String?
+        host.presentDirtyCloseSheet = { basename, _, respond in
+            presentedBasename = basename
+            respond(.cancel)
+        }
+
+        host.requestCloseTab("t1")
+
+        await officeWaitUntil(timeout: 5) { presentedBasename != nil }
         XCTAssertEqual(presentedBasename, (path as NSString).lastPathComponent)
         try? await Task.sleep(nanoseconds: 100_000_000) // given a beat, in case a close were racing behind it
         XCTAssertFalse(mgmt.methods.contains("panel.closeTab"), "Cancel must never fire the RPC")
@@ -4622,23 +4744,31 @@ final class ShellSessionHostTests: XCTestCase {
         try? FileManager.default.removeItem(atPath: path)
     }
 
-    /// The dirty sheet's Discard: closes without ever asking the save door for anything.
+    /// The dirty sheet's Discard: closes without asking the save door for anything MORE.
+    ///
+    /// ⚠️ **office-live-ux Job 2 changed how this sheet is reached** (see the Cancel test's own doc):
+    /// the silent save runs first and this arms it to FAIL, so the assertion below counts saves
+    /// rather than asserting there were none — one save has legitimately already happened, and it is
+    /// the failure that produced the sheet.
     func testRequestCloseTabOnADirtyDocumentTabDiscardChoiceClosesWithoutSaving() async throws {
         let rows = [codeRow("S1", dirs: [SessionDirEntry(path: "/repo", locked: false)])]
         let (host, factory, mgmt) = await makeHostWithManagement(rows: rows)
         defer { host.deselect() }
         let office = officeFactory()
         host.makeOfficeRuntime = office.make
-        let (runtime, path, _) = try await makeDirtyDocumentTab(
+        let (runtime, path, docId) = try await makeDirtyDocumentTab(
             host: host, factory: factory, sessionId: "S1", tabId: "t1", scratchPrefix: "discard")
+        office.recorder.saveFailures[docId] = "disk full"
         host.presentDirtyCloseSheet = { _, _, respond in respond(.discard) }
 
         host.requestCloseTab("t1")
 
+        await feedWaitUntil { mgmt.methods.contains("panel.closeTab") }
         XCTAssertNil(runtime.stateSnapshot.documents[path], "discard still closes the document — synchronous "
                      + "in the reducer's own state (`OfficeRuntimeReducer.closeRequested`)")
-        await feedWaitUntil { mgmt.methods.contains("panel.closeTab") }
-        XCTAssertTrue(office.recorder.saveCalls.isEmpty, "Discard must never save")
+        XCTAssertEqual(office.recorder.saveCalls.filter { $0 == docId }.count, 1,
+                       "exactly the ONE failed silent save that produced the sheet — Discard must "
+                         + "never add a second")
         await officeWaitUntil(timeout: 2) { office.recorder.closeCalls.count == 1 }
         try? FileManager.default.removeItem(atPath: path)
     }
@@ -4803,7 +4933,15 @@ final class ShellSessionHostTests: XCTestCase {
         XCTAssertNotNil(runtime.stateSnapshot.documents[path], "setup: the failed save must not have closed anything")
         XCTAssertEqual(runtime.stateSnapshot.documents[path]?.dirty, true, "setup: still dirty after the failure")
 
-        // The retry: this time the save succeeds. `saveTempPaths` must point at a REAL file with real
+        // office-live-ux Job 2: the first `requestCloseTab` above now costs TWO saves for this
+        // docId, not one — the silent save that fails and produces the sheet, then the sheet's own
+        // `respond(.save)` retry that fails again. So the retry leg below counts RELATIVE to that
+        // rather than against a fixed 2, which is what this test used to do and what made it red
+        // for a reason that had nothing to do with the drain it exists to pin.
+        let savesBeforeTheRetry = office.recorder.saveCalls.filter { $0 == docId }.count
+
+        // The retry: this time the save succeeds — and it is now the SILENT save that succeeds, so
+        // the sheet is never reached on this leg at all. `saveTempPaths` must point at a REAL file with real
         // bytes here too (same requirement the plain-success test's own comment names) — otherwise
         // `placeAtomically` fails downstream on the default temp path even after `saveFailures` is
         // cleared, which would mask this test's own point behind an unrelated place failure.
@@ -4820,7 +4958,9 @@ final class ShellSessionHostTests: XCTestCase {
         host.presentDirtyCloseSheet = { _, _, respond in respond(.save) }
         host.requestCloseTab("t1")
 
-        await officeWaitUntil(timeout: 8) { office.recorder.saveCalls.filter { $0 == docId }.count == 2 }
+        await officeWaitUntil(timeout: 8) {
+            office.recorder.saveCalls.filter { $0 == docId }.count > savesBeforeTheRetry
+        }
         XCTAssertEqual(runtime.stateSnapshot.documents[path]?.dirty, false, "sanity: the reducer's own "
                        + "synchronous clear on a successful retry already fired — the OLD dirty-gated "
                        + "drain would stop right here")

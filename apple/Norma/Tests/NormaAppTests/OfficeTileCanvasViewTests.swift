@@ -2117,92 +2117,96 @@ final class OfficeTileCanvasViewTests: XCTestCase {
         view.unmount()
     }
 
-    // MARK: - office-live-edit R1 — instant save, debounced and coalesced
+    // MARK: - office-live-ux Job 2 — the background backstop (the debounce these replaced is gone)
 
-    /// **The claim, and the only assertion shape that can carry it: N edits produce ONE save.**
+    /// **The claim: a tick saves a dirty document, and typing has nothing to do with it.**
     ///
-    /// A bool ("did it save?") would pass against a save-per-keystroke implementation, which is the
-    /// exact thing this design exists to avoid — one save is a full container rewrite holding the
-    /// app-wide FIFO. So the recorder counts, and this asserts the count.
-    func testABurstOfTypingProducesExactlyOneSaveNotOnePerKeystroke() async {
+    /// These four tests are the ported descendants of office-live-edit R1's debounce tests. What
+    /// they measure changed with the mechanism — a burst of typing no longer arms anything at all,
+    /// which is the whole point of the deletion — but three of the four claims survive verbatim
+    /// because they were never about the debounce: a dirty document gets saved, a clean one costs
+    /// nothing, and two saves never overlap.
+    func testOneTickSavesADirtyDocumentExactlyOnce() async {
         let (runtime, recorder) = await makeOpenedRuntime()
-        runtime.autoSaveEnabled = true
-        runtime.autoSaveDebounceInterval = 0.05
         // The REAL docId the runtime minted — not a literal. A hardcoded "doc-1" reaches no
         // document, `dirty` stays false, and the test then measures the clean-document path while
-        // claiming to measure coalescing.
+        // claiming to measure the dirty one.
         let docId = runtime.stateSnapshot.documents[gatePath]?.docId ?? ""
-        XCTAssertFalse(docId.isEmpty, "setup: the fixture must be open before this drives edits")
+        XCTAssertFalse(docId.isEmpty, "setup: the fixture must be open before this ticks")
         runtime.handle(documentEvent: .modifiedChanged(true), docId: docId)
         XCTAssertEqual(runtime.stateSnapshot.documents[gatePath]?.dirty, true,
                        "setup: the document must really be dirty, or this measures the clean path")
 
-        for code in 0..<12 {
-            runtime.postKeyEvent(path: gatePath, type: .keyInput, charCode: 65 + code, keyCode: 512 + code)
-        }
-        await runtime.drainInputChainForTesting()
+        runtime.periodicSaveTickForTesting()
         let saved = await waitUntil { recorder.saveCalls.count >= 1 }
-        XCTAssertTrue(saved, "twelve keystrokes must eventually produce a save")
-        // Let any second save that a non-coalescing implementation would fire arrive before counting.
-        try? await Task.sleep(nanoseconds: 400_000_000)
-        XCTAssertEqual(recorder.saveCalls.count, 1,
-                       "twelve keystrokes, ONE save — a count above one means the burst was not "
-                         + "coalesced and every keystroke is paying a full document rewrite")
+        XCTAssertTrue(saved, "a tick on a dirty document must save it")
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(recorder.saveCalls.count, 1, "one tick, one save")
     }
 
-    /// **The control arm.** Same door, same interval, but the document is CLEAN — so the debounce
-    /// must fire and then decline to save. Without this, an implementation that simply never saved
-    /// would be indistinguishable from one that coalesces correctly, and an implementation that
-    /// saved unconditionally would look correct in the test above.
-    func testACleanDocumentNeverSavesEvenWhenTheDebounceFires() async {
+    /// **The control arm, carried over unchanged in meaning.** A CLEAN document must cost NOTHING —
+    /// not even a helper request. Without this, an implementation that never saved would be
+    /// indistinguishable from a correct one, and one that saved unconditionally would look correct
+    /// in the test above.
+    func testACleanDocumentNeverSavesEvenWhenTheBackstopTicks() async {
         let (runtime, recorder) = await makeOpenedRuntime()
-        runtime.autoSaveEnabled = true
-        runtime.autoSaveDebounceInterval = 0.05
         // No `.modifiedChanged(true)` — `dirty` stays false.
-        runtime.postKeyEvent(path: gatePath, type: .keyInput, charCode: 65, keyCode: 512)
-        await runtime.drainInputChainForTesting()
-        try? await Task.sleep(nanoseconds: 400_000_000)
+        runtime.periodicSaveTickForTesting()
+        try? await Task.sleep(nanoseconds: 300_000_000)
         XCTAssertEqual(recorder.saveCalls.count, 0,
                        "an unmodified document must cost NOTHING — not even a helper request. This "
                          + "is what keeps an idle document off the shared FIFO entirely")
     }
 
-    /// Two separate edit bursts, separated by more than the interval, are two saves — the debounce
-    /// coalesces a burst, it does not swallow later work. The complement of the coalescing test:
-    /// together they pin "exactly as many saves as there were quiet periods".
-    func testTwoSeparatedBurstsProduceTwoSaves() async {
+    /// **The never-overlap guard, which is the one guard a fixed cadence needs most.** A tick that
+    /// lands while the previous save is still in flight must DECLINE, not queue a second: two saves'
+    /// file-watcher expected-write tokens interleaving is a tested edge case that must not become
+    /// the ordinary path.
+    ///
+    /// Its own control arm is the test above it: a mechanism that declined EVERYTHING would satisfy
+    /// this assertion perfectly and fail that one.
+    func testASecondTickWhileASaveIsInFlightDoesNotStartAnother() async {
         let (runtime, recorder) = await makeOpenedRuntime()
-        runtime.autoSaveEnabled = true
-        runtime.autoSaveDebounceInterval = 0.05
         let docId = runtime.stateSnapshot.documents[gatePath]?.docId ?? ""
         XCTAssertFalse(docId.isEmpty, "setup: the fixture must be open")
         runtime.handle(documentEvent: .modifiedChanged(true), docId: docId)
 
-        runtime.postKeyEvent(path: gatePath, type: .keyInput, charCode: 65, keyCode: 512)
-        await runtime.drainInputChainForTesting()
-        let first = await waitUntil { recorder.saveCalls.count >= 1 }
-        XCTAssertTrue(first, "the first burst must save")
-
-        // The save cleared LOK's ModifiedStatus in production; re-dirty for the second burst.
-        runtime.handle(documentEvent: .modifiedChanged(true), docId: docId)
-        runtime.postKeyEvent(path: gatePath, type: .keyInput, charCode: 66, keyCode: 513)
-        await runtime.drainInputChainForTesting()
-        let second = await waitUntil { recorder.saveCalls.count >= 2 }
-        XCTAssertTrue(second, "a later, separate burst must save again — a debounce that coalesced "
-                        + "across quiet periods would lose the second edit until something else saved")
+        runtime.periodicSaveTickForTesting()
+        runtime.periodicSaveTickForTesting()
+        runtime.periodicSaveTickForTesting()
+        let saved = await waitUntil { recorder.saveCalls.count >= 1 }
+        XCTAssertTrue(saved, "the first tick must save")
+        try? await Task.sleep(nanoseconds: 400_000_000)
+        XCTAssertEqual(recorder.saveCalls.count, 1,
+                       "three ticks in one instant are ONE save — a count above one means the "
+                         + "never-overlap guard is not holding")
     }
 
-    /// Undo is an EDIT, and must re-arm the save like any other. Without this the document could be
-    /// left on disk in a state the user had already taken back — which is worse than not saving at
-    /// all, because it looks saved.
-    func testUndoReArmsTheDebouncedSave() async {
-        let (runtime, _) = await makeOpenedRuntime()
-        runtime.autoSaveEnabled = true
-        runtime.autoSaveDebounceInterval = 5.0    // long, so the arming is observable before it fires
-        XCTAssertFalse(runtime.autoSaveIsArmedForTesting(path: gatePath))
+    /// **Typing arms NOTHING now**, and this is the assertion that would red if someone reintroduced
+    /// the idle debounce. The document is dirty and a burst is typed into it; no save may follow
+    /// from the typing alone. Then a tick is taken, and the save appears — which is what stops this
+    /// from being satisfied by a mechanism that simply never saves at all.
+    func testTypingAloneNeverSchedulesASave() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        let docId = runtime.stateSnapshot.documents[gatePath]?.docId ?? ""
+        XCTAssertFalse(docId.isEmpty, "setup: the fixture must be open")
+        runtime.handle(documentEvent: .modifiedChanged(true), docId: docId)
+
+        for code in 0..<12 {
+            runtime.postKeyEvent(path: gatePath, type: .keyInput, charCode: 65 + code, keyCode: 512 + code)
+        }
         runtime.postUndo(path: gatePath)
-        XCTAssertTrue(runtime.autoSaveIsArmedForTesting(path: gatePath),
-                      "⌘Z changes the document, so it must arm the save exactly as typing does")
+        await runtime.drainInputChainForTesting()
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        XCTAssertEqual(recorder.saveCalls.count, 0,
+                       "typing (and ⌘Z) must arm no save whatsoever — the idle debounce is deleted, "
+                         + "and a save landing on the user's own pause is the repaint storm that "
+                         + "deleted it")
+
+        runtime.periodicSaveTickForTesting()
+        let saved = await waitUntil { recorder.saveCalls.count >= 1 }
+        XCTAssertTrue(saved, "…and the backstop still saves those edits when it ticks — without "
+                        + "this arm the assertion above passes against a runtime that never saves")
     }
 
     /// **office-live-edit R3 — ⌘Z must dispatch with `Repair: true`.** Without it LOK refuses any
@@ -2568,5 +2572,197 @@ final class OfficeTileCanvasViewTests: XCTestCase {
                        + "margin — and scrolls FURTHER than the whole document is tall")
 
         view.unmount()
+    }
+}
+
+// MARK: - office-live-ux Job 3: "Norma is working"
+
+/// The overlay's own contract, and the half its pixels cannot deliver.
+///
+/// **An extension of `OfficeTileCanvasViewTests`**, so it can use that class's `makeOpenedRuntime`
+/// and its `SubscribeCapturingDriverRecorder` — the recorder already counts every one of the six
+/// mutating doors this needs (a private nested type is reachable from an extension of its enclosing
+/// type in the same file). A second recorder would have been a second, divergent fake of the same
+/// Driver, and the Driver has thirty-odd members.
+///
+/// The spec has four clauses:
+///  1. the overlay appears **as soon as Norma reads the document open in that tab**;
+///  2. it is scoped to **that tab**, not the app;
+///  3. **no timer** — it is tied to real turn state and clears when the turn ends;
+///  4. tapping **interrupts** (Job 1's door; pinned in `ComposerStopButtonTests` and in
+///     `ShellSessionHostTests.testAttachingWiresTheAdaptersInterruptAndItReachesTheWire`).
+///
+/// Plus the one worded as a hazard rather than a feature — *"a stuck overlay with no turn behind it
+/// is the failure to avoid; make it impossible rather than unlikely"*. That is what the two
+/// derivation tests below exist for, and they are the reason this section exists at all: every other
+/// assertion here would be green against a design that toggled the overlay with a matched pair of
+/// events and could therefore drop the second one.
+@MainActor
+extension OfficeTileCanvasViewTests {
+
+    /// **Clauses 1 and 3 together: the conjunction, and that BOTH halves are needed.**
+    ///
+    /// Each half is checked alone as well as together, because the single-half failures are the
+    /// interesting ones: a mark alone would light the overlay over a document nobody is touching,
+    /// and a running turn alone would light it over every open document in the session — which is
+    /// exactly the "scoped to the app, not the tab" failure clause 2 forbids.
+    func testTheOverlayNeedsBothAMarkAndARunningTurn() async {
+        let (runtime, _) = await makeOpenedRuntime()
+
+        XCTAssertFalse(runtime.agentIsWorking(on: gatePath), "neither half: hidden")
+
+        runtime.noteAgentEngaged(path: gatePath)
+        XCTAssertFalse(runtime.agentIsWorking(on: gatePath),
+                       "a mark with NO running turn must stay hidden — otherwise a leftover mark is "
+                         + "an overlay with nothing behind it, which is the whole failure mode")
+
+        runtime.setSessionTurnRunning(true)
+        XCTAssertFalse(runtime.agentIsWorking(on: gatePath),
+                       "…and the TRUE edge clears the mark, so a turn starting can never relight a "
+                         + "stale one")
+
+        runtime.noteAgentEngaged(path: gatePath)
+        XCTAssertTrue(runtime.agentIsWorking(on: gatePath), "marked during a running turn: shown")
+    }
+
+    /// **Clause 2: scoped to THAT tab.** A second document, same session, same runtime, same running
+    /// turn, stays clear.
+    func testTheOverlayIsScopedToTheEngagedDocumentNotTheSession() async {
+        let (runtime, _) = await makeOpenedRuntime()
+        // A REAL file: `OfficeRuntime` stages a copy before opening, so a path with nothing on disk
+        // never becomes a document and the assertion below would be measuring an absent bystander
+        // rather than an uncovered one.
+        let bystander = (gatePath as NSString).deletingLastPathComponent + "/bystander.xlsx"
+        try? Data().write(to: URL(fileURLWithPath: bystander))
+        runtime.open(bystander)
+        let opened = await waitUntil { runtime.stateSnapshot.documents[bystander] != nil }
+        XCTAssertTrue(opened, "setup: the bystander must open too")
+
+        runtime.setSessionTurnRunning(true)
+        runtime.noteAgentEngaged(path: gatePath)
+
+        XCTAssertTrue(runtime.agentIsWorking(on: gatePath))
+        XCTAssertFalse(runtime.agentIsWorking(on: bystander),
+                       "a turn running is not a reason to cover every open document")
+    }
+
+    /// **The impossibility argument, driven rather than reasoned.** Nothing clears the mark here —
+    /// the turn simply ends — and the overlay goes away anyway, because visibility is DERIVED from
+    /// the conjunction rather than toggled by a matched pair of events.
+    ///
+    /// A design with an explicit hide event would pass every other test in this section and fail
+    /// this one the moment the hide were dropped, which is precisely the failure the spec names.
+    func testTheOverlayClearsWhenTheTurnEndsEvenIfNothingUnmarksTheDocument() async {
+        let (runtime, _) = await makeOpenedRuntime()
+        runtime.setSessionTurnRunning(true)
+        runtime.noteAgentEngaged(path: gatePath)
+        XCTAssertTrue(runtime.agentIsWorking(on: gatePath), "setup")
+
+        runtime.setSessionTurnRunning(false)
+
+        XCTAssertFalse(runtime.agentIsWorking(on: gatePath),
+                       "the turn ending is sufficient on its own — no unmark call exists to be missed")
+    }
+
+    /// **The BOTH-EDGES clear, which is the self-heal.** If a false edge is ever missed — a runtime
+    /// minted mid-turn, a hop away and back, a sink rewired late — a stale mark plus the NEXT turn's
+    /// `true` would relight the overlay over a document the agent is not touching, and block typing
+    /// on it. The true edge is what makes a missed false edge cost one turn instead of forever.
+    func testATurnStartingWipesAStaleMarkRatherThanRelightingIt() async {
+        let (runtime, _) = await makeOpenedRuntime()
+        runtime.setSessionTurnRunning(true)
+        runtime.noteAgentEngaged(path: gatePath)
+        XCTAssertTrue(runtime.agentIsWorking(on: gatePath), "setup: engaged during a turn")
+
+        // The turn ends and the NEXT one starts. The mark is deliberately not touched in between —
+        // that is the state a missed clear would leave behind.
+        runtime.setSessionTurnRunning(false)
+        runtime.noteAgentEngaged(path: gatePath)   // a stale mark, planted the way a leak would
+        runtime.setSessionTurnRunning(true)
+
+        XCTAssertFalse(runtime.agentIsWorking(on: gatePath),
+                       "the next turn must start with a clean slate — a mark from a previous turn "
+                         + "must never survive into it")
+    }
+
+    /// A path with no open document cannot be marked at all — the mark is a claim about a TAB, and a
+    /// path nothing has open has no tab. Without this, a fence-passing path the agent merely named
+    /// could accumulate marks forever.
+    func testMarkingAPathWithNoOpenDocumentDoesNothing() async {
+        let (runtime, _) = await makeOpenedRuntime()
+        runtime.setSessionTurnRunning(true)
+        let never = (gatePath as NSString).deletingLastPathComponent + "/never-opened.odt"
+        runtime.noteAgentEngaged(path: never)
+        XCTAssertFalse(runtime.agentIsWorking(on: never))
+        XCTAssertTrue(runtime.agentEngagedPaths.isEmpty, "nothing was recorded")
+        XCTAssertFalse(runtime.agentIsWorking(on: gatePath), "…and the open one is untouched")
+    }
+
+    /// **The half a SwiftUI overlay cannot deliver.** The canvas keeps first responder while the
+    /// cover is up, so a design that only intercepted the pointer would let every keystroke through
+    /// — the user would type into a document they cannot see, underneath a read the agent is acting
+    /// on. This is what makes the refusal a property of the runtime.
+    ///
+    /// All six mutating doors, because they were changed as a SET (they are the same six lines that
+    /// used to arm the deleted debounce) and a partial sweep is the failure worth catching.
+    func testEveryMutatingInputDoorRefusesWhileNormaIsWorking() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+
+        func mutatingCalls() -> Int {
+            recorder.postKeyCalls.count + recorder.postExtTextInputCalls.count
+                + recorder.clipboardCutCalls.count + recorder.clipboardPasteCalls.count
+                + recorder.undoCalls.count + recorder.redoCalls.count
+        }
+        func driveAllSix() {
+            runtime.postKeyEvent(path: gatePath, type: .keyInput, charCode: 65, keyCode: 512)
+            runtime.postExtTextInput(path: gatePath, type: .input, text: "x")
+            runtime.postClipboardCut(path: gatePath)
+            runtime.postClipboardPaste(path: gatePath, text: "y")
+            runtime.postUndo(path: gatePath)
+            runtime.postRedo(path: gatePath)
+        }
+
+        // CONTROL ARM FIRST, and it is the important half: idle, every one of these doors reaches
+        // the driver. Without it, a runtime whose doors were broken outright would satisfy the
+        // refusal assertion below perfectly.
+        driveAllSix()
+        await runtime.drainInputChainForTesting()
+        let baseline = mutatingCalls()
+        XCTAssertEqual(baseline, 6, "control: all six doors must reach the driver when idle, got \(baseline)")
+
+        runtime.setSessionTurnRunning(true)
+        runtime.noteAgentEngaged(path: gatePath)
+        XCTAssertTrue(runtime.agentIsWorking(on: gatePath), "setup: the overlay is up")
+
+        driveAllSix()
+        await runtime.drainInputChainForTesting()
+        XCTAssertEqual(mutatingCalls(), baseline,
+                       "not one of the six mutating doors may reach the driver while Norma is "
+                         + "working — a SwiftUI cover stops the pointer and nothing else")
+
+        // …and they reopen when the turn ends. Without this, a permanently-wedged runtime would
+        // pass the assertion above.
+        runtime.setSessionTurnRunning(false)
+        driveAllSix()
+        await runtime.drainInputChainForTesting()
+        XCTAssertEqual(mutatingCalls(), baseline + 6, "the doors must reopen the moment the turn ends")
+    }
+
+    /// The MOUSE is deliberately NOT refused — the same posture the read-only-format gate takes, and
+    /// for the same reason: a click cannot mutate content on its own, and blocking it would make the
+    /// canvas inert. Pinned so the asymmetry reads as a decision rather than an omission.
+    func testTheMouseDoorIsDeliberatelyNotRefusedWhileNormaIsWorking() async {
+        let (runtime, recorder) = await makeOpenedRuntime()
+        runtime.setSessionTurnRunning(true)
+        runtime.noteAgentEngaged(path: gatePath)
+
+        // Copy is the observable proxy: `postMouseEvent` has no recorder counter, and Copy is the
+        // OTHER deliberately-ungated door — same reasoning, and it is the one that would break if
+        // the gate were applied by "everything that touches the document" rather than by mutation.
+        runtime.postClipboardCopy(path: gatePath)
+        await runtime.drainInputChainForTesting()
+        XCTAssertEqual(recorder.clipboardCopyCalls.count, 1,
+                       "Copy reads and never mutates; the overlay covers it visually and the door "
+                         + "stays open, exactly as it does for a read-only format")
     }
 }

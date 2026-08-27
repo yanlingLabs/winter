@@ -219,26 +219,41 @@ final class OfficeSheetsCommandTests: XCTestCase {
         try await pressReturn(client: client, docId: docId)
     }
 
-    // MARK: - office-live-edit R1 — what a save actually costs
+    // MARK: - what a save actually costs (office-live-edit R1 → office-live-ux Job 2)
 
-    /// **The measurement the debounce interval is chosen against.** Nothing in this repo recorded
+    /// **The measurement every save-frequency choice in this arc is taken against.** Nothing in this repo recorded
     /// how long one office save actually takes, and the engine research names that number as "the
     /// whole feasibility question" for instant save — a save is a full container rewrite (the whole
     /// document re-rendered inside the helper, then a full-file copy, an `fsync` and a `rename`),
     /// and it holds the one app-wide FIFO while it runs.
     ///
+    /// The bound this test asserts against, named so the number and its reasoning sit together.
+    /// 1.0 s: a save runs synchronously in front of every agent office verb (a pre-save before it
+    /// and a save-through after it) and in front of every tab close. A second at BEST — on a
+    /// sub-30 KB fixture, on an idle machine — would mean the shipped experience is worse than that
+    /// on every document that is bigger or every machine that is busier.
+    private var liveSaveActionPathBudget: TimeInterval { 1.0 }
+
     /// **This asserts a RELATIONSHIP, not a stopwatch number.** A test that pinned "a save takes
-    /// under 250 ms" would be a machine-speed flake with no design meaning. What must hold for the
-    /// debounce to be coherent is that a save on an ordinary document finishes comfortably inside
-    /// the idle interval — otherwise every burst would still be saving when the next one armed, and
-    /// the design would silently degrade to the re-arm path on every edit. The measured number is
-    /// PRINTED so a human can see the real cost and revisit the interval on evidence.
+    /// under 250 ms" would be a machine-speed flake with no design meaning. What the shipped
+    /// design needs is that a save on an ordinary document finishes fast enough to sit in the
+    /// CRITICAL PATH of the things that now trigger one. The measured number is PRINTED so a human
+    /// can see the real cost and revisit any of those choices on evidence.
+    ///
+    /// ⚠️ **office-live-ux Job 2 re-pointed what this bound MEANS, because the mechanism changed.**
+    /// It used to assert "comfortably inside the 900 ms idle debounce", and against the 120 s
+    /// backstop that ratio would be vacuous — a save could take a full minute and still pass. What
+    /// is NOT vacuous is the bound the four ACTION-triggered save points impose: a pre-save runs
+    /// before every agent read and write of an open tab, a save-through runs after every write, and
+    /// a save runs on every tab close, each of them synchronously in front of the thing the user or
+    /// the agent actually asked for. A second per save at BEST would make every office verb visibly
+    /// slow and every tab close a stutter, which is a real design failure this can catch.
     ///
     /// ⚠️ Scope, stated rather than implied: every office fixture in this repo is under 30 KB, so
     /// this measures the FLOOR. The cost is O(document size) and the curve for a multi-megabyte
-    /// document is unmeasured — which is exactly why `fireAutoSave` never overlaps saves and re-arms
-    /// instead, so a document too slow for the interval degrades to "as often as it can".
-    func testLiveSaveWallClockIsWellInsideTheAutoSaveDebounceInterval() async throws {
+    /// document is unmeasured — which is exactly why `fireAutoSave` never overlaps saves, so a slow
+    /// document degrades to "as often as it can".
+    func testLiveSaveWallClockIsFastEnoughToSitInTheActionSavePointsCriticalPath() async throws {
         try requireLiveEngine()
         let path = try makeWritableCopy(of: "gate.ods", as: "save-cost.ods")
         let stateDir = makeScratchDirectory()
@@ -270,9 +285,10 @@ final class OfficeSheetsCommandTests: XCTestCase {
 
         let worst = elapsed.max() ?? 0
         let best = elapsed.min() ?? 0
-        print(String(format: "[save cost] gate.ods, 3 rounds: %@ — best %.3fs, worst %.3fs, debounce %.3fs",
+        print(String(format: "[save cost] gate.ods, 3 rounds: %@ — best %.3fs, worst %.3fs, "
+                        + "action-path bound %.3fs, backstop interval %.0fs",
                      elapsed.map { String(format: "%.3fs", $0) }.joined(separator: ", "),
-                     best, worst, OfficeRuntime.autoSaveDebounceIntervalDefault))
+                     best, worst, liveSaveActionPathBudget, OfficeRuntime.periodicSaveIntervalDefault))
 
         // ⚠️ **Asserted on the BEST round, not the worst — and that is a correction, with evidence.**
         // This first asserted `worst < interval`, which is a stopwatch number wearing a
@@ -283,15 +299,15 @@ final class OfficeSheetsCommandTests: XCTestCase {
         // share with a hundred other office tests.
         //
         // The design question this test exists to answer is whether a save is INHERENTLY fast enough
-        // for a sub-second idle interval, and the best round answers exactly that while being immune
-        // to whatever else is running. It is still a real bound, not a vacuous one: a save that
-        // needed even a third of the interval AT BEST would fail here, and that would genuinely
-        // invalidate the 900 ms choice. The whole distribution is printed either way, so a human
-        // reading a CI log sees the real cost rather than the assertion's summary.
-        XCTAssertLessThan(best, OfficeRuntime.autoSaveDebounceIntervalDefault / 3,
-                          "a save on an ordinary document must be COMFORTABLY inside the idle "
-                            + "interval at best, or the 900 ms debounce is not a coherent choice. "
-                            + "Best of \(elapsed.count) rounds: \(best)s")
+        // to sit in the critical path of an agent verb and a tab close, and the best round answers
+        // exactly that while being immune to whatever else is running. The whole distribution is
+        // printed either way, so a human reading a CI log sees the real cost rather than the
+        // assertion's summary.
+        XCTAssertLessThan(best, liveSaveActionPathBudget,
+                          "a save on an ordinary document sits in front of every agent office verb "
+                            + "and every tab close — at BEST it must be well under a second, or "
+                            + "action-triggered saving is not a coherent choice. Best of "
+                            + "\(elapsed.count) rounds: \(best)s")
 
         _ = host.teardownAllOfficeRuntimesAndStopHelper()
     }

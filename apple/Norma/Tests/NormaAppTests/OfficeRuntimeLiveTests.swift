@@ -2695,7 +2695,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         _ = host.teardownAllOfficeRuntimesAndStopHelper()
     }
 
-    // MARK: - office-instant-save Job 2: what an ARMED instant save actually does to a close
+    // MARK: - the unprompted save vs. the close (office-instant-save Job 2 → office-live-ux Job 2)
 
     /// **The drill Job 2's decision had to be taken on, because the drill the brief named turned out
     /// to be BLIND to instant save — measured, not suspected.**
@@ -2707,11 +2707,25 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// difference to it in EITHER direction. It passes armed for the same reason it passes disarmed.
     /// Full counts: `.superpowers/research/office-close-race-report.md`.
     ///
-    /// So this drill exists to ask the question that one cannot. It arms **its own runtime instance
-    /// only** — `autoSaveEnabled` is an instance `var`, so nothing here can touch the shipped
-    /// default, which is exactly why the parked feature stays testable — shortens the debounce, and
-    /// then does the thing that was supposed to be lethal: it lets a real auto-save land and closes
-    /// the document on top of it, with **no explicit save anywhere in the drill at all**.
+    /// So this drill exists to ask the question that one cannot: it lets a real UNPROMPTED save land
+    /// and closes the document on top of it, with **no explicit save anywhere in the drill at all**.
+    ///
+    /// ⚠️ **PORTED, office-live-ux Job 2.** The mechanism it drives changed — the idle debounce it
+    /// was written against is deleted, and the unprompted save is now the 120 s background backstop
+    /// (`periodicSaveTick`). Everything that made the drill discriminating is unchanged and is why
+    /// it was ported rather than dropped: the save is still unprompted, still goes through
+    /// `fireAutoSave`'s own three guards, still resolves into `onAutoSaveFinishedForTesting`, and the
+    /// close is still taken from inside that hook. It remains the standing evidence for
+    /// `awaitCloseBarrier` (9/9 green vs 3/3 red with the barrier's body emptied, 45 laps —
+    /// `.superpowers/research/office-close-race-report.md`), and re-measured on the ported mechanism
+    /// in `.superpowers/research/office-live-ux-report.md`.
+    ///
+    /// **`periodicSaveInterval` is shortened here, and unlike the debounce it replaced that is the
+    /// RIGHT knob.** The old comment warned against shortening the debounce because it armed at key
+    /// ENQUEUE time, so a short interval fired while the document was still clean and the drill went
+    /// inert. A repeating tick has no such coupling: an early tick simply finds nothing dirty,
+    /// refuses at guard 1 costing no helper request, and the NEXT tick saves. The drill's own
+    /// "inert rather than passing" assertion still catches it if that reasoning is wrong.
     ///
     /// **It cannot pass vacuously.** The only thing that can write the file here is instant save
     /// itself, so `autoSaved` failing means the drill was inert rather than green — the assertion is
@@ -2720,7 +2734,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     ///
     /// **RED/GREEN measured**: with `OfficeRuntime.awaitCloseBarrier`'s body emptied this drill dies;
     /// with it in place it does not. Counts in the report.
-    func testAnArmedInstantSaveFollowedImmediatelyByACloseNeverKillsTheSharedHelper() async throws {
+    func testAnUnpromptedBackstopSaveFollowedImmediatelyByACloseNeverKillsTheSharedHelper() async throws {
         let helperURL = Bundle.main.bundleURL.deletingLastPathComponent()
             .appendingPathComponent("NormaOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
@@ -2743,16 +2757,11 @@ final class OfficeRuntimeLiveTests: XCTestCase {
                 extraArguments: ["--lok-root", vendorRoot.path, "--sandbox-profile", Self.sandboxProfilePath.path]))
         }
         let runtime = host.officeRuntime(for: "S1")
-        // **This runtime instance only.** `autoSaveEnabled` is an instance `var` with no setting,
-        // plist, `UserDefaults` or wire operand behind it, so arming it here cannot reach the
-        // production default — see its own doc comment.
-        runtime.autoSaveEnabled = true
-        // `autoSaveDebounceInterval` is deliberately LEFT AT PRODUCTION'S OWN 0.9 s. Shortening it
-        // would be the wrong knob to turn: `noteEditActivity` arms the timer at key ENQUEUE time,
-        // not delivery, so an interval shorter than the input chain's own drain lets `fireAutoSave`
-        // run while the document is still clean, where its guard (1) refuses — and the drill would
-        // go inert again for a NEW reason. The five extra seconds are the price of the drill
-        // measuring the shipped timing rather than a convenient one.
+        // **This runtime instance only**, and set BEFORE the first `open` — `startPeriodicSaveIfNeeded`
+        // captures the interval when it arms, which `open(_:)` is what triggers. `periodicSaveInterval`
+        // is an instance `var` with no setting, plist, `UserDefaults` or wire operand behind it, so
+        // nothing here can reach the shipped 120 s default.
+        runtime.periodicSaveInterval = 1.0
 
         let scratchDir = makeScratchDirectory()
         let docPath = scratchDir.appendingPathComponent("instant-save-close.ods").path
@@ -2784,14 +2793,18 @@ final class OfficeRuntimeLiveTests: XCTestCase {
             }
             let beforeStat = officeFileStat(atPath: docPath)
             // ⚠️ **Through `OfficeRuntime`'s OWN input doors — NOT `postRealEdit`.** That helper goes
-            // straight at `OfficeHelperClient.postKey`, bypassing the runtime entirely, and
-            // `noteEditActivity` is called from the runtime's doors and nowhere else: the
-            // `ModifiedStatus` belt its own header used to describe was deliberately removed (see
-            // the `.modifiedStatus` case in `handleHelperEvent`, and that header, now corrected).
-            // A first version of this drill used `postRealEdit` and was INERT in 5 of 5 laps —
-            // armed, with a 0.3 s debounce and a 30 s wait, instant save never wrote the file once,
-            // because nothing had armed it. The `autoSaved` assertion below is what caught that,
-            // which is the whole reason it is worded as "inert rather than passing".
+            // straight at `OfficeHelperClient.postKey`, bypassing the runtime entirely.
+            //
+            // office-live-ux Job 2 note: the reason this mattered has CHANGED, and the instruction
+            // has not. It used to matter because `noteEditActivity` (the debounce's only arming
+            // door) lived on the runtime, so a raw wire client armed nothing and the drill was INERT
+            // in 5 of 5 laps. The backstop that replaced it is armed by `open(_:)` and reads
+            // `state.documents[path].dirty` at tick time, so a raw-wire edit WOULD eventually be
+            // picked up — but `dirty` itself is driven by the helper's `.modifiedChanged` event
+            // reaching THIS runtime, and everything else in this drill (the `becameDirty` wait, the
+            // close through `runtime.close`) is runtime-side too. Driving input through the real
+            // doors keeps the whole drill on one side of the seam. The "inert rather than passing"
+            // assertion below is still what would catch it if that is wrong.
             let keyCodes: [Character: Int] = [
                 "T": 531 | 0x1000, "E": 516 | 0x1000, "D": 515 | 0x1000, "I": 520 | 0x1000, "4": 260,
             ]
@@ -2816,15 +2829,15 @@ final class OfficeRuntimeLiveTests: XCTestCase {
             // auto-save's `saveAndAwaitOutcome` resolves, which is exactly where the clean-close
             // drill takes its close. See that property's own doc.
             let closedAt = await waitUntil(timeout: 30) { box.closedAt != nil }
-            XCTAssertTrue(closedAt, "lap \(lap): instant save never completed a save of its own — "
+            XCTAssertTrue(closedAt, "lap \(lap): the backstop never completed a save of its own — "
                           + "this drill is INERT rather than passing if this fails, because nothing "
                           + "else here calls any save door at all")
             XCTAssertNotEqual(officeFileStat(atPath: docPath), beforeStat,
-                              "lap \(lap): instant save resolved but nothing reached the real path")
+                              "lap \(lap): the backstop resolved but nothing reached the real path")
             await runtime.awaitPendingCloseBarriersForTesting()
             XCTAssertLessThan(Date().timeIntervalSince(box.closedAt ?? Date()), 10.0,
                               "lap \(lap): the close barrier must stay a bounded round trip even with "
-                              + "instant save armed — the control arm, same as the clean-close drill")
+                              + "an unprompted save in flight — the control arm, same as the clean-close drill")
             box.closedAt = nil
 
             guard let helperPID = host.officeHelperSupervisor?.process?.processIdentifier else {
@@ -2832,7 +2845,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
             }
             XCTAssertTrue(isProcessAlive(helperPID),
                           "lap \(lap): the shared helper died on a close taken straight after an "
-                          + "INSTANT save — Job 2's own blocker")
+                          + "UNPROMPTED save — Job 2's own blocker")
         }
 
         runtime.open(docPath)

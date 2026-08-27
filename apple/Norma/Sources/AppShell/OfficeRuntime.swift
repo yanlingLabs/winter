@@ -2920,6 +2920,9 @@ final class OfficeRuntime: ObservableObject {
     ///
     /// **The three gates arming is taken on, all re-measured on the shipping build:**
     ///  - the testifying drill `testAnArmedInstantSaveFollowedImmediatelyByAClose…` — **3/3 pass**,
+    ///    (office-live-ux Job 2 renamed it to `testAnUnpromptedBackstopSaveFollowedImmediatelyByA
+    ///    Close…` when it was ported off the deleted debounce; the three round-3/4 references below
+    ///    keep the historical name deliberately, since that is what those counts were taken on)
     ///    on top of round 3's 9/9-vs-3/3;
     ///  - the **office harness, ARMED: 103/103 four times** (149–150 s), i.e. better than the base
     ///    commit's own 102/103 — measured four times because the original failure was a cascade and
@@ -3231,7 +3234,7 @@ final class OfficeRuntime: ObservableObject {
     /// — i.e. the exact `.saved` moment, with no polling latency in between.
     ///
     /// It exists because that latency turned out to matter: a first version of
-    /// `OfficeRuntimeLiveTests.testAnArmedInstantSaveFollowedImmediatelyByAClose…` took the close
+    /// `OfficeRuntimeLiveTests.testAnUnpromptedBackstopSaveFollowedImmediatelyByAClose…` took the close
     /// after a 20 ms `waitUntil` poll on the file's own stat, and with the close barrier REMOVED it
     /// still passed 3 of 3 — the window is narrower than one poll. A drill that cannot reach the
     /// window cannot testify about it either way, so this hook is what lets one close at the timing

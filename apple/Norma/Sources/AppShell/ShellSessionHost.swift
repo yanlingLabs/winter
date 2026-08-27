@@ -1609,6 +1609,23 @@ final class ShellSessionHost: ObservableObject {
             // `.document` tabs ONLY. The `.code` leg a few lines above keeps its sheet unchanged —
             // the editor's buffers are a different product surface with their own ratified gate, and
             // this task's spec is about office documents.
+            //
+            // ⚠️ **EXCEPT IN CONFLICT, where the sheet still asks — and this carve-out is not
+            // caution, it is a different question.** A silent save is safe when the only thing at
+            // stake is the user's own unsaved edits, which is what save-on-close is FOR. A document
+            // in conflict is one whose file ALSO changed outside the app while it was dirty
+            // (`OfficeRuntimeReducer`'s `.externalChangeDetected`/`externalDeleted` arms, which fire
+            // only on a dirty document), so saving it silently would discard somebody else's write
+            // with nobody ever asked. That is exactly the loss the conflict machinery exists to
+            // surface, and it is not the user's spec's "commit on actions" — it is a genuine choice
+            // between two versions. The tab already carries the conflict banner naming it.
+            if runtime.stateSnapshot.documentConflicts[path] != nil {
+                let basename = (path as NSString).lastPathComponent
+                presentDirtyCloseSheet(basename, presentingWindow?()) { [weak self] choice in
+                    self?.resolveDirtyDocumentTabClose(tabId: tabId, choice: choice)
+                }
+                return
+            }
             saveThenCloseDocumentTab(tabId: tabId, path: path, runtime: runtime)
             return
         }
