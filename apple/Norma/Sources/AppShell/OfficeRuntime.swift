@@ -1920,6 +1920,10 @@ final class OfficeRuntime: ObservableObject {
     /// observe `state`/`stateSnapshot` instead (the same rule `EditorRuntime.openFile`'s own header
     /// states, for the identical reason: this returns before the helper has answered anything).
     func open(_ path: String) {
+        // office-live-ux Job 2 — arm the background backstop here, lazily and idempotently. A
+        // runtime that was pre-warmed but never opened a document runs no timer at all; the second
+        // and later opens re-use the first one's.
+        startPeriodicSaveIfNeeded()
         perform(dispatch(.openRequested(path: path)))
     }
 
@@ -1929,13 +1933,16 @@ final class OfficeRuntime: ObservableObject {
     /// own close request is now issued behind a barrier (`awaitCloseBarrier`, reached from
     /// `.helperClose`'s performer). Nothing a caller can observe from here moved.
     ///
-    /// The debounce cancel is the other half of that fix, and it belongs here rather than in the
-    /// barrier because `autoSaveTasks` is keyed by PATH and `.helperClose` carries only a docId: an
-    /// auto-save armed by the user's last keystroke must not be allowed to fire into the close it is
-    /// racing. Harmless when instant save is parked — the bag is empty, because `noteEditActivity`
-    /// refuses before ever arming one.
+    /// office-live-ux Job 2 removed the debounce-cancel that used to open this body. It was the
+    /// other half of Job 1's close fix and it is no longer reachable: nothing arms a per-path save
+    /// any more, and the backstop that replaced it reads `state.documents` at TICK time, by which
+    /// point the reducer has already dropped this path. What still protects the close is the part
+    /// that always did the real work — `awaitCloseBarrier`, which awaits this docId's IN-FLIGHT
+    /// saves (`inFlightSaveTasks`, registered by `performSave` itself) and then one real helper
+    /// round trip. A backstop tick that started a save a millisecond before this call is caught
+    /// there, exactly as a debounced one was.
     func close(_ path: String) {
-        autoSaveTasks.removeValue(forKey: path)?.cancel()
+        agentEngagedPaths.remove(path)
         perform(dispatch(.closeRequested(path: path)))
     }
 
@@ -2673,8 +2680,8 @@ final class OfficeRuntime: ObservableObject {
     /// "no dirty tracking" an honest description rather than a UI-only illusion. `postClipboardCopy`
     /// is the one sibling that does NOT gate — copying out is a pure read, not a mutation.
     func postKeyEvent(path: String, type: OfficeKeyEventType, charCode: Int, keyCode: Int) {
-        guard let doc = state.documents[path], !officeDocumentIsReadOnlyFormat(path: path) else { return }
-        noteEditActivity(path: path)
+        guard let doc = state.documents[path], !officeDocumentIsReadOnlyFormat(path: path),
+              !agentIsWorking(on: path) else { return }
         let docId = doc.docId
         let part = doc.activePart
         let previous = inputChainTail
@@ -2719,8 +2726,8 @@ final class OfficeRuntime: ObservableObject {
     /// Task 9: same read-only-format gate as `postKeyEvent`'s own — an IME commit mutates content
     /// exactly like an ordinary keystroke does, so it is gated on the identical terms.
     func postExtTextInput(path: String, type: OfficeExtTextInputType, text: String) {
-        guard let doc = state.documents[path], !officeDocumentIsReadOnlyFormat(path: path) else { return }
-        noteEditActivity(path: path)
+        guard let doc = state.documents[path], !officeDocumentIsReadOnlyFormat(path: path),
+              !agentIsWorking(on: path) else { return }
         let docId = doc.docId
         let part = doc.activePart
         let previous = inputChainTail
@@ -2760,8 +2767,8 @@ final class OfficeRuntime: ObservableObject {
     /// Task 9: gated, unlike `postClipboardCopy` immediately above — Cut MUTATES (it is a copy
     /// followed by a delete), the same reason it is not grouped with Copy's own un-gated posture.
     func postClipboardCut(path: String) {
-        guard let doc = state.documents[path], !officeDocumentIsReadOnlyFormat(path: path) else { return }
-        noteEditActivity(path: path)
+        guard let doc = state.documents[path], !officeDocumentIsReadOnlyFormat(path: path),
+              !agentIsWorking(on: path) else { return }
         let docId = doc.docId
         let part = doc.activePart
         let previous = inputChainTail
@@ -2783,8 +2790,8 @@ final class OfficeRuntime: ObservableObject {
     /// Task 9: same read-only-format gate as `postKeyEvent`'s own — Paste mutates exactly like
     /// typing does.
     func postClipboardPaste(path: String, text: String) {
-        guard let doc = state.documents[path], !officeDocumentIsReadOnlyFormat(path: path) else { return }
-        noteEditActivity(path: path)
+        guard let doc = state.documents[path], !officeDocumentIsReadOnlyFormat(path: path),
+              !agentIsWorking(on: path) else { return }
         let docId = doc.docId
         let part = doc.activePart
         let previous = inputChainTail
@@ -2819,8 +2826,8 @@ final class OfficeRuntime: ObservableObject {
     /// depth query fails, this issues exactly one repair-undo: the granularity the user had before
     /// this change, not a silent no-op.
     func postUndo(path: String) {
-        guard let doc = state.documents[path], !officeDocumentIsReadOnlyFormat(path: path) else { return }
-        noteEditActivity(path: path)
+        guard let doc = state.documents[path], !officeDocumentIsReadOnlyFormat(path: path),
+              !agentIsWorking(on: path) else { return }
         let docId = doc.docId
         let previous = inputChainTail
         inputChainTail = Task { [driver, weak self] in
@@ -2845,8 +2852,8 @@ final class OfficeRuntime: ObservableObject {
     /// A repair undo that was not mirrored here would make redo silently stop working the moment an
     /// agent edit was taken back.
     func postRedo(path: String) {
-        guard let doc = state.documents[path], !officeDocumentIsReadOnlyFormat(path: path) else { return }
-        noteEditActivity(path: path)
+        guard let doc = state.documents[path], !officeDocumentIsReadOnlyFormat(path: path),
+              !agentIsWorking(on: path) else { return }
         let docId = doc.docId
         let previous = inputChainTail
         inputChainTail = Task { [driver, weak self] in
@@ -2877,24 +2884,17 @@ final class OfficeRuntime: ObservableObject {
     /// document and session queues behind. Per-keystroke saving would mean N complete rewrites of
     /// the whole file to record N characters.
     ///
-    /// So: **debounce, and coalesce.** A burst of typing arms one save, not one per keystroke.
-    ///
-    /// 900 ms is chosen against a measured floor, not guessed: `saveAndAwaitOutcome` on this repo's
-    /// office fixtures completes in the low hundreds of milliseconds (`OfficeSheetsCommandTests
-    /// .testLiveSaveWallClockIsWellInsideTheAutoSaveDebounceInterval` measures it and asserts the
-    /// relationship rather than a bare number). It is long enough that ordinary typing rhythm never
-    /// triggers a save mid-word, and short enough to read as immediate.
+    /// So: **never on a keystroke.** office-live-ux Job 2's answer is the user's own — commit on
+    /// ACTIONS (before and after an agent edit, before an agent read, on tab close) plus one slow
+    /// backstop; see `periodicSaveIntervalDefault` for the shape that replaced the debounce and
+    /// why the debounce itself is gone rather than merely disarmed.
     ///
     /// ⚠️ **The cost curve for LARGE documents is UNMEASURED** — every fixture in this repo is under
     /// 30 KB, and nothing here records a save of a multi-megabyte spreadsheet. Since the cost is
-    /// O(document size), a large document's save will exceed this interval. That is handled by
-    /// construction rather than by the number: `fireAutoSave` never starts a save while one is in
-    /// flight for the same path, it re-arms instead — so a document too slow to save in 900 ms
+    /// O(document size), a large document's save will take proportionally longer. That is handled by
+    /// construction rather than by any number: `fireAutoSave` never starts a save while one is in
+    /// flight for the same path — so a document too slow to save inside the backstop's interval
     /// degrades to "saves as often as it can", never to overlapping saves.
-    static let autoSaveDebounceIntervalDefault: TimeInterval = 0.9
-
-    /// Injectable so tests can drive the machine without sleeping for real. Production never sets it.
-    var autoSaveDebounceInterval: TimeInterval = OfficeRuntime.autoSaveDebounceIntervalDefault
 
     /// ✅ **ARMED — office-finish, after round 4 closed the last blocker.** This shipped OFF through
     /// three rounds; the history below is kept in full, in order, because it is the record of what
@@ -2920,6 +2920,9 @@ final class OfficeRuntime: ObservableObject {
     ///
     /// **The three gates arming is taken on, all re-measured on the shipping build:**
     ///  - the testifying drill `testAnArmedInstantSaveFollowedImmediatelyByAClose…` — **3/3 pass**,
+    ///    (office-live-ux Job 2 renamed it to `testAnUnpromptedBackstopSaveFollowedImmediatelyByA
+    ///    Close…` when it was ported off the deleted debounce; the three round-3/4 references below
+    ///    keep the historical name deliberately, since that is what those counts were taken on)
     ///    on top of round 3's 9/9-vs-3/3;
     ///  - the **office harness, ARMED: 103/103 four times** (149–150 s), i.e. better than the base
     ///    commit's own 102/103 — measured four times because the original failure was a cascade and
@@ -2927,10 +2930,13 @@ final class OfficeRuntime: ObservableObject {
     ///  - the **full Swift suite: 3086/3087**. The single failure is
     ///    `OfficeSlidesCommandTests.testLiveSetTextTitleOnlyAndBodyOnly…`, which is the documented
     ///    rotating isolation-clean live drill (the base commit scores 3082/**1** on this machine with
-    ///    the same shape). **Arming is provably inert for it**: `autoSaveEnabled` gates exactly one
-    ///    entry point, `noteEditActivity`, whose only callers are the six input doors in this file,
-    ///    and that test posts no input at all — it drives `set_text` through the broker. It passes
-    ///    **5/5 in isolation** on the same armed binary.
+    ///    the same shape). **Arming was provably inert for it**: `autoSaveEnabled` gated exactly one
+    ///    entry point, `noteEditActivity`, whose only callers were the six input doors in this file,
+    ///    and that test posts no input at all — it drives `set_text` through the broker. It passed
+    ///    **5/5 in isolation** on the same armed binary. (Past tense throughout: office-live-ux
+    ///    DELETED both symbols along with the debounce. This paragraph is a record of a measurement
+    ///    taken on a build that had them, not a claim about this tree — commit `170ddcdb` swept for
+    ///    exactly this present-tense-about-a-deleted-symbol shape and missed this one.)
     ///
     /// ⛔ **What is still true and must stay true:** instant save makes the app an UNPROMPTED writer
     /// to the wire. Round 3's warning was right; what changed is that the wire can now cope with a
@@ -3044,52 +3050,193 @@ final class OfficeRuntime: ObservableObject {
     /// and it is a design problem, not a bug — seamless autosave needs an incremental save or a
     /// repaint that does not discard the rendered page, not a shorter debounce (which only makes the
     /// flashing less frequent, not absent).
-    var autoSaveEnabled: Bool = false
-
-    private var autoSaveTasks: [String: Task<Void, Never>] = [:]
+    /// ⛔ **`autoSaveEnabled` and `noteEditActivity` are GONE, and the deletion is the decision.**
+    /// office-live-ux Job 2 replaced the idle debounce with the user's own spec — commit on
+    /// ACTIONS, plus one slow background backstop — so nothing arms a save off a keystroke any
+    /// more. Deleted rather than left disarmed: a `false` flag next to a machine that works is an
+    /// invitation, and the invitation here reintroduces the repaint storm the paragraphs above
+    /// record. The six input doors that used to call `noteEditActivity` now carry Job 3's
+    /// agent-engagement gate instead — same six lines, opposite direction.
+    ///
+    /// What SURVIVES the deletion, and why each piece is still here:
+    ///  * `fireAutoSave`'s guards — they are the correct guards for ANY unprompted save, and
+    ///    the periodic tick below is one;
+    ///  * `autoSaveInFlight` + `onAutoSaveFinishedForTesting` — the close drill
+    ///    (`OfficeRuntimeLiveTests.testAnArmedInstantSaveFollowedImmediatelyByAClose…`, 9/9 green vs
+    ///    3/3 red) takes its close from inside that hook, and it is the standing evidence for
+    ///    `awaitCloseBarrier`. It is ported to this timer, not deleted;
+    ///  * this whole comment, because the four blockers it records are the reason the shape is what
+    ///    it is.
     private var autoSaveInFlight: Set<String> = []
 
-    /// **Called by every door that can CHANGE the document, and by NOTHING else** — typing, IME,
-    /// paste, cut, undo, redo. All six live in this file; there is no other caller.
+    /// **The background backstop — save point 4 of the user's five.** Every OTHER save point is a
+    /// discrete action (before an agent edit, after one, before an agent read, on tab close), so
+    /// this timer exists only for the case none of them covers: the user typed and then walked away
+    /// while nothing else happened.
     ///
-    /// ⛔ **This paragraph used to end "plus a belt on LOK's own `ModifiedStatus` transition for
-    /// anything that changes the document by a route the app did not post itself." That belt does
-    /// not exist** — it was deliberately removed, and `handleHelperEvent`'s own `.modifiedStatus`
-    /// case states at length why ("the belt covered no real case and cost real saves"). The sentence
-    /// survived the removal, and it is not a harmless leftover: a live drill written against it
-    /// (driving input through `OfficeHelperClient.postKey` directly, which bypasses this file) was
-    /// **inert in 5 of 5 laps** — armed, with a 0.3 s debounce and a 30 s wait, instant save never
-    /// wrote the file once, because nothing had armed it. **A test that means to exercise instant
-    /// save must drive `OfficeRuntime`'s own input doors; a raw wire client will not arm anything.**
+    /// **120 seconds, and the number is argued from what else is already true rather than tuned:**
+    ///  1. **A save is a full container rewrite plus a LOK re-render**, i.e. one visible repaint of
+    ///     the page under the user's cursor. That is the FOURTH blocker recorded above and it is a
+    ///     design property, not a bug — so the only honest lever is frequency. At 120 s the worst
+    ///     case while actively typing is one flash every two minutes; at 0.9 s it was a storm.
+    ///  2. **Crash loss is already bounded at 60 s by something else** —
+    ///     `OfficeHelper/OfficeAutosaveScheduler` writes a recovery SIDECAR every 60 s while a
+    ///     document is dirty. This timer is therefore about the user's own file on disk, never
+    ///     about crash recovery, so shortening it buys durability that is already covered.
+    ///  3. **The other four save points carry the load.** Anything the agent touches is saved on
+    ///     both sides of the touch; anything the user closes is saved on the way out. What is left
+    ///     for a timer is genuinely a backstop.
     ///
-    /// Why the input doors and not `ModifiedStatus` alone: **`STATE_CHANGED` is a TRANSITION.** On a
-    /// clean document the first keystroke fires `modified=true` and every subsequent keystroke fires
-    /// nothing at all, so a timer armed only on that signal would fire once, mid-burst, rather than
-    /// once the user stopped. The app's own input doors are the per-keystroke signal, and they are at
-    /// the right layer: they are what the app SENDS, so they cost nothing to observe.
+    /// ⚠️ **The tick is deliberately DUMB: no "skip if the user typed recently".** That predicate is
+    /// the idle debounce wearing a different name, and it reintroduces exactly the behaviour the
+    /// blocker above is about (a save landing the moment the user pauses, i.e. while they are
+    /// looking at the page). A fixed cadence flashes on a schedule the user can learn; an
+    /// idle-triggered one flashes precisely when they stop to read.
+    static let periodicSaveIntervalDefault: TimeInterval = 120
+
+    /// Injectable so tests can drive the tick without sleeping for two minutes. Production never
+    /// sets it — same posture the debounce interval had.
+    var periodicSaveInterval: TimeInterval = OfficeRuntime.periodicSaveIntervalDefault
+
+    /// One repeating task per RUNTIME, not per path: a tick walks every open document and lets
+    /// `fireAutoSave`'s own guards decide. A clean document costs a dictionary read and no helper
+    /// request at all (guard 1), so an idle session's timer is free.
+    private var periodicSaveTask: Task<Void, Never>?
+
+    // MARK: - office-live-ux Job 3: "Norma is working"
+
+    /// Paths this session's agent has ENGAGED — set by `OfficeAgentBroker` the moment it adopts a
+    /// document a tab already has open, for a read exactly as for a write.
     ///
-    /// Deliberately NOT `postMouseEvent`: a click or drag only moves the caret or extends a
-    /// selection — it cannot mutate content on its own (that needs a key/IME/paste event, all of
-    /// which are here). Re-arming on mouse movement would postpone a save while the user was merely
-    /// looking around.
+    /// **This is half of the overlay's condition and it is deliberately NOT the whole of it.** The
+    /// other half is `sessionTurnRunning`, and `agentIsWorking(on:)` is the only reader of either.
+    /// The user's spec rejected a timed lockout, so the overlay has to be tied to real turn state —
+    /// which means the thing that makes a stuck overlay IMPOSSIBLE is that visibility is DERIVED
+    /// from a conjunction, never toggled by a pair of events. If the broker never gets to clear its
+    /// mark (it throws, the app is killed mid-verb, a future caller forgets), the overlay still
+    /// disappears the instant the turn ends, because the turn is what the other half tracks.
+    @Published private(set) var agentEngagedPaths: Set<String> = []
+
+    /// Whether THIS runtime's session has a turn running right now, pushed in by
+    /// `ShellSessionHost`. `false` is the fail-closed answer for every case the host cannot speak
+    /// for — no attachment, a different session attached, a detach in progress — and that is the
+    /// correct default: an overlay that cannot prove a turn is running must not claim one, because
+    /// it also blocks the user's typing.
+    @Published private(set) var sessionTurnRunning: Bool = false
+
+    /// The host's door onto `sessionTurnRunning`. **Clears engagement on BOTH edges, and the TRUE
+    /// edge is the one worth explaining.**
     ///
-    /// Constraint C7 is respected by construction: none of this is reducer state, nothing renders
-    /// from it, and `dispatch` is never called at keystroke frequency on its account.
-    func noteEditActivity(path: String) {
-        guard autoSaveEnabled else { return }
-        guard !officeDocumentIsReadOnlyFormat(path: path) else { return }
-        autoSaveTasks[path]?.cancel()
-        let interval = autoSaveDebounceInterval
-        autoSaveTasks[path] = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(max(0, interval) * 1_000_000_000))
-            guard !Task.isCancelled else { return }
-            await self?.fireAutoSave(path: path)
+    /// Clearing on the false edge is obvious hygiene. Clearing on the TRUE edge is the self-heal:
+    /// if a false edge is ever missed — a runtime minted mid-turn, a hop away and back, a sink
+    /// rewired late — a stale mark plus the NEXT turn's `true` would relight the overlay on a
+    /// document the agent is not touching, and block typing on it. The next turn start wipes it, and
+    /// it can never race a legitimate mark: the broker only ever marks while a turn is already
+    /// running, i.e. strictly after this edge has passed.
+    ///
+    /// ⚠️ **The price, named rather than left to be found (fix round, review MINOR-1): both edges
+    /// also drop a LIVE mark.** Hop away from a session mid-turn and back — the detach pushes
+    /// `false` (clearing), the re-attach pushes `true` (clearing again) — and the turn is still
+    /// running with the agent possibly still mid-verb, but the document is now unmarked, so the
+    /// overlay does not come back and typing is re-enabled until the agent's next verb re-marks it.
+    /// That is the deliberate cost of making a STUCK overlay impossible, and it degrades in the
+    /// safe direction: a missing cover, never a wedged one. A cover that could stick would also be
+    /// a keyboard that could stay dead.
+    func setSessionTurnRunning(_ running: Bool) {
+        guard running != sessionTurnRunning else { return }
+        sessionTurnRunning = running
+        if !agentEngagedPaths.isEmpty { agentEngagedPaths.removeAll() }
+    }
+
+    /// The broker's door. Marks `path` engaged; never unmarks (see `agentEngagedPaths`' own doc for
+    /// why the clear lives on the turn edge instead of here).
+    func noteAgentEngaged(path: String) {
+        guard state.documents[path] != nil else { return }
+        agentEngagedPaths.insert(path)
+    }
+
+    /// **The one predicate.** The overlay reads it, and so does every input door that can mutate the
+    /// document — which is what makes "the user does not edit underneath a read the agent is about
+    /// to act on" a property of the runtime rather than a promise the overlay makes with its pixels.
+    /// A SwiftUI overlay only intercepts the POINTER; the canvas stays first responder and the
+    /// keyboard would go straight past it.
+    func agentIsWorking(on path: String) -> Bool {
+        sessionTurnRunning && agentEngagedPaths.contains(path)
+    }
+
+    /// Arms the background backstop, once per runtime. **Idempotent and lazy** — called from
+    /// `open(_:)`, so a runtime that was pre-warmed but never opened a document runs no timer at
+    /// all, and a second/third open re-uses the first one's task.
+    ///
+    /// Not armed on `dirty` and not disarmed on clean, deliberately: a dirty-armed timer needs an
+    /// arm/disarm edge on `.modifiedStatusChanged`, and this file already carries the record of what
+    /// that belt cost last time (it "covered no real case and cost real saves", and its removal left
+    /// a doc comment claiming it still existed for weeks). One dumb timer whose TICK is dirty-gated
+    /// has the same effect with no edges to get wrong.
+    private func startPeriodicSaveIfNeeded() {
+        guard periodicSaveTask == nil else { return }
+        let interval = max(0, periodicSaveInterval)
+        periodicSaveTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                guard !Task.isCancelled else { return }
+                // **`guard let self ... else { return }`, not `await self?.tick()`.** The optional-chain
+                // form no-ops on a deallocated runtime but keeps LOOPING forever, once per interval,
+                // for the life of the process — `teardown()` is what cancels this, and a runtime that
+                // is released WITHOUT a teardown (which is every runtime a unit test builds and drops)
+                // would leave one such task behind each time. Exiting on a nil `self` costs nothing and
+                // makes the task's lifetime the runtime's.
+                guard let self else { return }
+                self.periodicSaveTick()
+            }
         }
     }
 
-    /// The trailing edge. Three guards, and each is load-bearing for a different reason.
+    /// One tick. Walks the open documents and asks `fireAutoSave` about each; every refusal
+    /// (nothing to write, a save already in flight, a read-only format) belongs to that function,
+    /// which is what keeps this the only unprompted-save policy in the file.
+    ///
+    /// `state.documents.keys` is snapshotted into an Array first. `fireAutoSave` mutates nothing in
+    /// `state` today, but iterating a `@Published` value's storage while calling out into code that
+    /// might is the kind of thing that becomes true later.
+    func periodicSaveTick() {
+        for path in Array(state.documents.keys) {
+            fireAutoSave(path: path)
+        }
+    }
+
+    /// Test-only: run one tick synchronously, without waiting for the timer.
+    func periodicSaveTickForTesting() { periodicSaveTick() }
+
+    /// **The one unprompted save, and its four guards.** Reached only from `periodicSaveTick`
+    /// now; every OTHER save point in Job 2's five is an explicit `saveAndAwaitOutcome` at the door
+    /// that triggered it, because those callers need the OUTCOME and this one does not.
+    ///
+    /// Each guard is load-bearing for a different reason. Guards 1-3 predate this task; guard 0 is
+    /// the fix round's, and the reason it is new is that this function only became REACHABLE in
+    /// production on this branch — see its own comment.
     private func fireAutoSave(path: String) {
-        autoSaveTasks.removeValue(forKey: path)
+        // (0) ⛔ **NEVER resolve a conflict unprompted** — fix round, review CRITICAL-2.
+        //
+        //     A conflict means the file on disk ALSO changed outside Norma while this tab held it
+        //     (`.externalChangeDetected`/`.externalDeleted`, both gated on `doc.dirty`). Saving it
+        //     discards the other party's bytes — and `.saveSucceeded` unconditionally clears
+        //     `documentConflicts`, so the banner about them deletes itself in the same operation.
+        //     A user who raised a conflict and walked away to think about it would come back, at
+        //     most two minutes later, to a tab that looks completely normal and a file that no
+        //     longer holds what the other writer put there.
+        //
+        //     ⚠️ **This is not pre-existing exposure — this branch is what armed it.** Before
+        //     office-live-ux, `fireAutoSave` was reachable only from the idle debounce and the
+        //     debounce was disarmed (`autoSaveEnabled == false`), so guard 1 never ran in
+        //     production at all. `periodicSaveTick` reaches it now. That makes this the ONLY save
+        //     point of the five with no user and no agent action behind it, which is exactly why
+        //     it is the one that must refuse hardest: every other door has somebody to tell.
+        //
+        //     A conflicted document simply stays dirty until the banner is answered. That is what
+        //     the banner is for, and `.conflictKeepMineRequested`/`.conflictReloadRequested` are
+        //     the two doors that legitimately end it.
+        guard state.documentConflicts[path] == nil else { return }
         // (1) Nothing to write. The engine has its own `DontSaveIfUnmodified` lever, but refusing
         //     here is strictly better: it costs no helper request at all, so an idle document never
         //     touches the shared FIFO. This is also what makes the agent's own writes free of
@@ -3099,12 +3246,13 @@ final class OfficeRuntime: ObservableObject {
         //     deliberate design ("two ⌘S on one path are two independent saves"), and overlapping
         //     saves are already a known cost to the file-watcher's self-attribution bookkeeping —
         //     two saves' expected-write tokens interleaving is a tested EDGE case, and an
-        //     instant-save design must not make it the ordinary path. Re-arming rather than dropping
-        //     is what keeps a slow document saving as often as it can instead of not at all.
-        guard !autoSaveInFlight.contains(path) else {
-            noteEditActivity(path: path)
-            return
-        }
+        //     instant-save design must not make it the ordinary path.
+        //
+        //     office-live-ux Job 2: this used to RE-ARM the debounce here. With a fixed cadence
+        //     there is nothing to re-arm — the next tick asks again on its own, which is the same
+        //     "a document too slow to save inside the interval saves as often as it can" behaviour
+        //     with one fewer moving part.
+        guard !autoSaveInFlight.contains(path) else { return }
         // (3) Through the ORDINARY save path — `saveAndAwaitOutcome`, which is `doc_saveAs` into the
         //     fence plus an atomic place. Never `.uno:Save`: that route enters `GUIStoreModel`,
         //     where two dialog sites have NO LibreOfficeKit guard and can be reached via the
@@ -3123,20 +3271,20 @@ final class OfficeRuntime: ObservableObject {
         onAutoSaveFinishedForTesting?(path)
     }
 
-    /// Test-only, and production never sets it (same posture as `autoSaveDebounceInterval` just
-    /// above). Fires SYNCHRONOUSLY at the instant an auto-save's own `saveAndAwaitOutcome` resolves
+    /// Test-only, and production never sets it (same posture as `periodicSaveInterval` above).
+    /// Fires SYNCHRONOUSLY at the instant an unprompted save's own `saveAndAwaitOutcome` resolves
     /// — i.e. the exact `.saved` moment, with no polling latency in between.
     ///
     /// It exists because that latency turned out to matter: a first version of
-    /// `OfficeRuntimeLiveTests.testAnArmedInstantSaveFollowedImmediatelyByAClose…` took the close
+    /// `OfficeRuntimeLiveTests.testAnUnpromptedBackstopSaveFollowedImmediatelyByAClose…` took the close
     /// after a 20 ms `waitUntil` poll on the file's own stat, and with the close barrier REMOVED it
     /// still passed 3 of 3 — the window is narrower than one poll. A drill that cannot reach the
     /// window cannot testify about it either way, so this hook is what lets one close at the timing
     /// the clean-close drill closes at.
     var onAutoSaveFinishedForTesting: ((String) -> Void)?
 
-    /// Test-only: is a debounced save currently armed for this path?
-    func autoSaveIsArmedForTesting(path: String) -> Bool { autoSaveTasks[path] != nil }
+    /// Test-only: is the background backstop running for this runtime?
+    func periodicSaveIsArmedForTesting() -> Bool { periodicSaveTask != nil }
 
     // MARK: office-live-edit R3 — the undo ledger's actor-side doors
     //
@@ -3351,10 +3499,14 @@ final class OfficeRuntime: ObservableObject {
             //  2. **Raw wire clients** (this suite's own drills and the harness) are test surface,
             //     not product.
             //
-            // A human's edits — the whole point of instant save — all arrive through the app's own
-            // input doors, which is where `noteEditActivity` is called. Nothing a human does reaches
-            // LOK without passing one of them. So the belt covered no real case and cost real saves,
-            // and every extra save widens the window that measurably kills the helper ~4 times in 5.
+            // A human's edits all arrive through the app's own input doors (`postKeyEvent` and its
+            // five mutating siblings). Nothing a human does reaches LOK without passing one of them.
+            // So the belt covered no real case and cost real saves, and every extra save widens the
+            // window that measurably kills the helper ~4 times in 5.
+            //
+            // office-live-ux Job 2 note: those six doors no longer arm ANY save — the debounce they
+            // used to arm is deleted. They now carry Job 3's agent-engagement refusal instead. The
+            // paragraph above still holds as the reason this belt stays absent.
         case .caretRect, .textSelection, .textSelectionStart, .textSelectionEnd, .cellCursor, .cellFormula:
             let activePart = state.documents.first(where: { $0.value.docId == docId })?.value.activePart ?? 0
             cursorStore.apply(docId: docId, event: event, activePart: activePart)
@@ -3386,20 +3538,20 @@ final class OfficeRuntime: ObservableObject {
         // Costs O(number of ledgers), not O(open documents): only paths that actually have a group
         // are looked at, and that is zero for every document the agent has never written to.
         //
-        // office-live-edit R1 rides the SAME funnel for the same reason: a debounced save armed for
-        // a document that has since closed or been replaced must not fire. `fireAutoSave` would
-        // decline it anyway (its `dirty` guard reads `state.documents[path]`, which is gone), so
-        // this is hygiene rather than a correctness fix — but it is the difference between a timer
-        // that is cancelled and one that merely finds nothing to do up to a second later, next to a
-        // close window that measurably kills the shared helper.
-        let watched = Set(undoLedgers.keys).union(autoSaveTasks.keys)
+        // office-live-ux Job 2: the debounce bag this funnel also swept is GONE — the backstop is
+        // one runtime-wide timer whose tick reads `state.documents` live, so a document that closed
+        // or was replaced is simply absent by the next tick and there is nothing per-path to cancel.
+        // Job 3's engagement set rides the funnel in its place, for the identical reason the ledger
+        // does: it is keyed by PATH, and a path whose docId changed underneath is a different
+        // document.
+        let watched = Set(undoLedgers.keys).union(agentEngagedPaths)
         let watchedDocIds: [String: String?] = watched.isEmpty ? [:]
             : watched.reduce(into: [:]) { $0[$1] = state.documents[$1]?.docId }
         let (next, effects) = OfficeRuntimeReducer.reduce(state, event)
         state = next
         for (path, previousDocId) in watchedDocIds where next.documents[path]?.docId != previousDocId {
             undoLedgers.removeValue(forKey: path)
-            autoSaveTasks.removeValue(forKey: path)?.cancel()
+            agentEngagedPaths.remove(path)
         }
         return effects
     }
@@ -4515,11 +4667,12 @@ final class OfficeRuntime: ObservableObject {
         for (_, watcher) in watchers { watcher.stop() }
         watchers.removeAll()
         diskBaselines.removeAll()
-        // office-instant-save Job 1 — the debounce bag goes too, for the reason `close(_:)`'s own
-        // cancel exists: an auto-save armed by the user's last keystroke must never fire into a
-        // teardown.
-        for (_, task) in autoSaveTasks { task.cancel() }
-        autoSaveTasks.removeAll()
+        // office-live-ux Job 2 — the background backstop goes too, for the reason the debounce
+        // bag it replaced went: an unprompted save must never fire into a teardown. Job 3's
+        // engagement set goes with it; a runtime being torn down has no tab left to cover.
+        periodicSaveTask?.cancel()
+        periodicSaveTask = nil
+        agentEngagedPaths.removeAll()
         // Office Stage B Task 2 — the save-suppression bag goes with everything else this runtime
         // holds; mirrors `EditorRuntime`'s own teardown treatment of its identical bag.
         pendingExpectedWrites.removeAll()

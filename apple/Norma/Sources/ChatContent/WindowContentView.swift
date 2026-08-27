@@ -350,8 +350,33 @@ struct WindowContentView<Accessory: View>: View {
             model: composerModelControl,
             stripEdge: .above,
             sendBlockedReason: adapter.composerDraft
-                .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : nil
+                .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : nil,
+            stop: composerStopControl
         )
+    }
+
+    /// office-live-ux Job 1 — the card's stop wiring, or `nil` when this surface offers none.
+    ///
+    /// **`onInterrupt == nil` is the gate**, not `turnRunning`: a surface that never wired an
+    /// interrupt must render no stop button AND leave Esc alone, at every turn state. The orb's
+    /// morph window and every detached window are exactly that surface — both already own Esc
+    /// through `NSEvent` monitors of their own (`OrbWindowController.swift:567`,
+    /// `DetachedWindowController.swift:499`), and neither renders this card today anyway
+    /// (`composerCardMode` is nil for both), so this is belt as well as gate.
+    ///
+    /// `isRunning` is a SNAPSHOT taken at render, deliberately: the button has to draw one, and
+    /// giving Esc a live closure while the button drew a snapshot is precisely the disagreement this
+    /// task exists to prevent. It cannot go stale in practice — `FieldStateAdapter.init` republishes
+    /// `SessionModel.objectWillChange` as its own, so this view re-renders on the turn boundary that
+    /// flips the value. Both stale directions are harmless anyway: a stale `true` sends an interrupt
+    /// the daemon answers `wasRunning: false`; a stale `false` hands Esc back to AppKit.
+    ///
+    /// **Hoisted out of `composerCard` for the tests' sake**, the same reason that property was
+    /// hoisted out of `contentColumn`: the whole path from adapter to rendered button is a value
+    /// here, so "a running turn shows stop" is assertable without rendering anything.
+    var composerStopControl: ComposerStopControl? {
+        guard let onInterrupt = adapter.onInterrupt else { return nil }
+        return ComposerStopControl(isRunning: adapter.turnRunning, onStop: onInterrupt)
     }
 
     /// mac-chat-parity Task 7 (spec §5): a LIVE session's model/effort wiring, as the composer's chip

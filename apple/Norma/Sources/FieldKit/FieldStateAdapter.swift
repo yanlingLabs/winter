@@ -812,6 +812,22 @@ final class FieldStateAdapter: ObservableObject {
     /// nothing — the shown-but-broken shape this codebase keeps closing.
     var onSetActivity: ((String?) -> Void)?
 
+    /// office-live-ux Job 1 — **stop the running turn** (`session.interrupt`). Both of Job 1's two
+    /// surfaces come through here: the composer's Esc (`ComposerTextView.onEscape`) and the send
+    /// button's stop role (`NormaComposerCard`), so the two cannot end up calling different things.
+    ///
+    /// **OPTIONAL, defaulting `nil`, and that is the affordance gate** — the same opt-in shape
+    /// `onSetActivity` just above uses, for the same reason it gives. A surface that does not wire
+    /// this shows no stop button and consumes no Esc: the orb's morph window and every detached
+    /// window already own their Esc through `NSEvent` monitors of their own
+    /// (`OrbWindowController.swift:567`, `DetachedWindowController.swift:499`), and a second,
+    /// responder-scoped door on the same key in the same window is exactly the double-interrupt
+    /// this default rules out.
+    ///
+    /// **`turnRunning` is the single source of truth for whether it is offered**, and it is read at
+    /// call time in both places rather than mirrored into a second flag — see that property.
+    var onInterrupt: (() -> Void)?
+
     /// True while a `session.setActivity` RPC is in flight — the affordance's rows disable on it.
     /// A SEPARATE flag from the other four for the same reason those are separate from each other.
     @Published var activityChangeInFlight: Bool = false

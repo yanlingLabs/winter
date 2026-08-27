@@ -545,7 +545,12 @@ struct NewChatPage: View {
             announcement: newChatAnnouncement(announcement, fallback: announcementLine),
             isEnabled: ui.composerEnabled,
             showsWorkingIndicator: ui.showsWorkingIndicator,
-            sendBlockedReason: newChatSendBlockedReason(draft: host.newChatDraft, mode: mode)
+            sendBlockedReason: newChatSendBlockedReason(draft: host.newChatDraft, mode: mode),
+            // office-live-ux Job 1: no session exists yet, so there is no turn to stop — the same
+            // reason `policy` is nil above. The button keeps its send/blocked pair here and Esc keeps
+            // whatever AppKit already gave it. Written out rather than defaulted: `stop` is a `let`
+            // precisely so this page has to answer the question (see its own doc).
+            stop: nil
         )
     }
 

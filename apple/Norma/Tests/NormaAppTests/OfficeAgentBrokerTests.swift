@@ -737,9 +737,15 @@ final class OfficeAgentBrokerTests: XCTestCase {
         }
     }
 
-    // MARK: - Rule 3: dirty refusal
+    // MARK: - Rule 3, as office-live-ux Job 2 left it: SAVE first, refuse only if that fails
 
-    func testRefusesAWriteOnADirtyAdoptedDocumentNamingTheTab() async throws {
+    /// **The rule change, pinned in the direction it changed.** A write to a dirty adopted document
+    /// used to refuse outright. It now saves the tab's edits first and proceeds.
+    ///
+    /// Three assertions, and the ORDER one is the point: without it, "a save happened and the action
+    /// ran" is satisfied by rule 4's own save-through afterwards, which was always there. Two saves
+    /// with the action between them is what says the FIRST one is new.
+    func testAWriteOnADirtyAdoptedDocumentSavesTheTabsEditsFirstAndThenProceeds() async throws {
         let scratch = makeScratchDirectory()
         let path = scratch.appendingPathComponent("dirty.xlsx").path
         writeDummyFile(at: path)
@@ -756,24 +762,117 @@ final class OfficeAgentBrokerTests: XCTestCase {
         let dirtied = await waitUntil { runtime.stateSnapshot.documents[path]?.dirty == true }
         XCTAssertTrue(dirtied, "setup: the document never became dirty")
 
+        // A real rendered temp per SAVE, not per test: `OfficeRuntime.performSave` DELETES the
+        // helper's temp render once it has placed it, so the pre-save consumes the first one and
+        // rule 4's own save-through needs a second. (Written after exactly that turned this test
+        // into a `saveFailed` while it claimed to be measuring the proceed path.)
+        func nameAFreshRender(_ docId: String) {
+            let rendered = FileManager.default.temporaryDirectory
+                .appendingPathComponent("rendered-\(UUID().uuidString).xlsx").path
+            try? Data("rendered bytes".utf8).write(to: URL(fileURLWithPath: rendered))
+            office.saveTempPaths[docId] = rendered
+        }
+        nameAFreshRender(docId)
+
+        var savesWhenTheActionRan = -1
+        let result = try await host.officeAgentBroker.perform(
+            sessionId: "S1", path: path, access: .write, requestId: UUID().uuidString
+        ) { _, docId, _ in
+            savesWhenTheActionRan = office.saveCalls.count
+            nameAFreshRender(docId)
+            return "wrote"
+        }
+
+        XCTAssertEqual(result, "wrote", "the write must proceed once the tab's edits are safe")
+        XCTAssertEqual(savesWhenTheActionRan, 1,
+                       "the tab's edits must be saved BEFORE the agent's action runs — saw "
+                       + "\(savesWhenTheActionRan) save(s) at that moment")
+        XCTAssertEqual(office.saveCalls.count, 2,
+                       "…and rule 4 still saves afterwards: pre-save + save-through, in that order")
+        XCTAssertEqual(office.closeCalls.count, 0, "an ADOPTED document is never closed by the broker")
+    }
+
+    /// **The refusal SURVIVES, exactly where it should: the pre-save failed.** This is the control
+    /// arm for the test above — without it, deleting rule 3 entirely would look identical, and
+    /// deleting rule 3 entirely is precisely the wrong reading of this change.
+    func testAWriteStillRefusesWhenTheTabsEditsCouldNotBeSavedFirst() async throws {
+        let scratch = makeScratchDirectory()
+        let path = scratch.appendingPathComponent("dirty-unsavable.xlsx").path
+        writeDummyFile(at: path)
+        let office = BrokerOfficeDriverRecorder()
+        let host = makeHost(office: office, dirs: [SessionDirEntry(path: scratch.path, locked: true)])
+        await host.directory.refresh()
+
+        let runtime = host.officeRuntime(for: "S1")
+        runtime.open(path)
+        let opened = await waitUntil { runtime.stateSnapshot.documents[path] != nil }
+        XCTAssertTrue(opened, "setup")
+        let docId = try XCTUnwrap(runtime.stateSnapshot.documents[path]?.docId)
+        office.saveFailures[docId] = "the disk said no"
+        runtime.handle(documentEvent: .modifiedChanged(true), docId: docId)
+        let dirtied = await waitUntil { runtime.stateSnapshot.documents[path]?.dirty == true }
+        XCTAssertTrue(dirtied, "setup: the document never became dirty")
+
         var actionRan = false
         do {
             _ = try await host.officeAgentBroker.perform(
                 sessionId: "S1", path: path, access: .write, requestId: UUID().uuidString
             ) { _, _, _ in actionRan = true; return "should not run" }
-            XCTFail("a write on a dirty adopted document must refuse")
+            XCTFail("a write must still refuse when the tab's edits could not be saved first")
         } catch let error as OfficeAgentBrokerError {
-            guard case .documentDirty(let refusedPath) = error else {
+            guard case .documentDirty(let refusedPath, let failure) = error else {
                 return XCTFail("expected .documentDirty, got \(error)")
             }
             XCTAssertEqual(refusedPath, path)
-            XCTAssertTrue(error.message.contains("dirty.xlsx"), "the refusal must name the tab: \(error.message)")
+            XCTAssertTrue(error.message.contains("dirty-unsavable.xlsx"),
+                          "the refusal must name the tab: \(error.message)")
+            // The sentence must say the save was TRIED. A refusal that only said "it has unsaved
+            // changes" reads as "wait and retry", which after this change is the one instruction
+            // that cannot help — the agent would walk into an identical wall with no new
+            // information.
+            XCTAssertEqual(failure, "the disk said no")
+            XCTAssertTrue(error.message.contains("the disk said no"),
+                          "the refusal must name why the save failed: \(error.message)")
         } catch {
             XCTFail("unexpected error: \(error)")
         }
         XCTAssertFalse(actionRan, "the write's own action must never run once refused")
-        XCTAssertEqual(office.saveCalls.count, 0, "a refused write must never reach save-through")
         XCTAssertEqual(office.closeCalls.count, 0, "a dirty-refused ADOPTED document must never be closed")
+    }
+
+    /// A CLEAN adopted document takes no pre-save at all — the second control arm, and the one that
+    /// keeps the pre-save from becoming "an extra save on every agent verb". Without it, an
+    /// implementation that saved unconditionally would pass both tests above.
+    func testACleanAdoptedDocumentTakesNoPreSaveAtAll() async throws {
+        let scratch = makeScratchDirectory()
+        let path = scratch.appendingPathComponent("clean.xlsx").path
+        writeDummyFile(at: path)
+        let office = BrokerOfficeDriverRecorder()
+        let host = makeHost(office: office, dirs: [SessionDirEntry(path: scratch.path, locked: true)])
+        await host.directory.refresh()
+
+        let runtime = host.officeRuntime(for: "S1")
+        runtime.open(path)
+        let opened = await waitUntil { runtime.stateSnapshot.documents[path] != nil }
+        XCTAssertTrue(opened, "setup")
+        XCTAssertNotEqual(runtime.stateSnapshot.documents[path]?.dirty, true, "setup: must start clean")
+
+        var savesWhenTheActionRan = -1
+        _ = try await host.officeAgentBroker.perform(
+            sessionId: "S1", path: path, access: .write, requestId: UUID().uuidString
+        ) { _, docId, _ in
+            // Rule 4's own save-through still has to succeed for this to reach its assertions —
+            // named inside the action, exactly as every other successful-write test here does.
+            let rendered = FileManager.default.temporaryDirectory
+                .appendingPathComponent("rendered-\(UUID().uuidString).xlsx").path
+            try? Data("rendered bytes".utf8).write(to: URL(fileURLWithPath: rendered))
+            office.saveTempPaths[docId] = rendered
+            savesWhenTheActionRan = office.saveCalls.count
+            return "wrote"
+        }
+
+        XCTAssertEqual(savesWhenTheActionRan, 0, "a clean document must take no pre-save")
+        XCTAssertEqual(office.saveCalls.count, 1, "only rule 4's save-through")
     }
 
     func testAllowsAReadOnADirtyAdoptedDocument() async throws {
@@ -798,6 +897,202 @@ final class OfficeAgentBrokerTests: XCTestCase {
         ) { _, _, _ in "read the dirty in-memory state" }
 
         XCTAssertEqual(result, "read the dirty in-memory state", "reads must proceed on a dirty document")
+    }
+
+    // MARK: - Fix round, review CRITICAL-1: the pre-save must never resolve a CONFLICT
+
+    /// Open `path` through a real runtime, dirty it, then make the file change underneath — the
+    /// exact sequence `OfficeRuntimeReducer.externalChangeDetected` needs to raise a conflict (it is
+    /// gated on `doc.dirty`; a CLEAN document silently reloads instead, and a test that got the
+    /// order wrong would measure the reload path while claiming to measure the conflict one).
+    ///
+    /// Returns the docId so the caller can arm save fixtures against it. The conflict is asserted
+    /// standing before returning: `officeDiskChange` can answer `.ours` for a write it recognises as
+    /// the runtime's own, and a drill whose conflict never actually appeared would find "nothing was
+    /// saved" trivially true.
+    private func makeConflictedAdoptedDocument(
+        runtime: OfficeRuntime, path: String, file: StaticString = #filePath, line: UInt = #line
+    ) async throws -> String {
+        runtime.open(path)
+        let opened = await waitUntil { runtime.stateSnapshot.documents[path] != nil }
+        XCTAssertTrue(opened, "setup: the document never opened", file: file, line: line)
+        let docId = try XCTUnwrap(runtime.stateSnapshot.documents[path]?.docId, file: file, line: line)
+        runtime.handle(documentEvent: .modifiedChanged(true), docId: docId)
+        let dirtied = await waitUntil { runtime.stateSnapshot.documents[path]?.dirty == true }
+        XCTAssertTrue(dirtied, "setup: the document never became dirty, so no conflict can be raised",
+                      file: file, line: line)
+
+        try Data("external bytes landed while this document was still dirty".utf8)
+            .write(to: URL(fileURLWithPath: path))
+        runtime.fileChangedOnDisk(path)
+        let conflicted = await waitUntil(timeout: 5) {
+            runtime.stateSnapshot.documentConflicts[path] != nil
+        }
+        XCTAssertTrue(conflicted, "setup: no conflict was raised — every assertion downstream of "
+                      + "this would be trivially true", file: file, line: line)
+        return docId
+    }
+
+    /// ⛔ **The read that destroyed somebody else's write, and erased the evidence.**
+    ///
+    /// The user edits `budget.xlsx`; a colleague's sync client (or the agent's OWN `git checkout`,
+    /// which is why no third party is needed to reach this) rewrites it on disk; the tab raises a
+    /// conflict banner and the user has a real choice pending. The user then asks, in chat, "what's
+    /// in A1:B5 of budget.xlsx?" — a pure question. Pre-fix, the pre-save fired on that read, the
+    /// colleague's version was gone, and `.saveSucceeded` deleted the banner in the same operation.
+    ///
+    /// **The read still PROCEEDS** — by the same argument the failed-save arm already uses, a read
+    /// serves the runtime's in-memory state and is never wrong because a save did not happen.
+    /// Refusing it would remove a capability and protect nothing.
+    ///
+    /// Three assertions, and the third is the user-visible stake: the banner has to still be there.
+    /// A build that skipped the save but cleared the conflict some other way would satisfy the first
+    /// two and still have thrown away the warning.
+    func testAnAgentReadOnAConflictedDocumentTakesNoPreSaveAndLeavesTheBannerStanding() async throws {
+        let scratch = makeScratchDirectory()
+        let path = scratch.appendingPathComponent("conflicted-read.xlsx").path
+        writeDummyFile(at: path)
+        let office = BrokerOfficeDriverRecorder()
+        let host = makeHost(office: office, dirs: [SessionDirEntry(path: scratch.path, locked: true)])
+        await host.directory.refresh()
+
+        let runtime = host.officeRuntime(for: "S1")
+        _ = try await makeConflictedAdoptedDocument(runtime: runtime, path: path)
+        let savesBefore = office.saveCalls.count
+
+        var actionRan = false
+        let result = try await host.officeAgentBroker.perform(
+            sessionId: "S1", path: path, access: .read, requestId: UUID().uuidString
+        ) { _, _, _ in actionRan = true; return "read the in-memory state" }
+
+        XCTAssertTrue(actionRan, "the read must still PROCEED — skipping the save costs it nothing")
+        XCTAssertEqual(result, "read the in-memory state")
+        XCTAssertEqual(office.saveCalls.count, savesBefore,
+                       "a read must take NO pre-save on a conflicted document: that save discards "
+                         + "the external write, which is not this feature's to discard")
+        XCTAssertNotNil(runtime.stateSnapshot.documentConflicts[path],
+                        "…and the banner must survive the read. `.saveSucceeded` clears "
+                          + "`documentConflicts` unconditionally, so a pre-save here does not just "
+                          + "destroy the other version — it deletes the warning about it")
+    }
+
+    /// ⛔ **A WRITE to a conflicted document is refused, and the refusal names the conflict.**
+    ///
+    /// The asymmetry is deliberate and is the same one the failed-pre-save arm carries: a read is
+    /// never wrong because a save was skipped, but a write would overwrite a second party's bytes.
+    /// This is precisely what rule 3 was ratified to protect, with somebody else's work added to the
+    /// stake.
+    ///
+    /// **`.documentConflicted`, not `.documentDirty`.** That case's own sentence promises a save was
+    /// tried and failed and tells the human to "Save … then try again" — no save is tried here, and
+    /// a save is exactly what would complete the loss. Pinned on the CASE, not merely on "it threw".
+    func testAWriteOnAConflictedDocumentIsRefusedNamingTheConflictAndNeverSaves() async throws {
+        let scratch = makeScratchDirectory()
+        let path = scratch.appendingPathComponent("conflicted-write.xlsx").path
+        writeDummyFile(at: path)
+        let office = BrokerOfficeDriverRecorder()
+        let host = makeHost(office: office, dirs: [SessionDirEntry(path: scratch.path, locked: true)])
+        await host.directory.refresh()
+
+        let runtime = host.officeRuntime(for: "S1")
+        let docId = try await makeConflictedAdoptedDocument(runtime: runtime, path: path)
+        // A save that WOULD succeed, so the refusal below cannot be an artefact of an unsavable
+        // document — the conflict has to be what produces it. (Mirrors the close-path conflict
+        // test's own arming, and for the identical reason.)
+        let rendered = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rendered-\(UUID().uuidString).xlsx").path
+        try Data("rendered bytes".utf8).write(to: URL(fileURLWithPath: rendered))
+        office.saveTempPaths[docId] = rendered
+        let savesBefore = office.saveCalls.count
+
+        var actionRan = false
+        do {
+            _ = try await host.officeAgentBroker.perform(
+                sessionId: "S1", path: path, access: .write, requestId: UUID().uuidString
+            ) { _, _, _ in actionRan = true; return "should not run" }
+            XCTFail("a write on a conflicted document must refuse")
+        } catch let error as OfficeAgentBrokerError {
+            guard case .documentConflicted(let refusedPath) = error else {
+                return XCTFail("expected .documentConflicted, got \(error)")
+            }
+            XCTAssertEqual(refusedPath, path)
+            XCTAssertTrue(error.message.contains("conflicted-write.xlsx"),
+                          "the refusal must name the file: \(error.message)")
+            XCTAssertTrue(error.message.contains("changed on disk outside Norma"),
+                          "…and it must name the CONFLICT, not merely unsaved changes: \(error.message)")
+            XCTAssertFalse(error.message.contains("Save or discard"),
+                           "…and it must not tell the human to save — a save here is what completes "
+                             + "the loss: \(error.message)")
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+
+        XCTAssertFalse(actionRan, "the write's own action must never run once refused")
+        XCTAssertEqual(office.saveCalls.count, savesBefore,
+                       "and nothing may be saved on the way to refusing — not the pre-save, not "
+                         + "rule 4")
+        XCTAssertNotNil(runtime.stateSnapshot.documentConflicts[path], "the banner still stands")
+        XCTAssertEqual(office.closeCalls.count, 0, "an ADOPTED document is never closed by the broker")
+    }
+
+    /// **The ORDERING pin, and it is the one assertion that a plainly-correct-looking fix fails.**
+    ///
+    /// "Conflicted but CLEAN" is reachable: the user edits, the file changes underneath, the banner
+    /// goes up — and then they press ⌘Z back to clean. `.modifiedStatusChanged(modified: false)`
+    /// does NOT clear `documentConflicts` — the six arms that do are `.opened`, `.closeRequested`,
+    /// `.saveSucceeded`, `.reloadFailed` and the banner's own two answers, none of them an undo — so
+    /// the banner is still standing over a clean document.
+    ///
+    /// Put the conflict check AFTER the pre-save's dirty guard — which is where it reads most
+    /// naturally, and where the review's own suggested patch put it — and this document returns
+    /// early from the pre-save, `action` dirties it, and **rule 4's unconditional save-through
+    /// resolves the conflict anyway**: the identical defect, one function further down. Checking
+    /// before the dirty guard is what closes it, and this test is the only thing that can tell the
+    /// two placements apart.
+    func testAWriteOnAConflictedDocumentIsRefusedEvenAfterTheUserUndoesBackToClean() async throws {
+        let scratch = makeScratchDirectory()
+        let path = scratch.appendingPathComponent("conflicted-undone.xlsx").path
+        writeDummyFile(at: path)
+        let office = BrokerOfficeDriverRecorder()
+        let host = makeHost(office: office, dirs: [SessionDirEntry(path: scratch.path, locked: true)])
+        await host.directory.refresh()
+
+        let runtime = host.officeRuntime(for: "S1")
+        let docId = try await makeConflictedAdoptedDocument(runtime: runtime, path: path)
+
+        // ⌘Z back to clean. The conflict must survive it — if this assertion ever fails, the state
+        // this test exists for stopped being reachable and the ordering above became belt.
+        runtime.handle(documentEvent: .modifiedChanged(false), docId: docId)
+        let cleaned = await waitUntil { runtime.stateSnapshot.documents[path]?.dirty == false }
+        XCTAssertTrue(cleaned, "setup: undo-to-clean never landed")
+        XCTAssertNotNil(runtime.stateSnapshot.documentConflicts[path],
+                        "setup: the conflict must OUTLIVE undo-to-clean — that is the whole premise")
+
+        let rendered = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rendered-\(UUID().uuidString).xlsx").path
+        try Data("rendered bytes".utf8).write(to: URL(fileURLWithPath: rendered))
+        office.saveTempPaths[docId] = rendered
+        let savesBefore = office.saveCalls.count
+
+        var actionRan = false
+        do {
+            _ = try await host.officeAgentBroker.perform(
+                sessionId: "S1", path: path, access: .write, requestId: UUID().uuidString
+            ) { _, _, _ in actionRan = true; return "should not run" }
+            XCTFail("a write must still refuse on a conflicted document that is no longer dirty")
+        } catch let error as OfficeAgentBrokerError {
+            guard case .documentConflicted = error else {
+                return XCTFail("expected .documentConflicted, got \(error)")
+            }
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+
+        XCTAssertFalse(actionRan, "the action must never run — it is what would dirty the document "
+                       + "and hand rule 4 something to save")
+        XCTAssertEqual(office.saveCalls.count, savesBefore,
+                       "and rule 4 must never get the chance to resolve the conflict")
+        XCTAssertNotNil(runtime.stateSnapshot.documentConflicts[path], "the banner still stands")
     }
 
     // MARK: - Coordinator review F3 (2026-08-22): read-only-format refusal runs before the action

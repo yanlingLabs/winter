@@ -584,6 +584,18 @@ final class PanelDocumentTabModel: ObservableObject {
         self.path = path
     }
 
+    /// office-live-ux Job 3 — the overlay's tap. Reaches Job 1's ONE interrupt door, so the overlay,
+    /// the composer's stop button and Esc-in-the-composer are literally the same call.
+    ///
+    /// That is also what closes the loop: the interrupt ends the turn, the turn ending makes
+    /// `agentIsWorking(on:)` false, and the overlay goes away through its own derivation rather than
+    /// through anything this method does. Nothing here hides it.
+    ///
+    /// `host` is weak and re-asked, exactly like every other use of it here.
+    func interruptAgentTurn() {
+        host?.interruptAttachedTurn()
+    }
+
     /// Re-point at a host/session. Called on every render pass (`panelTabContent`) — idempotent, and
     /// must not publish (runs inside `ShellPanel`'s own `body`; see `PanelEditorTabModel.bind`'s own
     /// header for the exact trap this avoids).
@@ -1335,6 +1347,80 @@ struct OfficeDocumentSurface: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // office-live-ux Job 3 — the overlay sits over the WHOLE surface (canvas, formula bar, part
+        // strips), which is the "full-tab" scope the spec asks for, and over nothing else: it is
+        // attached HERE rather than at the tab's root so the tab's own chrome and its close button
+        // stay reachable while Norma works. Scoped to this document by `path`.
+        .overlay {
+            OfficeAgentWorkingOverlay(runtime: runtime, path: path,
+                                      onInterrupt: model.interruptAgentTurn)
+        }
+    }
+}
+
+// MARK: - office-live-ux Job 3: "Norma is working"
+
+/// The full-surface cover shown while Norma is reading or writing THIS document.
+///
+/// ## Why it exists
+///
+/// The agent reads a document, then acts on what it read. A user typing in between is editing
+/// underneath a read that is already in flight — so the moment the agent adopts a document a tab has
+/// open, the tab says so and stops accepting edits.
+///
+/// ## What makes a STUCK overlay impossible
+///
+/// **Visibility is DERIVED, never toggled.** `OfficeRuntime.agentIsWorking(on:)` is
+/// `sessionTurnRunning && agentEngagedPaths.contains(path)` — a conjunction whose second half is
+/// pushed in from the live session feed. There is no "hide the overlay" event that can be missed,
+/// because there is no hide event at all: the turn ending makes the expression false, whatever the
+/// office layer believes about engagement. If the broker throws, if the app is killed mid-verb, if
+/// some future verb forgets to clean up — the overlay still goes away when the turn does. And
+/// `setSessionTurnRunning` clears engagement on BOTH edges, so a missed clear cannot survive into
+/// the next turn and relight this over a document nobody is touching.
+///
+/// **There is no timer**, which was an explicit user ruling ("this lock seconds is probably a little
+/// too much"). Nothing here counts.
+///
+/// ## What it actually stops
+///
+/// The pointer, and only the pointer. **The keyboard is stopped one layer down**, by the same
+/// predicate, at `OfficeRuntime`'s six mutating input doors — the canvas keeps first responder while
+/// this is up, so a cover that only intercepted clicks would let every keystroke straight through.
+/// Pinned by `OfficeAgentWorkingOverlayTests`.
+struct OfficeAgentWorkingOverlay: View {
+    /// `@ObservedObject`, and that is what makes this react: both halves of the predicate are
+    /// `@Published` on the runtime, and `OfficeDocumentSurface` holds it as a plain `let`.
+    @ObservedObject var runtime: OfficeRuntime
+    let path: String
+    let onInterrupt: () -> Void
+
+    var body: some View {
+        if runtime.agentIsWorking(on: path) {
+            ZStack {
+                // Nearly opaque rather than a light scrim: the point is that the user should not be
+                // reading and reacting to a document mid-edit, so the content goes away rather than
+                // being shown through a haze. `Theme.canvas` (not a black wash) keeps it the app's
+                // own surface in both appearances.
+                Theme.canvas.opacity(0.94)
+                VStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Norma is working")
+                        .font(Typography.heading(.semibold))
+                    Text("Tap to interrupt")
+                        .font(Typography.caption())
+                        .foregroundStyle(Theme.textMuted)
+                }
+            }
+            // `contentShape` over the whole frame, not just the label: the spec is that TAPPING
+            // interrupts, and a user whose document just vanished behind a cover will click the
+            // cover, not hunt for the words.
+            .contentShape(Rectangle())
+            .onTapGesture(perform: onInterrupt)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Norma is working. Tap to interrupt.")
+            .transition(.opacity)
+        }
     }
 }
 

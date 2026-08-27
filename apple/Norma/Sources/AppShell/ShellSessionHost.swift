@@ -825,7 +825,55 @@ final class ShellSessionHost: ObservableObject {
         let supervisor = ensureOfficeHelperSupervisor()
         let runtime = makeOfficeRuntime(sessionId, officeDriver(for: supervisor))
         officeRuntimes[sessionId] = runtime
+        // office-live-ux Job 3, wiring door 3 of 3: a runtime MINTED MID-TURN. The other two doors
+        // (attach/hop, detach) rewire the sink; neither of them fires when a document is opened for
+        // the first time during a turn that is already running, and without this seed that runtime
+        // would sit at `sessionTurnRunning == false` until the NEXT turn boundary — i.e. the overlay
+        // would never appear for the very document the agent just opened.
+        if sessionId == attachedSessionId, let live = attachment {
+            runtime.setSessionTurnRunning(live.session.state.turnRunning)
+        }
         return runtime
+    }
+
+    /// office-live-ux Job 3 — **the live turn signal, pushed into the office runtime.**
+    ///
+    /// The overlay's condition is `agentEngagedPaths.contains(path) && sessionTurnRunning`, and this
+    /// is what keeps the second half true. It is a PUSH rather than a pull because both readers of
+    /// it live below the host: the overlay (a SwiftUI view on the runtime) and — more importantly —
+    /// the six input doors inside `OfficeRuntime` itself, which have to refuse synchronously and
+    /// cannot go asking a host for permission.
+    ///
+    /// `.removeDuplicates()` is not tidiness: `SessionModel.$state` publishes on EVERY delta, so an
+    /// undeduped sink would write the runtime's `@Published sessionTurnRunning` at streaming
+    /// frequency — the neighbourhood of constraint C7. `BrowserSignals.swift:174-179` dedupes the
+    /// identical publisher for the identical reason.
+    private var officeTurnRunningSink: AnyCancellable?
+
+    /// The three wiring doors, enumerated because missing any one of them is silent:
+    ///  1. **attach / hop** — rewire onto the new session and push its CURRENT value immediately
+    ///     (the sink's own first delta may be a long way off);
+    ///  2. **detach / hide** — push `false` into the DEPARTING session's runtime, which a hop may
+    ///     well have retained (`releaseOfficeRuntimeIfClean` keeps a dirty one);
+    ///  3. **a runtime minted mid-turn** — seeded in `officeRuntime(for:)` above.
+    ///
+    /// Fail-closed everywhere: no attachment, or a runtime for some session that is not the attached
+    /// one, means nothing is pushed and `sessionTurnRunning` stays at its `false` default. An
+    /// overlay that cannot prove a turn is running must not claim one — it also blocks typing.
+    private func rewireOfficeTurnSignal(departing: String?) {
+        officeTurnRunningSink = nil
+        if let departing, departing != attachedSessionId {
+            existingOfficeRuntime(for: departing)?.setSessionTurnRunning(false)
+        }
+        guard let live = attachment, let sid = attachedSessionId else { return }
+        existingOfficeRuntime(for: sid)?.setSessionTurnRunning(live.session.state.turnRunning)
+        officeTurnRunningSink = live.session.$state
+            .map(\.turnRunning)
+            .removeDuplicates()
+            .sink { [weak self] running in
+                guard let self, let current = self.attachedSessionId else { return }
+                self.existingOfficeRuntime(for: current)?.setSessionTurnRunning(running)
+            }
     }
 
     /// The session's office runtime **if it already has one** — mirrors `existingEditorRuntime`.
@@ -1549,10 +1597,36 @@ final class ShellSessionHost: ObservableObject {
                 closePanelTab(tabId) // closes the document itself, inline — see this method's own doc
                 return
             }
-            let basename = (path as NSString).lastPathComponent
-            presentDirtyCloseSheet(basename, presentingWindow?()) { [weak self] choice in
-                self?.resolveDirtyDocumentTabClose(tabId: tabId, choice: choice)
+            // ── office-live-ux Job 2, save point 3: **closing a document tab SAVES it.**
+            //
+            // The sheet no longer asks on the ordinary path, and that is the answer to "what happens
+            // to the dirty-close sheet": it survives as the FAILURE path only. That is the only case
+            // where it still has a real question to ask — a Save button that would lie, and a
+            // genuine choice between discarding the edits and keeping the tab open. On the success
+            // path there was never a decision worth interrupting for; the user asked for Xcode's
+            // model, and Xcode does not ask.
+            //
+            // `.document` tabs ONLY. The `.code` leg a few lines above keeps its sheet unchanged —
+            // the editor's buffers are a different product surface with their own ratified gate, and
+            // this task's spec is about office documents.
+            //
+            // ⚠️ **EXCEPT IN CONFLICT, where the sheet still asks — and this carve-out is not
+            // caution, it is a different question.** A silent save is safe when the only thing at
+            // stake is the user's own unsaved edits, which is what save-on-close is FOR. A document
+            // in conflict is one whose file ALSO changed outside the app while it was dirty
+            // (`OfficeRuntimeReducer`'s `.externalChangeDetected`/`externalDeleted` arms, which fire
+            // only on a dirty document), so saving it silently would discard somebody else's write
+            // with nobody ever asked. That is exactly the loss the conflict machinery exists to
+            // surface, and it is not the user's spec's "commit on actions" — it is a genuine choice
+            // between two versions. The tab already carries the conflict banner naming it.
+            if runtime.stateSnapshot.documentConflicts[path] != nil {
+                let basename = (path as NSString).lastPathComponent
+                presentDirtyCloseSheet(basename, presentingWindow?()) { [weak self] choice in
+                    self?.resolveDirtyDocumentTabClose(tabId: tabId, choice: choice)
+                }
+                return
             }
+            saveThenCloseDocumentTab(tabId: tabId, path: path, runtime: runtime)
             return
         }
         closePanelTab(tabId)
@@ -1704,6 +1778,46 @@ final class ShellSessionHost: ObservableObject {
                     // only exercised the success path") is also the one outcome that structurally
                     // never asks anything to drain or close here at all.
                     break
+                }
+            }
+        }
+    }
+
+    /// office-live-ux Job 2, save point 3 — the silent save-then-close, and the sheet's new job.
+    ///
+    /// **The body is deliberately `resolveDirtyDocumentTabClose`'s own `.awaitSave` arm**, not a
+    /// second copy of it: `saveAndAwaitOutcome` → on `.saved`, `drainUntilClean` → close. That
+    /// ordering is measured, not stylistic — `.saved` resolves when `placeAtomically` lands, which
+    /// is earlier than LOK's own `ModifiedStatus=false`, and closing inside that gap kills the
+    /// SHARED helper (~4 in 5, and the app-wide FIFO takes every other open document down with it).
+    /// `drainUntilClean` is the barrier that route's own regression tripwires are written against.
+    ///
+    /// **On `.failed` the sheet appears, and only then.** The reducer's `.saveFailed` arm has
+    /// already written its sentence into `documentBanners[path]`, so the tab carries the reason
+    /// while the sheet asks — and the sheet's own Save button retries through
+    /// `resolveDirtyDocumentTabClose`, unchanged, which is exactly the right retry door.
+    ///
+    /// **`.noModel` CLOSES, and it does so because `dirtyCloseActionAfterSave` says so** — that
+    /// function maps `.saved` and `.noModel` alike to `.close` (`PanelEditorTab.swift:472-477`), on
+    /// the ratified reading that "nothing to save" is discard-able by construction. This route
+    /// reuses the decision verbatim rather than inventing a second, divergent answer for the same
+    /// outcome on the same tab kind. (Stated because I first wrote the opposite here and the code
+    /// disagreed: `.noModel` needs `documents[path]` to have vanished between the call site's own
+    /// `dirty` read and this save, a window the reducer makes vanishingly small, and one this task
+    /// has no new evidence about.)
+    private func saveThenCloseDocumentTab(tabId: String, path: String, runtime: OfficeRuntime) {
+        let basename = (path as NSString).lastPathComponent
+        Task { @MainActor [weak self, weak runtime] in
+            guard let runtime else { return }
+            let outcome = await runtime.saveAndAwaitOutcome(path)
+            guard let self else { return }
+            switch dirtyCloseActionAfterSave(outcome) {
+            case .close:
+                await runtime.drainUntilClean(path)
+                self.closePanelTab(tabId)
+            case .keepOpen, .awaitSave:
+                self.presentDirtyCloseSheet(basename, self.presentingWindow?()) { [weak self] choice in
+                    self?.resolveDirtyDocumentTabClose(tabId: tabId, choice: choice)
                 }
             }
         }
@@ -2867,6 +2981,8 @@ final class ShellSessionHost: ObservableObject {
         panelStore.beginReplay(for: sessionId)
         refreshPanelTabs(for: sessionId)
         wire(adapter: adapter, feed: made.feed)
+        // office-live-ux Job 3, wiring door 1 of 3 — see `rewireOfficeTurnSignal`.
+        rewireOfficeTurnSignal(departing: nil)
         live.feedTask = Task { await made.feed.start() }
     }
 
@@ -2901,8 +3017,13 @@ final class ShellSessionHost: ObservableObject {
         // office-plumbing Task 5 / Stage B Task 3: same departure moment, and since editing became
         // real the same clean-only policy as the editor line above — a dirty office runtime is
         // RETAINED across a hop. See `releaseOfficeRuntimeIfClean`'s own doc.
+        let officeDeparting = attachedSessionId
         if let departing = attachedSessionId { releaseOfficeRuntimeIfClean(for: departing) }
         attachedSessionId = sessionId
+        // office-live-ux Job 3, wiring door 1 of 3 (the hop half) — the departing session's runtime
+        // may well still be alive (`releaseOfficeRuntimeIfClean` keeps a dirty one), so it is pushed
+        // to `false` here rather than left holding the value it had when we left it.
+        rewireOfficeTurnSignal(departing: officeDeparting)
         refreshOutputFiles(for: sessionId)
         openOutputFile = nil
         // panel-shell T9: same swap + instant-seed pair as `attachFresh` — see those calls' own doc
@@ -2979,7 +3100,11 @@ final class ShellSessionHost: ObservableObject {
     /// mints a fresh harness rather than reviving this one.
     private func detachCurrent() {
         guard let live = attachment else {
+            // office-live-ux Job 3, wiring door 2 of 3 — belt for the no-attachment branch too: a
+            // runtime retained from an earlier attachment must not keep a stale `true`.
+            let departing = attachedSessionId
             attachedSessionId = nil
+            rewireOfficeTurnSignal(departing: departing)
             panelStore.detach() // defensive symmetry with the branch below — see that call's own note
             return
         }
@@ -3000,11 +3125,15 @@ final class ShellSessionHost: ObservableObject {
         // the editor line above it — a hidden shell releases a CLEAN office runtime and keeps a
         // dirty one. See `releaseOfficeRuntimeIfClean`'s own doc.
         if let departing = attachedSessionId { releaseOfficeRuntimeIfClean(for: departing) }
+        let officeDeparting = attachedSessionId
         live.feedTask?.cancel()
         live.feedTask = nil
         live.feed.stop()
         attachment = nil
         attachedSessionId = nil
+        // office-live-ux Job 3, wiring door 2 of 3 — tears the sink down and pushes `false` into
+        // whatever runtime the departing session still has.
+        rewireOfficeTurnSignal(departing: officeDeparting)
         outputFiles = []
         openOutputFile = nil
         // panel-shell T9: the panel shows nothing while detached, but `panelStore.detach()` never
@@ -3284,6 +3413,49 @@ final class ShellSessionHost: ObservableObject {
         // (`FieldStateAdapter.onSetActivity` is optional and nil elsewhere), so the shell is the
         // one surface that grows the verb this task — every pre-existing window is untouched.
         adapter.onSetActivity = { [weak self] target in self?.applyActivity(target) }
+        // office-live-ux Job 1: the shell is the surface that grows a stop affordance — wiring this
+        // is what makes the composer's stop button exist and its Esc mean anything at all
+        // (`FieldStateAdapter.onInterrupt` is optional and nil everywhere else, so no pre-existing
+        // window changes). Both surfaces come through this one closure.
+        adapter.onInterrupt = { [weak self] in self?.interruptAttachedTurn() }
+    }
+
+    /// office-live-ux Job 1 — **stop the attached session's running turn.** The composer's stop
+    /// button and Esc-in-the-composer both land here, and this is the only door either has.
+    ///
+    /// The same shape as `interruptFromRoster(_:)` above and as `DetachedWindowController`'s Esc
+    /// branch: `session.interrupt`, verbatim the kit's own wrapper, `try?` because the daemon has no
+    /// refusal vocabulary here (it just answers `wasRunning`). Unlike the roster's, it does NOT
+    /// refresh the directory — the attached session's own live feed already reports the turn ending,
+    /// and the roster's refresh exists only because a roster row has no feed behind it.
+    ///
+    /// **`attachedSessionId` is read FRESH at call time**, the house rule every closure in `wire`
+    /// follows: a hop between the click and this call must re-target rather than interrupt the
+    /// session the user just left.
+    ///
+    /// **The `turnRunning` guard is a BELT, not the gate.** The gate is
+    /// `WindowContentView.composerStopControl`, which is what decides the button is a stop button
+    /// and what decides Esc is ours; both read `FieldStateAdapter.turnRunning`, i.e. the same
+    /// `SessionModel.state.turnRunning` this line reads. It is kept because the two reads happen at
+    /// different instants (render vs. click) and an interrupt fired at an idle session, while
+    /// harmless on the wire, would be a lie in the log.
+    func interruptAttachedTurn() {
+        guard let live = attachment, let sid = attachedSessionId,
+              live.session.state.turnRunning else {
+            // Same diagnostic `AppDelegate.onEsc` carries for the orb's own Esc, and for the same
+            // reason: this door is reached from a key press and from a click, and "nothing happened"
+            // has three different causes (no attachment, no session id, idle) that are otherwise
+            // indistinguishable from the outside.
+            OrbDebug.log("ShellSessionHost.interruptAttachedTurn: refused attached="
+                         + "\(attachment != nil) sid=\(attachedSessionId ?? "nil") running="
+                         + "\(attachment?.session.state.turnRunning ?? false)")
+            return
+        }
+        let client = live.feed.client
+        OrbDebug.log("ShellSessionHost.interruptAttachedTurn: interrupting \(sid.prefix(10))")
+        Task { @MainActor in
+            _ = try? await client.interrupt(sessionId: sid)
+        }
     }
 
     /// Mirrors `DetachedWindowController.submit` — steer a running turn, else send; the draft is

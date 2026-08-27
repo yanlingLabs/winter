@@ -760,4 +760,30 @@ describe("outcomes", () => {
     expect(result.output).toContain("interrupted");
     expect(h.recorded).toEqual([]);
   });
+
+  // ⛔ **Fix round, review IMPORTANT-1 — a READ is no longer read-only with respect to disk.**
+  //
+  // office-live-ux added a pre-save at five action points, two of which are the agent's own verbs.
+  // Before an ADOPTED read (a file the human already has open in a tab), Norma flushes that tab to
+  // disk. The description described `read` as returning data and attributed saving specifically to
+  // *write* verbs — the description-contradicting-the-code shape, in the one artifact the model
+  // actually plans from. A user who says "don't change anything, just tell me what's in there" gets
+  // a model that correctly picks `read`, and the file is rewritten anyway; the model cannot warn
+  // about a consequence nobody told it about.
+  //
+  // Both directions are asserted, and the `not.toContain` half is the load-bearing one: the claim
+  // being present says the model is told; the retracted claim being ABSENT is what stops the old,
+  // now-false sentence from surviving beside it and being believed instead.
+  test("the description tells the model that a read flushes the human's tab, and no longer claims a dirty tab refuses every write", () => {
+    const h = makeHarness();
+    const description = h.registry.specFor("sheets", WORKDIR, "code")?.description ?? "";
+    expect(description).toContain("`read` and `info` included");
+    expect(description).toContain("NOT read-only with respect to disk");
+    // The conflict carve-out — the one case where the pre-save is SKIPPED (read) or the verb is
+    // REFUSED (write). A model told only "a read saves" would mis-explain that refusal.
+    expect(description).toContain("REFUSED until the human answers the conflict");
+    // And the two facts that must never come back, both false since office-live-ux:
+    expect(description).not.toContain("UNSAVED changes refuses every write");
+    expect(description).not.toContain("refused until they save or discard");
+  });
 });

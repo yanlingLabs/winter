@@ -219,26 +219,41 @@ final class OfficeSheetsCommandTests: XCTestCase {
         try await pressReturn(client: client, docId: docId)
     }
 
-    // MARK: - office-live-edit R1 — what a save actually costs
+    // MARK: - what a save actually costs (office-live-edit R1 → office-live-ux Job 2)
 
-    /// **The measurement the debounce interval is chosen against.** Nothing in this repo recorded
+    /// **The measurement every save-frequency choice in this arc is taken against.** Nothing in this repo recorded
     /// how long one office save actually takes, and the engine research names that number as "the
     /// whole feasibility question" for instant save — a save is a full container rewrite (the whole
     /// document re-rendered inside the helper, then a full-file copy, an `fsync` and a `rename`),
     /// and it holds the one app-wide FIFO while it runs.
     ///
+    /// The bound this test asserts against, named so the number and its reasoning sit together.
+    /// 1.0 s: a save runs synchronously in front of every agent office verb (a pre-save before it
+    /// and a save-through after it) and in front of every tab close. A second at BEST — on a
+    /// sub-30 KB fixture, on an idle machine — would mean the shipped experience is worse than that
+    /// on every document that is bigger or every machine that is busier.
+    private var liveSaveActionPathBudget: TimeInterval { 1.0 }
+
     /// **This asserts a RELATIONSHIP, not a stopwatch number.** A test that pinned "a save takes
-    /// under 250 ms" would be a machine-speed flake with no design meaning. What must hold for the
-    /// debounce to be coherent is that a save on an ordinary document finishes comfortably inside
-    /// the idle interval — otherwise every burst would still be saving when the next one armed, and
-    /// the design would silently degrade to the re-arm path on every edit. The measured number is
-    /// PRINTED so a human can see the real cost and revisit the interval on evidence.
+    /// under 250 ms" would be a machine-speed flake with no design meaning. What the shipped
+    /// design needs is that a save on an ordinary document finishes fast enough to sit in the
+    /// CRITICAL PATH of the things that now trigger one. The measured number is PRINTED so a human
+    /// can see the real cost and revisit any of those choices on evidence.
+    ///
+    /// ⚠️ **office-live-ux Job 2 re-pointed what this bound MEANS, because the mechanism changed.**
+    /// It used to assert "comfortably inside the 900 ms idle debounce", and against the 120 s
+    /// backstop that ratio would be vacuous — a save could take a full minute and still pass. What
+    /// is NOT vacuous is the bound the four ACTION-triggered save points impose: a pre-save runs
+    /// before every agent read and write of an open tab, a save-through runs after every write, and
+    /// a save runs on every tab close, each of them synchronously in front of the thing the user or
+    /// the agent actually asked for. A second per save at BEST would make every office verb visibly
+    /// slow and every tab close a stutter, which is a real design failure this can catch.
     ///
     /// ⚠️ Scope, stated rather than implied: every office fixture in this repo is under 30 KB, so
     /// this measures the FLOOR. The cost is O(document size) and the curve for a multi-megabyte
-    /// document is unmeasured — which is exactly why `fireAutoSave` never overlaps saves and re-arms
-    /// instead, so a document too slow for the interval degrades to "as often as it can".
-    func testLiveSaveWallClockIsWellInsideTheAutoSaveDebounceInterval() async throws {
+    /// document is unmeasured — which is exactly why `fireAutoSave` never overlaps saves, so a slow
+    /// document degrades to "as often as it can".
+    func testLiveSaveWallClockIsFastEnoughToSitInTheActionSavePointsCriticalPath() async throws {
         try requireLiveEngine()
         let path = try makeWritableCopy(of: "gate.ods", as: "save-cost.ods")
         let stateDir = makeScratchDirectory()
@@ -270,9 +285,10 @@ final class OfficeSheetsCommandTests: XCTestCase {
 
         let worst = elapsed.max() ?? 0
         let best = elapsed.min() ?? 0
-        print(String(format: "[save cost] gate.ods, 3 rounds: %@ — best %.3fs, worst %.3fs, debounce %.3fs",
+        print(String(format: "[save cost] gate.ods, 3 rounds: %@ — best %.3fs, worst %.3fs, "
+                        + "action-path bound %.3fs, backstop interval %.0fs",
                      elapsed.map { String(format: "%.3fs", $0) }.joined(separator: ", "),
-                     best, worst, OfficeRuntime.autoSaveDebounceIntervalDefault))
+                     best, worst, liveSaveActionPathBudget, OfficeRuntime.periodicSaveIntervalDefault))
 
         // ⚠️ **Asserted on the BEST round, not the worst — and that is a correction, with evidence.**
         // This first asserted `worst < interval`, which is a stopwatch number wearing a
@@ -283,15 +299,15 @@ final class OfficeSheetsCommandTests: XCTestCase {
         // share with a hundred other office tests.
         //
         // The design question this test exists to answer is whether a save is INHERENTLY fast enough
-        // for a sub-second idle interval, and the best round answers exactly that while being immune
-        // to whatever else is running. It is still a real bound, not a vacuous one: a save that
-        // needed even a third of the interval AT BEST would fail here, and that would genuinely
-        // invalidate the 900 ms choice. The whole distribution is printed either way, so a human
-        // reading a CI log sees the real cost rather than the assertion's summary.
-        XCTAssertLessThan(best, OfficeRuntime.autoSaveDebounceIntervalDefault / 3,
-                          "a save on an ordinary document must be COMFORTABLY inside the idle "
-                            + "interval at best, or the 900 ms debounce is not a coherent choice. "
-                            + "Best of \(elapsed.count) rounds: \(best)s")
+        // to sit in the critical path of an agent verb and a tab close, and the best round answers
+        // exactly that while being immune to whatever else is running. The whole distribution is
+        // printed either way, so a human reading a CI log sees the real cost rather than the
+        // assertion's summary.
+        XCTAssertLessThan(best, liveSaveActionPathBudget,
+                          "a save on an ordinary document sits in front of every agent office verb "
+                            + "and every tab close — at BEST it must be well under a second, or "
+                            + "action-triggered saving is not a coherent choice. Best of "
+                            + "\(elapsed.count) rounds: \(best)s")
 
         _ = host.teardownAllOfficeRuntimesAndStopHelper()
     }
@@ -1102,6 +1118,30 @@ final class OfficeSheetsCommandTests: XCTestCase {
         XCTAssertFalse(result.lowercased().contains("uno:"), result)
         XCTAssertFalse(result.lowercased().contains("exception"), result)
 
+        // ── **TAKEN HERE, BEFORE ANY READ VERB — and the placement is the whole point.**
+        //
+        // office-live-ux Job 2 made `sheets read` a SAVE POINT (the user's own save point 5: "when
+        // the agent reads the file"), so every `office.sheets.read` below pre-saves this dirty tab.
+        // The claim this block makes — that the FAILED call itself saved nothing — is only
+        // observable in the window before the first of those reads runs. Asserting it after them,
+        // which is what this test used to do, measures the read's pre-save instead and reports it as
+        // a failure of the write path.
+        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.dirty, true,
+                       "the tab must be left DIRTY by the failed call — `action` threw before rule "
+                           + "4's save switch ever ran, so nothing from this call was ever saved")
+        guard let preReadClient = host.officeHelperSupervisor?.client else {
+            return XCTFail("no live client for the pre-read reopen")
+        }
+        let preReadDocId = "sheets-set-partial-failure-preread"
+        _ = try await preReadClient.open(docId: preReadDocId, path: path)
+        let preReadD1 = try await preReadClient.sheetsRead(docId: preReadDocId, sheet: "Sheet1",
+                                                           range: "D1", formulas: false).rows
+        try await preReadClient.close(docId: preReadDocId)
+        XCTAssertNotEqual(preReadD1, [["ok value"]],
+                          "D1 must be ABSENT from the SAVED FILE at this instant — it was written to "
+                            + "the in-memory document only, and the call failed before rule 4's save "
+                            + "switch ever ran: \(preReadD1)")
+
         // D2 — the bad cell — must be COMPLETELY untouched: not "=A1&"" (a partial formula from the
         // OLD, mid-loop-throw code), not left in Calc's own uncommitted edit mode (which would make
         // the FOLLOWING read itself behave strangely), genuinely empty.
@@ -1131,9 +1171,19 @@ final class OfficeSheetsCommandTests: XCTestCase {
         // cleanest possible demonstration of written-vs-saved." This is the other half of that pair
         // — a genuinely independent reopen straight from disk, the SAME mechanism every other
         // saved-bytes proof in this file already uses (`sheets-resize-reopen-midchain` etc.).
-        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.dirty, true,
-                       "the tab must be left DIRTY by the failed call — `action` threw before rule "
-                           + "4's save switch ever ran, so nothing from this call was ever saved")
+        // ── **AND NOW THE OTHER HALF: the two read verbs above each PRE-SAVED this tab.**
+        //
+        // office-live-ux Job 2, save point 5. This is the same independent-reopen instrument as the
+        // block before the reads, run again after them — and the pair is what makes "a read is a
+        // save point" a measured fact here rather than a claim in a comment. The `preReadD1`
+        // assertion above is its control arm: without it, D1 being on disk now would be
+        // indistinguishable from the failed write having saved it all along.
+        //
+        // ⚠️ Worth stating plainly because it surprises: **`sheets read` is not read-only with
+        // respect to DISK.** It does not change the document, but it flushes whatever the tab is
+        // already holding — here, the agent's own partial work from the failed call.
+        XCTAssertNotEqual(runtime.stateSnapshot.documents[path]?.dirty, true,
+                          "the reads' own pre-save must have cleared the dirt")
         guard let independentClient = host.officeHelperSupervisor?.client else {
             return XCTFail("no live client for the independent reopen")
         }
@@ -1141,24 +1191,54 @@ final class OfficeSheetsCommandTests: XCTestCase {
         _ = try await independentClient.open(docId: independentDocId, path: path)
         let savedD1Rows = try await independentClient.sheetsRead(docId: independentDocId, sheet: "Sheet1",
                                                                    range: "D1", formulas: false).rows
-        let savedD1 = savedD1Rows.map { $0.joined(separator: "\t") }.joined(separator: "\n")
-        XCTAssertFalse(savedD1.contains("ok value"),
-                       "D1 must be ABSENT from the SAVED FILE — it was written to the in-memory "
-                           + "document only, never saved, since the call failed before rule 4's save "
-                           + "switch ever ran: \(savedD1)")
+        XCTAssertEqual(savedD1Rows, [["ok value"]],
+                       "D1 is on disk NOW, put there by the reads' pre-save rather than by the failed "
+                         + "write: \(savedD1Rows)")
+        let savedD2Rows = try await independentClient.sheetsRead(docId: independentDocId, sheet: "Sheet1",
+                                                                  range: "D2", formulas: false).rows
+        XCTAssertNotEqual(savedD2Rows, [["=A1&\"café\""]],
+                          "…and the cell that FAILED is still absent from the saved file — a pre-save "
+                            + "flushes what the tab holds, it does not resurrect what was never "
+                            + "typed: \(savedD2Rows)")
         try await independentClient.close(docId: independentDocId)
 
-        // The wedge, proven live, not merely asserted: rule 3's own dirty refusal must now fire for
-        // ANY further write to this SAME document — the tab is dirty with edits the human never
-        // asked for, and only the human (saving or discarding) can clear it. "Re-read before
-        // retrying" (the per-cell failure text) is NOT a recovery path for this document anymore.
+        // ── **THE WEDGE IS GONE, and this test used to pin it.** office-live-ux Job 2, live.
+        //
+        // Before that task, rule 3 refused ANY further write to this now-dirty document, so the tab
+        // was wedged until a human saved or discarded — this test's own previous comment said as
+        // much, and called "re-read before retrying" no recovery path at all. The follow-up write
+        // now SAVES the tab first and proceeds.
+        //
+        // ⚠️ **The trade, stated rather than buried: what the pre-save persists here is the agent's
+        // OWN partial work** (D1, written before the failure), not a human's edit. That is the
+        // honest consequence of "save before an agent edit" — `officeDocumentIsDirty` cannot tell a
+        // human's dirt from a failed call's, and inventing that distinction would need provenance
+        // tracking this task does not have. Nothing is LOST either way: D1 was already in the user's
+        // own open tab and visible there; the change is that it now reaches disk instead of sitting
+        // unsaved behind a refusal nobody could clear from the agent's side.
         let followUpSent = await send(command("office.sheets.set", args: [
-            "path": path, "sheet": "Sheet1", "range": "E1", "values": [["should refuse"]],
+            "path": path, "sheet": "Sheet1", "range": "E1", "values": [["follow-up lands"]],
         ], sessionId: "S1", commandId: "pcmd-badformula-followup"), through: host)
-        XCTAssertFalse(followUpSent.ok, "a follow-up write to the now-dirty tab must be refused, "
-                       + "proving the wedge rather than merely asserting it: \(followUpSent)")
-        XCTAssertTrue((followUpSent.result ?? "").lowercased().contains("unsaved"),
-                      "the refusal must be the rule-3 dirty refusal specifically: \(String(describing: followUpSent.result))")
+        XCTAssertTrue(followUpSent.ok, "a follow-up write to the now-dirty tab must no longer be "
+                      + "wedged — it saves first and proceeds: \(followUpSent)")
+
+        // Proven on the SAVED BYTES, through an independent reopen: both the follow-up's own cell
+        // AND the partial work the pre-save flushed. Asserting only `ok: true` would pass against a
+        // verb that skipped the pre-save entirely and simply stopped refusing.
+        guard let followUpClient = host.officeHelperSupervisor?.client else {
+            return XCTFail("no live client for the follow-up reopen")
+        }
+        let followUpDocId = "sheets-set-followup-reopen"
+        _ = try await followUpClient.open(docId: followUpDocId, path: path)
+        let savedE1 = try await followUpClient.sheetsRead(docId: followUpDocId, sheet: "Sheet1",
+                                                          range: "E1", formulas: false).rows
+        let savedD1After = try await followUpClient.sheetsRead(docId: followUpDocId, sheet: "Sheet1",
+                                                               range: "D1", formulas: false).rows
+        try await followUpClient.close(docId: followUpDocId)
+        XCTAssertEqual(savedE1, [["follow-up lands"]], "the follow-up's own write must be saved: \(savedE1)")
+        XCTAssertEqual(savedD1After, [["ok value"]],
+                       "…and the earlier call's partial work, which the pre-save flushed on the way "
+                         + "past, is now on disk too — the trade this comment names: \(savedD1After)")
     }
 
     /// Second fix-round review (Important #2) — the OPENED (not adopted) half of the same claim: a
@@ -1690,12 +1770,21 @@ final class OfficeSheetsCommandTests: XCTestCase {
         try await endChainClient.close(docId: endChainDocId)
     }
 
-    /// **Rule 3 — the dirty refusal, live.** A document a human's own tab holds DIRTY (a real,
-    /// unsaved keystroke edit through the PRIMARY view — never the agent's own view, which would be
-    /// a different, less honest drill) must refuse a `sheets set` naming the tab, exactly as
-    /// `OfficeAgentBroker`'s own rule 3 requires — proven here through the REAL `sheets` tool path,
-    /// not the broker's own fake-driver unit tests.
-    func testLiveSheetsSetRefusesADirtyAdoptedDocumentNamingTheTab() async throws {
+    /// **Rule 3 as office-live-ux Job 2 left it, LIVE: the human's edit is SAVED first, and the
+    /// write proceeds.** A document a human's own tab holds DIRTY (a real, unsaved keystroke edit
+    /// through the PRIMARY view — never the agent's own view, which would be a different, less
+    /// honest drill) used to refuse a `sheets set`. It now saves those edits and writes.
+    ///
+    /// This is the live mirror of `OfficeAgentBrokerTests
+    /// .testAWriteOnADirtyAdoptedDocumentSavesTheTabsEditsFirstAndThenProceeds`, and it is stronger
+    /// where a fake driver cannot be: it proves the human's keystroke reached the SAVED BYTES on
+    /// disk, through a genuinely independent reopen. A pre-save that ran but wrote nothing would
+    /// pass the unit test and fail here.
+    ///
+    /// The REFUSAL's own live cover is the unit test's failure arm — a driver-level save failure is
+    /// not producible against a real helper without breaking it, which is exactly the kind of
+    /// contrivance this file avoids.
+    func testLiveSheetsSetOnADirtyAdoptedDocumentSavesTheHumansEditFirstThenWrites() async throws {
         try requireLiveEngine()
         let path = try makeWritableCopy(of: "gate.xlsx")
         let stateDir = makeScratchDirectory()
@@ -1718,24 +1807,35 @@ final class OfficeSheetsCommandTests: XCTestCase {
         let beforeStat = officeFileStat(atPath: path)
 
         let setSent = await send(command("office.sheets.set", args: [
-            "path": path, "sheet": "Sheet1", "range": "H10", "values": [["should never land"]],
-        ], sessionId: "S1", commandId: "pcmd-dirty-refuse"), through: host)
-        XCTAssertFalse(setSent.ok, "a write on a dirty adopted document must refuse: \(setSent)")
-        let name = (path as NSString).lastPathComponent
-        XCTAssertTrue(setSent.result?.contains(name) == true, "the refusal must name the tab: \(setSent)")
+            "path": path, "sheet": "Sheet1", "range": "H10", "values": [["agent wrote this"]],
+        ], sessionId: "S1", commandId: "pcmd-dirty-presave"), through: host)
+        XCTAssertTrue(setSent.ok, "a write on a dirty adopted document must now SAVE first and "
+                      + "proceed, not refuse: \(setSent)")
 
-        // No file changed — the strongest form of this drill's own claim.
-        XCTAssertEqual(officeFileStat(atPath: path), beforeStat, "a refused write must never touch the "
-                       + "file — the stat must be byte-identical to before the attempt")
-        XCTAssertEqual(runtime.stateSnapshot.documents[path]?.dirty, true,
-                       "the document must remain exactly as dirty as the human left it")
+        // The file really moved. Without this, "ok: true" is satisfied by a verb that did nothing.
+        XCTAssertNotEqual(officeFileStat(atPath: path), beforeStat,
+                          "the write must have reached the user's own path")
 
-        // Confirm the refusal is real, not merely "any string with the filename" — the SAME range
-        // read back must show NOTHING was written.
-        let readBack = await send(command("office.sheets.read",
-                                          args: ["path": path, "sheet": "Sheet1", "range": "H10"],
-                                          sessionId: "S1", commandId: "pcmd-dirty-verify"), through: host)
-        XCTAssertFalse(readBack.result?.contains("should never land") == true, "\(readBack)")
+        // ── THE ASSERTION A FAKE DRIVER CANNOT MAKE: the HUMAN'S keystroke is in the saved bytes.
+        //
+        // `typeOneCharacterOnPrimaryView` types into A1 and commits, so the human's edit is A1's
+        // value. Read back through a genuinely independent open — never the adopted runtime's
+        // in-memory model, which would show the edit whether or not it was ever saved.
+        let verifyClient = try XCTUnwrap(host.officeHelperSupervisor?.client)
+        let verifyDocId = UUID().uuidString
+        _ = try await verifyClient.open(docId: verifyDocId, path: path)
+        let savedA1 = try await verifyClient.sheetsRead(docId: verifyDocId, sheet: "Sheet1",
+                                                        range: "A1", formulas: false).rows
+        let savedH10 = try await verifyClient.sheetsRead(docId: verifyDocId, sheet: "Sheet1",
+                                                         range: "H10", formulas: false).rows
+        try await verifyClient.close(docId: verifyDocId)
+
+        XCTAssertNotEqual(savedA1, [["NORMA GATE"]],
+                          "the human's own unsaved keystroke must be in the SAVED file — the pre-save "
+                            + "is what puts it there, and A1 still reading the pristine fixture value "
+                            + "means it was lost: \(savedA1)")
+        XCTAssertEqual(savedH10, [["agent wrote this"]],
+                       "…and the agent's write landed too, in the same saved file: \(savedH10)")
     }
 
     /// **The office fence, live, on a WRITE verb** — mirrors
