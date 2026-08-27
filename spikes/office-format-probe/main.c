@@ -162,6 +162,45 @@ static void select_slide_text(LibreOfficeKitDocument *doc, int part, int tab_cou
     pump(doc, part);
 }
 
+/*
+ * Pump until a selection actually EXISTS, and report whether it ever did.
+ *
+ * This is not a convenience — it is the load-bearing guard the whole verb needs, and the probe
+ * found it the hard way. `.uno:ExecuteSearch` is dispatched through `postUnoCommand`, whose effect
+ * lands on a deferred internal queue; the first LT-1 attempt pumped once, got no selection, and
+ * dispatched `.uno:Bold` into a document with nothing selected. Every layer reported success and
+ * the saved bytes were untouched — a silent no-op reported as a completed format.
+ *
+ * `text/rtf` is used as the liveness probe rather than `text/plain;charset=utf-8` because it
+ * measured as the MORE reliable of the two here (LT-4 §1.3: in 3/3 null-RTF runs the plain read was
+ * also null, but the converse was common — plain was null while RTF returned correct scoped bytes).
+ * That inverts the natural assumption that plain is the dependable flavour.
+ *
+ * Returns the RTF (caller frees) or NULL if no selection ever appeared.
+ */
+static char *ensure_selection(LibreOfficeKitDocument *doc, int part, int max_attempts, int *attempts_out) {
+    char *rtf = NULL;
+    int n = 0;
+    while (n < max_attempts) {
+        n++;
+        /* The PLAIN read is not diagnostic noise — it is load-bearing, and the probe measured that
+           the hard way. Reading `text/rtf` alone in a pump loop failed to produce a selection in
+           2/2 runs, while the identical search followed by plain reads interleaved with pumps
+           produced one in ~2/3. Kept in this order because it is what measured as working. */
+        char *plain = doc->pClass->getTextSelection(doc, "text/plain;charset=utf-8", NULL);
+        rtf = doc->pClass->getTextSelection(doc, "text/rtf", NULL);
+        if (getenv("OFP_VERBOSE"))
+            fprintf(stderr, "[sel] attempt %d plain=%s(%zu) rtf=%s(%zu)\n", n,
+                    plain ? "ok" : "NULL", plain ? strlen(plain) : 0,
+                    rtf ? "ok" : "NULL", rtf ? strlen(rtf) : 0);
+        if (plain) free(plain);
+        if (rtf) break;
+        pump(doc, part);
+    }
+    if (attempts_out) *attempts_out = n;
+    return rtf;
+}
+
 static int save_as(LibreOfficeKitDocument *doc, const char *out_path, const char *format) {
     char *url = file_url(out_path);
     int ok = doc->pClass->saveAs(doc, url, format, NULL);
@@ -347,6 +386,26 @@ int main(int argc, char **argv) {
             free(rtf);
         }
 
+    } else if (strcmp(op, "saveonly") == 0) {
+        /* The DELETION-RED control arm for every saved-bytes drill below: the identical open ->
+           save round trip with NO command dispatched at all. Any assertion that also passes here is
+           an assertion about the fixture, not about the verb — the arc's #1 defect class. */
+        if (argc < 6) { fprintf(stderr, "saveonly needs <out>\n"); return 2; }
+        rc = save_as(doc, argv[5], "odt");
+
+    } else if (strcmp(op, "findall-noop") == 0) {
+        /* LT-1's own control: FIND_ALL runs, the Bold dispatch does NOT. Separates "FIND_ALL
+           selected three ranges" from "the format reached three ranges". */
+        if (argc < 7) { fprintf(stderr, "findall-noop needs <literal> <out>\n"); return 2; }
+        uno(doc, ".uno:ExecuteSearch", search_args(argv[5], 1 /* FIND_ALL */));
+        pump(doc, 0);
+        int sat = 0;
+        char *sel = ensure_selection(doc, 0, 12, &sat);
+        printf("SELECT_ATTEMPTS: %d\n", sat);
+        printf("SELECTED_RTF_LEN: %zu\n", sel ? strlen(sel) : 0);
+        if (sel) free(sel);
+        rc = save_as(doc, argv[6], "odt");
+
     } else if (strcmp(op, "styles") == 0) {
         char *v = doc->pClass->getCommandValues(doc, ".uno:StyleApply");
         if (!v) printf("STYLES_NULL\n");
@@ -356,8 +415,12 @@ int main(int argc, char **argv) {
                || strcmp(op, "mistype-bold") == 0 || strcmp(op, "noargs-bold") == 0) {
         const char *out = NULL;
         if (strcmp(op, "findall-bold") == 0) {
-            if (argc < 7) { fprintf(stderr, "findall-bold needs <literal> <out>\n"); return 2; }
-            uno(doc, ".uno:ExecuteSearch", search_args(argv[5], 1 /* FIND_ALL */));
+            if (argc < 7) { fprintf(stderr, "findall-bold needs <literal> <out> [searchCmd]\n"); return 2; }
+            /* `searchCmd` defaults to FIND_ALL (1); pass 0 to compare against a plain FIND.
+               `include/svl/srchitem.hxx:36-42`: FIND=0, FIND_ALL=1, REPLACE=2, REPLACE_ALL=3. */
+            int scmd = argc > 7 ? atoi(argv[7]) : 1;
+            printf("SEARCH_CMD: %d\n", scmd);
+            uno(doc, ".uno:ExecuteSearch", search_args(argv[5], scmd));
             pump(doc, 0);
             out = argv[6];
         } else {
@@ -366,9 +429,19 @@ int main(int argc, char **argv) {
             pump(doc, 0);
             out = argv[5];
         }
-        char *sel = doc->pClass->getTextSelection(doc, "text/plain;charset=utf-8", NULL);
-        printf("SELECTED_LEN: %zu\n", sel ? strlen(sel) : 0);
-        if (sel) { printf("SELECTED: %.200s\n", sel); free(sel); }
+        int sat = 0;
+        char *sel = ensure_selection(doc, 0, 12, &sat);
+        printf("SELECT_ATTEMPTS: %d\n", sat);
+        if (!sel) {
+            /* Refuse rather than format nothing and report success — the exact silent no-op this
+               probe produced on its first LT-1 attempt. */
+            printf("RESULT: FAIL no selection after %d attempts\n", sat);
+            return 1;
+        }
+        printf("SELECTED_RTF_LEN: %zu\n", strlen(sel));
+        { int bon = 0, boff = 0; count_bold_tokens(sel, &bon, &boff);
+          printf("PRE_BOLD_ON: %d PRE_BOLD_OFF: %d\n", bon, boff); }
+        free(sel);
 
         if (strcmp(op, "mistype-bold") == 0) {
             /* H3 — `SvxWeightItem::PutValue` NEVER rejects a value: `Any2Bool` coerces a string Any
@@ -388,7 +461,10 @@ int main(int argc, char **argv) {
     } else if (strcmp(op, "align") == 0 || strcmp(op, "linespace") == 0) {
         if (argc < 7) { fprintf(stderr, "%s needs <unoName> <out>\n", op); return 2; }
         uno(doc, ".uno:SelectAll", "{}");
-        pump(doc, 0);
+        { int sat = 0; char *sel = ensure_selection(doc, 0, 12, &sat);
+          printf("SELECT_ATTEMPTS: %d\n", sat);
+          if (!sel) { printf("RESULT: FAIL no selection\n"); return 1; }
+          free(sel); }
         char cmd[128];
         snprintf(cmd, sizeof cmd, ".uno:%s", argv[5]);
         uno(doc, cmd, "{}");   /* argument-free BY DESIGN — research §3.2/§3.3 */
@@ -398,7 +474,10 @@ int main(int argc, char **argv) {
     } else if (strcmp(op, "style") == 0) {
         if (argc < 7) { fprintf(stderr, "style needs <programmaticName> <out>\n"); return 2; }
         uno(doc, ".uno:SelectAll", "{}");
-        pump(doc, 0);
+        { int sat = 0; char *sel = ensure_selection(doc, 0, 12, &sat);
+          printf("SELECT_ATTEMPTS: %d\n", sat);
+          if (!sel) { printf("RESULT: FAIL no selection\n"); return 1; }
+          free(sel); }
         char args[512];
         snprintf(args, sizeof args,
                  "{\"Style\":{\"type\":\"string\",\"value\":\"%s\"},"
