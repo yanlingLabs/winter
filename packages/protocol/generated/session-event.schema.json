@@ -2641,12 +2641,14 @@
             "office.slides.add_slide",
             "office.slides.delete_slide",
             "office.slides.reorder",
+            "office.slides.format",
             "office.slides.batch",
             "office.docs.info",
             "office.docs.read",
             "office.docs.replace",
             "office.docs.insert",
-            "office.docs.append"
+            "office.docs.append",
+            "office.docs.format"
           ]
         },
         "url": {

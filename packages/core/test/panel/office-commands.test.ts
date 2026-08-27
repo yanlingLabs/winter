@@ -27,13 +27,14 @@ describe("office-commands: the verb list", () => {
     expect(REEXPORTED_OFFICE_COMMAND_ACTIONS).toBe(OFFICE_COMMAND_ACTIONS);
   });
 
-  test("24 verbs: 12 sheets + 7 slides + 5 docs, spec §2's tables plus office-finish's two batch verbs", () => {
+  test("26 verbs: 12 sheets + 8 slides + 6 docs, spec §2's tables plus the batch and format verbs", () => {
     const byKind: Record<"sheets" | "slides" | "docs", number> = {
       sheets: OFFICE_COMMAND_ACTIONS.filter((a) => a.startsWith("office.sheets.")).length,
       slides: OFFICE_COMMAND_ACTIONS.filter((a) => a.startsWith("office.slides.")).length,
       docs: OFFICE_COMMAND_ACTIONS.filter((a) => a.startsWith("office.docs.")).length,
     };
-    expect(byKind).toEqual({ sheets: 12, slides: 7, docs: 5 });
+    // slides and docs each gained a `format` verb in office-format; sheets already had one.
+    expect(byKind).toEqual({ sheets: 12, slides: 8, docs: 6 });
     // Every verb was counted under exactly one kind — catches a stray fourth namespace the three
     // startsWith checks above would otherwise undercount silently rather than fail on.
     expect(byKind.sheets + byKind.slides + byKind.docs).toBe(OFFICE_COMMAND_ACTIONS.length);
@@ -174,12 +175,18 @@ describe("office-commands: the read/write split, pinned literally (Task 4 gates 
     "office.slides.add_slide": "write",
     "office.slides.delete_slide": "write",
     "office.slides.reorder": "write",
+    // office-format — the two formatting verbs. They land on the WRITE side through the suffix rule
+    // (`.format` is neither `.info` nor `.read`), and "write" is the CORRECT answer, not merely the
+    // fail-safe one: both apply character/paragraph attributes and save immediately, exactly as
+    // `office.sheets.format` (already above) does.
+    "office.slides.format": "write",
     "office.slides.batch": "write",
     "office.docs.info": "read",
     "office.docs.read": "read",
     "office.docs.replace": "write",
     "office.docs.insert": "write",
     "office.docs.append": "write",
+    "office.docs.format": "write",
   };
 
   test("the table names every verb OFFICE_COMMAND_ACTIONS has — no more, no fewer", () => {
