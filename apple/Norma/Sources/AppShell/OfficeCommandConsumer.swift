@@ -2136,10 +2136,22 @@ struct OfficeCommandConsumer {
                 // "at least one of them" — never "all N". Saying a bare "Confirmed" for a format
                 // that reached 1 of 3 occurrences would be a false universal claim, so the count is
                 // named whenever there is more than one occurrence to be wrong about.
-                let scope = (find != nil && occurrences > 1)
-                    ? "in at least one of the \(occurrences) occurrences (Norma cannot check each one "
-                        + "separately)"
-                    : "in the text it re-read"
+                // **Every path is hedged, including — especially — the whole-document one.**
+                // The first version gated the hedge on `find != nil && occurrences > 1`, which got
+                // it exactly backwards: `find` is optional, so `{verb:"format", bold:true}` selects
+                // the WHOLE DOCUMENT, and that broadest possible operation was the one making the
+                // unqualified claim. The check is existential over whatever was selected, so the
+                // wider the selection the weaker the guarantee, never the stronger.
+                let scope: String
+                if find == nil {
+                    scope = "somewhere in the document (Norma checks that the formatting is present "
+                        + "in what it re-read, not that it reached every paragraph)"
+                } else if occurrences > 1 {
+                    scope = "in at least one of the \(occurrences) occurrences (Norma cannot check "
+                        + "each one separately)"
+                } else {
+                    scope = "in the text it re-read"
+                }
                 sentence += " Confirmed \(verified.joined(separator: ", ")) \(scope)."
                 if !unconfirmed.isEmpty {
                     sentence += " \(unconfirmed.joined(separator: ", ")) could not be confirmed the "

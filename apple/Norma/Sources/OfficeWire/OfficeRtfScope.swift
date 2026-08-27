@@ -61,7 +61,18 @@ public enum OfficeRtfScope {
             }
             if c == "{" {
                 var j = i + 1
-                while j < chars.count, chars[j] == " " || chars[j] == "\n" || chars[j] == "\r" { j += 1 }
+                // **`isWhitespace`, not a hand-listed set — and the difference is a real bug this
+                // file shipped for one commit.** The hand-listed version read
+                // `== " " || == "\n" || == "\r" || == "\t"` and still failed on CRLF, because in
+                // Swift `"\r\n"` is a SINGLE Character (one grapheme cluster) that equals neither
+                // `"\r"` nor `"\n"`. A stylesheet group preceded by a Windows line ending was
+                // therefore not stripped, and the leak came back. Caught by the very pin added to
+                // cover the TAB case; `isWhitespace` handles every cluster correctly.
+                //
+                // LibreOffice emits these groups tightly, so none of this has been observed from
+                // the engine — but "today's producer happens to be tidy" is a property of the
+                // producer, not of the RTF format.
+                while j < chars.count, chars[j].isWhitespace { j += 1 }
                 if j < chars.count, chars[j] == "\\" {
                     let word = controlWord(chars, j)
                     if word == "*" || destinations.contains(word) {

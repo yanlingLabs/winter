@@ -1437,9 +1437,15 @@ final class LOKBridge: OfficeDocumentBridge {
     /// the check asks only whether the control word appears in the serialized body — so a `true`
     /// means *at least one* of the N ranges carries the attribute, not all N. Measured: a document
     /// with three matches of which exactly one is bold reports the attribute present whichever one
-    /// it is, and RTF additionally MERGES adjacent runs, so per-occurrence attribution is partly
-    /// destroyed by the serializer before this code ever sees it. Answering "all N" honestly would
-    /// need a per-run parse of the body; v1 narrows the CLAIM instead of overstating the check.
+    /// it is.
+    ///
+    /// ⚠️ **A stated reason here was WRONG and is corrected rather than deleted.** It claimed RTF
+    /// "merges adjacent runs, so per-occurrence attribution is partly destroyed by the serializer".
+    /// Merging fuses only *identically-formatted* neighbours — the captured dump's own body is
+    /// `{MARKERMARKER}{\b MARKER}`, which keeps the bold run separate — so attribution **is**
+    /// recoverable by parsing the body run by run. The narrowed CLAIM stands; the excuse for not
+    /// doing better does not. Answering "all N" is future work with a known route, not an
+    /// impossibility.
     private func docsFormatOnDedicatedThread(docId: String, find: String?, align: OfficeDocsAlign?,
                                              lineSpacing: OfficeDocsLineSpacing?, bold: Bool?, italic: Bool?,
                                              underline: Bool?, style: OfficeDocsParagraphStyle?)

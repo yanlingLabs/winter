@@ -849,27 +849,48 @@ final class OfficeDocsCommandTests: XCTestCase {
                       "italic landed in the file, so the verb must confirm it: \(text)")
     }
 
-    /// The same cross-check for the attribute the review proved was falsely confirmed on documents
-    /// carrying a bold NAMED PARAGRAPH STYLE. `format-bolded.odt` is exactly that shape — its bold
-    /// lives on a paragraph style — so a whole-string check confirms `bold` here no matter what.
-    /// Formatting a *different* attribute must therefore never report bold as confirmed.
-    func testLiveDocsFormatDoesNotConfirmBoldFromTheDocumentsOwnStyleTableWhenBoldWasNotAsked() async throws {
-        let (path, host, _) = try await openLive("format-bolded.odt")
+    /// ⭐ **The drill that actually catches the stylesheet leak — third attempt, and the first one
+    /// that can fail.**
+    ///
+    /// The two previous versions were empirically vacuous, and the reason is worth stating because
+    /// it is not obvious: `verified` and `applied` only ever contain attributes that were
+    /// REQUESTED. So any assertion of the form "bold must not be reported when bold was not asked
+    /// for" cannot fail — bold is unreachable on that path regardless of what the check does.
+    /// Review proved both earlier versions passed with `officeRtfBody` forced to the identity, i.e.
+    /// with both Criticals restored.
+    ///
+    /// **The shape that IS sensitive: request the attribute, and pick the value the leak gets
+    /// wrong.** `italic: false` on a document with no italic is *correct* to confirm — the check
+    /// asks `requested == present`, and `false == false` holds. But an unscoped scan sees the stock
+    /// `caption` style's `\i` in the stylesheet, computes `present = true`, and `false == true`
+    /// fails — so the verb declines to confirm and the sentence changes. One requested attribute,
+    /// one document, and the leak flips the answer.
+    ///
+    /// **Forced red, run:** with `officeRtfBody` replaced by `return rtf`, this test fails on the
+    /// "Confirmed italic" assertion, reporting the "could not confirm any of it" sentence instead.
+    /// Reverted byte-identical, green.
+    func testLiveDocsFormatConfirmsItalicIsOffWhichAnUnscopedScanCouldNotDo() async throws {
+        let (path, host, _) = try await openLive("format-target.odt")
+        // The fixture has no italic, and that is the whole premise — asserted, so the drill cannot
+        // quietly stop testing anything if the fixture changes.
+        XCTAssertFalse(try savedFileHas("fo:font-style", "italic", atPath: path),
+                       "setup: format-target.odt must ship with no italic anywhere")
+
         let result = await send(command("office.docs.format",
-                                        args: ["path": path, "find": "MARKER", "italic": true],
-                                        sessionId: "S1", commandId: "pcmd_verify_noleak"), through: host)
+                                        args: ["path": path, "find": "MARKER", "italic": false],
+                                        sessionId: "S1", commandId: "pcmd_italic_off"), through: host)
         XCTAssertTrue(result.ok, "\(result)")
         let text = result.result ?? ""
-        // ⚠️ Asserted on the CLAIM PHRASES, not on the bare word "bold" — the fixture is called
-        // `format-bolded.odt`, so a substring test for "bold" matches the FILENAME the sentence
-        // quotes and fails against correct output. The first version of this drill did exactly that:
-        // a check blind to its own construction, caught on the first live run.
-        XCTAssertFalse(text.contains("Confirmed bold"),
-                       "bold was never requested, so it must never be reported as confirmed — the "
-                           + "document's own bold paragraph style must not leak into the "
-                           + "verification: \(text)")
-        XCTAssertFalse(text.contains("set bold"),
-                       "bold was never requested, so it must not appear as applied: \(text)")
+
+        // Still no italic in the file — turning off what was never on is a legitimate no-op.
+        XCTAssertFalse(try savedFileHas("fo:font-style", "italic", atPath: path),
+                       "italic:false must not somehow ADD italic")
+        // And the verb must be able to say so. Under the stylesheet leak it cannot: the document's
+        // own caption style makes `present` true, the comparison fails, and this goes red.
+        XCTAssertTrue(text.contains("Confirmed italic"),
+                      "italic is genuinely absent and italic:false was requested, so the verb must "
+                          + "confirm it. Reading 'could not confirm' here means the check is seeing "
+                          + "the document's STYLE TABLE rather than the selected text: \(text)")
     }
 
     /// **F-4 made honest.** The check is existential over the matched occurrences, so a multi-match

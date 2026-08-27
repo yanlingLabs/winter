@@ -511,22 +511,38 @@ export function registerDocsTool(r: ToolRegistry, deps: DocsToolDeps): void {
       // operand on, say, `replace` would tell the model its formatting request succeeded when
       // nothing of the sort was sent.
       //
-      // ⚠️ **The exemption is PER-KEY, not per-verb, and getting that wrong was the fourth
-      // occurrence of the vanishing-operand class in this arc.** `find` is genuinely shared with
-      // `replace`; the six formatting attributes are not. An earlier version exempted the whole
-      // `replace` VERB from this loop, so `{verb:"replace", find, replaceWith, bold:true}` passed
-      // zod, dropped `bold` on the way to the wire, and reported success — pinned 3/3 in review.
-      // Each key now names the verbs that may carry it.
-      const FORMAT_OPERAND_VERBS: Record<string, ReadonlyArray<DocsArgs["verb"]>> = {
-        find: ["format", "replace"],
+      // ⚠️ **The exemption is PER-KEY, not per-verb, and this table covers EVERY optional operand
+      // — not just the formatting ones.** Two rounds of review found two different shapes here:
+      //
+      //  1. A per-VERB exemption let `{verb:"replace", find, replaceWith, bold:true}` pass zod and
+      //     drop `bold` on the way to the wire, reporting success. (`find` really is shared with
+      //     `replace`; the six formatting attributes are not.)
+      //  2. Restricting the table to formatting keys still left the READ operands loose, and one of
+      //     those shapes is worse than dropping: `{verb:"format", fromParagraph:2, toParagraph:3,
+      //     bold:true}` was dispatched as **whole-document bold**. Not ignored — silently WIDENED.
+      //     The model asks for two paragraphs and the user's entire document is bolded, reported as
+      //     success. An unrecognised scope operand must never fall back to "everything".
+      //
+      // So the table is now exhaustive over the schema's optional keys, and the loop is the single
+      // place that decides which verb may carry what. `path`/`verb` are required and excluded by
+      // construction. The earlier, more specific checks above (`texts` on non-append, `at` on
+      // append, `replaceWith` on format, `all:false`) still run first and keep their better-worded
+      // refusals; this is the backstop that makes the set CLOSED rather than a list of the mistakes
+      // someone happened to think of.
+      const OPERAND_VERBS: Record<string, ReadonlyArray<DocsArgs["verb"]>> = {
+        fromParagraph: ["read"], toParagraph: ["read"],
+        find: ["format", "replace"], replaceWith: ["replace"], all: ["replace"],
+        text: ["insert", "append"], texts: ["append"], at: ["insert"],
         align: ["format"], lineSpacing: ["format"], style: ["format"],
         bold: ["format"], italic: ["format"], underline: ["format"],
       };
-      for (const [key, allowedVerbs] of Object.entries(FORMAT_OPERAND_VERBS)) {
+      for (const [key, allowedVerbs] of Object.entries(OPERAND_VERBS)) {
         if (a[key as keyof DocsArgs] === undefined) continue;
         if (allowedVerbs.includes(a.verb)) continue;
-        throw new Error(`docs ${a.verb} has no \`${key}\` — that is a \`format\` operand. `
-          + `Use verb:"format" to change how text looks.`);
+        const takenBy = allowedVerbs.map((v) => `\`${v}\``).join(" or ");
+        throw new Error(`docs ${a.verb} has no \`${key}\` — that operand belongs to ${takenBy}. `
+          + "Nothing was changed. (Norma refuses an operand it cannot honour rather than ignoring "
+          + "it, because ignoring one would report success for something it did not do.)");
       }
       if (a.verb === "format") {
         if (a.align === undefined && a.lineSpacing === undefined && a.style === undefined

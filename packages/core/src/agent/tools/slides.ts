@@ -487,18 +487,26 @@ export function registerSlidesTool(r: ToolRegistry, deps: SlidesToolDeps): void 
           }
         }
       }
-      // `format`'s operands are `format`-only, and a present one on another verb REFUSES rather
-      // than being silently dropped — the same rule every other per-verb operand in this arc
-      // follows. Dropping one would tell the model a formatting request succeeded when nothing of
-      // the sort was sent.
-      const formatOnlyKeys = ["placeholder", "align", "lineSpacing", "bold", "italic", "underline"] as const;
-      if (a.verb !== "format") {
-        for (const key of formatOnlyKeys) {
-          if (a[key] !== undefined) {
-            throw new Error(`slides ${a.verb} has no \`${key}\` — that is a \`format\` operand. `
-              + `Use verb:"format" to change how a slide's text looks.`);
-          }
-        }
+      // **Exhaustive over every optional operand, not just the formatting ones** — the same closure
+      // `docs.ts` carries, for the same reason and after the same review finding. A key this verb
+      // cannot honour REFUSES; it is never dropped (which would report success for something not
+      // done) and never allowed to fall back to a wider default (which would change more of the
+      // user's file than they asked for). `path` and `verb` are required and excluded by
+      // construction; the earlier per-verb checks keep their better-worded refusals and run first.
+      const OPERAND_VERBS: Record<string, ReadonlyArray<SlidesArgs["verb"]>> = {
+        slide: ["read", "set_text", "delete_slide", "reorder", "format"],
+        title: ["set_text"], body: ["set_text"],
+        at: ["add_slide"], to: ["reorder"], layout: ["add_slide"], ops: ["batch"],
+        placeholder: ["format"], align: ["format"], lineSpacing: ["format"],
+        bold: ["format"], italic: ["format"], underline: ["format"],
+      };
+      for (const [key, allowedVerbs] of Object.entries(OPERAND_VERBS)) {
+        if (a[key as keyof SlidesArgs] === undefined) continue;
+        if (allowedVerbs.includes(a.verb)) continue;
+        const takenBy = allowedVerbs.map((v) => `\`${v}\``).join(" or ");
+        throw new Error(`slides ${a.verb} has no \`${key}\` — that operand belongs to ${takenBy}. `
+          + "Nothing was changed. (Norma refuses an operand it cannot honour rather than ignoring "
+          + "it, because ignoring one would report success for something it did not do.)");
       }
       if (a.verb === "format") {
         if (a.placeholder === undefined) {

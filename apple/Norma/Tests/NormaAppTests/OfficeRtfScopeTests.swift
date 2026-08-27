@@ -128,6 +128,20 @@ final class OfficeRtfScopeTests: XCTestCase {
         XCTAssertFalse(OfficeRtfScope.officeRtfHasControlWord(body, "i"))
     }
 
+    /// Whitespace between `{` and the destination keyword — including a TAB, which LibreOffice does
+    /// not currently emit. Fixed rather than recorded as latent: "the producer happens to be tidy"
+    /// is a property of today's producer, not of the RTF format, and this code may one day read RTF
+    /// from somewhere else.
+    func testWhitespaceIncludingATabBeforeTheDestinationKeywordStillStrips() {
+        for gap in [" ", "\t", "\n", "\r\n", " \t "] {
+            let rtf = "{\\rtf1{\(gap)\\stylesheet{\\s16\\i caption;}}\\pard BODY}"
+            let body = OfficeRtfScope.officeRtfBody(rtf)
+            XCTAssertTrue(body.contains("BODY"), "body must survive for gap \(gap.debugDescription)")
+            XCTAssertFalse(OfficeRtfScope.officeRtfHasControlWord(body, "i"),
+                           "the stylesheet must be stripped for gap \(gap.debugDescription): \(body)")
+        }
+    }
+
     /// A body group that merely STARTS with a formatting control word is not a destination and must
     /// be kept — otherwise the stripper eats exactly the runs it is supposed to inspect.
     func testABodyRunGroupIsNotMistakenForADestination() {
