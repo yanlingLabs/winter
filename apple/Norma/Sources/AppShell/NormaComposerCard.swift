@@ -417,6 +417,14 @@ struct NormaComposerCard: View {
                         // rather than `stop != nil` alone so an idle session hands Esc back to
                         // AppKit untouched (`CommandTextView.keyDown`'s own contract).
                         onEscape: { [stop] in
+                            // Logged BEFORE the guard, and that placement is the point — the same
+                            // shape `AppDelegate.onEsc` uses (`AppDelegate.swift:1076-1079`). A line
+                            // logged only on the interrupting arm cannot distinguish "Esc never
+                            // reached the composer" from "Esc reached it and correctly declined",
+                            // which are the two live failures worth telling apart. Fires only on an
+                            // actual Esc keypress, so it is not a hot path.
+                            OrbDebug.log("NormaComposerCard.onEscape: fired stop="
+                                         + "\(stop != nil) running=\(stop?.isRunning ?? false)")
                             guard composerEscapeInterrupts(isRunning: stop?.isRunning ?? false,
                                                            canStop: stop != nil) else { return false }
                             stop?.onStop()

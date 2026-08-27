@@ -3312,8 +3312,18 @@ final class ShellSessionHost: ObservableObject {
     /// harmless on the wire, would be a lie in the log.
     func interruptAttachedTurn() {
         guard let live = attachment, let sid = attachedSessionId,
-              live.session.state.turnRunning else { return }
+              live.session.state.turnRunning else {
+            // Same diagnostic `AppDelegate.onEsc` carries for the orb's own Esc, and for the same
+            // reason: this door is reached from a key press and from a click, and "nothing happened"
+            // has three different causes (no attachment, no session id, idle) that are otherwise
+            // indistinguishable from the outside.
+            OrbDebug.log("ShellSessionHost.interruptAttachedTurn: refused attached="
+                         + "\(attachment != nil) sid=\(attachedSessionId ?? "nil") running="
+                         + "\(attachment?.session.state.turnRunning ?? false)")
+            return
+        }
         let client = live.feed.client
+        OrbDebug.log("ShellSessionHost.interruptAttachedTurn: interrupting \(sid.prefix(10))")
         Task { @MainActor in
             _ = try? await client.interrupt(sessionId: sid)
         }
