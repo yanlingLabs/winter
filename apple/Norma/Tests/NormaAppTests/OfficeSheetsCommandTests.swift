@@ -1062,7 +1062,7 @@ final class OfficeSheetsCommandTests: XCTestCase {
         let reopenDocId = "sheets-set-reopen"
         let metadata = try await client.open(docId: reopenDocId, path: path)
         XCTAssertEqual(metadata.type, .spreadsheet)
-        let reopenRows = try await client.sheetsRead(docId: reopenDocId, sheet: "Sheet1", range: "D1:E2", formulas: false)
+        let reopenRows = try await client.sheetsRead(docId: reopenDocId, sheet: "Sheet1", range: "D1:E2", formulas: false).rows
         XCTAssertEqual(reopenRows, [["42", "42"], ["hello world", "=NOT A REAL FORMULA"]],
                        "the write must survive an independent close+reopen, exact values")
         try await client.close(docId: reopenDocId)
@@ -1140,7 +1140,7 @@ final class OfficeSheetsCommandTests: XCTestCase {
         let independentDocId = "sheets-set-partial-failure-reopen"
         _ = try await independentClient.open(docId: independentDocId, path: path)
         let savedD1Rows = try await independentClient.sheetsRead(docId: independentDocId, sheet: "Sheet1",
-                                                                   range: "D1", formulas: false)
+                                                                   range: "D1", formulas: false).rows
         let savedD1 = savedD1Rows.map { $0.joined(separator: "\t") }.joined(separator: "\n")
         XCTAssertFalse(savedD1.contains("ok value"),
                        "D1 must be ABSENT from the SAVED FILE — it was written to the in-memory "
@@ -1624,7 +1624,7 @@ final class OfficeSheetsCommandTests: XCTestCase {
         let midChainDocId = "sheets-resize-reopen-midchain"
         _ = try await midChainClient.open(docId: midChainDocId, path: path)
         func midChainCell(_ cell: String) async throws -> String {
-            let rows = try await midChainClient.sheetsRead(docId: midChainDocId, sheet: "Sheet1", range: cell, formulas: false)
+            let rows = try await midChainClient.sheetsRead(docId: midChainDocId, sheet: "Sheet1", range: cell, formulas: false).rows
             return rows.map { $0.joined(separator: "\t") }.joined(separator: "\n")
         }
         let midChainB3 = try await midChainCell("B3")
@@ -1677,12 +1677,12 @@ final class OfficeSheetsCommandTests: XCTestCase {
         }
         let endChainDocId = "sheets-resize-reopen-endchain"
         _ = try await endChainClient.open(docId: endChainDocId, path: path)
-        let endChainA1 = try await endChainClient.sheetsRead(docId: endChainDocId, sheet: "Sheet1", range: "A1", formulas: false)
+        let endChainA1 = try await endChainClient.sheetsRead(docId: endChainDocId, sheet: "Sheet1", range: "A1", formulas: false).rows
         XCTAssertEqual(endChainA1, [["NORMA GATE"]],
                        "the full round trip must have actually PERSISTED A1's restoration to the "
                            + "saved file — read from a genuinely independent reopen, not the adopted "
                            + "runtime's in-memory model")
-        let endChainB3 = try await endChainClient.sheetsRead(docId: endChainDocId, sheet: "Sheet1", range: "B3", formulas: false)
+        let endChainB3 = try await endChainClient.sheetsRead(docId: endChainDocId, sheet: "Sheet1", range: "B3", formulas: false).rows
         XCTAssertNotEqual(endChainB3, [["NORMA GATE"]],
                           "B3 (the cell insert_cols shifted real content into, earlier in this same "
                               + "chain) must be vacated in the SAVED file too — no leftover fragment "

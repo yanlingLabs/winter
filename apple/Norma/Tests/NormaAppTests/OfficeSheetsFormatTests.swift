@@ -489,7 +489,7 @@ final class OfficeSheetsFormatTests: XCTestCase {
         guard let client = host.officeHelperSupervisor?.client else { return XCTFail("no live client to reopen through") }
         let reopenDocId = "sheets-format-numfmt-reopen"
         _ = try await client.open(docId: reopenDocId, path: path)
-        let reopenedValues = try await client.sheetsRead(docId: reopenDocId, sheet: "Sheet1", range: "D7:D7", formulas: false)
+        let reopenedValues = try await client.sheetsRead(docId: reopenDocId, sheet: "Sheet1", range: "D7:D7", formulas: false).rows
         XCTAssertTrue(reopenedValues.first?.first?.contains("%") == true,
                       "the percent format must survive a REAL close-and-reopen through the engine "
                           + "itself, not merely serialise into the file: \(reopenedValues)")
@@ -500,7 +500,7 @@ final class OfficeSheetsFormatTests: XCTestCase {
         // string, because there is no formula to show and the engine falls back to the formatted
         // text. The description now says so; this assertion is the pin on the REAL behaviour, so the
         // claim and the code cannot drift apart again in either direction.
-        let reopenedFormulas = try await client.sheetsRead(docId: reopenDocId, sheet: "Sheet1", range: "D7:D7", formulas: true)
+        let reopenedFormulas = try await client.sheetsRead(docId: reopenDocId, sheet: "Sheet1", range: "D7:D7", formulas: true).rows
         let formulaCell = reopenedFormulas.first?.first ?? ""
         XCTAssertEqual(formulaCell, "50.00%",
                        "formulas mode on a formatted CONSTANT cell returns the display string, not "

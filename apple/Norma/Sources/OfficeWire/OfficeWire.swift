@@ -628,7 +628,12 @@ public enum OfficeWireFrame: Equatable, Sendable {
     /// `(endRow-startRow+1)` rows of `(endColumn-startColumn+1)` strings each — a wholly empty cell is
     /// `""`, never an absent element, so a caller can index this by the SAME 0-based offsets it sent
     /// without re-deriving the range's own shape from the reply.
-    case sheetsReadOk(seq: UInt64, docId: String, rows: [[String]])
+    /// `displayRestoreVerified` — office-polish final check, Critical. `false` means a
+    /// `formulas: true` read could not confirm it put Calc's document-wide Show Formulas mode back,
+    /// so this document's LATER reads may answer formula source where a value was asked for. Wire
+    /// default is `true` (absent key ⟹ verified) so an older peer's frame still decodes; the only
+    /// producer that omits it is one that predates the check.
+    case sheetsReadOk(seq: UInt64, docId: String, rows: [[String]], displayRestoreVerified: Bool)
 
     // MARK: office-agent-tools T4 — sheets write replies
 
@@ -897,7 +902,7 @@ public enum OfficeWireFrame: Equatable, Sendable {
         case .tileFailed(let seq, _, _, _): return seq
         case .invalidated(let seq, _, _): return seq
         case .sheetsInfoOk(let seq, _, _, _): return seq
-        case .sheetsReadOk(let seq, _, _): return seq
+        case .sheetsReadOk(let seq, _, _, _): return seq
         case .sheetsSetOk(let seq, _, _): return seq
         case .sheetsResizeOk(let seq, _, _, _): return seq
         case .sheetsManageSheetOk(let seq, _, _): return seq
@@ -1033,9 +1038,10 @@ public enum OfficeWireFrame: Equatable, Sendable {
             payload["docId"] = docId
             payload["sheets"] = sheets.map { $0.jsonObject() }
             payload["activeSheet"] = activeSheet
-        case .sheetsReadOk(_, let docId, let rows):
+        case .sheetsReadOk(_, let docId, let rows, let displayRestoreVerified):
             payload["docId"] = docId
             payload["rows"] = rows
+            payload["displayRestoreVerified"] = displayRestoreVerified
         case .sheetsSet(_, let docId, let sheet, let range, let cellAddresses, let cellValues):
             payload["docId"] = docId
             payload["sheet"] = sheet
@@ -2679,7 +2685,13 @@ public enum OfficeWireCodec {
                   let rows = OfficeWireFrame.decodeRows(object["rows"]) else {
                 return .rejected(seq: seq, reason: "malformed")
             }
-            return .frame(.sheetsReadOk(seq: seq, docId: docId, rows: rows))
+            // ABSENT defaults to `true` (verified), deliberately, and it is the one field on this
+            // frame that may be absent: the only producer that omits it is one older than the check
+            // itself, and inventing "unverified" for every such frame would attach a warning to
+            // reads that never had a problem. A producer that HAS the check always sends it.
+            let displayRestoreVerified = (object["displayRestoreVerified"] as? Bool) ?? true
+            return .frame(.sheetsReadOk(seq: seq, docId: docId, rows: rows,
+                                        displayRestoreVerified: displayRestoreVerified))
         case "sheetsSet":
             guard let docId = object["docId"] as? String, let sheet = object["sheet"] as? String,
                   let range = object["range"] as? String,

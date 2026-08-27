@@ -238,8 +238,10 @@ struct OfficeCommandConsumer {
             let resultText = try await broker.perform(
                 sessionId: command.sessionId, path: path, access: .read, requestId: command.commandId
             ) { runtime, docId, adopted in
-                let rows = try await runtime.sheetsRead(docId: docId, sheet: sheet, range: rangeString, formulas: formulas)
-                return Self.formatSheetsRead(sheet: sheet, range: rangeString, formulas: formulas, rows: rows)
+                let read = try await runtime.sheetsRead(docId: docId, sheet: sheet, range: rangeString, formulas: formulas)
+                return Self.formatSheetsRead(sheet: sheet, range: rangeString, formulas: formulas,
+                                             rows: read.rows,
+                                             displayRestoreVerified: read.displayRestoreVerified)
             }
             let (ok, text) = Self.capped(resultText)
             sendResult(command.sessionId, command.commandId, ok, text, nil)
@@ -1589,11 +1591,25 @@ struct OfficeCommandConsumer {
     /// row-major, with no reshaping this file could get wrong. An empty `rows` (the sheet had nothing
     /// in the requested range) still gets an honest header line, never a bare empty string a caller
     /// could mistake for a dropped result.
-    private static func formatSheetsRead(sheet: String, range: String, formulas: Bool, rows: [[String]]) -> String {
+    /// office-polish final check, Critical — `displayRestoreVerified` is the ONE thing this
+    /// formatter says that is not about the cells. A `formulas: true` read flips Calc's
+    /// document-wide Show Formulas mode on and back; when the helper could not CONFIRM it put the
+    /// mode back (see `LOKBridge.restoreFormulaDisplayOnDedicatedThread`), every LATER read of this
+    /// document may answer formula SOURCE where a value was asked for. Being handed source as if it
+    /// were a value, silently, is the whole defect — so the model is told, in the reply itself,
+    /// rather than in a log nobody reads. The line is appended, never substituted for the data: the
+    /// rows this read returned are still correct, and suppressing them would trade one wrong answer
+    /// for another.
+    private static func formatSheetsRead(sheet: String, range: String, formulas: Bool, rows: [[String]],
+                                         displayRestoreVerified: Bool) -> String {
         let header = "\(sheet)!\(range) (\(formulas ? "formulas" : "values")):"
-        guard !rows.isEmpty else { return "\(header) (nothing in this range)" }
+        let warning = displayRestoreVerified ? "" : "\n(Norma could not confirm it restored this "
+            + "workbook's Show Formulas display mode after this read. These rows are correct, but a "
+            + "later read of this workbook may return formula source where a value is expected — "
+            + "reopen the file if a value ever comes back looking like \"=A1*2\".)"
+        guard !rows.isEmpty else { return "\(header) (nothing in this range)\(warning)" }
         let grid = rows.map { row in row.map(quotedIfNeededForTSV).joined(separator: "\t") }.joined(separator: "\n")
-        return "\(header)\n\(grid)"
+        return "\(header)\n\(grid)\(warning)"
     }
 
     /// office-agent-tools T3 review (I3) — the wire-side half of the fix.

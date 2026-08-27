@@ -196,7 +196,7 @@ public protocol OfficeDocumentBridge: AnyObject {
     /// rather than as column/row integers. `sheet` is resolved to a part index HERE. Throws
     /// `SaveError.sheetNotFound` (carrying the real sheet list) for an unknown name, or the same
     /// existence/kind errors `sheetsInfo` throws.
-    func sheetsRead(docId: String, sheet: String, range: String, formulas: Bool) throws -> [[String]]
+    func sheetsRead(docId: String, sheet: String, range: String, formulas: Bool) throws -> (rows: [[String]], displayRestoreVerified: Bool)
 
     // MARK: - office-agent-tools T4: sheets write verbs
 
@@ -572,13 +572,16 @@ public final class FakeOfficeDocumentBridge: OfficeDocumentBridge {
     /// can exercise the `sheetNotFound` refusal path without real LOK. A deterministic, small grid —
     /// never real content — with `formulas` folded into the one cell that differs, so a wire-level
     /// test CAN tell the two request shapes apart without needing real LOK to compute anything.
-    public func sheetsRead(docId: String, sheet: String, range: String, formulas: Bool) throws -> [[String]] {
+    public func sheetsRead(docId: String, sheet: String, range: String,
+                           formulas: Bool) throws -> (rows: [[String]], displayRestoreVerified: Bool) {
         lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
         guard isOpen else { throw OfficeHelperServerError.posix("fake bridge: docId not open: \(docId)") }
         guard sheet == "Sheet1" else {
             throw OfficeHelperServerError.posix("fake bridge: no sheet named \"\(sheet)\" in \(docId) — this workbook has: Sheet1")
         }
-        return [["fake", formulas ? "=FAKE()" : "42"]]
+        // Always `true`: this fake never touches a display mode, so there is nothing it could have
+        // failed to restore. Reporting `false` here would put a warning on every wire-level test.
+        return ([["fake", formulas ? "=FAKE()" : "42"]], true)
     }
 
     /// office-agent-tools T4 — wire-level dispatch only, same reasoning as every other fake stub
@@ -1598,8 +1601,9 @@ public final class OfficeHelperServer {
                 return
             }
             do {
-                let rows = try documentBridge.sheetsRead(docId: docId, sheet: sheet, range: range, formulas: formulas)
-                writeReply(.sheetsReadOk(seq: seq, docId: docId, rows: rows), writer: writer)
+                let read = try documentBridge.sheetsRead(docId: docId, sheet: sheet, range: range, formulas: formulas)
+                writeReply(.sheetsReadOk(seq: seq, docId: docId, rows: read.rows,
+                                         displayRestoreVerified: read.displayRestoreVerified), writer: writer)
             } catch {
                 writeReply(.error(seq: seq, reason: "\(error)"), writer: writer)
             }

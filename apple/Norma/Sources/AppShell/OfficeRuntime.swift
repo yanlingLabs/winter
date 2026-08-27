@@ -1729,7 +1729,7 @@ final class OfficeRuntime: ObservableObject {
         var sheetsInfo: (_ docId: String) async throws -> (sheets: [OfficeSheetInfo], activeSheet: String)
         /// office-agent-tools T3 — same no-reducer posture as `sheetsInfo` above. `range` is already
         /// an A1 string; see `OfficeWireFrame.sheetsRead`'s own header for why.
-        var sheetsRead: (_ docId: String, _ sheet: String, _ range: String, _ formulas: Bool) async throws -> [[String]]
+        var sheetsRead: (_ docId: String, _ sheet: String, _ range: String, _ formulas: Bool) async throws -> (rows: [[String]], displayRestoreVerified: Bool)
         /// office-agent-tools T4 — same no-reducer, THROWS-through posture as `sheetsInfo`/
         /// `sheetsRead` above (a write caller needs to know WHY it failed): there is nothing in
         /// `OfficeRuntimeState` for a cell write to update either — LOK's own invalidation callbacks
@@ -2009,7 +2009,7 @@ final class OfficeRuntime: ObservableObject {
     /// Same no-reducer posture as `sheetsInfo` above. `range` is already an A1 string, and `sheet` is
     /// resolved to a part index by the HELPER, never here — see `OfficeWireFrame.sheetsRead`'s own
     /// header for why.
-    func sheetsRead(docId: String, sheet: String, range: String, formulas: Bool) async throws -> [[String]] {
+    func sheetsRead(docId: String, sheet: String, range: String, formulas: Bool) async throws -> (rows: [[String]], displayRestoreVerified: Bool) {
         try await driver.sheetsRead(docId, sheet, range, formulas)
     }
 

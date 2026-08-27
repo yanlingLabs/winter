@@ -1124,7 +1124,12 @@ final class LOKBridge: OfficeDocumentBridge {
     func sheetsInfo(docId: String) throws -> (sheets: [OfficeSheetInfo], activeSheet: String) {
         try thread.sync { try self.sheetsInfoOnDedicatedThread(docId: docId) }
     }
-    func sheetsRead(docId: String, sheet: String, range: String, formulas: Bool) throws -> [[String]] {
+    /// `displayRestoreVerified` is `false` ONLY when a `formulas: true` read could not confirm it
+    /// put Calc's document-wide Show Formulas mode back — see
+    /// `restoreFormulaDisplayOnDedicatedThread`. Always `true` for a `formulas: false` read, which
+    /// never touches the mode. It travels all the way to the model on purpose: being handed formula
+    /// SOURCE where a value was asked for is the defect, and a caller told "unverified" can re-read.
+    func sheetsRead(docId: String, sheet: String, range: String, formulas: Bool) throws -> (rows: [[String]], displayRestoreVerified: Bool) {
         try thread.sync { try self.sheetsReadOnDedicatedThread(docId: docId, sheet: sheet, range: range, formulas: formulas) }
     }
 
@@ -2394,7 +2399,8 @@ final class LOKBridge: OfficeDocumentBridge {
     /// an adopted tab's own visible sheet, which a read-only probe must not do. See
     /// `pumpDedicatedThreadForPendingDispatch` for the call itself and why it is not
     /// `paintTileOnDedicatedThread`.
-    private func selectionTextOnDedicatedThread(_ doc: OpenDocument, docId: String, viewId: Int32, part: Int, range: String, formulas: Bool) -> String {
+    private func selectionTextOnDedicatedThread(_ doc: OpenDocument, docId: String, viewId: Int32, part: Int, range: String, formulas: Bool,
+                                                restoreOutcome: FormulaRestoreOutcome? = nil) -> String {
         // **Order is load-bearing: the formula toggle MUST run BEFORE `.uno:GoToCell`, not after —
         // live-drill-caught, not reasoned in advance.** The first working version of this function
         // toggled AFTER selecting (select the range, then flip Show Formulas, then read) and got the
@@ -2469,7 +2475,7 @@ final class LOKBridge: OfficeDocumentBridge {
         defer {
             if formulas, let probe {
                 restoreFormulaDisplayOnDedicatedThread(doc, docId: docId, viewId: viewId, part: part,
-                                                       probe: probe)
+                                                       probe: probe, outcome: restoreOutcome)
             }
         }
 
@@ -2613,8 +2619,21 @@ final class LOKBridge: OfficeDocumentBridge {
     /// One restore round = a `.uno:ToggleFormula` dispatch plus this many probe-paint turns waiting
     /// for the render to come back to its pre-toggle reference. Sized above `goToCellVerificationAttempts` (4) because
     /// that budget waits on a command with an observable landing, while this one waits behind
-    /// whatever else is still queued in LOK's dispatcher. A turn costs one throwaway 64x64 tile
-    /// paint and is only spent while the restore is still visibly un-landed.
+    /// whatever else is still queued in LOK's dispatcher.
+    ///
+    /// **Cost, measured rather than asserted** (office-polish final check, Minor). A turn is one
+    /// 512x512 probe paint plus its hash — NOT the 64x64 throwaway
+    /// `pumpDedicatedThreadForPendingDispatch` makes, which an earlier version of this comment
+    /// claimed; a turn paints 64x those pixels. A `formulas: true` read takes three probe paints on
+    /// the happy path (reference, blindness check, first observation) and up to
+    /// `formulaRestoreRounds x formulaRestoreSettleTurns` more if the restore has to be chased.
+    /// Warm, on the user's own workbook, median of 7: **2 ms before this verification existed, 7 ms
+    /// with it** — `formulas: false`, which never touches the display mode, is unchanged at 4 ms.
+    /// That 5 ms is on the one dedicated LOK thread, so it is 5 ms every other open document also
+    /// waits, on a verb the agent invokes deliberately and rarely: acceptable, and small enough that
+    /// it is not worth trading any of the coverage back for. (It was 123 ms until the hash was made
+    /// word-wise instead of byte-wise — see `paintProbeHashOnDedicatedThread`.)
+    /// Turns are only spent while the restore is still visibly un-landed.
     private static let formulaRestoreSettleTurns = 6
 
     /// How many times the restore may RE-DISPATCH before giving up and saying so. Re-dispatch is
@@ -2668,7 +2687,8 @@ final class LOKBridge: OfficeDocumentBridge {
     private func restoreFormulaDisplayOnDedicatedThread(_ doc: OpenDocument, docId: String,
                                                         viewId: Int32, part: Int,
                                                         probe: (rect: (x: Int32, y: Int32, width: Int32, height: Int32),
-                                                                reference: UInt64)) {
+                                                                reference: UInt64),
+                                                        outcome: FormulaRestoreOutcome?) {
         // **The second half of the fix, and it is NOT optional.** Restoring the document's display
         // mode is not enough on its own: any tile painted while Show Formulas was on is already in
         // `TileRenderer`'s own cache (`TileRenderer.paint` serves a cache HIT without repainting),
@@ -2680,6 +2700,38 @@ final class LOKBridge: OfficeDocumentBridge {
         // means SUBSCRIBERS get their `invalidated` push too, by the exact path a real LOK
         // invalidation already uses. `defer`, so every exit path below is covered.
         defer { onEvent?(docId, .invalidated(rectsTwips: [], part: -1)) }
+
+        // office-polish final check, CRITICAL — **does this probe discriminate for THIS document at
+        // all?** Taken now, before the OFF-dispatch, while Show Formulas is (as far as anything can
+        // tell) still ON. If it already equals the values-mode reference, the two modes render
+        // identically inside `probe.rect` and every comparison below is vacuous — the loop would
+        // "succeed" on its first turn without having observed anything.
+        //
+        // **This is the check the final check caught missing, and it was measured, not argued**: a
+        // 3-column x 300-row sheet with formulas only in rows 120-300 produced
+        // `reference == entryHash` while `formulas:true C150:C150` proved the document really was
+        // in Show Formulas. The blind case is NOT "a very large sheet" — at ~255 twips per row the
+        // 15000-twip cap covers about 58 rows, so "headers on top, formulas below the fold" is
+        // ordinary. Claiming the blind case and the harmful case no longer overlapped was wrong;
+        // detecting the overlap and saying so is what this arm does instead.
+        let entryHash = paintProbeHashOnDedicatedThread(doc, viewId: viewId, part: part, rect: probe.rect)
+        if entryHash == probe.reference {
+            // Blind. Dispatch and spend the settle budget anyway — that is strictly more effort
+            // than the single pump this whole fix replaced, and it is all that can be done without
+            // an observable — then say so, LOUDLY and to the MODEL, rather than returning a silent
+            // "verified" that was never checked.
+            toggleFormulaOnDedicatedThread(doc, pump: (viewId: viewId, part: part))
+            for _ in 1..<Self.formulaRestoreSettleTurns {
+                pumpDedicatedThreadForPendingDispatch(doc, viewId: viewId, part: part)
+            }
+            outcome?.unverified = true
+            diagnostic("[LOKBridge sheets] formula-display restore is UNVERIFIABLE for this document — "
+                       + "the probe rect (\(probe.rect.width)x\(probe.rect.height) twips) renders "
+                       + "identically in both display modes, so nothing here can tell whether the "
+                       + "restore landed; spent the settle budget blind. Later reads of this document "
+                       + "may return formula SOURCE where a value was asked for")
+            return
+        }
 
         var dispatches = 0
         while dispatches < Self.formulaRestoreRounds {
@@ -2704,6 +2756,7 @@ final class LOKBridge: OfficeDocumentBridge {
         // — since office-polish's review — loud somewhere that actually exists: `diagnostic` writes
         // to `<state-path>/helper-diagnostics.log` as well as to a `stderr` that is `/dev/null` in
         // production.
+        outcome?.unverified = true
         diagnostic("[LOKBridge sheets] formula display was NOT restored after "
                    + "\(Self.formulaRestoreRounds) dispatch(es) x \(Self.formulaRestoreSettleTurns) "
                    + "settle turn(s) — the probe paint still differs from its pre-toggle reference, "
@@ -2772,12 +2825,34 @@ final class LOKBridge: OfficeDocumentBridge {
         guard let data = line.data(using: .utf8) else { return }
         if let handle = try? FileHandle(forWritingTo: diagnosticsLogURL) {
             defer { try? handle.close() }
-            _ = try? handle.seekToEnd()
+            let end = (try? handle.seekToEnd()) ?? 0
+            // office-polish final check, Important — ROTATION. The `.uno:GoToCell` line fires on
+            // essentially every sheets read, so an append-only file grows without bound on a
+            // long-lived helper; the first version of this sink had no cap at all. One generation
+            // kept (`.1`), replaced each time — enough to still hold the run that produced a
+            // failure, bounded at 2 x `diagnosticsLogMaxBytes` on disk in the worst case. Rotation
+            // is best-effort and never throws: a diagnostic that cannot be written must not become
+            // an error of its own, and that applies doubly to the housekeeping around it.
+            if end >= Self.diagnosticsLogMaxBytes {
+                try? handle.close()
+                let rotated = diagnosticsLogURL.appendingPathExtension("1")
+                try? FileManager.default.removeItem(at: rotated)
+                try? FileManager.default.moveItem(at: diagnosticsLogURL, to: rotated)
+                try? data.write(to: diagnosticsLogURL, options: .atomic)
+                return
+            }
             try? handle.write(contentsOf: data)
         } else {
             try? data.write(to: diagnosticsLogURL, options: .atomic)
         }
     }
+
+    /// 1 MiB before `helper-diagnostics.log` rotates. Sized against the line that actually drives
+    /// the growth: the `.uno:GoToCell` attempt line is ~120 bytes and fires roughly once per sheets
+    /// read, so a full generation is on the order of 9000 reads — long enough that a failure and
+    /// the reads around it stay in the same file, small enough that a helper left running for weeks
+    /// cannot fill a disk.
+    private static let diagnosticsLogMaxBytes: UInt64 = 1 << 20
 
     /// office-polish review must-fix 1 — the observable the Show Formulas restore verifies against,
     /// and the reason the old `contains("=")` branch is gone.
@@ -2802,8 +2877,12 @@ final class LOKBridge: OfficeDocumentBridge {
     /// document with no formulas has nothing to show wrongly and no read that can return source —
     /// the blind case and the harmful case no longer overlap, which is exactly what was wrong with
     /// the range-scoped check this replaces. The one real gap left is a formula living OUTSIDE
-    /// `rect`: `formulaProbeRect` caps the probe (see there), so a very large sheet is covered only
-    /// near its origin.
+    /// `rect`. `formulaProbeRect` caps the probe at 30000 x 15000 twips, and **that is not "very
+    /// large sheet" territory — measured, at ~255 twips per row the height cap covers about 58
+    /// rows**, so "headers and labels on top, formulas below the fold" is an ORDINARY sheet the
+    /// probe cannot see past. That is why `restoreFormulaDisplayOnDedicatedThread` DETECTS the case
+    /// (an entry probe taken while the mode is still flipped) and reports it, on the wire and in the
+    /// log, instead of relying on this blind spot being rare.
     ///
     /// FNV-1a rather than `Hasher`: deterministic across processes, so a hash can be logged and
     /// compared between runs rather than being meaningful only inside one.
@@ -2817,10 +2896,20 @@ final class LOKBridge: OfficeDocumentBridge {
                 Int32(Self.formulaProbePixelSize), Int32(Self.formulaProbePixelSize),
                 rect.x, rect.y, rect.width, rect.height)
         }
+        // Word-at-a-time, not byte-at-a-time: the payload is 1 MiB and this runs up to three times
+        // per `formulas: true` read on the ONE dedicated LOK thread, where every millisecond also
+        // blocks every other open office document. Measured on the user's own workbook, warm: a
+        // byte-wise FNV put a `formulas: true` read at 123 ms median against 2 ms before this
+        // verification existed; the word-wise form below is what that number was re-measured
+        // against. Still FNV-1a, just consuming eight bytes per step — this hash is only ever
+        // compared with another hash produced by this same function, so its exact avalanche
+        // properties do not matter, only that it changes when the pixels change.
         var hash: UInt64 = 0xcbf2_9ce4_8422_2325
-        for byte in buffer {
-            hash ^= UInt64(byte)
-            hash = hash &* 0x0000_0100_0000_01B3
+        buffer.withUnsafeBytes { raw in
+            for word in raw.bindMemory(to: UInt64.self) {
+                hash ^= word
+                hash = hash &* 0x0000_0100_0000_01B3
+            }
         }
         return hash
     }
@@ -2843,6 +2932,20 @@ final class LOKBridge: OfficeDocumentBridge {
         let clampedWidth = min(max(width, 1), Self.formulaProbeMaxTwips.width)
         let clampedHeight = min(max(height, 1), Self.formulaProbeMaxTwips.height)
         return (0, 0, Int32(clampedWidth), Int32(clampedHeight))
+    }
+
+    /// office-polish final check, Critical — how a `formulas: true` read tells its caller that the
+    /// display-mode restore could not be VERIFIED. A reference box, not a return value, because the
+    /// restore runs in `selectionTextOnDedicatedThread`'s `defer` and therefore cannot return
+    /// anything; and a box rather than bridge-level state so two reads can never read each other's
+    /// verdict even if the threading model ever stops serialising them.
+    ///
+    /// `unverified` is the SAFE default only in the sense that it is set deliberately: it starts
+    /// `false` and is set `true` exactly where this bridge knows it could not check. It reaches the
+    /// model, through `sheetsReadOk`, because a model handed formula SOURCE as if it were a value is
+    /// the actual defect — a model told "unverified" can simply read again.
+    final class FormulaRestoreOutcome {
+        var unverified = false
     }
 
     private static let formulaProbePixelSize = 512
@@ -3079,7 +3182,7 @@ final class LOKBridge: OfficeDocumentBridge {
     /// an async race, not a closed one: a genuinely still-queued `GoToCell` can still land later,
     /// against whatever view a SUBSEQUENT, unrelated LOK call on this thread makes current next.
     /// Disclosed, not solved — see task-3-report.md.
-    private func sheetsReadOnDedicatedThread(docId: String, sheet: String, range: String, formulas: Bool) throws -> [[String]] {
+    private func sheetsReadOnDedicatedThread(docId: String, sheet: String, range: String, formulas: Bool) throws -> (rows: [[String]], displayRestoreVerified: Bool) {
         guard let doc = documents[docId] else { throw SaveError.docNotOpen(docId) }
         guard doc.kind == .spreadsheet else { throw SaveError.notSpreadsheet(docId: docId, kind: doc.kind) }
         doc.handle.pointee.pClass.pointee.setView?(doc.handle, doc.viewId)
@@ -3093,8 +3196,10 @@ final class LOKBridge: OfficeDocumentBridge {
         doc.handle.pointee.pClass.pointee.setView?(doc.handle, agentViewId)
         doc.handle.pointee.pClass.pointee.setPart?(doc.handle, Int32(part))
 
-        let text = selectionTextOnDedicatedThread(doc, docId: docId, viewId: agentViewId, part: part, range: range, formulas: formulas)
-        return parseTSVGrid(text)
+        let outcome = FormulaRestoreOutcome()
+        let text = selectionTextOnDedicatedThread(doc, docId: docId, viewId: agentViewId, part: part,
+                                                  range: range, formulas: formulas, restoreOutcome: outcome)
+        return (parseTSVGrid(text), !outcome.unverified)
     }
 
     // MARK: - office-agent-tools T4: sheets write verbs
