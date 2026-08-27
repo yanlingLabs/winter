@@ -145,6 +145,19 @@ static void pump(LibreOfficeKitDocument *doc, int part) {
         doc->pClass->paintPartTile(doc, buf, part, 0, 64, 64, 0, 0, 3000, 3000);
 }
 
+/* `getCommandValues(".uno:UndoCount")` -> a bare decimal scalar (office-formatting research §6.5:
+   `getUndoOrRedoCount`, init.cxx, handled BEFORE the supportsCommand gate so it is reachable for
+   every document type). -1 means "this engine could not tell me", which a caller must never read as
+   "zero actions" — the difference between those two is the whole point of the check. */
+static int undo_count(LibreOfficeKitDocument *doc) {
+    char *raw = doc->pClass->getCommandValues(doc, ".uno:UndoCount");
+    if (!raw) return -1;
+    int value = -1;
+    if (raw[0] >= '0' && raw[0] <= '9') value = atoi(raw);
+    free(raw);
+    return value;
+}
+
 static void uno(LibreOfficeKitDocument *doc, const char *cmd, const char *args) {
     doc->pClass->postUnoCommand(doc, cmd, args, true);
 }
@@ -692,6 +705,38 @@ int main(int argc, char **argv) {
      *                                              needs re-deriving.
      * Run the two hazard arms under an external timeout — a wedge is a hang, and the whole
      * question is whether it hangs. */
+    /* office-authoring — THE CONTAINED CURE for the insert race, as an experiment.
+     *
+     * The race is "saveAs runs before the async dispatch has executed." The global fix (registering
+     * a callback on the agent view, which makes dispatches SYNCHRON) works but regresses Impress.
+     * This is the other shape: dispatch ONCE, then WAIT for it to land before saving.
+     *
+     * ⚠️ It is a WAIT, not a retry. Re-dispatching `.uno:InsertGraphic` on a late-landing first
+     * attempt would insert the image TWICE — the non-idempotent-write hazard this repo already
+     * carries as a hard rule for timed-out office writes. Nothing here re-dispatches.
+     *
+     * The signal is `getCommandValues(".uno:UndoCount")`, which the formatting research established
+     * returns a bare decimal scalar and is reachable for every document type. A +1 delta proves a
+     * mutation was RECORDED — it cannot say what was recorded, which is why the saved-bytes check
+     * still decides. */
+    } else if (strcmp(op, "insert-graphic-wait") == 0) {
+        if (argc < 8) { fprintf(stderr, "needs <image_path> <out_path> <format_ext>\n"); return 2; }
+        char *img_url = file_url(argv[5]);
+        char args[2048];
+        snprintf(args, sizeof args, "{\"FileName\":{\"type\":\"string\",\"value\":\"%s\"}}", img_url);
+        int before = undo_count(doc);
+        printf("UNDOCOUNT_BEFORE: %d\n", before);
+        uno(doc, ".uno:InsertGraphic", args);
+        int landed = 0, i;
+        for (i = 0; i < 40; i++) {
+            pump(doc, 0);
+            int now = undo_count(doc);
+            if (before >= 0 && now > before) { landed = 1; break; }
+        }
+        printf("UNDOCOUNT_AFTER: %d  waited=%d  landed=%d\n", undo_count(doc), i, landed);
+        free(img_url);
+        rc = save_as(doc, argv[6], argv[7]);
+
     } else if (strcmp(op, "insert-graphic") == 0 || strcmp(op, "insert-graphic-badarg") == 0) {
         if (argc < 8) { fprintf(stderr, "needs <image_path> <out_path> <format_ext>\n"); return 2; }
         char *img_url = file_url(argv[5]);
