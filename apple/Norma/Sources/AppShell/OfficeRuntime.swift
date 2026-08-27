@@ -3472,10 +3472,28 @@ final class OfficeRuntime: ObservableObject {
             // in-flight marker from wedging a placeholder forever.
             tileStore.evictEverything()
             cursorStore.evictEverything()
+            // office-authoring review MINOR-5 — create permissions die with the helper too.
+            //
+            // This is the hole the "bound the lifetime" commit MISSED, and it needed its own line
+            // because `createOnOpenPaths` is deliberately NOT reducer state: `.helperDied` replaces
+            // `state` with a fresh `OfficeRuntimeState()`, which sweeps every reducer field and
+            // none of this one. And `close` does not cover it either — on a helper death mid-open,
+            // `OfficeAgentBroker.awaitOpen` throws from its death-watch BEFORE the broker's rule-2
+            // `defer` is installed, so nothing ever calls `close(path)` for that path.
+            //
+            // Left behind, the entry is not inert: a later ORDINARY `open(path)` — with
+            // `createIfMissing` defaulting to `false` — for the same still-missing path reaches
+            // `openAndDispatch`'s `createOnOpenPaths.remove(path) != nil`, which does not care that
+            // THIS caller asked for `false`, and mints a blank document for it. The disk re-check
+            // cannot help: the file is still missing, which is exactly the condition that makes the
+            // stale permission fire.
+            createOnOpenPaths.removeAll()
             perform(dispatch(.helperDied))
         case .helperUnavailable:
             tileStore.evictEverything()
             cursorStore.evictEverything()
+            // Same reasoning as `.helperDied` above — this arm also resets the whole runtime.
+            createOnOpenPaths.removeAll()
             perform(dispatch(.helperUnavailable))
         }
     }

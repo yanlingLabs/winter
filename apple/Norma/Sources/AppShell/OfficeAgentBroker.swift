@@ -233,6 +233,10 @@ final class OfficeAgentBroker {
         let runtime: OfficeRuntime
         let docId: String
         let adopted: Bool
+        // office-authoring review IMPORTANT-1 — whether THIS call brought the document into
+        // existence. Set only on the mint branch below, and surfaced in the result at rule 4's own
+        // success return. See that site for why the answer has to say so.
+        var created = false
         if let existing = existingRuntime,
            let entry = existing.stateSnapshot.documents[resolvedPath] {
             runtime = existing
@@ -330,8 +334,8 @@ final class OfficeAgentBroker {
                 throw OfficeAgentBrokerError.hostGone
             }
             runtime = opened
-            docId = try await awaitOpen(opened, path: resolvedPath,
-                                        createIfMissing: !fileExists && access == .write)
+            created = !fileExists && access == .write
+            docId = try await awaitOpen(opened, path: resolvedPath, createIfMissing: created)
             adopted = false
         }
 
@@ -461,7 +465,30 @@ final class OfficeAgentBroker {
             // above can close the document (a `defer` fires at the function's actual exit, after
             // every statement in its body, including this `await`).
             await drainDirty(runtime, path: resolvedPath)
-            return result
+            // office-authoring review IMPORTANT-1 — **a verb that CREATED the document says so.**
+            //
+            // The scenario this exists for is a misspelled path, which is a thing agents actually
+            // produce: it means `report.docx`, types `reprot.docx`, and calls `replace`. Create-on-
+            // write mints the file, rule 4 above saves it unconditionally, and a zero-match replace
+            // is a perfectly ordinary success — so without this the answer reads *"nothing to
+            // replace in reprot.docx — "foo" does not appear in it"*, which tells the agent the
+            // document exists and simply lacks the string, and leaves a stray empty file in the
+            // user's working directory. **Before create-on-write that call failed loudly.**
+            // Reproduced live before it was fixed, not inferred
+            // (`testLiveAWriteThatCreatesTheDocumentSaysSoInsteadOfImplyingItAlreadyExisted`).
+            //
+            // Appended HERE rather than in each verb's own formatter, deliberately: this is the one
+            // place every office write verb of every tool family returns through, so no formatter
+            // can forget it and a verb added later inherits it. The alternative — threading a
+            // `created` flag into the `action` closure — would have changed ~20 call sites and put
+            // the obligation on each of them.
+            //
+            // Not on the READ path by construction: reads return at the `guard access == .write`
+            // above and can never create (the broker refuses a read on a missing path outright).
+            guard created else { return result }
+            return result + " (\(((resolvedPath as NSString).lastPathComponent)) did not exist, so "
+                + "it was created as a new, empty document first — check the path if you meant to "
+                + "edit a document that already exists.)"
         case .failed(let reason):
             // Dirty is held `true` here too (`OfficeRuntime`'s own `saveFailedPendingSave`), but no
             // drain is possible — LOK's own `ModifiedStatus=false` is never coming for a save that

@@ -1247,4 +1247,52 @@ final class OfficeDocsCommandTests: XCTestCase {
                        "nothing may be created outside the working directories")
     }
 
+
+    /// ⛔ **IMPORTANT-1 (review): a MISSPELLED path must not create a blank document and report
+    /// success as though the document had always been there.**
+    ///
+    /// The scenario is the one an agent actually produces: it means `report.docx`, types
+    /// `reprot.docx`, and calls `replace`. Create-on-write mints the file, rule 4 saves it
+    /// unconditionally, and a zero-match replace is `ok: true` — so the agent is told the document
+    /// exists and simply lacks the string, and the user gets a stray empty file they never asked
+    /// for. **Before create-on-write this failed loudly**, so the convenience feature turned a
+    /// useful error into a silent wrong answer.
+    ///
+    /// The fix is not to refuse — a write to a missing path creating it IS the ruling — it is that
+    /// the answer must SAY SO. This drill pins the saying-so, on the verb whose own result sentence
+    /// is most misleading when it does not.
+    func testLiveAWriteThatCreatesTheDocumentSaysSoInsteadOfImplyingItAlreadyExisted() async throws {
+        let (workdir, host) = try liveHostOverAnEmptyDirectory()
+        await host.directory.refresh()
+        // The misspelling, spelled out: the agent meant `report.docx`.
+        let path = workdir.appendingPathComponent("reprot.docx").path
+        let result = await send(command("office.docs.replace",
+                                        args: ["path": path, "find": "foo", "replaceWith": "bar"],
+                                        sessionId: "S1", commandId: "pcmd_typo_replace"), through: host)
+        let text = result.result ?? ""
+        // The file really is created — that is the ruling, and this drill is not arguing with it.
+        XCTAssertTrue(FileManager.default.fileExists(atPath: path),
+                      "setup: create-on-write really does mint the file — this drill is about what "
+                        + "the ANSWER says, not about refusing: \(result)")
+        // The whole point: the answer must disclose it.
+        XCTAssertTrue(text.lowercased().contains("created") || text.lowercased().contains("did not exist"),
+                      "a verb that CREATED the document must say so — otherwise a typo'd path reads "
+                        + "as \"the document exists and lacks your text\" and leaves a stray file "
+                        + "behind: \(result)")
+    }
+
+    /// The other half of the same contract, and the control that stops the fix from becoming a lie
+    /// in the opposite direction: a write to a document that ALREADY EXISTS must NOT claim to have
+    /// created anything.
+    func testLiveAWriteToAnExistingDocumentDoesNotClaimToHaveCreatedIt() async throws {
+        let (path, host, _) = try await openLive("two-page.odt", as: "already-here.odt")
+        let result = await send(command("office.docs.replace",
+                                        args: ["path": path, "find": "NORMA GATE", "replaceWith": "NORMA GATEWAY"],
+                                        sessionId: "S1", commandId: "pcmd_existing_replace"), through: host)
+        XCTAssertTrue(result.ok, "\(result)")
+        let text = (result.result ?? "").lowercased()
+        XCTAssertFalse(text.contains("created") || text.contains("did not exist"),
+                       "an existing document must not be reported as created: \(result)")
+    }
+
 }
