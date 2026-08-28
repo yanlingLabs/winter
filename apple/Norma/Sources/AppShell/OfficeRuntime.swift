@@ -3409,12 +3409,21 @@ final class OfficeRuntime: ObservableObject {
 
     /// Office Stage B Task 4 — **the other half of "a real edit reaches the screen," alongside
     /// `postKeyEvent`/`postMouseEvent` themselves.** `tileStore.invalidate` (wired from
-    /// `ShellSessionHost.wireOfficeTileCallbacks`'s `onInvalidated`) only EVICTS — it has no wire
-    /// access of its own to ask for a replacement, by design (the store's own header: it is a pure
-    /// pixel pool, not a driver). Without this door, an edit on a STATIC viewport (the exact typing
-    /// scenario — nothing else re-subscribes) leaves the canvas showing the placeholder tone
-    /// forever: `performSubscribe` only fires from a scroll/zoom/part-switch/discrete action, never
-    /// from a push arriving on a viewport that has not moved.
+    /// `ShellSessionHost.wireOfficeTileCallbacks`'s `onInvalidated`) only FLAGS the affected keys as
+    /// owing a repaint — it has no wire access of its own to ask for the replacement, by design (the
+    /// store's own header: it is a pure pixel pool, not a driver). Without this door, an edit on a
+    /// STATIC viewport (the exact typing scenario — nothing else re-subscribes) leaves the canvas
+    /// showing the PREVIOUS frame forever: `performSubscribe` only fires from a
+    /// scroll/zoom/part-switch/discrete action, never from a push arriving on a viewport that has
+    /// not moved.
+    ///
+    /// **office-responsive Job 2 changed both halves of that sentence and it is corrected here
+    /// rather than left as prose that contradicts the code.** It used to read "only EVICTS" and
+    /// "leaves the canvas showing the placeholder tone forever" — accurate until the store started
+    /// keeping an invalidated tile's pixels. The consequence of missing this door is now a
+    /// permanently STALE canvas rather than a permanently blank one, which is worse, not better:
+    /// a blank is obviously nothing, a stale tile looks like content. This door matters more after
+    /// Job 2, not less.
     ///
     /// Same shape as `prefetchTilesChunk` (bypasses `dispatch`/`perform` — an invalidation-driven
     /// re-fetch touches no reducer state, the identical reasoning that method's own header gives)
