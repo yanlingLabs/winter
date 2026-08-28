@@ -1439,32 +1439,45 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost, NSTextInputC
     /// whatever scroll/zoom eventually brings it back into view) reads the store fresh regardless.
     ///
     /// **Office Stage B Task 4 — also the door that makes a real edit's invalidation actually
-    /// REPAINT, not merely go blank.** `tilesArrived` fires for BOTH a fresh arrival (the store now
-    /// has pixels — `applyContents` below finds them) and an eviction (`OfficeTileStore.invalidate`
-    /// removed the entry — `applyContents` finds nothing and paints the placeholder tone). On a
-    /// STATIC viewport (the typing scenario: nothing scrolled, so `performSubscribe` never fires
-    /// again on its own), an evicted-but-still-visible key would otherwise sit at the placeholder
-    /// tone forever — nothing else in this file's own trigger list (mount/setActivePart/zoomStep/
-    /// the scroll throttle) covers "a push arrived for a key already on screen." Every key this
-    /// loop finds STILL uncached after `applyContents` (i.e. evicted, not filled) is collected and
-    /// handed to `OfficeRuntime.refetchInvalidatedTiles` — that call's own dedup
+    /// REPAINT.** `tilesArrived` fires for BOTH a fresh arrival (the store now has new pixels —
+    /// `applyContents` below picks them up) and an invalidation. On a STATIC viewport (the typing
+    /// scenario: nothing scrolled, so `performSubscribe` never fires again on its own), an
+    /// invalidated-but-still-visible key would otherwise never be re-asked for — nothing else in
+    /// this file's own trigger list (mount/setActivePart/zoomStep/the scroll throttle) covers "a
+    /// push arrived for a key already on screen." Every key this loop finds still owing a paint is
+    /// collected and handed to `OfficeRuntime.refetchInvalidatedTiles` — that call's own dedup
     /// (`OfficeTileStore.keysNeedingRequest`) makes this safe to call unconditionally, including for
     /// the ordinary "genuinely fresh pixels arrived" case, where the set is simply empty and the
     /// `Task` below does nothing.
+    ///
+    /// **office-responsive Job 2 changed what an invalidation LOOKS like here, and this comment is
+    /// updated with it rather than left describing the old shape.** It used to say the invalidation
+    /// arm was "an eviction — `applyContents` finds nothing and paints the placeholder tone", and
+    /// that WAS the mechanism: half the visible canvas went to the placeholder on every keystroke
+    /// for the length of a paint round trip. The store now keeps the pixels and flags them stale,
+    /// so `applyContents` re-draws the last good frame and nothing blanks; the only thing this loop
+    /// still has to do is notice the key owes a paint and ask for one.
     private func handleTilesArrived(_ keys: Set<TileKey>) {
         let placeholder = resolvedPlaceholderColor()
-        var stillUncachedVisibleKeys: [TileKey] = []
+        var keysStillOwedAPaint: [TileKey] = []
         for key in keys {
             guard let tileLayer = tileLayers[key] else { continue }
             applyContents(to: tileLayer, key: key, placeholder: placeholder)
-            if runtime.tileStore.tile(docId: docId, key: key) == nil {
-                stillUncachedVisibleKeys.append(key)
+            // **office-responsive Job 2 — `needsFreshPaint`, NOT `tile(...) == nil`.** After the
+            // store started KEEPING an invalidated tile's pixels and flagging them stale, "is
+            // there anything cached" stopped meaning "does this owe a repaint": an invalidated
+            // key now answers YES to the first question and still owes the second. Asking the old
+            // question here would collect nothing, re-ask nothing, and leave the stale frame on
+            // screen permanently — the exact silent-wrong-answer failure the store's own
+            // `needsFreshPaint` header warns about. This is one of its only two call sites.
+            if runtime.tileStore.needsFreshPaint(docId: docId, key: key) {
+                keysStillOwedAPaint.append(key)
             }
         }
-        guard !stillUncachedVisibleKeys.isEmpty else { return }
+        guard !keysStillOwedAPaint.isEmpty else { return }
         Task { [weak self] in
             guard let self else { return }
-            await self.runtime.refetchInvalidatedTiles(path: self.path, keys: stillUncachedVisibleKeys)
+            await self.runtime.refetchInvalidatedTiles(path: self.path, keys: keysStillOwedAPaint)
         }
     }
 

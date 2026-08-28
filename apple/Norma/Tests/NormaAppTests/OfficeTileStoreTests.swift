@@ -170,13 +170,117 @@ final class OfficeTileStoreTests: XCTestCase {
 
     // MARK: - Invalidation
 
-    func testInvalidateEvictsTheMatchingEntriesAndLeavesOthersAlone() {
+    /// **office-responsive Job 2 — this test used to assert the DEFECT.** It was
+    /// `testInvalidateEvictsTheMatchingEntriesAndLeavesOthersAlone` and its first assertion was
+    /// `XCTAssertNil(store.tile(docId: "d1", key: key(0, 0)))` — the eviction that made every
+    /// keystroke blank half the visible canvas. Inverted deliberately: the pixels must SURVIVE an
+    /// invalidation, flagged as owing a repaint.
+    func testInvalidateKeepsTheMatchingEntriesPixelsAndOnlyFlagsThemAsOwingAPaint() {
         let store = OfficeTileStore()
         store.ingest(docId: "d1", key: key(0, 0), generation: 0, pixels: pixels(1))
         store.ingest(docId: "d1", key: key(1, 0), generation: 0, pixels: pixels(2))
+
         store.invalidate(docId: "d1", keys: [key(0, 0)])
-        XCTAssertNil(store.tile(docId: "d1", key: key(0, 0)))
-        XCTAssertNotNil(store.tile(docId: "d1", key: key(1, 0)))
+
+        XCTAssertEqual(store.tile(docId: "d1", key: key(0, 0))?.pixels, pixels(1),
+                       "the last good frame must stay on screen — evicting it here IS the "
+                        + "per-keystroke blank the user reported")
+        XCTAssertTrue(store.needsFreshPaint(docId: "d1", key: key(0, 0)),
+                      "…but it must still be known to owe a repaint, or nothing ever asks for one "
+                       + "and the stale frame becomes permanent")
+        // Control: an untouched key is neither disturbed nor spuriously marked.
+        XCTAssertEqual(store.tile(docId: "d1", key: key(1, 0))?.pixels, pixels(2))
+        XCTAssertFalse(store.needsFreshPaint(docId: "d1", key: key(1, 0)),
+                       "control: invalidating one key must not make an unrelated one ask for a paint")
+    }
+
+    /// The other half of the contract: a key that owes a paint is asked for exactly like a key that
+    /// has none. Without this, `keysNeedingRequest` would see a cached entry, exclude it, and the
+    /// stale pixels would sit there forever with nothing scheduled to correct them.
+    func testAStaleEntryIsRequestedAgainExactlyLikeAMissingOne() {
+        let store = OfficeTileStore()
+        store.ingest(docId: "d1", key: key(0, 0), generation: 0, pixels: pixels(1))
+        XCTAssertEqual(store.keysNeedingRequest(docId: "d1", candidates: [key(0, 0)]), [],
+                       "setup: a fresh cached key is not worth asking for")
+
+        store.invalidate(docId: "d1", keys: [key(0, 0)])
+
+        XCTAssertEqual(store.keysNeedingRequest(docId: "d1", candidates: [key(0, 0)]), [key(0, 0)])
+    }
+
+    /// The replacement lands: pixels swapped, flag cleared, nothing left owing.
+    func testAFreshArrivalReplacesStalePixelsAndClearsTheFlag() {
+        let store = OfficeTileStore()
+        store.ingest(docId: "d1", key: key(0, 0), generation: 0, pixels: pixels(1))
+        store.invalidate(docId: "d1", keys: [key(0, 0)])
+        store.markRequested(docId: "d1", keys: [key(0, 0)])
+
+        // The helper bumps the generation on every invalidation (`TileCache.invalidate`), so the
+        // replacement always arrives with a strictly greater one.
+        XCTAssertTrue(store.ingest(docId: "d1", key: key(0, 0), generation: 1, pixels: pixels(7)))
+
+        XCTAssertEqual(store.tile(docId: "d1", key: key(0, 0))?.pixels, pixels(7))
+        XCTAssertFalse(store.needsFreshPaint(docId: "d1", key: key(0, 0)))
+        XCTAssertEqual(store.keysNeedingRequest(docId: "d1", candidates: [key(0, 0)]), [])
+    }
+
+    /// **The staleness BOUND.** A refresh that resolves as a failure must not leave known-stale
+    /// pixels on screen indefinitely — that is a silent wrong answer, strictly worse than the blank
+    /// this whole change removed, because a blank is obviously nothing while a stale tile looks like
+    /// content. It drops to the placeholder instead: exactly the pre-change behaviour, for exactly
+    /// the case where there is nothing better to show.
+    func testAFailedRefreshOfAStaleTileDropsItRatherThanLeavingALieOnScreen() {
+        let store = OfficeTileStore()
+        store.ingest(docId: "d1", key: key(0, 0), generation: 0, pixels: pixels(1))
+        store.invalidate(docId: "d1", keys: [key(0, 0)])
+        store.markRequested(docId: "d1", keys: [key(0, 0)])
+        XCTAssertNotNil(store.tile(docId: "d1", key: key(0, 0)), "setup: the stale pixels are on screen")
+
+        store.markFailed(docId: "d1", key: key(0, 0))
+
+        XCTAssertNil(store.tile(docId: "d1", key: key(0, 0)),
+                     "a refresh that will never arrive must not leave stale pixels claiming to be "
+                      + "the document")
+        XCTAssertEqual(store.lruOrderForTesting.filter { $0.tileKey == key(0, 0) }.count, 0,
+                       "and the LRU record goes with it, or the pool leaks a slot per failure")
+    }
+
+    /// **Control for the bound**: an ordinary failure on a tile that is NOT stale (a bad key, a
+    /// transient LOK error — nothing to do with an invalidation) must leave the good pixels exactly
+    /// where they are. Without this arm, the test above would pass on a `markFailed` that simply
+    /// dropped everything it touched.
+    func testAFailedRequestForATileThatIsNotStaleLeavesItsPixelsAlone() {
+        let store = OfficeTileStore()
+        store.ingest(docId: "d1", key: key(0, 0), generation: 0, pixels: pixels(1))
+        store.markRequested(docId: "d1", keys: [key(0, 0)])
+
+        store.markFailed(docId: "d1", key: key(0, 0))
+
+        XCTAssertEqual(store.tile(docId: "d1", key: key(0, 0))?.pixels, pixels(1))
+        XCTAssertFalse(store.needsFreshPaint(docId: "d1", key: key(0, 0)))
+    }
+
+    /// **The document-identity guarantee, pinned rather than argued.** Staleness must never survive
+    /// a change of what the document IS — a reload mints a fresh docId and `evictAll`s the old one
+    /// synchronously before the reopen starts, so a stale tile can never be shown against a
+    /// document it did not come from. `evictAll`/`evictEverything` therefore stay HARD evictions;
+    /// only `invalidate` became a flag.
+    func testEvictAllStillHardEvictsSoStalenessCannotOutliveADocumentIdentityChange() {
+        let store = OfficeTileStore()
+        store.ingest(docId: "d1", key: key(0, 0), generation: 0, pixels: pixels(1))
+        store.invalidate(docId: "d1", keys: [key(0, 0)])
+        XCTAssertNotNil(store.tile(docId: "d1", key: key(0, 0)), "setup: stale pixels are being held")
+
+        store.evictAll(docId: "d1")
+
+        XCTAssertNil(store.tile(docId: "d1", key: key(0, 0)),
+                     "a reload/close must drop the pixels outright — holding a stale tile across a "
+                      + "document identity change would put another document's content on screen")
+
+        store.ingest(docId: "d2", key: key(0, 0), generation: 0, pixels: pixels(2))
+        store.invalidate(docId: "d2", keys: [key(0, 0)])
+        store.evictEverything()
+        XCTAssertNil(store.tile(docId: "d2", key: key(0, 0)), "same for the helper-died sweep")
     }
 
     func testInvalidateOfAnUnknownKeyIsAHarmlessNoOp() {
@@ -336,7 +440,11 @@ final class OfficeTileStoreTests: XCTestCase {
         store.invalidate(docId: "d1", keys: [key(0, 0)])
 
         XCTAssertEqual(store.invalidatedWhileInFlightCountForTesting, 0)
-        XCTAssertNil(store.tile(docId: "d1", key: key(0, 0)), "still evicted, unrelated to the one-shot set")
+        // office-responsive Job 2 — this assertion used to be `XCTAssertNil(store.tile(...))`
+        // ("still evicted"). The pixels are kept now; what this test is actually about is the
+        // one-shot set, which is unaffected either way.
+        XCTAssertTrue(store.needsFreshPaint(docId: "d1", key: key(0, 0)),
+                      "still owes a repaint, unrelated to the one-shot set")
     }
 
     /// office-plumbing Task 8 (F5, the reload story): the OTHER half of the store header's
