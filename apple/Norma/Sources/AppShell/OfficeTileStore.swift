@@ -114,6 +114,35 @@ import Foundation
 /// LRU cap like anything else here, never read, never confused for the new document's own entries
 /// (different `docId` in the key). `testALateArrivalForAClosedDocIdCannotContaminateAFreshDocIds
 /// Entries` is the proof.
+///
+/// # office-responsive Job 2 — stale-while-revalidate
+///
+/// **An `invalidate` no longer removes an entry; it flags it `isStale` and leaves the pixels
+/// alone.** Everything above about `inFlight`, `invalidatedWhileInFlight` and the one-shot marker
+/// is unchanged and still load-bearing — the only thing that changed is that a key which owes a
+/// repaint keeps showing its last good frame while that repaint is fetched, instead of showing
+/// nothing.
+///
+/// Three properties make that safe, and each is a deliberate choice rather than a consequence:
+///
+/// 1. **"Has pixels" and "is current" became different questions, and every asker was swept.**
+///    `keysNeedingRequest` and `OfficeTileCanvasView.handleTilesArrived` both used to test
+///    `entries[k] == nil` / `tile(...) == nil` to decide whether to ask for a paint; both now go
+///    through `needsFreshPaint`. Missing that sweep would hold the stale pixels forever with
+///    nothing scheduled to correct them — silent, permanent, and worse than the blank it replaced,
+///    because a blank is obviously nothing while a stale tile looks like content.
+/// 2. **Staleness cannot outlive a document's identity, by construction rather than by a check.**
+///    `evictAll`/`evictEverything` stay HARD evictions, and every identity change funnels through
+///    one of them: a reload mints a fresh `docId` and `evictAll`s the old one synchronously before
+///    the new open starts (`OfficeRuntime.perform`'s `.reloadDocument`), a close `evictAll`s, and a
+///    dead helper `evictEverything`s. A part/slide/sheet switch needs nothing at all — `part` is
+///    part of the `TileKey`, so a stale tile for one part is never even looked up while another is
+///    on screen. Scrolling likewise: keys are position-addressed, so a stale tile can only ever be
+///    stale AT ITS OWN PLACE.
+/// 3. **Staleness is bounded by a RESOLUTION, not by a timer.** Refuse-never-ignore gives every
+///    request exactly one `onTile`/`onTileFailed`; `ingest` clears the flag, and `markFailed` drops
+///    a stale entry outright so a refresh that never succeeds degrades to the old placeholder
+///    rather than to a plausible lie. See `markFailed`'s own header.
 @MainActor
 final class OfficeTileStore {
     struct Key: Hashable {
@@ -124,6 +153,15 @@ final class OfficeTileStore {
     struct Entry {
         var generation: Int
         var pixels: Data
+        /// **office-responsive Job 2 — "these pixels are still on screen, but they are known to be
+        /// out of date".** Set by `invalidate` (which used to DELETE the entry outright), cleared
+        /// by the `ingest` that brings the replacement. It is the whole of stale-while-revalidate:
+        /// the canvas keeps drawing a stale entry, so an edit no longer blanks half the page for
+        /// the length of a paint round trip, while `keysNeedingRequest` treats it exactly like a
+        /// missing one so the replacement is still asked for.
+        ///
+        /// **`false` by default, so every construction site that predates this is unchanged.**
+        var isStale: Bool = false
     }
 
     /// office live-gate fix #3 — whole-document tile residency's own eligibility ceiling: the most
@@ -208,8 +246,35 @@ final class OfficeTileStore {
     func keysNeedingRequest(docId: String, candidates: [TileKey]) -> [TileKey] {
         candidates.filter { candidate in
             let k = Key(docId: docId, tileKey: candidate)
-            return entries[k] == nil && !inFlight.contains(k)
+            return needsFreshPaint(k) && !inFlight.contains(k)
         }
+    }
+
+    /// **office-responsive Job 2 — the predicate that replaced "is there an entry".** A stale entry
+    /// still has pixels (that is the point: the canvas keeps drawing them) but it owes a repaint
+    /// exactly as a missing one does. Every place that used to reason about a key by ASKING WHETHER
+    /// IT HAD PIXELS has to ask this instead, or the pixels are held forever and nothing re-asks —
+    /// which would be a silent, permanent wrong answer on screen, strictly worse than the blank it
+    /// replaced.
+    ///
+    /// The swept call sites, enumerated because "did you get them all" is the whole risk of this
+    /// change: `keysNeedingRequest` (right above — the one door every tile request goes through,
+    /// `OfficeRuntime.requestNeeded`), and `OfficeTileCanvasView.handleTilesArrived`'s refetch
+    /// collection. `OfficeHarness`'s drills 14/27/28 also ask it, to wait on an invalidation they
+    /// used to observe as the tile disappearing. Nothing else in `Sources/` decides anything from
+    /// "is there an entry": `applyContents` and the placeholder-at-draw instrument both WANT the
+    /// stale pixels (drawing them is the point), and `evictAll`/`evictEverything` are absolute.
+    ///
+    /// Deliberately does NOT consider `inFlight` — a caller that needs that asks
+    /// `keysNeedingRequest`, which layers it on. `handleTilesArrived` wants the un-layered question
+    /// because `refetchInvalidatedTiles` applies the in-flight filter itself, one call later.
+    func needsFreshPaint(docId: String, key: TileKey) -> Bool {
+        needsFreshPaint(Key(docId: docId, tileKey: key))
+    }
+
+    private func needsFreshPaint(_ k: Key) -> Bool {
+        guard let entry = entries[k] else { return true }
+        return entry.isStale
     }
 
     // MARK: - Test/debug visibility only
@@ -276,7 +341,17 @@ final class OfficeTileStore {
         }
         inFlight.remove(k)
         if let existing = entries[k], existing.generation > generation { return false }
-        entries[k] = Entry(generation: generation, pixels: pixels)
+        // office-responsive Job 2 — an accepted arrival is BY DEFINITION the fresh paint a stale
+        // entry was waiting for, so it replaces the pixels AND clears the flag. It cannot be a
+        // late pre-invalidation reply wearing fresh clothes: such a reply is always caught two
+        // lines above by `invalidatedWhileInFlight` (a reply only ever exists for a key
+        // `markRequested` put in `inFlight`, and `invalidate` marks exactly the keys that are in
+        // flight at the moment it runs), and, independently, the helper bumps the generation on
+        // every invalidation (`TileCache.invalidate`: `generations[key, default: 0] += 1`), so a
+        // post-invalidation paint always reports a strictly greater number than the stale pixels
+        // carry — while the `existing.generation > generation` guard right above already refuses
+        // anything that would regress what is on screen.
+        entries[k] = Entry(generation: generation, pixels: pixels, isStale: false)
         touch(k)
         evictIfNeeded()
         markDirty(docId: docId, key: key)
@@ -306,20 +381,64 @@ final class OfficeTileStore {
         let k = Key(docId: docId, tileKey: key)
         let wasMarked = invalidatedWhileInFlight.remove(k) != nil
         inFlight.remove(k)
-        if wasMarked { markDirty(docId: docId, key: key) }
+        // **office-responsive Job 2 — this is where staleness is BOUNDED, and the bound is a
+        // resolution rather than a timer.**
+        //
+        // The wire's refuse-never-ignore contract gives every sent request exactly one of
+        // `onTile`/`onTileFailed`, so a stale key's refresh always resolves: through `ingest`,
+        // which replaces the pixels and clears the flag, or through here. The one shape that would
+        // otherwise leave stale pixels on screen FOREVER is the failure path — a `.tileFailed` for
+        // a key nothing is scheduled to re-ask (an ordinary failure carries no
+        // `invalidatedWhileInFlight` marker, and this function deliberately does not signal for
+        // those; see the paragraph above about request storms).
+        //
+        // Before Job 2 that case left the tile BLANK forever, which is bad but honest. Holding
+        // known-stale pixels forever instead would be a silent wrong answer — content that looks
+        // current and is not. So a failed refresh of a STALE key drops the entry outright: the
+        // tile falls back to the placeholder tone, i.e. exactly the pre-Job-2 behaviour, for
+        // exactly the case where Job 2 has nothing better to offer. Degrading to the old, visibly
+        // empty answer is the correct direction; degrading to a plausible lie is not.
+        if entries[k]?.isStale == true {
+            entries.removeValue(forKey: k)
+            lruOrder.removeAll { $0 == k }
+            markDirty(docId: docId, key: key)
+        } else if wasMarked {
+            markDirty(docId: docId, key: key)
+        }
     }
 
-    /// Server-pushed invalidation (`OfficeHelperClient.onInvalidated`) — evict the matching entries
-    /// (their pixels are stale; the canvas returns to the placeholder tone until a fresh paint
-    /// arrives) and signal the change. First fires for real in Office Stage B Task 4 (a genuine
-    /// edit-triggered `INVALIDATE_TILES`) — the store's own header has the full account of what
-    /// changed here versus Stage A's honest, never-exercised implementation.
+    /// Server-pushed invalidation (`OfficeHelperClient.onInvalidated`) — **flag the matching entries
+    /// stale, keeping their pixels on screen, and signal the change.** First fires for real in
+    /// Office Stage B Task 4 (a genuine edit-triggered `INVALIDATE_TILES`) — the store's own header
+    /// has the full account of what changed here versus Stage A's honest, never-exercised
+    /// implementation.
+    ///
+    /// ⚠️ **office-responsive Job 2 — this used to EVICT, and the eviction was the defect.** This
+    /// doc comment previously read "evict the matching entries (their pixels are stale; the canvas
+    /// returns to the placeholder tone until a fresh paint arrives)", and that description was
+    /// accurate: LOK invalidates a full-text-width, one-line band on every keystroke, so roughly
+    /// half the visible canvas dropped to the placeholder tone on every keystroke, for the ~70-95 ms
+    /// a paint round trip takes. The pixels are kept now; see the body for the mechanism and
+    /// `markFailed` for how staleness is bounded.
     func invalidate(docId: String, keys: [TileKey]) {
         var changed: Set<TileKey> = []
         for key in keys {
             let k = Key(docId: docId, tileKey: key)
-            let hadEntry = entries.removeValue(forKey: k) != nil
-            if hadEntry { lruOrder.removeAll { $0 == k } }
+            // **office-responsive Job 2 — MARK, do not DELETE.** This line used to be
+            // `entries.removeValue(forKey: k)`, and that single removal is what made a keystroke
+            // blank half the visible canvas: the canvas repaints on this store's own signal, finds
+            // nothing cached, and paints the placeholder tone until a fresh paint round trip lands
+            // (measured at ~70-95 ms on a quiet machine — long enough to read as a flicker at
+            // typing speed, and the user's report was exactly "the page keeps refreshing as i
+            // write"). Keeping the pixels and flagging them stale means the canvas keeps showing
+            // the LAST GOOD frame while the replacement is fetched.
+            //
+            // The entry deliberately stays in `lruOrder` too — it is still real, displayed pixels
+            // occupying real memory, and the memory ceiling was never this eviction: it is
+            // `evictIfNeeded`'s `capacity` cap, which is unchanged. What used to be freed here is
+            // now freed there, a few tiles later.
+            let hadEntry = entries[k] != nil
+            if hadEntry { entries[k]?.isStale = true }
             // Office Stage B Task 4 (this type's own header has the full mechanism and the
             // liveness argument): a key currently in flight is marked `invalidatedWhileInFlight`
             // and DELIBERATELY left in `inFlight` — a second, ambiguous request for the same key

@@ -1605,29 +1605,41 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
     }
 
     /// **The invalidation proof, not assumed**: `onInvalidated`'s own wiring
-    /// (`ShellSessionHost.wireOfficeTileCallbacks`) only EVICTS the cached tile — a mounted
-    /// `OfficeTileCanvasView` is what normally calls `refetchInvalidatedTiles`/re-subscribes next;
-    /// this harness mounts no view, so it drives the same re-subscribe door drill 3 already proved
-    /// refills an evicted key (`subscribeTiles` never re-requests an already-cached key —
-    /// `OfficeTileStore.keysNeedingRequest`'s own filter — so asking again after a real eviction is a
-    /// genuine repaint request, not a cache-hit tautology).
+    /// (`ShellSessionHost.wireOfficeTileCallbacks`) only marks the cached tile as owing a repaint —
+    /// a mounted `OfficeTileCanvasView` is what normally calls `refetchInvalidatedTiles`/
+    /// re-subscribes next; this harness mounts no view, so it drives the same re-subscribe door
+    /// drill 3 already proved refills a key that owes a paint (`subscribeTiles` never re-requests a
+    /// key that is cached AND current — `OfficeTileStore.keysNeedingRequest`'s own filter — so
+    /// asking again after a real invalidation is a genuine repaint request, not a cache-hit
+    /// tautology).
+    ///
+    /// **office-responsive Job 2 changed the observable this waits on, and the change is the
+    /// point.** It used to wait for `tileStore.tile(...) == nil` — the invalidation EVICTED the
+    /// tile. The store now keeps the pixels and flags them, so absence would never arrive and this
+    /// drill would time out; it waits on `needsFreshPaint` instead, which is the same event under
+    /// its new name. The proof that a REAL repaint happened is unchanged and is the byte-comparison
+    /// below, not the wait.
     private func performFreshTile14() async -> (Bool, String) {
         guard !t14DocId.isEmpty, !t14BaselineHash.isEmpty else { return (false, "14.open/14.coldTile must run first") }
         let path = fixturesScratchDir.appendingPathComponent("t10-typing-drill.odt").path
         let key = TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0)
         let viewport = officeViewportTwips(scrollOrigin: .zero, visibleSize: CGSize(width: 512, height: 512), zoomPPT: 1000)
-        let evicted = await waitUntil(timeout: 15) { self.runtime.tileStore.tile(docId: self.t14DocId, key: key) == nil }
-        guard evicted else { return (false, "the typed edit never invalidated (evicted) tile (0,0) — no repaint to prove") }
+        let invalidated = await waitUntil(timeout: 15) {
+            self.runtime.tileStore.needsFreshPaint(docId: self.t14DocId, key: key)
+        }
+        guard invalidated else { return (false, "the typed edit never invalidated tile (0,0) — no repaint to prove") }
         runtime.subscribeTiles(path: path, part: 0, zoomPPT: 1000, viewportTwips: viewport)
-        let filled = await waitUntil(timeout: 25) { self.runtime.tileStore.tile(docId: self.t14DocId, key: key) != nil }
+        let filled = await waitUntil(timeout: 25) {
+            !self.runtime.tileStore.needsFreshPaint(docId: self.t14DocId, key: key)
+        }
         guard filled, let entry = runtime.tileStore.tile(docId: t14DocId, key: key) else {
-            return (false, "the re-subscribe after eviction never produced a fresh tile (0,0)")
+            return (false, "the re-subscribe after the invalidation never produced a fresh tile (0,0)")
         }
         let freshHash = Self.sha256Hex(entry.pixels)
         guard freshHash != t14BaselineHash else {
             return (false, "the refreshed tile is BYTE-IDENTICAL to the pre-type baseline — not a real repaint")
         }
-        return (true, "typed edit evicted tile (0,0) (invalidation proven, not assumed); re-subscribing "
+        return (true, "typed edit invalidated tile (0,0) (proven, not assumed); re-subscribing "
                      + "produced a fresh, DIFFERENT hash: \(t14BaselineHash) -> \(freshHash)")
     }
 
@@ -2700,17 +2712,25 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
         let key = TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0)
         let viewport = officeViewportTwips(scrollOrigin: .zero, visibleSize: CGSize(width: 512, height: 512), zoomPPT: 1000)
         // Both halves, exactly as drill 14 does and for the same reason: `subscribeTiles` never
-        // re-requests a key the store still holds, so asking again WITHOUT a prior eviction would be
-        // a cache-hit tautology rather than a repaint.
-        let evicted = await waitUntil(timeout: 20) { self.runtime.tileStore.tile(docId: self.t27DocId, key: key) == nil }
-        guard evicted else {
+        // re-requests a key the store holds AND considers current, so asking again WITHOUT a prior
+        // invalidation would be a cache-hit tautology rather than a repaint.
+        //
+        // office-responsive Job 2 — waits on `needsFreshPaint`, not on the tile disappearing: an
+        // invalidation now flags the entry instead of evicting it, so absence would never arrive
+        // and this drill would time out on a repaint that did happen. Same event, new name.
+        let invalidated = await waitUntil(timeout: 20) {
+            self.runtime.tileStore.needsFreshPaint(docId: self.t27DocId, key: key)
+        }
+        guard invalidated else {
             t27Repainted = false
-            return (false, "the agent's write never invalidated (evicted) tile (0,0) of the OPEN "
+            return (false, "the agent's write never invalidated tile (0,0) of the OPEN "
                           + "document — there is no repaint to prove. 27.disk's classifier will name "
                           + "this branch if the bytes did change.")
         }
         runtime.subscribeTiles(path: t27Path, part: 0, zoomPPT: 1000, viewportTwips: viewport)
-        let filled = await waitUntil(timeout: 25) { self.runtime.tileStore.tile(docId: self.t27DocId, key: key) != nil }
+        let filled = await waitUntil(timeout: 25) {
+            !self.runtime.tileStore.needsFreshPaint(docId: self.t27DocId, key: key)
+        }
         guard filled, let entry = runtime.tileStore.tile(docId: t27DocId, key: key) else {
             t27Repainted = false
             return (false, "the re-subscribe after eviction never produced a fresh tile (0,0)")
@@ -2722,7 +2742,7 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
                           + "store evicted and refilled, but nothing on screen actually changed")
         }
         t27Repainted = true
-        return (true, "the OPEN tab's tile (0,0) was evicted (invalidation proven, not assumed) and a "
+        return (true, "the OPEN tab's tile (0,0) was invalidated (proven, not assumed) and a "
                      + "re-subscribe repainted it to a DIFFERENT hash: "
                      + "\(t27BaselineTileHash.prefix(16))… -> \(freshHash.prefix(16))…")
     }
@@ -2820,17 +2840,22 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
         guard !t28DocId.isEmpty, !t28BaselineTileHash.isEmpty else { return (false, "28.baseline must run first") }
         let key = TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0)
         let viewport = officeViewportTwips(scrollOrigin: .zero, visibleSize: CGSize(width: 512, height: 512), zoomPPT: 1000)
-        let evicted = await waitUntil(timeout: 20) { self.runtime.tileStore.tile(docId: self.t28DocId, key: key) == nil }
-        guard evicted else {
+        // office-responsive Job 2 — `needsFreshPaint`, not absence; see drill 27's own comment.
+        let invalidated = await waitUntil(timeout: 20) {
+            self.runtime.tileStore.needsFreshPaint(docId: self.t28DocId, key: key)
+        }
+        guard invalidated else {
             t28Repainted = false
-            return (false, "the agent's append never invalidated (evicted) tile (0,0) of the OPEN "
+            return (false, "the agent's append never invalidated tile (0,0) of the OPEN "
                           + "document — 28.disk's classifier will name this branch if the bytes changed")
         }
         runtime.subscribeTiles(path: t28Path, part: 0, zoomPPT: 1000, viewportTwips: viewport)
-        let filled = await waitUntil(timeout: 25) { self.runtime.tileStore.tile(docId: self.t28DocId, key: key) != nil }
+        let filled = await waitUntil(timeout: 25) {
+            !self.runtime.tileStore.needsFreshPaint(docId: self.t28DocId, key: key)
+        }
         guard filled, let entry = runtime.tileStore.tile(docId: t28DocId, key: key) else {
             t28Repainted = false
-            return (false, "the re-subscribe after eviction never produced a fresh tile (0,0)")
+            return (false, "the re-subscribe after the invalidation never produced a fresh tile (0,0)")
         }
         let freshHash = Self.sha256Hex(entry.pixels)
         guard freshHash != t28BaselineTileHash else {
@@ -2838,7 +2863,7 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
             return (false, "the refreshed tile is BYTE-IDENTICAL to the pre-command baseline")
         }
         t28Repainted = true
-        return (true, "the OPEN tab's tile (0,0) was evicted and repainted to a DIFFERENT hash: "
+        return (true, "the OPEN tab's tile (0,0) was invalidated and repainted to a DIFFERENT hash: "
                      + "\(t28BaselineTileHash.prefix(16))… -> \(freshHash.prefix(16))…")
     }
 

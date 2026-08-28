@@ -5949,81 +5949,282 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// thing that would look like that — how many currently-laid-out tiles lose their pixels on a
     /// keystroke, and for how long they stay blank before fresh ones arrive.
     ///
-    /// **Why blanking happens at all**: `OfficeTileStore.invalidate` EVICTS an invalidated tile's
-    /// pixels ("their pixels are stale; the canvas returns to the placeholder tone until a fresh
-    /// paint arrives" — its own header), and `OfficeTileCanvasView.handleTilesArrived` then sets
-    /// `tileLayer.contents = nil` + the placeholder background for every evicted visible key before
-    /// asynchronously asking for replacements. So the blank IS the repaint, by design.
+    /// ⚠️ **office-responsive Job 2 INVERTED this test's central assertion, deliberately.** It used
+    /// to assert non-vacuity as `XCTAssertGreaterThan(plain.map(\.0).max() ?? 0, 0, "not one
+    /// keystroke blanked a single laid-out tile, so this instrument measured nothing")` — i.e. it
+    /// required the blank to happen, and it measured it at **2 of 4 laid-out tiles, ~50 ms, on every
+    /// single keystroke**. That blank was the defect. The assertion is now the opposite: **no tile
+    /// may EVER be blank, at any poll, during any keystroke.**
     ///
-    /// **The save arm is the only genuinely new ingredient.** Before `office-live-ux`, no save ever
-    /// fired on its own while a human typed (`autoSaveEnabled` was `false` in production, gating the
-    /// only path to `fireAutoSave`). `periodicSaveTick` now reaches it on a 120 s dirty-gated
-    /// backstop, and a save is a whole-container rewrite on the helper's ONE dedicated LOK thread —
-    /// every tile paint queues behind it. This drill types the same way twice, once with a save
-    /// forced into the middle, and prints both blank windows so the difference is a number.
+    /// **It asserts on the LAYER, not on the store, and that is the whole point.** The store is
+    /// bookkeeping; `CALayer.contents == nil` (with the placeholder tone behind it) is literally
+    /// what the user sees. A test that only checked the store could pass while the canvas still
+    /// blanked.
     ///
-    /// This is an INSTRUMENT, not a threshold test: the only hard assertions are non-vacuity (the
-    /// blanking mechanism really did fire, so the numbers are about something) and a very generous
-    /// ceiling that would only trip on a hang.
-    func testMeasureHowMuchOfTheCanvasBlanksPerKeystrokeWithAndWithoutASaveInFlight() async throws {
+    /// **And it asserts DURING, not after.** A rendering test that inspects only the final pixels
+    /// passes trivially — the settled frame was always correct, before and after this change; the
+    /// intermediate frame IS the defect. So the layer census is sampled every 5 ms from the moment
+    /// the key is posted until the replacement lands, and the assertion is on the PEAK over those
+    /// samples.
+    ///
+    /// **Two non-vacuity guards, because "nothing blanked" is exactly what a build that stopped
+    /// repainting altogether would also report.** Every keystroke must (1) advance at least one
+    /// tracked tile's generation — the helper bumps generations on invalidation, so this proves the
+    /// edit really reached LOK and a real repaint really came back — and (2) leave every tracked
+    /// tile holding pixels at the end. A build that dropped invalidation on the floor fails (1); a
+    /// build that never draws fails (2).
+    func testAKeystrokeNeverBlanksALaidOutTileWhileItsReplacementIsFetched() async throws {
         let live = try await openWriterCanvasForTypingDrill(name: "repaint-census")
         defer { live.view.unmount(); _ = live.host.teardownAllOfficeRuntimesAndStopHelper() }
 
         // Every key this 512x512 viewport can have laid out at zoom 1000 — probed, not assumed.
         let candidateKeys = (0..<4).flatMap { x in (0..<4).map { y in TileKey(part: 0, zoomPPT: 1000, tileX: x, tileY: y) } }
         func laidOutKeys() -> [TileKey] { candidateKeys.filter { live.view.tileLayerForTesting($0) != nil } }
-        func blankCount(_ keys: [TileKey]) -> Int {
+        /// What the USER sees: a laid-out tile whose layer is carrying no image is showing the
+        /// placeholder tone, i.e. it is blank on screen.
+        func blankLayerCount(_ keys: [TileKey]) -> Int {
+            keys.filter { live.view.tileLayerForTesting($0)?.contents == nil }.count
+        }
+        func storeBlankCount(_ keys: [TileKey]) -> Int {
             keys.filter { live.runtime.tileStore.tile(docId: live.docId, key: $0) == nil }.count
         }
+        func generations(_ keys: [TileKey]) -> [TileKey: Int] {
+            var out: [TileKey: Int] = [:]
+            for key in keys where live.runtime.tileStore.tile(docId: live.docId, key: key) != nil {
+                out[key] = live.runtime.tileStore.tile(docId: live.docId, key: key)!.generation
+            }
+            return out
+        }
 
-        let settledBaseline = await waitUntil(timeout: 30) { blankCount(laidOutKeys()) == 0 && !laidOutKeys().isEmpty }
-        XCTAssertTrue(settledBaseline, "baseline: every laid-out tile must have pixels before the "
+        let settledBaseline = await waitUntil(timeout: 30) {
+            !laidOutKeys().isEmpty && blankLayerCount(laidOutKeys()) == 0 && storeBlankCount(laidOutKeys()) == 0
+        }
+        XCTAssertTrue(settledBaseline, "baseline: every laid-out tile must be drawn before the "
                       + "census starts, or 'went blank' means nothing")
         let tracked = laidOutKeys()
-        NSLog("[office-typing] census tracks %d laid-out tiles", tracked.count)
+        NSLog("[office-responsive] blank census tracks %d laid-out tiles", tracked.count)
 
-        /// One keystroke, then poll until nothing laid out is blank again. Returns the peak number
-        /// of blank tiles seen and how long the blank lasted.
-        func typeOneAndMeasure(_ character: Character, keyCode: UInt16,
-                               forceSaveTick: Bool) async -> (peakBlank: Int, milliseconds: Int) {
+        /// One keystroke, sampled every 5 ms until the replacement lands. Returns the PEAK number of
+        /// blank layers seen at any sample, the peak number of store misses, how many tracked keys
+        /// advanced a generation, and how long the replacement took.
+        func typeOneAndCensus(_ character: Character, keyCode: UInt16,
+                              forceSaveTick: Bool) async -> (peakBlankLayers: Int, peakStoreMisses: Int,
+                                                             advanced: Int, milliseconds: Int) {
+            let before = generations(tracked)
             live.press(characters: String(character), keyCode: keyCode)
             if forceSaveTick { live.runtime.periodicSaveTickForTesting() }
             let started = Date()
-            var peak = 0
+            var peakBlankLayers = 0
+            var peakStoreMisses = 0
+            var advancedCount = 0
+            var lastAdvanceAt = started
+            var stableSince: Date?
             while Date().timeIntervalSince(started) < 30 {
-                let blank = blankCount(tracked)
-                peak = max(peak, blank)
-                if blank == 0 && peak > 0 { break }
-                if blank == 0 && Date().timeIntervalSince(started) > 1.5 { break } // nothing ever blanked
+                peakBlankLayers = max(peakBlankLayers, blankLayerCount(tracked))
+                peakStoreMisses = max(peakStoreMisses, storeBlankCount(tracked))
+                let now = generations(tracked)
+                let advanced = tracked.filter { key in
+                    guard let old = before[key], let fresh = now[key] else { return false }
+                    return fresh > old
+                }.count
+                if advanced != advancedCount {
+                    advancedCount = advanced
+                    lastAdvanceAt = Date()
+                    stableSince = nil
+                } else if advanced > 0 {
+                    if stableSince == nil { stableSince = Date() }
+                    if Date().timeIntervalSince(stableSince!) > 0.25 { break }
+                }
                 try? await Task.sleep(nanoseconds: 5_000_000)
             }
-            return (peak, Int(Date().timeIntervalSince(started) * 1000))
+            return (peakBlankLayers, peakStoreMisses, advancedCount,
+                    Int(lastAdvanceAt.timeIntervalSince(started) * 1000))
         }
 
-        // Arm 1 — plain typing, no save anywhere near it.
+        let codes: [Character: UInt16] = ["A": 0, "B": 11, "C": 8, "D": 2, "E": 14]
+        var plain: [(Int, Int, Int, Int)] = []
+        for character in "ABCDEA" {
+            plain.append(await typeOneAndCensus(character, keyCode: codes[character]!, forceSaveTick: false))
+        }
+        // The same keystrokes with the production 120 s backstop's own tick forced in after each —
+        // `periodicSaveTickForTesting` IS `periodicSaveTick`, not a stand-in.
+        var withSave: [(Int, Int, Int, Int)] = []
+        for character in "BCDEAB" {
+            withSave.append(await typeOneAndCensus(character, keyCode: codes[character]!, forceSaveTick: true))
+        }
+
+        NSLog("[office-responsive] BLANK PLAIN     peakBlankLayers/peakStoreMiss/advanced/ms: %@",
+              plain.map { "\($0.0)/\($0.1)/\($0.2)/\($0.3)" }.joined(separator: " "))
+        NSLog("[office-responsive] BLANK WITH SAVE peakBlankLayers/peakStoreMiss/advanced/ms: %@",
+              withSave.map { "\($0.0)/\($0.1)/\($0.2)/\($0.3)" }.joined(separator: " "))
+
+        // (1) non-vacuity: every keystroke really reached LOK and really came back repainted.
+        for (index, sample) in (plain + withSave).enumerated() {
+            XCTAssertGreaterThan(sample.2, 0,
+                                 "non-vacuity, keystroke \(index): no tracked tile's generation "
+                                  + "advanced, so this keystroke never reached LOK or never produced "
+                                  + "a repaint — 'nothing blanked' would be true of a dead pipeline too")
+        }
+        // (2) the fix itself, asserted on the peak DURING the window, not on where it settled.
+        XCTAssertEqual(plain.map(\.0).max() ?? -1, 0,
+                       "a keystroke must never blank a laid-out tile: the pixels are kept and "
+                        + "flagged stale until the replacement lands. Peak blank LAYERS per "
+                        + "keystroke: \(plain.map(\.0))")
+        XCTAssertEqual(withSave.map(\.0).max() ?? -1, 0,
+                       "…and a backstop save landing in the middle must not change that. Peak "
+                        + "blank LAYERS per keystroke: \(withSave.map(\.0))")
+        // (3) and it really settles — nothing is left half-drawn at the end.
+        XCTAssertEqual(blankLayerCount(tracked), 0, "every tracked tile must be drawn when the census ends")
+        XCTAssertLessThan(plain.map(\.3).max() ?? 0, 30_000, "a keystroke's repaint must not hang")
+        XCTAssertLessThan(withSave.map(\.3).max() ?? 0, 30_000, "a keystroke's repaint must not hang under a save")
+    }
+
+    // MARK: - office-responsive Job 1 — the save no longer renders a page thumbnail
+
+    /// **The tripwire for Job 1's fix, and it asserts the MECHANISM, not the timing.** A latency
+    /// threshold would be a flaky assertion about this machine; what actually has to stay true is
+    /// that a real save stops doing the expensive thing — rendering and embedding
+    /// `Thumbnails/thumbnail.png`, measured at a constant ~40-54 ms of every save's cost — against a
+    /// fitted fixed cost of 53.4 ms — on the ONE dedicated LOK thread that every keystroke and tile
+    /// paint also queues on.
+    ///
+    /// **Two assertions, and the second is what stops the first being vacuous.** "No thumbnail in
+    /// the file" passes trivially if the save never happened, never landed, or landed empty — so the
+    /// same bytes are also asserted to be a real, valid ODF container carrying the text that was
+    /// just typed. A save that silently did nothing fails the content arm; a save that regressed to
+    /// embedding a thumbnail fails the thumbnail arm. Neither can pass for the other's reason.
+    ///
+    /// Red/green: RED against the same binary with the `GenerateThumbnail` item removed from
+    /// `LOKBridge.disableDocumentLockFile`'s profile overlay (the rendered container carries the
+    /// entry, 9 entries not 8); GREEN with it.
+    func testARealSaveWritesNoEmbeddedPageThumbnail() async throws {
+        let live = try await openWriterCanvasForTypingDrill(name: "no-thumbnail")
+        defer { live.view.unmount(); _ = live.host.teardownAllOfficeRuntimesAndStopHelper() }
+
+        live.type("ABCDE")
+        await live.runtime.drainInputChainForTesting()
+        let body = await liveSaveAndReadBody(live)
+
+        // Control arm: the save really happened and really wrote this document's content. Without
+        // this, the thumbnail assertion below passes on a no-op save.
+        XCTAssertEqual(body, "ABCDE" + Self.twoPageBody,
+                       "control: the save must have written the typed content, or the thumbnail "
+                        + "assertion below is about a file nothing wrote — got: \(body)")
+
+        let saved = try Data(contentsOf: URL(fileURLWithPath: live.path))
+        let thumbnailName = Array("Thumbnails/thumbnail.png".utf8)
+        let bytes = [UInt8](saved)
+        var carriesThumbnail = false
+        if bytes.count >= thumbnailName.count {
+            for index in 0...(bytes.count - thumbnailName.count)
+            where Array(bytes[index..<(index + thumbnailName.count)]) == thumbnailName {
+                carriesThumbnail = true
+                break
+            }
+        }
+        XCTAssertFalse(carriesThumbnail,
+                       "a save must not render and embed a page thumbnail — that is a constant "
+                        + "~40 ms of LOK-thread time per save, on the one thread every keystroke "
+                        + "queues behind. "
+                        + "The `GenerateThumbnail` item in LOKBridge's profile overlay is what "
+                        + "turns it off; it has regressed or stopped being applied.")
+    }
+
+    // MARK: - office-responsive — the LOK-thread cost of a backstop save
+
+    /// **Job 1's instrument, and it is deliberately NOT the census's blank-window metric.**
+    /// `office-responsive` Job 2 changes what a keystroke LOOKS like during the gap (stale pixels
+    /// instead of the placeholder tone), which would make the census's "how long was something
+    /// blank" number mean two different things on either side of that change. This one measures
+    /// **echo latency** — from the instant the key is posted to the instant every tile the edit
+    /// invalidated is carrying FRESH pixels again — which is defined identically in both worlds,
+    /// because it is keyed off the tile GENERATION rather than off the absence of pixels.
+    ///
+    /// Generations are the right handle because the helper mints them: `TileCache.invalidate` does
+    /// `generations[key, default: 0] += 1` for every key it touches, so any paint issued after an
+    /// invalidation reports a strictly greater generation than the one on screen before it. "The
+    /// typed character is visible" is exactly "a tracked key's generation went up and it has
+    /// pixels."
+    ///
+    /// **Non-vacuity is structural, not asserted after the fact**: if invalidation stopped firing
+    /// altogether (the shape a "no more blanking!" fix could regress into), no generation would ever
+    /// advance and every sample would time out at the ceiling — loudly, not silently.
+    ///
+    /// The save arm forces `periodicSaveTick` — the production 120 s backstop's own tick, not a
+    /// stand-in — immediately after each keystroke. The helper prints its own `[office-responsive
+    /// save]` line per real save with the `saveAs` / `.uno:Save` split, which is the number the fix
+    /// is actually chosen from; this test's numbers are the user-facing corroboration of it.
+    func testMeasureTheLOKThreadCostOfABackstopSaveAsKeystrokeEchoLatency() async throws {
+        let live = try await openWriterCanvasForTypingDrill(name: "echo-census")
+        defer { live.view.unmount(); _ = live.host.teardownAllOfficeRuntimesAndStopHelper() }
+
+        let candidateKeys = (0..<4).flatMap { x in (0..<4).map { y in TileKey(part: 0, zoomPPT: 1000, tileX: x, tileY: y) } }
+        func laidOutKeys() -> [TileKey] { candidateKeys.filter { live.view.tileLayerForTesting($0) != nil } }
+        func generations(_ keys: [TileKey]) -> [TileKey: Int] {
+            var out: [TileKey: Int] = [:]
+            for key in keys {
+                if let entry = live.runtime.tileStore.tile(docId: live.docId, key: key) { out[key] = entry.generation }
+            }
+            return out
+        }
+
+        let settled = await waitUntil(timeout: 30) { !laidOutKeys().isEmpty && generations(laidOutKeys()).count == laidOutKeys().count }
+        XCTAssertTrue(settled, "baseline: every laid-out tile must carry pixels before the census starts")
+        let tracked = laidOutKeys()
+        NSLog("[office-responsive] echo census tracks %d laid-out tiles", tracked.count)
+
+        /// One keystroke, then poll until at least one tracked key's generation has advanced AND
+        /// the count of advanced keys has stopped growing for two consecutive polls. Returns how
+        /// many advanced and how long the last one took.
+        func typeOneAndMeasureEcho(_ character: Character, keyCode: UInt16,
+                                   forceSaveTick: Bool) async -> (advanced: Int, milliseconds: Int) {
+            let before = generations(tracked)
+            live.press(characters: String(character), keyCode: keyCode)
+            if forceSaveTick { live.runtime.periodicSaveTickForTesting() }
+            let started = Date()
+            var advancedCount = 0
+            var stableSince: Date?
+            var lastAdvanceAt = started
+            while Date().timeIntervalSince(started) < 30 {
+                let now = generations(tracked)
+                let advanced = tracked.filter { key in
+                    guard let old = before[key], let fresh = now[key] else { return false }
+                    return fresh > old
+                }.count
+                if advanced != advancedCount {
+                    advancedCount = advanced
+                    lastAdvanceAt = Date()
+                    stableSince = nil
+                } else if advanced > 0 {
+                    if stableSince == nil { stableSince = Date() }
+                    if Date().timeIntervalSince(stableSince!) > 0.25 { break }
+                }
+                try? await Task.sleep(nanoseconds: 5_000_000)
+            }
+            return (advancedCount, Int(lastAdvanceAt.timeIntervalSince(started) * 1000))
+        }
+
         var plain: [(Int, Int)] = []
         for character in "ABCDEA" {
-            plain.append(await typeOneAndMeasure(character, keyCode: ["A": 0, "B": 11, "C": 8, "D": 2, "E": 14][character]!,
-                                                 forceSaveTick: false))
+            plain.append(await typeOneAndMeasureEcho(character, keyCode: ["A": 0, "B": 11, "C": 8, "D": 2, "E": 14][character]!,
+                                                     forceSaveTick: false))
         }
-        // Arm 2 — the same keystrokes, each one immediately followed by the 120 s backstop's own
-        // tick. `periodicSaveTickForTesting` is the production `periodicSaveTick`, not a stand-in.
         var withSave: [(Int, Int)] = []
         for character in "BCDEAB" {
-            withSave.append(await typeOneAndMeasure(character, keyCode: ["A": 0, "B": 11, "C": 8, "D": 2, "E": 14][character]!,
-                                                    forceSaveTick: true))
+            withSave.append(await typeOneAndMeasureEcho(character, keyCode: ["A": 0, "B": 11, "C": 8, "D": 2, "E": 14][character]!,
+                                                        forceSaveTick: true))
         }
 
-        NSLog("[office-typing] PLAIN     peakBlank/ms per keystroke: %@",
+        NSLog("[office-responsive] ECHO PLAIN     advanced/ms per keystroke: %@",
               plain.map { "\($0.0)/\($0.1)" }.joined(separator: " "))
-        NSLog("[office-typing] WITH SAVE peakBlank/ms per keystroke: %@",
+        NSLog("[office-responsive] ECHO WITH SAVE advanced/ms per keystroke: %@",
               withSave.map { "\($0.0)/\($0.1)" }.joined(separator: " "))
 
         XCTAssertGreaterThan(plain.map(\.0).max() ?? 0, 0,
-                             "non-vacuity: not one keystroke blanked a single laid-out tile, so this "
-                              + "instrument measured nothing and its numbers cannot be reported")
-        XCTAssertLessThan(plain.map(\.1).max() ?? 0, 30_000, "a keystroke's repaint must not hang")
-        XCTAssertLessThan(withSave.map(\.1).max() ?? 0, 30_000, "a keystroke's repaint must not hang under a save")
+                             "non-vacuity: no tracked tile's generation ever advanced, so no keystroke "
+                              + "reached LOK and these numbers are about nothing")
+        XCTAssertLessThan(plain.map(\.1).max() ?? 0, 30_000, "a keystroke's echo must not hang")
+        XCTAssertLessThan(withSave.map(\.1).max() ?? 0, 30_000, "a keystroke's echo must not hang under a save")
     }
 
     // MARK: office-typing — the drill's own scaffolding
@@ -6090,8 +6291,25 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         let vendorRoot = Self.vendorProductSetRoot
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
                       "LibreOffice vendor tree not present at \(vendorRoot.path)")
-        let fixturePath = Self.fixturesRoot.appendingPathComponent("two-page.odt").path
-        try XCTSkipIf(!FileManager.default.fileExists(atPath: fixturePath), "two-page.odt fixture missing")
+        // office-responsive: the same `two-page.odt` unless a measurement run points at a larger
+        // document, which is how the save's O(document size) curve is measured without committing a
+        // multi-hundred-KB fixture to the repo.
+        //
+        // ⚠️ **A FILE, not an environment variable — and the reason is a caught defect, not taste.**
+        // The first version of this read `ProcessInfo.processInfo.environment`, and `xcodebuild`
+        // does not forward a caller's shell environment into the test HOST process: three "large
+        // document" runs silently re-measured `two-page.odt`, and the only reason that was caught is
+        // that the save instrument prints the staged file's own size+hash, which came back byte-
+        // identical (`8909:…:a0035cc1309a6b8f`) across every arm. A check blind to its own failure
+        // mode. The resolved path and its real byte count are logged below for the same reason.
+        let overrideFile = "/tmp/norma-responsive-fixture.txt"
+        let fixtureOverride = (try? String(contentsOfFile: overrideFile, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let fixturePath = (fixtureOverride?.isEmpty == false ? fixtureOverride! : nil)
+            ?? Self.fixturesRoot.appendingPathComponent("two-page.odt").path
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: fixturePath), "fixture missing at \(fixturePath)")
+        let fixtureBytes = (try? Data(contentsOf: URL(fileURLWithPath: fixturePath)).count) ?? -1
+        NSLog("[office-responsive] drill fixture: %@ (%d bytes on disk)", fixturePath, fixtureBytes)
 
         let stateDir = makeScratchDirectory()
         let directory = SessionDirectory(lister: { [] })
