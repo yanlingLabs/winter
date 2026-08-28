@@ -2742,7 +2742,7 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
                           + "store evicted and refilled, but nothing on screen actually changed")
         }
         t27Repainted = true
-        return (true, "the OPEN tab's tile (0,0) was evicted (invalidation proven, not assumed) and a "
+        return (true, "the OPEN tab's tile (0,0) was invalidated (proven, not assumed) and a "
                      + "re-subscribe repainted it to a DIFFERENT hash: "
                      + "\(t27BaselineTileHash.prefix(16))… -> \(freshHash.prefix(16))…")
     }
@@ -2863,7 +2863,7 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
             return (false, "the refreshed tile is BYTE-IDENTICAL to the pre-command baseline")
         }
         t28Repainted = true
-        return (true, "the OPEN tab's tile (0,0) was evicted and repainted to a DIFFERENT hash: "
+        return (true, "the OPEN tab's tile (0,0) was invalidated and repainted to a DIFFERENT hash: "
                      + "\(t28BaselineTileHash.prefix(16))… -> \(freshHash.prefix(16))…")
     }
 
