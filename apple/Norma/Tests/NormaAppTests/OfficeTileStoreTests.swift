@@ -245,6 +245,36 @@ final class OfficeTileStoreTests: XCTestCase {
                        "and the LRU record goes with it, or the pool leaks a slot per failure")
     }
 
+    /// **The other half of the bound: a refresh that keeps failing retries EXACTLY ONCE, then goes
+    /// quiet.** Dropping a stale entry also signals `tilesArrived`, which is what makes the canvas
+    /// re-ask — so without a terminating condition this would be ask → fail → signal → ask → fail →
+    /// forever, the precise request storm the pre-existing `markFailed` storm guard exists to
+    /// prevent. It terminates by construction: the first failure removes the entry, so the SECOND
+    /// failure finds nothing stale, consumes no marker, and signals nothing. A negative proof — a
+    /// bounded wait for silence, not a wait for an event.
+    func testARepeatedlyFailingRefreshOfAStaleTileRetriesOnceAndThenGoesQuiet() async {
+        let store = OfficeTileStore()
+        store.ingest(docId: "d1", key: key(0, 0), generation: 0, pixels: pixels(1))
+        store.invalidate(docId: "d1", keys: [key(0, 0)])
+        store.markRequested(docId: "d1", keys: [key(0, 0)])
+        store.markFailed(docId: "d1", key: key(0, 0)) // first failure: drops the stale entry, signals
+
+        var received: [(docId: String, keys: Set<TileKey>)] = []
+        store.tilesArrived.sink { received.append($0) }.store(in: &cancellables)
+
+        // The re-ask the signal above provokes, and its own failure.
+        store.markRequested(docId: "d1", keys: [key(0, 0)])
+        store.markFailed(docId: "d1", key: key(0, 0))
+
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertTrue(received.isEmpty,
+                      "the second failure must not signal again — nothing stale is left to protect, "
+                       + "and signaling would build an unbounded ask/fail loop")
+        XCTAssertEqual(store.keysNeedingRequest(docId: "d1", candidates: [key(0, 0)]), [key(0, 0)],
+                       "the key stays askable by anything that comes along on its own terms (a "
+                        + "scroll, a zoom) — it is simply no longer chasing itself")
+    }
+
     /// **Control for the bound**: an ordinary failure on a tile that is NOT stale (a bad key, a
     /// transient LOK error — nothing to do with an invalidation) must leave the good pixels exactly
     /// where they are. Without this arm, the test above would pass on a `markFailed` that simply
