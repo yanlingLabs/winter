@@ -259,6 +259,13 @@ final class OfficeTileStoreTests: XCTestCase {
         store.markRequested(docId: "d1", keys: [key(0, 0)])
         store.markFailed(docId: "d1", key: key(0, 0)) // first failure: drops the stale entry, signals
 
+        // **Let the FIRST failure's signal actually land before subscribing.** `scheduleFlush` hops
+        // through `DispatchQueue.main.async`, so without this the pending flush from the line above
+        // arrives after the sink is attached and the negative assertion below fails on the RIGHT
+        // signal — which is exactly how this test failed on its first real run. The subject of this
+        // test is the SECOND failure, so the first one's signal has to be out of the way first.
+        try? await Task.sleep(nanoseconds: 30_000_000)
+
         var received: [(docId: String, keys: Set<TileKey>)] = []
         store.tilesArrived.sink { received.append($0) }.store(in: &cancellables)
 
