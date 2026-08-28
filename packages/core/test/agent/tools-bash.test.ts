@@ -204,6 +204,34 @@ d("bash tool (sandboxed)", () => {
     expect(outside.output).not.toContain("[exit 0]");
   });
 
+  // macOS `mktemp(1)` calls confstr(_CS_DARWIN_USER_TEMP_DIR) and IGNORES $TMPDIR, so it always
+  // lands in the per-user temp dir — which used to be outside the fence, making bare `mktemp` (and
+  // therefore any `git commit` whose hooks shell out to it) fail with "Operation not permitted".
+  // sandbox.ts allows DIRECT CHILDREN of that dir; the very next test pins the other half, that
+  // this is not a subpath grant.
+  test("bare mktemp works under the sandbox (macOS mktemp ignores $TMPDIR)", async () => {
+    const cwd = proj();
+    const res = await reg().execute("bash", {
+      command: `f=$(mktemp) && echo mktemp-data > "$f" && cat "$f"`,
+      timeoutMs: 20000,
+    }, { cwd, roots: [cwd], sessionId: "s1" });
+    expect(res.output).toContain("mktemp-data");
+    expect(res.output).toContain("[exit 0]");
+    expect(res.output).not.toContain("Operation not permitted");
+  });
+
+  test("the per-user temp dir allowance is DIRECT CHILDREN ONLY — a subdirectory in it stays unwritable", async () => {
+    const cwd = proj();
+    // A sibling of mktemp's own files, one level deeper: exactly the shape another app's temp state
+    // has. If the rule were ever widened to `(subpath ...)` this write would start succeeding — and
+    // so would `CANNOT write outside the session cwd` above, whose target is also under this dir.
+    const nested = realpathSync(mkdtempSync(join(tmpdir(), "norma-bash-nested-")));
+    const target = join(nested, "escaped.txt");
+    const res = await reg().execute("bash", { command: `echo pwned > ${target}` }, { cwd, roots: [cwd], sessionId: "s1" });
+    expect(existsSync(target)).toBe(false);
+    expect(res.output).not.toContain("[exit 0]");
+  });
+
   test("bash can write to an extra allowed root", async () => {
     const cwd = proj();
     const extra = realpathSync(mkdtempSync(join(tmpdir(), "norma-bash-extra-")));

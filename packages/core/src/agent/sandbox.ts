@@ -1,4 +1,5 @@
 import { realpathSync, existsSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -16,6 +17,44 @@ function sbplString(p: string): string {
 /** realpath a path if it exists (canonicalizes macOS /tmp and /var symlinks); pass through otherwise. */
 function canon(p: string): string {
   try { return realpathSync(p); } catch { return p; }
+}
+
+
+/** Escape a string for embedding inside an SBPL `(regex #"...")` literal. */
+function sbplRegexLiteral(p: string): string {
+  return p.replace(/[\\^$.|?*+()\[\]{}]/g, "\\$&").replace(/"/g, '\\"');
+}
+
+/**
+ * macOS's per-user temp directory (`/var/folders/<x>/<y>/T`), resolved the SAME way the C library
+ * resolves it — `confstr(_CS_DARWIN_USER_TEMP_DIR)`, which `getconf DARWIN_USER_TEMP_DIR` exposes.
+ *
+ * Deliberately NOT `os.tmpdir()`: that reads `$TMPDIR`, and the one caller that matters (the bash
+ * tool) OVERRIDES `$TMPDIR` for its child to a per-session scratch dir. We need the directory the
+ * child's libc will actually use no matter what the environment says, which is exactly the
+ * distinction that makes this rule necessary in the first place (see the profile comment below).
+ *
+ * Cached for the process: the value is fixed per user per boot, and this is on the path of every
+ * sandboxed bash call. A failure to resolve degrades to `null` (rule simply omitted) rather than
+ * throwing — a profile without this convenience rule is still a CORRECT profile.
+ */
+let darwinTempDirCache: string | null | undefined;
+function darwinUserTempDir(): string | null {
+  if (darwinTempDirCache !== undefined) return darwinTempDirCache;
+  darwinTempDirCache = null;
+  if (process.platform === "darwin") {
+    try {
+      const out = spawnSync("/usr/bin/getconf", ["DARWIN_USER_TEMP_DIR"], { encoding: "utf8" });
+      const raw = out.stdout?.trim();
+      if (raw) darwinTempDirCache = canon(raw.replace(/\/+$/, ""));
+    } catch { /* leave null */ }
+  }
+  return darwinTempDirCache;
+}
+
+/** Test seam: forget the cached per-user temp dir so a test can observe resolution again. */
+export function __resetDarwinTempDirCacheForTests(): void {
+  darwinTempDirCache = undefined;
 }
 
 /**
@@ -97,6 +136,32 @@ export function buildSeatbeltProfile(opts: SandboxOptions): string {
   const SETTINGS_LOCAL_FILE_REGEX = String.raw`/\.[Nn][Oo][Rr][Mm][Aa]/[Ss][Ee][Tt][Tt][Ii][Nn][Gg][Ss]\.[Ll][Oo][Cc][Aa][Ll]\.[Jj][Ss][Oo][Nn]$`;
   const denySettingsFileRegex = `(deny file-write* (regex #"${SETTINGS_FILE_REGEX}"))`;
   const denySettingsLocalFileRegex = `(deny file-write* (regex #"${SETTINGS_LOCAL_FILE_REGEX}"))`;
+  // macOS `mktemp(1)` — and anything else calling `confstr(_CS_DARWIN_USER_TEMP_DIR)` — writes to
+  // the PER-USER temp dir (`/var/folders/<x>/<y>/T`) and IGNORES `$TMPDIR` entirely. Measured, not
+  // assumed: with `TMPDIR` correctly exported into the sandboxed child, bare `mktemp` still landed
+  // on `/var/folders/.../T/tmp.XXXXXXXX` and died with `Operation not permitted`, which is enough to
+  // fail an ordinary `git commit` outright whenever a hook (a global `core.hooksPath` one, say)
+  // shells out to `mktemp`. Both arms run against a real `/usr/bin/sandbox-exec`.
+  //
+  // ⚠️ DIRECT CHILDREN ONLY — a `(subpath ...)` here would be a REAL fence regression, not a
+  // convenience. The per-user temp dir is where every other app on the machine keeps its own temp
+  // state, and (this is the load-bearing part) it is also where the bash tool's own tests build the
+  // "outside" directories they assert are UNWRITABLE: `CANNOT write outside the session cwd` writes
+  // to `<tmp>/norma-bash-XXXX/escaped.txt`. That is two levels down, so `[^/]+$` leaves it denied,
+  // while `mktemp`'s own `<tmp>/tmp.XXXXXXXX` — one level — is allowed. The rule buys exactly the
+  // idiom that was broken and nothing else: creating a temp FILE, and writing to it.
+  // `mktemp -d` still yields an unwritable directory; `$TMPDIR` (the per-session scratch, fully
+  // writable) remains the right answer for anything that needs a temp TREE.
+  //
+  // Placed BEFORE the control-plane denies below on purpose: SBPL is last-match-wins, so those
+  // denies continue to override this allow. (No control-plane file can be a direct child anyway —
+  // they all sit under a `.norma/` component — but the ordering is what makes that structural
+  // rather than incidental.)
+  const perUserTemp = darwinUserTempDir();
+  const allowDarwinTempFiles = perUserTemp
+    ? `(allow file-write* (regex #"^${sbplRegexLiteral(perUserTemp)}/[^/]+$"))`
+    : "";
+
   const network = opts.allowNetwork ? "(allow network*)" : "(deny network*)";
   // Minimal mach services: deny blanket lookup so open/launchctl/osascript can't
   // ask a privileged, unsandboxed service to act out-of-band on our behalf.
@@ -122,6 +187,7 @@ ${machRules})
 (allow file-write*
 ${writeRules})
 (allow file-write-data (path "/dev/null") (path "/dev/stdout") (path "/dev/stderr") (path "/dev/dtracehelper"))
+${allowDarwinTempFiles}
 ${network}
 ${denyRulesFileRules}
 ${denyRulesFileRegex}
