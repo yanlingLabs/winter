@@ -59,6 +59,48 @@ describe("runtime-state.db", () => {
     expect(m1![2]).not.toBe(m2![2]);
     rs.close();
   });
+  test("an immediate transaction takes the write lock up front; a deferred one does not", () => {
+    // Review r1 finding 2: a read-then-write transaction (a lease claim) must not lose its snapshot
+    // to a concurrent writer and surface SQLITE_BUSY_SNAPSHOT. The discriminating, deterministic
+    // probe is a SECOND connection writing from inside the window: under `deferred` (nothing locked
+    // yet, this transaction has only read) it succeeds; under `immediate`/`exclusive` the RESERVED
+    // lock is already held, so it fails with "database is locked" once its own busy_timeout expires
+    // — set to 50 ms on that connection so the test costs milliseconds, not the daemon's 5 s.
+    const h = home();
+    const rs = openRuntimeStateDb(h);
+    const other = new Database(rs.path);
+    other.run("PRAGMA busy_timeout = 50");
+    const otherWrites = (): string => {
+      try {
+        other.run("INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('probe', 'other')");
+        return "ok";
+      } catch (e) {
+        return (e as Error).message;
+      }
+    };
+    const readThenProbe = () => {
+      rs.db.query("SELECT value FROM schema_meta WHERE key = 'created_at'").get();
+      return otherWrites();
+    };
+
+    expect(rs.transaction(readThenProbe)).toBe("ok");
+    expect(rs.transaction(readThenProbe, { mode: "deferred" })).toBe("ok");
+    expect(rs.transaction(readThenProbe, { mode: "immediate" })).toMatch(/locked/);
+    expect(rs.transaction(readThenProbe, { mode: "exclusive" })).toMatch(/locked/);
+    // the mode never changes what a transaction returns or its rollback-on-throw contract
+    expect(rs.transaction(() => 42, { mode: "immediate" })).toBe(42);
+    expect(() =>
+      rs.transaction(() => {
+        rs.db.run("INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('rolled', 'back')");
+        throw new Error("boom");
+      }, { mode: "immediate" }),
+    ).toThrow("boom");
+    expect(rs.db.query("SELECT value FROM schema_meta WHERE key = 'rolled'").get()).toBeNull();
+
+    other.close();
+    rs.close();
+  });
+
   test("a corrupt file is a typed refusal, never a silent recreate", () => {
     const h = home(); writeFileSync(join(h, "runtimes", "runtime-state.db"), "not a database");
     expect(() => openRuntimeStateDb(h)).toThrow(RuntimeStateUnavailableError);
