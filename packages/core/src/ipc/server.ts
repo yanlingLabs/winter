@@ -125,6 +125,12 @@ export interface IpcServerOptions {
   // private closure. Every real caller gets the true `reapEmptySessions` (sessions/reaper.ts) by
   // leaving this unset.
   reapEmptySessions?: typeof reapEmptySessions;
+  // P8a Task 12 (WS-16 §16): the runtime-state deletion hook, threaded into the mint-time sweep so
+  // THAT reap removes a session's runtime rows exactly like the boot sweep in daemon.ts does — the
+  // two are the same function and must not disagree about the reach of a delete. Undefined on a
+  // daemon whose runtime store would not open (there are no rows to remove), and in every test that
+  // constructs a server without one.
+  onSessionDeleted?: (sessionId: string) => void;
   // session-activity-hygiene T8: hands the caller THE bound activity derivation this server stamps
   // `session.list` with, once, at construction. Called exactly once, synchronously, from inside
   // startIpcServer.
@@ -1152,7 +1158,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           const home = opts.normaHome;
           const reap = opts.reapEmptySessions ?? reapEmptySessions;
           setTimeout(() => {
-            try { reap({ store: opts.store, attachedCount: (id) => hub.attachedCount(id), home }); }
+            try { reap({ store: opts.store, attachedCount: (id) => hub.attachedCount(id), home, onDelete: opts.onSessionDeleted }); }
             catch (err) { console.error("[reaper] mint-time sweep failed:", err); }
           }, 0);
         }

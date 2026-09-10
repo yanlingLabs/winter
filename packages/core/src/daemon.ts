@@ -102,6 +102,7 @@ import { openRoutineStore } from "./routines/store";
 import { RoutineAuditLog } from "./routines/audit";
 import { makeApply } from "./settings-apply";
 import { SettingsWatcher } from "./settings-watcher";
+import { startRuntimeState, runtimeStateOnline, type DaemonRuntimeState } from "./runtime-state/wiring";
 import { makeDaemonRoutineRunner } from "./routines/runner";
 import { makeRoutineScheduler } from "./routines/scheduler";
 import type { NewSessionEvent } from "@norma/protocol";
@@ -126,6 +127,12 @@ export interface RunningDaemon {
   // test/agent/mode-toolset-census.test.ts). `null` on a no-agentProvider daemon (opts.agentProvider
   // === null), same "typed no-op" precedent as `sharedRegistry ?? undefined` a few lines below.
   registry: ToolRegistry | null;
+  // P8a Task 12: the runtime spine this daemon booted — the open `runtime-state.db`, its six
+  // repositories, and the reports from this boot's recovery/backfill. `{ unavailable: error }` when
+  // the store would not open (a corrupt or newer-schema file): the daemon runs WITHOUT runtime
+  // routing rather than refusing to start, and nothing else in the daemon depends on it in 8a.
+  // 8b's `createRuntimeSdk({ directoryStore })` consumes `directory` off this.
+  runtimeState: DaemonRuntimeState;
   stop(): void;
 }
 
@@ -232,6 +239,40 @@ export async function startDaemon(opts: {
   // down (before any turn can run), so the tool never actually observes the unset holder.
   let activityDeriver: ActivityDeriver | undefined;
 
+  const normaHome = dirs.home;
+
+  // Loaded once, up front, so the settings-derived plugin consent (below) is available before
+  // the SkillStore and PluginStore are built. A malformed settings.json degrades to `null` here
+  // — the agent gets disabled further down rather than crashing daemon startup.
+  //
+  // P8a Task 12 HOISTED this above the reaper's boot sweep (it used to sit just below): the runtime
+  // spine's boot block between them reads `settings.provider.type` for §17's backfill, and recovery
+  // has to run BEFORE the reaper — a reaper pass reads the product index that recovery's step 1 is
+  // what rebuilds. `loadSettings` depends on nothing but `dirs.settingsPath`, so the move is a
+  // reordering of two independent statements, not a change of behaviour.
+  let settings: ReturnType<typeof loadSettings> | null;
+  try {
+    settings = loadSettings(dirs.settingsPath);
+  } catch (err) {
+    console.error(`settings unavailable, agent disabled: ${(err as Error).message}`);
+    settings = null;
+  }
+
+  // ── The runtime spine (P8a, WS-16) ────────────────────────────────────────────────────────────
+  // Open `runtimes/runtime-state.db`, run §13's twelve recovery steps, catch the §17 backfill up,
+  // and arm the §16 retention sweep — ALL of it before the reaper below and long before the socket
+  // exists, because §13's recovery must have finished before any client can ask this daemon about a
+  // session. A store that will not open costs runtime routing and NOTHING else: `runtimeState`
+  // carries `{ unavailable }`, the failure is logged, and boot continues (nothing else in the
+  // daemon depends on the spine in 8a). See `runtime-state/wiring.ts` for the whole sequence.
+  const runtimeState = await startRuntimeState({
+    home: normaHome,
+    store,
+    settings: () => settings, // LIVE holder, re-read per sweep — never a boot snapshot
+    log: (line) => console.error(`runtime-state: ${line}`),
+  });
+  const runtime = runtimeStateOnline(runtimeState);
+
   // session-activity-hygiene T6 (spec §2): the empty-session reaper's boot sweep — once, here,
   // right after store/hub exist and before anything can attach to anything. Catches sessions left
   // empty by a previous run that never triggered another `session.create` (that sweep only fires at
@@ -239,23 +280,13 @@ export async function startDaemon(opts: {
   // an old empty one forever. Synchronous (nothing is replying at boot to protect) and wrapped in
   // its own try/catch anyway (the same caution this file already gives other best-effort boot steps,
   // e.g. the settings load above) even though `reapEmptySessions` is designed to never throw.
+  //
+  // P8a Task 12: `onDelete` takes the reaped session's runtime state with it (WS-16 §16). Undefined
+  // when the spine could not be opened — there are no runtime rows to remove in that case.
   try {
-    reapEmptySessions({ store, attachedCount: (id) => hub.attachedCount(id), home: dirs.home });
+    reapEmptySessions({ store, attachedCount: (id) => hub.attachedCount(id), home: dirs.home, onDelete: runtime?.onSessionDeleted });
   } catch (err) {
     console.error(`empty-session boot sweep failed: ${(err as Error).message}`);
-  }
-
-  const normaHome = dirs.home;
-
-  // Loaded once, up front, so the settings-derived plugin consent (below) is available before
-  // the SkillStore and PluginStore are built. A malformed settings.json degrades to `null` here
-  // — the agent gets disabled further down rather than crashing daemon startup.
-  let settings: ReturnType<typeof loadSettings> | null;
-  try {
-    settings = loadSettings(dirs.settingsPath);
-  } catch (err) {
-    console.error(`settings unavailable, agent disabled: ${(err as Error).message}`);
-    settings = null;
   }
 
   const trustStore = new TrustStore(join(normaHome, "trust.json"));
@@ -1341,6 +1372,9 @@ export async function startDaemon(opts: {
         bgWork: (sid) => engine?.hasBackgroundWork(sid) ?? false,
         home: normaHome,
         enabled: cleanerEnabledHot,
+        // P8a Task 12: the second sanctioned deletion path takes runtime state with it too, exactly
+        // as the reaper's does (WS-16 §16).
+        onDelete: runtime?.onSessionDeleted,
       }),
     });
     dreamer.start();
@@ -1392,6 +1426,11 @@ export async function startDaemon(opts: {
       // own `.catch` (this closure just re-throws/returns whatever `migrateMemoryStore` does);
       // never touches/deletes the old store either way (memory-migrate.ts's own contract).
       migrateMemory: () => { migrateMemoryStore({ normaHome, trust: trustStore, directory: settings?.memory?.directory }); },
+      // P8a Task 12: `runtimes.migrations.memoryKeys` flipped on a RUNNING daemon must migrate
+      // without a restart (the project's standing no-restart-for-settings rule). The wiring's own
+      // `schema_meta` marker is what keeps it a ONE-TIME relocation, so this is handed the new
+      // settings unconditionally rather than diffed here.
+      applyRuntimeMigrations: (next) => runtime?.applySettings(next),
       log: (msg) => console.error(`settings-apply: ${msg}`),
     });
     settingsWatcher = new SettingsWatcher({
@@ -1567,6 +1606,9 @@ export async function startDaemon(opts: {
     // gain these four verbs.
     workflows: workflowRuntime ?? undefined,
     workflowStore,
+    // P8a Task 12: the mint-time reaper inside this server deletes sessions too — same hook, same
+    // reach as the boot sweep above (WS-16 §16).
+    onSessionDeleted: runtime?.onSessionDeleted,
     ...opts.server,
   });
 
@@ -1575,6 +1617,7 @@ export async function startDaemon(opts: {
     socketPath: dirs.socketPath,
     tokens,
     registry: sharedRegistry,
+    runtimeState,
     stop() {
       // lspManager: killAllNow() FIRST delivers a synchronous SIGTERM to every warm child (the real
       // shutdown protection — mcp/pluginSupervisor's stopAll are likewise synchronous kills), since
@@ -1585,7 +1628,14 @@ export async function startDaemon(opts: {
       settingsWatcher?.stop(); // closes the fs.watch handle on settings.json — no leaked watcher past shutdown
       routineScheduler.stop(); routineStore.close(); // no orphan tick timer past drain
       dreamer?.stop(); // no orphan dream tick timer past shutdown (unref'd already, but never left running)
-      store.close(); lock.release();
+      // P8a Task 12 — SHUTDOWN ORDER, and it is an order, not a list. `server.stop()` above has
+      // already run, so no RPC can arrive after this point and reach a closed handle; the reaper's
+      // mint-time sweep (the one caller that could still queue a runtime deletion) lives inside that
+      // server and is gone with it. `runtime.close()` then clears the retention interval and closes
+      // `runtime-state.db` — after the ipc server, before `lock.release()`, because `norma doctor`'s
+      // repairs refuse while the lock is held and must never find a live handle on a file they are
+      // about to replace. `store.close()` sits alongside it for the product index, same reasoning.
+      store.close(); runtime?.close(); lock.release();
     },
   };
 }

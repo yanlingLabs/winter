@@ -9,3 +9,4 @@ export * from "./doctor";
 export * from "./migrations/backfill";
 export * from "./migrations/memory-keys";
 export * from "./retention";
+export * from "./wiring";

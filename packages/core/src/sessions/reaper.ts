@@ -25,6 +25,14 @@ export interface ReaperDeps {
    *  test/sessions/activity-enforcement.test.ts) — defaults to the real `Date.now` so production
    *  callers pass nothing and every test controls "how old" without a real sleep. */
   now?: () => number;
+  /** P8a Task 12 (WS-16 §16): the deleted session's RUNTIME state goes with it. Called AFTER a
+   *  successful `deleteSession`, once per reaped session — never for one that failed to delete, and
+   *  never before, because a hook that ran first would strip the runtime rows of a session that is
+   *  still there. Synchronous by signature (this whole function is); the daemon's implementation
+   *  queues the async §16 deletion and never throws back into this pass. Absent in every caller
+   *  that has no runtime spine (a daemon whose `runtime-state.db` would not open, and the tests
+   *  that predate this hook). */
+  onDelete?: (sessionId: string) => void;
 }
 
 /**
@@ -67,6 +75,13 @@ export function reapEmptySessions(deps: ReaperDeps): string[] {
       continue;
     }
     reaped.push(sessionId);
+    // Same delete-first, best-effort-after discipline as the audit line below: the session is gone,
+    // and a hook that throws must not cost the pass its remaining candidates.
+    try {
+      deps.onDelete?.(sessionId);
+    } catch (err) {
+      console.error(`[reaper] runtime-state delete hook failed for ${sessionId}:`, err);
+    }
     try {
       appendCleanerLog(deps.home, { sessionId, title, reason: "reaped: empty", date: new Date(now()).toISOString() });
     } catch (err) {
