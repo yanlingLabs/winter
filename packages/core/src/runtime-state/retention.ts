@@ -219,7 +219,16 @@ export async function deleteSessionRuntimeState(
  *
  * 8b's messaging surface must refuse an archived session as a target; this door is what makes that
  * state exist to be refused.
+ *
+ * IDEMPOTENT, and that is not a convenience. `archived → archived` is deliberately not an edge in
+ * `ALLOWED_TRANSITIONS` (nothing should be able to re-archive its way around the table), but §17
+ * phase 4's backfill settles a session the user retired BEFORE the runtime spine existed straight
+ * INTO `archived` — so "archive this" routinely arrives at a record that is already there, through
+ * no fault of the caller. Answering that with a throw would make retiring a legacy session an error
+ * exactly once per legacy session. A record already in the requested state is left completely
+ * alone: no transition, no `updated_at` bump, nothing to observe.
  */
 export function archiveSession(records: RuntimeSessionRecords, winterSessionId: string): void {
+  if (records.get(winterSessionId)?.state === "archived") return;
   records.transition(winterSessionId, "archived");
 }

@@ -322,6 +322,30 @@ describe("archiveSession", () => {
     });
   });
 
+  test("archiving an already-archived session is a no-op, not a refusal", async () => {
+    await withTempHome(async (home) => {
+      const rs = openRuntimeStateDb(home);
+      try {
+        const store = createSqliteRuntimeDirectoryStore(rs);
+        const records = new RuntimeSessionRecords(rs);
+        await seedSession(rs, store, "s_retired");
+        records.transition("s_retired", "exited");
+        archiveSession(records, "s_retired");
+        const after = records.get("s_retired")!;
+
+        // A legacy session the user retired BEFORE the runtime spine existed is backfilled straight
+        // into `archived` (§17 phase 4), so "archive this" arrives at a record that is already
+        // there. `archived → archived` is not an edge in the lifecycle table, so a second call has
+        // to be a no-op rather than an `IllegalStateTransitionError` — the caller asked for a state
+        // the record is already in.
+        expect(() => archiveSession(records, "s_retired")).not.toThrow();
+        expect(records.get("s_retired")).toEqual(after); // not even `updated_at` moves
+      } finally {
+        rs.close();
+      }
+    });
+  });
+
   test("archiving refuses from a state the lifecycle does not allow it from", async () => {
     await withTempHome(async (home) => {
       const rs = openRuntimeStateDb(home);

@@ -1,31 +1,29 @@
 // WS-16 §14's crash matrix — the rows that are implementable against the 8a storage spine.
 //
-// SCOPE, STATED HONESTLY. Each row names an END STATE the system must be in after a particular
-// crash. Three of the four rows here are DRIVEN by startup recovery and diagnostics
-// (`recoverRuntimeState`, `diagnoseRuntimeState`, `repairRuntimeState`), which land in a sibling
-// lane of this same phase. This file pins the end state itself, composed from the spine primitives
-// that produce it — so the invariant is under test now, and the driver gets bound to it when
-// recovery lands. What is NOT deferred is the substance: a dead pid must break a lease, an unknown
-// identity must not, a `creating` record must never surface as live, and a re-projection after a
-// lost cursor commit must not double-append.
-//
-// WHAT IS STILL OWED IS MARKED, NOT DESCRIBED. Every place a Task-12 binding belongs carries a
-// `// OWED(task-12):` line naming the exact call to substitute, so that work is found by
-// `grep -rn 'OWED(task-12)'` rather than by re-reading a lane report. Rows (b) and (c) additionally
-// perform their own transitions today (review r1, minor 5): that proves the state machine HAS the
-// edge, not that recovery takes it — which is precisely what the marker is there to close.
+// SCOPE. Each row names an END STATE the system must be in after a particular crash. Three of the
+// four rows are DRIVEN by startup recovery and diagnostics (`recoverRuntimeState`,
+// `diagnoseRuntimeState`, `repairRuntimeState`) — and as of Task 12 every one of those rows CALLS
+// its driver rather than performing the transition by hand. The substance under test: a dead pid
+// must break a lease, an unknown identity must not, a `creating` record must never surface as live,
+// and a re-projection after a lost cursor commit must not double-append.
 import { describe, expect, test } from "bun:test";
-import { copyFileSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   ALLOWED_TRANSITIONS, ProjectionCheckpoints, RuntimeLeases, RuntimeSessionRecords,
-  RuntimeStateUnavailableError, openRuntimeStateDb, type LeaseProbe, type RuntimeStateDb,
+  RuntimeStateUnavailableError, diagnoseRuntimeState, openRuntimeStateDb, recoverRuntimeState,
+  repairRuntimeState, type LeaseProbe, type RuntimeStateDb,
 } from "../../src/runtime-state";
 import { SessionStore } from "../../src/sessions/store";
 import { ISO, withTempHome } from "./support";
 
 const SELF = { pid: process.pid, startedAt: "2026-01-01T00:00:00.000Z" };
 const DEAD = { pid: 999_001, startedAt: "2026-01-01T00:00:00.000Z" };
+
+/** A recovery run over a temp home, with step 8's scan pointed at that home rather than at the
+ *  developer's real `/private/tmp/norma-<uid>`. `probe` describes the machine the leases claim. */
+const recover = (home: string, rs: RuntimeStateDb, store: SessionStore, probe?: LeaseProbe) =>
+  recoverRuntimeState({ home, rs, store, self: SELF, probe, tempScanRoot: join(home, "tmp-scan") });
 
 function seedRecord(rs: RuntimeStateDb, id: string): RuntimeSessionRecords {
   const records = new RuntimeSessionRecords(rs);
@@ -42,15 +40,8 @@ function seedRecord(rs: RuntimeStateDb, id: string): RuntimeSessionRecords {
 /** A probe that describes a machine without spawning anything on it. */
 const probeOf = (alive: boolean, startedAt: string): LeaseProbe => ({ alive: () => alive, startedAt: () => startedAt });
 
-// OWED(task-12): bind this row to Lane C's diagnostics — `diagnoseRuntimeState(home)` must report
-// `db-corrupt` for the corrupt file and `db-missing` for the absent one, and the restore below must
-// become `repairRuntimeState(home, { kind: "restore-backup", backupPath })`.
-// OWED(task-12): `repairRuntimeState`'s `restore-backup` MUST delete `runtime-state.db-wal` and
-// `-shm` before copying the backup over the main file — a stale WAL beside a restored database is
-// its own corruption, and SQLite would replay a journal describing a database that no longer exists.
-// The manual restore in this file does exactly that; the repair op has to as well.
 describe("crash row (a) — runtime-state.db missing or corrupt refuses runtime routing until repaired", () => {
-  test("a corrupt database refuses to open, typed, rather than handing back a half-usable handle", async () => {
+  test("a corrupt database refuses to open, typed, and `norma doctor` reports it as the ONLY finding", async () => {
     await withTempHome(async (home) => {
       const rs = openRuntimeStateDb(home);
       seedRecord(rs, "s_a");
@@ -68,10 +59,17 @@ describe("crash row (a) — runtime-state.db missing or corrupt refuses runtime 
       expect(caught).toBeInstanceOf(RuntimeStateUnavailableError);
       expect((caught as RuntimeStateUnavailableError).reason).toBe("corrupt");
       expect((caught as RuntimeStateUnavailableError).path).toBe(path);
+
+      // §14: an authoritative store that will not open refuses routing and NOTHING further is
+      // inferred from the rebuildable index — so the diagnosis is exactly one finding.
+      const findings = await diagnoseRuntimeState(home);
+      expect(findings).toHaveLength(1);
+      expect(findings[0]!.kind).toBe("db-corrupt");
+      expect(findings[0]!.repairable).toContain("restore-backup");
     });
   });
 
-  test("a missing database refuses a read-only open instead of inventing an empty one", async () => {
+  test("a missing database refuses a read-only open, and the doctor reports db-missing", async () => {
     await withTempHome(async (home) => {
       const path = join(home, "runtimes", "runtime-state.db");
       expect(existsSync(path)).toBe(false);
@@ -79,10 +77,14 @@ describe("crash row (a) — runtime-state.db missing or corrupt refuses runtime 
       try { openRuntimeStateDb(home, { readonly: true }); } catch (e) { caught = e; }
       expect(caught).toBeInstanceOf(RuntimeStateUnavailableError);
       expect((caught as RuntimeStateUnavailableError).reason).toBe("missing");
+
+      const findings = await diagnoseRuntimeState(home);
+      expect(findings).toHaveLength(1);
+      expect(findings[0]!.kind).toBe("db-missing");
     });
   });
 
-  test("restoring a backup over the corrupt file makes it open again, with its rows intact", async () => {
+  test("`repairRuntimeState` restores a backup over the corrupt file, sidecars and all", async () => {
     await withTempHome(async (home) => {
       const rs = openRuntimeStateDb(home);
       seedRecord(rs, "s_a");
@@ -91,12 +93,15 @@ describe("crash row (a) — runtime-state.db missing or corrupt refuses runtime 
       rs.close();
 
       writeFileSync(path, "corrupt");
-      // THE SIDE-CAR TRAP, and why the repair op must do this too: a stale `-wal`/`-shm` beside a
-      // restored main file is its own corruption — SQLite would replay a journal that describes a
-      // database that no longer exists.
-      rmSync(`${path}-wal`, { force: true });
-      rmSync(`${path}-shm`, { force: true });
-      copyFileSync(backup, path);
+      // THE SIDE-CAR TRAP: a stale `-wal`/`-shm` beside a restored main file is its own corruption
+      // — SQLite would replay a journal that describes a database that no longer exists. The repair
+      // op has to clear them itself; this test leaves them in place so that it must.
+      expect(existsSync(`${path}-wal`)).toBe(true);
+
+      const result = await repairRuntimeState(home, { kind: "restore-backup", backupPath: backup });
+      expect(result.applied).toBe(true);
+      expect(existsSync(`${path}-wal`)).toBe(false);
+      expect(existsSync(`${path}-shm`)).toBe(false);
 
       const reopened = openRuntimeStateDb(home);
       try {
@@ -109,12 +114,10 @@ describe("crash row (a) — runtime-state.db missing or corrupt refuses runtime 
   });
 });
 
-// OWED(task-12): `recoverRuntimeState` is this row's driver. The `records.transition(…)` calls below
-// stand in for it — replace them with a recovery run and assert the same end state (lease broken,
-// record `unavailable`, an unidentifiable holder left alone and reported).
 describe("crash row (b) — machine restart with sessions running: reclassify after revalidation, never trust persisted liveness", () => {
-  test("a lease whose holder is provably gone is broken and its session becomes unavailable", async () => {
+  test("a lease whose holder is provably gone is broken by recovery and its session becomes unavailable", async () => {
     await withTempHome(async (home) => {
+      const store = new SessionStore(home);
       const rs = openRuntimeStateDb(home);
       try {
         const records = seedRecord(rs, "s_a");
@@ -125,24 +128,29 @@ describe("crash row (b) — machine restart with sessions running: reclassify af
         records.transition("s_a", "running");
 
         const leases = new RuntimeLeases(rs, SELF);
-        const persisted = leases.holder("s_a")!;
-        expect(persisted.holder.pid).toBe(DEAD.pid);
-        // Persisted liveness is never trusted: the verdict comes from revalidating the process.
-        expect(leases.revalidate(persisted, probeOf(false, "unknown"))).toBe("stale");
-        expect(leases.breakStale("s_a", generation, "machine restart")).toBe(true);
-        expect(leases.holder("s_a")).toBeUndefined();
+        expect(leases.holder("s_a")!.holder.pid).toBe(DEAD.pid);
 
-        // The end state startup recovery must produce (step 2 of WS-16 §13) — see OWED(task-12) above.
-        expect(records.transition("s_a", "unavailable").state).toBe("unavailable");
+        // THE DRIVER: startup recovery, not a hand-written transition. Persisted liveness is never
+        // trusted — the verdict comes from revalidating the process behind the lease.
+        const report = await recover(home, rs, store, probeOf(false, "unknown"));
+
+        expect(report.ok).toBe(true);
+        expect(report.markedUnavailable).toBe(1);
+        expect(report.steps.find((s) => s.step === 4)?.detail).toMatchObject({ checked: 1, stale: 1 });
+        expect(report.steps.find((s) => s.step === 5)?.detail).toMatchObject({ broken: 1 });
+        expect(leases.holder("s_a")).toBeUndefined();
+        expect(records.get("s_a")!.state).toBe("unavailable");
         expect(records.list({ state: ["ready", "running", "idle"] })).toEqual([]);
       } finally {
         rs.close();
+        store.close();
       }
     });
   });
 
   test("a lease whose holder is alive but unidentifiable is KEPT, and reported rather than broken", async () => {
     await withTempHome(async (home) => {
+      const store = new SessionStore(home);
       const rs = openRuntimeStateDb(home);
       try {
         const records = seedRecord(rs, "s_a");
@@ -155,19 +163,18 @@ describe("crash row (b) — machine restart with sessions running: reclassify af
         new RuntimeLeases(rs, { pid: process.pid, startedAt: "unknown" }).acquire("s_a", generation);
         records.transition("s_a", "running");
 
-        const leases = new RuntimeLeases(rs, SELF);
-        const persisted = leases.holder("s_a")!;
-        // Alive, but the OS would not say when it started: neither proven live nor proven stale.
-        expect(leases.revalidate(persisted, probeOf(true, "unknown"))).toBe("unknown");
-        expect(leases.breakStale("s_a", generation, "machine restart")).toBe(false);
-        expect(leases.holder("s_a")!.holder.startedAt).toBe("unknown");
+        const report = await recover(home, rs, store, probeOf(true, "unknown"));
 
-        // The session is still parked as unavailable — we cannot revalidate it — but the lease that
-        // might still have a live writer behind it is left exactly where it was.
-        expect(records.transition("s_a", "unavailable").state).toBe("unavailable");
-        expect(leases.holder("s_a")).toBeDefined();
+        // Neither proven live nor proven stale: the session is still parked (we cannot revalidate
+        // it), but the lease that might still have a live writer behind it is left exactly where it
+        // was — breaking it is how two writers reach one transcript.
+        expect(report.steps.find((s) => s.step === 4)?.detail).toMatchObject({ checked: 1, unknown: 1, stale: 0 });
+        expect(report.steps.find((s) => s.step === 5)?.detail).toMatchObject({ broken: 0, unknownLeft: 1 });
+        expect(records.get("s_a")!.state).toBe("unavailable");
+        expect(new RuntimeLeases(rs, SELF).holder("s_a")!.holder.startedAt).toBe("unknown");
       } finally {
         rs.close();
+        store.close();
       }
     });
   });
@@ -192,12 +199,10 @@ describe("crash row (b) — machine restart with sessions running: reclassify af
   });
 });
 
-// OWED(task-12): `recoverRuntimeState` is this row's driver too — it is what must move a stranded
-// `creating` record to `failed`. The transition below stands in for it; the structural assertion off
-// `ALLOWED_TRANSITIONS` underneath holds either way.
 describe("crash row (c) — a crash before the runtime mapping commit leaves no visible ready session", () => {
-  test("a record stranded in creating settles as failed and is invisible to a live-session listing", async () => {
+  test("recovery settles a record stranded in creating as failed, and it is never live in between", async () => {
     await withTempHome(async (home) => {
+      const store = new SessionStore(home);
       const rs = openRuntimeStateDb(home);
       try {
         const records = seedRecord(rs, "s_torn");
@@ -205,11 +210,17 @@ describe("crash row (c) — a crash before the runtime mapping commit leaves no 
         // It was never live and never can be reported as live, at any point before it settles.
         expect(records.list({ state: ["ready", "running", "idle"] })).toEqual([]);
 
-        // Recovery's own transition (WS-16 §13) — see OWED(task-12) above.
-        expect(records.transition("s_torn", "failed").state).toBe("failed");
+        // THE DRIVER: §13 step 2 settles what a torn creation left behind. Without it the record
+        // would sit in `creating` forever — reported `alreadyPresent` by every later backfill and
+        // repaired by nothing.
+        const report = await recover(home, rs, store);
+
+        expect(report.steps.find((s) => s.step === 2)?.detail).toMatchObject({ stranded: 1, settled: 1 });
+        expect(records.get("s_torn")!.state).toBe("failed");
         expect(records.list({ state: ["ready", "running", "idle"] })).toEqual([]);
       } finally {
         rs.close();
+        store.close();
       }
     });
   });

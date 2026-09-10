@@ -159,20 +159,21 @@ export async function recoverRuntimeState(deps: RecoveryDeps): Promise<RecoveryR
     writeAttempt(step, "failed", { step, errorName: e instanceof Error ? e.name : "unknown" }, winterSessionId);
   };
 
-  /** Park a session whose record cannot even be READ back (a corrupt `selection_json` makes every
-   *  typed door throw). The `state IN (…)` guard is the same edge `ALLOWED_TRANSITIONS` allows, so
-   *  this fallback can never make a transition the state machine forbids — it just does not need to
-   *  parse the row to know that. */
-  const parkRaw = (winterSessionId: string): void => {
+  /** Settle a session whose record cannot even be READ back (a corrupt `selection_json` makes every
+   *  typed door throw). The `state IN (…)` guard names the same edges `ALLOWED_TRANSITIONS` allows,
+   *  so this fallback can never make a transition the state machine forbids — it just does not need
+   *  to parse the row to know that. */
+  const forceRaw = (winterSessionId: string, to: "unavailable" | "failed", from: readonly string[]): void => {
     try {
       rs.db.run(
-        `UPDATE runtime_sessions SET state = 'unavailable', updated_at = ? WHERE winter_session_id = ? AND state IN ('running', 'ready', 'idle')`,
-        [now(), winterSessionId],
+        `UPDATE runtime_sessions SET state = ?, updated_at = ? WHERE winter_session_id = ? AND state IN (${from.map(() => "?").join(", ")})`,
+        [to, now(), winterSessionId, ...from],
       );
     } catch {
-      /* bounded: a session we cannot park must not stop the sweep */
+      /* bounded: a session we cannot settle must not stop the sweep */
     }
   };
+  const parkRaw = (winterSessionId: string): void => forceRaw(winterSessionId, "unavailable", LIVE_STATES);
 
   const count = (sql: string): number => (rs.db.query<{ n: number }, []>(sql).get()?.n ?? 0);
   const ids = (sql: string): string[] =>
@@ -246,7 +247,27 @@ export async function recoverRuntimeState(deps: RecoveryDeps): Promise<RecoveryR
           parkRaw(id);
         }
       }
-      finishStep(2, failed === 0 ? "ok" : "partial", { live: live.length, marked: markedUnavailable, failed });
+
+      // …and settle what a torn CREATION left behind (§14 crash row (c)). A record still in
+      // `creating` is one whose mapping commit never landed: after a restart nothing holds the
+      // handle that could finish it, and recovery runs before the socket exists, so no live
+      // creation can be misread as stranded. `creating` has exactly two exits and neither is live,
+      // so this can never make a torn session visible — what it prevents is the opposite failure,
+      // a record parked in `creating` forever, reported `alreadyPresent` by every later backfill
+      // and repaired by nothing (see migrations/backfill.ts's own note on that shape).
+      const stranded = ids(`SELECT winter_session_id FROM runtime_sessions WHERE state = 'creating' ORDER BY winter_session_id`);
+      let settled = 0;
+      for (const id of stranded) {
+        try {
+          records.transition(id, "failed");
+          settled++;
+        } catch (e) {
+          failed++;
+          noteCorrupt(id, 2, e);
+          forceRaw(id, "failed", ["creating"]);
+        }
+      }
+      finishStep(2, failed === 0 ? "ok" : "partial", { live: live.length, marked: markedUnavailable, stranded: stranded.length, settled, failed });
     }
 
     // ── 3. Reconcile the two tails ───────────────────────────────────────────────────────────────
