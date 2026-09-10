@@ -31,6 +31,18 @@ export { createProvider, OPENAI_API_KEY_SECRET, type ActiveProvider, type LiveMo
 export { CodexAuthStore, CODEX_SECRET_NAMES } from "./providers/codex-oauth";
 export { runLoginFlow } from "./providers/pkce";
 export { CODEX, CODEX_MODELS, DEFAULT_CODEX_MODEL } from "./providers/codex-config";
+// WS-16 §15's `norma doctor` runs IN-PROCESS against NORMA_HOME — no RPC, because the whole point
+// is to work when the daemon does not — so the CLI reaches these two through the package barrel.
+export {
+  diagnoseRuntimeState,
+  repairRuntimeState,
+  isDaemonLockHeld,
+  DAEMON_RUNNING_REFUSAL,
+  type Finding,
+  type FindingKind,
+  type RepairOp,
+  type RepairResult,
+} from "./runtime-state/doctor";
 export { AgentEngine, type EngineConfig } from "./agent/engine";
 export { FakeProvider } from "./agent/fake-provider";
 export { ToolRegistry, type ToolDefinition, type ToolContext, type ToolOutcome } from "./agent/tools/registry";

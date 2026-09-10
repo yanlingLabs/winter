@@ -1188,6 +1188,59 @@ if (import.meta.main) {
     c.close();
     break;
   }
+  case "doctor": {
+    // WS-16 §15's diagnostics/repair. IN-PROCESS against NORMA_HOME, deliberately NOT an RPC: a
+    // doctor whose first move is to reach the daemon is useless in exactly the state it exists for.
+    // `runtime-state.db` is WAL, so the read-only half runs happily beside a live daemon; every
+    // repair refuses while the lock is held, on the same probe `lock.ts` uses.
+    const { diagnoseRuntimeState, repairRuntimeState, isDaemonLockHeld, DAEMON_RUNNING_REFUSAL } = await import("@norma/core");
+    const home = resolveNormaHome();
+    const args = process.argv.slice(3);
+    const flag = (name: string): string | undefined => {
+      const i = args.indexOf(name);
+      return i === -1 ? undefined : args[i + 1];
+    };
+    const repair = flag("--repair");
+    if (repair === undefined) {
+      const findings = await diagnoseRuntimeState(home);
+      if (findings.length === 0) {
+        console.log(`${AQUA}no findings${RESET} ${DIM}(${home})${RESET}`);
+        break;
+      }
+      for (const f of findings) {
+        const where = f.winterSessionId ? ` ${f.winterSessionId}` : "";
+        const fix = f.repairable.length ? ` ${DIM}[--repair ${f.repairable.join(" | ")}]${RESET}` : "";
+        console.log(`${AQUA}${f.kind}${RESET}${where} — ${f.detail}${fix}`);
+      }
+      break;
+    }
+    if (isDaemonLockHeld(home)) {
+      console.error(DAEMON_RUNNING_REFUSAL);
+      process.exit(1);
+    }
+    const session = flag("--session");
+    const backend = flag("--backend");
+    const backup = flag("--backup");
+    const op =
+      repair === "rebuild-index" ? ({ kind: "rebuild-index" } as const)
+      : repair === "quarantine-tail" && session ? ({ kind: "quarantine-tail", winterSessionId: session } as const)
+      : repair === "relink-backend" && session && backend ? ({ kind: "relink-backend", winterSessionId: session, backendSessionId: backend } as const)
+      : repair === "detach-backend" && session ? ({ kind: "detach-backend", winterSessionId: session } as const)
+      : repair === "restore-backup" && backup ? ({ kind: "restore-backup", backupPath: backup } as const)
+      : undefined;
+    if (!op) {
+      console.error(
+        "usage: norma doctor | norma doctor --repair rebuild-index" +
+          " | --repair quarantine-tail --session <id> | --repair relink-backend --session <id> --backend <uuid>" +
+          " | --repair detach-backend --session <id> | --repair restore-backup --backup <path>",
+      );
+      process.exit(1);
+    }
+    const result = await repairRuntimeState(home, op);
+    console.log(result.detail);
+    if (!result.applied) process.exit(1);
+    break;
+  }
   case "quota": {
     const c = await connect("cli-quota");
     const q = await c.quotaState();
@@ -1975,6 +2028,7 @@ if (import.meta.main) {
   daemon run | daemon install | daemon uninstall | daemon status
   ping | sessions | status | quota | send <sessionId|new> <text> | watch <sessionId> | add-dir <sessionId> <path> [--persist] | cd <sessionId> <path>
   steer <sessionId> <text> | interrupt <sessionId> | compact <sessionId>
+  doctor [--repair <op> [--session <id>] [--backend <uuid>] [--backup <path>]]   runtime-state diagnostics and repair (runs without a daemon)
   agents                                          live roster of background/active sessions (stop, background, archive, resume)
   resume [id] [msg]   list sessions, or continue an existing one
   trust <dir> [--list] | trust list | trust remove <path>
