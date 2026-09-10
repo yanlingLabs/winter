@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { repoRootFor, sanitizeProjectKey, _clearRepoRootCacheForTests } from "../../src/agent/memory-dir";
 import {
@@ -291,6 +291,45 @@ describe("applyMemoryKeyMigration", () => {
         // The already-migrated directory is not "unreferenced" either — a record names it.
         expect(again.unreferenced).toEqual([]);
         expect(manifest(rs).map((r) => r.status)).toEqual(["moved"]);
+      } finally {
+        rs.close();
+      }
+    });
+  });
+
+  test("a rename that landed without its manifest commit is reconciled by the next plan", async () => {
+    // THE TORN-APPLY WINDOW. `apply` renames the tree and then commits the manifest row; a crash
+    // between the two leaves a directory at the NEW key with its row still `planned`. The next run
+    // starts with `plan`, which sees no source directory — so unless `plan` reconciles, the row
+    // stays `planned` forever, `rollback` (which reads `status = 'moved'`) never sees it, and the
+    // tree has no recorded way back. That is the one state the manifest exists to prevent.
+    await withTempHome(async (home) => {
+      _clearRepoRootCacheForTests();
+      const store = new SessionStore(home);
+      const cwd = workdir(home, "a");
+      store.createSession("work", { cwd });
+      const oldKey = seedMemory(home, cwd, "alpha");
+      const before = snapshotTree(join(home, "projects"));
+
+      const rs = openRuntimeStateDb(home);
+      try {
+        const records = new RuntimeSessionRecords(rs);
+        backfillNativeSessions({ rs, store, home, providerId: "codex-oauth" });
+        const plan = planMemoryKeyMigration({ rs, home, records });
+        expect(plan.moves.length).toBe(1);
+        expect(manifest(rs).map((r) => r.status)).toEqual(["planned"]);
+
+        // The crash: the rename landed, the commit did not.
+        renameSync(join(home, "projects", oldKey), join(home, "projects", plan.moves[0]!.newKey));
+
+        const resumed = planMemoryKeyMigration({ rs, home, records });
+        expect(resumed.moves).toEqual([]);
+        expect(resumed.collisions).toEqual([]);
+        expect(manifest(rs).map((r) => r.status)).toEqual(["moved"]);
+
+        // And the tree can still be put back, byte for byte.
+        expect(rollbackMemoryKeyMigration({ rs, home })).toEqual({ rolledBack: 1 });
+        expect(snapshotTree(join(home, "projects"))).toEqual(before);
       } finally {
         rs.close();
       }

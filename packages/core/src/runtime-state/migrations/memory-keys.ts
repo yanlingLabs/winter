@@ -123,14 +123,24 @@ export function planMemoryKeyMigration(deps: { rs: RuntimeStateDb; home: string;
     if (oldKeys.length > 1) plan.collisions.push({ newKey, oldKeys: [...oldKeys].sort(), reason: "many-old-keys" });
   }
 
+  // Rows whose rename landed but whose manifest commit did not — see `reconcile` below.
+  const reconcile: MemoryKeyMove[] = [];
+
   for (const [newKey, oldKeys] of byNewKey) {
     if (oldKeys.length > 1) continue;
     const oldKey = oldKeys[0]!;
     const sourceExists = existsSync(projectDir(home, oldKey));
     const targetExists = existsSync(projectDir(home, newKey));
-    // Source gone AND target present is not a conflict — it is a move this migration already made
-    // (or one an operator made by hand). Neither a move nor a collision: there is nothing to do.
-    if (!sourceExists) continue;
+    // Source gone AND target present is not a conflict — the tree is already where it belongs. It
+    // is, however, the TORN-APPLY WINDOW: `apply` renames and then commits, so a crash between the
+    // two leaves exactly this shape with the manifest row still `planned`. Left alone, that row
+    // would stay `planned` forever — `rollback` only reads `moved`, so the tree would have no
+    // recorded way back, which is the one state this manifest exists to prevent. So the row is
+    // reconciled here instead: the rename landed, and the manifest is made to say so.
+    if (!sourceExists) {
+      if (targetExists) reconcile.push({ oldKey, newKey });
+      continue;
+    }
     if (targetExists) {
       plan.collisions.push({ newKey, oldKeys: [oldKey], reason: "target-exists" });
       continue;
@@ -156,6 +166,15 @@ export function planMemoryKeyMigration(deps: { rs: RuntimeStateDb; home: string;
         [move.oldKey, move.newKey, at],
       );
     }
+    // Keyed on `new_key` as well: a row is only reconciled when the manifest agrees about WHERE the
+    // tree went. A `planned` row naming some other destination is a different, unresolved move, and
+    // marking it `moved` would send a later rollback after the wrong directory.
+    for (const move of reconcile) {
+      rs.db.run(
+        `UPDATE memory_key_manifest SET status = 'moved', moved_at = ? WHERE old_key = ? AND new_key = ? AND status = 'planned'`,
+        [at, move.oldKey, move.newKey],
+      );
+    }
   }, { mode: "immediate" });
 
   return plan;
@@ -166,10 +185,14 @@ export function planMemoryKeyMigration(deps: { rs: RuntimeStateDb; home: string;
  * carries any collision, so a partially-applied ambiguous migration is not a state that exists.
  *
  * The rename and the manifest row are two different stores and cannot share a transaction, so the
- * rename goes FIRST and the row is committed after: a crash in between leaves the directory moved
- * and the row still `planned`, which the idempotent re-run below resolves (source gone, target
- * present → the move already happened, mark it). The other order would leave a `moved` row for a
+ * rename goes FIRST and the row is committed after. The other order would leave a `moved` row for a
  * directory that never went anywhere, and rollback would then chase a tree that was never there.
+ *
+ * A crash in that window leaves the directory moved with its row still `planned`, and it is
+ * `planMemoryKeyMigration` — not this function — that repairs it: a resumed run always re-plans
+ * first, and by then the source directory is gone, so the pair never reaches this loop at all. See
+ * the reconciliation branch there. The tolerant `else if (!existsSync(target))` below covers only
+ * the narrower case of re-passing the SAME in-memory plan twice.
  */
 export function applyMemoryKeyMigration(deps: { rs: RuntimeStateDb; home: string }, plan: MemoryKeyPlan): { moved: number } {
   if (plan.collisions.length > 0) throw new MemoryKeyCollisionError(plan.collisions);
@@ -186,11 +209,12 @@ export function applyMemoryKeyMigration(deps: { rs: RuntimeStateDb; home: string
     } else if (!existsSync(target)) {
       continue; // Nothing at either end: nothing to record.
     }
-    rs.transaction(() => {
-      rs.db.run(`UPDATE memory_key_manifest SET status = 'moved', moved_at = ? WHERE old_key = ? AND status = 'planned'`,
-        [new Date().toISOString(), move.oldKey]);
-    }, { mode: "immediate" });
-    moved += 1;
+    // `.changes`, not an unconditional increment: the count reported is the number of manifest rows
+    // that actually transitioned, so a row someone else already settled is not counted twice.
+    moved += rs.transaction(() => rs.db.run(
+      `UPDATE memory_key_manifest SET status = 'moved', moved_at = ? WHERE old_key = ? AND new_key = ? AND status = 'planned'`,
+      [new Date().toISOString(), move.oldKey, move.newKey],
+    ).changes, { mode: "immediate" });
   }
   return { moved };
 }
