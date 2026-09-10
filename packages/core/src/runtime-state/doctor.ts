@@ -19,11 +19,11 @@
 // open is not a lock fight. Every REPAIR is the opposite: `restore-backup` refuses outright while
 // the lock is held, and the CLI refuses every op on the same probe.
 import { Database } from "bun:sqlite";
-import { copyFileSync, existsSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, copyFileSync, existsSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { SessionStore, SYNCED_SESSION_ID_RE } from "../sessions/store";
-import { openRuntimeStateDb, RuntimeStateUnavailableError } from "./db";
-import { ALLOWED_TRANSITIONS, RuntimeSessionRecords, type RuntimeSessionState } from "./records";
+import { openRuntimeStateDb, RuntimeStateUnavailableError, type RuntimeStateDb } from "./db";
+import { ALLOWED_TRANSITIONS, RuntimeSessionRecords } from "./records";
 import { processIsAlive } from "./leases";
 
 export type FindingKind =
@@ -145,7 +145,7 @@ interface SessionDiagRow {
 export async function diagnoseRuntimeState(home: string): Promise<Finding[]> {
   const findings: Finding[] = [];
 
-  let rs;
+  let rs: RuntimeStateDb;
   try {
     rs = openRuntimeStateDb(home, { readonly: true });
   } catch (e) {
@@ -367,7 +367,7 @@ function quarantineTail(home: string, sessionId: string, injected?: SessionStore
   // File surgery FIRST: constructing a `SessionStore` runs `recoverAll`, which would silently drop
   // the very line this repair exists to preserve.
   const quarantine = join(home, "sessions", row.scope, `${sessionId}.quarantine.jsonl`);
-  writeFileSync(quarantine, `${existsSync(quarantine) ? readFileSync(quarantine, "utf8") : ""}${last}\n`);
+  appendFileSync(quarantine, `${last}\n`);
   const tmp = `${logPath}.repair`;
   writeFileSync(tmp, lines.slice(0, -1).map((l) => `${l}\n`).join(""));
   renameSync(tmp, logPath); // atomic: a crash never leaves a partial log
@@ -436,7 +436,7 @@ function detachBackend(home: string, sessionId: string): RepairResult {
     const records = new RuntimeSessionRecords(rs);
     const record = records.get(sessionId);
     if (!record) return { applied: false, detail: `unknown session: ${sessionId}` };
-    if (ALLOWED_TRANSITIONS[record.state as RuntimeSessionState].includes("exited")) {
+    if (ALLOWED_TRANSITIONS[record.state].includes("exited")) {
       records.transition(sessionId, "exited", { backendSessionId: undefined, transcriptHealth: "unsupported" });
       return { applied: true, detail: `${sessionId} detached from its backend; history is read-only` };
     }
