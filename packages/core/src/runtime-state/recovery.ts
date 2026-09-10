@@ -1,0 +1,529 @@
+// WS-16 §13's daemon startup recovery: twelve steps, run once at boot, over `runtime-state.db` and
+// the product event store.
+//
+// THE ONE PROPERTY THIS FILE EXISTS FOR: "Recovery MUST be bounded. A corrupt or unavailable session
+// must not block the daemon or every other session." So every per-session operation runs inside its
+// own try/catch — a session that throws is recorded under `corrupt`, parked `unavailable` when that
+// is still possible, and the sweep continues. `RecoveryReport.ok` therefore answers "did every step
+// complete", NOT "was every session healthy": a handled per-session throw is this guarantee working,
+// and a daemon that refused to boot over one unreadable row would be the outage the boundedness
+// clause was written to prevent. `corrupt` is the orthogonal answer, and it is what an operator (and
+// `norma doctor`) reads.
+//
+// WHAT IS AND IS NOT IMPLEMENTED IN 8a. Steps 3, 5 (reattach), 6 and 10 are seams whose real work
+// belongs to 8b/8c — they are hooks with an explicit default of "nothing reattached / skipped",
+// never a silent no-op. Steps 2, 4, 5 (lease breaking), 7, 8, 9, 11 and 12 are implemented here.
+// Step 8 REPORTS and never deletes: §13 forbids selecting staging by recency, adopting temp data as
+// a resume source, or reading staged credentials during cleanup, and the safest way to obey all
+// three in 8a is to open nothing at all.
+//
+// DIAGNOSTICS CARRY COUNTS, IDS AND PATHS — NOTHING ELSE (§13 step 12, §17). Every `detail_json`
+// this file writes is assembled from numbers, session/child ids and filesystem paths. Even a caught
+// error contributes only its `name`: an error MESSAGE routinely quotes the payload it choked on
+// (`JSON.parse` echoes the corrupt bytes verbatim), and that payload is exactly the content the
+// runtime-state tables are trusted never to leak.
+import { readdirSync } from "node:fs";
+import { join } from "node:path";
+import type { SessionStore } from "../sessions/store";
+import type { RuntimeStateDb } from "./db";
+import { RuntimeSessionRecords, type GenerationRow, type RuntimeSessionRecord } from "./records";
+import { RuntimeLeases, type LeaseProbe, type LeaseRow, type ProcessIdentity } from "./leases";
+import { RuntimeChildren, type ChildRef, type PersistedWinterChild } from "./children";
+
+/** The three states §13 step 2 calls "live": everything a previous daemon believed it was running.
+ *  All three admit `unavailable` in `ALLOWED_TRANSITIONS`, which is what makes the park legal. */
+const LIVE_STATES = ["running", "ready", "idle"] as const;
+
+/** The shared temp tree's own subdirectory (§2's path contract): resume-staging and the binary
+ *  cache, never a session root — so it is never a candidate orphan. */
+const TEMP_RUNTIME_DIR = ".runtime";
+
+export interface RecoveryHooks {
+  /** step 3 — reconcile product-event and transcript tails; 8a: product log only (SessionStore.recoverAll). */
+  reconcileTranscriptTail?: (record: RuntimeSessionRecord) => Promise<"ok" | "quarantined" | "skipped">;
+  /** step 5 — 8b/8c: reattach live Winter channels / verify official processes. Default: none reattached. */
+  reattach?: (record: RuntimeSessionRecord, generation: GenerationRow) => Promise<"reattached" | "gone" | "skipped">;
+  /** step 6 — 8c: reconcile recorded official local-write roots. Default: skipped. */
+  reconcileLocalWriteRoot?: (record: RuntimeSessionRecord) => Promise<"ok" | "repair-required" | "skipped">;
+  /** step 8 — temp orphan scan. Receives the roots NAMED by authoritative generation/session rows
+   *  and returns the ones on disk that nothing names. Default: the lease-safe scan below. */
+  scanTempOrphans?: (roots: string[]) => Promise<{ orphans: string[] }>;
+  /** step 10 — the router's directory.recover(); 8b wires it. */
+  recoverDirectory?: () => Promise<unknown>;
+  /** step 7 — the caller's PROOF that a `running` child's process/thread is gone (WS-16 §12). The
+   *  default is `() => true`: after a daemon restart nothing this process owns survived. */
+  isChildGone?: (child: PersistedWinterChild) => boolean;
+}
+
+export interface RecoveryDeps {
+  home: string;
+  rs: RuntimeStateDb;
+  store: SessionStore;
+  self: ProcessIdentity;
+  hooks?: RecoveryHooks;
+  log?: (line: string) => void;
+  now?: () => string;
+  /**
+   * Step 4's process probe. Injectable so a test can describe a dead or reused pid without spawning
+   * one — and DELIBERATELY only half the story: it governs the VERDICT, while `breakStale` re-proves
+   * staleness against the live machine before it releases anything (leases.ts keeps that probe
+   * un-injectable on purpose). A probe that lies about a live holder therefore moves a count in this
+   * report and takes nobody's lease away.
+   */
+  probe?: LeaseProbe;
+  /** Step 8's scan root. Defaults to §2's canonical `/private/tmp/norma-<uid>`; a test MUST point it
+   *  at a temp directory, because the default is a real path on the developer's machine. */
+  tempScanRoot?: string;
+}
+
+export interface RecoveryStepReport {
+  step: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12;
+  outcome: "ok" | "partial" | "skipped" | "failed";
+  detail: Record<string, number | string | string[]>;
+}
+
+export interface RecoveryReport {
+  startedAt: string;
+  finishedAt: string;
+  steps: RecoveryStepReport[];
+  sessionsSeen: number;
+  markedUnavailable: number;
+  /** The children step 7 moved `running → interrupted`, as `{parent, childId}` pairs — a bare id
+   *  cannot say whose child it was (two parents may mint the same `childId`). */
+  reclassified: ChildRef[];
+  corrupt: string[];
+  /** "Every step completed." Orthogonal to `corrupt` — see this file's header. */
+  ok: boolean;
+}
+
+/** §2's canonical ephemeral root. The numeric suffix is the ACTUAL uid, never a hard-coded value. */
+export function canonicalTempScanRoot(): string {
+  return `/private/tmp/norma-${process.getuid?.() ?? -1}`;
+}
+
+export async function recoverRuntimeState(deps: RecoveryDeps): Promise<RecoveryReport> {
+  const { rs, store, self } = deps;
+  const now = deps.now ?? (() => new Date().toISOString());
+  const hooks = deps.hooks ?? {};
+  const log = deps.log ?? (() => {});
+  const records = new RuntimeSessionRecords(rs, now);
+  const leases = new RuntimeLeases(rs, self, now);
+  const children = new RuntimeChildren(rs, now);
+
+  const startedAt = now();
+  const steps: RecoveryStepReport[] = [];
+  const corrupt: string[] = [];
+  const reclassified: ChildRef[] = [];
+  const parked: string[] = [];
+  let markedUnavailable = 0;
+
+  /** Step 12, written as we go rather than at the end: a recovery that dies halfway must still leave
+   *  the evidence of how far it got. Best-effort — a diagnostics write that fails is never allowed
+   *  to take down the recovery it is describing. */
+  const writeAttempt = (
+    step: RecoveryStepReport["step"],
+    outcome: string,
+    detail: Record<string, number | string | string[]>,
+    winterSessionId?: string,
+  ): void => {
+    try {
+      rs.db.run(
+        `INSERT INTO runtime_recovery_attempts (started_at, finished_at, daemon_pid, daemon_started_at, step, winter_session_id, outcome, detail_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [startedAt, now(), self.pid, self.startedAt, step, winterSessionId ?? null, outcome, JSON.stringify(detail)],
+      );
+    } catch {
+      /* bounded: diagnostics are evidence, never a dependency */
+    }
+  };
+
+  const finishStep = (step: RecoveryStepReport["step"], outcome: RecoveryStepReport["outcome"], detail: RecoveryStepReport["detail"]): void => {
+    steps.push({ step, outcome, detail });
+    writeAttempt(step, outcome, detail);
+    // The sink is the CALLER's, and it is the last thing standing between a bad log target and a
+    // daemon that will not boot. It is also called from inside the outer catch below, so an
+    // unguarded throw here would escape the very guard that exists to contain it — a sink that
+    // fails on EVERY line would reject the promise no matter how carefully the sweep behaved.
+    // Recovery narrates; it does not depend on being heard.
+    try {
+      log(`recovery step ${step}: ${outcome}`);
+    } catch {
+      /* a logging sink must never take recovery down */
+    }
+  };
+
+  /** The per-session bound. Records the id once, writes ONE attempt row naming the step and the
+   *  error's TYPE (never its message — see this file's header), and returns so the caller continues. */
+  const noteCorrupt = (winterSessionId: string, step: RecoveryStepReport["step"], e: unknown): void => {
+    if (!corrupt.includes(winterSessionId)) corrupt.push(winterSessionId);
+    writeAttempt(step, "failed", { step, errorName: e instanceof Error ? e.name : "unknown" }, winterSessionId);
+  };
+
+  /** Park a session whose record cannot even be READ back (a corrupt `selection_json` makes every
+   *  typed door throw). The `state IN (…)` guard is the same edge `ALLOWED_TRANSITIONS` allows, so
+   *  this fallback can never make a transition the state machine forbids — it just does not need to
+   *  parse the row to know that. */
+  const parkRaw = (winterSessionId: string): void => {
+    try {
+      rs.db.run(
+        `UPDATE runtime_sessions SET state = 'unavailable', updated_at = ? WHERE winter_session_id = ? AND state IN ('running', 'ready', 'idle')`,
+        [now(), winterSessionId],
+      );
+    } catch {
+      /* bounded: a session we cannot park must not stop the sweep */
+    }
+  };
+
+  const count = (sql: string): number => (rs.db.query<{ n: number }, []>(sql).get()?.n ?? 0);
+  const ids = (sql: string): string[] =>
+    rs.db.query<{ winter_session_id: string }, []>(sql).all().map((r) => r.winter_session_id);
+
+  // Assigned INSIDE the outer try below, not here: this is a db read like any other, and a read
+  // above the guard is a read whose failure rejects the promise. Zero until the sweep has counted.
+  let sessionsSeen = 0;
+  const finish = (): RecoveryReport => ({
+    startedAt,
+    finishedAt: now(),
+    steps,
+    sessionsSeen,
+    markedUnavailable,
+    reclassified,
+    corrupt,
+    ok: steps.every((s) => s.outcome !== "failed"),
+  });
+
+  // Review r1 (Minor 4): the boundedness claim has to be TOTAL. The per-session guards cover every
+  // door that reads a session, but the bare counting helpers between them do not — and once 8b
+  // wires this into boot, a rejected promise here is a daemon that does not start. A throw from
+  // anywhere in the sweep therefore still leaves a step-12 row and a report that says `ok: false`.
+  try {
+    sessionsSeen = count("SELECT COUNT(*) AS n FROM runtime_sessions");
+
+    // ── 1. Integrity-check both stores ───────────────────────────────────────────────────────────
+    // Two stores with two different ownership rules: `runtime-state.db` is AUTHORITATIVE (§14: a
+    // missing or corrupt one refuses runtime resume/routing — never infer a runtime kind or backend id
+    // from the rebuildable index), while the product index is DISPOSABLE and rebuilds itself from the
+    // SessionEvent JSONL. A failed authoritative check is the one condition that stops this sweep:
+    // every later step would be reading and rewriting a store that cannot be trusted.
+    {
+      let integrityOk = false;
+      let checks: string[] = ["unreadable"];
+      try {
+        const report = rs.integrity();
+        integrityOk = report.ok;
+        checks = report.checks;
+      } catch (e) {
+        checks = [e instanceof Error ? e.name : "unknown"];
+      }
+      if (!integrityOk) {
+        finishStep(1, "failed", { integrity: checks });
+        return finish();
+      }
+      try {
+        store.recoverAll();
+        finishStep(1, "ok", { integrity: checks, sessions: sessionsSeen });
+      } catch (e) {
+        finishStep(1, "failed", { integrity: checks, errorName: e instanceof Error ? e.name : "unknown" });
+        return finish();
+      }
+    }
+
+    // ── 2. Park every live state pending revalidation ────────────────────────────────────────────
+    // Enumerated as RAW IDS, deliberately: `records.list()` maps every row through `JSON.parse`, so a
+    // single corrupt `selection_json` would throw before the first healthy session was even seen. One
+    // id at a time is what makes the corruption bound per-session rather than per-sweep.
+    {
+      const live = ids(`SELECT winter_session_id FROM runtime_sessions WHERE state IN ('running', 'ready', 'idle') ORDER BY winter_session_id`);
+      let failed = 0;
+      for (const id of live) {
+        try {
+          records.transition(id, "unavailable");
+          markedUnavailable++;
+          parked.push(id);
+        } catch (e) {
+          failed++;
+          noteCorrupt(id, 2, e);
+          parkRaw(id);
+        }
+      }
+      finishStep(2, failed === 0 ? "ok" : "partial", { live: live.length, marked: markedUnavailable, failed });
+    }
+
+    // ── 3. Reconcile the two tails ───────────────────────────────────────────────────────────────
+    // The PRODUCT tail was already reconciled by step 1's `recoverAll` (skip-bad-lines + atomic
+    // rewrite). The COMPATIBILITY transcript tail is 8b/8c's, and so is resolving the open projection
+    // marks: `ProjectionCheckpoints.resolvePending` needs a witness predicate over the product log
+    // tail, and inventing one here would be a guess with two bad answers — `false` DELETES marks (the
+    // projector re-appends events that are already there), `true` COMMITS them (events that never
+    // landed are never re-applied). So 8a REPORTS the open window and resolves nothing.
+    {
+      const pendingMarks = count("SELECT COUNT(*) AS n FROM projection_applied WHERE state = 'pending'");
+      const hook = hooks.reconcileTranscriptTail;
+      if (!hook) {
+        finishStep(3, "skipped", { pendingMarks, productLog: "recovered-by-store", transcriptTail: "8b" });
+      } else {
+        const tally = { ok: 0, quarantined: 0, skipped: 0, failed: 0 };
+        for (const id of ids("SELECT winter_session_id FROM runtime_sessions ORDER BY winter_session_id")) {
+          try {
+            const record = records.get(id);
+            if (!record) continue;
+            const verdict = await hook(record);
+            tally[verdict]++;
+          } catch (e) {
+            tally.failed++;
+            noteCorrupt(id, 3, e);
+          }
+        }
+        finishStep(3, tally.failed === 0 ? "ok" : "partial", { ...tally, pendingMarks });
+      }
+    }
+
+    // ── 4. Revalidate every unreleased lease by pid AND start identity ───────────────────────────
+    // WS-16 §11: never adopt a reused PID. At most one lease per SESSION can be unreleased (acquire
+    // refuses a live one and releases a stale other-generation one in the same transaction), so the
+    // session list plus `holder()` is the whole worklist — `unreleasedRows` is carried alongside as a
+    // tripwire: a count above `checked` would mean that invariant had broken.
+    const verdicts: { lease: LeaseRow; verdict: "live" | "stale" | "unknown" }[] = [];
+    {
+      const unreleasedRows = count("SELECT COUNT(*) AS n FROM runtime_generations WHERE lease_holder_pid IS NOT NULL AND lease_released_at IS NULL");
+      const held = ids(
+        `SELECT DISTINCT winter_session_id FROM runtime_generations WHERE lease_holder_pid IS NOT NULL AND lease_released_at IS NULL ORDER BY winter_session_id`,
+      );
+      let failed = 0;
+      for (const id of held) {
+        try {
+          const lease = leases.holder(id);
+          if (!lease) continue;
+          verdicts.push({ lease, verdict: leases.revalidate(lease, deps.probe) });
+        } catch (e) {
+          failed++;
+          noteCorrupt(id, 4, e);
+        }
+      }
+      finishStep(4, failed === 0 ? "ok" : "partial", {
+        checked: verdicts.length,
+        unreleasedRows,
+        live: verdicts.filter((v) => v.verdict === "live").length,
+        stale: verdicts.filter((v) => v.verdict === "stale").length,
+        unknown: verdicts.filter((v) => v.verdict === "unknown").length,
+        failed,
+      });
+    }
+
+    // ── 5. Break the proven-stale leases; reattach what a live runtime still owns ─────────────────
+    {
+      let broken = 0;
+      let breakRefused = 0;
+      let unknownLeft = 0;
+      let failed = 0;
+      for (const { lease, verdict } of verdicts) {
+        if (verdict === "unknown") {
+          // §11's third answer: alive, but no identity. Neither proven live nor proven stale, so it is
+          // left exactly as it is and reported. Breaking it is how two writers reach one transcript.
+          unknownLeft++;
+          continue;
+        }
+        if (verdict !== "stale") continue;
+        try {
+          if (leases.breakStale(lease.winterSessionId, lease.generation, "startup-recovery: holder revalidated as gone")) broken++;
+          else breakRefused++;
+        } catch (e) {
+          failed++;
+          noteCorrupt(lease.winterSessionId, 5, e);
+        }
+      }
+
+      let reattached = 0;
+      let gone = 0;
+      let skipped = 0;
+      const reattach = hooks.reattach;
+      if (reattach) {
+        for (const id of parked) {
+          try {
+            const record = records.get(id);
+            if (!record) continue;
+            const generations = records.generations(id);
+            const generation = generations[generations.length - 1];
+            // Nothing has ever attached to this session, so there is no live channel to reattach to.
+            if (!generation) {
+              skipped++;
+              continue;
+            }
+            const outcome = await reattach(record, generation);
+            if (outcome === "reattached") {
+              records.transition(id, "ready");
+              reattached++;
+            } else if (outcome === "gone") gone++;
+            else skipped++;
+          } catch (e) {
+            failed++;
+            noteCorrupt(id, 5, e);
+          }
+        }
+      } else {
+        skipped = parked.length;
+      }
+      finishStep(5, failed === 0 ? "ok" : "partial", { broken, breakRefused, unknownLeft, reattached, gone, skipped, failed });
+    }
+
+    // ── 6. Reconcile recorded official local-write roots ─────────────────────────────────────────
+    // §13 step 6 / §14's mirror row: a mismatch is marked `repair-required` BEFORE any handoff is
+    // allowed. 8c owns the comparison; the marking is here so the verdict has one durable sink.
+    {
+      const hook = hooks.reconcileLocalWriteRoot;
+      if (!hook) {
+        finishStep(6, "skipped", { reason: "8c" });
+      } else {
+        const tally = { ok: 0, "repair-required": 0, skipped: 0, failed: 0 };
+        for (const id of ids("SELECT winter_session_id FROM runtime_sessions ORDER BY winter_session_id")) {
+          try {
+            const record = records.get(id);
+            if (!record) continue;
+            const verdict = await hook(record);
+            tally[verdict]++;
+            if (verdict === "repair-required") records.setTranscriptHealth(id, "repair-required");
+          } catch (e) {
+            tally.failed++;
+            noteCorrupt(id, 6, e);
+          }
+        }
+        finishStep(6, tally.failed === 0 ? "ok" : "partial", { ...tally });
+      }
+    }
+
+    // ── 7. Rebuild the child roster and mark interrupted work accurately ─────────────────────────
+    // Review r1 (Important 1): PER PARENT, not one sweep. `reclassifyAfterRestart` is a single
+    // transaction over everything it enumerates, so an unscoped call makes one bad row — or one
+    // `isChildGone` proof that throws — cost every child of every session, at every boot, forever.
+    // Same shape as step 2's: enumerate raw, act one at a time, record the failure, continue.
+    {
+      const parents = rs.db
+        .query<{ parent_winter_session_id: string }, []>(
+          `SELECT DISTINCT parent_winter_session_id FROM runtime_children WHERE status = 'running' ORDER BY parent_winter_session_id`,
+        )
+        .all()
+        .map((r) => r.parent_winter_session_id);
+      const isGone = hooks.isChildGone ?? (() => true);
+      // A LOCAL tally, not the report-level `reclassified`: a step's detail must describe what THAT
+      // step did. Reading the shared array happens to agree today only because nothing else writes
+      // it — which is exactly the kind of coincidence that stops being true quietly.
+      const interrupted: ChildRef[] = [];
+      let kept = 0;
+      let failed = 0;
+      for (const parent of parents) {
+        try {
+          const result = children.reclassifyAfterRestart(isGone, { parent });
+          interrupted.push(...result.interrupted);
+          kept += result.kept.length;
+        } catch (e) {
+          failed++;
+          noteCorrupt(parent, 7, e);
+        }
+      }
+      reclassified.push(...interrupted);
+      finishStep(7, failed === 0 ? "ok" : "partial", {
+        parents: parents.length,
+        interrupted: interrupted.length,
+        kept,
+        failed,
+        children: interrupted.map((c) => `${c.parent}/${c.childId}`),
+      });
+    }
+
+    // ── 8. Lease-safe temp orphan scan — REPORT ONLY ─────────────────────────────────────────────
+    // The canonical tree is `<scanRoot>/<temp-project-key>/<backend-session-uuid>/`, so an
+    // authoritative root sits BELOW a direct child of the scan root. A child is an orphan only when no
+    // recorded root lives inside it — anything shallower would report a whole project key as abandoned
+    // because one of its sessions ended. Names only: nothing under this root is opened, so a staged
+    // credential cannot be read or logged even by accident (§13 step 8).
+    {
+      const known = new Set<string>(
+        [
+          ...rs.db.query<{ p: string }, []>("SELECT DISTINCT local_write_root AS p FROM runtime_generations WHERE local_write_root IS NOT NULL").all(),
+          ...rs.db.query<{ p: string }, []>("SELECT DISTINCT effective_temp_dir AS p FROM runtime_sessions WHERE effective_temp_dir IS NOT NULL").all(),
+          ...rs.db.query<{ p: string }, []>("SELECT DISTINCT active_local_write_root AS p FROM runtime_sessions WHERE active_local_write_root IS NOT NULL").all(),
+        ].map((r) => r.p),
+      );
+      const scanRoot = deps.tempScanRoot ?? canonicalTempScanRoot();
+      const scan = hooks.scanTempOrphans ?? (async (roots: string[]) => defaultTempScan(scanRoot, roots));
+      try {
+        const { orphans } = await scan([...known]);
+        finishStep(8, "ok", { root: scanRoot, known: known.size, orphans, deleted: 0 });
+      } catch (e) {
+        finishStep(8, "skipped", { root: scanRoot, known: known.size, errorName: e instanceof Error ? e.name : "unknown" });
+      }
+    }
+
+    // ── 9. No auto-resume ────────────────────────────────────────────────────────────────────────
+    // §13 step 9: resume only what an attached client, a queued accepted message, a routine or an
+    // explicit product policy demands — none of which this sweep is. Stated as an assertion rather
+    // than as a comment, so a future step that quietly resumed something would show up as a count.
+    finishStep(9, "ok", { autoResumed: 0, running: count("SELECT COUNT(*) AS n FROM runtime_sessions WHERE state = 'running'") });
+
+    // ── 10. Global messages and uncertain receipts ───────────────────────────────────────────────
+    // Counts only. The rows this step looks at hold whole message envelopes; the pair (claimed, no
+    // receipt) is the messaging spec's entire evidence for `delivery_uncertain`, and how MANY there
+    // are is the only part of it that belongs in a diagnostic.
+    {
+      const detail = {
+        heldMessages: count("SELECT COUNT(*) AS n FROM held_messages"),
+        claimedWithoutReceipt: count("SELECT COUNT(*) AS n FROM global_messages WHERE claimed_by IS NOT NULL AND outcome_json IS NULL"),
+        idleSubscriptions: count("SELECT COUNT(*) AS n FROM idle_subscriptions"),
+      };
+      if (!hooks.recoverDirectory) {
+        finishStep(10, "skipped", { ...detail, reason: "8b" });
+      } else {
+        try {
+          await hooks.recoverDirectory();
+          finishStep(10, "ok", detail);
+        } catch (e) {
+          finishStep(10, "failed", { ...detail, errorName: e instanceof Error ? e.name : "unknown" });
+        }
+      }
+    }
+
+    // ── 11. Re-establish live directory entries with new generations ─────────────────────────────
+    // 8b's, by construction: a live entry is minted when a runtime actually attaches, and nothing has
+    // attached yet at this point in boot. Recovery must not invent one.
+    finishStep(11, "skipped", { reason: "8b", directoryEntries: count("SELECT COUNT(*) AS n FROM directory_entries") });
+
+    // ── 12. Emit recovery diagnostics ────────────────────────────────────────────────────────────
+    // Every step above already wrote its own row as it finished (a recovery that dies halfway must
+    // still leave evidence of how far it got), so this last one is the summary — and the twelfth row.
+    finishStep(12, "ok", {
+      sessionsSeen,
+      markedUnavailable,
+      corrupt,
+      reclassified: reclassified.map((c) => `${c.parent}/${c.childId}`),
+    });
+  } catch (e) {
+    finishStep(12, "failed", { errorName: e instanceof Error ? e.name : "unknown" });
+  }
+  return finish();
+}
+
+/**
+ * The default step-8 scan: one level under the canonical temp root, names only.
+ *
+ * Never `readFileSync`, never a symlink follow, never a delete — the whole point of §13 step 8 is
+ * that a recovery sweep may look at what EXISTS and nothing else.
+ */
+function defaultTempScan(scanRoot: string, known: string[]): { orphans: string[] } {
+  let entries: string[];
+  try {
+    entries = readdirSync(scanRoot, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name);
+  } catch {
+    // No temp root yet (a first boot, or a machine that cleared /private/tmp) — nothing to report.
+    return { orphans: [] };
+  }
+  const orphans: string[] = [];
+  for (const name of entries) {
+    if (name === TEMP_RUNTIME_DIR) continue;
+    const path = join(scanRoot, name);
+    const claimed = known.some((root) => root === path || root.startsWith(`${path}/`));
+    if (!claimed) orphans.push(path);
+  }
+  return { orphans };
+}
