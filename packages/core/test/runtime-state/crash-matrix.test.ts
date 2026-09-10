@@ -5,9 +5,15 @@
 // (`recoverRuntimeState`, `diagnoseRuntimeState`, `repairRuntimeState`), which land in a sibling
 // lane of this same phase. This file pins the end state itself, composed from the spine primitives
 // that produce it — so the invariant is under test now, and the driver gets bound to it when
-// recovery lands (see the per-row notes). What is NOT deferred is the substance: a dead pid must
-// break a lease, an unknown identity must not, a `creating` record must never surface as live, and a
-// re-projection after a lost cursor commit must not double-append.
+// recovery lands. What is NOT deferred is the substance: a dead pid must break a lease, an unknown
+// identity must not, a `creating` record must never surface as live, and a re-projection after a
+// lost cursor commit must not double-append.
+//
+// WHAT IS STILL OWED IS MARKED, NOT DESCRIBED. Every place a Task-12 binding belongs carries a
+// `// OWED(task-12):` line naming the exact call to substitute, so that work is found by
+// `grep -rn 'OWED(task-12)'` rather than by re-reading a lane report. Rows (b) and (c) additionally
+// perform their own transitions today (review r1, minor 5): that proves the state machine HAS the
+// edge, not that recovery takes it — which is precisely what the marker is there to close.
 import { describe, expect, test } from "bun:test";
 import { copyFileSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -36,6 +42,13 @@ function seedRecord(rs: RuntimeStateDb, id: string): RuntimeSessionRecords {
 /** A probe that describes a machine without spawning anything on it. */
 const probeOf = (alive: boolean, startedAt: string): LeaseProbe => ({ alive: () => alive, startedAt: () => startedAt });
 
+// OWED(task-12): bind this row to Lane C's diagnostics — `diagnoseRuntimeState(home)` must report
+// `db-corrupt` for the corrupt file and `db-missing` for the absent one, and the restore below must
+// become `repairRuntimeState(home, { kind: "restore-backup", backupPath })`.
+// OWED(task-12): `repairRuntimeState`'s `restore-backup` MUST delete `runtime-state.db-wal` and
+// `-shm` before copying the backup over the main file — a stale WAL beside a restored database is
+// its own corruption, and SQLite would replay a journal describing a database that no longer exists.
+// The manual restore in this file does exactly that; the repair op has to as well.
 describe("crash row (a) — runtime-state.db missing or corrupt refuses runtime routing until repaired", () => {
   test("a corrupt database refuses to open, typed, rather than handing back a half-usable handle", async () => {
     await withTempHome(async (home) => {
@@ -96,6 +109,9 @@ describe("crash row (a) — runtime-state.db missing or corrupt refuses runtime 
   });
 });
 
+// OWED(task-12): `recoverRuntimeState` is this row's driver. The `records.transition(…)` calls below
+// stand in for it — replace them with a recovery run and assert the same end state (lease broken,
+// record `unavailable`, an unidentifiable holder left alone and reported).
 describe("crash row (b) — machine restart with sessions running: reclassify after revalidation, never trust persisted liveness", () => {
   test("a lease whose holder is provably gone is broken and its session becomes unavailable", async () => {
     await withTempHome(async (home) => {
@@ -116,8 +132,7 @@ describe("crash row (b) — machine restart with sessions running: reclassify af
         expect(leases.breakStale("s_a", generation, "machine restart")).toBe(true);
         expect(leases.holder("s_a")).toBeUndefined();
 
-        // The end state startup recovery must produce (step 2 of WS-16 §13; bound to
-        // `recoverRuntimeState` when the recovery lane lands).
+        // The end state startup recovery must produce (step 2 of WS-16 §13) — see OWED(task-12) above.
         expect(records.transition("s_a", "unavailable").state).toBe("unavailable");
         expect(records.list({ state: ["ready", "running", "idle"] })).toEqual([]);
       } finally {
@@ -177,6 +192,9 @@ describe("crash row (b) — machine restart with sessions running: reclassify af
   });
 });
 
+// OWED(task-12): `recoverRuntimeState` is this row's driver too — it is what must move a stranded
+// `creating` record to `failed`. The transition below stands in for it; the structural assertion off
+// `ALLOWED_TRANSITIONS` underneath holds either way.
 describe("crash row (c) — a crash before the runtime mapping commit leaves no visible ready session", () => {
   test("a record stranded in creating settles as failed and is invisible to a live-session listing", async () => {
     await withTempHome(async (home) => {
@@ -187,7 +205,7 @@ describe("crash row (c) — a crash before the runtime mapping commit leaves no 
         // It was never live and never can be reported as live, at any point before it settles.
         expect(records.list({ state: ["ready", "running", "idle"] })).toEqual([]);
 
-        // Recovery's own transition (WS-16 §13; the driver binds when the recovery lane lands).
+        // Recovery's own transition (WS-16 §13) — see OWED(task-12) above.
         expect(records.transition("s_torn", "failed").state).toBe("failed");
         expect(records.list({ state: ["ready", "running", "idle"] })).toEqual([]);
       } finally {

@@ -77,7 +77,7 @@ function authFamilyFor(providerId: string): RuntimeSelection["authFamily"] {
  * to catch up, and re-running after a crash mid-migration completes it.
  */
 export function backfillNativeSessions(deps: BackfillDeps): BackfillReport {
-  const { rs, store, home, providerId } = deps;
+  const { rs, store, providerId } = deps;
   const now = deps.now ?? (() => new Date().toISOString());
   const records = new RuntimeSessionRecords(rs, now);
   const report: BackfillReport = { created: [], skipped: [], alreadyPresent: [], errors: [] };
@@ -115,12 +115,20 @@ function backfillOne(deps: BackfillDeps, records: RuntimeSessionRecords, now: ()
   // memory path can never disagree about where a project's memory is. Task 10 (§17 phase 5) is what
   // moves it to the compatibility key; until then the record states where the memory IS.
   const memoryKey = sanitizeProjectKey(repoRootFor(cwd));
-  const settled = settledStateFor(store, winterSessionId);
+  const settle = settlePathFor(store, meta, winterSessionId);
   const at = now();
 
   const selection: RuntimeSelection = {
     runtimeKind: "winter-agent",
     providerId,
+    // A BARE MODEL ID, DELIBERATELY, and 8b should read legacy rows as unqualified (review r1,
+    // minor 6). The SDK types `modelRef` as the provider-qualified catalog ROW KEY
+    // (`anthropic/claude-opus-5`), and the obvious derivation — `${providerId}/${model}` — would be
+    // a fabrication here: `providerId` on this record is `settings.provider.type`
+    // (`codex-oauth` | `openai-compatible`), which is Norma's PROVIDER TYPE, not a catalog provider
+    // id, so the composed string would name a row no catalog has ever contained. The bare id is what
+    // the session actually ran with, and the record already says it is not to be trusted as current:
+    // `versionProvenance: "legacy-unknown"`, `family: "legacy"`, `reason: "backfill"`.
     modelRef: meta.model ?? "unknown",
     family: "legacy",
     authFamily: authFamilyFor(providerId),
@@ -155,16 +163,28 @@ function backfillOne(deps: BackfillDeps, records: RuntimeSessionRecords, now: ()
         capabilities: ["import-conversation"],
         selection,
       });
-      records.transition(winterSessionId, "ready");
-      records.transition(winterSessionId, settled);
+      for (const state of settle) records.transition(winterSessionId, state);
     },
     { mode: "immediate" },
   );
 }
 
-/** `exited` when the log's last event says the session finished; `unavailable` otherwise. */
-function settledStateFor(store: SessionStore, winterSessionId: string): RuntimeSessionState {
+/**
+ * The states this record walks through to reach the one it should rest in.
+ *
+ * Always via `ready`, because `create` inserts `creating` and §4's table gives it exactly two exits.
+ * Then `exited` when the log's last event says the session finished, `unavailable` otherwise — a log
+ * ending mid-turn cannot be called a clean finish.
+ *
+ * A session the USER ALREADY ARCHIVED then takes one more step to `archived` (review r1, minor 9).
+ * "Archive is not delete" (WS-16 §16) has to hold for legacy sessions too: 8b refuses messaging to an
+ * archived session, and without this step that refusal would silently skip every session a user
+ * retired before the runtime spine existed. `archived` is reachable from `exited` and from
+ * `unavailable` alike, so neither has to pretend it ended the way the other did.
+ */
+function settlePathFor(store: SessionStore, meta: { archived?: boolean }, winterSessionId: string): RuntimeSessionState[] {
   const events = store.read(winterSessionId);
   const last = events[events.length - 1];
-  return last && TERMINAL_LAST_EVENTS.has(last.type) ? "exited" : "unavailable";
+  const settled: RuntimeSessionState = last && TERMINAL_LAST_EVENTS.has(last.type) ? "exited" : "unavailable";
+  return meta.archived ? ["ready", settled, "archived"] : ["ready", settled];
 }

@@ -131,6 +131,33 @@ describe("backfillNativeSessions", () => {
     });
   });
 
+  test("a session the user archived backfills as an archived runtime record", async () => {
+    // WS-16 §16's "archive is not delete" applies to legacy sessions too: 8b refuses messaging to an
+    // archived session, and that refusal must cover the ones a user archived before the spine existed.
+    await withTempHome(async (home) => {
+      _clearRepoRootCacheForTests();
+      const store = new SessionStore(home);
+      const finished = store.createSession("work", { cwd: workdir(home, "done") });
+      const midflight = store.createSession("work", { cwd: workdir(home, "mid") });
+      store.append(finished, { type: "turn_completed", sessionId: finished, threadId: "main", stopReason: "end_turn", inputTokens: 1, outputTokens: 1 });
+      store.append(midflight, { type: "turn_started", sessionId: midflight, threadId: "main" });
+      store.setArchived(finished, true);
+      store.setArchived(midflight, true);
+
+      const rs = openRuntimeStateDb(home);
+      try {
+        backfillNativeSessions({ rs, store, home, providerId: "codex-oauth" });
+        const records = new RuntimeSessionRecords(rs);
+        // Both settle first and are then retired — `archived` is reachable from `exited` and from
+        // `unavailable` alike, so neither has to pretend it ended the way the other did.
+        expect(records.get(finished)!.state).toBe("archived");
+        expect(records.get(midflight)!.state).toBe("archived");
+      } finally {
+        rs.close();
+      }
+    });
+  });
+
   test("a second run creates nothing and reports both sessions as already present", async () => {
     await withTempHome(async (home) => {
       _clearRepoRootCacheForTests();

@@ -16,6 +16,17 @@
 // consistent inputs. They are kept anyway, because "nobody's memory is merged or overwritten" should
 // be true by refusal rather than by an argument about derivations.
 //
+// THAT ARGUMENT HAS A PRECONDITION, AND IT IS ENFORCED HERE: THE CWD MUST STILL EXIST. The SDK's
+// `gitCommonRoot` returns null whenever `git -C <cwd>` fails — a missing directory included — and
+// `compatibilityKeys` then falls back to the CWD's OWN key, which is not root-derived. The old key
+// does not degrade the same way: it was computed at backfill time, when the directory was still
+// there. So a record whose cwd has since been deleted would offer a root-derived old key and a
+// per-cwd destination, and two sessions in one repo with one dead cwd would present ONE old key with
+// TWO destinations — a fan-out arising from ordinary inputs (legacy sessions are exactly the
+// population whose cwds are most likely gone), refusing the whole migration. With no sibling it is
+// worse: the repo's entire memory tree is renamed under a per-cwd key, and a later re-clone finds an
+// empty memory directory. Such a record is therefore `unresolved`: skipped, reported, never moved.
+//
 // The old key is read from the record (Task 9 stored today's key there); the new key is derived from
 // the session's CWD, which is why this phase needs the product store — a record carries project
 // keys, never the cwd they came from.
@@ -35,7 +46,7 @@
 //
 // A refusal costs a re-run. Guessing costs somebody's notes.
 import { compatibilityKeys } from "@yanlinglabs/winter-agent-sdk";
-import { existsSync, readdirSync, renameSync } from "node:fs";
+import { existsSync, readdirSync, renameSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { SessionStore } from "../../sessions/store";
 import type { RuntimeStateDb } from "../db";
@@ -94,7 +105,48 @@ export class MemoryKeyCollisionError extends Error {
   }
 }
 
+/**
+ * `apply` refused a move because the manifest does not carry a `planned` row for it — the plan is
+ * stale (already applied, or rolled back since), or it was built by hand and never planned at all.
+ *
+ * CHECKED BEFORE ANY RENAME, and that ordering is the whole point. Renaming first and only then
+ * looking for the row is how a re-applied plan used to move a tree forward, match nothing, leave the
+ * records naming the old key and report `{ moved: 0 }` — a moved tree with no recorded way back and
+ * nothing reporting it (review r1, Important 2).
+ */
+export class MemoryKeyNotPlannedError extends Error {
+  constructor(public readonly oldKey: string, public readonly newKey: string, public readonly status: string | undefined) {
+    super(
+      `memory key migration refused — ${oldKey} → ${newKey} is ${status === undefined ? "not in the manifest at all" : `recorded as '${status}', not 'planned'`}; ` +
+        `re-run planMemoryKeyMigration to plan it`,
+    );
+    this.name = "MemoryKeyNotPlannedError";
+  }
+}
+
+/** One tree a rollback could not restore. Reported rather than thrown — see `rollbackMemoryKeyMigration`. */
+export interface MemoryKeyRollbackFailure {
+  oldKey: string;
+  newKey: string;
+  reason: "target-exists";
+}
+
 interface ManifestRow { old_key: string; new_key: string; status: string }
+
+/** The manifest's own word on one (oldKey → newKey) pair, or `undefined` when it has none. Keyed on
+ *  BOTH halves: a row naming a different destination describes a different move. */
+function manifestStatus(rs: RuntimeStateDb, oldKey: string, newKey: string): string | undefined {
+  return (rs.db.query(`SELECT status FROM memory_key_manifest WHERE old_key = ? AND new_key = ?`).get(oldKey, newKey) as { status: string } | null)?.status;
+}
+
+/** An EXISTING directory — `existsSync` alone would accept a file sitting at that path. */
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
 
 const projectsDir = (home: string): string => join(home, "projects");
 const projectDir = (home: string, key: string): string => join(projectsDir(home), key);
@@ -110,6 +162,19 @@ const projectDir = (home: string, key: string): string => join(projectsDir(home)
 export function planMemoryKeyMigration(deps: { rs: RuntimeStateDb; home: string; records: RuntimeSessionRecords; store: SessionStore }): MemoryKeyPlan {
   const { rs, home, store } = deps;
   const plan: MemoryKeyPlan = { moves: [], collisions: [], preserved: [...RESERVED_PROJECT_KEYS], unreferenced: [], unchanged: [], unresolved: [] };
+
+  // `compatibilityKeys` spawns `git` and, unlike Norma's own `repoRootFor`, memoises nothing — so a
+  // migration over hundreds of records would be hundreds of subprocesses. One `Map` per plan call
+  // (sessions cluster heavily on a handful of cwds) fixes that without caching across calls, which
+  // would risk answering from a stale repo layout.
+  const destinations = new Map<string, string>();
+  const destinationFor = (cwd: string): string => {
+    const cached = destinations.get(cwd);
+    if (cached !== undefined) return cached;
+    const key = compatibilityKeys(cwd).memoryProjectKey;
+    destinations.set(cwd, key);
+    return key;
+  };
 
   // The distinct (oldKey → newKey) pairs the records ask for, in a stable order, plus the cwd each
   // destination was derived from.
@@ -131,7 +196,14 @@ export function planMemoryKeyMigration(deps: { rs: RuntimeStateDb; home: string;
       plan.unresolved.push(record.winterSessionId);
       continue;
     }
-    const newKey = compatibilityKeys(cwd).memoryProjectKey;
+    // See the header: a cwd that is gone silently degrades the destination to a per-cwd key. The
+    // only safe answer is to leave that record's memory exactly where the live lookup will look for
+    // it once the directory comes back.
+    if (!isDirectory(cwd)) {
+      plan.unresolved.push(record.winterSessionId);
+      continue;
+    }
+    const newKey = destinationFor(cwd);
     referenced.add(newKey);
     if (oldKey === newKey) {
       if (!plan.unchanged.includes(oldKey)) plan.unchanged.push(oldKey);
@@ -246,6 +318,13 @@ export function applyMemoryKeyMigration(deps: { rs: RuntimeStateDb; home: string
   // belongs to `RuntimeSessionRecords`, so the record-side write goes through its owner instead of a
   // raw UPDATE from a migration, and the pinned `{ rs, home }` signature is left alone.
   const records = new RuntimeSessionRecords(rs);
+  // EVERY row is checked before ANY rename, mirroring the collision refusal directly above: a
+  // half-applied stale plan is not a state that should exist, and the check is what stops a rename
+  // from happening with no manifest row to record it. See `MemoryKeyNotPlannedError`.
+  for (const move of plan.moves) {
+    const status = manifestStatus(rs, move.oldKey, move.newKey);
+    if (status !== "planned") throw new MemoryKeyNotPlannedError(move.oldKey, move.newKey, status);
+  }
   let moved = 0;
   for (const move of plan.moves) {
     const source = projectDir(home, move.oldKey);
@@ -283,17 +362,31 @@ export function applyMemoryKeyMigration(deps: { rs: RuntimeStateDb; home: string
  *
  * Tolerant in the same direction `apply` is: a row whose new directory is already gone and whose old
  * directory is already present has been rolled back by hand, and is recorded rather than re-fought.
+ *
+ * NEVER THROWS PART-WAY. A tree whose old location has been re-occupied is reported in `failures`
+ * and left completely alone — every other tree is still restored. Throwing mid-loop would leave some
+ * trees back and some forward with nothing saying which.
  */
-export function rollbackMemoryKeyMigration(deps: { rs: RuntimeStateDb; home: string }): { rolledBack: number } {
+export function rollbackMemoryKeyMigration(deps: { rs: RuntimeStateDb; home: string }): { rolledBack: number; failures: MemoryKeyRollbackFailure[] } {
   const { rs, home } = deps;
   const records = new RuntimeSessionRecords(rs);
   const rows = rs.db.query(`SELECT old_key, new_key, status FROM memory_key_manifest WHERE status = 'moved' ORDER BY old_key`).all() as ManifestRow[];
+  const failures: MemoryKeyRollbackFailure[] = [];
   let rolledBack = 0;
   for (const row of rows) {
     const source = projectDir(home, row.new_key);
     const target = projectDir(home, row.old_key);
     if (existsSync(source)) {
-      if (existsSync(target)) throw new MemoryKeyCollisionError([{ newKey: row.old_key, oldKeys: [row.new_key], reason: "target-exists" }]);
+      // A rollback is an undo under pressure. One blocked tree must not deny every other tree its
+      // restore — and it must not throw halfway through either, which would leave some trees back
+      // and some forward with no report of which. So it is COLLECTED, and this row is left entirely
+      // alone: directory, record and manifest all stay `moved`, ready to retry once the obstruction
+      // is cleared. (`apply` refuses up front instead, because a move can still be declined; by the
+      // time rollback runs the trees have already been moved.)
+      if (existsSync(target)) {
+        failures.push({ oldKey: row.old_key, newKey: row.new_key, reason: "target-exists" });
+        continue;
+      }
       renameSync(source, target);
     } else if (!existsSync(target)) {
       continue;
@@ -305,5 +398,5 @@ export function rollbackMemoryKeyMigration(deps: { rs: RuntimeStateDb; home: str
     }, { mode: "immediate" });
     rolledBack += 1;
   }
-  return { rolledBack };
+  return { rolledBack, failures };
 }

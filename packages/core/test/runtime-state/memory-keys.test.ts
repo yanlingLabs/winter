@@ -1,11 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { compatibilityKeys } from "@yanlinglabs/winter-agent-sdk";
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { repoRootFor, sanitizeProjectKey, _clearRepoRootCacheForTests } from "../../src/agent/memory-dir";
 import {
-  MemoryKeyCollisionError, RuntimeSessionRecords, applyMemoryKeyMigration, backfillNativeSessions,
-  openRuntimeStateDb, planMemoryKeyMigration, rollbackMemoryKeyMigration, type RuntimeStateDb,
+  MemoryKeyCollisionError, MemoryKeyNotPlannedError, RuntimeSessionRecords, applyMemoryKeyMigration,
+  backfillNativeSessions, openRuntimeStateDb, planMemoryKeyMigration, rollbackMemoryKeyMigration,
+  type RuntimeStateDb,
 } from "../../src/runtime-state";
 import { SessionStore } from "../../src/sessions/store";
 import { withTempHome } from "./support";
@@ -15,6 +16,15 @@ const oldKeyFor = (cwd: string): string => sanitizeProjectKey(repoRootFor(cwd));
 /** The compatibility memory key — the SDK's own, and root-based like today's, so the mapping is
  *  one-to-one per repo root by construction. */
 const newKeyFor = (cwd: string): string => compatibilityKeys(cwd).memoryProjectKey;
+
+/** A real git repo, so two cwds inside it share ONE repo root — the shape the whole one-to-one
+ *  safety argument rests on, and the only way to reproduce it faithfully. */
+function gitRepo(home: string, name: string): string {
+  const root = join(home, "repos", name);
+  mkdirSync(root, { recursive: true });
+  Bun.spawnSync(["git", "init", "-q", root]);
+  return root;
+}
 
 function workdir(home: string, name: string): string {
   const dir = join(home, "work", name);
@@ -154,6 +164,79 @@ describe("planMemoryKeyMigration", () => {
     });
   });
 
+  test("a record whose cwd no longer exists is unresolved, never a degraded per-cwd destination", async () => {
+    // THE DEGRADATION (review r1, Important 1). The old key is read from the record and was computed
+    // when the directory still existed, so it is root-derived. The NEW key is derived live — and the
+    // SDK's `gitCommonRoot` returns null when `git -C <cwd>` fails, including when the cwd is simply
+    // gone, at which point `compatibilityKeys` falls back to the CWD's OWN key. Two sessions in one
+    // repo with one deleted cwd would then present one old key with two destinations: a fan-out that
+    // refuses the entire migration, from ordinary inputs rather than corruption. Legacy sessions are
+    // exactly the population whose cwds are most likely gone.
+    await withTempHome(async (home) => {
+      _clearRepoRootCacheForTests();
+      const store = new SessionStore(home);
+      const root = gitRepo(home, "one-repo");
+      const alive = join(root, "alive");
+      const doomed = join(root, "doomed");
+      mkdirSync(alive, { recursive: true });
+      mkdirSync(doomed, { recursive: true });
+      store.createSession("work", { cwd: alive });
+      const gone = store.createSession("work", { cwd: doomed });
+      // Both cwds are in one repo, so both records carry the SAME root-derived old key.
+      const sharedOldKey = seedMemory(home, alive, "shared");
+      expect(oldKeyFor(doomed)).toBe(sharedOldKey);
+
+      const rs = openRuntimeStateDb(home);
+      try {
+        const records = new RuntimeSessionRecords(rs);
+        backfillNativeSessions({ rs, store, home, providerId: "codex-oauth" });
+        expect(records.get(gone)!.memoryProjectKey).toBe(sharedOldKey);
+
+        rmSync(doomed, { recursive: true, force: true });
+        _clearRepoRootCacheForTests();
+
+        const plan = planMemoryKeyMigration({ rs, home, records, store });
+        expect(plan.collisions).toEqual([]);          // no fan-out from an ordinary input
+        expect(plan.unresolved).toEqual([gone]);
+        expect(plan.moves.length).toBe(1);
+        expect(plan.moves[0]!.oldKey).toBe(sharedOldKey);
+        expect(plan.moves[0]!.newKey).toBe(newKeyFor(alive));   // the ROOT key, not a per-cwd one
+        expect(plan.moves[0]!.cwd).toBe(alive);
+      } finally {
+        rs.close();
+      }
+    });
+  });
+
+  test("a lone record whose cwd is gone is skipped rather than stranding the repo's memory", async () => {
+    await withTempHome(async (home) => {
+      _clearRepoRootCacheForTests();
+      const store = new SessionStore(home);
+      const root = gitRepo(home, "lonely");
+      const sub = join(root, "sub");
+      mkdirSync(sub, { recursive: true });
+      store.createSession("work", { cwd: sub });
+      const oldKey = seedMemory(home, sub, "alpha");
+
+      const rs = openRuntimeStateDb(home);
+      try {
+        const records = new RuntimeSessionRecords(rs);
+        backfillNativeSessions({ rs, store, home, providerId: "codex-oauth" });
+        rmSync(sub, { recursive: true, force: true });
+        _clearRepoRootCacheForTests();
+
+        const plan = planMemoryKeyMigration({ rs, home, records, store });
+        expect(plan.moves).toEqual([]);
+        expect(plan.unresolved.length).toBe(1);
+        expect(applyMemoryKeyMigration({ rs, home }, plan)).toEqual({ moved: 0 });
+        // The tree stays exactly where the live lookup will look for it once the cwd comes back.
+        expect(existsSync(join(home, "projects", oldKey, "memory"))).toBe(true);
+      } finally {
+        rs.close();
+      }
+    });
+  });
+
   test("a record whose product session is gone is skipped and reported, never guessed at", async () => {
     await withTempHome(async (home) => {
       _clearRepoRootCacheForTests();
@@ -229,7 +312,7 @@ describe("applyMemoryKeyMigration", () => {
         applyMemoryKeyMigration({ rs, home }, planMemoryKeyMigration({ rs, home, records, store }));
         expect(snapshotTree(join(home, "projects"))).not.toEqual(before);
 
-        expect(rollbackMemoryKeyMigration({ rs, home })).toEqual({ rolledBack: 2 });
+        expect(rollbackMemoryKeyMigration({ rs, home })).toEqual({ rolledBack: 2, failures: [] });
         expect(snapshotTree(join(home, "projects"))).toEqual(before);
         expect(manifest(rs).map((r) => r.status)).toEqual(["rolled-back", "rolled-back"]);
         expect(records.get(a.sessionId)!.memoryProjectKey).toBe(a.oldKey);
@@ -244,7 +327,7 @@ describe("applyMemoryKeyMigration", () => {
     await withTempHome(async (home) => {
       const rs = openRuntimeStateDb(home);
       try {
-        expect(rollbackMemoryKeyMigration({ rs, home })).toEqual({ rolledBack: 0 });
+        expect(rollbackMemoryKeyMigration({ rs, home })).toEqual({ rolledBack: 0, failures: [] });
       } finally {
         rs.close();
       }
@@ -404,9 +487,96 @@ describe("applyMemoryKeyMigration", () => {
         // disagree about where the memory is.
         expect(records.get(a.sessionId)!.memoryProjectKey).toBe(a.newKey);
 
-        expect(rollbackMemoryKeyMigration({ rs, home })).toEqual({ rolledBack: 1 });
+        expect(rollbackMemoryKeyMigration({ rs, home })).toEqual({ rolledBack: 1, failures: [] });
         expect(snapshotTree(join(home, "projects"))).toEqual(before);
         expect(records.get(a.sessionId)!.memoryProjectKey).toBe(a.oldKey);
+      } finally {
+        rs.close();
+      }
+    });
+  });
+
+  test("re-applying a plan whose manifest row is no longer planned is refused before anything moves", async () => {
+    // REVIEW r1, IMPORTANT 2. `apply` used to rename first and only then look for a `planned` row.
+    // After plan → apply → rollback the row reads `rolled-back`, so a second `apply` with the same
+    // plan object moved the tree forward, matched no row, left the records on the old key and
+    // reported `{moved: 0}` — a moved tree with no recorded way back, and nothing reporting it.
+    await withTempHome(async (home) => {
+      _clearRepoRootCacheForTests();
+      const store = new SessionStore(home);
+      const a = seedProject(home, store, "a", "alpha");
+      const rs = openRuntimeStateDb(home);
+      try {
+        const records = new RuntimeSessionRecords(rs);
+        backfillNativeSessions({ rs, store, home, providerId: "codex-oauth" });
+        const plan = planMemoryKeyMigration({ rs, home, records, store });
+        applyMemoryKeyMigration({ rs, home }, plan);
+        rollbackMemoryKeyMigration({ rs, home });
+        const before = snapshotTree(join(home, "projects"));
+
+        expect(() => applyMemoryKeyMigration({ rs, home }, plan)).toThrow(MemoryKeyNotPlannedError);
+        expect(snapshotTree(join(home, "projects"))).toEqual(before);
+        expect(existsSync(join(home, "projects", a.oldKey))).toBe(true);
+        expect(existsSync(join(home, "projects", a.newKey))).toBe(false);
+        expect(records.get(a.sessionId)!.memoryProjectKey).toBe(a.oldKey);
+        expect(manifest(rs).map((r) => r.status)).toEqual(["rolled-back"]);
+      } finally {
+        rs.close();
+      }
+    });
+  });
+
+  test("a hand-built plan with no manifest row behind it is refused the same way", async () => {
+    await withTempHome(async (home) => {
+      _clearRepoRootCacheForTests();
+      const store = new SessionStore(home);
+      const a = seedProject(home, store, "a", "alpha");
+      const rs = openRuntimeStateDb(home);
+      try {
+        backfillNativeSessions({ rs, store, home, providerId: "codex-oauth" });
+        const before = snapshotTree(join(home, "projects"));
+        // Both the type and the function are exported, so this is a reachable call shape.
+        const forged = { moves: [{ oldKey: a.oldKey, newKey: a.newKey }], collisions: [], preserved: [], unreferenced: [], unchanged: [], unresolved: [] };
+        expect(() => applyMemoryKeyMigration({ rs, home }, forged)).toThrow(MemoryKeyNotPlannedError);
+        expect(snapshotTree(join(home, "projects"))).toEqual(before);
+        expect(manifest(rs)).toEqual([]);
+      } finally {
+        rs.close();
+      }
+    });
+  });
+
+  test("a rollback blocked on one tree still restores the others and reports the failure", async () => {
+    await withTempHome(async (home) => {
+      _clearRepoRootCacheForTests();
+      const store = new SessionStore(home);
+      const a = seedProject(home, store, "a", "alpha");
+      const b = seedProject(home, store, "b", "beta");
+      const rs = openRuntimeStateDb(home);
+      try {
+        const records = new RuntimeSessionRecords(rs);
+        backfillNativeSessions({ rs, store, home, providerId: "codex-oauth" });
+        applyMemoryKeyMigration({ rs, home }, planMemoryKeyMigration({ rs, home, records, store }));
+
+        // Something has re-occupied one of the old keys — rolling that tree back would overwrite it.
+        mkdirSync(join(home, "projects", a.oldKey, "memory"), { recursive: true });
+        writeFileSync(join(home, "projects", a.oldKey, "memory", "MEMORY.md"), "someone else's");
+
+        // A rollback is an undo under pressure: one blocked tree must not deny every other tree its
+        // restore, and the blockage must be reported rather than thrown mid-loop after half the
+        // renames already happened.
+        const result = rollbackMemoryKeyMigration({ rs, home });
+        expect(result.rolledBack).toBe(1);
+        expect(result.failures.length).toBe(1);
+        expect(result.failures[0]!.oldKey).toBe(a.oldKey);
+        expect(result.failures[0]!.reason).toBe("target-exists");
+
+        expect(readFileSync(join(home, "projects", b.oldKey, "memory", "MEMORY.md"), "utf8")).toBe("beta");
+        expect(records.get(b.sessionId)!.memoryProjectKey).toBe(b.oldKey);
+        // The blocked one is untouched in every store: tree, record and manifest all still `moved`.
+        expect(readFileSync(join(home, "projects", a.newKey, "memory", "MEMORY.md"), "utf8")).toBe("alpha");
+        expect(records.get(a.sessionId)!.memoryProjectKey).toBe(a.newKey);
+        expect(manifest(rs).find((r) => r.old_key === a.oldKey)!.status).toBe("moved");
       } finally {
         rs.close();
       }
