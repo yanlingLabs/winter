@@ -6,3 +6,4 @@ export * from "./directory-store";
 export * from "./checkpoints";
 export * from "./migrations/backfill";
 export * from "./migrations/memory-keys";
+export * from "./retention";
