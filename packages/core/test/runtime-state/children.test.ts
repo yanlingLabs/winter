@@ -178,6 +178,38 @@ describe("RuntimeChildren", () => {
         expect(children.get(PARENT, "c_1")?.status).toBe("failed");
       })));
 
+  test("a damaged slot/permission blob costs that field, never the row", () =>
+    withTempHome((home) =>
+      use(home, (rs, children) => {
+        children.upsert(child({ slot: { family: "openai", name: "Sol", source: "inherited" }, permission: { effectiveMode: "ask", parentPolicyHash: "abc" } }));
+        children.upsert(child({ childId: "c_2" }));
+        rs.db.run("UPDATE runtime_children SET slot_json = ?, permission_json = ? WHERE child_id = 'c_1'", ["{not json", "also not json"]);
+
+        // Review r1 (Important 1): slot/permission are DESCRIPTIVE. A row that cannot describe its
+        // slot still knows whether it was running — and `reclassifyAfterRestart` maps every running
+        // child in ONE transaction, so a throw here used to mean no child anywhere was reclassified.
+        const damaged = children.get(PARENT, "c_1")!;
+        expect(damaged.slot).toBeUndefined();
+        expect(damaged.permission).toBeUndefined();
+        expect(damaged.status).toBe("running");
+        expect(children.reclassifyAfterRestart(() => true).interrupted).toEqual([
+          { parent: PARENT, childId: "c_1" },
+          { parent: PARENT, childId: "c_2" },
+        ]);
+      })));
+
+  test("reclassifyAfterRestart can be scoped to one parent", () =>
+    withTempHome((home) =>
+      use(home, (_rs, children) => {
+        children.upsert(child());
+        children.upsert(child({ parentWinterSessionId: "s_other", childId: "c_2" }));
+
+        const scoped = children.reclassifyAfterRestart(() => true, { parent: PARENT });
+
+        expect(scoped.interrupted).toEqual([{ parent: PARENT, childId: "c_1" }]);
+        expect(children.get("s_other", "c_2")?.status).toBe("running");
+      })));
+
   test("resumeContextRef is a locator, never a closure", () =>
     withTempHome((home) =>
       use(home, (rs, children) => {

@@ -99,6 +99,25 @@ interface ChildDbRow {
 
 const opt = (v: string | null): string | undefined => v ?? undefined;
 
+/**
+ * Review r1 (Important 1): a damaged JSON column must not be able to hide a whole roster.
+ *
+ * `slot`/`permission` are DESCRIPTIVE metadata — which family slot resolved, what the effective
+ * permission mode was. Nothing decides a child's STATUS from them, and `reclassifyAfterRestart` maps
+ * every running child in ONE transaction, so a single unparseable `slot_json` used to throw before
+ * `isGone` was consulted even once: the transaction rolled back and NO child anywhere was
+ * reclassified, at every boot, forever. A row that cannot describe its slot is still a row that
+ * knows whether it was running, so the field is dropped and the child is let through.
+ */
+const optJson = <T>(v: string | null): T | undefined => {
+  if (v === null) return undefined;
+  try {
+    return JSON.parse(v) as T;
+  } catch {
+    return undefined;
+  }
+};
+
 function fromRow(row: ChildDbRow): PersistedWinterChild {
   return {
     parentWinterSessionId: row.parent_winter_session_id,
@@ -120,8 +139,8 @@ function fromRow(row: ChildDbRow): PersistedWinterChild {
     requestedModel: opt(row.requested_model),
     effectiveModel: opt(row.effective_model),
     effectiveProvider: opt(row.effective_provider),
-    slot: row.slot_json ? (JSON.parse(row.slot_json) as PersistedWinterChild["slot"]) : undefined,
-    permission: row.permission_json ? (JSON.parse(row.permission_json) as PersistedWinterChild["permission"]) : undefined,
+    slot: optJson<NonNullable<PersistedWinterChild["slot"]>>(row.slot_json),
+    permission: optJson<NonNullable<PersistedWinterChild["permission"]>>(row.permission_json),
   };
 }
 
@@ -209,10 +228,19 @@ export class RuntimeChildren {
    * Returns the children it interrupted and the still-running ones it left alone, as
    * `{parent, childId}` pairs — a bare id cannot say whose child it was.
    */
-  reclassifyAfterRestart(isGone: (child: PersistedWinterChild) => boolean): { interrupted: ChildRef[]; kept: ChildRef[] } {
+  reclassifyAfterRestart(
+    isGone: (child: PersistedWinterChild) => boolean,
+    // Review r1 (Important 1): the whole sweep is ONE transaction, so its blast radius is whatever
+    // it enumerates. Scoping it to a single parent is what lets startup recovery bound step 7 per
+    // session — a parent whose roster (or whose `isGone` proof) throws costs that parent's children
+    // and nobody else's. Absent = every parent, which is what a caller with no bound wants.
+    opts: { parent?: string } = {},
+  ): { interrupted: ChildRef[]; kept: ChildRef[] } {
     return this.rs.transaction(() => {
+      const where = opts.parent === undefined ? "" : " AND parent_winter_session_id = ?";
+      const args = opts.parent === undefined ? [] : [opts.parent];
       const running = (
-        this.rs.db.query(`SELECT ${CHILD_COLUMNS} FROM runtime_children WHERE status = 'running' ORDER BY started_at, child_id`).all() as ChildDbRow[]
+        this.rs.db.query(`SELECT ${CHILD_COLUMNS} FROM runtime_children WHERE status = 'running'${where} ORDER BY started_at, child_id`).all(...args) as ChildDbRow[]
       ).map(fromRow);
       const interrupted: ChildRef[] = [];
       const kept: ChildRef[] = [];

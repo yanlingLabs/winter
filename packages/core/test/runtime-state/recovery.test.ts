@@ -288,6 +288,71 @@ describe("recoverRuntimeState — WS-16 §13's twelve steps", () => {
     });
   });
 
+  test("a child with a damaged slot column no longer hides the whole roster", async () => {
+    await withHarness(async (h) => {
+      seedLive(h, "s_a", "running");
+      seedLive(h, "s_b", "running");
+      h.children.upsert(newChild("s_a", "c1", { slot: { family: "openai", name: "sol", source: "inherited" } }));
+      h.children.upsert(newChild("s_b", "c2"));
+      // Descriptive metadata, damaged. Before the r1 fix this threw inside `reclassifyAfterRestart`'s
+      // single transaction, so NOTHING was reclassified — at every boot, forever.
+      h.rs.db.run("UPDATE runtime_children SET slot_json = ? WHERE child_id = ?", ["{not json", "c1"]);
+
+      const report = await h.run();
+
+      expect(h.children.get("s_a", "c1")?.status).toBe("interrupted");
+      expect(h.children.get("s_b", "c2")?.status).toBe("interrupted");
+      expect(h.children.get("s_a", "c1")?.slot).toBeUndefined();
+      expect(report.ok).toBe(true);
+      expect(report.steps.find((s) => s.step === 7)?.detail).toMatchObject({ parents: 2, interrupted: 2, failed: 0 });
+    });
+  });
+
+  test("step 7 is bounded per parent: one parent's failure costs only that parent's children", async () => {
+    await withHarness(async (h) => {
+      seedLive(h, "s_a", "running");
+      seedLive(h, "s_b", "running");
+      h.children.upsert(newChild("s_a", "c1"));
+      h.children.upsert(newChild("s_b", "c2"));
+
+      const report = await h.run({
+        hooks: {
+          isChildGone: (child) => {
+            if (child.parentWinterSessionId === "s_a") throw new Error("cannot prove this one either way");
+            return true;
+          },
+        },
+      });
+
+      expect(h.children.get("s_a", "c1")?.status).toBe("running");
+      expect(h.children.get("s_b", "c2")?.status).toBe("interrupted");
+      expect(report.corrupt).toEqual(["s_a"]);
+      expect(report.reclassified).toEqual([{ parent: "s_b", childId: "c2" }]);
+      expect(report.steps.find((s) => s.step === 7)?.outcome).toBe("partial");
+    });
+  });
+
+  test("a throw outside every per-session guard still returns a report, never a rejected promise", async () => {
+    await withHarness(async (h) => {
+      seedLive(h, "s_live", "running");
+      // A door that is deliberately outside every per-session guard: the daemon's own log sink,
+      // called by `finishStep` once a step is already recorded. A sink that dies mid-sweep must
+      // still leave a report behind — once 8b wires this into boot, a rejected promise here is a
+      // daemon that does not start.
+      const report = await h.run({
+        log: (line) => {
+          if (line.includes("step 7")) throw new Error("log sink is gone");
+        },
+      });
+
+      expect(report.ok).toBe(false);
+      expect(report.steps[report.steps.length - 1]).toMatchObject({ step: 12, outcome: "failed" });
+      // Everything before the failure still happened, and is still on the record.
+      expect(h.records.get("s_live")?.state).toBe("unavailable");
+      expect(h.attempts().some((r) => r.step === 12 && r.outcome === "failed")).toBe(true);
+    });
+  });
+
   test("step 8 reports temp orphans and deletes nothing", async () => {
     await withHarness(async (h) => {
       const scanRoot = join(h.home, "tmp-scan");
