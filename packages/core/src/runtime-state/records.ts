@@ -81,9 +81,10 @@ export type NewRuntimeSessionRecord = Omit<RuntimeSessionRecord, "createdAt" | "
 /** The fields `transition` may patch alongside the state change — deliberately a short list: the
  *  facts that change WHEN a session changes state. An absent key leaves the column exactly as it
  *  was; an explicit `undefined` CLEARS a nullable column (that is how `activeLocalWriteRoot` is
- *  dropped "after verified cleanup", WS-16 §4) and is ignored for the two whose columns are NOT
- *  NULL (`transcriptHealth`, `capabilities` — see `NON_NULLABLE_PATCH_KEYS`), where writing NULL
- *  would be a raw SQLite refusal rather than anything a caller could have meant. */
+ *  dropped "after verified cleanup", WS-16 §4) and means "no change" for the two whose columns are
+ *  NOT NULL (`transcriptHealth`, `capabilities` — see `NON_NULLABLE_PATCH_KEYS`). To empty the
+ *  capability list, pass `capabilities: []`; there is no way to clear `transcriptHealth`, which
+ *  always holds one of the four health values. */
 export type RuntimeSessionPatch = Partial<
   Pick<
     RuntimeSessionRecord,
@@ -274,8 +275,11 @@ const PATCH_COLUMNS: ReadonlyArray<readonly [keyof RuntimeSessionPatch, string]>
 
 const DUPLICATE_BACKEND_ID = /UNIQUE constraint failed: runtime_sessions\.backend_session_id/;
 
-/** Patch keys whose column is NOT NULL. An explicit `undefined` for one of these is "no change",
- *  never "write NULL": the schema would refuse it, and no caller can have meant a raw SQLite error. */
+/** Patch keys whose column is NOT NULL, where "clear it" is not a state the column can be in. An
+ *  explicit `undefined` for one of these therefore means "no change" rather than a write — for
+ *  `transcriptHealth` a NULL is a refusal the schema would raise, and for `capabilities` an
+ *  undefined used to serialise as `[]`, which silently emptied a list the caller never mentioned.
+ *  Emptying the list is still available, and says so: `capabilities: []`. */
 const NON_NULLABLE_PATCH_KEYS: ReadonlySet<keyof RuntimeSessionPatch> = new Set<keyof RuntimeSessionPatch>(["transcriptHealth", "capabilities"]);
 
 function fromRow(row: SessionRow): RuntimeSessionRecord {
@@ -466,14 +470,19 @@ export class RuntimeSessionRecords {
   }
 
   endGeneration(winterSessionId: string, generation: number, endReason: string): void {
-    this.rs.transaction(() => {
-      // Review r1 minor 10: a zero-row UPDATE reported as success is the same silent lie the lease
-      // half of this table already refuses — and it is the same refusal type there.
-      if (!this.generationExists(winterSessionId, generation)) throw new UnknownRuntimeGenerationError(winterSessionId, generation);
-      this.rs.db
-        .query(`UPDATE runtime_generations SET ended_at = ?, end_reason = ? WHERE winter_session_id = ? AND generation = ?`)
-        .run(this.now(), endReason, winterSessionId, generation);
-    });
+    // Read-then-write, so it begins IMMEDIATE for the same reason a lease claim does: the existence
+    // check and the UPDATE must not be separated by another writer's commit.
+    this.rs.transaction(
+      () => {
+        // Review r1 minor 10: a zero-row UPDATE reported as success is the same silent lie the lease
+        // half of this table already refuses — and it is the same refusal type there.
+        if (!this.generationExists(winterSessionId, generation)) throw new UnknownRuntimeGenerationError(winterSessionId, generation);
+        this.rs.db
+          .query(`UPDATE runtime_generations SET ended_at = ?, end_reason = ? WHERE winter_session_id = ? AND generation = ?`)
+          .run(this.now(), endReason, winterSessionId, generation);
+      },
+      { mode: "immediate" },
+    );
   }
 
   generations(winterSessionId: string): GenerationRow[] {

@@ -131,36 +131,41 @@ export class RuntimeChildren {
   upsert(child: PersistedWinterChild): void {
     if (child.resumeContextRef !== undefined && typeof child.resumeContextRef !== "string")
       throw new TypeError("resumeContextRef must be a locator string — never a closure or handle (WS-16 §12)");
-    this.rs.transaction(() => {
-      const existing = this.get(child.parentWinterSessionId, child.childId);
-      if (existing && TERMINAL.has(existing.status) && !TERMINAL.has(child.status))
-        throw new ChildAlreadyTerminalError(child.parentWinterSessionId, child.childId, existing.status);
-      this.rs.db
-        .query(`INSERT OR REPLACE INTO runtime_children (${CHILD_COLUMNS}) VALUES (${CHILD_PLACEHOLDERS})`)
-        .run(
-          child.parentWinterSessionId,
-          child.childId,
-          child.name ?? null,
-          child.agentType,
-          child.providerId,
-          child.modelRef,
-          child.connectionRef ?? null,
-          child.providerCatalogVersion,
-          child.providerAdapterVersion,
-          child.status,
-          child.transcriptRef,
-          child.resumeContextRef ?? null,
-          child.worktreeRef ?? null,
-          child.startedAt,
-          child.completedAt ?? null,
-          child.generation,
-          child.requestedModel ?? null,
-          child.effectiveModel ?? null,
-          child.effectiveProvider ?? null,
-          child.slot ? JSON.stringify(child.slot) : null,
-          child.permission ? JSON.stringify(child.permission) : null,
-        );
-    });
+    // Read-then-write (the terminal-status check decides the write), so it begins IMMEDIATE: a
+    // deferred BEGIN could lose its snapshot between the check and the INSERT.
+    this.rs.transaction(
+      () => {
+        const existing = this.get(child.parentWinterSessionId, child.childId);
+        if (existing && TERMINAL.has(existing.status) && !TERMINAL.has(child.status))
+          throw new ChildAlreadyTerminalError(child.parentWinterSessionId, child.childId, existing.status);
+        this.rs.db
+          .query(`INSERT OR REPLACE INTO runtime_children (${CHILD_COLUMNS}) VALUES (${CHILD_PLACEHOLDERS})`)
+          .run(
+            child.parentWinterSessionId,
+            child.childId,
+            child.name ?? null,
+            child.agentType,
+            child.providerId,
+            child.modelRef,
+            child.connectionRef ?? null,
+            child.providerCatalogVersion,
+            child.providerAdapterVersion,
+            child.status,
+            child.transcriptRef,
+            child.resumeContextRef ?? null,
+            child.worktreeRef ?? null,
+            child.startedAt,
+            child.completedAt ?? null,
+            child.generation,
+            child.requestedModel ?? null,
+            child.effectiveModel ?? null,
+            child.effectiveProvider ?? null,
+            child.slot ? JSON.stringify(child.slot) : null,
+            child.permission ? JSON.stringify(child.permission) : null,
+          );
+      },
+      { mode: "immediate" },
+    );
   }
 
   get(parent: string, childId: string): PersistedWinterChild | undefined {

@@ -133,9 +133,9 @@ export function openRuntimeStateDb(home: string, opts: { readonly?: boolean; cre
       if (!opts.readonly) opened.run(`INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('last_backup_path', ?)`, [dest]);
       return dest;
     },
-    transaction: (fn, opts) => {
+    transaction: (fn, txOpts) => {
       const tx = opened.transaction(fn);
-      const mode = opts?.mode ?? "deferred";
+      const mode = txOpts?.mode ?? "deferred";
       return mode === "immediate" ? tx.immediate() : mode === "exclusive" ? tx.exclusive() : tx();
     },
     close: () => opened.close(),
