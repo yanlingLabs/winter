@@ -310,6 +310,40 @@ export const Settings = z.object({
   cleaner: z.object({
     enabled: z.boolean().optional(),
   }).optional(),
+  /** Runtime-state housekeeping (P8a, WS-16 §16). Hot like every other key here: the retention
+   *  sweep re-reads this through a live getter on each pass, so widening or narrowing a window
+   *  takes effect at the very next sweep with no daemon restart (the project's standing rule).
+   *
+   *  `.prefault({})` RATHER THAN `.default({})` on the two inner blocks, and the difference is not
+   *  cosmetic: in zod 4 a `.default()` value is the parsed OUTPUT, handed back verbatim without
+   *  descending — so `.default({})` would make `runtimes: {}` parse with `retention` and
+   *  `migrations` UNDEFINED, and the shipped 30/7 defaults would exist only in this file's prose.
+   *  `.prefault` feeds the value back through the schema, which is what actually fills them in.
+   *
+   *  The BLOCK ITSELF is `.optional()`, like every other top-level key in this schema, rather than
+   *  defaulted. Two reasons, both about not moving things that already work: a defaulted block makes
+   *  `runtimes` REQUIRED on the inferred `Settings` type, which breaks every hand-built settings
+   *  literal in the codebase (35 of them); and `saveSettings` writes the parsed object verbatim, so
+   *  it would start stamping these defaults into every user's settings.json — freezing today's
+   *  values into files that should have kept following the shipped default. The 30/7 answer for an
+   *  absent block therefore lives in `retention.ts`'s `retentionFromSettings`, which is the door
+   *  every consumer actually reads, and which must answer for `undefined` settings anyway.
+   *
+   *  The two windows have a floor of one day and must be whole days: a zero would prune a delivery
+   *  record in the same second its receipt landed, destroying the evidence WS-15 §6.4 needs to tell
+   *  `delivered` from `delivery_uncertain`. Neither window can ever reach an UNRECEIPTED delivery or
+   *  a HELD name lease — those are pruned at no age at all (see `directory-store.ts`); retention
+   *  only ever shortens the tail of things that are already settled.
+   *
+   *  `migrations.memoryKeys` is OFF until a user turns it on: WS-16 §17 phase 5 relocates a user's
+   *  own memory files, and that is not a thing an upgrade does on its own initiative. */
+  runtimes: z.object({
+    retention: z.object({
+      deliveriesDays: z.number().int().min(1).default(30),
+      nameLeasesDays: z.number().int().min(1).default(7),
+    }).prefault({}),
+    migrations: z.object({ memoryKeys: z.boolean().default(false) }).prefault({}),
+  }).optional(),
 });
 export type Settings = z.infer<typeof Settings>;
 

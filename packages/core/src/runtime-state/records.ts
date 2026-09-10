@@ -534,6 +534,31 @@ export class RuntimeSessionRecords {
     }));
   }
 
+  /**
+   * Move every record whose memory lives under `oldKey` to `newKey` — Migration A phase 5's
+   * record-side half (WS-16 §17).
+   *
+   * KEYED BY THE OLD KEY, NOT BY A SESSION ID, because the thing being moved is a DIRECTORY and the
+   * key is what names it. Several sessions in one repo share a memory directory (the key is derived
+   * from the repo root), so one rename must re-key all of them or the ones left behind would point
+   * at a path that no longer exists — and a memory read would then silently find nothing rather than
+   * fail. One statement also means the caller can put it in the same transaction as the manifest row
+   * for that move, which is what makes "the directory moved and every record agrees" atomic.
+   *
+   * Returns the number of records re-keyed. Deliberately does NOT touch `transcript_project_key` or
+   * `temp_project_key`: those are a different layout with a different algorithm, and this migration
+   * moves the memory tree only.
+   */
+  rekeyMemoryProjectKey(oldKey: string, newKey: string): number {
+    return this.rs.transaction(
+      () =>
+        this.rs.db
+          .query(`UPDATE runtime_sessions SET memory_project_key = ?, updated_at = ? WHERE memory_project_key = ?`)
+          .run(newKey, this.now(), oldKey).changes,
+      { mode: "immediate" },
+    );
+  }
+
   setTranscriptHealth(winterSessionId: string, health: RuntimeSessionRecord["transcriptHealth"]): void {
     this.rs.transaction(() => {
       this.require(winterSessionId);

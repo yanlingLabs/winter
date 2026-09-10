@@ -659,3 +659,42 @@ describe("loadPermissionDirs trust gating", () => {
     expect(loadPermissionDirs(home, project)).not.toContain("/opt/committed-dir");
   });
 });
+
+// P8a Task 11 (WS-16 §16): the runtime-state retention + migration block. Hot like every other
+// settings key — a sweep reads it through a getter each pass, so changing a window never needs a
+// daemon restart.
+describe("settings.runtimes", () => {
+  const base = { schemaVersion: 2, provider: { type: "codex-oauth", model: DEFAULT_CODEX_MODEL } };
+
+  // The block is OPTIONAL, like every other top-level key here — a defaulted one would make
+  // `runtimes` required on the inferred Settings type and would make `saveSettings` stamp today's
+  // defaults into every user's file. The shipped 30/7 answer for an absent block lives in
+  // `retentionFromSettings`, the door every consumer reads (see runtime-state/retention.test.ts).
+  test("an absent block stays absent rather than freezing today's defaults into the file", () => {
+    expect(Settings.parse(base).runtimes).toBeUndefined();
+  });
+
+  test("an empty block fills every nested default rather than staying empty", () => {
+    expect(Settings.parse({ ...base, runtimes: {} }).runtimes).toEqual({
+      retention: { deliveriesDays: 30, nameLeasesDays: 7 },
+      migrations: { memoryKeys: false },
+    });
+  });
+
+  test("a half-specified retention block keeps the other default", () => {
+    expect(Settings.parse({ ...base, runtimes: { retention: { deliveriesDays: 90 } } }).runtimes?.retention)
+      .toEqual({ deliveriesDays: 90, nameLeasesDays: 7 });
+  });
+
+  test("the memory-key migration is OFF until a user turns it on — it relocates a user's own files", () => {
+    expect(Settings.parse({ ...base, runtimes: {} }).runtimes?.migrations.memoryKeys).toBe(false);
+    expect(Settings.parse({ ...base, runtimes: { migrations: { memoryKeys: true } } }).runtimes?.migrations.memoryKeys).toBe(true);
+  });
+
+  test("a zero-day retention window is rejected — it would prune evidence the same second it lands", () => {
+    expect(() => Settings.parse({ ...base, runtimes: { retention: { deliveriesDays: 0 } } })).toThrow();
+    expect(() => Settings.parse({ ...base, runtimes: { retention: { nameLeasesDays: 0 } } })).toThrow();
+    expect(() => Settings.parse({ ...base, runtimes: { retention: { deliveriesDays: 1.5 } } })).toThrow();
+    expect(() => Settings.parse({ ...base, runtimes: { retention: { deliveriesDays: -30 } } })).toThrow();
+  });
+});
