@@ -2,13 +2,18 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { openRuntimeStateDb, type RuntimeStateDb } from "../../src/runtime-state/db";
-import { ProjectionCheckpoints, type ProjectionCheckpoint, type ProjectionMark } from "../../src/runtime-state/checkpoints";
+import { ProjectionCheckpoints, ProjectionCursorMismatchError, type ProjectionCheckpoint, type ProjectionMark } from "../../src/runtime-state/checkpoints";
 import { SessionStore } from "../../src/sessions/store";
 import { withTempHome } from "./support";
 
 const S = "s_alpha";
-const CURSOR = (over: Partial<Omit<ProjectionCheckpoint, "winterSessionId" | "generation" | "updatedAt">> = {}) => ({
-  runtimeKind: "claude-agent" as const, backendSessionId: "be_1", backendCursor: "line:42", lastWinterSeq: 0,
+/**
+ * `lastWinterSeq` is a REQUIRED argument here because `complete` now refuses a cursor that disagrees
+ * with the appended range (fix round 1, minor 2) — a helper that defaulted it would quietly hide the
+ * very disagreement the check exists to surface.
+ */
+const CURSOR = (lastWinterSeq: number, over: Partial<Omit<ProjectionCheckpoint, "winterSessionId" | "generation" | "updatedAt">> = {}) => ({
+  runtimeKind: "claude-agent" as const, backendSessionId: "be_1", backendCursor: "line:42", lastWinterSeq,
   sourceDigest: "sha256:abc", ...over,
 });
 
@@ -33,7 +38,7 @@ describe("ProjectionCheckpoints — the begin/append/complete contract", () => {
       try {
         const cp = at(rs);
         expect(cp.begin({ winterSessionId: S, generation: 1, sourceId: "toolu_01" })).toBe("begun");
-        cp.complete({ winterSessionId: S, generation: 1, sourceId: "toolu_01" }, CURSOR(), { first: 7, last: 9 });
+        cp.complete({ winterSessionId: S, generation: 1, sourceId: "toolu_01" }, CURSOR(9), { first: 7, last: 9 });
         expect(cp.begin({ winterSessionId: S, generation: 1, sourceId: "toolu_01" })).toBe("already-committed");
         // A DIFFERENT source in the same generation is untouched by that.
         expect(cp.begin({ winterSessionId: S, generation: 1, sourceId: "toolu_02" })).toBe("begun");
@@ -49,7 +54,7 @@ describe("ProjectionCheckpoints — the begin/append/complete contract", () => {
       try {
         const cp = at(rs);
         cp.begin({ winterSessionId: S, generation: 1, sourceId: "toolu_01" });
-        const checkpoint = cp.complete({ winterSessionId: S, generation: 1, sourceId: "toolu_01" }, CURSOR(), { first: 7, last: 9 });
+        const checkpoint = cp.complete({ winterSessionId: S, generation: 1, sourceId: "toolu_01" }, CURSOR(9), { first: 7, last: 9 });
         expect(checkpoint).toEqual({
           winterSessionId: S, generation: 1, runtimeKind: "claude-agent", backendSessionId: "be_1",
           backendCursor: "line:42", lastWinterSeq: 9, sourceDigest: "sha256:abc", updatedAt: "2026-09-10T12:00:00.000Z",
@@ -69,7 +74,7 @@ describe("ProjectionCheckpoints — the begin/append/complete contract", () => {
         const cp = at(rs);
         cp.begin({ winterSessionId: S, generation: 1, sourceId: "toolu_01" });
         // `backend_cursor` is NOT NULL: this is the write half failing after the mark half ran.
-        expect(() => cp.complete({ winterSessionId: S, generation: 1, sourceId: "toolu_01" }, CURSOR({ backendCursor: null as unknown as string }), { first: 7, last: 9 })).toThrow();
+        expect(() => cp.complete({ winterSessionId: S, generation: 1, sourceId: "toolu_01" }, CURSOR(9, { backendCursor: null as unknown as string }), { first: 7, last: 9 })).toThrow();
         expect(cp.get(S, 1)).toBeUndefined();
         expect(cp.pending()).toEqual([{ winterSessionId: S, generation: 1, sourceId: "toolu_01", state: "pending", updatedAt: "2026-09-10T12:00:00.000Z" }]);
         // And the pending mark is still a mark: `begin` refuses a second projection of the source.
@@ -86,7 +91,7 @@ describe("ProjectionCheckpoints — the begin/append/complete contract", () => {
         cp.begin({ winterSessionId: S, generation: 1, sourceId: "toolu_01" });
         cp.begin({ winterSessionId: S, generation: 1, sourceId: "toolu_02" });
         cp.begin({ winterSessionId: "s_beta", generation: 4, sourceId: "uuid_x" });
-        cp.complete({ winterSessionId: S, generation: 1, sourceId: "toolu_02" }, CURSOR(), { first: 1, last: 2 });
+        cp.complete({ winterSessionId: S, generation: 1, sourceId: "toolu_02" }, CURSOR(2), { first: 1, last: 2 });
         expect(cp.pending().map((m) => `${m.winterSessionId}/${m.generation}/${m.sourceId}`)).toEqual([`${S}/1/toolu_01`, "s_beta/4/uuid_x"]);
         expect(cp.pending(S)).toEqual([{ winterSessionId: S, generation: 1, sourceId: "toolu_01", state: "pending", updatedAt: "2026-09-10T12:00:00.000Z" }]);
         expect(cp.pending("s_gamma")).toEqual([]);
@@ -113,6 +118,55 @@ describe("ProjectionCheckpoints — the begin/append/complete contract", () => {
     });
   });
 
+  test("a STALE pending mark can never erase a committed one — it reports 'already-resolved'", async () => {
+    // Fix round 1, important 1. A ProjectionMark is a VALUE read at an earlier instant. If the
+    // source is completed between the `pending()` read and the resolve, a `false` predicate keyed
+    // only on (session, generation, source) would DELETE the committed mark — after which `begin`
+    // says "begun" and the projector re-appends events already in the product log.
+    await withTempHome(async (home) => {
+      const rs = openRuntimeStateDb(home);
+      try {
+        const cp = at(rs);
+        const key = { winterSessionId: S, generation: 1, sourceId: "toolu_01" };
+        cp.begin(key);
+        const stale = cp.pending()[0] as ProjectionMark;   // read while still pending…
+        cp.complete(key, CURSOR(3), { first: 1, last: 3 }); // …and completed by someone else meanwhile
+
+        expect(cp.resolvePending(stale, () => false)).toBe("already-resolved");
+        expect(cp.begin(key)).toBe("already-committed");
+        expect(cp.get(S, 1)?.lastWinterSeq).toBe(3);
+        expect(rs.db.query<{ state: string }, []>("SELECT state FROM projection_applied").all()).toEqual([{ state: "committed" }]);
+
+        // The `true` branch must not lie either: it changed no row, so it claims no transition.
+        expect(cp.resolvePending(stale, () => true)).toBe("already-resolved");
+        // Nor may a mark that was already RESET report a second reset.
+        cp.begin({ ...key, sourceId: "gone" });
+        const goneMark = cp.pending()[0] as ProjectionMark;
+        expect(cp.resolvePending(goneMark, () => false)).toBe("reset");
+        expect(cp.resolvePending(goneMark, () => false)).toBe("already-resolved");
+      } finally { rs.close(); }
+    });
+  });
+
+  test("complete refuses a cursor whose lastWinterSeq disagrees with the appended range", async () => {
+    // Fix round 1, minor 2: the field used to be silently discarded, which hid projector bugs.
+    await withTempHome(async (home) => {
+      const rs = openRuntimeStateDb(home);
+      try {
+        const cp = at(rs);
+        const key = { winterSessionId: S, generation: 1, sourceId: "toolu_01" };
+        cp.begin(key);
+        expect(() => cp.complete(key, CURSOR(4), { first: 1, last: 9 })).toThrow(ProjectionCursorMismatchError);
+        expect(() => cp.complete(key, CURSOR(4), { first: 1, last: 9 })).toThrow(/cursor\.lastWinterSeq=4, seqs\.last=9/);
+        // It throws BEFORE anything is written: no cursor row, and the mark is untouched.
+        expect(cp.get(S, 1)).toBeUndefined();
+        expect(cp.pending()).toHaveLength(1);
+        // And agreement is all it wants.
+        expect(cp.complete(key, CURSOR(9), { first: 1, last: 9 }).lastWinterSeq).toBe(9);
+      } finally { rs.close(); }
+    });
+  });
+
   test("resolvePending hands the predicate the mark's own seq range", async () => {
     await withTempHome(async (home) => {
       const rs = openRuntimeStateDb(home);
@@ -130,10 +184,10 @@ describe("ProjectionCheckpoints — the begin/append/complete contract", () => {
     await withTempHome(async (home) => {
       const first = openRuntimeStateDb(home);
       const cp = at(first);
-      cp.complete({ winterSessionId: S, generation: 1, sourceId: "a" }, CURSOR({ backendCursor: "line:1" }), { first: 1, last: 1 });
-      cp.complete({ winterSessionId: S, generation: 3, sourceId: "b" }, CURSOR({ backendCursor: "line:3" }), { first: 2, last: 5 });
-      cp.complete({ winterSessionId: S, generation: 2, sourceId: "c" }, CURSOR({ backendCursor: "line:2" }), { first: 6, last: 6 });
-      cp.complete({ winterSessionId: "s_beta", generation: 9, sourceId: "d" }, CURSOR({ backendCursor: "other" }), { first: 1, last: 1 });
+      cp.complete({ winterSessionId: S, generation: 1, sourceId: "a" }, CURSOR(1, { backendCursor: "line:1" }), { first: 1, last: 1 });
+      cp.complete({ winterSessionId: S, generation: 3, sourceId: "b" }, CURSOR(5, { backendCursor: "line:3" }), { first: 2, last: 5 });
+      cp.complete({ winterSessionId: S, generation: 2, sourceId: "c" }, CURSOR(6, { backendCursor: "line:2" }), { first: 6, last: 6 });
+      cp.complete({ winterSessionId: "s_beta", generation: 9, sourceId: "d" }, CURSOR(1, { backendCursor: "other" }), { first: 1, last: 1 });
       expect(cp.latest(S)?.generation).toBe(3);
       expect(cp.latest(S)?.backendCursor).toBe("line:3");
       expect(cp.latest("s_gamma")).toBeUndefined();
@@ -153,8 +207,8 @@ describe("ProjectionCheckpoints — the begin/append/complete contract", () => {
       const rs = openRuntimeStateDb(home);
       try {
         const cp = at(rs);
-        cp.complete({ winterSessionId: S, generation: 1, sourceId: "a" }, CURSOR({ backendCursor: "line:1" }), { first: 1, last: 1 });
-        cp.complete({ winterSessionId: S, generation: 1, sourceId: "b" }, CURSOR({ backendCursor: "line:2" }), { first: 2, last: 4 });
+        cp.complete({ winterSessionId: S, generation: 1, sourceId: "a" }, CURSOR(1, { backendCursor: "line:1" }), { first: 1, last: 1 });
+        cp.complete({ winterSessionId: S, generation: 1, sourceId: "b" }, CURSOR(4, { backendCursor: "line:2" }), { first: 2, last: 4 });
         expect(rs.db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM runtime_projection_cursors").get()?.n).toBe(1);
         expect(cp.get(S, 1)).toEqual({ winterSessionId: S, generation: 1, runtimeKind: "claude-agent", backendSessionId: "be_1", backendCursor: "line:2", lastWinterSeq: 4, sourceDigest: "sha256:abc", updatedAt: "2026-09-10T12:00:00.000Z" });
       } finally { rs.close(); }
@@ -166,7 +220,7 @@ describe("ProjectionCheckpoints — the begin/append/complete contract", () => {
       const rs = openRuntimeStateDb(home);
       try {
         const cp = at(rs);
-        cp.complete({ winterSessionId: S, generation: 1, sourceId: "a" }, { runtimeKind: "winter-agent", backendCursor: "seq:12", lastWinterSeq: 0 }, { first: 1, last: 3 });
+        cp.complete({ winterSessionId: S, generation: 1, sourceId: "a" }, { runtimeKind: "winter-agent", backendCursor: "seq:12", lastWinterSeq: 3 }, { first: 1, last: 3 });
         const got = cp.get(S, 1);
         expect(got).toEqual({ winterSessionId: S, generation: 1, runtimeKind: "winter-agent", backendCursor: "seq:12", lastWinterSeq: 3, updatedAt: "2026-09-10T12:00:00.000Z" });
         expect("backendSessionId" in (got as object)).toBe(false);
@@ -182,7 +236,7 @@ describe("ProjectionCheckpoints — cursors are opaque", () => {
       const rs = openRuntimeStateDb(home);
       try {
         const cp = at(rs, "NOW-STAMP");
-        cp.complete({ winterSessionId: S, generation: 1, sourceId: "a" }, CURSOR({ backendCursor: "2026-09-10T00:00:00.000Z" }), { first: 1, last: 1 });
+        cp.complete({ winterSessionId: S, generation: 1, sourceId: "a" }, CURSOR(1, { backendCursor: "2026-09-10T00:00:00.000Z" }), { first: 1, last: 1 });
         expect(cp.get(S, 1)?.backendCursor).toBe("2026-09-10T00:00:00.000Z");
         // The clock reaches `updatedAt` and NOTHING else — a cursor is never a wall-clock reading.
         expect(cp.get(S, 1)?.updatedAt).toBe("NOW-STAMP");
@@ -213,7 +267,7 @@ describe("ProjectionCheckpoints — the documented begin → append → complete
         // Turn 1: the full cycle. begin → append → complete.
         expect(cp.begin({ winterSessionId: sessionId, generation: 1, sourceId: "toolu_01" })).toBe("begun");
         const first = sessions.append(sessionId, { type: "assistant_message", sessionId, threadId: "main", text: "toolu_01 landed" });
-        cp.complete({ winterSessionId: sessionId, generation: 1, sourceId: "toolu_01" }, CURSOR({ backendCursor: "line:1" }), { first: first.seq, last: first.seq });
+        cp.complete({ winterSessionId: sessionId, generation: 1, sourceId: "toolu_01" }, CURSOR(first.seq, { backendCursor: "line:1" }), { first: first.seq, last: first.seq });
 
         // Turn 2: the crash window — begin and append ran, `complete` never did.
         expect(cp.begin({ winterSessionId: sessionId, generation: 1, sourceId: "toolu_02" })).toBe("begun");

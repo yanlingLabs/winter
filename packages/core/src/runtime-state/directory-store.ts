@@ -78,6 +78,11 @@ export function createSqliteRuntimeDirectoryStore(rs: RuntimeStateDb): RuntimeDi
       return db.query<HeldRow, [string]>(`SELECT ${HELD_COLUMNS} FROM held_messages WHERE receiver = ? ORDER BY rowid`).all(receiver).map(toHeld);
     },
     async hold(record) {
+      // DELIBERATE DIVERGENCE from the in-memory reference, which APPENDS: `PRIMARY KEY (receiver,
+      // message_id)` dedupes here, so re-holding a message updates it in place instead of leaving
+      // two copies of one envelope in a durable mailbox. Edge it changes: a second `hold` of the
+      // same (receiver, messageId) overwrites reason/kind/expiry and moves the record to the end of
+      // hold order, where the reference would have listed the message twice.
       db.run(`INSERT OR REPLACE INTO held_messages (${HELD_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?)`,
         [record.receiver, record.messageId, record.reason, record.kind, record.heldAt, record.expiresAt ?? null, JSON.stringify(record.message)]);
     },
@@ -175,6 +180,11 @@ export function createSqliteRuntimeDirectoryStore(rs: RuntimeStateDb): RuntimeDi
       return db.query<LeaseRow, [string]>(`SELECT ${LEASE_COLUMNS} FROM name_leases WHERE name = ? ORDER BY rowid`).all(name).map(toLease);
     },
     async claim(record) {
+      // DELIBERATE DIVERGENCE from the in-memory reference, which APPENDS: `PRIMARY KEY (name,
+      // address, claimed_at)` dedupes here. A re-claim at a NEW `claimedAt` still appends a second
+      // row, exactly like the reference. Edge it changes: a re-claim at a BYTE-IDENTICAL
+      // `claimedAt` overwrites the existing row — including resurrecting one that had already been
+      // released, since the incoming record's absent `releasedAt` is written as NULL.
       db.run(`INSERT OR REPLACE INTO name_leases (${LEASE_COLUMNS}) VALUES (?, ?, ?, ?, ?)`,
         [record.name, record.address, record.generation, record.claimedAt, record.releasedAt ?? null]);
     },

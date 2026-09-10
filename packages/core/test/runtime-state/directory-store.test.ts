@@ -106,7 +106,9 @@ async function runScenario(store: RuntimeDirectoryStore): Promise<unknown[]> {
   await run("upsert A", () => store.upsert(ENTRY_A));
   await run("upsert B", () => store.upsert(ENTRY_B));
   await run("upsert A again (same address, new status)", () => store.upsert({ ...ENTRY_A, status: "idle", updatedAt: "2026-09-10T00:00:09.000Z" }));
+  await run("remove A (present)", () => store.remove(ADDR_A));
   await run("remove C (never present)", () => store.remove(ADDR_C));
+  await run("upsert A back", () => store.upsert(ENTRY_A));
 
   await run("cursor set A", () => store.cursors.set(ADDR_A, "cur-a-1"));
   await run("cursor set B", () => store.cursors.set(ADDR_B, "cur-b-1"));

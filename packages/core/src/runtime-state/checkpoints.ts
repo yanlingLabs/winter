@@ -33,6 +33,10 @@ import type { RuntimeStateDb } from "./db";
  * is the thing the append actually wrote. A `true` commits the mark (the events are already there);
  * a `false` DELETES it, so the next `begin` returns `"begun"` and the projector re-applies.
  *
+ * A `ProjectionMark` is a VALUE read at some earlier instant, so by the time it is resolved the row
+ * may already have moved on. Both of `resolvePending`'s statements therefore require
+ * `state = 'pending'` and report `"already-resolved"` when they change no row — see the method.
+ *
  * ── NEVER A WALL-CLOCK CURSOR ───────────────────────────────────────────────────────────────────
  *
  * `backendCursor` is an OPAQUE string owned by the adapter that produced it — a JSONL line number, a
@@ -74,6 +78,19 @@ export interface ProjectionKey {
 
 /** What `complete` is told about the cursor — the checkpoint minus the parts the key already fixes. */
 export type ProjectionCursorInput = Omit<ProjectionCheckpoint, "winterSessionId" | "generation" | "updatedAt">;
+
+/**
+ * `complete` was handed a cursor whose `lastWinterSeq` disagrees with the range that was actually
+ * appended (`seqs.last`). Those are two statements of one fact, and a caller that disagrees with
+ * itself is a bug in the projector — loud here beats a silently-preferred half, which would leave
+ * the mark and the checkpoint describing different ends of the same append.
+ */
+export class ProjectionCursorMismatchError extends Error {
+  constructor(public readonly key: ProjectionKey, public readonly cursorLastWinterSeq: number, public readonly appendedLast: number) {
+    super(`projection cursor disagrees with the appended range for ${key.winterSessionId}/${key.generation}/${key.sourceId}: cursor.lastWinterSeq=${cursorLastWinterSeq}, seqs.last=${appendedLast}`);
+    this.name = "ProjectionCursorMismatchError";
+  }
+}
 
 interface CursorRow { winter_session_id: string; generation: number; runtime_kind: string; backend_session_id: string | null; backend_cursor: string; last_winter_seq: number; source_digest: string | null; updated_at: string }
 interface MarkRow { winter_session_id: string; generation: number; source_id: string; state: string; first_winter_seq: number | null; last_winter_seq: number | null; updated_at: string }
@@ -139,8 +156,13 @@ export class ProjectionCheckpoints {
    * `seqs.last` — not `cursor.lastWinterSeq` — is what the cursor row records, so the checkpoint and
    * the mark can never disagree about where the appended range ended. The field is still on the
    * input type because the seam's checkpoint shape carries it; it is the RANGE that is authoritative.
+   * The two are nonetheless required to AGREE: a caller that states both and states them
+   * differently is throwing away one of its own facts, and `ProjectionCursorMismatchError` says so
+   * before anything is written. (Fix round 1, minor 2 — silently discarding the field was the
+   * previous behaviour, and it hid exactly this class of projector bug.)
    */
   complete(key: ProjectionKey, cursor: ProjectionCursorInput, seqs: { first: number; last: number }): ProjectionCheckpoint {
+    if (cursor.lastWinterSeq !== seqs.last) throw new ProjectionCursorMismatchError(key, cursor.lastWinterSeq, seqs.last);
     const updatedAt = this.now();
     return this.rs.transaction(() => {
       this.rs.db.run(`INSERT OR REPLACE INTO projection_applied (${MARK_COLUMNS}) VALUES (?, ?, ?, 'committed', ?, ?, ?)`,
@@ -173,16 +195,27 @@ export class ProjectionCheckpoints {
    * never re-applied. `false` → nothing landed: DELETE the mark, so the next `begin` says `"begun"`
    * and the projector re-applies it. A reset is a deletion, not a state, because a third state would
    * be one more thing every reader of `projection_applied` has to know about.
+   *
+   * BOTH STATEMENTS REQUIRE `state = 'pending'`, and the outcome is derived from how many rows they
+   * actually changed (fix round 1, important 1). The `mark` is a VALUE the caller read from
+   * `pending()` at some earlier instant; if the source was `complete`d in between, keying only on
+   * (session, generation, source) would let a `false` predicate ERASE THE COMMITTED MARK — after
+   * which `begin` answers `"begun"` and the projector re-appends events that are already in the
+   * product log. That is precisely the double-append this class exists to prevent, and it is why
+   * the predicate's answer alone must not decide the outcome: a resolve that changed no row reports
+   * `"already-resolved"` rather than claiming a transition it did not make.
+   *
+   * Each branch is still ONE statement, so the check and the write cannot be split by a racing
+   * writer — there is no read-then-write window to lose.
    */
-  resolvePending(mark: ProjectionMark, tailContains: (mark: ProjectionMark) => boolean): "committed" | "reset" {
+  resolvePending(mark: ProjectionMark, tailContains: (mark: ProjectionMark) => boolean): "committed" | "reset" | "already-resolved" {
     const landed = tailContains(mark);
-    if (landed) {
-      this.rs.db.run("UPDATE projection_applied SET state = 'committed', updated_at = ? WHERE winter_session_id = ? AND generation = ? AND source_id = ?",
-        [this.now(), mark.winterSessionId, mark.generation, mark.sourceId]);
-      return "committed";
-    }
-    this.rs.db.run("DELETE FROM projection_applied WHERE winter_session_id = ? AND generation = ? AND source_id = ?",
-      [mark.winterSessionId, mark.generation, mark.sourceId]);
-    return "reset";
+    const changes = landed
+      ? this.rs.db.run("UPDATE projection_applied SET state = 'committed', updated_at = ? WHERE winter_session_id = ? AND generation = ? AND source_id = ? AND state = 'pending'",
+        [this.now(), mark.winterSessionId, mark.generation, mark.sourceId]).changes
+      : this.rs.db.run("DELETE FROM projection_applied WHERE winter_session_id = ? AND generation = ? AND source_id = ? AND state = 'pending'",
+        [mark.winterSessionId, mark.generation, mark.sourceId]).changes;
+    if (changes === 0) return "already-resolved";
+    return landed ? "committed" : "reset";
   }
 }
