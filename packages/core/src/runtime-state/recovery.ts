@@ -140,7 +140,16 @@ export async function recoverRuntimeState(deps: RecoveryDeps): Promise<RecoveryR
   const finishStep = (step: RecoveryStepReport["step"], outcome: RecoveryStepReport["outcome"], detail: RecoveryStepReport["detail"]): void => {
     steps.push({ step, outcome, detail });
     writeAttempt(step, outcome, detail);
-    log(`recovery step ${step}: ${outcome}`);
+    // The sink is the CALLER's, and it is the last thing standing between a bad log target and a
+    // daemon that will not boot. It is also called from inside the outer catch below, so an
+    // unguarded throw here would escape the very guard that exists to contain it — a sink that
+    // fails on EVERY line would reject the promise no matter how carefully the sweep behaved.
+    // Recovery narrates; it does not depend on being heard.
+    try {
+      log(`recovery step ${step}: ${outcome}`);
+    } catch {
+      /* a logging sink must never take recovery down */
+    }
   };
 
   /** The per-session bound. Records the id once, writes ONE attempt row naming the step and the
@@ -169,7 +178,9 @@ export async function recoverRuntimeState(deps: RecoveryDeps): Promise<RecoveryR
   const ids = (sql: string): string[] =>
     rs.db.query<{ winter_session_id: string }, []>(sql).all().map((r) => r.winter_session_id);
 
-  const sessionsSeen = count("SELECT COUNT(*) AS n FROM runtime_sessions");
+  // Assigned INSIDE the outer try below, not here: this is a db read like any other, and a read
+  // above the guard is a read whose failure rejects the promise. Zero until the sweep has counted.
+  let sessionsSeen = 0;
   const finish = (): RecoveryReport => ({
     startedAt,
     finishedAt: now(),
@@ -186,6 +197,8 @@ export async function recoverRuntimeState(deps: RecoveryDeps): Promise<RecoveryR
   // wires this into boot, a rejected promise here is a daemon that does not start. A throw from
   // anywhere in the sweep therefore still leaves a step-12 row and a report that says `ok: false`.
   try {
+    sessionsSeen = count("SELECT COUNT(*) AS n FROM runtime_sessions");
+
     // ── 1. Integrity-check both stores ───────────────────────────────────────────────────────────
     // Two stores with two different ownership rules: `runtime-state.db` is AUTHORITATIVE (§14: a
     // missing or corrupt one refuses runtime resume/routing — never infer a runtime kind or backend id
@@ -391,24 +404,29 @@ export async function recoverRuntimeState(deps: RecoveryDeps): Promise<RecoveryR
         .all()
         .map((r) => r.parent_winter_session_id);
       const isGone = hooks.isChildGone ?? (() => true);
+      // A LOCAL tally, not the report-level `reclassified`: a step's detail must describe what THAT
+      // step did. Reading the shared array happens to agree today only because nothing else writes
+      // it — which is exactly the kind of coincidence that stops being true quietly.
+      const interrupted: ChildRef[] = [];
       let kept = 0;
       let failed = 0;
       for (const parent of parents) {
         try {
           const result = children.reclassifyAfterRestart(isGone, { parent });
-          reclassified.push(...result.interrupted);
+          interrupted.push(...result.interrupted);
           kept += result.kept.length;
         } catch (e) {
           failed++;
           noteCorrupt(parent, 7, e);
         }
       }
+      reclassified.push(...interrupted);
       finishStep(7, failed === 0 ? "ok" : "partial", {
         parents: parents.length,
-        interrupted: reclassified.length,
+        interrupted: interrupted.length,
         kept,
         failed,
-        children: reclassified.map((c) => `${c.parent}/${c.childId}`),
+        children: interrupted.map((c) => `${c.parent}/${c.childId}`),
       });
     }
 

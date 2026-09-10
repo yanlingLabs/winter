@@ -113,6 +113,21 @@ const withHarness = (fn: (h: Harness) => Promise<void>): Promise<void> =>
     }
   });
 
+/** The same store, with one SQL made to fail — the way a table that has gone missing under a live
+ *  handle behaves. Used to reach the bare counting helpers BETWEEN the steps, which are the only
+ *  doors left outside recovery's per-session guards. `transaction` is untouched (db.ts closes over
+ *  the real handle), so everything but the chosen query still works. */
+const brittleDb = (rs: RuntimeStateDb, failOn: string): RuntimeStateDb => ({
+  ...rs,
+  db: {
+    query: (sql: string) => {
+      if (sql.includes(failOn)) throw new Error(`no such table: ${failOn}`);
+      return rs.db.query(sql);
+    },
+    run: (...args: unknown[]) => (rs.db.run as (...a: unknown[]) => unknown)(...args),
+  } as unknown as RuntimeStateDb["db"],
+});
+
 /** A record parked in one of the three live states, with a generation to hang a lease on. */
 const seedLive = (h: Harness, id: string, state: "running" | "ready" | "idle"): void => {
   h.records.create(newRecord(h.home, id));
@@ -335,21 +350,44 @@ describe("recoverRuntimeState — WS-16 §13's twelve steps", () => {
   test("a throw outside every per-session guard still returns a report, never a rejected promise", async () => {
     await withHarness(async (h) => {
       seedLive(h, "s_live", "running");
-      // A door that is deliberately outside every per-session guard: the daemon's own log sink,
-      // called by `finishStep` once a step is already recorded. A sink that dies mid-sweep must
-      // still leave a report behind — once 8b wires this into boot, a rejected promise here is a
-      // daemon that does not start.
-      const report = await h.run({
-        log: (line) => {
-          if (line.includes("step 7")) throw new Error("log sink is gone");
-        },
-      });
+      // The doors genuinely outside every per-session guard are the bare counting helpers between
+      // the steps. One of them is made to fail here — once 8b wires this into boot, a rejected
+      // promise is a daemon that does not start, so the guarantee has to be TOTAL, not per-session.
+      const report = await h.run({ rs: brittleDb(h.rs, "idle_subscriptions") });
 
       expect(report.ok).toBe(false);
       expect(report.steps[report.steps.length - 1]).toMatchObject({ step: 12, outcome: "failed" });
       // Everything before the failure still happened, and is still on the record.
       expect(h.records.get("s_live")?.state).toBe("unavailable");
       expect(h.attempts().some((r) => r.step === 12 && r.outcome === "failed")).toBe(true);
+
+      // …including the very first read of the sweep, the session count. It is taken INSIDE the
+      // guard, so even a store that fails before step 1 returns a report rather than rejecting.
+      const earliest = await h.run({ rs: brittleDb(h.rs, "COUNT(*) AS n FROM runtime_sessions") });
+      expect(earliest.ok).toBe(false);
+      expect(earliest.steps).toEqual([{ step: 12, outcome: "failed", detail: { errorName: "Error" } }]);
+    });
+  });
+
+  test("a sink that fails on EVERY line does not take recovery down with it", async () => {
+    await withHarness(async (h) => {
+      seedLive(h, "s_live", "running");
+      h.children.upsert(newChild("s_live", "c1"));
+
+      // The outer guard's catch calls `finishStep`, which narrates — so an unguarded sink would
+      // escape the very guard that exists to contain it. Recovery narrates; it does not depend on
+      // being heard.
+      const report = await h.run({
+        log: () => {
+          throw new Error("log sink is gone");
+        },
+      });
+
+      expect(report.ok).toBe(true);
+      expect(report.steps.map((s) => s.step)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+      expect(h.records.get("s_live")?.state).toBe("unavailable");
+      expect(h.children.get("s_live", "c1")?.status).toBe("interrupted");
+      expect(report.sessionsSeen).toBe(1);
     });
   });
 
