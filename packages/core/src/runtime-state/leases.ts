@@ -16,6 +16,7 @@
 // drop a holder.
 import { readFileSync } from "node:fs";
 import type { RuntimeStateDb } from "./db";
+import { UnknownRuntimeGenerationError } from "./records";
 
 /** The honest answer when the OS will not tell us when a process started. Never equal to itself:
  *  two unknowns are not evidence of the same process (see `identityMatches`). */
@@ -53,14 +54,19 @@ export class LeaseHeldError extends Error {
   }
 }
 
-/** No leasable generation row: either the generation was never recorded (`bumpGeneration` writes
- *  it), or the lease this process was renewing is no longer live. A lease can only ever sit on a
- *  generation row that already exists — this class never creates one, because every other column on
- *  that row belongs to `RuntimeSessionRecords`. */
-export class UnknownRuntimeGenerationError extends Error {
-  constructor(public readonly winterSessionId: string, public readonly generation: number, message?: string) {
-    super(message ?? `runtime generation ${generation} of ${winterSessionId} does not exist`);
-    this.name = "UnknownRuntimeGenerationError";
+/**
+ * The generation row exists, but this process no longer holds a live lease on it — it was released,
+ * or broken as stale by a recovery sweep while this process believed it was still the writer.
+ *
+ * DISTINCT FROM `UnknownRuntimeGenerationError` (records.ts) on purpose: "that generation never
+ * existed" is a programming error, while "you lost the lease" is a runtime condition recovery has
+ * to branch on — stop writing and re-acquire. A caller must never have to string-match a message to
+ * tell those apart (review r1 minor 11).
+ */
+export class LeaseLostError extends Error {
+  constructor(public readonly winterSessionId: string, public readonly generation: number) {
+    super(`no live runtime lease held by this process for ${winterSessionId} generation ${generation}`);
+    this.name = "LeaseLostError";
   }
 }
 
@@ -132,6 +138,13 @@ function sameHolder(a: ProcessIdentity, b: ProcessIdentity): boolean {
   return a.pid === b.pid && a.startedAt === b.startedAt;
 }
 
+/** "Is this the very lease I probed" — identity of the ROW, not of the process: same generation,
+ *  same holder, same renewal stamp. `acquire` probes outside its write window (the probe spawns a
+ *  subprocess), so it must confirm under the lock that nothing moved before acting on that verdict. */
+function sameLease(a: LeaseRow, b: LeaseRow): boolean {
+  return a.generation === b.generation && sameHolder(a.holder, b.holder) && a.renewedAt === b.renewedAt;
+}
+
 const LIVE_PROBE: LeaseProbe = { alive: processIsAlive, startedAt: processStartedAt };
 
 interface LeaseDbRow {
@@ -171,51 +184,73 @@ export class RuntimeLeases {
    * REVALIDATES AS STALE (holder gone, or the pid demonstrably belongs to a different process), and
    * that is the same proof `breakStale` demands; a lease whose identity cannot be established
    * (`"unknown"`) is not stale and is never taken.
+   *
+   * TWO THINGS ARE DELIBERATE ABOUT THE WINDOW (review r1, findings 1–2). The probe runs BEFORE the
+   * transaction, because revalidation spawns `ps` and a subprocess must not run while the write
+   * lock is held; under the lock the holder is re-read and the probe's verdict is only trusted if
+   * the row did not move (anything else is another writer acting, and is refused). And the write
+   * begins IMMEDIATE, so a losing process blocks on the busy handler and then re-reads a committed
+   * truth — a deferred BEGIN would fail its read→write upgrade with a raw SQLITE_BUSY_SNAPSHOT
+   * instead of the typed `LeaseHeldError` this class exists to give.
    */
   acquire(winterSessionId: string, generation: number): LeaseRow {
-    return this.rs.transaction(() => {
-      const held = this.holder(winterSessionId);
-      if (held && this.revalidate(held) !== "stale") throw new LeaseHeldError(winterSessionId, held.holder);
-      const at = this.now();
-      this.rs.db
-        .query(
-          `UPDATE runtime_generations SET lease_holder_pid = ?, lease_holder_started_at = ?, lease_renewed_at = ?, lease_released_at = NULL
-           WHERE winter_session_id = ? AND generation = ?`,
-        )
-        .run(this.self.pid, this.self.startedAt, at, winterSessionId, generation);
-      const lease = this.leaseAt(winterSessionId, generation);
-      if (!lease) throw new UnknownRuntimeGenerationError(winterSessionId, generation);
-      return lease;
-    });
+    const probed = this.holder(winterSessionId);
+    const verdict = probed ? this.revalidate(probed) : undefined;
+    return this.rs.transaction(
+      () => {
+        const held = this.holder(winterSessionId);
+        if (held) {
+          if (!probed || !sameLease(probed, held) || verdict !== "stale") throw new LeaseHeldError(winterSessionId, held.holder);
+          // The stale lease we are taking over may sit on ANOTHER generation. Claiming only the
+          // target row would leave that one holding a dead pid with no `lease_released_at` forever:
+          // `holder()` masks it while this new lease is live, then starts reporting a long-gone
+          // process the moment this lease is released (review r1, finding 1).
+          if (held.generation !== generation) this.markReleased(winterSessionId, held.generation);
+        }
+        const at = this.now();
+        this.rs.db
+          .query(
+            `UPDATE runtime_generations SET lease_holder_pid = ?, lease_holder_started_at = ?, lease_renewed_at = ?, lease_released_at = NULL
+             WHERE winter_session_id = ? AND generation = ?`,
+          )
+          .run(this.self.pid, this.self.startedAt, at, winterSessionId, generation);
+        const lease = this.leaseAt(winterSessionId, generation);
+        if (!lease) throw new UnknownRuntimeGenerationError(winterSessionId, generation);
+        return lease;
+      },
+      { mode: "immediate" },
+    );
   }
 
   /** Heartbeat: "still live". Only the process that recorded the lease may renew it. */
   renew(winterSessionId: string, generation: number): void {
-    this.rs.transaction(() => {
-      const lease = this.leaseAt(winterSessionId, generation);
-      if (!lease)
-        throw new UnknownRuntimeGenerationError(
-          winterSessionId,
-          generation,
-          `no live runtime lease for ${winterSessionId} generation ${generation}`,
-        );
-      if (!sameHolder(lease.holder, this.self)) throw new LeaseHeldError(winterSessionId, lease.holder);
-      this.rs.db
-        .query(`UPDATE runtime_generations SET lease_renewed_at = ? WHERE winter_session_id = ? AND generation = ?`)
-        .run(this.now(), winterSessionId, generation);
-    });
+    this.rs.transaction(
+      () => {
+        const lease = this.leaseAt(winterSessionId, generation);
+        if (!lease) {
+          if (!this.generationExists(winterSessionId, generation)) throw new UnknownRuntimeGenerationError(winterSessionId, generation);
+          throw new LeaseLostError(winterSessionId, generation);
+        }
+        if (!sameHolder(lease.holder, this.self)) throw new LeaseHeldError(winterSessionId, lease.holder);
+        this.rs.db
+          .query(`UPDATE runtime_generations SET lease_renewed_at = ? WHERE winter_session_id = ? AND generation = ?`)
+          .run(this.now(), winterSessionId, generation);
+      },
+      { mode: "immediate" },
+    );
   }
 
   /** Hand the lease back. Releasing a lease this process does not hold is a no-op, never a theft —
    *  taking someone else's lease is `breakStale`'s job, and it demands proof. */
   release(winterSessionId: string, generation: number): void {
-    this.rs.transaction(() => {
-      const lease = this.leaseAt(winterSessionId, generation);
-      if (!lease || !sameHolder(lease.holder, this.self)) return;
-      this.rs.db
-        .query(`UPDATE runtime_generations SET lease_released_at = ? WHERE winter_session_id = ? AND generation = ?`)
-        .run(this.now(), winterSessionId, generation);
-    });
+    this.rs.transaction(
+      () => {
+        const lease = this.leaseAt(winterSessionId, generation);
+        if (!lease || !sameHolder(lease.holder, this.self)) return;
+        this.markReleased(winterSessionId, generation);
+      },
+      { mode: "immediate" },
+    );
   }
 
   /** The session's live lease, whichever generation holds it (the lease is per SESSION — WS-16 §11
@@ -256,14 +291,30 @@ export class RuntimeLeases {
    */
   breakStale(winterSessionId: string, generation: number, reason: string): boolean {
     void reason;
-    return this.rs.transaction(() => {
-      const lease = this.leaseAt(winterSessionId, generation);
-      if (!lease || this.revalidate(lease) !== "stale") return false;
-      this.rs.db
-        .query(`UPDATE runtime_generations SET lease_released_at = ? WHERE winter_session_id = ? AND generation = ?`)
-        .run(this.now(), winterSessionId, generation);
-      return true;
-    });
+    // Probed before the window for the same reason `acquire` does it: no subprocess under the lock.
+    const probed = this.leaseAt(winterSessionId, generation);
+    if (!probed || this.revalidate(probed) !== "stale") return false;
+    return this.rs.transaction(
+      () => {
+        const lease = this.leaseAt(winterSessionId, generation);
+        if (!lease || !sameLease(probed, lease)) return false;
+        this.markReleased(winterSessionId, generation);
+        return true;
+      },
+      { mode: "immediate" },
+    );
+  }
+
+  private markReleased(winterSessionId: string, generation: number): void {
+    this.rs.db
+      .query(`UPDATE runtime_generations SET lease_released_at = ? WHERE winter_session_id = ? AND generation = ?`)
+      .run(this.now(), winterSessionId, generation);
+  }
+
+  private generationExists(winterSessionId: string, generation: number): boolean {
+    return (
+      this.rs.db.query(`SELECT 1 AS ok FROM runtime_generations WHERE winter_session_id = ? AND generation = ?`).get(winterSessionId, generation) !== null
+    );
   }
 
   /** The live (unreleased) lease on exactly one generation. */

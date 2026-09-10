@@ -2,14 +2,14 @@ import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import type { RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
 import { openRuntimeStateDb, type RuntimeStateDb } from "../../src/runtime-state/db";
-import { RuntimeSessionRecords, type NewRuntimeSessionRecord } from "../../src/runtime-state/records";
+import { RuntimeSessionRecords, UnknownRuntimeGenerationError, type NewRuntimeSessionRecord } from "../../src/runtime-state/records";
 import {
   identityMatches,
   LeaseHeldError,
+  LeaseLostError,
   processIsAlive,
   processStartedAt,
   RuntimeLeases,
-  UnknownRuntimeGenerationError,
   type ProcessIdentity,
 } from "../../src/runtime-state/leases";
 import { ISO, withTempHome } from "./support";
@@ -73,10 +73,13 @@ describe("process identity", () => {
     const at = processStartedAt(process.pid);
     expect(at).not.toBe("unknown");
     expect(at).toMatch(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/);
-    // A start time is always in the past — and this is the timezone regression: `ps` renders wall
-    // clock, so a reader in another timezone (Bun's test runner runs at UTC) would otherwise read
-    // this process as having started in the future, i.e. as a DIFFERENT process.
-    expect(new Date(at).getTime()).toBeLessThanOrEqual(Date.now());
+    // The timezone regression, bounded in BOTH directions (review r1 minor 3): an unpinned parse
+    // pushes the start time into the future on a positive-offset machine and into the past on a
+    // negative-offset one, so an upper bound alone would pass west of Greenwich. This process's own
+    // uptime is the ground truth for how long ago it can possibly have started.
+    const ageMs = Date.now() - new Date(at).getTime();
+    expect(ageMs).toBeGreaterThanOrEqual(0);
+    expect(ageMs).toBeLessThan(process.uptime() * 1000 + 60_000);
   });
 
   test("a pid that cannot exist has no start identity and is not alive", () => {
@@ -216,8 +219,64 @@ describe("RuntimeLeases", () => {
         const stranger = new RuntimeLeases(rs, { pid: DEAD_PID, startedAt: "2020-01-01T00:00:00.000Z" });
         expect(() => stranger.renew(id, 1)).toThrow(LeaseHeldError);
         mine.release(id, 1);
-        expect(() => mine.renew(id, 1)).toThrow(UnknownRuntimeGenerationError);
+        // Review r1 minor 11: "you lost the lease" and "no such generation" are different classes,
+        // because recovery branches on the first and only the first.
+        expect(() => mine.renew(id, 1)).toThrow(LeaseLostError);
+        expect(() => mine.renew(id, 9)).toThrow(UnknownRuntimeGenerationError);
       })));
+
+  test("taking over a stale lease on another generation releases the row it came from", () =>
+    withTempHome(
+      (home) =>
+        use(
+          home,
+          ({ rs, leases, id }) => {
+            // Review r1, finding 1: claiming only the target row left the stale generation holding a
+            // dead pid with no `lease_released_at`, and `holder()` reported it forever after this
+            // lease was released.
+            new RuntimeLeases(rs, { pid: DEAD_PID, startedAt: "2020-01-01T00:00:00.000Z" }).acquire(id, 1);
+            expect(leases.acquire(id, 2).generation).toBe(2);
+            leases.release(id, 2);
+            expect(leases.holder(id)).toBeUndefined();
+            const gen1 = rs.db
+              .query("SELECT lease_holder_pid AS pid, lease_released_at AS released FROM runtime_generations WHERE winter_session_id = ? AND generation = 1")
+              .get(id) as { pid: number; released: string | null };
+            expect(gen1.pid).toBe(DEAD_PID);
+            expect(gen1.released).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+          },
+          2,
+        ),
+    ));
+
+  test("two connections to one db: exactly one acquires, the loser gets LeaseHeldError", () =>
+    withTempHome((home) => {
+      // Review r1, finding 2: the point is the SHAPE of the loser's failure. Two separate
+      // connections stand in for two daemons; the second must see the first's committed lease and
+      // refuse in this class's own vocabulary, never with a raw SQLite error. (The lock semantics
+      // that make the concurrent version of this block-and-re-read instead of failing the snapshot
+      // upgrade are pinned in db.test.ts's immediate-transaction test.)
+      const a = openRuntimeStateDb(home);
+      const b = openRuntimeStateDb(home);
+      try {
+        const records = new RuntimeSessionRecords(a);
+        records.create(newRecord(home, "s_race"));
+        records.bumpGeneration("s_race", { runtimeKind: "winter-agent" });
+        const outcome = (leases: RuntimeLeases): string => {
+          try {
+            leases.acquire("s_race", 1);
+            return "acquired";
+          } catch (e) {
+            return e instanceof LeaseHeldError ? "refused" : `raw:${(e as Error).message}`;
+          }
+        };
+        expect(outcome(new RuntimeLeases(a, self()))).toBe("acquired");
+        expect(outcome(new RuntimeLeases(b, self()))).toBe("refused");
+        expect(new RuntimeLeases(b, self()).holder("s_race")?.holder.pid).toBe(process.pid);
+      } finally {
+        b.close();
+        a.close();
+      }
+    }));
 
   test("a generation that was never recorded cannot be leased", () =>
     withTempHome((home) =>

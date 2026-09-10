@@ -79,9 +79,11 @@ export type NewRuntimeSessionRecord = Omit<RuntimeSessionRecord, "createdAt" | "
 };
 
 /** The fields `transition` may patch alongside the state change — deliberately a short list: the
- *  facts that change WHEN a session changes state. An explicit `undefined` clears the column (that
- *  is how `activeLocalWriteRoot` is dropped "after verified cleanup", WS-16 §4); an absent key
- *  leaves it exactly as it was. */
+ *  facts that change WHEN a session changes state. An absent key leaves the column exactly as it
+ *  was; an explicit `undefined` CLEARS a nullable column (that is how `activeLocalWriteRoot` is
+ *  dropped "after verified cleanup", WS-16 §4) and is ignored for the two whose columns are NOT
+ *  NULL (`transcriptHealth`, `capabilities` — see `NON_NULLABLE_PATCH_KEYS`), where writing NULL
+ *  would be a raw SQLite refusal rather than anything a caller could have meant. */
 export type RuntimeSessionPatch = Partial<
   Pick<
     RuntimeSessionRecord,
@@ -145,6 +147,17 @@ export class UnknownRuntimeSessionError extends Error {
   constructor(public readonly winterSessionId: string) {
     super(`unknown runtime session: ${winterSessionId}`);
     this.name = "UnknownRuntimeSessionError";
+  }
+}
+
+/** No such row in `runtime_generations`. Declared here because this class owns that table's
+ *  lifecycle (`bumpGeneration` is the only door that creates a row); `leases.ts` imports it rather
+ *  than declaring a second one, so both halves of the shared table answer "no such generation" with
+ *  the same type. */
+export class UnknownRuntimeGenerationError extends Error {
+  constructor(public readonly winterSessionId: string, public readonly generation: number, message?: string) {
+    super(message ?? `runtime generation ${generation} of ${winterSessionId} does not exist`);
+    this.name = "UnknownRuntimeGenerationError";
   }
 }
 
@@ -260,6 +273,10 @@ const PATCH_COLUMNS: ReadonlyArray<readonly [keyof RuntimeSessionPatch, string]>
 ];
 
 const DUPLICATE_BACKEND_ID = /UNIQUE constraint failed: runtime_sessions\.backend_session_id/;
+
+/** Patch keys whose column is NOT NULL. An explicit `undefined` for one of these is "no change",
+ *  never "write NULL": the schema would refuse it, and no caller can have meant a raw SQLite error. */
+const NON_NULLABLE_PATCH_KEYS: ReadonlySet<keyof RuntimeSessionPatch> = new Set<keyof RuntimeSessionPatch>(["transcriptHealth", "capabilities"]);
 
 function fromRow(row: SessionRow): RuntimeSessionRecord {
   return {
@@ -407,6 +424,7 @@ export class RuntimeSessionRecords {
       const values: (string | number | null)[] = [to, this.now()];
       for (const [key, column] of PATCH_COLUMNS) {
         if (!(key in patch)) continue;
+        if (patch[key] === undefined && NON_NULLABLE_PATCH_KEYS.has(key)) continue;
         sets.push(`${column} = ?`);
         values.push(key === "capabilities" ? JSON.stringify(patch.capabilities ?? []) : (patch[key] as string | undefined) ?? null);
       }
@@ -448,9 +466,14 @@ export class RuntimeSessionRecords {
   }
 
   endGeneration(winterSessionId: string, generation: number, endReason: string): void {
-    this.rs.db
-      .query(`UPDATE runtime_generations SET ended_at = ?, end_reason = ? WHERE winter_session_id = ? AND generation = ?`)
-      .run(this.now(), endReason, winterSessionId, generation);
+    this.rs.transaction(() => {
+      // Review r1 minor 10: a zero-row UPDATE reported as success is the same silent lie the lease
+      // half of this table already refuses — and it is the same refusal type there.
+      if (!this.generationExists(winterSessionId, generation)) throw new UnknownRuntimeGenerationError(winterSessionId, generation);
+      this.rs.db
+        .query(`UPDATE runtime_generations SET ended_at = ?, end_reason = ? WHERE winter_session_id = ? AND generation = ?`)
+        .run(this.now(), endReason, winterSessionId, generation);
+    });
   }
 
   generations(winterSessionId: string): GenerationRow[] {
@@ -517,6 +540,12 @@ export class RuntimeSessionRecords {
       .run(winterSessionId, dialect.dialect, dialect.corpusVersion, dialect.producer ?? null, dialect.consumer ?? null, this.now());
   }
 
+  private generationExists(winterSessionId: string, generation: number): boolean {
+    return (
+      this.rs.db.query(`SELECT 1 AS ok FROM runtime_generations WHERE winter_session_id = ? AND generation = ?`).get(winterSessionId, generation) !== null
+    );
+  }
+
   private require(winterSessionId: string): RuntimeSessionRecord {
     const record = this.get(winterSessionId);
     if (!record) throw new UnknownRuntimeSessionError(winterSessionId);
@@ -524,10 +553,15 @@ export class RuntimeSessionRecords {
   }
 
   /** SQLite's UNIQUE violation on `backend_session_id` is the ambiguous-mapping refusal WS-16 §4
-   *  demands — typed here, with the existing owner named, so a caller never has to parse SQL text. */
+   *  demands — typed here, with the existing owner named, so a caller never has to parse SQL text.
+   *
+   *  When the owner cannot be looked up the RAW error is rethrown untouched: `existingWinterSessionId`
+   *  is an id callers render and compare, so it must never carry prose (review r1 minor 7), and a
+   *  UNIQUE violation with no owner behind it means the invariant is already broken — that deserves
+   *  to surface as what it is rather than be dressed up as a mapping. */
   private mapDuplicate(e: unknown, backendSessionId: string | undefined): unknown {
     if (!backendSessionId || !(e instanceof Error) || !DUPLICATE_BACKEND_ID.test(e.message)) return e;
     const owner = this.byBackendSessionId(backendSessionId);
-    return new DuplicateBackendSessionError(backendSessionId, owner?.winterSessionId ?? "an unknown session");
+    return owner ? new DuplicateBackendSessionError(backendSessionId, owner.winterSessionId) : e;
   }
 }

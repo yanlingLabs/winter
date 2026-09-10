@@ -7,6 +7,7 @@ import {
   DuplicateBackendSessionError,
   IllegalStateTransitionError,
   RuntimeSessionRecords,
+  UnknownRuntimeGenerationError,
   UnknownRuntimeSessionError,
   VersionProvenanceError,
   type NewRuntimeSessionRecord,
@@ -61,6 +62,21 @@ const use = (home: string, fn: (rs: RuntimeStateDb, records: RuntimeSessionRecor
 };
 
 describe("RuntimeSessionRecords", () => {
+  test("ALLOWED_TRANSITIONS is pinned literally, as a drift tripwire", () => {
+    // Review r1 minor 4: the whole table, not just `.archived` — a typo inside any one list would
+    // otherwise pass the suite. This literal IS the brief's table (WS-16 §4/§16).
+    expect(ALLOWED_TRANSITIONS).toEqual({
+      creating: ["ready", "failed"],
+      ready: ["running", "idle", "exited", "failed", "unavailable", "archived"],
+      running: ["idle", "exited", "failed", "unavailable"],
+      idle: ["running", "exited", "failed", "unavailable", "archived"],
+      exited: ["running", "archived", "unavailable"],
+      failed: ["archived", "unavailable"],
+      unavailable: ["ready", "running", "idle", "exited", "failed", "archived"],
+      archived: ["idle", "exited"],
+    });
+  });
+
   test("create stamps creating/generation 0 and round-trips the selection", () =>
     withTempHome((home) =>
       use(home, (_rs, records) => {
@@ -175,6 +191,22 @@ describe("RuntimeSessionRecords", () => {
         expect(patched.compatibilityLevel).toBe("conversation");
       })));
 
+  test("an explicit undefined clears a nullable column and is ignored for a NOT NULL one", () =>
+    withTempHome((home) =>
+      use(home, (_rs, records) => {
+        // Review r1 minor 6: `transcript_health` and `capabilities_json` are NOT NULL, so an
+        // explicit `undefined` there must be "no change" rather than a raw SQLite refusal.
+        records.create(newRecord(home, "s_u", { activeLocalWriteRoot: "/private/tmp/spool/s_u", capabilities: ["resume"] }));
+        const patched = records.transition("s_u", "ready", {
+          activeLocalWriteRoot: undefined,
+          transcriptHealth: undefined,
+          capabilities: undefined,
+        });
+        expect(patched.activeLocalWriteRoot).toBeUndefined();
+        expect(patched.transcriptHealth).toBe("clean");
+        expect(patched.capabilities).toEqual(["resume"]);
+      })));
+
   test("list filters by state, runtime kind and parent", () =>
     withTempHome((home) =>
       use(home, (_rs, records) => {
@@ -228,6 +260,17 @@ describe("RuntimeSessionRecords", () => {
         // Task 5 owns the lease_* columns; nothing here may write them.
         expect(rs.db.query("SELECT count(*) AS n FROM runtime_generations WHERE lease_holder_pid IS NOT NULL OR lease_renewed_at IS NOT NULL").get()).toEqual({ n: 0 });
         expect(() => records.bumpGeneration("s_missing", { runtimeKind: "winter-agent" })).toThrow(UnknownRuntimeSessionError);
+        // Review r1 minor 10: closing a generation that does not exist is a typed refusal, not a
+        // zero-row UPDATE reported as success — the same type the lease half of this table uses.
+        let caught: unknown;
+        try {
+          records.endGeneration("s_g", 9, "handoff");
+        } catch (e) {
+          caught = e;
+        }
+        expect(caught).toBeInstanceOf(UnknownRuntimeGenerationError);
+        expect((caught as UnknownRuntimeGenerationError).generation).toBe(9);
+        expect(() => records.endGeneration("s_missing", 1, "handoff")).toThrow(UnknownRuntimeGenerationError);
       })));
 
   test("the handoff history is append-only and ordered", () =>
