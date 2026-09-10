@@ -19,12 +19,12 @@
 // open is not a lock fight. Every REPAIR is the opposite: `restore-backup` refuses outright while
 // the lock is held, and the CLI refuses every op on the same probe.
 import { Database } from "bun:sqlite";
-import { appendFileSync, copyFileSync, existsSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, copyFileSync, existsSync, openSync, readFileSync, readSync, realpathSync, rmSync, statSync, truncateSync } from "node:fs";
 import { join } from "node:path";
 import { SessionStore, SYNCED_SESSION_ID_RE } from "../sessions/store";
-import { openRuntimeStateDb, RuntimeStateUnavailableError, type RuntimeStateDb } from "./db";
+import { openRuntimeStateDb, RUNTIME_STATE_SCHEMA_VERSION, RuntimeStateUnavailableError, type RuntimeStateDb } from "./db";
 import { ALLOWED_TRANSITIONS, RuntimeSessionRecords } from "./records";
-import { processIsAlive } from "./leases";
+import { RuntimeLeases, type LeaseRow } from "./leases";
 
 export type FindingKind =
   | "db-missing"
@@ -113,7 +113,22 @@ function readIndex(home: string): Map<string, IndexRow> | undefined {
   let readable = true;
   try {
     db = new Database(path, { readonly: true });
-    for (const row of db.query<IndexRow, []>("SELECT session_id, scope, last_seq, cwd FROM sessions").all()) rows.set(row.session_id, row);
+    // The three columns `sessions` has had since it existed. `cwd` is ALTER-added (store.ts's
+    // migration loop), and a READONLY handle cannot run that migration — so an index written by a
+    // pre-`cwd` build is perfectly readable, and folding it in with a genuinely unopenable file
+    // would claim the daemon will not start when it would start and migrate. Asked for separately,
+    // tolerantly (review r1, minor 5).
+    for (const row of db.query<Omit<IndexRow, "cwd">, []>("SELECT session_id, scope, last_seq FROM sessions").all()) {
+      rows.set(row.session_id, { ...row, cwd: null });
+    }
+    try {
+      for (const row of db.query<{ session_id: string; cwd: string | null }, []>("SELECT session_id, cwd FROM sessions").all()) {
+        const known = rows.get(row.session_id);
+        if (known) known.cwd = row.cwd;
+      }
+    } catch {
+      /* an index older than the `cwd` column: every workspace check simply has nothing to check */
+    }
   } catch {
     readable = false;
   } finally {
@@ -126,16 +141,56 @@ function readIndex(home: string): Map<string, IndexRow> | undefined {
   return readable ? rows : undefined;
 }
 
-/** The last non-empty line of a session log, parsed only far enough to learn its `seq`. Never
- *  inspects a body: `undefined` means "there is no readable trailing frame", which is all the
- *  drift check and the tail repair need to know. */
-function tailSeq(logPath: string): number | undefined {
+/** How much of a log's tail is read to find its last line. A session event is orders of magnitude
+ *  smaller; the loop below widens for the pathological case rather than assuming. */
+const TAIL_WINDOW_BYTES = 64 * 1024;
+
+/**
+ * The last line of a session log, read POSITIONALLY from the end.
+ *
+ * Never pulls the file into memory (review r1, minor 9): a long session is tens of megabytes, and
+ * "this tool does not read bodies" should be true of the machine, not just of the intent. The scan
+ * works on BYTES — the last 0x0A, then decode only what follows it — so a window boundary landing
+ * mid-codepoint cannot corrupt the answer.
+ *
+ * `startOffset` is where that line begins, which is also the length the file would have without it:
+ * `quarantineTail` truncates to exactly this.
+ */
+function readTrailingFrame(logPath: string): { line: string; startOffset: number } | undefined {
   if (!existsSync(logPath)) return undefined;
-  const lines = readFileSync(logPath, "utf8").split("\n").filter((l) => l.length > 0);
-  const last = lines[lines.length - 1];
-  if (last === undefined) return undefined;
+  const size = statSync(logPath).size;
+  if (size === 0) return undefined;
+  const fd = openSync(logPath, "r");
   try {
-    const seq = (JSON.parse(last) as { seq?: unknown }).seq;
+    let window = Math.min(TAIL_WINDOW_BYTES, size);
+    for (;;) {
+      const buf = Buffer.alloc(window);
+      readSync(fd, buf, 0, window, size - window);
+      // A complete final frame ends in a newline; a torn one does not. Either way the trailing
+      // newlines are not part of the line.
+      let end = buf.length;
+      while (end > 0 && buf[end - 1] === 0x0a) end--;
+      if (end === 0) {
+        if (window === size) return undefined; // nothing but newlines
+      } else {
+        const nl = buf.lastIndexOf(0x0a, end - 1);
+        if (nl !== -1) return { line: buf.subarray(nl + 1, end).toString("utf8"), startOffset: size - window + nl + 1 };
+        if (window === size) return { line: buf.subarray(0, end).toString("utf8"), startOffset: 0 };
+      }
+      window = Math.min(window * 8, size); // one very long line, or a run of newlines: widen
+    }
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** The trailing frame's `seq`, parsed only that far. `undefined` means "no readable trailing
+ *  frame", which is all the drift check and the tail repair need to know. */
+function tailSeq(logPath: string): number | undefined {
+  const frame = readTrailingFrame(logPath);
+  if (frame === undefined) return undefined;
+  try {
+    const seq = (JSON.parse(frame.line) as { seq?: unknown }).seq;
     return typeof seq === "number" ? seq : undefined;
   } catch {
     return undefined;
@@ -161,7 +216,19 @@ export async function diagnoseRuntimeState(home: string): Promise<Finding[]> {
     // §14: an authoritative store that is missing or corrupt refuses runtime resume/routing — and
     // NOTHING further is inferred from the rebuildable index, so this is the only finding returned.
     if (e.reason === "newer-schema") return [{ kind: "db-newer-schema", detail: `${e.path}: written by a newer Norma; this build will not open it`, repairable: [] }];
-    if (e.reason === "missing") return [{ kind: "db-missing", detail: `${e.path}: the authoritative runtime store is not there`, repairable: ["restore-backup"] }];
+    if (e.reason === "missing") {
+      // A home that has never run a daemon has no `runtimes/` at all, and therefore no backups
+      // either — offering `restore-backup` there sends the operator hunting for a file that cannot
+      // exist (review r1, minor 8). The finding is the same; the advice is not.
+      const everRan = existsSync(join(home, "runtimes"));
+      return [
+        {
+          kind: "db-missing",
+          detail: everRan ? `${e.path}: the authoritative runtime store is not there` : `${e.path}: this home has never run a daemon (no runtimes/ directory)`,
+          repairable: everRan ? ["restore-backup"] : [],
+        },
+      ];
+    }
     return [{ kind: "db-corrupt", detail: `${e.path}: ${e.reason}`, repairable: ["restore-backup"] }];
   }
 
@@ -175,7 +242,7 @@ export async function diagnoseRuntimeState(home: string): Promise<Finding[]> {
     if (!readIndexResult) {
       findings.push({
         kind: "index-drift",
-        detail: `${join(home, "sessions", "index.db")} cannot be opened; the daemon will refuse to start until it is rebuilt`,
+        detail: `${join(home, "sessions", "index.db")} cannot be opened at all (not an older schema — that reads fine); the daemon will refuse to start until it is rebuilt`,
         repairable: ["rebuild-index"],
       });
     }
@@ -275,17 +342,31 @@ export async function diagnoseRuntimeState(home: string): Promise<Finding[]> {
 
     // §15 "stale live registration": a lease nothing is holding. Recovery's step 5 is what breaks
     // it (with proof) — a doctor only says so.
+    // Through `RuntimeLeases.revalidate`, NOT a bare liveness check (review r1, minor 3): pid AND
+    // start identity, so a lease held by a pid some unrelated process has since reused is stale here
+    // exactly as it is to recovery's step 4. Two answers to "is this holder gone" — with the
+    // operator-facing one the weaker — is how an operator and a boot sweep come to disagree. An
+    // `"unknown"` verdict is deliberately NOT reported: §11 says a lease whose identity cannot be
+    // established is neither proven live nor proven stale, and naming it here would invite exactly
+    // the break that rule forbids.
+    const leases = new RuntimeLeases(rs, { pid: process.pid, startedAt: "diagnostic" });
     for (const row of rs.db
-      .query<{ winter_session_id: string; generation: number; lease_holder_pid: number; lease_holder_started_at: string | null }, []>(
-        `SELECT winter_session_id, generation, lease_holder_pid, lease_holder_started_at FROM runtime_generations
+      .query<{ winter_session_id: string; generation: number; lease_holder_pid: number; lease_holder_started_at: string | null; lease_renewed_at: string | null }, []>(
+        `SELECT winter_session_id, generation, lease_holder_pid, lease_holder_started_at, lease_renewed_at FROM runtime_generations
          WHERE lease_holder_pid IS NOT NULL AND lease_released_at IS NULL ORDER BY winter_session_id, generation`,
       )
       .all()) {
-      if (processIsAlive(row.lease_holder_pid)) continue;
+      const lease: LeaseRow = {
+        winterSessionId: row.winter_session_id,
+        generation: row.generation,
+        holder: { pid: row.lease_holder_pid, startedAt: row.lease_holder_started_at ?? "unknown" },
+        renewedAt: row.lease_renewed_at ?? "",
+      };
+      if (leases.revalidate(lease) !== "stale") continue;
       findings.push({
         kind: "stale-live-registration",
         winterSessionId: row.winter_session_id,
-        detail: `generation ${row.generation} still holds a lease for pid ${row.lease_holder_pid} (started ${row.lease_holder_started_at ?? "unknown"}), which is gone`,
+        detail: `generation ${row.generation} still holds a lease for pid ${row.lease_holder_pid} (started ${row.lease_holder_started_at ?? "unknown"}), which no longer identifies that process`,
         repairable: [],
       });
     }
@@ -330,18 +411,31 @@ export async function diagnoseRuntimeState(home: string): Promise<Finding[]> {
   }
 }
 
+/**
+ * Run one repair. TOTAL — it returns a result or it returns a result.
+ *
+ * Review r1 (Important 2): the type promised that and the code did not. `openRuntimeStateDb` refuses
+ * a corrupt/newer/unmigrated store by THROWING, and the filesystem can refuse a write for a dozen
+ * reasons (EACCES, ENOSPC, a read-only volume) — so `norma doctor --repair` printed a raw stack
+ * trace in exactly the broken-home state the verb exists for. Unlike the recovery path, a message is
+ * safe to carry here: nothing on this path ever touches a message body or a transcript body.
+ */
 export async function repairRuntimeState(home: string, op: RepairOp, deps: { store?: SessionStore } = {}): Promise<RepairResult> {
-  switch (op.kind) {
-    case "rebuild-index":
-      return rebuildIndex(home);
-    case "quarantine-tail":
-      return quarantineTail(home, op.winterSessionId, deps.store);
-    case "relink-backend":
-      return relinkBackend(home, op.winterSessionId, op.backendSessionId);
-    case "detach-backend":
-      return detachBackend(home, op.winterSessionId);
-    case "restore-backup":
-      return restoreBackup(home, op.backupPath);
+  try {
+    switch (op.kind) {
+      case "rebuild-index":
+        return rebuildIndex(home);
+      case "quarantine-tail":
+        return quarantineTail(home, op.winterSessionId, deps.store);
+      case "relink-backend":
+        return relinkBackend(home, op.winterSessionId, op.backendSessionId);
+      case "detach-backend":
+        return detachBackend(home, op.winterSessionId);
+      case "restore-backup":
+        return restoreBackup(home, op.backupPath);
+    }
+  } catch (e) {
+    return { applied: false, detail: e instanceof Error ? `${e.name}: ${e.message}` : "repair failed" };
   }
 }
 
@@ -375,11 +469,10 @@ function quarantineTail(home: string, sessionId: string, injected?: SessionStore
   const logPath = join(home, "sessions", row.scope, `${sessionId}.jsonl`);
   if (!existsSync(logPath)) return { applied: false, detail: `no event log at ${logPath}` };
 
-  const lines = readFileSync(logPath, "utf8").split("\n").filter((l) => l.length > 0);
-  const last = lines[lines.length - 1];
-  if (last === undefined) return { applied: false, detail: `no incomplete trailing frame in ${logPath}` };
+  const frame = readTrailingFrame(logPath);
+  if (frame === undefined) return { applied: false, detail: `no incomplete trailing frame in ${logPath}` };
   try {
-    JSON.parse(last);
+    JSON.parse(frame.line);
     return { applied: false, detail: `no incomplete trailing frame in ${logPath}` };
   } catch {
     /* torn tail: fall through and quarantine it */
@@ -387,11 +480,14 @@ function quarantineTail(home: string, sessionId: string, injected?: SessionStore
 
   // File surgery FIRST: constructing a `SessionStore` runs `recoverAll`, which would silently drop
   // the very line this repair exists to preserve.
+  //
+  // TRUNCATE, not a temp+rename rewrite. Removing a SUFFIX is one syscall whose size change is
+  // atomic, so a crash leaves either the old length or the new one — where a full rewrite puts every
+  // earlier event through a copy it never needed to survive. (Concurrency is not the argument for
+  // either: every repair refuses while the daemon lock is held.)
   const quarantine = join(home, "sessions", row.scope, `${sessionId}.quarantine.jsonl`);
-  appendFileSync(quarantine, `${last}\n`);
-  const tmp = `${logPath}.repair`;
-  writeFileSync(tmp, lines.slice(0, -1).map((l) => `${l}\n`).join(""));
-  renameSync(tmp, logPath); // atomic: a crash never leaves a partial log
+  appendFileSync(quarantine, `${frame.line}\n`);
+  truncateSync(logPath, frame.startOffset);
 
   const store = injected ?? new SessionStore(home);
   try {
@@ -400,7 +496,7 @@ function quarantineTail(home: string, sessionId: string, injected?: SessionStore
     if (!injected) store.close();
   }
   // Bytes and a path — never the bytes themselves.
-  return { applied: true, detail: `quarantined 1 trailing frame (${Buffer.byteLength(last)} bytes) to ${quarantine}` };
+  return { applied: true, detail: `quarantined 1 trailing frame (${Buffer.byteLength(frame.line)} bytes) to ${quarantine}` };
 }
 
 /**
@@ -414,9 +510,15 @@ function quarantineTail(home: string, sessionId: string, injected?: SessionStore
  */
 function relinkBackend(home: string, sessionId: string, backendSessionId: string): RepairResult {
   if (!SYNCED_SESSION_ID_RE.test(backendSessionId)) return { applied: false, detail: `not a backend session uuid: ${backendSessionId}` };
-  const rs = openRuntimeStateDb(home);
+  // Inside the try: opening the store is itself a refusable operation (corrupt / newer-schema /
+  // unmigrated all THROW), and this function's contract is to return a refusal, not to raise one.
+  let rs: RuntimeStateDb | undefined;
   try {
-    const records = new RuntimeSessionRecords(rs);
+    // Bound to a const as well as to `rs`: the transaction below is a CLOSURE, and TypeScript will
+    // not carry a `let`'s narrowing into one.
+    const opened = openRuntimeStateDb(home);
+    rs = opened;
+    const records = new RuntimeSessionRecords(opened);
     const record = records.get(sessionId);
     if (!record) return { applied: false, detail: `unknown session: ${sessionId}` };
     const owner = records.byBackendSessionId(backendSessionId);
@@ -429,11 +531,11 @@ function relinkBackend(home: string, sessionId: string, backendSessionId: string
     // the lifecycle state exactly where it was, and `ALLOWED_TRANSITIONS` has no self-edge — there
     // is deliberately no "same state, new patch" door on the state machine for ordinary code to
     // reach. An out-of-band repair is exactly the case §15 carves out for that.
-    rs.transaction(
+    opened.transaction(
       () => {
         const still = records.byBackendSessionId(backendSessionId);
         if (still && still.winterSessionId !== sessionId) throw new Error(`backend ${backendSessionId} is already mapped to ${still.winterSessionId}`);
-        rs.db.run("UPDATE runtime_sessions SET backend_session_id = ?, updated_at = ? WHERE winter_session_id = ?", [
+        opened.db.run("UPDATE runtime_sessions SET backend_session_id = ?, updated_at = ? WHERE winter_session_id = ?", [
           backendSessionId,
           new Date().toISOString(),
           sessionId,
@@ -443,17 +545,19 @@ function relinkBackend(home: string, sessionId: string, backendSessionId: string
     );
     return { applied: true, detail: `${sessionId} now maps to backend ${backendSessionId}` };
   } catch (e) {
-    return { applied: false, detail: e instanceof Error ? e.message : "relink failed" };
+    return { applied: false, detail: e instanceof Error ? `${e.name}: ${e.message}` : "relink failed" };
   } finally {
-    rs.close();
+    rs?.close();
   }
 }
 
 /** §14's "canonical compatibility transcript missing" row: show product history read-only, mark
  *  resume unavailable. The product log is never touched — that history is the whole point. */
 function detachBackend(home: string, sessionId: string): RepairResult {
-  const rs = openRuntimeStateDb(home);
+  // Opened inside the try for the same reason `relinkBackend` does it — see there.
+  let rs: RuntimeStateDb | undefined;
   try {
+    rs = openRuntimeStateDb(home);
     const records = new RuntimeSessionRecords(rs);
     const record = records.get(sessionId);
     if (!record) return { applied: false, detail: `unknown session: ${sessionId}` };
@@ -468,8 +572,10 @@ function detachBackend(home: string, sessionId: string): RepairResult {
       sessionId,
     ]);
     return { applied: true, detail: `${sessionId} detached from its backend; state left as ${record.state} (exited is unreachable from it)` };
+  } catch (e) {
+    return { applied: false, detail: e instanceof Error ? `${e.name}: ${e.message}` : "detach failed" };
   } finally {
-    rs.close();
+    rs?.close();
   }
 }
 
@@ -496,6 +602,12 @@ function restoreBackup(home: string, backupPath: string): RepairResult {
     probe = new Database(real, { readonly: true });
     const quick = probe.query<{ quick_check: string }, []>("PRAGMA quick_check").get();
     if (quick?.quick_check !== "ok") return { applied: false, detail: `backup fails its own integrity check: ${backupPath}` };
+    // A backup written by a newer build passes quick_check and then refuses to open afterwards
+    // (`db.ts` rejects `newer-schema`), i.e. the restore would "succeed" into an unusable store.
+    // Caught here, while the current file is still intact (review r1, minor 7).
+    const version = probe.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version ?? 0;
+    if (version > RUNTIME_STATE_SCHEMA_VERSION)
+      return { applied: false, detail: `backup was written by a newer Norma (schema ${version} > ${RUNTIME_STATE_SCHEMA_VERSION}): ${backupPath}` };
   } catch (e) {
     return { applied: false, detail: `backup is not a readable database: ${e instanceof Error ? e.name : "unknown"}` };
   } finally {
@@ -506,10 +618,29 @@ function restoreBackup(home: string, backupPath: string): RepairResult {
     }
   }
 
+  // The one IRREVERSIBLE repair, made reversible: snapshot what is about to be overwritten (review
+  // r1, minor 7). Best-effort by design — a current file that will not open is the usual reason
+  // someone is restoring at all, and refusing the restore because the broken file cannot be backed
+  // up would be the tool working against its own purpose.
+  let snapshot: string | undefined;
+  try {
+    const current = openRuntimeStateDb(home, { readonly: true });
+    try {
+      snapshot = current.backup();
+    } finally {
+      current.close();
+    }
+  } catch {
+    /* nothing snapshottable — which is very often exactly why a restore is being run */
+  }
+
   const dest = join(home, "runtimes", "runtime-state.db");
   copyFileSync(real, dest);
   // A leftover WAL from the REPLACED database would be replayed over the restored one on the next
   // open — the sidecars must go with the file they belonged to.
   for (const path of [`${dest}-wal`, `${dest}-shm`]) rmSync(path, { force: true });
-  return { applied: true, detail: `restored ${dest} from ${backupPath} (${statSync(dest).size} bytes)` };
+  return {
+    applied: true,
+    detail: `restored ${dest} from ${backupPath} (${statSync(dest).size} bytes); ${snapshot ? `the replaced file is at ${snapshot}` : "the replaced file could not be snapshotted (it did not open)"}`,
+  };
 }

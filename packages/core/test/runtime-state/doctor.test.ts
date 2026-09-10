@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
@@ -121,6 +122,66 @@ describe("diagnoseRuntimeState — WS-16 §15 read-only diagnostics", () => {
     });
   });
 
+  test("a home that has never run a daemon says so, and offers no backup to restore", async () => {
+    await withTempHome(async (home) => {
+      rmSync(join(home, "runtimes"), { recursive: true, force: true });
+
+      const findings = await diagnoseRuntimeState(home);
+      expect(kinds(findings)).toEqual(["db-missing"]);
+      expect(findings[0]!.detail).toContain("never run a daemon");
+      // There is no backups directory either — sending the operator after one would be a wild goose.
+      expect(findings[0]!.repairable).toEqual([]);
+    });
+  });
+
+  test("a runtime-state.db that is not a database at all is db-corrupt", async () => {
+    await withTempHome(async (home) => {
+      withDb(home, () => {});
+      const db = join(home, "runtimes", "runtime-state.db");
+      for (const p of [`${db}-wal`, `${db}-shm`]) rmSync(p, { force: true });
+      writeFileSync(db, "SQLite format 3 says hello and then lies");
+
+      const findings = await diagnoseRuntimeState(home);
+      expect(kinds(findings)).toEqual(["db-corrupt"]);
+      expect(findings[0]!.repairable).toEqual(["restore-backup"]);
+    });
+  });
+
+  test("a store that predates the schema folds into db-corrupt, naming the reason", async () => {
+    await withTempHome(async (home) => {
+      mkdirSync(join(home, "runtimes"), { recursive: true });
+      // A real, healthy sqlite file that has simply never been migrated — a readonly handle cannot
+      // migrate it, so refusing is the only honest answer (db.ts's `unmigrated` reason).
+      new Database(join(home, "runtimes", "runtime-state.db")).close();
+
+      const findings = await diagnoseRuntimeState(home);
+      expect(kinds(findings)).toEqual(["db-corrupt"]);
+      expect(findings[0]!.detail).toContain("unmigrated");
+    });
+  });
+
+  test("an index older than the cwd column reads fine and is not called unopenable", async () => {
+    await withTempHome(async (home) => {
+      withDb(home, () => {});
+      const id = seedProductSession(home, { cwd: home });
+      withDb(home, (_rs, records) => {
+        records.create(newRecord(home, id));
+      });
+      // `cwd` is ALTER-added, and a readonly handle cannot run that migration. A pre-cwd index is
+      // READABLE — claiming the daemon will not start would be false (review r1, minor 5).
+      const index = new Database(join(home, "sessions", "index.db"));
+      const rows = index.query("SELECT session_id, scope, created_at, last_seq FROM sessions").all();
+      index.run("DROP TABLE sessions");
+      index.run("CREATE TABLE sessions (session_id TEXT PRIMARY KEY, scope TEXT NOT NULL, created_at INTEGER NOT NULL, last_seq INTEGER NOT NULL)");
+      for (const r of rows as { session_id: string; scope: string; created_at: number; last_seq: number }[]) {
+        index.run("INSERT INTO sessions (session_id, scope, created_at, last_seq) VALUES (?, ?, ?, ?)", [r.session_id, r.scope, r.created_at, r.last_seq]);
+      }
+      index.close();
+
+      expect(await diagnoseRuntimeState(home)).toEqual([]);
+    });
+  });
+
   test("a schema newer than this build refuses rather than guessing", async () => {
     await withTempHome(async (home) => {
       withDb(home, (rs) => {
@@ -214,6 +275,32 @@ describe("diagnoseRuntimeState — WS-16 §15 read-only diagnostics", () => {
     });
   });
 
+  test("a reused PID is stale to the doctor exactly as it is to recovery", async () => {
+    await withTempHome(async (home) => {
+      withDb(home, () => {});
+      const alive = seedProductSession(home, { cwd: home });
+      const unknown = seedProductSession(home, { cwd: home });
+      withDb(home, (rs, records) => {
+        for (const id of [alive, unknown]) {
+          records.create(newRecord(home, id));
+          records.transition(id, "ready");
+          records.bumpGeneration(id, { runtimeKind: "winter-agent" });
+        }
+        // This pid is very much alive — it is us — but the recorded start time says it is a
+        // DIFFERENT process. A bare liveness check calls that healthy; pid + start identity does not
+        // (review r1, minor 3).
+        new RuntimeLeases(rs, { pid: process.pid, startedAt: "1999-01-01T00:00:00.000Z" }).acquire(alive, 1);
+        // …while a live pid with no start identity is §11's third answer: neither proven live nor
+        // proven stale, so it is NOT reported. Naming it here would invite the break §11 forbids.
+        new RuntimeLeases(rs, { pid: process.pid, startedAt: "unknown" }).acquire(unknown, 1);
+      });
+
+      const findings = await diagnoseRuntimeState(home);
+      expect(kinds(findings)).toEqual(["stale-live-registration"]);
+      expect(findings[0]!.winterSessionId).toBe(alive);
+    });
+  });
+
   test("a generation with no session behind it, and a backend id two sessions disagree about", async () => {
     await withTempHome(async (home) => {
       withDb(home, () => {});
@@ -297,11 +384,17 @@ describe("diagnoseRuntimeState — WS-16 §15 read-only diagnostics", () => {
   });
 });
 
-/** `SELECT *` of the authoritative table, ordered — the byte-identity witness Task 11 reuses. */
+/** `SELECT *` of the authoritative tables, ordered — the byte-identity witness Task 11 reuses.
+ *  Three tables, not one (review r1, minor 6): a mutation that spared `runtime_sessions` and moved
+ *  a generation or a child would otherwise pass the read-only pin. */
 const dumpSessions = (home: string): string => {
   const rs = openRuntimeStateDb(home, { readonly: true });
   try {
-    return JSON.stringify(rs.db.query("SELECT * FROM runtime_sessions ORDER BY winter_session_id").all());
+    return JSON.stringify({
+      sessions: rs.db.query("SELECT * FROM runtime_sessions ORDER BY winter_session_id").all(),
+      generations: rs.db.query("SELECT * FROM runtime_generations ORDER BY winter_session_id, generation").all(),
+      children: rs.db.query("SELECT * FROM runtime_children ORDER BY parent_winter_session_id, child_id").all(),
+    });
   } finally {
     rs.close();
   }
@@ -470,6 +563,40 @@ describe("repairRuntimeState — WS-16 §15 explicit, recoverable repairs", () =
         expect(records.get(id)).toBeDefined();
         expect(records.get("s_after_backup")).toBeUndefined();
       });
+      // The one irreversible repair, made reversible: what it overwrote is still on disk.
+      const snapshot = /the replaced file is at (\S+)/.exec(restored.detail)?.[1];
+      expect(snapshot).toBeDefined();
+      expect(existsSync(snapshot!)).toBe(true);
+      const rolledBack = openRuntimeStateDb(home, { readonly: true });
+      try {
+        expect(new RuntimeSessionRecords(rolledBack).get("s_after_backup")).toBeUndefined();
+      } finally {
+        rolledBack.close();
+      }
+      const undone = await repairRuntimeState(home, { kind: "restore-backup", backupPath: snapshot! });
+      expect(undone.applied).toBe(true);
+      withDb(home, (_rs, records) => {
+        expect(records.get("s_after_backup")).toBeDefined();
+      });
+    });
+  });
+
+  test("restore-backup refuses a backup written by a newer Norma", async () => {
+    await withTempHome(async (home) => {
+      let backup = "";
+      withDb(home, (rs) => {
+        backup = rs.backup();
+      });
+      const newer = new Database(backup);
+      newer.run("PRAGMA user_version = 99");
+      newer.close();
+
+      const result = await repairRuntimeState(home, { kind: "restore-backup", backupPath: backup });
+
+      // It would pass quick_check and then refuse to OPEN — a restore that "succeeds" into an
+      // unusable store, caught while the current file is still intact (review r1, minor 7).
+      expect(result.applied).toBe(false);
+      expect(result.detail).toContain("newer Norma");
     });
   });
 
@@ -483,6 +610,29 @@ describe("repairRuntimeState — WS-16 §15 explicit, recoverable repairs", () =
 
       expect(result.applied).toBe(false);
       expect(result.detail).toContain("outside");
+    });
+  });
+
+  test("a repair against a store that will not open returns a refusal, never a stack trace", async () => {
+    await withTempHome(async (home) => {
+      withDb(home, () => {});
+      const id = seedProductSession(home, { cwd: home });
+      writeTranscript(home, UUID);
+      const db = join(home, "runtimes", "runtime-state.db");
+      for (const p of [`${db}-wal`, `${db}-shm`]) rmSync(p, { force: true });
+      writeFileSync(db, "not a database");
+
+      // `openRuntimeStateDb` refuses by THROWING, and the CLI does `if (!result.applied)` — so a
+      // repair that raises instead of returning is a raw stack trace in exactly the broken-home
+      // state the verb exists for (review r1, important 2).
+      for (const op of [
+        { kind: "relink-backend", winterSessionId: id, backendSessionId: UUID },
+        { kind: "detach-backend", winterSessionId: id },
+      ] as const) {
+        const result = await repairRuntimeState(home, op);
+        expect(result.applied).toBe(false);
+        expect(result.detail).toContain("RuntimeStateUnavailableError");
+      }
     });
   });
 

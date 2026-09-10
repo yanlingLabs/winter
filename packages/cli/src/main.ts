@@ -1215,10 +1215,6 @@ if (import.meta.main) {
       }
       break;
     }
-    if (isDaemonLockHeld(home)) {
-      console.error(DAEMON_RUNNING_REFUSAL);
-      process.exit(1);
-    }
     const session = flag("--session");
     const backend = flag("--backend");
     const backup = flag("--backup");
@@ -1235,6 +1231,12 @@ if (import.meta.main) {
           " | --repair quarantine-tail --session <id> | --repair relink-backend --session <id> --backend <uuid>" +
           " | --repair detach-backend --session <id> | --repair restore-backup --backup <path>",
       );
+      process.exit(1);
+    }
+    // The op is validated BEFORE the lock is probed (review r1, minor 8): a malformed invocation
+    // should say so, not blame a running daemon for it.
+    if (isDaemonLockHeld(home)) {
+      console.error(DAEMON_RUNNING_REFUSAL);
       process.exit(1);
     }
     const result = await repairRuntimeState(home, op);
