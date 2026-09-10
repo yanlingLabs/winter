@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { openRuntimeStateDb, type RuntimeStateDb } from "../../src/runtime-state/db";
-import { RuntimeChildren, type PersistedWinterChild } from "../../src/runtime-state/children";
+import { ChildAlreadyTerminalError, RuntimeChildren, type PersistedWinterChild } from "../../src/runtime-state/children";
 import { withTempHome } from "./support";
 
 const PARENT = "s_parent";
@@ -115,11 +115,18 @@ describe("RuntimeChildren", () => {
 
         const kept = children.reclassifyAfterRestart(() => false);
         expect(kept.interrupted).toEqual([]);
-        expect(kept.kept.sort()).toEqual(["c_run", "c_run2"]);
+        // {parent, childId} pairs, not bare ids: two parents may mint the same childId
+        expect(kept.kept).toEqual([
+          { parent: PARENT, childId: "c_run" },
+          { parent: "s_second", childId: "c_run2" },
+        ]);
         expect(children.get(PARENT, "c_run")?.status).toBe("running");
 
         const gone = children.reclassifyAfterRestart(() => true);
-        expect(gone.interrupted.sort()).toEqual(["c_run", "c_run2"]);
+        expect(gone.interrupted).toEqual([
+          { parent: PARENT, childId: "c_run" },
+          { parent: "s_second", childId: "c_run2" },
+        ]);
         expect(gone.kept).toEqual([]);
         expect(children.get(PARENT, "c_run")?.status).toBe("interrupted");
         expect(children.get("s_second", "c_run2")?.status).toBe("interrupted");
@@ -131,19 +138,44 @@ describe("RuntimeChildren", () => {
         expect(children.reclassifyAfterRestart(() => true)).toEqual({ interrupted: [], kept: [] });
       })));
 
-  test("the predicate sees the whole child, so 'proven gone' can be decided per row", () =>
+  test("the predicate sees the whole child, so two parents' same-named children are told apart", () =>
     withTempHome((home) =>
       use(home, (_rs, children) => {
-        children.upsert(child({ childId: "c_a", worktreeRef: "/tmp/wt/a" }));
-        children.upsert(child({ childId: "c_b" }));
+        // The same childId under two parents — the case a bare-id result could not describe.
+        children.upsert(child({ childId: "c_same", worktreeRef: "/tmp/wt/a" }));
+        children.upsert(child({ childId: "c_same", parentWinterSessionId: "s_second" }));
         const seen: string[] = [];
         const out = children.reclassifyAfterRestart((c) => {
-          seen.push(c.childId);
+          seen.push(`${c.parentWinterSessionId}/${c.childId}`);
           return c.worktreeRef !== undefined;
         });
-        expect(seen.sort()).toEqual(["c_a", "c_b"]);
-        expect(out.interrupted).toEqual(["c_a"]);
-        expect(out.kept).toEqual(["c_b"]);
+        expect(seen.sort()).toEqual(["s_parent/c_same", "s_second/c_same"]);
+        expect(out.interrupted).toEqual([{ parent: PARENT, childId: "c_same" }]);
+        expect(out.kept).toEqual([{ parent: "s_second", childId: "c_same" }]);
+        expect(children.get(PARENT, "c_same")?.status).toBe("interrupted");
+        expect(children.get("s_second", "c_same")?.status).toBe("running");
+      })));
+
+  test("a child that already finished is never resurrected by an upsert", () =>
+    withTempHome((home) =>
+      use(home, (_rs, children) => {
+        children.upsert(child({ status: "completed", completedAt: "2026-09-10T00:05:00.000Z" }));
+        let caught: unknown;
+        try {
+          children.upsert(child({ status: "running" }));
+        } catch (e) {
+          caught = e;
+        }
+        expect(caught).toBeInstanceOf(ChildAlreadyTerminalError);
+        expect((caught as ChildAlreadyTerminalError).status).toBe("completed");
+        expect((caught as ChildAlreadyTerminalError).childId).toBe("c_1");
+        // the row kept its outcome AND its completedAt
+        expect(children.get(PARENT, "c_1")?.status).toBe("completed");
+        expect(children.get(PARENT, "c_1")?.completedAt).toBe("2026-09-10T00:05:00.000Z");
+        expect(() => children.upsert(child({ status: "interrupted" }))).toThrow(ChildAlreadyTerminalError);
+        // one terminal outcome may still correct another (nothing is being resurrected)
+        children.upsert(child({ status: "failed", completedAt: "2026-09-10T00:06:00.000Z" }));
+        expect(children.get(PARENT, "c_1")?.status).toBe("failed");
       })));
 
   test("resumeContextRef is a locator, never a closure", () =>

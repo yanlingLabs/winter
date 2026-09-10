@@ -41,9 +41,27 @@ export interface PersistedWinterChild {
   permission?: { effectiveMode: string; parentPolicyHash: string };
 }
 
+/** Which child a result line is about. Two parents may mint the same `childId`, so a bare id cannot
+ *  say whose child was interrupted — the pair can (review r1 minor 8). */
+export interface ChildRef {
+  parent: string;
+  childId: string;
+}
+
 /** The statuses that mean "this child is over", i.e. the ones that stamp `completedAt`.
  *  `interrupted` is deliberately absent: WS-16 §12 calls it "interrupted/recoverable". */
 const TERMINAL: ReadonlySet<ChildStatus> = new Set<ChildStatus>(["completed", "failed", "stopped", "timeout"]);
+
+/** WS-16 §12: a child that already finished is evidence of what happened, not state to rewrite. An
+ *  `upsert` that would push a terminal row back to `running` (a restart re-registering children off
+ *  a stale roster is exactly how that happens) is refused rather than silently dropping the row's
+ *  outcome and its `completedAt`. */
+export class ChildAlreadyTerminalError extends Error {
+  constructor(public readonly parentWinterSessionId: string, public readonly childId: string, public readonly status: ChildStatus) {
+    super(`child ${childId} of ${parentWinterSessionId} already finished as ${status}`);
+    this.name = "ChildAlreadyTerminalError";
+  }
+}
 
 const CHILD_COLUMNS =
   "parent_winter_session_id, child_id, name, agent_type, provider_id, model_ref, connection_ref, provider_catalog_version, provider_adapter_version, " +
@@ -113,31 +131,36 @@ export class RuntimeChildren {
   upsert(child: PersistedWinterChild): void {
     if (child.resumeContextRef !== undefined && typeof child.resumeContextRef !== "string")
       throw new TypeError("resumeContextRef must be a locator string — never a closure or handle (WS-16 §12)");
-    this.rs.db
-      .query(`INSERT OR REPLACE INTO runtime_children (${CHILD_COLUMNS}) VALUES (${CHILD_PLACEHOLDERS})`)
-      .run(
-        child.parentWinterSessionId,
-        child.childId,
-        child.name ?? null,
-        child.agentType,
-        child.providerId,
-        child.modelRef,
-        child.connectionRef ?? null,
-        child.providerCatalogVersion,
-        child.providerAdapterVersion,
-        child.status,
-        child.transcriptRef,
-        child.resumeContextRef ?? null,
-        child.worktreeRef ?? null,
-        child.startedAt,
-        child.completedAt ?? null,
-        child.generation,
-        child.requestedModel ?? null,
-        child.effectiveModel ?? null,
-        child.effectiveProvider ?? null,
-        child.slot ? JSON.stringify(child.slot) : null,
-        child.permission ? JSON.stringify(child.permission) : null,
-      );
+    this.rs.transaction(() => {
+      const existing = this.get(child.parentWinterSessionId, child.childId);
+      if (existing && TERMINAL.has(existing.status) && !TERMINAL.has(child.status))
+        throw new ChildAlreadyTerminalError(child.parentWinterSessionId, child.childId, existing.status);
+      this.rs.db
+        .query(`INSERT OR REPLACE INTO runtime_children (${CHILD_COLUMNS}) VALUES (${CHILD_PLACEHOLDERS})`)
+        .run(
+          child.parentWinterSessionId,
+          child.childId,
+          child.name ?? null,
+          child.agentType,
+          child.providerId,
+          child.modelRef,
+          child.connectionRef ?? null,
+          child.providerCatalogVersion,
+          child.providerAdapterVersion,
+          child.status,
+          child.transcriptRef,
+          child.resumeContextRef ?? null,
+          child.worktreeRef ?? null,
+          child.startedAt,
+          child.completedAt ?? null,
+          child.generation,
+          child.requestedModel ?? null,
+          child.effectiveModel ?? null,
+          child.effectiveProvider ?? null,
+          child.slot ? JSON.stringify(child.slot) : null,
+          child.permission ? JSON.stringify(child.permission) : null,
+        );
+    });
   }
 
   get(parent: string, childId: string): PersistedWinterChild | undefined {
@@ -178,24 +201,26 @@ export class RuntimeChildren {
    * WS-16 §12: on restart, `running` becomes `interrupted` only after the process/thread is proven
    * gone. `isGone` carries that proof — this class never guesses it, and never touches a child that
    * already reached a terminal status (that row is evidence of what happened, not state to rewrite).
-   * Returns the child ids it interrupted and the still-running ones it left alone.
+   * Returns the children it interrupted and the still-running ones it left alone, as
+   * `{parent, childId}` pairs — a bare id cannot say whose child it was.
    */
-  reclassifyAfterRestart(isGone: (child: PersistedWinterChild) => boolean): { interrupted: string[]; kept: string[] } {
+  reclassifyAfterRestart(isGone: (child: PersistedWinterChild) => boolean): { interrupted: ChildRef[]; kept: ChildRef[] } {
     return this.rs.transaction(() => {
       const running = (
         this.rs.db.query(`SELECT ${CHILD_COLUMNS} FROM runtime_children WHERE status = 'running' ORDER BY started_at, child_id`).all() as ChildDbRow[]
       ).map(fromRow);
-      const interrupted: string[] = [];
-      const kept: string[] = [];
+      const interrupted: ChildRef[] = [];
+      const kept: ChildRef[] = [];
       for (const child of running) {
+        const ref: ChildRef = { parent: child.parentWinterSessionId, childId: child.childId };
         if (!isGone(child)) {
-          kept.push(child.childId);
+          kept.push(ref);
           continue;
         }
         this.rs.db
           .query(`UPDATE runtime_children SET status = 'interrupted' WHERE parent_winter_session_id = ? AND child_id = ?`)
           .run(child.parentWinterSessionId, child.childId);
-        interrupted.push(child.childId);
+        interrupted.push(ref);
       }
       return { interrupted, kept };
     });
