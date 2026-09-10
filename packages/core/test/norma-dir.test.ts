@@ -12,11 +12,14 @@ describe("bootstrapNormaDir", () => {
   test("creates the full directory layout", () => {
     const home = tmpHome();
     const dirs = bootstrapNormaDir(home);
-    for (const d of ["sessions", "memory", "skills/self", "agents", "plugins", "hooks", "logs", "run"]) {
+    for (const d of ["sessions", "memory", "skills/self", "agents", "plugins", "hooks", "logs", "run", "runtimes", "runtimes/backups", "runtimes/official-agent-spool", "runtimes/handoff-leases"]) {
       expect(existsSync(join(home, d))).toBe(true);
     }
     expect(dirs.runDir).toBe(join(home, "run"));
     expect(dirs.socketPath).toBe(join(home, "run", "core.sock"));
+    expect(dirs.runtimesDir).toBe(join(home, "runtimes"));
+    expect(dirs.runtimeStatePath).toBe(join(home, "runtimes", "runtime-state.db"));
+    expect(statSync(join(home, "runtimes", "official-agent-spool")).mode & 0o777).toBe(0o700);
   });
 
   test("run dir is 0700", () => {
