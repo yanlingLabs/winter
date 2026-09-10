@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdtempSync, openSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { bootstrapNormaDir } from "../../src/norma-dir";
@@ -47,6 +47,16 @@ describe("runtime-state.db", () => {
     expect(b1).not.toBe(b2);
     expect(existsSync(b1)).toBe(true);
     expect(existsSync(b2)).toBe(true);
+    // Minors follow-up (re-review): pin the actual disambiguator (pid + base36 sequence) rather
+    // than just "the two strings differ" — a test that only checks inequality would still pass if
+    // the millisecond timestamp had simply ticked over between the two calls, which doesn't
+    // exercise the same-millisecond collision this fix addresses.
+    const suffixRe = /-(\d+)-([0-9a-z]+)\.db$/;
+    const m1 = b1.match(suffixRe);
+    const m2 = b2.match(suffixRe);
+    expect(m1).not.toBeNull();
+    expect(m2).not.toBeNull();
+    expect(m1![2]).not.toBe(m2![2]);
     rs.close();
   });
   test("a corrupt file is a typed refusal, never a silent recreate", () => {
@@ -58,6 +68,11 @@ describe("runtime-state.db", () => {
     // Fix round 1, finding 3: a leaked handle from the first failed open used to keep the file
     // locked/in a WAL-adjacent state; the second open must fail identically, and no -wal sidecar
     // should linger from either attempt.
+    // NOTE: this fixture (garbage text from byte 0) fails header validation inside the very first
+    // PRAGMA, before WAL is ever engaged — no -wal file is created whether or not the handle leaks,
+    // so the sidecar assertions below hold regardless of the fix. It still checks a real property
+    // (repeated opens on the same broken file fail identically), but it does NOT discriminate the
+    // handle-leak fix — see the header-valid/body-corrupt test below for that.
     const h = home();
     const path = join(h, "runtimes", "runtime-state.db");
     writeFileSync(path, "not a database");
@@ -65,6 +80,38 @@ describe("runtime-state.db", () => {
     expect(existsSync(`${path}-wal`)).toBe(false);
     expect(() => openRuntimeStateDb(h)).toThrow(/corrupt/);
     expect(existsSync(`${path}-wal`)).toBe(false);
+  });
+  test("a corrupt (header-valid, body-scribbled) file: the failed open's handle is closed exactly once", () => {
+    // Minors follow-up (re-review): unlike the garbage-text fixture above, this one has an intact
+    // header — `new Database()` opens it, `PRAGMA journal_mode = WAL` succeeds (a real WAL
+    // connection is established), and only `PRAGMA quick_check` (which reads every page) trips over
+    // the scribbled page 2. This is the fixture that actually discriminates the `db?.close()` fix:
+    // with the fixture above, no WAL connection is ever live, so there's nothing for the leak to
+    // leak. Originally asserted `existsSync(path + "-wal")` is false after the failed open, but that
+    // proved flaky exactly as anticipated — closing a connection to a database whose body is
+    // corrupt does not necessarily get to checkpoint (and hence remove) the WAL file, so the
+    // assertion failed even WITH the fix applied. Falling back to spying on
+    // `Database.prototype.close` and counting calls instead, per the fallback the review specified.
+    // Verified this discriminates by temporarily reverting the `db?.close()` line locally (that run
+    // asserts 0 calls, not 1) — both runs' output are in task-1-report.md "Minors follow-up".
+    const h = home();
+    const path = join(h, "runtimes", "runtime-state.db");
+    openRuntimeStateDb(h).close(); // a real v1 db — valid header, WAL already engaged once
+    const fd = openSync(path, "r+");
+    writeSync(fd, Buffer.alloc(256, 0x41), 0, 256, 4096); // scribble page 2 (page size 4096); header untouched
+    closeSync(fd);
+    let closeCalls = 0;
+    const originalClose = Database.prototype.close;
+    Database.prototype.close = function (this: Database, ...args: unknown[]) {
+      closeCalls++;
+      return (originalClose as (...a: unknown[]) => void).apply(this, args);
+    };
+    try {
+      expect(() => openRuntimeStateDb(h)).toThrow(/corrupt/);
+    } finally {
+      Database.prototype.close = originalClose;
+    }
+    expect(closeCalls).toBe(1);
   });
   test("a missing file with createIfMissing:false is a typed refusal", () => {
     const h = home();
