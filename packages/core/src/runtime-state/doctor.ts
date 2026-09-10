@@ -19,7 +19,7 @@
 // open is not a lock fight. Every REPAIR is the opposite: `restore-backup` refuses outright while
 // the lock is held, and the CLI refuses every op on the same probe.
 import { Database } from "bun:sqlite";
-import { appendFileSync, closeSync, copyFileSync, existsSync, openSync, readFileSync, readSync, realpathSync, rmSync, statSync, truncateSync } from "node:fs";
+import { appendFileSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, rmSync, statSync, truncateSync } from "node:fs";
 import { join } from "node:path";
 import { SessionStore, SYNCED_SESSION_ID_RE } from "../sessions/store";
 import { openRuntimeStateDb, RUNTIME_STATE_SCHEMA_VERSION, RuntimeStateUnavailableError, type RuntimeStateDb } from "./db";
@@ -422,6 +422,13 @@ export async function diagnoseRuntimeState(home: string): Promise<Finding[]> {
  */
 export async function repairRuntimeState(home: string, op: RepairOp, deps: { store?: SessionStore } = {}): Promise<RepairResult> {
   try {
+    // EVERY repair refuses while the daemon holds the lock, not just `restore-backup` (whole-branch
+    // review, M3). This function is exported on the package barrel, so the CLI's own probe is not
+    // the only way in: `rebuild-index` unlinks the index file a live daemon holds open, and
+    // `relink`/`detach`/`quarantine-tail` write stores it is reading. The CLI's earlier check stays
+    // — it is what prints the usage-level message — and this one is what makes the refusal a
+    // property of the operation rather than of one caller.
+    if (isDaemonLockHeld(home)) return { applied: false, detail: DAEMON_RUNNING_REFUSAL };
     switch (op.kind) {
       case "rebuild-index":
         return rebuildIndex(home);
@@ -485,7 +492,16 @@ function quarantineTail(home: string, sessionId: string, injected?: SessionStore
   // atomic, so a crash leaves either the old length or the new one — where a full rewrite puts every
   // earlier event through a copy it never needed to survive. (Concurrency is not the argument for
   // either: every repair refuses while the daemon lock is held.)
-  const quarantine = join(home, "sessions", row.scope, `${sessionId}.quarantine.jsonl`);
+  // OUT OF THE SESSIONS TREE ENTIRELY (whole-branch review, M2). This used to be
+  // `sessions/<scope>/<id>.quarantine.jsonl`, and `SessionStore.recoverAll`'s pass 2 enumerates
+  // `*.jsonl` there and derives a session id from the filename — so `<id>.quarantine` was a
+  // candidate SESSION, skipped only because the sidecar happens to hold nothing but unparseable
+  // lines. That is a coincidence of what `quarantineTail` writes, not a boundary. Under
+  // `runtimes/quarantine/<scope>/` nothing enumerates it, and it inherits the read-denial the model
+  // already has on `runtimes/`.
+  const quarantineDir = join(home, "runtimes", "quarantine", row.scope);
+  mkdirSync(quarantineDir, { recursive: true });
+  const quarantine = join(quarantineDir, `${sessionId}.jsonl`);
   appendFileSync(quarantine, `${frame.line}\n`);
   truncateSync(logPath, frame.startOffset);
 
@@ -584,6 +600,9 @@ function detachBackend(home: string, sessionId: string): RepairResult {
  *  of it), and the source must pass its own integrity check — restoring a corrupt backup over a
  *  corrupt database would be the one repair that cannot be undone. */
 function restoreBackup(home: string, backupPath: string): RepairResult {
+  // The lock probe moved up to `repairRuntimeState`, which now gates EVERY op — it is kept here as
+  // well because this is the one irreversible repair, and a future caller reaching it directly must
+  // not be the exception (M3).
   if (isDaemonLockHeld(home)) return { applied: false, detail: DAEMON_RUNNING_REFUSAL };
   if (!existsSync(backupPath)) return { applied: false, detail: `no such backup: ${backupPath}` };
   const backupsDir = join(home, "runtimes", "backups");

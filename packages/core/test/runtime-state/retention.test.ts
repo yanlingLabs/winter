@@ -235,6 +235,39 @@ describe("deleteSessionRuntimeState", () => {
     });
   });
 
+  test("a claimed-but-unreceipted delivery to the doomed session SURVIVES it, and is reported", async () => {
+    await withTempHome(async (home) => {
+      const rs = openRuntimeStateDb(home);
+      try {
+        const store = createSqliteRuntimeDirectoryStore(rs);
+        const records = new RuntimeSessionRecords(rs);
+        const leases = new RuntimeLeases(rs, { pid: process.pid, startedAt: "2026-01-01T00:00:00.000Z" });
+        const children = new RuntimeChildren(rs);
+        await seedSession(rs, store, "s_doomed"); // seeds `del-s_doomed`, receipted
+        await seedSession(rs, store, "s_sibling");
+
+        // The three shapes a delivery to this session can be in, side by side.
+        await store.deliveries.put(delivery("m-claimed", addr("s_doomed"), { claimedBy: "winter-agent" }));
+        await store.deliveries.put(delivery("m-unclaimed", addr("s_doomed")));
+        await store.deliveries.put(delivery("m-sibling", addr("s_sibling"), { claimedBy: "winter-agent" }));
+        expect((await store.deliveries.claimedWithoutReceipt()).map((d) => d.messageId).sort()).toEqual(["m-claimed", "m-sibling"]);
+
+        const { retainedUnreceipted } = await deleteSessionRuntimeState({ rs, records, leases, children, directory: store }, "s_doomed");
+
+        // (claimed, no receipt) is WS-15 §6.4 step 5's whole evidence for `delivery_uncertain`, and
+        // it belongs to the SENDER — deleting the target must not answer the sender's question for
+        // it. Receipted and never-claimed rows carry no such evidence and go.
+        expect(retainedUnreceipted).toEqual(["m-claimed"]);
+        expect(await store.deliveries.get("m-claimed")).toBeDefined();
+        expect(await store.deliveries.get("m-unclaimed")).toBeUndefined();
+        expect(await store.deliveries.get("del-s_doomed")).toBeUndefined();
+        expect((await store.deliveries.claimedWithoutReceipt()).map((d) => d.messageId).sort()).toEqual(["m-claimed", "m-sibling"]);
+      } finally {
+        rs.close();
+      }
+    });
+  });
+
   test("project memory is never touched", async () => {
     await withTempHome(async (home) => {
       const rs = openRuntimeStateDb(home);

@@ -16,8 +16,8 @@ function proj(): string {
 }
 
 // task-10: a fixture standing in for Norma's own ~/.norma/run — NEVER the real ~/.norma. Mirrors
-// daemon.ts's wiring (registerReadTools(registry, { deniedPrefixes: [dirs.runDir] })) with a
-// throwaway temp "normaHome" instead of the real one.
+// daemon.ts's wiring (registerReadTools(registry, { deniedPrefixes: [dirs.runDir, dirs.runtimesDir] }))
+// with a throwaway temp "normaHome" instead of the real one.
 function denyFixture(): string {
   const home = realpathSync(mkdtempSync(join(tmpdir(), "norma-deny-home-")));
   const runDir = join(home, "run");
@@ -25,6 +25,20 @@ function denyFixture(): string {
   writeFileSync(join(runDir, "core.lock"), JSON.stringify({ pid: 123 }));
   writeFileSync(join(runDir, "harness-token.secret"), "topsecrettoken");
   return runDir;
+}
+
+/** P8a: the SECOND denied root daemon.ts wires. `runtimes/` holds the authoritative
+ *  `runtime-state.db` (message bodies from 8b on), its backups and the official-agent spool. Its own
+ *  temp home, deliberately not `denyFixture`'s: the parent-listing test below pins exactly which
+ *  entries sit beside the denied one there. */
+function runtimesDenyFixture(): string {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "norma-deny-runtimes-")));
+  const runtimesDir = join(home, "runtimes");
+  mkdirSync(join(runtimesDir, "backups"), { recursive: true });
+  mkdirSync(join(runtimesDir, "official-agent-spool"), { recursive: true });
+  writeFileSync(join(runtimesDir, "runtime-state.db"), "SQLite format 3 ");
+  writeFileSync(join(runtimesDir, "backups", "runtime-state-2026.db"), "SQLite format 3 ");
+  return runtimesDir;
 }
 
 describe("resolveWithin", () => {
@@ -323,6 +337,27 @@ describe("read-only denylist — Norma's own credential/runtime dir (task-10)", 
     const res = await r.execute("read", { path: join(runDir, "harness-token.secret") }, { cwd: d, roots: [d], sessionId: "s1" });
     expect(res.isError).toBe(true);
     expect(res.output).toBe("this path is Norma's own credential store and is never readable");
+  });
+
+  test("the runtimes/ root is denied too — the runtime store, its backups and the spool", async () => {
+    const d = proj();
+    const runDir = denyFixture();
+    const runtimesDir = runtimesDenyFixture();
+    const r = new ToolRegistry();
+    // daemon.ts's own list, both entries (P8a / WS-16 §10).
+    registerReadTools(r, { deniedPrefixes: [runDir, runtimesDir] });
+    for (const target of [
+      join(runtimesDir, "runtime-state.db"),
+      join(runtimesDir, "runtime-state.db-wal"), // never created, but the denial is by path
+      join(runtimesDir, "backups", "runtime-state-2026.db"),
+      join(runtimesDir, "official-agent-spool", "whatever"),
+    ]) {
+      const res = await r.execute("read", { path: target }, { cwd: d, roots: [d], sessionId: "s1" });
+      expect(res.isError).toBe(true);
+      expect(res.output).toBe("this path is Norma's own credential store and is never readable");
+    }
+    const listed = await r.execute("ls", { path: runtimesDir }, { cwd: d, roots: [d], sessionId: "s1" });
+    expect(listed.isError).toBe(true);
   });
 
   test("ls of a denylisted directory is refused with the exact message", async () => {

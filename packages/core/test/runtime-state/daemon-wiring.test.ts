@@ -154,6 +154,26 @@ describe("daemon wiring — the store opens and recovery runs before the socket 
   });
 });
 
+describe("daemon wiring — the runtime store is not readable by the model", () => {
+  test("read of runtime-state.db goes through the real daemon's registry and is refused", async () => {
+    await withTempHome(async (home, dirs) => {
+      writeSettings(home);
+      const d = await boot(home, { agent: true });
+      const registry = d.registry!;
+      expect(registry).toBeDefined();
+
+      // The tool the daemon itself hosts must not be able to read the store this branch built —
+      // metadata today, whole message envelopes from 8b (WS-16 §10).
+      const res = await registry.execute("read", { path: dirs.runtimeStatePath }, { cwd: home, roots: [home], sessionId: "s1" });
+      expect(res.isError).toBe(true);
+      expect(res.output).toBe("this path is Norma's own credential store and is never readable");
+
+      const listed = await registry.execute("ls", { path: dirs.runtimesDir }, { cwd: home, roots: [home], sessionId: "s1" });
+      expect(listed.isError).toBe(true);
+    });
+  });
+});
+
 describe("daemon wiring — the retention sweep reads settings live", () => {
   test("a narrowed deliveries window takes effect at the next sweep, with no daemon restart", async () => {
     await withTempHome(async (home) => {

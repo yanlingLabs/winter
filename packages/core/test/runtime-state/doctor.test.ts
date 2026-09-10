@@ -527,14 +527,49 @@ describe("repairRuntimeState — WS-16 §15 explicit, recoverable repairs", () =
 
       expect(result.applied).toBe(true);
       expect(readFileSync(log, "utf8")).toBe(good);
-      const quarantine = join(home, "sessions", "global", `${id}.quarantine.jsonl`);
+      // OUTSIDE the sessions tree: `SessionStore.recoverAll` enumerates `sessions/<scope>/*.jsonl`
+      // and derives a session id from each filename, so a sidecar living there was a candidate
+      // session that only ever got skipped because its lines do not parse (M2).
+      const quarantine = join(home, "runtimes", "quarantine", "global", `${id}.jsonl`);
       expect(existsSync(quarantine)).toBe(true);
+      expect(readFileSync(quarantine, "utf8")).toBe('{"type":"assistant_mess\n');
+      expect(existsSync(join(home, "sessions", "global", `${id}.quarantine.jsonl`))).toBe(false);
       // The detail names bytes and a path, never the bytes themselves.
       expect(result.detail).not.toContain("assistant_mess");
 
       const again = await repairRuntimeState(home, { kind: "quarantine-tail", winterSessionId: id });
       expect(again.applied).toBe(false);
       expect(again.detail).toContain("no incomplete trailing frame");
+    });
+  });
+
+  test("EVERY repair refuses while the daemon holds the lock, not just restore-backup", async () => {
+    await withTempHome(async (home) => {
+      withDb(home, () => {});
+      const id = seedProductSession(home, { cwd: home });
+      withDb(home, (_rs, records) => records.create(newRecord(home, id)));
+      const indexPath = join(home, "sessions", "index.db");
+
+      writeFileSync(join(home, "run", "core.lock"), JSON.stringify({ pid: process.pid, startedAt: Date.now() }));
+      // `repairRuntimeState` is exported on the package barrel, so the CLI's own probe is not the
+      // only door: a programmatic caller could unlink the index a live daemon holds open, or write
+      // the store it is reading.
+      for (const op of [
+        { kind: "rebuild-index" },
+        { kind: "quarantine-tail", winterSessionId: id },
+        { kind: "relink-backend", winterSessionId: id, backendSessionId: "11111111-2222-4333-8444-555555555555" },
+        { kind: "detach-backend", winterSessionId: id },
+        { kind: "restore-backup", backupPath: join(home, "runtimes", "backups", "nope.db") },
+      ] as const) {
+        const refused = await repairRuntimeState(home, op);
+        expect(refused.applied).toBe(false);
+        expect(refused.detail).toBe("daemon is running; stop it first");
+      }
+      // Nothing was touched on the way to those refusals.
+      expect(existsSync(indexPath)).toBe(true);
+
+      rmSync(join(home, "run", "core.lock"));
+      expect((await repairRuntimeState(home, { kind: "rebuild-index" })).applied).toBe(true);
     });
   });
 

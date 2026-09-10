@@ -104,6 +104,15 @@ function addressBelongsTo(address: SerializedRuntimeAddress, winterSessionId: st
  *   - `runtime_recovery_attempts` is deliberately absent. It is the daemon's own audit of recovery
  *     runs (its `winter_session_id` is nullable), not this session's state, and an audit trail that
  *     deletes itself when the thing it describes is deleted is not an audit trail.
+ *   - A CLAIMED-BUT-UNRECEIPTED delivery addressed to this session is RETAINED, and named in
+ *     `retainedUnreceipted`. That pair is WS-15 §6.4 step 5's entire evidence for
+ *     `delivery_uncertain`, and the evidence belongs to the SENDER, not to the target: a message a
+ *     target runtime claimed and then crashed on, followed by that target being reaped — an empty
+ *     session is exactly the shape a claimed-then-crashed first message leaves behind — would
+ *     otherwise turn "we do not know whether it arrived" into "it was never sent", silently, for a
+ *     third party who was never consulted about the deletion. Receipted records go (their outcome
+ *     is known and the session they described is gone) and never-claimed ones go (an unclaimed
+ *     message to a deleted target can never be delivered and carries no uncertainty).
  *
  * The product's own history (the session JSONL and `sessions/index.db`) stays with
  * `SessionStore.deleteSession`, and project memory is never touched by any door here.
@@ -111,15 +120,17 @@ function addressBelongsTo(address: SerializedRuntimeAddress, winterSessionId: st
 export async function deleteSessionRuntimeState(
   deps: DeleteSessionRuntimeStateDeps,
   winterSessionId: string,
-): Promise<{ removed: string[] }> {
+): Promise<{ removed: string[]; retainedUnreceipted: string[] }> {
   const { rs, records, leases, children, directory } = deps;
   const removed: string[] = [];
+  /** Message ids step 6 deliberately did not delete — see the note above. */
+  const retainedUnreceipted: string[] = [];
   const touched = (table: string, changes: number): void => {
     if (changes > 0 && !removed.includes(table)) removed.push(table);
   };
 
   const record = records.get(winterSessionId);
-  if (!record) return { removed };
+  if (!record) return { removed, retainedUnreceipted };
   removed.push("runtime_sessions");
 
   // 1. Mark unavailable — the honest state while the rest of this runs. Two lifecycle states have
@@ -175,11 +186,22 @@ export async function deleteSessionRuntimeState(
   // 6. Delivery records whose message TARGETS this session, and the receipts that audit them. The
   //    seam has no "list every delivery" door (nothing else needs one), so the target is read out
   //    of the stored envelope here — the same JSON the seam wrote, parsed, never re-shaped.
-  const deliveries = rs.db.query("SELECT message_id, message_json FROM global_messages").all() as Array<{ message_id: string; message_json: string }>;
+  //
+  //    THE RECEIPT FILTER IS THE POINT, not an optimisation: `claimed_by IS NOT NULL AND
+  //    outcome_json IS NULL` is the sender's `delivery_uncertain` evidence (WS-15 §6.4 step 5), and
+  //    deleting the target must not destroy a third party's answer about it. Those rows stay and are
+  //    reported; everything else addressed here goes.
+  const deliveries = rs.db.query("SELECT message_id, message_json, claimed_by, outcome_json FROM global_messages").all() as Array<{
+    message_id: string; message_json: string; claimed_by: string | null; outcome_json: string | null;
+  }>;
   for (const row of deliveries) {
     let to: GlobalAgentMessage["to"] | undefined;
     try { to = (JSON.parse(row.message_json) as GlobalAgentMessage).to; } catch { continue; }
     if (to?.winterSessionId !== winterSessionId && to?.parentWinterSessionId !== winterSessionId) continue;
+    if (row.claimed_by !== null && row.outcome_json === null) {
+      retainedUnreceipted.push(row.message_id);
+      continue;
+    }
     touched("global_messages", rs.db.run("DELETE FROM global_messages WHERE message_id = ?", [row.message_id]).changes);
     touched("global_message_receipts", rs.db.run("DELETE FROM global_message_receipts WHERE message_id = ?", [row.message_id]).changes);
   }
@@ -206,7 +228,7 @@ export async function deleteSessionRuntimeState(
     rs.db.run("DELETE FROM runtime_sessions WHERE winter_session_id = ?", [winterSessionId]);
   }, { mode: "immediate" });
 
-  return { removed };
+  return { removed, retainedUnreceipted };
 }
 
 /**

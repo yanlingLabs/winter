@@ -106,6 +106,20 @@ export function runtimeStateOnline(state: DaemonRuntimeState): RuntimeStateWirin
   return "unavailable" in state ? undefined : state;
 }
 
+/**
+ * An error's TYPE and nothing else — the rule `recovery.ts`'s header states and this file must not
+ * disagree with (whole-branch review, M7).
+ *
+ * An error MESSAGE routinely quotes the payload that produced it: `JSON.parse` echoes the bytes it
+ * choked on, and on these paths those bytes are session records, directory entries and message
+ * envelopes. Nothing here is worth a line that could carry one, because every one of these failures
+ * is already written to `runtime_recovery_attempts` or is a repeat-next-boot condition.
+ */
+const errName = (e: unknown): string => (e instanceof Error ? e.name : "unknown");
+
+/** Type AND message. Reserved for the two failures whose message is a REASON and a PATH that this
+ *  daemon composed itself (`RuntimeStateUnavailableError`: `runtime-state.db corrupt: <path>`) —
+ *  the operator cannot act on "the store did not open" without them, and no payload can reach it. */
 const errText = (e: unknown): string => (e instanceof Error ? `${e.name}: ${e.message}` : String(e));
 
 /**
@@ -181,7 +195,7 @@ export async function startRuntimeState(deps: DaemonRuntimeStateDeps): Promise<D
           log(`runtime backfill: ${lastBackfill.created.length} created, ${lastBackfill.skipped.length} phone-owned, ${lastBackfill.errors.length} failed`);
         }
       } catch (e) {
-        log(`runtime backfill failed (it retries at the next boot): ${errText(e)}`);
+        log(`runtime backfill failed (it retries at the next boot): ${errName(e)}`);
       }
     }
 
@@ -225,7 +239,7 @@ export async function startRuntimeState(deps: DaemonRuntimeStateDeps): Promise<D
           log(`runtime retention: pruned ${swept.deliveriesPruned} receipted deliver(ies), ${swept.leasesPruned} released name lease(s)`);
         }
       } catch (e) {
-        log(`runtime retention sweep failed (it runs again at the next interval): ${errText(e)}`);
+        log(`runtime retention sweep failed (it runs again at the next interval): ${errName(e)}`);
       }
     };
     await sweep();
@@ -245,10 +259,15 @@ export async function startRuntimeState(deps: DaemonRuntimeStateDeps): Promise<D
       deletions = deletions.then(async () => {
         if (dbClosed) return; // the bounded drain gave up on us — the handle is gone
         try {
-          const { removed } = await deleteSessionRuntimeState({ rs, records, leases, children, directory }, sessionId);
+          const { removed, retainedUnreceipted } = await deleteSessionRuntimeState({ rs, records, leases, children, directory }, sessionId);
           if (removed.length > 0) log(`runtime state deleted for ${sessionId}: ${removed.join(", ")}`);
+          // The delete stopped short ON PURPOSE: those rows are somebody else's `delivery_uncertain`
+          // evidence (WS-15 §6.4), and an audit that did not say so would read as a missed delete.
+          if (retainedUnreceipted.length > 0) {
+            log(`runtime state delete for ${sessionId} retained ${retainedUnreceipted.length} claimed-unreceipted deliver(ies): ${retainedUnreceipted.join(", ")}`);
+          }
         } catch (e) {
-          log(`runtime state delete failed for ${sessionId}: ${errText(e)}`);
+          log(`runtime state delete failed for ${sessionId}: ${errName(e)}`);
         }
       });
     };

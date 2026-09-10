@@ -702,7 +702,13 @@ export async function startDaemon(opts: {
     // the real, deliberately-hardened boundary Norma draws around its own runtime material (the IPC
     // socket, the daemon lock file, plugin-supervisor PID files), so a prompt-injected turn can't
     // read the daemon's own control-plane files through the tool the daemon itself hosts.
-    registerReadTools(registry, { deniedPrefixes: [dirs.runDir] });
+    // P8a (WS-16 §10, whole-branch review M1): `runtimes/` joins `run/`. It holds the authoritative
+    // `runtime-state.db` (and its `-wal`, and every `backups/*.db` copy of it), the official-agent
+    // spool and the resume-staging roots — i.e. router metadata today and MESSAGE BODIES the moment
+    // 8b lands (`global_messages`/`held_messages` carry whole envelopes), plus 8c's staged
+    // credentials. A model that could `read` the db file could read all of it around every seam this
+    // branch built. `norma doctor` is a separate CLI process and is unaffected by this denial.
+    registerReadTools(registry, { deniedPrefixes: [dirs.runDir, dirs.runtimesDir] });
     registerWriteTools(registry);
     registerBashTool(registry, { bgRegistry }); // D1-T2: bash is never deferred in code — bash.ts's own `deferred: ["dispatch"]` only rides ToolSearch deferral for the dispatch coordinator; its background-poll tool below (bash_output; task_stop, below, is the sole way to kill one) is unaffected
     registerBackgroundTools(registry, { bgRegistry }, { deferred: true });
