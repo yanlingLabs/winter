@@ -290,8 +290,15 @@ export class SessionStore {
 
   /** Index is disposable (spec §4.4): on open, scan log files on disk to rebuild the index,
    *  then resync last_seq for all known sessions. Corrupt lines are skipped (not stopped at);
-   *  logs are rewritten only when bad lines were found, using a temp+rename atomic swap. */
-  private recoverAll(): void {
+   *  logs are rewritten only when bad lines were found, using a temp+rename atomic swap.
+   *
+   *  PUBLIC as of WS-16 §13 (P8a task 7): the constructor still calls it, but startup recovery's
+   *  step 1 and `norma doctor`'s `rebuild-index` repair both have to run it EXPLICITLY on a store
+   *  they already hold — recovery because "recover each store according to its ownership rules" is
+   *  a step it must be able to report on, and the repair because it deletes `index.db` first. It is
+   *  idempotent by construction (pass 1 resyncs known rows, pass 2 inserts unknown logs), so
+   *  calling it again after the constructor already did costs a rescan and changes nothing. */
+  recoverAll(): void {
     // Pass 1: resync sessions already in sqlite
     const rows = this.db.query("SELECT session_id, scope FROM sessions").all() as { session_id: string; scope: string }[];
     const known = new Set<string>();

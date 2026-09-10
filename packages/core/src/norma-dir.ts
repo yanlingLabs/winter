@@ -10,17 +10,20 @@ export interface NormaDirs {
   socketPath: string;
   lockPath: string;
   settingsPath: string;
+  runtimesDir: string;
+  runtimeStatePath: string;
 }
 
 export function resolveNormaHome(): string {
   return process.env.NORMA_HOME ?? join(homedir(), ".norma");
 }
 
-const SUBDIRS = ["sessions", "memory", "skills/self", "agents", "plugins", "hooks", "logs", "run"];
+const SUBDIRS = ["sessions", "memory", "skills/self", "agents", "plugins", "hooks", "logs", "run", "runtimes", "runtimes/backups", "runtimes/official-agent-spool", "runtimes/handoff-leases"];
 
 export function bootstrapNormaDir(home: string = resolveNormaHome()): NormaDirs {
   for (const d of SUBDIRS) mkdirSync(join(home, d), { recursive: true });
   chmodSync(join(home, "run"), 0o700);
+  chmodSync(join(home, "runtimes", "official-agent-spool"), 0o700);
 
   const settingsPath = join(home, "settings.json");
   if (!existsSync(settingsPath)) {
@@ -36,5 +39,7 @@ export function bootstrapNormaDir(home: string = resolveNormaHome()): NormaDirs 
     socketPath: join(home, "run", "core.sock"),
     lockPath: join(home, "run", "core.lock"),
     settingsPath,
+    runtimesDir: join(home, "runtimes"),
+    runtimeStatePath: join(home, "runtimes", "runtime-state.db"),
   };
 }

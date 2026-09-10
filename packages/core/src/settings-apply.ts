@@ -34,6 +34,15 @@ export interface SettingsApplyDeps {
   // (see `applyMemoryMigrationDiff` below) — migration walks every trusted dir + spawns `git` per
   // dir (repoRootFor), never worth making the settings-watcher's single-flight apply() wait on it.
   migrateMemory?: () => void | Promise<void>;
+  /** P8a Task 12: the runtime spine's opt-in migrations, re-checked against the NEW settings
+   *  (`runtime-state/wiring.ts`'s `applySettings`). Not a flip diff like the two above — the wiring
+   *  guards itself with a `schema_meta` marker, so "run it if the flag is on and it has never
+   *  completed" is both the boot rule and the hot rule, and passing `next` unconditionally is what
+   *  makes flipping `runtimes.migrations.memoryKeys` on a RUNNING daemon take effect with no
+   *  restart. Synchronous and total by contract (it logs and returns rather than throwing), so it
+   *  needs neither the `Promise.all` below nor a drain. Optional — every pre-8a caller (and this
+   *  file's own test helper) keeps compiling unchanged. */
+  applyRuntimeMigrations?: (next: Settings) => void;
   drainTimeoutMs?: number; // default 10000 — cap on the CU-disable drain wait
   drainIntervalMs?: number; // default 50 — poll interval while draining
   sleep?: (ms: number) => Promise<void>; // injectable clock (default Bun.sleep) so the cap test never waits real seconds
@@ -139,6 +148,14 @@ export function makeApply(deps: SettingsApplyDeps): (prev: Settings | null, next
     // Fire-and-forget, NOT awaited and NOT inside the Promise.all below — see the function's own
     // doc comment for why this diff is treated differently from CU/LSP.
     applyMemoryMigrationDiff(prev, next);
+    // P8a Task 12: the runtime spine's own opt-in migrations. Wrapped even though the wiring never
+    // throws — a settings apply that died here would leave `prevSnapshot` un-advanced and re-diff
+    // the same change forever (the F1 argument below, applied to this call too).
+    try {
+      deps.applyRuntimeMigrations?.(next);
+    } catch (err) {
+      log(`runtime migrations apply failed (best-effort, retried at the next change): ${errMsg(err)}`);
+    }
     // Independent flips: a long CU-disable drain must not stall the LSP re-wire in the same
     // reload, so the two diffs run concurrently.
     //

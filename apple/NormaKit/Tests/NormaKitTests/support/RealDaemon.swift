@@ -76,7 +76,7 @@ struct RealDaemon {
     const home = process.env.NORMA_HOME;
     const d = await startDaemon({ home, secrets: new FileSecretStore(home + "/secrets"), agentProvider: null });
     process.stdout.write(JSON.stringify({ socketPath: d.socketPath, harness: d.tokens.harness, remote: d.tokens.remote }) + "\\n");
-    process.on("SIGTERM", () => { d.stop(); process.exit(0); });
+    process.on("SIGTERM", async () => { await d.stop(); process.exit(0); });
     """
 
     /// iOS remote-path T2: the same daemon, booted with an INJECTED streaming `Provider` instead of
@@ -111,7 +111,7 @@ struct RealDaemon {
       agentProvider: { provider, model: "conformance-model" },
     });
     process.stdout.write(JSON.stringify({ socketPath: d.socketPath, harness: d.tokens.harness, remote: d.tokens.remote }) + "\\n");
-    process.on("SIGTERM", () => { d.stop(); process.exit(0); });
+    process.on("SIGTERM", async () => { await d.stop(); process.exit(0); });
     """
 
     /// The six small chunks `streamingProviderFixture` streams, in order — and the expected

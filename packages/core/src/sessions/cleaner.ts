@@ -108,6 +108,10 @@ export interface CleanerDeps {
    *  cleaner runs inside `Dreamer.tick`'s re-entrancy guard, so a provider that never answers would
    *  wedge dreaming as well as cleaning, permanently. */
   timeoutMs?: number;
+  /** P8a Task 12 (WS-16 §16): the deleted session's RUNTIME state goes with it — the same hook the
+   *  reaper takes (`ReaperDeps.onDelete`), for the same reason and with the same ordering: called
+   *  only AFTER `deleteSession` succeeded. Absent on a daemon with no runtime spine. */
+  onDelete?: (sessionId: string) => void;
 }
 
 /** What one pass did. Tests/observability only — the Dreamer ignores it. */
@@ -358,6 +362,12 @@ export class SessionCleaner {
     } catch (err) {
       console.error(`[cleaner] failed to delete ${sessionId}:`, err);
       return false;
+    }
+    // Runtime state follows the session out (§16), on the same best-effort terms as the audit line.
+    try {
+      this.deps.onDelete?.(sessionId);
+    } catch (err) {
+      console.error(`[cleaner] runtime-state delete hook failed for ${sessionId}:`, err);
     }
     try {
       appendCleanerLog(this.deps.home, { sessionId, title, reason, date: new Date(nowMs).toISOString() });
