@@ -33,9 +33,17 @@ import { deleteSessionRuntimeState, retentionFromSettings, sweepRetention } from
  *  sweep is only ever removing rows that crossed a horizon since the last pass. */
 export const RUNTIME_SWEEP_INTERVAL_MS = 60 * 60_000;
 
-/** How long teardown waits for queued §16 deletions before it closes the handle anyway. Bounded so
- *  a wedged chain costs a slow shutdown, never a daemon that will not exit. */
-export const RUNTIME_SHUTDOWN_DRAIN_MS = 5_000;
+/**
+ * How long teardown waits for queued §16 deletions before it closes the handle anyway.
+ *
+ * MUST STAY UNDER THE APP'S GRACE PERIOD. `DaemonSupervisor.gracefulExitTimeout` (2.0 s,
+ * `apple/Norma/Sources/App/DaemonSupervisor.swift`) is how long the app waits after SIGTERM before
+ * escalating to SIGKILL — so a drain budgeted above that would be force-killed mid-drain, losing the
+ * deletion it was waiting for AND the `lock.release()` behind it, which is what unlinks the socket.
+ * A stale socket sends the supervisor into `.connectOnly` on the next launch. 1500 ms leaves the
+ * rest of teardown room inside the 2 s and still covers a drain that is, in practice, microtasks.
+ */
+export const RUNTIME_SHUTDOWN_DRAIN_MS = 1_500;
 
 /** The `schema_meta` key that makes §17 phase 5 a ONE-TIME relocation. NOTHING WRITES IT IN 8a — the
  *  migration is refused here (see `startRuntimeState`) — but it is read, so that the build which

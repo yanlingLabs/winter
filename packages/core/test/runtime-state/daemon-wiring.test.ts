@@ -23,9 +23,13 @@ import { EMPTY_SESSION_GRACE_MS, SessionStore } from "../../src/sessions/store";
 import { ISO, withTempHome } from "./support";
 
 let daemon: RunningDaemon | undefined;
-afterEach(() => {
-  daemon?.stop();
+// AWAITED: `stop()`'s tail drains the queued runtime deletions, closes `runtime-state.db` and
+// releases the lock. Dropping it would let the NEXT test's `withTempHome` rm the home while this
+// daemon still held a handle on it.
+afterEach(async () => {
+  const stopping = daemon?.stop();
   daemon = undefined;
+  await stopping;
 });
 
 /** A daemon on a temp home. `agent: true` also starts the SettingsWatcher — daemon.ts builds it
