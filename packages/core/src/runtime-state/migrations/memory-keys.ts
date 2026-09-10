@@ -48,6 +48,7 @@
 import { compatibilityKeys } from "@yanlinglabs/winter-agent-sdk";
 import { existsSync, readdirSync, renameSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { repoRootFor, sanitizeProjectKey } from "../../agent/memory-dir";
 import type { SessionStore } from "../../sessions/store";
 import type { RuntimeStateDb } from "../db";
 import { RuntimeSessionRecords } from "../records";
@@ -60,6 +61,25 @@ import { RuntimeSessionRecords } from "../records";
 export const RESERVED_PROJECT_KEYS: readonly string[] = Object.freeze(["_global", "_assistant"]);
 
 export type MemoryKeyCollisionReason = "many-old-keys" | "old-key-fans-out" | "target-exists";
+
+/**
+ * Why a record was skipped.
+ *
+ * `session-gone`     — the record outlived its product session; there is no cwd to derive from.
+ * `cwd-missing`      — the recorded cwd is not a directory any more.
+ * `root-disagrees`   — the cwd is there, but today's root resolution no longer produces the key the
+ *                      record stores. EVERY git failure lands here: git not installed, a
+ *                      dubious-ownership refusal, a `.git` removed under a surviving directory. All
+ *                      of them make `repoRootFor` AND the SDK's `gitCommonRoot` fall back to the cwd
+ *                      itself, so the destination this run would derive is not the one the memory
+ *                      was filed under.
+ */
+export type UnresolvedReason = "session-gone" | "cwd-missing" | "root-disagrees";
+
+export interface UnresolvedRecord {
+  winterSessionId: string;
+  reason: UnresolvedReason;
+}
 
 export interface MemoryKeyMove {
   oldKey: string;
@@ -88,10 +108,11 @@ export interface MemoryKeyPlan {
   /** Keys already equal to their destination: nothing to do. Normally the shape a completed
    *  migration leaves behind. */
   unchanged: string[];
-  /** Records whose session cwd could not be read (the record outlived its product session), so no
-   *  destination could be derived. Skipped rather than guessed at — a wrong destination here would
-   *  move somebody's memory somewhere nothing looks. */
-  unresolved: string[];
+  /** Records this migration will not touch because it cannot derive a trustworthy destination for
+   *  them. Skipped rather than guessed at — a wrong destination moves somebody's memory somewhere
+   *  nothing looks — and each carries the reason, because the three have different remedies:
+   *  restore or re-clone the cwd, or accept that the record is orphaned. */
+  unresolved: UnresolvedRecord[];
 }
 
 /** `apply` refused: the mapping is ambiguous, and nothing was moved. */
@@ -115,10 +136,23 @@ export class MemoryKeyCollisionError extends Error {
  * nothing reporting it (review r1, Important 2).
  */
 export class MemoryKeyNotPlannedError extends Error {
-  constructor(public readonly oldKey: string, public readonly newKey: string, public readonly status: string | undefined) {
+  constructor(
+    public readonly oldKey: string,
+    public readonly newKey: string,
+    public readonly status: string | undefined,
+    /** The destination the manifest actually records for `oldKey`, when it holds a row at all. */
+    public readonly recordedNewKey?: string,
+  ) {
     super(
-      `memory key migration refused — ${oldKey} → ${newKey} is ${status === undefined ? "not in the manifest at all" : `recorded as '${status}', not 'planned'`}; ` +
-        `re-run planMemoryKeyMigration to plan it`,
+      `memory key migration refused — ${oldKey} → ${newKey} ` +
+        (status === undefined
+          ? "is not in the manifest at all"
+          : recordedNewKey !== undefined && recordedNewKey !== newKey
+            // Saying "not in the manifest" here would be a lie: the row is right there, pointing
+            // somewhere else, and THAT is what the operator has to reconcile.
+            ? `disagrees with the manifest, which records ${oldKey} → ${recordedNewKey} ('${status}')`
+            : `is recorded as '${status}', which is neither 'planned' nor already 'moved'`) +
+        `; re-run planMemoryKeyMigration to plan it`,
     );
     this.name = "MemoryKeyNotPlannedError";
   }
@@ -133,10 +167,11 @@ export interface MemoryKeyRollbackFailure {
 
 interface ManifestRow { old_key: string; new_key: string; status: string }
 
-/** The manifest's own word on one (oldKey → newKey) pair, or `undefined` when it has none. Keyed on
- *  BOTH halves: a row naming a different destination describes a different move. */
-function manifestStatus(rs: RuntimeStateDb, oldKey: string, newKey: string): string | undefined {
-  return (rs.db.query(`SELECT status FROM memory_key_manifest WHERE old_key = ? AND new_key = ?`).get(oldKey, newKey) as { status: string } | null)?.status;
+/** The manifest's own row for one old key, if it holds one. Read by the PRIMARY KEY alone rather
+ *  than by the whole pair, so a row that names a DIFFERENT destination is visible as what it is —
+ *  a disagreement to report — instead of looking like no row at all. */
+function manifestRow(rs: RuntimeStateDb, oldKey: string): { new_key: string; status: string } | undefined {
+  return (rs.db.query(`SELECT new_key, status FROM memory_key_manifest WHERE old_key = ?`).get(oldKey) as { new_key: string; status: string } | null) ?? undefined;
 }
 
 /** An EXISTING directory — `existsSync` alone would accept a file sitting at that path. */
@@ -193,20 +228,41 @@ export function planMemoryKeyMigration(deps: { rs: RuntimeStateDb; home: string;
     try {
       cwd = store.meta(record.winterSessionId).cwd ?? home;
     } catch {
-      plan.unresolved.push(record.winterSessionId);
+      plan.unresolved.push({ winterSessionId: record.winterSessionId, reason: "session-gone" });
       continue;
     }
-    // See the header: a cwd that is gone silently degrades the destination to a per-cwd key. The
-    // only safe answer is to leave that record's memory exactly where the live lookup will look for
-    // it once the directory comes back.
+    // See the header: a cwd that is gone silently degrades the destination to a per-cwd key.
     if (!isDirectory(cwd)) {
-      plan.unresolved.push(record.winterSessionId);
+      plan.unresolved.push({ winterSessionId: record.winterSessionId, reason: "cwd-missing" });
       continue;
     }
     const newKey = destinationFor(cwd);
     referenced.add(newKey);
+    // ALREADY AT THE DESTINATION — checked FIRST, and the order matters: `apply` re-keys the record
+    // to the new key, so after a completed migration the stored key is no longer what today's root
+    // algorithm produces. Testing root agreement before this would report every migrated record as
+    // corrupt on the next plan.
     if (oldKey === newKey) {
       if (!plan.unchanged.includes(oldKey)) plan.unchanged.push(oldKey);
+      continue;
+    }
+    // AND THE DIRECTORY EXISTING IS NOT ENOUGH. `repoRootFor` falls back to the cwd on ANY git
+    // failure — git missing, a dubious-ownership refusal, a `.git` deleted under a surviving
+    // directory — and the SDK's `gitCommonRoot` fails in exactly the same conditions, so the
+    // destination would degrade with nothing on disk looking wrong. The witness is the record
+    // itself: it stores the key today's algorithm produced when the memory was filed. If re-running
+    // that algorithm now disagrees, this run cannot derive the right destination and must not move
+    // anything. (Deliberately compared through `repoRootFor`, the same memoised door the live memory
+    // path uses, so this agrees with what the daemon itself would resolve.)
+    //
+    // THIS ALSO SUBSUMES THE TWO PLAN-LEVEL COLLISION SHAPES. A record whose stored key disagrees
+    // with its own derivation is exactly the corruption `many-old-keys` and `old-key-fans-out` were
+    // written to catch, and it is now intercepted here instead — one record at a time, reported, and
+    // without refusing everybody else's migration. Those two guards are kept as defence in depth
+    // (they would matter again the moment this precondition is weakened); `target-exists` remains
+    // reachable on entirely consistent input.
+    if (sanitizeProjectKey(repoRootFor(cwd)) !== oldKey) {
+      plan.unresolved.push({ winterSessionId: record.winterSessionId, reason: "root-disagrees" });
       continue;
     }
     (wanted.get(oldKey) ?? wanted.set(oldKey, new Set()).get(oldKey)!).add(newKey);
@@ -308,8 +364,10 @@ export function planMemoryKeyMigration(deps: { rs: RuntimeStateDb; home: string;
  * A crash in that window leaves the directory moved with its row still `planned`, and it is
  * `planMemoryKeyMigration` — not this function — that repairs it: a resumed run always re-plans
  * first, and by then the source directory is gone, so the pair never reaches this loop at all. See
- * the reconciliation branch there. The tolerant `else if (!existsSync(target))` below covers only
- * the narrower case of re-passing the SAME in-memory plan twice.
+ * the reconciliation branch there.
+ *
+ * Re-passing the SAME in-memory plan is handled by the pre-check instead: a pair whose row already
+ * reads `moved` is skipped as done, and any other stale state refuses before a rename can happen.
  */
 export function applyMemoryKeyMigration(deps: { rs: RuntimeStateDb; home: string }, plan: MemoryKeyPlan): { moved: number } {
   if (plan.collisions.length > 0) throw new MemoryKeyCollisionError(plan.collisions);
@@ -321,12 +379,26 @@ export function applyMemoryKeyMigration(deps: { rs: RuntimeStateDb; home: string
   // EVERY row is checked before ANY rename, mirroring the collision refusal directly above: a
   // half-applied stale plan is not a state that should exist, and the check is what stops a rename
   // from happening with no manifest row to record it. See `MemoryKeyNotPlannedError`.
+  //
+  // A row already `moved` TO THE SAME DESTINATION is not a refusal — it is work this plan already
+  // did. A collision thrown mid-loop leaves exactly that shape behind, and the operator who clears
+  // the obstruction and re-runs must be told what is STILL wrong rather than handed a complaint
+  // about the move that succeeded. Anything else — another status, or a row naming a different
+  // destination — is a stale or forged plan and still refuses.
+  const alreadyDone = new Set<string>();
   for (const move of plan.moves) {
-    const status = manifestStatus(rs, move.oldKey, move.newKey);
-    if (status !== "planned") throw new MemoryKeyNotPlannedError(move.oldKey, move.newKey, status);
+    const row = manifestRow(rs, move.oldKey);
+    if (row === undefined) throw new MemoryKeyNotPlannedError(move.oldKey, move.newKey, undefined);
+    if (row.new_key !== move.newKey) throw new MemoryKeyNotPlannedError(move.oldKey, move.newKey, row.status, row.new_key);
+    if (row.status === "moved") {
+      alreadyDone.add(move.oldKey);
+      continue;
+    }
+    if (row.status !== "planned") throw new MemoryKeyNotPlannedError(move.oldKey, move.newKey, row.status, row.new_key);
   }
   let moved = 0;
   for (const move of plan.moves) {
+    if (alreadyDone.has(move.oldKey)) continue; // idempotent: this pair is already recorded as moved
     const source = projectDir(home, move.oldKey);
     const target = projectDir(home, move.newKey);
     if (existsSync(source)) {
