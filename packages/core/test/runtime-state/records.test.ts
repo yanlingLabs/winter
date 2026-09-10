@@ -318,6 +318,27 @@ describe("RuntimeSessionRecords", () => {
         expect(() => records.setTranscriptHealth("s_missing", "clean")).toThrow(UnknownRuntimeSessionError);
       })));
 
+  // Migration A phase 5's record-side half: the key names a DIRECTORY, and several sessions in one
+  // repo share it, so the door is keyed by the old key rather than by a session id.
+  test("rekeyMemoryProjectKey moves every record under one memory key and touches nothing else", () =>
+    withTempHome((home) =>
+      use(home, (_rs, records) => {
+        records.create(newRecord(home, "s_a", { memoryProjectKey: "shared-old" }));
+        records.create(newRecord(home, "s_b", { memoryProjectKey: "shared-old" }));
+        records.create(newRecord(home, "s_c", { memoryProjectKey: "other-old" }));
+
+        expect(records.rekeyMemoryProjectKey("shared-old", "shared-new")).toBe(2);
+        expect(records.get("s_a")?.memoryProjectKey).toBe("shared-new");
+        expect(records.get("s_b")?.memoryProjectKey).toBe("shared-new");
+        expect(records.get("s_c")?.memoryProjectKey).toBe("other-old");
+        // The transcript/temp layout is a different algorithm and is deliberately left alone.
+        expect(records.get("s_a")?.transcriptProjectKey).toBe("-tmp-work");
+        expect(records.get("s_a")?.tempProjectKey).toBe("-tmp-work");
+
+        // A key nothing is stored under is a no-op, never a throw: the migration re-runs.
+        expect(records.rekeyMemoryProjectKey("shared-old", "shared-new")).toBe(0);
+      })));
+
   test("recorded provenance requires the versions it claims to have recorded", () =>
     withTempHome((home) =>
       use(home, (_rs, records) => {
