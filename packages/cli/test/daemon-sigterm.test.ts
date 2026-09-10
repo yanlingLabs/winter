@@ -21,7 +21,7 @@ describe("daemon run SIGTERM socket cleanup", () => {
     import { startDaemon, FileSecretStore } from "@norma/core";
     const home = process.env.NORMA_HOME;
     const daemon = await startDaemon({ home, secrets: new FileSecretStore(home + "/secrets"), agentProvider: null });
-    const shutdown = () => { daemon.stop(); process.exit(0); };
+    const shutdown = async () => { await daemon.stop(); process.exit(0); };
     process.on("SIGTERM", shutdown);
     process.on("SIGINT", shutdown);
   `;

@@ -100,6 +100,9 @@ describe("daemon wiring — the store opens and recovery runs before the socket 
       expect(rt.db.schemaVersion()).toBe(1);
       expect(rt.lastRecovery.ok).toBe(true);
       expect(rt.lastRecovery.steps).toHaveLength(12);
+      // The boot path does NOT re-scan every session log: `SessionStore`'s constructor already ran
+      // `recoverAll()` under this same lock, before any socket existed.
+      expect(rt.lastRecovery.steps.find((s) => s.step === 1)?.detail).toMatchObject({ indexRecovery: "skipped-already-done" });
       // The ordering claim, measured rather than asserted by construction: the socket did not exist
       // until after recovery had finished.
       expect(new Date(rt.lastRecovery.finishedAt).getTime()).toBeLessThanOrEqual(statSync(dirs.socketPath).ctimeMs);
@@ -193,7 +196,7 @@ describe("daemon wiring — the retention sweep runs at boot and on its own inte
         await rt!.directory.deliveries.put(receipted("stale", 40 * 86_400_000));
         await until("the interval sweep to prune it", async () => (await rt!.directory.deliveries.get("stale")) === undefined, 4000);
       } finally {
-        rt?.close();
+        await rt?.close();
         store.close();
       }
     });
@@ -220,14 +223,46 @@ describe("daemon wiring — deletion and teardown", () => {
     });
   });
 
-  test("stop() closes the database — the handle refuses, and a second open succeeds", async () => {
+  test("a deletion queued in the same tick as stop() still lands — teardown drains, then closes", async () => {
+    await withTempHome(async (home) => {
+      const store = new SessionStore(home);
+      const sessionId = store.createSession("work", { cwd: home });
+      store.append(sessionId, { type: "user_message", sessionId, threadId: "main", text: "hi", clientName: "test" });
+      store.close();
+
+      const d = await boot(home);
+      const rt = online(d);
+      expect(rt.records.get(sessionId)).toBeDefined();
+
+      // Queued and deliberately NOT awaited — the shape a mint-time reap leaves behind when a
+      // shutdown lands in the same tick. Without teardown's drain the handle would close over it
+      // and the §16 delete would be lost for good.
+      rt.onSessionDeleted(sessionId);
+      await d.stop();
+      daemon = undefined;
+
+      const reopened = openRuntimeStateDb(home);
+      try {
+        expect(new RuntimeSessionRecords(reopened).get(sessionId)).toBeUndefined();
+      } finally {
+        reopened.close();
+      }
+    });
+  });
+
+  test("stop() closes the database — the handle refuses, a second open succeeds, no WAL is left behind", async () => {
     await withTempHome(async (home, dirs) => {
       const d = await boot(home);
       const rt = online(d);
-      d.stop();
+      await d.stop();
       daemon = undefined;
 
       expect(() => rt.db.db.query("SELECT COUNT(*) AS n FROM runtime_sessions").get()).toThrow();
+      // Brief step 1's "no -wal growth": a clean close checkpoints, so whatever is left on disk
+      // carries no un-replayed frames.
+      const wal = `${dirs.runtimeStatePath}-wal`;
+      expect(existsSync(wal) && statSync(wal).size > 0).toBe(false);
+
       const reopened = openRuntimeStateDb(dirs.home);
       try {
         expect(reopened.integrity().ok).toBe(true);
@@ -254,7 +289,11 @@ describe("daemon wiring — a corrupt store costs runtime routing and nothing el
   });
 });
 
-describe("daemon wiring — the memory-key migration is opt-in, hot, and runs once", () => {
+// §17 phase 5 is REFUSED in this build (review r1, Important 2): the live memory path
+// (`memoryDirFor`) still derives today's key, so relocating a user's memory now would leave the
+// agent reading an empty directory — one-way, with no CLI rollback. The plan/apply code and its unit
+// tests stay (they are 8b's); what this build must do is say so and move nothing.
+describe("daemon wiring — the memory-key migration is refused in this build", () => {
   /** A session whose memory tree sits under TODAY's key, so the migration has something to move. */
   function seedProject(home: string, store: SessionStore, name: string): { sessionId: string; oldKey: string; newKey: string } {
     const cwd = join(home, "work", name);
@@ -272,46 +311,53 @@ describe("daemon wiring — the memory-key migration is opt-in, hot, and runs on
     return existsSync(path) ? readFileSync(path, "utf8") : undefined;
   };
 
-  test("flipping runtimes.migrations.memoryKeys on a RUNNING daemon migrates without a restart", async () => {
+  test("booting with the flag ON moves nothing, plans nothing, and marks nothing", async () => {
     await withTempHome(async (home) => {
-      writeSettings(home);
+      writeSettings(home, { runtimes: { migrations: { memoryKeys: true } } });
       const store = new SessionStore(home);
       const first = seedProject(home, store, "alpha");
       store.close();
 
-      const rt = online(await boot(home, { agent: true }));
-      expect(memoryBody(home, first.oldKey)).toBeDefined(); // untouched while the flag is off
-      expect(memoryBody(home, first.newKey)).toBeUndefined();
+      const rt = online(await boot(home));
 
-      writeSettings(home, { runtimes: { migrations: { memoryKeys: true } } });
-      await until("the memory tree to move to its compatibility key", () => memoryBody(home, first.newKey) !== undefined);
-      expect(memoryBody(home, first.oldKey)).toBeUndefined();
-      expect(rt.records.get(first.sessionId)!.memoryProjectKey).toBe(first.newKey);
+      expect(memoryBody(home, first.oldKey)).toBeDefined(); // the user's memory is where it was
+      expect(memoryBody(home, first.newKey)).toBeUndefined();
+      expect(rt.records.get(first.sessionId)!.memoryProjectKey).toBe(first.oldKey);
+      // Not even a PLAN: a `planned` manifest row is a promise to move something.
+      expect(rt.db.db.query("SELECT COUNT(*) AS n FROM memory_key_manifest").get()).toEqual({ n: 0 });
+      expect(rt.db.db.query("SELECT value FROM schema_meta WHERE key = 'memory_keys_migrated'").get()).toBe(null);
     });
   });
 
-  test("a second boot does not migrate again — the schema_meta marker is the guard", async () => {
+  test("flipping the flag on a running daemon says so exactly once; flipping it back says nothing", async () => {
     await withTempHome(async (home) => {
-      writeSettings(home, { runtimes: { migrations: { memoryKeys: true } } });
       const store = new SessionStore(home);
       const first = seedProject(home, store, "alpha");
-      store.close();
+      const lines: string[] = [];
+      const settingsWith = (memoryKeys: boolean) => Settings.parse({ ...SETTINGS_BASE, runtimes: { migrations: { memoryKeys } } });
+      let live = settingsWith(false);
 
-      const one = online(await boot(home));
-      expect(memoryBody(home, first.newKey)).toBeDefined();
-      expect(one.db.db.query("SELECT value FROM schema_meta WHERE key = 'memory_keys_migrated'").get()).toBeTruthy();
-      daemon!.stop();
-      daemon = undefined;
+      const state = await startRuntimeState({ home, store, settings: () => live, log: (l) => lines.push(l) });
+      const rt = "unavailable" in state ? undefined : state;
+      try {
+        expect(rt).toBeDefined();
+        const quiet = lines.length; // whatever boot said; the flag was off, so it said nothing about it
 
-      // A project that appears AFTER the migration ran is deliberately left where it is: §17 phase 5
-      // is a one-time relocation, and the marker is what makes "once" true across boots.
-      const store2 = new SessionStore(home);
-      const second = seedProject(home, store2, "beta");
-      store2.close();
+        live = settingsWith(true);
+        rt!.applySettings(live); // the settings-watcher's diff path
+        expect(lines.slice(quiet)).toHaveLength(1);
+        expect(lines[quiet]).toContain("not enabled in this build");
 
-      await boot(home);
-      expect(memoryBody(home, second.oldKey)).toBeDefined();
-      expect(memoryBody(home, second.newKey)).toBeUndefined();
+        live = settingsWith(false);
+        rt!.applySettings(live);
+        expect(lines).toHaveLength(quiet + 1); // an off flag is not an event
+
+        expect(memoryBody(home, first.oldKey)).toBeDefined();
+        expect(rt!.db.db.query("SELECT COUNT(*) AS n FROM memory_key_manifest").get()).toEqual({ n: 0 });
+      } finally {
+        await rt?.close();
+        store.close();
+      }
     });
   });
 });

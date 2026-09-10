@@ -133,7 +133,11 @@ export interface RunningDaemon {
   // routing rather than refusing to start, and nothing else in the daemon depends on it in 8a.
   // 8b's `createRuntimeSdk({ directoryStore })` consumes `directory` off this.
   runtimeState: DaemonRuntimeState;
-  stop(): void;
+  /** Tear the daemon down. Everything except the runtime-state drain is synchronous and has already
+   *  happened when this returns; the promise (present only when the runtime spine opened) resolves
+   *  once the queued §16 deletions have drained, `runtime-state.db` is closed and the lock —
+   *  i.e. the socket file — is released. A caller that then exits the process MUST await it. */
+  stop(): void | Promise<void>;
 }
 
 /** Builds the `policy(sessionId, cls)` dependency PeripheralBroker.lease() awaits (spec §A1:
@@ -1631,11 +1635,19 @@ export async function startDaemon(opts: {
       // P8a Task 12 — SHUTDOWN ORDER, and it is an order, not a list. `server.stop()` above has
       // already run, so no RPC can arrive after this point and reach a closed handle; the reaper's
       // mint-time sweep (the one caller that could still queue a runtime deletion) lives inside that
-      // server and is gone with it. `runtime.close()` then clears the retention interval and closes
-      // `runtime-state.db` — after the ipc server, before `lock.release()`, because `norma doctor`'s
-      // repairs refuse while the lock is held and must never find a live handle on a file they are
-      // about to replace. `store.close()` sits alongside it for the product index, same reasoning.
-      store.close(); runtime?.close(); lock.release();
+      // server and is gone with it. `runtime.close()` then clears the retention interval, DRAINS the
+      // queued §16 deletions (bounded, 5s — review r1 minor 5: a delete queued microseconds before
+      // shutdown has only reached the microtask queue, and dropping it strands a runtime record
+      // whose session is gone), and closes `runtime-state.db`. That drain is the one part of
+      // teardown that cannot be synchronous, which is why `stop()` hands back a promise: everything
+      // before it has already happened when `stop()` returns, and `lock.release()` — which unlinks
+      // the socket, and whose absence is what `norma doctor`'s repairs check before touching this
+      // file — happens strictly after the handle is closed. AWAIT IT in any path that then calls
+      // `process.exit` (daemon.ts's own SIGTERM handler below, and cli/src/main.ts's `daemon run`),
+      // or the process dies mid-drain with the lock still on disk.
+      store.close();
+      if (!runtime) { lock.release(); return; }
+      return runtime.close().then(() => lock.release(), () => lock.release());
     },
   };
 }
@@ -1643,7 +1655,10 @@ export async function startDaemon(opts: {
 // Direct execution: `bun run src/daemon.ts` (also the compiled binary's `daemon run` path).
 if (import.meta.main) {
   const daemon = await startDaemon();
-  const shutdown = () => { daemon.stop(); process.exit(0); };
+  // AWAITED (P8a Task 12): `stop()`'s tail drains the queued runtime-state deletions and releases
+  // the lock — which unlinks the socket. Exiting without awaiting would leave a stale socket file,
+  // the exact regression the CLI's own `daemon run` handler was written to prevent.
+  const shutdown = async () => { await daemon.stop(); process.exit(0); };
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
 }

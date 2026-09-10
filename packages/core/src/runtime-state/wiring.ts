@@ -14,7 +14,8 @@
 // LIVE SETTINGS, NEVER A BOOT SNAPSHOT. `deps.settings()` is re-read on every sweep and every
 // migration check, because `settings.json` is hot-swapped and no setting in this daemon may require
 // a restart to take effect. That is also why `applySettings` exists: `settings-apply.ts`'s diff path
-// calls it, so flipping `runtimes.migrations.memoryKeys` runs the migration on a RUNNING daemon.
+// calls it, so flipping `runtimes.migrations.memoryKeys` is ANSWERED on a RUNNING daemon (in 8a the
+// answer is a refusal — see the §17 phase 5 block below).
 import type { RuntimeDirectoryStore } from "@yanlinglabs/winter-runtime-sdk";
 import type { SessionStore } from "../sessions/store";
 import type { Settings } from "../settings";
@@ -23,7 +24,6 @@ import { RuntimeChildren } from "./children";
 import { openRuntimeStateDb, type RuntimeStateDb } from "./db";
 import { createSqliteRuntimeDirectoryStore } from "./directory-store";
 import { RuntimeLeases, processStartedAt, type LeaseProbe } from "./leases";
-import { applyMemoryKeyMigration, planMemoryKeyMigration } from "./migrations/memory-keys";
 import { backfillNativeSessions, type BackfillReport } from "./migrations/backfill";
 import { RuntimeSessionRecords } from "./records";
 import { recoverRuntimeState, type RecoveryHooks, type RecoveryReport } from "./recovery";
@@ -33,9 +33,14 @@ import { deleteSessionRuntimeState, retentionFromSettings, sweepRetention } from
  *  sweep is only ever removing rows that crossed a horizon since the last pass. */
 export const RUNTIME_SWEEP_INTERVAL_MS = 60 * 60_000;
 
-/** The `schema_meta` key that makes §17 phase 5 a ONE-TIME relocation. Written only after an apply
- *  that actually completed — a run blocked by collisions leaves it unset, so an operator who clears
- *  the obstruction gets the migration on the next settings change or the next boot. */
+/** How long teardown waits for queued §16 deletions before it closes the handle anyway. Bounded so
+ *  a wedged chain costs a slow shutdown, never a daemon that will not exit. */
+export const RUNTIME_SHUTDOWN_DRAIN_MS = 5_000;
+
+/** The `schema_meta` key that makes §17 phase 5 a ONE-TIME relocation. NOTHING WRITES IT IN 8a — the
+ *  migration is refused here (see `startRuntimeState`) — but it is read, so that the build which
+ *  eventually performs the relocation never repeats it and never starts narrating about a flag whose
+ *  work is already done. 8b owns the write. */
 export const MEMORY_KEYS_MIGRATED_MARKER = "memory_keys_migrated";
 
 export interface DaemonRuntimeStateDeps {
@@ -76,9 +81,9 @@ export interface RuntimeStateWiring {
   deletionsSettled(): Promise<void>;
   /** `settings-apply.ts`'s diff path: re-checks the opt-in migrations against the new settings. */
   applySettings(next: Settings | null): void;
-  /** Stops the sweep timer and closes the database. Called from the daemon's teardown AFTER the ipc
-   *  server has stopped — see daemon.ts's `stop()`. */
-  close(): void;
+  /** Stops the sweep timer, drains the queued deletions (bounded), and closes the database. Called
+   *  from the daemon's teardown AFTER the ipc server has stopped — see daemon.ts's `stop()`. */
+  close(timeoutMs?: number): Promise<void>;
 }
 
 /** The runtime spine could not be opened. The daemon starts anyway, with no runtime routing. */
@@ -122,15 +127,32 @@ export async function startRuntimeState(deps: DaemonRuntimeStateDeps): Promise<D
     const checkpoints = new ProjectionCheckpoints(rs);
     const directory = createSqliteRuntimeDirectoryStore(rs);
 
-    let closed = false;
+    /** Teardown has begun: no new work is accepted, but what is already queued still runs. */
+    let closing = false;
+    /** The handle is gone. Only the drain's own tasks read this, and only to stop mid-flight. */
+    let dbClosed = false;
 
     // ── §13's twelve steps, before anything else in this daemon can touch a session ──────────────
+    // `indexAlreadyRecovered`: the caller built the `SessionStore` — whose constructor runs
+    // `recoverAll()` — under this same lock, with no socket open and nothing writing a session log
+    // since. Step 1 keeps its integrity check and skips the second full scan of every session's
+    // JSONL (review r1, Important 1).
+    //
+    // NO PER-STEP SINK, deliberately (review r1, Minor 3). Recovery narrates every step, and a
+    // healthy boot has twelve of them to narrate; the durable record is `runtime_recovery_attempts`,
+    // which it writes regardless. So the daemon reports the SUMMARY plus only the steps that did not
+    // complete cleanly — a healthy boot is one line, and a line that does appear means something.
     const lastRecovery = await recoverRuntimeState({
-      home, rs, store, self, log,
+      home, rs, store, self,
+      indexAlreadyRecovered: true,
       hooks: deps.recovery?.hooks,
       probe: deps.recovery?.probe,
       tempScanRoot: deps.recovery?.tempScanRoot,
     });
+    for (const step of lastRecovery.steps) {
+      if (step.outcome === "ok" || step.outcome === "skipped") continue;
+      log(`runtime recovery step ${step.step}: ${step.outcome} — ${JSON.stringify(step.detail)}`);
+    }
     log(
       `runtime recovery: ${lastRecovery.ok ? "ok" : "incomplete"}, ${lastRecovery.sessionsSeen} session(s), ` +
         `${lastRecovery.markedUnavailable} parked, ${lastRecovery.reclassified.length} child(ren) interrupted, ${lastRecovery.corrupt.length} corrupt`,
@@ -155,45 +177,37 @@ export async function startRuntimeState(deps: DaemonRuntimeStateDeps): Promise<D
       }
     }
 
-    // ── §17 phase 5: the opt-in memory-key relocation ────────────────────────────────────────────
+    // ── §17 phase 5: the opt-in memory-key relocation — REFUSED IN THIS BUILD ────────────────────
+    //
+    // CONTROLLER RULING (review r1, Important 2). The migration itself works and is fully tested
+    // (`migrations/memory-keys.ts` and its unit tests are 8b's to switch on), but the LIVE memory
+    // path does not follow it yet: `agent/memory-dir.ts`'s `memoryDirFor` still derives
+    // `sanitizeProjectKey(repoRootFor(cwd))`, the OLD key. Running the migration today would move
+    // the user's `MEMORY.md` to the compatibility key, leave the agent reading an empty directory at
+    // the old one, and start a fresh memory file there — one-way (the `schema_meta` marker makes it
+    // one-shot), with `rollbackMemoryKeyMigration` unreachable from the CLI. So the flag is
+    // ACKNOWLEDGED AND IGNORED here rather than half-honoured, and 8b re-enables it in one place the
+    // day `memoryDirFor` reads the record's own key.
     const markerIsSet = (): boolean =>
-      rs.db.query("SELECT value FROM schema_meta WHERE key = ?").get(MEMORY_KEYS_MIGRATED_MARKER) !== null;
+      rs.db.query("SELECT value FROM schema_meta WHERE key = ?").get(MEMORY_KEYS_MIGRATED_MARKER) != null;
 
-    /** Run §17 phase 5 if — and only if — the user asked for it and it has never completed here.
-     *
-     *  NEVER THROWS. It is called from boot and from the settings-watcher's apply path, and neither
-     *  may die over a migration that cannot proceed: a plan with collisions is LOGGED (counts and
-     *  the keys involved) and leaves the marker unset, so clearing the obstruction and touching
-     *  settings.json is enough to make it run. */
+    /** Answer `runtimes.migrations.memoryKeys`. Called at boot AND from `settings-apply.ts`'s diff
+     *  path, so a user who flips the flag on a running daemon gets the answer immediately rather
+     *  than at the next restart. Nothing is planned, applied or marked; a flag left off says
+     *  nothing at all. NEVER THROWS. */
     const runMemoryKeyMigration = (settings: Settings | null): void => {
-      if (closed) return;
+      if (closing) return;
       if (settings?.runtimes?.migrations?.memoryKeys !== true) return;
-      if (markerIsSet()) return;
-      try {
-        const plan = planMemoryKeyMigration({ rs, home, records, store });
-        if (plan.unresolved.length > 0) {
-          log(`memory key migration: ${plan.unresolved.length} record(s) skipped — ${plan.unresolved.map((u) => `${u.winterSessionId}:${u.reason}`).join(", ")}`);
-        }
-        if (plan.collisions.length > 0) {
-          log(
-            `memory key migration REFUSED — ${plan.collisions.length} ambiguous mapping(s), nothing moved: ` +
-              plan.collisions.map((c) => `${c.oldKeys.join("+")} → ${c.newKey} (${c.reason})`).join("; "),
-          );
-          return;
-        }
-        const { moved } = applyMemoryKeyMigration({ rs, home }, plan);
-        rs.db.run("INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?, ?)", [MEMORY_KEYS_MIGRATED_MARKER, new Date().toISOString()]);
-        log(`memory key migration: ${moved} project tree(s) moved, ${plan.unchanged.length} already at their destination`);
-      } catch (e) {
-        // No marker: the next settings change or the next boot tries again.
-        log(`memory key migration failed, nothing marked done: ${errText(e)}`);
-      }
+      if (markerIsSet()) return; // a build that DID migrate must not start narrating about it again
+      log(
+        "memory-key migration is not enabled in this build: the live memory path moves in Phase 8b; the flag is ignored",
+      );
     };
     runMemoryKeyMigration(deps.settings());
 
     // ── §16 retention: at boot, then hourly, always off the LIVE windows ─────────────────────────
     const sweepNow = async (): Promise<{ deliveriesPruned: number; leasesPruned: number }> => {
-      if (closed) return { deliveriesPruned: 0, leasesPruned: 0 };
+      if (closing) return { deliveriesPruned: 0, leasesPruned: 0 };
       return await sweepRetention(directory, retentionFromSettings(deps.settings() ?? undefined));
     };
     const sweep = async (): Promise<void> => {
@@ -219,8 +233,9 @@ export async function startRuntimeState(deps: DaemonRuntimeStateDeps): Promise<D
     // catching up.
     let deletions: Promise<void> = Promise.resolve();
     const onSessionDeleted = (sessionId: string): void => {
+      if (closing) return; // teardown has begun; the store is about to close under us
       deletions = deletions.then(async () => {
-        if (closed) return;
+        if (dbClosed) return; // the bounded drain gave up on us — the handle is gone
         try {
           const { removed } = await deleteSessionRuntimeState({ rs, records, leases, children, directory }, sessionId);
           if (removed.length > 0) log(`runtime state deleted for ${sessionId}: ${removed.join(", ")}`);
@@ -237,10 +252,34 @@ export async function startRuntimeState(deps: DaemonRuntimeStateDeps): Promise<D
       onSessionDeleted,
       deletionsSettled: () => deletions,
       applySettings: runMemoryKeyMigration,
-      close() {
-        if (closed) return;
-        closed = true;
+      /**
+       * Stop the sweep, DRAIN the queued deletions, then close the database.
+       *
+       * The drain is why this is async (review r1, Minor 5). A deletion queued microseconds before
+       * shutdown — the mint-time reap inside the ipc server is the one that can race it — has only
+       * reached the microtask queue, and a synchronous teardown would close the handle out from
+       * under it and lose the §16 delete for good: the residue is a runtime record whose product
+       * session no longer exists, which nothing currently reports. BOUNDED, so a wedged chain
+       * delays shutdown by at most `timeoutMs` and then loses the handle rather than the process.
+       */
+      async close(timeoutMs = RUNTIME_SHUTDOWN_DRAIN_MS) {
+        if (closing) return;
+        closing = true;
         clearInterval(timer);
+        let cap: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            deletions,
+            new Promise<void>((resolve) => {
+              cap = setTimeout(resolve, timeoutMs);
+            }),
+          ]);
+        } catch {
+          /* the chain never rejects (each task has its own catch); belt only */
+        } finally {
+          if (cap) clearTimeout(cap);
+        }
+        dbClosed = true;
         rs.close();
       },
     };

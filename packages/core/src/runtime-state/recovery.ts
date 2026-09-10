@@ -74,6 +74,22 @@ export interface RecoveryDeps {
   /** Step 8's scan root. Defaults to §2's canonical `/private/tmp/norma-<uid>`; a test MUST point it
    *  at a temp directory, because the default is a real path on the developer's machine. */
   tempScanRoot?: string;
+  /**
+   * "The product index has ALREADY been rebuilt in this process, since the lock was taken."
+   *
+   * Step 1 reconciles the product tail by calling `SessionStore.recoverAll()` — which reads and
+   * `JSON.parse`s every line of every session's JSONL and then `readdir`s the whole sessions tree.
+   * `SessionStore`'s CONSTRUCTOR already does exactly that, and the daemon constructs its store
+   * before it calls recovery (review r1, Important 1): between those two points the lock is held,
+   * no socket exists and nothing writes a session log, so the second pass is provably redundant —
+   * and it is the largest single synchronous cost on the boot path, doubled, for every user.
+   *
+   * Set it only when the caller can make that argument. The default is `false`: an out-of-band
+   * recovery run (a test, a future maintenance verb) has no such guarantee, and step 1's job is to
+   * reconcile the tail, not to assume somebody else did. The integrity check and the step's outcome
+   * are unchanged either way; the detail says which happened.
+   */
+  indexAlreadyRecovered?: boolean;
 }
 
 export interface RecoveryStepReport {
@@ -220,12 +236,18 @@ export async function recoverRuntimeState(deps: RecoveryDeps): Promise<RecoveryR
         finishStep(1, "failed", { integrity: checks });
         return finish();
       }
-      try {
-        store.recoverAll();
-        finishStep(1, "ok", { integrity: checks, sessions: sessionsSeen });
-      } catch (e) {
-        finishStep(1, "failed", { integrity: checks, errorName: e instanceof Error ? e.name : "unknown" });
-        return finish();
+      if (deps.indexAlreadyRecovered) {
+        // The caller has already rebuilt it in this process, under this lock — see the dep's own
+        // doc comment for why re-reading every session log here would be pure duplicated work.
+        finishStep(1, "ok", { integrity: checks, sessions: sessionsSeen, indexRecovery: "skipped-already-done" });
+      } else {
+        try {
+          store.recoverAll();
+          finishStep(1, "ok", { integrity: checks, sessions: sessionsSeen, indexRecovery: "recovered" });
+        } catch (e) {
+          finishStep(1, "failed", { integrity: checks, errorName: e instanceof Error ? e.name : "unknown" });
+          return finish();
+        }
       }
     }
 

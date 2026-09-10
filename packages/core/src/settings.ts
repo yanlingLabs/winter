@@ -336,7 +336,12 @@ export const Settings = z.object({
    *  only ever shortens the tail of things that are already settled.
    *
    *  `migrations.memoryKeys` is OFF until a user turns it on: WS-16 §17 phase 5 relocates a user's
-   *  own memory files, and that is not a thing an upgrade does on its own initiative. */
+   *  own memory files, and that is not a thing an upgrade does on its own initiative.
+   *
+   *  IN THIS BUILD THE FLAG IS ACCEPTED AND IGNORED, deliberately: the live memory path
+   *  (`agent/memory-dir.ts`'s `memoryDirFor`) still derives today's key, so relocating the files now
+   *  would leave the agent reading an empty directory — the daemon logs one line saying so and moves
+   *  nothing. Phase 8b switches the live path and the migration on together. */
   runtimes: z.object({
     retention: z.object({
       deliveriesDays: z.number().int().min(1).default(30),

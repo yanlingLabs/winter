@@ -635,10 +635,14 @@ function restoreBackup(home: string, backupPath: string): RepairResult {
   }
 
   const dest = join(home, "runtimes", "runtime-state.db");
-  copyFileSync(real, dest);
-  // A leftover WAL from the REPLACED database would be replayed over the restored one on the next
-  // open — the sidecars must go with the file they belonged to.
+  // SIDECARS FIRST, THEN THE COPY (review r1, minor 4). A leftover WAL from the REPLACED database
+  // would be replayed over the restored one on the next open, so it must go — and it must go BEFORE
+  // the copy, not after: in between lies a window where a crash (or a kill) would leave a RESTORED
+  // database sitting beside the journal of the one it replaced, which is precisely the corruption
+  // this clause exists to prevent. Removing them first can only ever leave the old file beside no
+  // journal, and the old file is the one being thrown away.
   for (const path of [`${dest}-wal`, `${dest}-shm`]) rmSync(path, { force: true });
+  copyFileSync(real, dest);
   return {
     applied: true,
     detail: `restored ${dest} from ${backupPath} (${statSync(dest).size} bytes); ${snapshot ? `the replaced file is at ${snapshot}` : "the replaced file could not be snapshotted (it did not open)"}`,

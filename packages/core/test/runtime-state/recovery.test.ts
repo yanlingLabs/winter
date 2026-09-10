@@ -171,6 +171,30 @@ describe("recoverRuntimeState — WS-16 §13's twelve steps", () => {
     });
   });
 
+  test("step 1 skips the product-index rebuild when the caller has already done it this boot", async () => {
+    await withHarness(async (h) => {
+      // `recoverAll` reads and JSON.parses every line of every session log, then readdirs the whole
+      // tree. `SessionStore`'s constructor already ran it; the daemon calls recovery a few
+      // statements later with the lock held and no socket open, so a second pass is pure duplicated
+      // work on the boot path (review r1, Important 1).
+      let calls = 0;
+      const real = h.store.recoverAll.bind(h.store);
+      (h.store as unknown as { recoverAll: () => void }).recoverAll = () => {
+        calls++;
+        real();
+      };
+
+      const skipped = await h.run({ indexAlreadyRecovered: true });
+      expect(calls).toBe(0);
+      expect(skipped.steps.find((s) => s.step === 1)).toMatchObject({ outcome: "ok", detail: { indexRecovery: "skipped-already-done" } });
+
+      // The default is unchanged: an out-of-band run cannot assume anybody rebuilt anything.
+      const rebuilt = await h.run();
+      expect(calls).toBe(1);
+      expect(rebuilt.steps.find((s) => s.step === 1)).toMatchObject({ outcome: "ok", detail: { indexRecovery: "recovered" } });
+    });
+  });
+
   test("a corrupt record is reported and every other session is still processed", async () => {
     await withHarness(async (h) => {
       seedLive(h, "s_bad", "running");

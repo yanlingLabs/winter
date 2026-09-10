@@ -1141,7 +1141,10 @@ if (import.meta.main) {
     // socket, which is why the supervisor's socketExists is also now a liveness probe, not a
     // presence check.)
     const daemon = await startDaemon();
-    const shutdown = () => { daemon.stop(); process.exit(0); };
+    // AWAITED (P8a Task 12): `stop()` is synchronous up to the runtime-state drain, and the tail it
+    // hands back is what releases the lock (→ unlinks the socket). `process.exit(0)` on the same
+    // line would kill the process mid-drain and leave the stale socket this handler exists to avoid.
+    const shutdown = async () => { await daemon.stop(); process.exit(0); };
     process.on("SIGTERM", shutdown);
     process.on("SIGINT", shutdown);
     break; // keeps running; the open listening socket keeps the event loop alive
