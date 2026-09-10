@@ -1200,7 +1200,8 @@ if (import.meta.main) {
       const i = args.indexOf(name);
       return i === -1 ? undefined : args[i + 1];
     };
-    const repair = flag("--repair");
+    // `--repair` with nothing after it must reach the usage branch, not silently run a diagnosis.
+    const repair = args.includes("--repair") ? (flag("--repair") ?? "") : undefined;
     if (repair === undefined) {
       const findings = await diagnoseRuntimeState(home);
       if (findings.length === 0) {

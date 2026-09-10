@@ -95,19 +95,27 @@ interface IndexRow {
   cwd: string | null;
 }
 
-/** The product index, read through its OWN readonly handle — never through `SessionStore`, whose
- *  constructor would rebuild the drift we are here to report. Absent index = an empty map, not a
- *  throw: a home whose daemon has never run has no index and no drift. */
-function readIndex(home: string): Map<string, IndexRow> {
+/**
+ * The product index, read through its OWN readonly handle — never through `SessionStore`, whose
+ * constructor would rebuild the drift we are here to report.
+ *
+ * THREE STATES, NOT TWO. An ABSENT index is an empty map and no finding: a home whose daemon has
+ * never run has no index and no drift. An UNREADABLE one is `undefined` — and that distinction is
+ * load-bearing, because it is exactly the state in which the daemon will not boot at all
+ * (`SessionStore`'s constructor throws on a file that is not a database). Folding it into "empty"
+ * would answer `no findings` to an operator whose daemon is refusing to start.
+ */
+function readIndex(home: string): Map<string, IndexRow> | undefined {
   const path = join(home, "sessions", "index.db");
   const rows = new Map<string, IndexRow>();
   if (!existsSync(path)) return rows;
   let db: Database | undefined;
+  let readable = true;
   try {
     db = new Database(path, { readonly: true });
     for (const row of db.query<IndexRow, []>("SELECT session_id, scope, last_seq, cwd FROM sessions").all()) rows.set(row.session_id, row);
   } catch {
-    // An unreadable index is drift by definition, and `rebuild-index` is the answer either way.
+    readable = false;
   } finally {
     try {
       db?.close();
@@ -115,7 +123,7 @@ function readIndex(home: string): Map<string, IndexRow> {
       /* best effort */
     }
   }
-  return rows;
+  return readable ? rows : undefined;
 }
 
 /** The last non-empty line of a session log, parsed only far enough to learn its `seq`. Never
@@ -163,7 +171,15 @@ export async function diagnoseRuntimeState(home: string): Promise<Finding[]> {
       return [{ kind: "db-corrupt", detail: `${rs.path}: ${integrity.checks.join("; ")}`, repairable: ["restore-backup"] }];
     }
 
-    const index = readIndex(home);
+    const readIndexResult = readIndex(home);
+    if (!readIndexResult) {
+      findings.push({
+        kind: "index-drift",
+        detail: `${join(home, "sessions", "index.db")} cannot be opened; the daemon will refuse to start until it is rebuilt`,
+        repairable: ["rebuild-index"],
+      });
+    }
+    const index = readIndexResult ?? new Map<string, IndexRow>();
     const sessions = rs.db
       .query<SessionDiagRow, []>(
         "SELECT winter_session_id, backend_session_id, transcript_project_key, transcript_health, state FROM runtime_sessions ORDER BY winter_session_id",
@@ -249,7 +265,11 @@ export async function diagnoseRuntimeState(home: string): Promise<Finding[]> {
         kind: "duplicate-backend-id",
         winterSessionId: row.winter_session_id,
         detail: `generation ${row.generation} claims backend ${row.backend_session_id}, which is mapped to ${row.owner}`,
-        repairable: ["detach-backend"],
+        // §4: "ambiguous backend-ID mappings are rejected, never resolved by picking a file." No op
+        // here can honestly clear this — `detach-backend` only touches `runtime_sessions`, so
+        // detaching the session NAMED by this finding would leave the generation's claim, and the
+        // finding, exactly where they are. Which of the two rows is wrong is the operator's call.
+        repairable: [],
       });
     }
 
@@ -349,6 +369,7 @@ function rebuildIndex(home: string): RepairResult {
  *  the evidence behind. */
 function quarantineTail(home: string, sessionId: string, injected?: SessionStore): RepairResult {
   const index = readIndex(home);
+  if (!index) return { applied: false, detail: "the product index cannot be read; run --repair rebuild-index first" };
   const row = index.get(sessionId);
   if (!row) return { applied: false, detail: `unknown session: ${sessionId}` };
   const logPath = join(home, "sessions", row.scope, `${sessionId}.jsonl`);

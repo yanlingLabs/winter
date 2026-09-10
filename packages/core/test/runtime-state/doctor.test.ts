@@ -240,6 +240,9 @@ describe("diagnoseRuntimeState — WS-16 §15 read-only diagnostics", () => {
 
       const findings = await diagnoseRuntimeState(home);
       expect(kinds(findings).sort()).toEqual(["duplicate-backend-id", "orphan-generation"]);
+      // §4: an ambiguous backend-ID mapping is REJECTED, never resolved by picking a file — and no
+      // repair here can honestly clear it, so none is offered.
+      expect(findings.find((f) => f.kind === "duplicate-backend-id")!.repairable).toEqual([]);
     });
   });
 
@@ -257,6 +260,24 @@ describe("diagnoseRuntimeState — WS-16 §15 read-only diagnostics", () => {
       const findings = await diagnoseRuntimeState(home);
       expect(kinds(findings)).toEqual(["index-drift"]);
       expect(findings[0]!.repairable).toEqual(["quarantine-tail", "rebuild-index"]);
+    });
+  });
+
+  test("an index.db that cannot be opened is reported, not read as an empty one", async () => {
+    await withTempHome(async (home) => {
+      withDb(home, () => {});
+      const id = seedProductSession(home, { cwd: home });
+      withDb(home, (_rs, records) => {
+        records.create(newRecord(home, id));
+      });
+      // The state in which the daemon will not boot at all: SessionStore's constructor throws on
+      // this file. Answering "no findings" here would be the worst possible lie.
+      writeFileSync(join(home, "sessions", "index.db"), "not a database");
+
+      const findings = await diagnoseRuntimeState(home);
+      expect(kinds(findings)).toEqual(["index-drift"]);
+      expect(findings[0]!.winterSessionId).toBeUndefined();
+      expect(findings[0]!.repairable).toEqual(["rebuild-index"]);
     });
   });
 
