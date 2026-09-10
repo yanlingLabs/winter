@@ -5,7 +5,7 @@ import { join } from "node:path";
 export const RUNTIME_STATE_SCHEMA_VERSION = 1;
 
 export class RuntimeStateUnavailableError extends Error {
-  constructor(public readonly path: string, public readonly reason: "missing" | "corrupt" | "newer-schema", cause?: unknown) {
+  constructor(public readonly path: string, public readonly reason: "missing" | "corrupt" | "newer-schema" | "unmigrated", cause?: unknown) {
     super(`runtime-state.db ${reason}: ${path}`, { cause }); this.name = "RuntimeStateUnavailableError";
   }
 }
@@ -59,40 +59,72 @@ const MIGRATIONS: ReadonlyArray<{ version: number; up: (db: Database) => void }>
   } },
 ];
 
+// Fix round 1, finding (b): backup() can be called more than once per millisecond (two immediate
+// backups, or two db instances in the same process); a Date.toISOString() name alone collides and
+// the second VACUUM INTO silently clobbers the first. A process-wide monotonic counter alongside
+// the pid makes every generated name unique regardless of timing or how many RuntimeStateDb
+// instances are backing up concurrently in this process.
+let backupSeq = 0;
+
 export function openRuntimeStateDb(home: string, opts: { readonly?: boolean; createIfMissing?: boolean } = {}): RuntimeStateDb {
   const dir = join(home, "runtimes"); const path = join(dir, "runtime-state.db");
   const createIfMissing = opts.createIfMissing ?? !opts.readonly;
   if (!existsSync(path) && !createIfMissing) throw new RuntimeStateUnavailableError(path, "missing");
   mkdirSync(dir, { recursive: true });
-  let db: Database;
+  // Fix round 1, finding 3: `db` must be visible to the catch block so a partially-opened handle
+  // (constructor succeeded, a later PRAGMA or quick_check did not) can be closed before we refuse —
+  // otherwise the failed attempt leaks a handle that keeps the -wal/-shm files on disk and a second
+  // open on the same corrupt file inherits that mess.
+  let db: Database | undefined;
   try {
     db = new Database(path, opts.readonly ? { readonly: true } : { create: true });
-    db.run("PRAGMA journal_mode = WAL"); db.run("PRAGMA synchronous = NORMAL"); db.run("PRAGMA foreign_keys = ON"); db.run("PRAGMA busy_timeout = 5000");
+    // journal_mode=WAL and synchronous are persisted to the database header and setting them
+    // requires a write; on an already-WAL file a readonly connection can re-affirm the current
+    // mode as a no-op, but on a not-yet-migrated (still default-journal) file it cannot — that
+    // failure is not corruption, so these two are skipped entirely for readonly opens. foreign_keys
+    // and busy_timeout are per-connection settings and never need a write, so they're unconditional.
+    if (!opts.readonly) { db.run("PRAGMA journal_mode = WAL"); db.run("PRAGMA synchronous = NORMAL"); }
+    db.run("PRAGMA foreign_keys = ON"); db.run("PRAGMA busy_timeout = 5000");
     const quick = db.query<{ quick_check: string }, []>("PRAGMA quick_check").get();
     if (quick?.quick_check !== "ok") throw new RuntimeStateUnavailableError(path, "corrupt", quick);
   } catch (e) {
+    try { db?.close(); } catch { /* already broken; best-effort close only */ }
     if (e instanceof RuntimeStateUnavailableError) throw e;
     throw new RuntimeStateUnavailableError(path, "corrupt", e);
   }
-  const version = () => (db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version ?? 0);
-  if (version() > RUNTIME_STATE_SCHEMA_VERSION) { db.close(); throw new RuntimeStateUnavailableError(path, "newer-schema"); }
-  if (!opts.readonly) for (const m of MIGRATIONS) if (version() < m.version) db.transaction(() => { m.up(db); db.run(`PRAGMA user_version = ${m.version}`); })();
+  // Every path through the catch above throws, so reaching here means `db` was assigned and is
+  // healthy. Rebinding to a `const` (rather than asserting `db!` at every later use) is what lets
+  // TypeScript trust the narrowing inside the closures returned below.
+  if (!db) throw new RuntimeStateUnavailableError(path, "corrupt");
+  const opened: Database = db;
+  const version = () => (opened.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version ?? 0);
+  if (version() > RUNTIME_STATE_SCHEMA_VERSION) { opened.close(); throw new RuntimeStateUnavailableError(path, "newer-schema"); }
+  // Minor (a): a readonly open of a pre-v1 (or not-yet-migrated) file must refuse rather than hand
+  // back a handle with none of the v1 tables — readonly can never run the migrations that would fix
+  // that up, so silently returning schemaVersion 0 here would be a worse trap than just refusing.
+  if (opts.readonly && version() < RUNTIME_STATE_SCHEMA_VERSION) { opened.close(); throw new RuntimeStateUnavailableError(path, "unmigrated"); }
+  if (!opts.readonly) for (const m of MIGRATIONS) if (version() < m.version) opened.transaction(() => { m.up(opened); opened.run(`PRAGMA user_version = ${m.version}`); })();
   return {
-    path, db,
+    path, db: opened,
     schemaVersion: version,
     integrity() {
-      const checks = db.query<{ integrity_check: string }, []>("PRAGMA integrity_check").all().map((r) => r.integrity_check);
-      const tables = db.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map((r) => r.name);
+      const checks = opened.query<{ integrity_check: string }, []>("PRAGMA integrity_check").all().map((r) => r.integrity_check);
+      // GLOB (not LIKE) so the `sqlite_*` bookkeeping tables SQLite creates for us — e.g.
+      // `sqlite_sequence`, from the AUTOINCREMENT columns above — never leak into the inventory of
+      // OUR schema's tables; GLOB treats `_` literally, unlike LIKE's single-char wildcard.
+      const tables = opened.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type='table' AND name NOT GLOB 'sqlite_*' ORDER BY name").all().map((r) => r.name);
       return { ok: checks.length === 1 && checks[0] === "ok", checks, schemaVersion: version(), tables };
     },
     backup(destDir = join(dir, "backups")) {
       mkdirSync(destDir, { recursive: true });
-      const dest = join(destDir, `runtime-state-${new Date().toISOString().replace(/[:.]/g, "-")}.db`);
-      db.run(`VACUUM INTO ?`, [dest]);
-      db.run(`INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('last_backup_path', ?)`, [dest]);
+      const dest = join(destDir, `runtime-state-${new Date().toISOString().replace(/[:.]/g, "-")}-${process.pid}-${(backupSeq++).toString(36)}.db`);
+      opened.run(`VACUUM INTO ?`, [dest]);
+      // Minor (a): a readonly handle can still VACUUM INTO (it only reads the source), but it must
+      // not attempt a write against its own (readonly) connection to record the backup path.
+      if (!opts.readonly) opened.run(`INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('last_backup_path', ?)`, [dest]);
       return dest;
     },
-    transaction: (fn) => db.transaction(fn)(),
-    close: () => db.close(),
+    transaction: (fn) => opened.transaction(fn)(),
+    close: () => opened.close(),
   };
 }
