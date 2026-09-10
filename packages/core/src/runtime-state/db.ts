@@ -10,7 +10,16 @@ export class RuntimeStateUnavailableError extends Error {
   }
 }
 export interface IntegrityReport { ok: boolean; checks: string[]; schemaVersion: number; tables: string[] }
-export interface RuntimeStateDb { readonly path: string; readonly db: Database; schemaVersion(): number; integrity(): IntegrityReport; backup(destDir?: string): string; transaction<T>(fn: () => T): T; close(): void }
+
+/** SQLite's three BEGIN flavours. `deferred` (the default) takes no lock until the first statement
+ *  needs one, so a read-then-write transaction can lose its snapshot to a concurrent writer and
+ *  fail the upgrade with SQLITE_BUSY_SNAPSHOT — which `busy_timeout` deliberately does NOT retry.
+ *  A transaction whose decision is READ from the db and then WRITTEN back (a lease claim, WS-16
+ *  §11) must therefore begin `immediate`: the writer lock is taken up front, so a second process
+ *  blocks on the busy handler, then re-reads and sees the committed truth instead of an error. */
+export type TransactionMode = "deferred" | "immediate" | "exclusive";
+
+export interface RuntimeStateDb { readonly path: string; readonly db: Database; schemaVersion(): number; integrity(): IntegrityReport; backup(destDir?: string): string; transaction<T>(fn: () => T, opts?: { mode?: TransactionMode }): T; close(): void }
 
 // Schema v1. Every column that holds a router-owned or product-owned JSON blob is named *_json;
 // opaque provider state never lands here (WS-16 §7).
@@ -124,7 +133,11 @@ export function openRuntimeStateDb(home: string, opts: { readonly?: boolean; cre
       if (!opts.readonly) opened.run(`INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('last_backup_path', ?)`, [dest]);
       return dest;
     },
-    transaction: (fn) => opened.transaction(fn)(),
+    transaction: (fn, opts) => {
+      const tx = opened.transaction(fn);
+      const mode = opts?.mode ?? "deferred";
+      return mode === "immediate" ? tx.immediate() : mode === "exclusive" ? tx.exclusive() : tx();
+    },
     close: () => opened.close(),
   };
 }
