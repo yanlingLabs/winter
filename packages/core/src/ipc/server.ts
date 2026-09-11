@@ -1692,6 +1692,10 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         } catch (e) {
           throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message);
         }
+        // P8b Task 17 Step 0(b): a LIVE Winter child learns the new policy now (`setPermissionMode`);
+        // the bridge's policy getter already reads the store live, and a resumable session re-reads
+        // it when it reopens. Fire-and-forget, like `session.setModel`'s own driver call.
+        opts.winter?.get(p.sessionId)?.setPolicy(p.policy).catch((err) => console.error(`winter-leg: setPolicy for ${p.sessionId} failed: ${err instanceof Error ? err.name : "unknown"}`));
         return { ok: true };
       }
       // Chat Slice D task 1: per-session model override — mode-agnostic for chat/code (unlike

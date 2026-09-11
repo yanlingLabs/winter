@@ -121,19 +121,20 @@ describe("session.* with the driver table present and every flag off (P8b-13)", 
       replies.push(norm(await client.request(METHODS.sessionInterrupt, { sessionId: sid })));
       replies.push(norm(await client.request(METHODS.sessionCompact, { sessionId: sid })));
       replies.push(norm(await client.request(METHODS.sessionSetModel, { sessionId: sid, model: "gpt-x" })));
+      replies.push(norm(await client.request(METHODS.sessionSetPolicy, { sessionId: sid, policy: "auto" })));   // chat: the fixed-policy refusal, both sides
       replies.push(norm(await client.request(METHODS.sessionList, {})));
     }
     return { replies, sessionIds };
   }
 
-  test("create/attach/send/steer/interrupt/compact/setModel/list reply byte-identically with and without the table", async () => {
+  test("create/attach/send/steer/interrupt/compact/setModel/setPolicy/list reply byte-identically with and without the table", async () => {
     const off = await boot(false);
     const on = await boot(true);
     const a = await script(off.client);
     const b = await script(on.client);
     expect(b.replies).toEqual(a.replies);
-    expect(a.replies).toHaveLength(16);
-    expect(a.replies.filter((r) => r.includes('"error"'))).toEqual([]);
+    expect(a.replies).toHaveLength(18);
+    expect(a.replies.filter((r) => r.includes('"error"'))).toHaveLength(1);   // chat's setPolicy refusal (identical on both sides)
     // the table's ONLY trace: an engine-shaped record per create (no backend id), and no driver
     for (const sid of b.sessionIds) {
       const rec = on.records!.get(sid);

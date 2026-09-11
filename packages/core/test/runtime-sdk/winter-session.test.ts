@@ -30,6 +30,7 @@ const named = (name: string, message = name): Error => { const e = new Error(mes
 class FakeQuery {
   readonly pushed: string[] = [];
   readonly models: Array<string | undefined> = [];
+  readonly modes: string[] = [];
   interrupts = 0;
   promptClosed = false;
   /** What `interrupt()` does: emit the interrupted terminal (the 0.0.4 behaviour) and, when asked,
@@ -87,6 +88,7 @@ class FakeQuery {
     if (this.interruptEndsChild) this.fail(named("AbortError", "query aborted: runtime process killed"));
   }
   async setModel(model?: string): Promise<void> { this.models.push(model); }
+  async setPermissionMode(mode: string): Promise<void> { this.modes.push(mode); }
 }
 
 // ── the harness ──────────────────────────────────────────────────────────────────────────────────
@@ -338,6 +340,39 @@ describe("startWinterSession — one incarnation", () => {
     await h.settled();
     expect(h.q().pushed).toEqual(["A", "B", "C"]);        // a normal result drains again
     expect(seen(h, "turn_started")).toHaveLength(3);
+  });
+
+  test("Task 17 Step 0(c): a messaging DELIVERY after an interrupt re-arms the drain too — its own text first, then the held one at its result", async () => {
+    const h = harness();
+    await h.session.open();
+    h.q().emit(init(h.q().options));
+    await h.settled();
+    await h.session.send("A", "cli");
+    await h.session.send("B", "cli");
+    await h.session.interrupt();
+    await h.settled();
+    expect(h.q().pushed).toEqual(["A"]);
+    h.attachments[0]!.session.push("<agent-message>news</agent-message>");
+    await h.settled();
+    expect(h.q().pushed).toEqual(["A", "<agent-message>news</agent-message>"]);
+    h.q().emit(result());
+    await h.settled();
+    expect(h.q().pushed).toEqual(["A", "<agent-message>news</agent-message>", "B"]);
+    expect(h.session.pendingSends).toEqual([]);
+  });
+
+  test("Task 17 Step 0(b): setPolicy reaches a LIVE child as Query.setPermissionMode through the P8b-7 map; a no-op while resumable (the reopen re-reads the store)", async () => {
+    const h = harness();
+    await h.session.open();
+    h.q().emit(init(h.q().options));
+    await h.session.setPolicy("plan");
+    await h.session.setPolicy("accept-edits");
+    await h.session.setPolicy("bypass");
+    await h.session.setPolicy("chat");
+    expect(h.q().modes).toEqual(["plan", "acceptEdits", "bypassPermissions", "default"]);
+    await h.session.end();
+    await h.session.setPolicy("auto");
+    expect(h.q().modes).toHaveLength(4);
   });
 
   test("P8b-39: a steer after an interrupt also re-arms the drain — its own text first, then the held one at its result", async () => {

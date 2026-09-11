@@ -975,6 +975,10 @@ export async function startDaemon(opts: {
     // The SAME relocation-aware derivation the live memory path uses (`memoryDirOf` above), so the
     // record names the directory the session actually reads.
     memoryKeyOf: (cwd) => memoryProjectKeyFor(cwd, { normaHome, directory: settings?.memory?.directory, relocatedKey: (k) => runtime?.relocatedMemoryKey(k) }),
+    // Task 17 Step 0(a): the SAME assembler the engine's `turn()` composes its instructions with —
+    // Norma's persona per mode, the `_assistant` bucket, the output style — so a Winter-leg session
+    // speaks as Norma.
+    assembler,
     log: (line) => console.error(`winter-leg: ${line}`),
   });
   /** A deleted session takes its Winter child (bounded `end()`, out of the table) AND its runtime

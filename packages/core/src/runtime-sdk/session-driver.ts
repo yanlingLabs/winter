@@ -60,6 +60,8 @@ import { buildWinterOptions, permissionModeFor } from "./mode-options";
 import { providerSelectionFor } from "./provider-selection";
 import { normaSessions } from "./sessions";
 import { NORMA_PEER_VERSIONS } from "./versions";
+import { winterSystemPromptFor } from "./system-prompt";
+import type { ContextAssembler } from "../agent/context";
 import { startWinterSession, unconsumedUserMessages, type WinterIncarnation, type WinterIncarnationShape, type WinterSession } from "./winter-session";
 
 export type WinterLegRefusalCode =
@@ -106,6 +108,10 @@ export interface WinterLegDeps {
   outDirOf: (sessionId: string) => string;
   /** The memory key the LIVE memory path files this cwd under (relocation-aware). */
   memoryKeyOf: (cwd: string) => string;
+  /** Task 17 Step 0(a): the daemon's ONE `ContextAssembler` — Norma's system prompt per mode,
+   *  composed per incarnation (hot: NORMA.md, memory, the output style are re-read on resume).
+   *  Absent (a harness without one) ⇒ no `systemPrompt` and the child runs Winter's own. */
+  assembler?: Pick<ContextAssembler, "assemble">;
   /** Any OTHER MCP servers merged into a session's record (settings/plugin servers). None in 8b;
    *  the seam exists so the collision guard has something to guard. */
   extraMcpServers?: (session: CapabilitySession) => Record<string, unknown>;
@@ -264,6 +270,19 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         signal: inc.abort.signal,
       };
       const capabilities = deps.buildSessionCapabilities(capSession);
+      // Norma's own voice (Step 0(a)): the engine's `primaryDir`/`cwd`/`additionalWorkDirs` inputs,
+      // read live so a resume sees the session's current directories.
+      let primary: string | undefined = live.cwd ?? undefined;
+      let extraDirs: string[] = [];
+      try {
+        const rows = deps.store.dirs(sessionId).map((d) => d.path);
+        primary ??= rows[0];
+        extraDirs = primary === undefined ? [] : rows.filter((d) => d !== primary);
+      } catch { /* a session with no dirs row: workdir-less */ }
+      const systemPrompt = deps.assembler === undefined ? undefined : winterSystemPromptFor(deps.assembler, {
+        mode, origin: live.origin, primary, cwd: primary ?? deps.tmpDirOf(sessionId),
+        outDir: deps.outDirOf(sessionId), extraDirs, effort: live.effort,
+      });
       // P8b-36 obligation: any other server merged into the same record must not shadow a
       // daemon-owned one. Nothing else is merged in 8b; the guard runs regardless so the day
       // something is, the collision is loud.
@@ -280,6 +299,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         model: live.model,
         credentials,
         effort: sdkEffortOf(live.effort),
+        ...(systemPrompt === undefined ? {} : { systemPrompt }),
         spawn: hook,
         canUseTool,
         abort: inc.abort,

@@ -51,8 +51,8 @@
 //
 //   - after a normal `result` the next held text is pushed (and its turn begun) automatically;
 //   - after an INTERRUPT the held texts are NOT auto-run — they stay in the log until the next
-//     `send`/`steer` (the engine's own rule, engine.ts `interrupt`: a queued `user_message` waits
-//     for the next user action);
+//     inbound action: a `send`, a `steer`, or a messaging delivery (the engine's own rule,
+//     engine.ts `interrupt`: a queued `user_message` waits for the next user action);
 //   - on resume (and so at boot, since a daemon resumes a session on its first RPC) `open()` asks
 //     the log (`deps.unconsumed`: every host-appended main-thread `user_message` with no
 //     `turn_started` after it) and re-pushes them in order — the first now, the rest one per
@@ -90,6 +90,8 @@ import { ALLOWED_TRANSITIONS, type RuntimeSessionState } from "../runtime-state/
 import type { NormaRuntimeSdk, SessionMode } from "./create";
 import type { attachWinterSession, WinterSessionAttachHandle, WinterSessionAttachment } from "./messaging";
 import { createHostPromptQueue, type HostPromptQueue } from "./prompt-queue";
+import { permissionModeFor } from "./mode-options";
+import type { SessionApprovalPolicy } from "../agent/gate";
 
 export type WinterSessionState = "live" | "resumable" | "ended";
 
@@ -235,6 +237,10 @@ export interface WinterSession {
   /** Winter's `Query` has no compaction control at 0.0.4 — a typed `WinterLegUnsupported`, never a silent no-op. */
   compact(): Promise<never>;
   setModel(model?: string): Promise<void>;
+  /** Task 17 Step 0(b): `session.setPolicy` reaches a LIVE child as `Query.setPermissionMode`
+   *  (the 1:1 map of P8b-7); the bridge's policy getter is live already, and a resumable session
+   *  re-reads the stored policy when it reopens. */
+  setPolicy(policy: SessionApprovalPolicy): Promise<void>;
   /** Close the queue, wait, abort stragglers; `resumable` afterwards. Idempotent; never rejects. */
   end(): Promise<void>;
   /** The messaging push sink: a delivered envelope becomes this session's next user turn. */
@@ -376,6 +382,9 @@ class WinterSessionImpl implements WinterSession {
       this.held.push(text);
       return;
     }
+    // Step 0(c): a delivery is the next INBOUND action too — it re-arms the post-interrupt drain,
+    // so the texts held before the interrupt run after this one's result (P8b-39).
+    this.drainPaused = false;
     this.appendUser(text, "messaging");
     this.beginAndPush(text, this.inc);
   }
@@ -402,6 +411,10 @@ class WinterSessionImpl implements WinterSession {
     // A resumable session re-reads its model from the store when it reopens (`deps.options`), so
     // only a live child needs telling.
     if (this.stateValue === "live" && this.inc !== undefined) await this.inc.query.setModel(model);
+  }
+
+  async setPolicy(policy: SessionApprovalPolicy): Promise<void> {
+    if (this.stateValue === "live" && this.inc !== undefined) await this.inc.query.setPermissionMode(permissionModeFor(policy));
   }
 
   end(): Promise<void> {
